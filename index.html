@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>No Man's Sky · three.js — a procedural universe</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="hud" class="panel">
+    <div id="sys-name">—</div>
+    <div id="sys-planets" class="sub">—</div>
+    <div id="sys-seed" class="sub">—</div>
+    <button id="new-universe" title="Generate a new universe">⟲ new universe</button>
+  </div>
+
+  <div id="target-card" class="panel hidden">
+    <div id="tc-name">—</div>
+    <div id="tc-type" class="sub">—</div>
+    <div id="tc-info" class="sub">—</div>
+    <div id="tc-dist" class="dist">—</div>
+  </div>
+
+  <div id="altitude" class="hidden"></div>
+
+  <div id="labels"></div>
+
+  <div id="bottom">
+    <button id="land-btn" class="hidden">LAND — walk the surface</button>
+    <div id="hint" class="hidden"></div>
+  </div>
+
+  <div id="crosshair" class="hidden"></div>
+  <div id="stats"></div>
+
+  <div id="loading">
+    <div class="loading-inner">
+      <div class="loading-ring"></div>
+      <div id="loading-text">generating universe…</div>
+    </div>
+  </div>
+
+  <div id="fade"></div>
+  <div id="err" class="hidden"></div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
