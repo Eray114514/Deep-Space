@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { Planet, TYPES } from '../src/planet.js';
 import { flushChunkQueue, pendingChunks } from '../src/quadtree.js';
+import { Scatter } from '../src/scatter.js';
 
 const dir = new THREE.Vector3();
 const col = new THREE.Color();
@@ -76,6 +77,54 @@ for (const type of Object.keys(TYPES)) {
   check(pendingChunks() === 0, `${type}: build queue never drained`);
   const chunks = p.lod.countChunks();
   check(chunks > 30, `${type}: too little subdivision near surface (${chunks} chunks)`);
+
+  // props must be planet-fixed: walk the camera and the same props must
+  // stand in exactly the same places (this was a real bug once)
+  if (type === 'lush') {
+    const scatter = new Scatter();
+    const m4 = new THREE.Matrix4();
+    const grab = (camPos) => {
+      const map = new Map();
+      const arr = [];
+      for (const kind in scatter.meshes) {
+        const im = scatter.meshes[kind];
+        for (let i = 0; i < im.count; i++) {
+          im.getMatrixAt(i, m4);
+          const x = m4.elements[12], y = m4.elements[13], z = m4.elements[14];
+          const k = kind + ':' + x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3);
+          map.set(k, true);
+          arr.push({ k, x, y, z });
+        }
+      }
+      return { map, arr, camPos };
+    };
+    const dirA = p.scenicDir();
+    const camA = dirA.clone().multiplyScalar(p.R + p.height(dirA, p.fullMaxFreq) + 2);
+    scatter.update(p, camA, 2);
+    const A = grab(camA);
+
+    let axis = new THREE.Vector3(0, 1, 0).cross(dirA);
+    if (axis.lengthSq() < 0.01) axis.set(1, 0, 0).cross(dirA);
+    axis.normalize();
+    const dirB = dirA.clone().applyAxisAngle(axis, 25 / p.R);
+    const camB = dirB.clone().multiplyScalar(p.R + p.height(dirB, p.fullMaxFreq) + 2);
+    scatter.update(p, camB, 2);
+    const B = grab(camB);
+
+    let stable = 0, candidates = 0;
+    for (const pa of A.arr) {
+      const da = Math.hypot(pa.x - camA.x, pa.y - camA.y, pa.z - camA.z);
+      const db = Math.hypot(pa.x - camB.x, pa.y - camB.y, pa.z - camB.z);
+      if (da > 150 || db > 150) continue;     // safely inside both ranges
+      candidates++;
+      if (B.map.has(pa.k)) stable++;
+    }
+    check(candidates > 40, `${type}: too few props to judge stability (${candidates})`);
+    check(stable / Math.max(1, candidates) > 0.97,
+      `${type}: props moved when the camera moved (${stable}/${candidates} stable)`);
+    console.log(`         scatter: ${A.arr.length} props, ${stable}/${candidates} identical after a 25 m walk`);
+    scatter.clear();
+  }
   let leafTris = 0;
   for (const r of p.lod.roots) {
     const walk = (n) => {

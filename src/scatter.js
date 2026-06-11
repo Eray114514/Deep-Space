@@ -13,6 +13,10 @@ const SHOW_BELOW_ALT = 600;  // metres
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _dir = new THREE.Vector3();
+const _anchor = new THREE.Vector3();
+const _jd = new THREE.Vector3();
+const _ce1 = new THREE.Vector3();
+const _ce2 = new THREE.Vector3();
 const _up = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
@@ -84,6 +88,7 @@ export class Scatter {
     this.planet = null;
     this.meshes = {};   // kind -> InstancedMesh
     this.lastKey = '';
+    this.seen = new Set();
   }
 
   setPlanet(planet) {
@@ -134,76 +139,99 @@ export class Scatter {
 
     const p = this.planet;
     _dir.copy(camLocal).normalize();
-
-    // stable planet-fixed tangent lattice
-    if (Math.abs(_dir.y) < 0.93) _e1.set(-_dir.z, 0, _dir.x).normalize();
-    else _e1.set(1, 0, 0).projectOnPlane(_dir).normalize();
-    _e2.crossVectors(_dir, _e1);
-
+    const Q = p.R / CELL_M;                 // cell-id lattice radius
     const cellAng = CELL_M / p.R;
-    // quantize the anchor so the lattice doesn't swim as the camera moves
-    const ax = Math.round(Math.asin(Math.max(-1, Math.min(1, _dir.y))) / cellAng);
-    const az = Math.round(Math.atan2(_dir.z, _dir.x) / cellAng);
-    const key = p.seed + ':' + ax + ':' + az;
+
+    // rebuild only when the camera crosses into a new planet-fixed cell
+    const kx = Math.round(_dir.x * Q), ky = Math.round(_dir.y * Q), kz = Math.round(_dir.z * Q);
+    const key = p.seed + ':' + kx + ':' + ky + ':' + kz;
     if (key === this.lastKey) return;
     this.lastKey = key;
+
+    // discovery lattice anchored at the CANONICAL center of the camera's own
+    // cell — planet-fixed, so the grid of sample points never swims
+    _anchor.set(kx, ky, kz).normalize();
+    if (Math.abs(_anchor.y) < 0.93) _e1.set(-_anchor.z, 0, _anchor.x).normalize();
+    else _e1.set(1, 0, 0).projectOnPlane(_anchor).normalize();
+    _e2.crossVectors(_anchor, _e1);
 
     const counts = {};
     for (const kind in this.meshes) counts[kind] = 0;
     const seedI = p.intSeed ^ 0x5ca7;
+    this.seen.clear();
 
-    for (let gy = -RANGE; gy <= RANGE; gy++) {
-      for (let gx = -RANGE; gx <= RANGE; gx++) {
-        if (gx * gx + gy * gy > RANGE * RANGE) continue;
-        // cell center direction on the sphere (planet-fixed once quantized)
-        _v.copy(_dir)
-          .addScaledVector(_e1, (gx + 0.0) * cellAng)
-          .addScaledVector(_e2, (gy + 0.0) * cellAng)
+    // half-step oversampling, and every sample claims all 8 lattice corners
+    // of its cube — so which cells get found cannot depend on how the
+    // discovery grid happens to align with the planet lattice
+    const STEPS = RANGE * 2;
+    for (let gy = -STEPS; gy <= STEPS; gy++) {
+      for (let gx = -STEPS; gx <= STEPS; gx++) {
+        if (gx * gx + gy * gy > STEPS * STEPS) continue;
+        _v.copy(_anchor)
+          .addScaledVector(_e1, gx * 0.5 * cellAng)
+          .addScaledVector(_e2, gy * 0.5 * cellAng)
           .normalize();
-        // planet-fixed integer id for this patch of ground
-        const qx = Math.round(_v.x * p.R / CELL_M);
-        const qy = Math.round(_v.y * p.R / CELL_M);
-        const qz = Math.round(_v.z * p.R / CELL_M);
-        const h0 = hash3i(qx, qy, qz, seedI);
-
-        const hgt = p.height(_v, p.fullMaxFreq);
-        const recipe = RECIPES[p.biomeAt(_v, hgt)];
-        if (!recipe) continue;
-
-        const sel = hashFloat(h0, 0);
-        let acc = 0, chosen = null;
-        for (const r of recipe) { acc += r[1]; if (sel < acc) { chosen = r; break; } }
-        if (!chosen) continue;
-        const [kind, , s0, s1] = chosen;
-        const im = this.meshes[kind];
-        if (!im || counts[kind] >= MAX_PER_KIND) continue;
-
-        // grass grows in little clumps; everything else stands alone
-        const copies = kind === 'grass' ? 3 : 1;
-        for (let c = 0; c < copies && counts[kind] < MAX_PER_KIND; c++) {
-          const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
-          // jitter inside the cell, then re-sample ground height there
-          _up.copy(_v)
-            .addScaledVector(_e1, (hashFloat(hc, 1) - 0.5) * cellAng)
-            .addScaledVector(_e2, (hashFloat(hc, 2) - 0.5) * cellAng)
-            .normalize();
-          const hh = p.height(_up, p.fullMaxFreq);
-          if (p.hasLiquid && hh < p.seaLevel + 0.4) continue;   // not in the sea
-
-          _v2.copy(_up).multiplyScalar(p.R + hh);
-          _q.setFromUnitVectors(Y, _up);
-          _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
-          _q.multiply(_q2);
-          const sc = s0 + (s1 - s0) * hashFloat(hc, 2);
-          _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
-          _m.compose(_v2, _q, _s);
-          im.setMatrixAt(counts[kind]++, _m);
+        const fx = Math.floor(_v.x * Q), fy = Math.floor(_v.y * Q), fz = Math.floor(_v.z * Q);
+        for (let corner = 0; corner < 8; corner++) {
+          const qx = fx + (corner & 1), qy = fy + ((corner >> 1) & 1), qz = fz + (corner >> 2);
+          const ck = (qx + 512) + (qy + 512) * 1024 + (qz + 512) * 1048576;
+          if (this.seen.has(ck)) continue;
+          this.seen.add(ck);
+          // only cells on the planet's surface shell carry a prop
+          if (Math.abs(Math.hypot(qx, qy, qz) - Q) > 0.7) continue;
+          this.placeCell(p, qx, qy, qz, Q, cellAng, seedI, counts);
         }
       }
     }
     for (const kind in this.meshes) {
       this.meshes[kind].count = counts[kind];
       this.meshes[kind].instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  // everything here depends ONLY on (planet seed, qx, qy, qz):
+  // the same rock stands in the same spot forever
+  placeCell(p, qx, qy, qz, Q, cellAng, seedI, counts) {
+    _up.set(qx, qy, qz).normalize();          // canonical cell direction
+    const h0 = hash3i(qx, qy, qz, seedI);
+
+    const hgt = p.height(_up, p.fullMaxFreq);
+    const recipe = RECIPES[p.biomeAt(_up, hgt)];
+    if (!recipe) return;
+
+    const sel = hashFloat(h0, 0);
+    let acc = 0, chosen = null;
+    for (const r of recipe) { acc += r[1]; if (sel < acc) { chosen = r; break; } }
+    if (!chosen) return;
+    const [kind, , s0, s1] = chosen;
+    const im = this.meshes[kind];
+    if (!im || counts[kind] >= MAX_PER_KIND) return;
+
+    // cell-local tangent frame, derived from the canonical direction
+    if (Math.abs(_up.y) < 0.93) _ce1.set(-_up.z, 0, _up.x).normalize();
+    else _ce1.set(1, 0, 0).projectOnPlane(_up).normalize();
+    _ce2.crossVectors(_up, _ce1);
+
+    // grass grows in little clumps; everything else stands alone
+    const copies = kind === 'grass' ? 3 : 1;
+    for (let c = 0; c < copies && counts[kind] < MAX_PER_KIND; c++) {
+      const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
+      // jitter inside the cell, then re-sample ground height there
+      _jd.copy(_up)
+        .addScaledVector(_ce1, (hashFloat(hc, 1) - 0.5) * cellAng)
+        .addScaledVector(_ce2, (hashFloat(hc, 2) - 0.5) * cellAng)
+        .normalize();
+      const hh = p.height(_jd, p.fullMaxFreq);
+      if (p.hasLiquid && hh < p.seaLevel + 0.4) continue;   // not in the sea
+
+      _v2.copy(_jd).multiplyScalar(p.R + hh);
+      _q.setFromUnitVectors(Y, _jd);
+      _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
+      _q.multiply(_q2);
+      const sc = s0 + (s1 - s0) * hashFloat(hc, 2);
+      _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
+      _m.compose(_v2, _q, _s);
+      im.setMatrixAt(counts[kind]++, _m);
     }
   }
 }
