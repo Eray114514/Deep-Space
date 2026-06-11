@@ -112,9 +112,16 @@ body { overscroll-behavior: none; }
 .pl-sub { color: var(--fg-dim); font-size: 10px; }
 
 #stats {
-  position: fixed; bottom: 8px; left: 10px;
+  position: fixed; bottom: 22px; left: 10px;
   font-size: 10px; color: rgba(160, 190, 205, 0.6);
   z-index: 10; pointer-events: none; white-space: pre;
+}
+
+#version {
+  position: fixed; bottom: 6px; left: 10px;
+  font-size: 10px; color: rgba(160, 190, 205, 0.75);
+  z-index: 10; pointer-events: none;
+  letter-spacing: 0.08em;
 }
 
 #loading {

@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { Planet, TYPES } from '../src/planet.js';
 import { flushChunkQueue, pendingChunks } from '../src/quadtree.js';
-import { Scatter } from '../src/scatter.js';
+import { Scatter, capFor } from '../src/scatter.js';
 
 const dir = new THREE.Vector3();
 const col = new THREE.Color();
@@ -78,51 +78,85 @@ for (const type of Object.keys(TYPES)) {
   const chunks = p.lod.countChunks();
   check(chunks > 30, `${type}: too little subdivision near surface (${chunks} chunks)`);
 
-  // props must be planet-fixed: walk the camera and the same props must
-  // stand in exactly the same places (this was a real bug once)
+  // props must be planet-fixed: WALK the camera through dense vegetation
+  // across many rebuilds — every prop in the shared interior must persist
+  // bit-identically at every single rebuild (this has been broken twice)
   if (type === 'lush') {
     const scatter = new Scatter();
     const m4 = new THREE.Matrix4();
-    const grab = (camPos) => {
+    const grab = () => {
       const map = new Map();
-      const arr = [];
+      const cnt = {};
       for (const kind in scatter.meshes) {
         const im = scatter.meshes[kind];
+        cnt[kind] = im.count;
         for (let i = 0; i < im.count; i++) {
           im.getMatrixAt(i, m4);
           const x = m4.elements[12], y = m4.elements[13], z = m4.elements[14];
-          const k = kind + ':' + x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3);
-          map.set(k, true);
-          arr.push({ k, x, y, z });
+          map.set(kind + ':' + x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3), [x, y, z]);
         }
       }
-      return { map, arr, camPos };
+      return { map, cnt };
     };
-    const dirA = p.scenicDir();
-    const camA = dirA.clone().multiplyScalar(p.R + p.height(dirA, p.fullMaxFreq) + 2);
-    scatter.update(p, camA, 2);
-    const A = grab(camA);
 
-    let axis = new THREE.Vector3(0, 1, 0).cross(dirA);
-    if (axis.lengthSq() < 0.01) axis.set(1, 0, 0).cross(dirA);
-    axis.normalize();
-    const dirB = dirA.clone().applyAxisAngle(axis, 25 / p.R);
-    const camB = dirB.clone().multiplyScalar(p.R + p.height(dirB, p.fullMaxFreq) + 2);
-    scatter.update(p, camB, 2);
-    const B = grab(camB);
-
-    let stable = 0, candidates = 0;
-    for (const pa of A.arr) {
-      const da = Math.hypot(pa.x - camA.x, pa.y - camA.y, pa.z - camA.z);
-      const db = Math.hypot(pa.x - camB.x, pa.y - camB.y, pa.z - camB.z);
-      if (da > 150 || db > 150) continue;     // safely inside both ranges
-      candidates++;
-      if (B.map.has(pa.k)) stable++;
+    // start somewhere green and dense
+    const rnd2 = (s => () => (s = (s * 48271) % 2147483647) / 2147483647)(1234);
+    let walkDir = null;
+    const probe = new THREE.Vector3();
+    for (let i = 0; i < 2000 && !walkDir; i++) {
+      probe.set(rnd2() * 2 - 1, rnd2() * 2 - 1, rnd2() * 2 - 1);
+      if (probe.lengthSq() < 0.05 || probe.lengthSq() > 1) continue;
+      probe.normalize();
+      const h = p.height(probe, 64);
+      if (p.hasLiquid && h < p.seaLevel + 3) continue;
+      const biome = p.biomeAt(probe, h);
+      if (biome === 'grass' || biome === 'forest') walkDir = probe.clone();
     }
-    check(candidates > 40, `${type}: too few props to judge stability (${candidates})`);
-    check(stable / Math.max(1, candidates) > 0.97,
-      `${type}: props moved when the camera moved (${stable}/${candidates} stable)`);
-    console.log(`         scatter: ${A.arr.length} props, ${stable}/${candidates} identical after a 25 m walk`);
+    check(!!walkDir, `${type}: found no vegetated ground to walk`);
+
+    let axis = new THREE.Vector3(0, 1, 0).cross(walkDir);
+    if (axis.lengthSq() < 0.01) axis.set(1, 0, 0).cross(walkDir);
+    axis.normalize();
+
+    let prev = null, prevCam = null;
+    let rebuilds = 0, worstKept = 1, totChecked = 0;
+    const peaks = {};
+    const cam = new THREE.Vector3();
+    for (let step = 0; step <= 50; step++) {
+      const dir = walkDir.clone().applyAxisAngle(axis, (step * 1.4) / p.R);
+      cam.copy(dir).multiplyScalar(p.R + p.height(dir, p.fullMaxFreq) + 1.7);
+      const keyBefore = scatter.lastKey;
+      scatter.update(p, cam, 2);
+      if (scatter.lastKey === keyBefore) continue;
+      rebuilds++;
+      const cur = grab();
+      for (const k in cur.cnt) peaks[k] = Math.max(peaks[k] || 0, cur.cnt[k]);
+      if (prev) {
+        let miss = 0, tot = 0;
+        for (const [k, pos] of prev.map) {
+          const da = Math.hypot(pos[0] - prevCam.x, pos[1] - prevCam.y, pos[2] - prevCam.z);
+          const db = Math.hypot(pos[0] - cam.x, pos[1] - cam.y, pos[2] - cam.z);
+          if (da > 110 || db > 110) continue;     // safely inside both ranges
+          tot++;
+          if (!cur.map.has(k)) miss++;
+        }
+        totChecked += tot;
+        if (tot > 0) worstKept = Math.min(worstKept, 1 - miss / tot);
+      }
+      prev = cur;
+      prevCam = cam.clone();
+    }
+    check(rebuilds >= 4, `${type}: walk produced too few rebuilds (${rebuilds})`);
+    check(totChecked > 500, `${type}: too few props to judge stability (${totChecked})`);
+    check(worstKept === 1, `${type}: props churn while walking (worst rebuild kept ${(worstKept * 100).toFixed(1)}%)`);
+    // a kind at its instance cap means anchor-dependent selection: which
+    // props render would depend on where the camera stands → visible churn
+    for (const k in peaks) {
+      check(peaks[k] < capFor(k), `${type}: '${k}' saturated its instance cap (${peaks[k]}/${capFor(k)})`);
+    }
+    const peakStr = Object.entries(peaks).filter(([, v]) => v > 0)
+      .map(([k, v]) => `${k}:${v}`).join(' ');
+    console.log(`         scatter walk: ${rebuilds} rebuilds, ${totChecked} interior checks, worst kept ${(worstKept * 100).toFixed(1)}%  peaks[${peakStr}]`);
     scatter.clear();
   }
   let leafTris = 0;

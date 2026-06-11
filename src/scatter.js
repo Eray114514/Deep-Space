@@ -7,7 +7,11 @@ import { hash3i, hashFloat } from './rng.js';
 
 const CELL_M = 9;            // metres per scatter cell (approx)
 const RANGE = 24;            // cells of radius around the camera
-const MAX_PER_KIND = 1400;
+// instance caps sized ABOVE the densest possible biome in range — a kind
+// that saturates its cap renders an anchor-dependent subset, which shows
+// up as props sliding around while you walk
+const CAPS = { grass: 6000, default: 2000 };
+export function capFor(kind) { return CAPS[kind] ?? CAPS.default; }
 const SHOW_BELOW_ALT = 600;  // metres
 
 const _v = new THREE.Vector3();
@@ -103,7 +107,7 @@ export class Scatter {
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
       });
-      const im = new THREE.InstancedMesh(GEO[kind], mat, MAX_PER_KIND);
+      const im = new THREE.InstancedMesh(GEO[kind], mat, capFor(kind));
       im.count = 0;
       im.frustumCulled = false;
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -205,7 +209,7 @@ export class Scatter {
     if (!chosen) return;
     const [kind, , s0, s1] = chosen;
     const im = this.meshes[kind];
-    if (!im || counts[kind] >= MAX_PER_KIND) return;
+    if (!im || counts[kind] >= capFor(kind)) return;
 
     // cell-local tangent frame, derived from the canonical direction
     if (Math.abs(_up.y) < 0.93) _ce1.set(-_up.z, 0, _up.x).normalize();
@@ -214,7 +218,7 @@ export class Scatter {
 
     // grass grows in little clumps; everything else stands alone
     const copies = kind === 'grass' ? 3 : 1;
-    for (let c = 0; c < copies && counts[kind] < MAX_PER_KIND; c++) {
+    for (let c = 0; c < copies && counts[kind] < capFor(kind); c++) {
       const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
       // jitter inside the cell, then re-sample ground height there
       _jd.copy(_up)

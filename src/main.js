@@ -14,6 +14,7 @@ import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord, systemName } from './names.js';
 import { makeRng } from './rng.js';
+import { VERSION } from './version.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -25,6 +26,9 @@ window.addEventListener('error', (e) => {
 const qs = new URLSearchParams(location.search);
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
+
+document.getElementById('version').textContent = 'v' + VERSION;
+console.info(`No Man's Sky three.js v${VERSION}`);
 
 // touch-first device? (gestures replace wheel/keys, virtual stick for walking)
 const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
@@ -593,6 +597,7 @@ frame();
 
 // ---- debug / test API (used by tools/screenshot.js) ----------------------------
 window.NMS = {
+  version: VERSION,
   get booted() { return frameNo > 3; },
   get state() { return state; },
   seed: () => SEED,
