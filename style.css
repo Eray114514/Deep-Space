@@ -18,6 +18,8 @@ html, body {
 }
 
 #app, #app canvas { position: fixed; inset: 0; display: block; }
+#app canvas { touch-action: none; }
+body { overscroll-behavior: none; }
 
 .hidden { display: none !important; }
 
@@ -136,6 +138,54 @@ html, body {
   background: #000; opacity: 0;
   pointer-events: none;
   transition: opacity 0.6s;
+}
+
+/* ---- touch controls ---- */
+#touch-ui { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
+#joystick {
+  position: absolute; left: 26px; bottom: 30px;
+  width: 124px; height: 124px; border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: rgba(10, 24, 32, 0.35);
+  pointer-events: auto; touch-action: none;
+}
+#joystick-knob {
+  position: absolute; left: 50%; top: 50%;
+  width: 52px; height: 52px; margin: -26px 0 0 -26px;
+  border-radius: 50%;
+  background: rgba(102, 224, 194, 0.35);
+  border: 1.5px solid var(--accent);
+  pointer-events: none;
+}
+.touch-btn {
+  position: absolute;
+  width: 64px; height: 64px; border-radius: 50%;
+  font-size: 24px; line-height: 1;
+  color: var(--fg); background: rgba(10, 24, 32, 0.45);
+  border: 1.5px solid var(--border);
+  pointer-events: auto; touch-action: none;
+  user-select: none; -webkit-user-select: none;
+}
+.touch-btn:active { background: rgba(102, 224, 194, 0.35); border-color: var(--accent); }
+#btn-jump { right: 30px; bottom: 44px; }
+#btn-takeoff { right: 44px; bottom: 128px; font-size: 20px; }
+
+/* ---- small screens ---- */
+@media (max-width: 760px) {
+  #hud { top: 8px; left: 8px; min-width: 0; padding: 7px 10px; }
+  #hud #sys-name { font-size: 13px; }
+  #hud .sub { display: none; }
+  #new-universe { margin-top: 4px; font-size: 10px; padding: 3px 6px; }
+  #target-card { top: 8px; right: 8px; min-width: 0; padding: 7px 10px; }
+  #target-card #tc-name { font-size: 13px; }
+  #target-card #tc-info { display: none; }
+  #target-card .dist { font-size: 12px; margin-top: 2px; }
+  #altitude { top: 78px; right: 8px; font-size: 10px; }
+  #hint { font-size: 10px; padding: 5px 10px; max-width: 86vw; }
+  #bottom { bottom: 14px; }
+  #land-btn { font-size: 13px; padding: 12px 20px; }
+  #stats { display: none; }
+  .planet-label { font-size: 10px; padding: 6px 8px; }
 }
 
 #err {

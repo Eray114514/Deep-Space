@@ -13,10 +13,59 @@ export class UI {
       fade: $('fade'), labels: $('labels'), stats: $('stats'),
       loading: $('loading'), loadingText: $('loading-text'),
       altitude: $('altitude'), newBtn: $('new-universe'),
+      touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
+      btnJump: $('btn-jump'), btnTakeoff: $('btn-takeoff'),
     };
     this.labelPool = [];
     this.els.land.addEventListener('click', () => this.cb.onLand && this.cb.onLand());
     this.els.newBtn.addEventListener('click', () => this.cb.onNewUniverse && this.cb.onNewUniverse());
+    this.setupTouch();
+  }
+
+  setupTouch() {
+    const { joystick, knob, btnJump, btnTakeoff } = this.els;
+    let pid = null;
+    const R = 36;                      // knob travel radius (px)
+    const emit = (x, y) => this.cb.onJoystick && this.cb.onJoystick(x, y);
+    const move = (e) => {
+      if (e.pointerId !== pid) return;
+      const r = joystick.getBoundingClientRect();
+      let dx = e.clientX - (r.left + r.width / 2);
+      let dy = e.clientY - (r.top + r.height / 2);
+      const len = Math.hypot(dx, dy);
+      if (len > R) { dx *= R / len; dy *= R / len; }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      emit(dx / R, -dy / R);           // stick up = forward
+    };
+    const end = (e) => {
+      if (e.pointerId !== pid) return;
+      pid = null;
+      knob.style.transform = '';
+      emit(0, 0);
+    };
+    joystick.addEventListener('pointerdown', (e) => {
+      pid = e.pointerId;
+      try { joystick.setPointerCapture(pid); } catch { /* synthetic pointers */ }
+      move(e);
+    });
+    joystick.addEventListener('pointermove', move);
+    joystick.addEventListener('pointerup', end);
+    joystick.addEventListener('pointercancel', end);
+
+    const jump = (down) => this.cb.onJump && this.cb.onJump(down);
+    btnJump.addEventListener('pointerdown', (e) => { e.preventDefault(); jump(true); });
+    btnJump.addEventListener('pointerup', () => jump(false));
+    btnJump.addEventListener('pointercancel', () => jump(false));
+    btnTakeoff.addEventListener('click', () => this.cb.onTakeoff && this.cb.onTakeoff());
+  }
+
+  showTouchUI(show) {
+    this.els.touchUI.classList.toggle('hidden', !show);
+    if (!show) {
+      this.els.knob.style.transform = '';
+      if (this.cb.onJoystick) this.cb.onJoystick(0, 0);
+      if (this.cb.onJump) this.cb.onJump(false);
+    }
   }
 
   setSystem(name, planetCount, seed) {

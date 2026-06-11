@@ -33,6 +33,20 @@ Optional URL params: `?seed=ANYTHING` (a different universe), `&nolock=1` (no po
 | **T** | — | take off |
 | **Esc** | abort fly-to | release mouse |
 
+### Touch (phones / tablets)
+
+| gesture | in space | on foot |
+|---|---|---|
+| **one-finger drag** | look around | look around |
+| **pinch** | fly forward / back (the touch throttle) | — |
+| **tap** | select / fly to a planet · tap a far star to warp | — |
+| **two-finger drag** | orbit the selected planet | — |
+| **virtual joystick** | — | walk · push to the edge to run |
+| **⤊ / 🚀 buttons** | — | jump / take off |
+
+Touch devices are auto-detected (`pointer: coarse`); the joystick appears only while
+walking, render resolution is capped for mobile GPUs, and the Land button works as a tap.
+
 ## How consistency works (the interesting part)
 
 Every planet is *defined* as two pure functions of a unit direction on its sphere,

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>No Man's Sky · three.js — a procedural universe</title>
   <link rel="stylesheet" href="style.css" />
   <script type="importmap">
@@ -37,6 +37,14 @@
 
   <div id="crosshair" class="hidden"></div>
   <div id="stats"></div>
+
+  <div id="touch-ui" class="hidden">
+    <div id="joystick">
+      <div id="joystick-knob"></div>
+    </div>
+    <button id="btn-jump" class="touch-btn">⤊</button>
+    <button id="btn-takeoff" class="touch-btn">🚀</button>
+  </div>
 
   <div id="loading">
     <div class="loading-inner">

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "shots": "node tools/screenshot.js"
+    "shots": "node tools/screenshot.js",
+    "touchtest": "node tools/touchtest.js"
   },
   "devDependencies": {
     "playwright": "^1.60.0",

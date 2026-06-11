@@ -24,10 +24,13 @@ const qs = new URLSearchParams(location.search);
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 
+// touch-first device? (gestures replace wheel/keys, virtual stick for walking)
+const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+
 // ---- renderer ---------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.7 : 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 document.getElementById('app').appendChild(renderer.domElement);
@@ -117,7 +120,7 @@ const spaceCtl = new SpaceControls(renderer.domElement, nav, { onClick: handleCl
 const walkCtl = new WalkControls(renderer.domElement);
 
 renderer.domElement.addEventListener('pointerdown', () => {
-  if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK) {
+  if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && !IS_TOUCH) {
     renderer.domElement.requestPointerLock();
   }
 });
@@ -139,13 +142,24 @@ const ui = new UI({
     const p = universe.system.planets[idx];
     if (p) clickPlanet(p);
   },
+  onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
+  onJump: (down) => { walkCtl.touchJump = down; },
+  onTakeoff: () => takeoff(),
 });
 
 function setState(s) {
   state = s;
   spaceCtl.enabled = s === 'space';
   ui.setCrosshair(s === 'walk');
-  const hints = {
+  ui.showTouchUI(IS_TOUCH && s === 'walk');
+  const hints = IS_TOUCH ? {
+    space: '<b>drag</b> look · <b>pinch</b> fly · <b>tap</b> a planet or a far star · <b>two-finger drag</b> orbit',
+    flyto: 'travelling…',
+    landing: 'descending…',
+    walk: '<b>stick</b> move (push far to run) · <b>drag</b> look · <b>⤊</b> jump · <b>🚀</b> take off',
+    takeoff: 'lifting off…',
+    warp: 'warping…',
+  } : {
     space: '<b>scroll</b> fly · <b>drag</b> look · <b>click</b> a planet or a far star · <b>right-drag</b> orbit',
     flyto: 'travelling… <b>Esc</b> to abort',
     landing: 'descending…',
@@ -194,7 +208,7 @@ function tryLand() {
   const endPos = planet.posUniv.clone().addScaledVector(dirLocal, ground + 1.7);
   _v2.set(0, 0, -1).applyQuaternion(startQuat);
   const endQuat = horizonQuat(dirLocal, _v2, new THREE.Quaternion());
-  if (!window.NMS_NOLOCK) renderer.domElement.requestPointerLock();
+  if (!window.NMS_NOLOCK && !IS_TOUCH) renderer.domElement.requestPointerLock();
   setState('landing');
   ui.showLand(false);
   nav.vel.set(0, 0, 0);
@@ -271,6 +285,7 @@ function newUniverse(seed) {
 }
 
 function handleClick(cx, cy) {
+  window.__lastClick = { x: cx, y: cy, state, hit: null };
   if (state !== 'space') return;
   camera.updateMatrixWorld();
   _v.set((cx / window.innerWidth) * 2 - 1, -(cy / window.innerHeight) * 2 + 1, 0.5)
@@ -288,6 +303,7 @@ function handleClick(cx, cy) {
       if (t < hitDist) { hitDist = t; hit = p; }
     }
   }
+  window.__lastClick.hit = hit ? hit.name : null;
   if (hit) { clickPlanet(hit); return; }
   const star = universe.pickStar(nav.pos, _v);
   if (star) { warpTo(star); return; }
@@ -572,7 +588,10 @@ window.NMS = {
   },
   setSeed: (s) => newUniverse(s),
   pos: () => nav.pos.toArray(),
+  quat: () => nav.quat.toArray(),
   alt: () => nearestAlt,
+  isTouch: IS_TOUCH,
+  walkSpeed: () => walkCtl.hSpeed.length(),
   // internals, for the headless diagnosis harness
   get _internals() { return { universe, scene, renderer, nav, camera }; },
 };
