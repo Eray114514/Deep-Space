@@ -89,6 +89,14 @@ export class UI {
     this.setTargetDist(dist);
   }
 
+  setStarTarget(name, dist, sub) {
+    this.els.card.classList.remove('hidden');
+    this.els.cardName.textContent = name;
+    this.els.cardType.textContent = `Star system — ${sub}`;
+    this.els.cardInfo.textContent = 'an unexplored system awaits';
+    this.setTargetDist(dist);
+  }
+
   setTargetDist(dist) {
     this.els.cardDist.textContent = dist == null ? '' :
       dist > 10000 ? `${(dist / 1000).toFixed(0)} km` :

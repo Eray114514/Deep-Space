@@ -5,12 +5,24 @@
 
 import * as THREE from 'three';
 import { makeRng, strHash32, hash3i, hashFloat } from './rng.js';
+import { clamp } from './noise.js';
 import { Planet, TYPES } from './planet.js';
 import { systemName, planetName, moonName } from './names.js';
 
 export const CELL = 900000;            // metres between star lattice cells
 const STAR_PROB = 0.42;
-const NEAR_CELLS = 3;                  // clickable star radius (in cells)
+// the visible star field: a galactic disc (dense) with a sparse halo above
+// and below — every rendered dot is a real, warpable system
+const FIELD_XZ = 22;                   // cells of radius in the disc plane
+const DISC_Y = 6;                      // dense disc half-thickness (cells)
+const HALO_Y = 30;                     // sparse halo half-thickness (cells)
+const HALO_PROB = 0.10;                // halo keeps this fraction of stars
+
+// seamless interstellar flight: approaching a star instantiates its system
+// while its planets are still sub-pixel; the system you leave lingers until
+// it is genuinely out of sight
+const APPROACH_DIST = 1.9e6;
+const FADE_DIST = 2.3e6;
 
 const STAR_CLASSES = [
   { c: 0xfff4e0, w: 4 },   // warm white
@@ -21,6 +33,53 @@ const STAR_CLASSES = [
 ];
 
 const _v = new THREE.Vector3();
+
+// Every star in the sky is a real lattice star. Apparent size and brightness
+// fall off with true distance (computed in view space, where the f64 group
+// offset has already been applied).
+function makeStarPointsMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uDim: { value: 0 },               // 1 inside a bright daytime atmosphere
+      uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
+      uProj: { value: 600 },            // height / (2·tan(fov/2)) — set by main
+    },
+    vertexShader: /* glsl */`
+      uniform float uPixelRatio;
+      uniform float uProj;
+      attribute float aSize;
+      varying vec3 vColor;
+      varying float vBright;
+      void main() {
+        vColor = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float dist = length(mv.xyz);
+        // a star's sprite tracks the TRUE angular size of its sun
+        // (radius = aSize * 6750 m), so flying close resolves the dot into
+        // the same disc the real sun mesh has when the system instantiates
+        float discPx = 2.0 * 6750.0 * aSize * uProj / dist;
+        gl_PointSize = clamp(max(2.2 * aSize, discPx), 2.2, 34.0) * uPixelRatio;
+        // apparent magnitude falls with distance; only the very edge fades out
+        vBright = clamp(4.5e6 / dist, 0.5, 1.0)
+                * (1.0 - smoothstep(1.8e7, 2.15e7, dist));
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uDim;
+      varying vec3 vColor;
+      varying float vBright;
+      void main() {
+        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+        float a = smoothstep(1.0, 0.15, r);
+        gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
+                     * a * vBright * (1.0 - uDim * 0.97);
+      }`,
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
 
 function glowTexture(size = 128, inner = 0.0) {
   const canvas = document.createElement('canvas');
@@ -50,17 +109,29 @@ export class Universe {
 
     this.nearStarsMesh = null;
     this.nearStarsList = [];
+    this.candidates = [];              // stars close enough to fly to manually
     this.lastStarRebuild = new THREE.Vector3(Infinity, 0, 0);
+    this.camPos = new THREE.Vector3();
 
     this.homeStar = this.starAt(0, 0, 0, true);
     this.system = null;
+    this.fadingSystem = null;          // the system being left behind
     this.setSystem(this.homeStar);
+  }
+
+  // all live planets (current system + the one fading behind us)
+  planets() {
+    return this.fadingSystem
+      ? this.system.planets.concat(this.fadingSystem.planets)
+      : this.system.planets;
   }
 
   // Deterministic star lookup for a lattice cell. force=true for the home cell.
   starAt(ix, iy, iz, force = false) {
     const h = hash3i(ix, iy, iz, this.galaxySeed);
-    if (!force && hashFloat(h, 0) > STAR_PROB) return null;
+    // above/below the galactic disc only a sparse halo of stars survives
+    const prob = STAR_PROB * (Math.abs(iy) > DISC_Y ? HALO_PROB : 1);
+    if (!force && hashFloat(h, 0) > prob) return null;
     const pos = new THREE.Vector3(
       (ix + 0.12 + hashFloat(h, 0) * 0.76) * CELL,
       (iy + 0.12 + hashFloat(h, 1) * 0.76) * CELL * 0.5,   // flattened disc feel
@@ -79,36 +150,8 @@ export class Universe {
 
   buildSkybox() {
     const rand = makeRng(this.seed + ':skybox');
-    const COUNT = 9000;
-    const pos = new Float32Array(COUNT * 3);
-    const col = new Float32Array(COUNT * 3);
-    const RAD = 5.5e6;
-    const bandQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(rand() * 1.2, rand() * 3, rand() * 1.2));
-    for (let i = 0; i < COUNT; i++) {
-      const inBand = rand() < 0.55;
-      _v.set(rand() * 2 - 1, (rand() * 2 - 1) * (inBand ? 0.18 : 1), rand() * 2 - 1);
-      if (_v.lengthSq() < 0.01) _v.x = 1;
-      _v.normalize();
-      if (inBand) _v.applyQuaternion(bandQ);
-      pos[i * 3] = _v.x * RAD; pos[i * 3 + 1] = _v.y * RAD; pos[i * 3 + 2] = _v.z * RAD;
-      const b = 0.35 + rand() * 0.65;
-      const tint = rand();
-      col[i * 3] = b * (tint < 0.12 ? 1.0 : tint < 0.24 ? 0.75 : 0.92);
-      col[i * 3 + 1] = b * 0.9;
-      col[i * 3 + 2] = b * (tint < 0.12 ? 0.75 : 1.0);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    this.skybox = new THREE.Points(geo, new THREE.PointsMaterial({
-      size: 1.6, sizeAttenuation: false, vertexColors: true,
-      transparent: true, opacity: 1, depthWrite: false, fog: false,
-    }));
-    this.skybox.renderOrder = -10;
-    this.skybox.frustumCulled = false;
-    this.scene.add(this.skybox);
-
-    // nebulae: big soft additive sprites at infinity
+    // nebulae: big soft additive sprites at infinity (purely scenery — unlike
+    // the stars, which are all real places)
     this.nebulas = new THREE.Group();
     const nCount = 4 + ((rand() * 3) | 0);
     for (let i = 0; i < nCount; i++) {
@@ -128,83 +171,141 @@ export class Universe {
     this.scene.add(this.nebulas);
   }
 
-  setSystem(star) {
-    if (this.system) this.system.dispose();
-    this.system = new StarSystem(this, star);
+  // deferred=true: the sun appears now, planets materialize one per
+  // buildNext() call — spreads the cost over warp/approach frames
+  setSystem(star, deferred = false) {
+    // returning to the system we were just leaving? promote it back
+    if (this.fadingSystem && this.fadingSystem.star.id === star.id) {
+      const f = this.fadingSystem;
+      this.fadingSystem = this.system;
+      this.system = f;
+      this.rebuildNearStars(star.pos);
+      if (this.onSystemChange) this.onSystemChange(this.system);
+      return this.system;
+    }
+    if (this.system) {
+      this.disposeFading();
+      if (this.camPos.distanceTo(this.system.star.pos) < FADE_DIST) {
+        this.fadingSystem = this.system;     // still visible behind us
+      } else {
+        this.system.dispose();
+      }
+    }
+    this.system = new StarSystem(this, star, { deferred });
     this.rebuildNearStars(star.pos);
+    if (this.onSystemChange) this.onSystemChange(this.system);
     return this.system;
   }
 
+  disposeFading() {
+    if (!this.fadingSystem) return;
+    if (this.onBeforeSystemDispose && this.onBeforeSystemDispose(this.fadingSystem) === false) return;
+    this.fadingSystem.dispose();
+    this.fadingSystem = null;
+  }
+
+  // Gather every real star around the camera — the entire night sky.
+  // Dense galactic disc + sparse halo, ~15–18k stars, all warpable.
   rebuildNearStars(camPos) {
     this.lastStarRebuild.copy(camPos);
-    const cx = Math.round(camPos.x / CELL), cy = Math.round(camPos.y / (CELL * 0.5)), cz = Math.round(camPos.z / CELL);
+    const cx = Math.round(camPos.x / CELL);
+    const cy = Math.round(camPos.y / (CELL * 0.5));
+    const cz = Math.round(camPos.z / CELL);
     const list = [];
-    for (let dz = -NEAR_CELLS; dz <= NEAR_CELLS; dz++) {
-      for (let dy = -NEAR_CELLS; dy <= NEAR_CELLS; dy++) {
-        for (let dx = -NEAR_CELLS; dx <= NEAR_CELLS; dx++) {
+    for (let dz = -FIELD_XZ; dz <= FIELD_XZ; dz++) {
+      for (let dy = -HALO_Y; dy <= HALO_Y; dy++) {
+        for (let dx = -FIELD_XZ; dx <= FIELD_XZ; dx++) {
           const s = this.starAt(cx + dx, cy + dy, cz + dz);
           if (s && s.id !== this.system.star.id) list.push(s);
         }
       }
     }
     this.nearStarsList = list;
+    // stars worth proximity-checking every frame for manual approach
+    this.candidates = list.filter((s) => s.pos.distanceTo(camPos) < 5.5e6);
 
     if (this.nearStarsMesh) {
       this.scene.remove(this.nearStarsMesh);
       this.nearStarsMesh.geometry.dispose();
-      this.nearStarsMesh.material.dispose();
     }
     const pos = new Float32Array(list.length * 3);
     const col = new Float32Array(list.length * 3);
+    const siz = new Float32Array(list.length);
     list.forEach((s, i) => {
       pos[i * 3] = s.pos.x; pos[i * 3 + 1] = s.pos.y; pos[i * 3 + 2] = s.pos.z;
       col[i * 3] = s.color.r; col[i * 3 + 1] = s.color.g; col[i * 3 + 2] = s.color.b;
+      siz[i] = s.radius / 6750;          // 0.66..1.33 apparent-size jitter
     });
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    this.nearStarsMesh = new THREE.Points(geo, new THREE.PointsMaterial({
-      size: 5, sizeAttenuation: false, vertexColors: true, map: this.glowTex,
-      transparent: true, depthWrite: false, fog: false,
-    }));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(siz, 1));
+    if (!this.starMaterial) this.starMaterial = makeStarPointsMaterial();
+    this.nearStarsMesh = new THREE.Points(geo, this.starMaterial);
     this.nearStarsMesh.frustumCulled = false;
     this.nearStarsMesh.renderOrder = -8;
     this.scene.add(this.nearStarsMesh);
   }
 
-  // ray pick a distant star (by angular proximity)
+  // ray pick a distant star (by angular proximity; near bright stars are
+  // forgiving targets, far pinpricks demand more precision)
   pickStar(origin, dir) {
-    let best = null, bestAng = 0.018;
+    let best = null, bestAng = Infinity;
     for (const s of this.nearStarsList) {
       _v.copy(s.pos).sub(origin);
       const dist = _v.length();
+      if (dist < 60000) continue;
       const ang = _v.normalize().angleTo(dir);
-      if (ang < bestAng && dist > 60000) { bestAng = ang; best = s; }
+      const limit = dist < 5e6 ? 0.018 : 0.008;
+      if (ang < limit && ang < bestAng) { bestAng = ang; best = s; }
     }
     return best;
   }
 
-  update(camPos) {
+  update(camPos, allowSwap = false) {
+    this.camPos.copy(camPos);
     if (camPos.distanceTo(this.lastStarRebuild) > CELL * 0.5) {
       this.rebuildNearStars(camPos);
+    }
+    // the system behind us slips out of range
+    if (this.fadingSystem && camPos.distanceTo(this.fadingSystem.star.pos) > FADE_DIST) {
+      this.disposeFading();
+    }
+    // flying up to a dot makes it a real place: nearest star wins the camera
+    if (allowSwap) {
+      let best = null, bestD = Infinity;
+      for (const s of this.candidates) {
+        const d = camPos.distanceTo(s.pos);
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      const curD = camPos.distanceTo(this.system.star.pos);
+      if (best && best.id !== this.system.star.id && bestD < APPROACH_DIST && bestD < curD * 0.9) {
+        this.setSystem(best, true);
+      }
     }
   }
 
   // camera-relative placement: camera sits at scene origin, the universe moves
-  updateRelative(camPos) {
-    const sys = this.system;
+  relativizeSystem(sys, camPos) {
     sys.sunGroup.position.copy(sys.star.pos).sub(camPos);
     sys.sunLight.position.copy(sys.sunGroup.position);
+    // each sun lights its own neighbourhood; it fades for a camera leaving it
+    const d = camPos.distanceTo(sys.star.pos);
+    sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 7e5, 0, 1);
     for (const p of sys.planets) {
       p.group.position.copy(p.posUniv).sub(camPos);
     }
+  }
+
+  updateRelative(camPos) {
+    this.relativizeSystem(this.system, camPos);
+    if (this.fadingSystem) this.relativizeSystem(this.fadingSystem, camPos);
     if (this.nearStarsMesh) this.nearStarsMesh.position.copy(camPos).negate();
   }
 
   setStarDimming(f) {
     // f: 0 in deep space -> 1 inside a bright daytime atmosphere
-    this.skybox.material.opacity = 1 - f * 0.97;
-    if (this.nearStarsMesh) this.nearStarsMesh.material.opacity = 1 - f * 0.9;
+    if (this.starMaterial) this.starMaterial.uniforms.uDim.value = f;
     for (const n of this.nebulas.children) {
       n.material.opacity = n.userData.baseOp === undefined
         ? (n.userData.baseOp = n.material.opacity)
@@ -213,15 +314,15 @@ export class Universe {
   }
 
   dispose() {
+    if (this.fadingSystem) this.fadingSystem.dispose();
+    this.fadingSystem = null;
     if (this.system) this.system.dispose();
-    this.scene.remove(this.group, this.skybox, this.nebulas);
+    this.scene.remove(this.group, this.nebulas);
     if (this.nearStarsMesh) {
       this.scene.remove(this.nearStarsMesh);
       this.nearStarsMesh.geometry.dispose();
-      this.nearStarsMesh.material.dispose();
     }
-    this.skybox.geometry.dispose();
-    this.skybox.material.dispose();
+    if (this.starMaterial) this.starMaterial.dispose();
     for (const n of this.nebulas.children) n.material.dispose();
     this.glowTex.dispose();
   }
@@ -230,7 +331,7 @@ export class Universe {
 // ============================================================================
 
 export class StarSystem {
-  constructor(universe, star) {
+  constructor(universe, star, { deferred = false } = {}) {
     this.universe = universe;
     this.star = star;
     const rand = makeRng(universe.seed + ':sys:' + star.id);
@@ -254,6 +355,7 @@ export class StarSystem {
 
     // --- planets ---
     this.planets = [];
+    this._specs = [];
     const count = (this.isHome ? 6 : 5) + ((rand() * 4) | 0);
     const weights = {};
     for (const k of Object.keys(TYPES)) weights[k] = TYPES[k].weight;
@@ -280,33 +382,46 @@ export class StarSystem {
 
       const type = (i === 0 && this.isHome) ? 'lush' : pickType();
       const name = planetName(rand, this.name, i);
-      const planet = new Planet({
-        seed: universe.seed + ':p:' + star.id + ':' + i,
-        name, posUniv: pos, type,
-      });
-      planet.orbitIndex = i;
-      planet.setSunDir(_v.copy(star.pos).sub(pos).normalize());
-      this.planets.push(planet);
-      universe.group.add(planet.group);
+      const seed = universe.seed + ':p:' + star.id + ':' + i;
+      this._specs.push({ seed, name, pos, type, isMoon: false, orbitIndex: i, parentSpec: -1 });
 
-      // occasional moon
-      if (rand() < 0.28 && planet.R > 1500) {
+      // occasional moon — the parent's radius is its seed-rng's first draw
+      // (mirrors Planet's constructor so specs need no Planet instance)
+      const parentR = 1300 + makeRng(seed)() * 1500;
+      if (rand() < 0.28 && parentR > 1500) {
         const mAng = rand() * Math.PI * 2;
         const mPos = new THREE.Vector3(
           Math.cos(mAng), (rand() - 0.5) * 0.5, Math.sin(mAng),
-        ).normalize().multiplyScalar(planet.R * (5 + rand() * 3)).add(pos);
+        ).normalize().multiplyScalar(parentR * (5 + rand() * 3)).add(pos);
         const mType = pickType();
-        const moon = new Planet({
+        this._specs.push({
           seed: universe.seed + ':m:' + star.id + ':' + i,
-          name: moonName(rand, name), posUniv: mPos, type: mType, isMoon: true,
+          name: moonName(rand, name), pos: mPos, type: mType,
+          isMoon: true, orbitIndex: i, parentSpec: this._specs.length - 1,
         });
-        moon.orbitIndex = i;
-        moon.parentPlanet = planet;
-        moon.setSunDir(_v.copy(star.pos).sub(mPos).normalize());
-        this.planets.push(moon);
-        universe.group.add(moon.group);
       }
     }
+
+    // a deferred system materializes one planet per call (mid-warp); a normal
+    // one is complete on construction
+    this._buildIdx = 0;
+    if (!deferred) while (this.buildNext());
+  }
+
+  get built() { return this._buildIdx >= this._specs.length; }
+
+  buildNext() {
+    if (this.built) return false;
+    const s = this._specs[this._buildIdx++];
+    const planet = new Planet({
+      seed: s.seed, name: s.name, posUniv: s.pos, type: s.type, isMoon: s.isMoon,
+    });
+    planet.orbitIndex = s.orbitIndex;
+    if (s.parentSpec >= 0) planet.parentPlanet = this.planets[s.parentSpec];
+    planet.setSunDir(_v.copy(this.star.pos).sub(s.pos).normalize());
+    this.planets.push(planet);
+    this.universe.group.add(planet.group);
+    return !this.built;
   }
 
   sunDirFrom(pos, out) {

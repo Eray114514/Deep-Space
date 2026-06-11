@@ -103,12 +103,32 @@ try {
   await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 15000 });
   const target = await page.evaluate('NMS.warpToStar()');   // state flips to 'warp' synchronously
   console.log('warping to', target);
-  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 30000 });
-  await page.waitForTimeout(1500); // fade-in after arrival
+  // catch the flight at full burn: streaks, fov stretch, stars rushing past
+  await page.waitForFunction('window.NMS.warp() > 0.85', null, { timeout: 90000 });
+  await page.screenshot({ path: `${OUT}/11a-warp-flight.png` });
+  console.log('✓ 11a-warp-flight (mid-burn)');
+  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 150000 });
+  await page.waitForTimeout(800);
   await shot('11-warp-arrival');
 } catch (e) {
   errors.push('warp flow failed: ' + e);
   console.error('warp flow failed');
+}
+
+// 12: a dot in the sky is a real place — fly toward it manually (no warp)
+// and its solar system must materialize around it
+try {
+  const stars = await page.evaluate('NMS.nearStars()');
+  const target = stars[0];
+  const myPos = await page.evaluate('NMS.pos()');
+  const wp = [0, 1, 2].map((i) => myPos[i] + (target.pos[i] - myPos[i]) * 0.85);
+  await page.evaluate(`NMS.setPosition(${wp[0]}, ${wp[1]}, ${wp[2]}, ${target.pos[0]}, ${target.pos[1]}, ${target.pos[2]})`);
+  await page.waitForFunction(`window.NMS.system().id === ${JSON.stringify(target.id)}`, null, { timeout: 20000 });
+  console.log(`✓ manual approach: system swapped to ${target.id} without warping`);
+  await shot('12-manual-approach');
+} catch (e) {
+  errors.push('manual approach failed: ' + e);
+  console.error('manual approach failed:', String(e).split('\n')[0]);
 }
 
 console.log(errors.length ? `DONE WITH ${errors.length} PAGE ERROR(S)` : 'DONE — no page errors');

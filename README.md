@@ -75,9 +75,28 @@ Float precision at planetary scale is handled with **camera-relative rendering**
 live in float64 universe coordinates, the camera stays at the scene origin and the world is
 repositioned around it each frame (plus a logarithmic depth buffer).
 
+### The galaxy: every dot is a real place
+
 The galaxy (`src/galaxy.js`) is an infinite lattice: each cell hashes to (maybe) a star;
 each star's system — sun colour, planet count, types, orbits, moons, names — generates
-deterministically from its coordinates. Clicking a distant star warps you there.
+deterministically from its coordinates. **Every star you can see in the sky is one of
+these** (~15,000 in view at any time: a dense galactic disc plus a sparse halo). There is
+no fake skybox; star sprites are sized to their sun's true angular diameter and parallax
+correctly as you move.
+
+That makes interstellar travel seamless in both modes:
+
+- **Warp** (click a star twice): a real flight, not a teleport — align, spool, FOV
+  stretch, hyperspace streaks, the whole sky parallaxing past, and the destination sun
+  growing from a dot while its planets quietly materialize one per frame mid-flight.
+- **Manual flight**: just scroll toward any dot. When you get close enough to a star,
+  its system instantiates while the planets are still sub-pixel; the system behind you
+  lingers until it's genuinely out of sight. The dot you watched resolves into the same
+  sun you arrive at.
+
+Scale is NMS-style compressed (suns ~5–9 km radius, planets orbiting 30–300 km out,
+systems ~1,300 km apart) so that sister planets hang visibly in each other's skies and
+crossing between stars is minutes, not lifetimes.
 
 ## Source map
 

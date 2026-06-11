@@ -9,9 +9,11 @@ import { Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks } from './quadtree.js';
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
+import { WarpStreaks } from './effects.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
-import { makeWord } from './names.js';
+import { makeWord, systemName } from './names.js';
+import { makeRng } from './rng.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -37,7 +39,8 @@ document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.0);
-const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.12, 2.5e7);
+const BASE_FOV = 62;
+const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.12, 2.5e7);
 scene.add(camera);
 
 const ambient = new THREE.AmbientLight(0x506080, 0.09);
@@ -49,7 +52,16 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  updateStarProj();
 });
+
+// star sprites need the projection factor to match suns' true angular size
+function updateStarProj() {
+  if (universe.starMaterial) {
+    universe.starMaterial.uniforms.uProj.value =
+      window.innerHeight / (2 * Math.tan(BASE_FOV * Math.PI / 360));
+  }
+}
 
 // ---- navigation state -------------------------------------------------------
 // nav.pos lives in universe coordinates (JS doubles); the camera itself stays
@@ -61,6 +73,7 @@ const nav = {
 };
 let state = 'space';
 let focusPlanet = null;
+let focusStar = null;      // far star targeted once; targeting it again warps
 let nearest = null;
 let nearestAlt = Infinity;
 let frameNo = 0;
@@ -69,6 +82,10 @@ let lastBuildFrame = 0;
 // ---- world ------------------------------------------------------------------
 let universe = new Universe(SEED, scene);
 const scatter = new Scatter();
+const warpStreaks = new WarpStreaks(scene);
+let warpIntensity = 0;
+const prevNavPos = new THREE.Vector3();
+const _velActual = new THREE.Vector3();
 
 // ---- temps ------------------------------------------------------------------
 const _v = new THREE.Vector3();
@@ -139,13 +156,29 @@ const ui = new UI({
   onLand: tryLand,
   onNewUniverse: () => newUniverse(),
   onLabelClick: (idx) => {
-    const p = universe.system.planets[idx];
+    const p = universe.planets()[idx];
     if (p) clickPlanet(p);
   },
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
   onJump: (down) => { walkCtl.touchJump = down; },
   onTakeoff: () => takeoff(),
 });
+
+// universe → app notifications (system handoffs during warp / manual flight)
+function wireUniverse(u) {
+  u.onSystemChange = (sys) => ui.setSystem(sys.name, sys._specs.length, SEED);
+  u.onBeforeSystemDispose = (sys) => {
+    if (walkCtl.planet && sys.planets.includes(walkCtl.planet)) return false; // not under our feet
+    if (focusPlanet && sys.planets.includes(focusPlanet)) {
+      focusPlanet = null;
+      spaceCtl.focus = null;
+      ui.setTarget(null);
+    }
+    if (scatter.planet && sys.planets.includes(scatter.planet)) scatter.clear();
+    return true;
+  };
+  updateStarProj();
+}
 
 function setState(s) {
   state = s;
@@ -183,7 +216,7 @@ function flyToPlanet(planet) {
   if (state !== 'space') return;
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
-  const sunDir = universe.system.sunDirFrom(planet.posUniv, _v).clone();
+  const sunDir = planet.sunDirLocal.clone();
   const fromDir = _v2.copy(startPos).sub(planet.posUniv).normalize();
   // arrive on the sunlit side, offset from straight-in for a nicer reveal
   const targetDir = fromDir.add(sunDir.multiplyScalar(1.1)).normalize();
@@ -241,30 +274,55 @@ function takeoff() {
   });
 }
 
+// A warp is a flight, not a teleport: align with the target, spool up, then
+// cross real space at ferocious speed — every star in the sky parallaxes past,
+// the destination sun grows from a dot — and decelerate into the new system.
 function warpTo(star) {
   if (state !== 'space') return;
   setState('warp');
   focusPlanet = null;
+  focusStar = null;
   spaceCtl.focus = null;
   ui.setTarget(null);
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
   const arriveDir = startPos.clone().sub(star.pos).normalize();
   const endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 35, 180000));
-  let swapped = false, fading = false;
+  const dist = startPos.distanceTo(endPos);
+  const dur = clamp(5.5 + dist / 5e6, 6.5, 11);
+  const targetQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
+  const SPOOL = 0.07;
+  let swapped = false;
   nav.vel.set(0, 0, 0);
-  addTween(4.4, (k) => {
-    nav.pos.lerpVectors(startPos, endPos, easeInOut(k));
-    lookQuatAt(nav.pos, star.pos, _q);
-    nav.quat.copy(startQuat).slerp(_q, Math.min(1, k * 3));
-    if (k > 0.28 && !fading) { fading = true; ui.fadeTo(1, '#dff2ff', 900); }
-    if (k >= 0.5 && !swapped) {
-      swapped = true;
-      const sys = universe.setSystem(star);
-      ui.setSystem(sys.name, sys.planets.length, SEED);
-      ui.fadeTo(0, '#dff2ff', 1300);
+  warpStreaks.reset(_v.copy(star.pos).sub(startPos).normalize());
+
+  addTween(dur, (k) => {
+    if (k < SPOOL) {
+      // turn toward the target and charge the jump
+      nav.quat.copy(startQuat).slerp(targetQuat, smoothstep(0, 1, k / SPOOL));
+      camera.fov = BASE_FOV - 4 * (k / SPOOL);
+    } else {
+      const kf = (k - SPOOL) / (1 - SPOOL);
+      // quintic smootherstep: gentle ends, ferocious middle
+      const s = kf * kf * kf * (kf * (kf * 6 - 15) + 10);
+      nav.pos.lerpVectors(startPos, endPos, s);
+      nav.quat.copy(targetQuat);
+      const ramp = smoothstep(0, 0.2, kf) * (1 - smoothstep(0.78, 0.97, kf));
+      camera.fov = BASE_FOV - 4 + 30 * ramp;
+      warpIntensity = ramp;
+      if (kf >= 0.32 && !swapped) {
+        // swap systems mid-flight; the new planets build one per frame
+        swapped = true;
+        universe.setSystem(star, true);
+      }
     }
-  }, () => setState('space'));
+    camera.updateProjectionMatrix();
+  }, () => {
+    camera.fov = BASE_FOV;
+    camera.updateProjectionMatrix();
+    warpIntensity = 0;
+    setState('space');
+  });
 }
 
 function newUniverse(seed) {
@@ -278,8 +336,13 @@ function newUniverse(seed) {
   scatter.clear();
   universe.dispose();
   universe = new Universe(SEED, scene);
+  wireUniverse(universe);
   focusPlanet = null;
+  focusStar = null;
   spaceCtl.focus = null;
+  warpIntensity = 0;
+  camera.fov = BASE_FOV;
+  camera.updateProjectionMatrix();
   setState('space');
   spawn();
 }
@@ -292,7 +355,7 @@ function handleClick(cx, cy) {
     .unproject(camera).normalize();
   // planets: analytic ray/sphere in camera-relative space
   let hit = null, hitDist = Infinity;
-  for (const p of universe.system.planets) {
+  for (const p of universe.planets()) {
     _v2.copy(p.posUniv).sub(nav.pos);
     const b = _v2.dot(_v);
     if (b <= 0) continue;
@@ -304,10 +367,25 @@ function handleClick(cx, cy) {
     }
   }
   window.__lastClick.hit = hit ? hit.name : null;
-  if (hit) { clickPlanet(hit); return; }
+  if (hit) { focusStar = null; clickPlanet(hit); return; }
   const star = universe.pickStar(nav.pos, _v);
-  if (star) { warpTo(star); return; }
+  if (star) {
+    window.__lastClick.hit = '★' + star.id;
+    if (focusStar && focusStar.id === star.id) {
+      warpTo(star);
+    } else {
+      // first tap targets; the same star again warps (saves stray thumbs)
+      focusStar = star;
+      focusPlanet = null;
+      spaceCtl.focus = null;
+      const name = systemName(makeRng(SEED + ':sys:' + star.id));
+      ui.setStarTarget(name, nav.pos.distanceTo(star.pos),
+        IS_TOUCH ? 'tap again to warp' : 'click again to warp');
+    }
+    return;
+  }
   focusPlanet = null;
+  focusStar = null;
   spaceCtl.focus = null;
   ui.setTarget(null);
 }
@@ -339,7 +417,8 @@ function ambience() {
     const x = clamp(nearestAlt / (p.atmoHeight * 2.4), 0, 1);
     inAtmo = (1 - smoothstep(0.25, 1, x)) * p.cfg.atmoDensity;
     _up.copy(nav.pos).sub(p.posUniv).normalize();
-    const sunDir = universe.system.sunDirFrom(nav.pos, _v);
+    // the sun that matters is the one this planet orbits
+    const sunDir = nearest.sunDirLocal || universe.system.sunDirFrom(nav.pos, _v);
     day = smoothstep(-0.22, 0.28, _up.dot(sunDir));
 
     if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone().convertSRGBToLinear();
@@ -381,7 +460,7 @@ function updateLabels() {
   const showLabels = (state === 'space' || state === 'flyto') && frameNo > 5;
   if (showLabels) {
     camera.updateMatrixWorld();
-    const planets = universe.system.planets;
+    const planets = universe.planets();
     for (let i = 0; i < planets.length; i++) {
       const p = planets[i];
       _v.copy(p.posUniv).sub(nav.pos);
@@ -422,7 +501,7 @@ function frame() {
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet : null;
   if (!nearest) {
     let bestD = Infinity;
-    for (const p of universe.system.planets) {
+    for (const p of universe.planets()) {
       const d = _v.copy(nav.pos).sub(p.posUniv).length() - p.R;
       if (d < bestD) { bestD = d; nearest = p; }
     }
@@ -451,9 +530,15 @@ function frame() {
   }
   stepTweens(dt);
 
-  // world updates
-  universe.update(nav.pos);
-  for (const p of universe.system.planets) {
+  // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
+  if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
+  warpStreaks.update(dt, _velActual, warpIntensity);
+  // a deferred system (warp or manual approach) materializes one planet/frame
+  if (universe.system && !universe.system.built) universe.system.buildNext();
+
+  // world updates (proximity system swap allowed while free-flying)
+  universe.update(nav.pos, state === 'space' || state === 'flyto');
+  for (const p of universe.planets()) {
     _v.copy(nav.pos).sub(p.posUniv);
     p.update(_v, dt, p === nearest);
   }
@@ -481,7 +566,9 @@ function frame() {
 
   // HUD
   if (focusPlanet) ui.setTargetDist(nav.pos.distanceTo(focusPlanet.posUniv) - focusPlanet.R);
-  const spd = state === 'walk' ? walkCtl.hSpeed.length() : nav.vel.length();
+  else if (focusStar) ui.setTargetDist(nav.pos.distanceTo(focusStar.pos));
+  const spd = state === 'walk' ? walkCtl.hSpeed.length()
+    : state === 'space' ? nav.vel.length() : _velActual.length();
   ui.setAltitude(nearest && nearestAlt < 5e5 ? Math.max(0, nearestAlt) : null, spd);
   updateLabels();
 
@@ -490,14 +577,16 @@ function frame() {
     statAcc = 0;
     const info = renderer.info.render;
     let chunks = 0;
-    for (const p of universe.system.planets) chunks += p.lod.countChunks();
+    for (const p of universe.planets()) chunks += p.lod.countChunks();
     ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued`);
   }
 
   renderer.render(scene, camera);
+  prevNavPos.copy(nav.pos);
   if (frameNo === 3) ui.setLoading(false);
 }
 
+wireUniverse(universe);
 spawn();
 ui.setLoading(true, 'generating universe…');
 frame();
@@ -514,7 +603,7 @@ window.NMS = {
   stats() {
     const info = renderer.info.render;
     let chunks = 0;
-    for (const p of universe.system.planets) chunks += p.lod.countChunks();
+    for (const p of universe.planets()) chunks += p.lod.countChunks();
     return { frame: frameNo, calls: info.calls, tris: info.triangles, chunks, pending: pendingChunks(), state, alt: nearestAlt };
   },
   planets() {
@@ -530,7 +619,7 @@ window.NMS = {
     tweens.length = 0;
     if (walkCtl.active) walkCtl.exit();
     setState('space');
-    const sunDir = universe.system.sunDirFrom(p.posUniv, _v).clone();
+    const sunDir = p.sunDirLocal.clone();
     let dir = opts.dir ? new THREE.Vector3(...opts.dir).normalize()
       : p.scenicDir(sunDir).lerp(sunDir, 0.55).normalize();
     nav.pos.copy(p.posUniv).addScaledVector(dir, p.R + p.R * altFactor);
@@ -553,7 +642,7 @@ window.NMS = {
     if (!p) return false;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
-    const sunDir = universe.system.sunDirFrom(p.posUniv, _v).clone();
+    const sunDir = p.sunDirLocal.clone();
     const dir = p.scenicDir(sunDir);
     const ground = p.surfaceRadius(dir);
     _v2.copy(dir).multiplyScalar(ground + 1.7);
@@ -580,9 +669,35 @@ window.NMS = {
   },
   flyTo: (i) => { const p = universe.system.planets[i]; if (p) { focusPlanet = p; spaceCtl.focus = p; flyToPlanet(p); } },
   tryLand, takeoff,
-  nearStars: () => universe.nearStarsList.map((s) => ({ id: s.id, dist: Math.round(s.pos.distanceTo(nav.pos)) })),
+  nearStars: () => universe.nearStarsList
+    .map((s) => ({ id: s.id, dist: Math.round(s.pos.distanceTo(nav.pos)), pos: s.pos.toArray() }))
+    .sort((a, b) => a.dist - b.dist).slice(0, 50),
+  starCount: () => universe.nearStarsList.length,
+  system: () => ({
+    id: universe.system.star.id,
+    name: universe.system.name,
+    planets: universe.system.planets.length,
+    fading: universe.fadingSystem ? universe.fadingSystem.star.id : null,
+  }),
+  // park the camera anywhere in universe coords (testing manual flight)
+  setPosition(x, y, z, lookX, lookY, lookZ) {
+    tweens.length = 0;
+    if (walkCtl.active) walkCtl.exit();
+    setState('space');
+    nav.pos.set(x, y, z);
+    nav.vel.set(0, 0, 0);
+    if (lookX !== undefined) lookQuatAt(nav.pos, _v.set(lookX, lookY, lookZ), nav.quat);
+    return true;
+  },
   warpToStar(id) {
-    const s = universe.nearStarsList.find((x) => x.id === id) || universe.nearStarsList[0];
+    let s = id ? universe.nearStarsList.find((x) => x.id === id) : null;
+    if (!s) {
+      let best = Infinity;
+      for (const st of universe.nearStarsList) {
+        const d = st.pos.distanceTo(nav.pos);
+        if (d < best) { best = d; s = st; }
+      }
+    }
     if (s) warpTo(s);
     return s ? s.id : null;
   },
@@ -592,6 +707,7 @@ window.NMS = {
   alt: () => nearestAlt,
   isTouch: IS_TOUCH,
   walkSpeed: () => walkCtl.hSpeed.length(),
+  warp: () => warpIntensity,
   // internals, for the headless diagnosis harness
   get _internals() { return { universe, scene, renderer, nav, camera }; },
 };
