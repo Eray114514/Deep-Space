@@ -199,6 +199,13 @@ export class Scatter {
     _up.set(qx, qy, qz).normalize();          // canonical cell direction
     const h0 = hash3i(qx, qy, qz, seedI);
 
+    // props near the range edge grow in instead of popping in
+    const dot = Math.min(1, Math.max(-1, _up.dot(_anchor)));
+    const cells = Math.acos(dot) / cellAng;
+    let edge = Math.min(1, Math.max(0, ((RANGE - 1) - cells) / 5));
+    if (edge < 0.03) return;
+    edge = edge * edge * (3 - 2 * edge);
+
     const hgt = p.height(_up, p.fullMaxFreq);
     const recipe = RECIPES[p.biomeAt(_up, hgt)];
     if (!recipe) return;
@@ -232,7 +239,7 @@ export class Scatter {
       _q.setFromUnitVectors(Y, _jd);
       _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
       _q.multiply(_q2);
-      const sc = s0 + (s1 - s0) * hashFloat(hc, 2);
+      const sc = (s0 + (s1 - s0) * hashFloat(hc, 2)) * edge;
       _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
       _m.compose(_v2, _q, _s);
       im.setMatrixAt(counts[kind]++, _m);

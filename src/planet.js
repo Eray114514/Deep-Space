@@ -52,7 +52,8 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, fadeIn = false }) {
+    this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
     this.seed = seed;
     this.name = name;
     this.isMoon = isMoon;
@@ -138,6 +139,23 @@ export class Planet {
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;
+
+    // materials touched by the fade-in
+    this._fades = [{ mat: this.terrainMaterial, base: 1 }];
+    if (this.liquidMesh) this._fades.push({ mat: this.liquidMesh.material, base: this.liquidMesh.material.opacity });
+    if (this.cloudMesh) this._fades.push({ mat: this.cloudMesh.material, base: this.cloudMesh.material.opacity });
+    if (this.ringMesh) this._fades.push({ mat: this.ringMesh.material, base: this.ringMesh.material.opacity });
+    this._atmoBaseDensity = this.atmoMesh ? this.atmoMesh.material.uniforms.density.value : 0;
+    if (this.appear < 1) this.applyAppear();
+  }
+
+  applyAppear() {
+    const a = this.appear;
+    for (const f of this._fades) {
+      f.mat.opacity = f.base * a;
+      f.mat.transparent = a < 1 || f.base < 1;
+    }
+    if (this.atmoMesh) this.atmoMesh.material.uniforms.density.value = this._atmoBaseDensity * a;
   }
 
   // ======================================================================
@@ -470,7 +488,11 @@ export class Planet {
 
   // camLocal: camera position in planet-local coords (f64 Vector3)
   update(camLocal, dt, focused) {
-    this.lod.update(camLocal);
+    this.lod.update(camLocal, dt);
+    if (this.appear < 1) {
+      this.appear = Math.min(1, this.appear + dt / 1.2);
+      this.applyAppear();
+    }
     if (this.cloudMesh) {
       this.cloudSpin += dt * 0.0045;
       this.cloudMesh.quaternion.copy(this.axisQuat)

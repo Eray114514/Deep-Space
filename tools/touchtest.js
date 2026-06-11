@@ -98,6 +98,10 @@ check(altAfter < 5200, `altitude dropped toward planet (${altAfter.toFixed(0)} m
 
 // -- tap a planet = travel ----------------------------------------------------
 await page.evaluate('NMS.teleport(0, 6)');
+// settle first: a tap must not straddle the post-teleport chunk-build stalls
+try {
+  await page.waitForFunction('window.NMS.idle()', null, { timeout: 120000 });
+} catch { console.warn('tap-settle timeout (continuing)'); }
 await sleep(300);
 await tap(CX, CY);                       // the planet fills the view center
 await sleep(400);

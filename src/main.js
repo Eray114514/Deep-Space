@@ -559,8 +559,8 @@ function frame() {
     _v.copy(nav.pos).sub(nearest.posUniv).length() < nearest.seaRadius + 2
     ? 'DIVE — walk the seabed' : 'LAND — walk the surface (L)');
 
-  // chunk builds (budgeted per frame)
-  const built = flushChunkQueue(state === 'walk' ? 6 : 12);
+  // chunk builds (budgeted per frame; geomorph sampling makes each ~2× dearer)
+  const built = flushChunkQueue(state === 'walk' ? 5 : 9);
   if (built > 0) lastBuildFrame = frameNo;
 
   // camera-relative placement

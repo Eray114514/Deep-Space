@@ -64,6 +64,9 @@ Everything samples these same two functions:
   `height`/`colorAt` on its grid. `maxFreq` caps noise octaves at the chunk's own sampling
   rate (first octave of each landform always survives, so mean elevation and silhouette
   never jump between LODs). A planet is literally the same function at every distance.
+  LOD swaps are **geomorphed**: every chunk carries its parent-resolution shape, normals
+  and colours as a relative morph target, so splits appear in the parent's exact shape
+  and relax into detail (and merges animate back) — no popping terrain.
 - **Walking** (`src/controls.js`): the ground under your feet is `height(dir)` —
   not a mesh raycast — so you stand exactly on the terrain you saw from orbit.
 - **Liquids**: seas, ice sheets and magma are spheres at the seeded sea level; rivers are

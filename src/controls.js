@@ -131,7 +131,8 @@ export class SpaceControls {
     }
     if (!this._drag || this._drag.id !== e.pointerId) return;
     const thresh = this._drag.touch ? 14 : 7;        // fingers wobble more than mice
-    const wasClick = this._drag.moved < thresh && performance.now() - this._drag.t < 500;
+    // generous time window: one long frame (chunk builds, GC) must not eat a tap
+    const wasClick = this._drag.moved < thresh && performance.now() - this._drag.t < 700;
     const btn = this._drag.button;
     this._drag = null;
     if (wasClick && btn === 0 && this.onClick) this.onClick(e.clientX, e.clientY);

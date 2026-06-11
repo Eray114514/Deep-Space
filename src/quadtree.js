@@ -8,6 +8,7 @@ import * as THREE from 'three';
 export const GRID_CELLS = 20;          // quads per chunk edge
 const SPLIT = 4.0;                     // split when dist < size * SPLIT
 const MERGE = 5.2;                     // merge when dist > size * MERGE
+const MORPH_TIME = 0.45;               // seconds for a LOD transition to relax
 
 const FACE_FN = [
   (u, v, out) => out.set(1, v, -u),
@@ -28,7 +29,27 @@ const _p1 = new THREE.Vector3();
 const _p2 = new THREE.Vector3();
 const _n = new THREE.Vector3();
 const _col = new THREE.Color();
+const _dirV = new THREE.Vector3();
+const _cP = new THREE.Vector3();
+const _cN = new THREE.Vector3();
+const _cC = new THREE.Color();
 const _camDir = new THREE.Vector3();
+
+// position/normal/color of the surface at one LOD cutoff
+function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm, outCol) {
+  const h = p.height(dir, maxFreq);
+  outPos.copy(dir).multiplyScalar(p.R + h);
+  if (Math.abs(dir.y) < 0.95) _t1.set(-dir.z, 0, dir.x).normalize();
+  else _t1.set(1, 0, 0).projectOnPlane(dir).normalize();
+  _t2.crossVectors(dir, _t1);
+  _d1.copy(dir).addScaledVector(_t1, eps).normalize();
+  _p1.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq));
+  _d2.copy(dir).addScaledVector(_t2, eps).normalize();
+  _p2.copy(_d2).multiplyScalar(p.R + p.height(_d2, maxFreq));
+  outNrm.crossVectors(_p1.sub(outPos), _p2.sub(outPos)).normalize();
+  const slope = Math.max(0, 1 - outNrm.dot(dir));
+  p.colorAt(dir, h, slope, maxFreq, outCol);
+}
 
 // ---- global build scheduler -------------------------------------------------
 const buildQueue = [];
@@ -66,6 +87,8 @@ function makeNode(lod, face, level, ix, iy) {
     centerDir: new THREE.Vector3(),
     centerPos: new THREE.Vector3(),
     children: null, mesh: null, queued: false, dead: false,
+    // geomorph state: 1 = parent's shape, 0 = own full detail
+    morph: 1, morphTo: 0, splitActive: false, mergePending: false,
   };
   FACE_FN[face]((u0 + node.u1) / 2, (v0 + node.v1) / 2, node.centerDir);
   node.centerDir.normalize();
@@ -102,9 +125,24 @@ export class ChunkedLOD {
     return ang > horizon;
   }
 
-  update(camLocal) {
+  update(camLocal, dt = 0.016) {
     this.camLocal.copy(camLocal);
+    this._dt = dt;
     for (const root of this.roots) this.process(root);
+  }
+
+  setMorph(node, v) {
+    node.morph = v;
+    if (node.mesh && node.mesh.morphTargetInfluences) node.mesh.morphTargetInfluences[0] = v;
+  }
+
+  advanceMorph(node) {
+    if (node.morph === node.morphTo) return;
+    const step = this._dt / MORPH_TIME;
+    const m = node.morph < node.morphTo
+      ? Math.min(node.morphTo, node.morph + step)
+      : Math.max(node.morphTo, node.morph - step);
+    this.setMorph(node, m);
   }
 
   process(node) {
@@ -118,20 +156,55 @@ export class ChunkedLOD {
       let ready = true;
       for (const c of node.children) if (!c.mesh) { ready = false; break; }
       if (ready) {
+        if (node.mergePending) {            // re-approached mid-merge: refine again
+          node.mergePending = false;
+          for (const c of node.children) c.morphTo = 0;
+        }
+        if (!node.splitActive) {
+          node.splitActive = true;
+          // children appear in the parent's exact shape, then relax into detail
+          for (const c of node.children) { this.setMorph(c, 1); c.morphTo = 0; }
+        }
         if (node.mesh) node.mesh.visible = false;
         for (const c of node.children) this.process(c);
         return;
       }
       // children still building: keep this level on screen meanwhile
     } else if (node.children && d > node.size * MERGE) {
-      this.disposeChildren(node);
+      const leavesOnly = node.children.every((c) => !c.children);
+      if (leavesOnly && node.mesh) {
+        // animate children back into the parent's shape, then swap — no pop
+        if (!node.mergePending) {
+          node.mergePending = true;
+          for (const c of node.children) c.morphTo = 1;
+        }
+        const done = node.children.every((c) => !c.mesh || c.morph >= 0.999);
+        if (done) {
+          this.disposeChildren(node);
+        } else {
+          if (node.mesh) node.mesh.visible = false;
+          for (const c of node.children) {
+            if (c.mesh) c.mesh.visible = true;
+            this.advanceMorph(c);
+          }
+          return;
+        }
+      } else if (!leavesOnly) {
+        // grandchildren must collapse first; keep recursing
+        if (node.mesh) node.mesh.visible = false;
+        for (const c of node.children) this.process(c);
+        return;
+      }
     }
 
     if (!node.mesh && !node.queued) {
       node.queued = true;
       buildQueue.push(node);
     }
-    if (node.mesh) node.mesh.visible = true;
+    if (node.mesh) {
+      node.mesh.visible = true;
+      this.advanceMorph(node);
+    }
     if (node.children) {
       for (const c of node.children) this.hideSubtree(c);
     }
@@ -165,6 +238,8 @@ export class ChunkedLOD {
       }
     }
     node.children = null;
+    node.splitActive = false;
+    node.mergePending = false;
   }
 
   buildNodeMesh(node) {
@@ -174,6 +249,10 @@ export class ChunkedLOD {
     const maxFreq = p.freqAtLevel(node.level);
     const eps = cellAngle * 0.5;
     const skirtDrop = p.R * cellAngle * 2.5 + 6;
+    // non-root chunks carry their parent's shape as a morph target, so LOD
+    // transitions can relax between levels instead of popping
+    const hasMorph = node.level > 0;
+    const coarseFreq = hasMorph ? p.freqAtLevel(node.level - 1) : 0;
 
     const gridVerts = (N + 1) * (N + 1);
     const skirtVerts = 4 * (N + 1);
@@ -181,6 +260,9 @@ export class ChunkedLOD {
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
     const colors = new Float32Array(total * 3);
+    const dPos = hasMorph ? new Float32Array(total * 3) : null;
+    const dNrm = hasMorph ? new Float32Array(total * 3) : null;
+    const dCol = hasMorph ? new Float32Array(total * 3) : null;
 
     const faceFn = FACE_FN[node.face];
 
@@ -190,30 +272,29 @@ export class ChunkedLOD {
         const u = node.u0 + (node.u1 - node.u0) * (i / N);
         const idx = j * (N + 1) + i;
 
-        faceFn(u, v, _v).normalize();
-        const h = p.height(_v, maxFreq);
-        _p0.copy(_v).multiplyScalar(p.R + h);
-
-        // analytic-ish normal from two forward differences of the same field
-        if (Math.abs(_v.y) < 0.95) _t1.set(-_v.z, 0, _v.x).normalize();
-        else _t1.set(1, 0, 0).projectOnPlane(_v).normalize();
-        _t2.crossVectors(_v, _t1);
-
-        _d1.copy(_v).addScaledVector(_t1, eps).normalize();
-        _p1.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq));
-        _d2.copy(_v).addScaledVector(_t2, eps).normalize();
-        _p2.copy(_d2).multiplyScalar(p.R + p.height(_d2, maxFreq));
-
-        _n.crossVectors(_p1.sub(_p0), _p2.sub(_p0)).normalize();
-        const slope = Math.max(0, 1 - _n.dot(_v));
-
-        p.colorAt(_v, h, slope, maxFreq, _col);
+        faceFn(u, v, _dirV).normalize();
+        sampleSurface(p, _dirV, maxFreq, eps, _p0, _n, _col);
 
         positions[idx * 3] = _p0.x;
         positions[idx * 3 + 1] = _p0.y;
         positions[idx * 3 + 2] = _p0.z;
         normals[idx * 3] = _n.x; normals[idx * 3 + 1] = _n.y; normals[idx * 3 + 2] = _n.z;
         colors[idx * 3] = _col.r; colors[idx * 3 + 1] = _col.g; colors[idx * 3 + 2] = _col.b;
+
+        if (hasMorph) {
+          // the same vertex as the parent level sees it (coarser cutoff,
+          // parent's sampling eps) — stored relative to the fine vertex
+          sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN, _cC);
+          dPos[idx * 3] = _cP.x - _p0.x;
+          dPos[idx * 3 + 1] = _cP.y - _p0.y;
+          dPos[idx * 3 + 2] = _cP.z - _p0.z;
+          dNrm[idx * 3] = _cN.x - _n.x;
+          dNrm[idx * 3 + 1] = _cN.y - _n.y;
+          dNrm[idx * 3 + 2] = _cN.z - _n.z;
+          dCol[idx * 3] = _cC.r - _col.r;
+          dCol[idx * 3 + 1] = _cC.g - _col.g;
+          dCol[idx * 3 + 2] = _cC.b - _col.b;
+        }
       }
     }
 
@@ -232,6 +313,11 @@ export class ChunkedLOD {
       positions[dst * 3] = px * k; positions[dst * 3 + 1] = py * k; positions[dst * 3 + 2] = pz * k;
       normals[dst * 3] = normals[src * 3]; normals[dst * 3 + 1] = normals[src * 3 + 1]; normals[dst * 3 + 2] = normals[src * 3 + 2];
       colors[dst * 3] = colors[src * 3]; colors[dst * 3 + 1] = colors[src * 3 + 1]; colors[dst * 3 + 2] = colors[src * 3 + 2];
+      if (hasMorph) {
+        dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
+        dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
+        dCol[dst * 3] = dCol[src * 3]; dCol[dst * 3 + 1] = dCol[src * 3 + 1]; dCol[dst * 3 + 2] = dCol[src * 3 + 2];
+      }
     }
 
     const indices = [];
@@ -259,10 +345,18 @@ export class ChunkedLOD {
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    if (hasMorph) {
+      geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
+      geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];
+      geo.morphAttributes.color = [new THREE.BufferAttribute(dCol, 3)];
+      geo.morphTargetsRelative = true;
+    }
     geo.setIndex(indices);
     geo.computeBoundingSphere();
+    if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
+    if (hasMorph && mesh.morphTargetInfluences) mesh.morphTargetInfluences[0] = node.morph;
     mesh.visible = false;
     node.mesh = mesh;
     p.group.add(mesh);

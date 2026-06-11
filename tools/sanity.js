@@ -69,11 +69,46 @@ for (const type of Object.keys(TYPES)) {
   // (the tree deepens one level per update, so iterate past convergence)
   const cam = p.scenicDir().multiplyScalar(p.R + 50);
   const t1 = performance.now();
+  let maxInfSeen = 0;
+  const scanInfluence = () => {
+    let m = 0;
+    const walk = (n) => {
+      if (n.mesh && n.mesh.visible && n.mesh.morphTargetInfluences) {
+        m = Math.max(m, n.mesh.morphTargetInfluences[0]);
+      }
+      if (n.children) n.children.forEach(walk);
+    };
+    for (const r of p.lod.roots) walk(r);
+    return m;
+  };
   for (let it = 0; it < 80; it++) {
-    p.lod.update(cam);
+    p.lod.update(cam, 0.05);
     flushChunkQueue(400);
+    maxInfSeen = Math.max(maxInfSeen, scanInfluence());
   }
   const tRefine = performance.now() - t1;
+
+  // geomorph: transitions must happen (influence ~1 observed on new chunks),
+  // settle to full detail, and carry bounded parent-shape deltas
+  check(maxInfSeen > 0.5, `${type}: no geomorph transition observed (max influence ${maxInfSeen.toFixed(2)})`);
+  check(scanInfluence() < 0.01, `${type}: geomorph never settled (${scanInfluence().toFixed(2)})`);
+  {
+    let morphed = 0, maxDelta = 0;
+    const walk = (n) => {
+      if (n.mesh && n.level > 0) {
+        const ma = n.mesh.geometry.morphAttributes;
+        if (ma && ma.position && ma.position[0]) {
+          morphed++;
+          const a = ma.position[0].array;
+          for (let i = 0; i < a.length; i += 37 * 3) maxDelta = Math.max(maxDelta, Math.abs(a[i]));
+        }
+      }
+      if (n.children) n.children.forEach(walk);
+    };
+    for (const r of p.lod.roots) walk(r);
+    check(morphed > 10, `${type}: chunks missing morph targets (${morphed})`);
+    check(maxDelta < p.hAmp * 2.5, `${type}: morph deltas out of range (${maxDelta.toFixed(1)} m)`);
+  }
   check(pendingChunks() === 0, `${type}: build queue never drained`);
   const chunks = p.lod.countChunks();
   check(chunks > 30, `${type}: too little subdivision near surface (${chunks} chunks)`);

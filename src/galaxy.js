@@ -289,9 +289,13 @@ export class Universe {
   relativizeSystem(sys, camPos) {
     sys.sunGroup.position.copy(sys.star.pos).sub(camPos);
     sys.sunLight.position.copy(sys.sunGroup.position);
-    // each sun lights its own neighbourhood; it fades for a camera leaving it
     const d = camPos.distanceTo(sys.star.pos);
+    // each sun lights its own neighbourhood; it fades for a camera leaving it
     sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 7e5, 0, 1);
+    // the corona blooms only on approach: from afar the sun mesh is the same
+    // small disc as its star sprite, so the handoff has nothing to pop
+    const tg = clamp((1.7e6 - d) / 8e5, 0, 1);
+    sys.sunGlow.material.opacity = tg * tg * (3 - 2 * tg);
     for (const p of sys.planets) {
       p.group.position.copy(p.posUniv).sub(camPos);
     }
@@ -343,12 +347,12 @@ export class StarSystem {
     const sunMat = new THREE.MeshBasicMaterial({ color: star.color, fog: false });
     this.sunMesh = new THREE.Mesh(new THREE.SphereGeometry(star.radius, 48, 32), sunMat);
     this.sunGroup.add(this.sunMesh);
-    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
       map: universe.glowTex, color: star.color.clone().lerp(new THREE.Color(0xffffff), 0.3),
       transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
     }));
-    glow.scale.setScalar(star.radius * 14);
-    this.sunGroup.add(glow);
+    this.sunGlow.scale.setScalar(star.radius * 14);
+    this.sunGroup.add(this.sunGlow);
     this.sunLight = new THREE.PointLight(0xffffff, 3.2, 0, 0);
     this.sunLight.color.copy(star.color.clone().lerp(new THREE.Color(0xffffff), 0.7));
     universe.group.add(this.sunGroup, this.sunLight);
@@ -405,6 +409,7 @@ export class StarSystem {
     // a deferred system materializes one planet per call (mid-warp); a normal
     // one is complete on construction
     this._buildIdx = 0;
+    this._deferred = deferred;
     if (!deferred) while (this.buildNext());
   }
 
@@ -415,6 +420,7 @@ export class StarSystem {
     const s = this._specs[this._buildIdx++];
     const planet = new Planet({
       seed: s.seed, name: s.name, posUniv: s.pos, type: s.type, isMoon: s.isMoon,
+      fadeIn: this._deferred,
     });
     planet.orbitIndex = s.orbitIndex;
     if (s.parentSpec >= 0) planet.parentPlanet = this.planets[s.parentSpec];
