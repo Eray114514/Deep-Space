@@ -52,10 +52,12 @@ export class UI {
     joystick.addEventListener('pointerup', end);
     joystick.addEventListener('pointercancel', end);
 
-    const jump = (down) => this.cb.onJump && this.cb.onJump(down);
-    btnJump.addEventListener('pointerdown', (e) => { e.preventDefault(); jump(true); });
-    btnJump.addEventListener('pointerup', () => jump(false));
-    btnJump.addEventListener('pointercancel', () => jump(false));
+    // jump latches on press; the controller clears it when consumed, so a
+    // quick tap can never disappear between two slow frames
+    btnJump.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      if (this.cb.onJump) this.cb.onJump(true);
+    });
     btnTakeoff.addEventListener('click', () => this.cb.onTakeoff && this.cb.onTakeoff());
   }
 

@@ -21,14 +21,14 @@ const browser = await chromium.launch({
     '--disable-gpu-sandbox',
   ],
 });
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 
 const errors = [];
 page.on('pageerror', (e) => { errors.push(String(e)); console.error('PAGEERROR:', String(e).split('\n')[0]); });
 page.on('console', (m) => { if (m.type() === 'error') console.error('CONSOLE:', m.text().slice(0, 300)); });
 
 console.log(`seed=${SEED} → http://127.0.0.1:${port}`);
-await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(SEED)}&nolock=1`);
+await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(SEED)}&nolock=1&buildms=30`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 
 async function shot(name, timeout = 150000) {
@@ -86,11 +86,11 @@ if (alt) {
 
 // 10: the real landing flow — low orbit, then the animated descent into walk
 const dry = planets.find((p) => !p.hasLiquid && !p.isMoon) || planets[0];
-await page.evaluate(`NMS.teleport(${dry.i}, 0.09)`);
+await page.evaluate(`NMS.teleport(${dry.i}, 0.003)`);   // a few hundred metres up
 try {
-  await page.waitForFunction('window.NMS.idle()', null, { timeout: 120000 });
+  await page.waitForTimeout(800);   // landing needs no settle, just the prompt range
   await page.evaluate('NMS.tryLand()');
-  await page.waitForFunction('window.NMS.state === "walk"', null, { timeout: 30000 });
+  await page.waitForFunction('window.NMS.state === "walk"', null, { timeout: 60000 });
   await shot(`10-landed-${dry.type}`);
 } catch (e) {
   errors.push('landing flow failed: ' + e);
@@ -100,7 +100,8 @@ try {
 // 11: warp to a neighbouring star system
 try {
   await page.evaluate('NMS.takeoff()');
-  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 15000 });
+  // the 1.5 s tween can take ~20 s of wall time under SwiftShader build load
+  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 60000 });
   const target = await page.evaluate('NMS.warpToStar()');   // state flips to 'warp' synchronously
   console.log('warping to', target);
   // catch the flight at full burn: streaks, fov stretch, stars rushing past
@@ -112,7 +113,7 @@ try {
   await shot('11-warp-arrival');
 } catch (e) {
   errors.push('warp flow failed: ' + e);
-  console.error('warp flow failed');
+  console.error('warp flow failed:', String(e).split('\n')[0]);
 }
 
 // 12: a dot in the sky is a real place — fly toward it manually (no warp)

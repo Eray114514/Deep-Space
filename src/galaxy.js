@@ -9,7 +9,7 @@ import { clamp } from './noise.js';
 import { Planet, TYPES } from './planet.js';
 import { systemName, planetName, moonName } from './names.js';
 
-export const CELL = 900000;            // metres between star lattice cells
+export const CELL = 6e7;               // metres between star lattice cells
 const STAR_PROB = 0.42;
 // the visible star field: a galactic disc (dense) with a sparse halo above
 // and below — every rendered dot is a real, warpable system
@@ -21,8 +21,8 @@ const HALO_PROB = 0.10;                // halo keeps this fraction of stars
 // seamless interstellar flight: approaching a star instantiates its system
 // while its planets are still sub-pixel; the system you leave lingers until
 // it is genuinely out of sight
-const APPROACH_DIST = 1.9e6;
-const FADE_DIST = 2.3e6;
+const APPROACH_DIST = 1.2e8;
+const FADE_DIST = 1.5e8;
 
 const STAR_CLASSES = [
   { c: 0xfff4e0, w: 4 },   // warm white
@@ -55,13 +55,13 @@ function makeStarPointsMaterial() {
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
         float dist = length(mv.xyz);
         // a star's sprite tracks the TRUE angular size of its sun
-        // (radius = aSize * 6750 m), so flying close resolves the dot into
+        // (radius = aSize * 3e5 m), so flying close resolves the dot into
         // the same disc the real sun mesh has when the system instantiates
-        float discPx = 2.0 * 6750.0 * aSize * uProj / dist;
+        float discPx = 2.0 * 3.0e5 * aSize * uProj / dist;
         gl_PointSize = clamp(max(2.2 * aSize, discPx), 2.2, 34.0) * uPixelRatio;
         // apparent magnitude falls with distance; only the very edge fades out
-        vBright = clamp(4.5e6 / dist, 0.5, 1.0)
-                * (1.0 - smoothstep(1.8e7, 2.15e7, dist));
+        vBright = clamp(3.0e8 / dist, 0.5, 1.0)
+                * (1.0 - smoothstep(1.15e9, 1.38e9, dist));
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: /* glsl */`
@@ -144,7 +144,7 @@ export class Universe {
       id: `${ix},${iy},${iz}`,
       ix, iy, iz, pos,
       color: new THREE.Color(color),
-      radius: 4500 + hashFloat(h, 2) * 4500,
+      radius: 2e5 + hashFloat(h, 2) * 2e5,
     };
   }
 
@@ -161,9 +161,9 @@ export class Universe {
         blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
       });
       const spr = new THREE.Sprite(mat);
-      _v.set(rand() * 2 - 1, (rand() * 2 - 1) * 0.5, rand() * 2 - 1).normalize().multiplyScalar(4.5e6);
+      _v.set(rand() * 2 - 1, (rand() * 2 - 1) * 0.5, rand() * 2 - 1).normalize().multiplyScalar(1.8e9);
       spr.position.copy(_v);
-      const s = (1.2 + rand() * 2.2) * 1.8e6;
+      const s = (1.2 + rand() * 2.2) * 6.5e8;
       spr.scale.set(s, s, 1);
       this.nebulas.add(spr);
     }
@@ -222,7 +222,7 @@ export class Universe {
     }
     this.nearStarsList = list;
     // stars worth proximity-checking every frame for manual approach
-    this.candidates = list.filter((s) => s.pos.distanceTo(camPos) < 5.5e6);
+    this.candidates = list.filter((s) => s.pos.distanceTo(camPos) < 3.5e8);
 
     if (this.nearStarsMesh) {
       this.scene.remove(this.nearStarsMesh);
@@ -234,7 +234,7 @@ export class Universe {
     list.forEach((s, i) => {
       pos[i * 3] = s.pos.x; pos[i * 3 + 1] = s.pos.y; pos[i * 3 + 2] = s.pos.z;
       col[i * 3] = s.color.r; col[i * 3 + 1] = s.color.g; col[i * 3 + 2] = s.color.b;
-      siz[i] = s.radius / 6750;          // 0.66..1.33 apparent-size jitter
+      siz[i] = s.radius / 3e5;           // 0.66..1.33 apparent-size jitter
     });
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -254,9 +254,9 @@ export class Universe {
     for (const s of this.nearStarsList) {
       _v.copy(s.pos).sub(origin);
       const dist = _v.length();
-      if (dist < 60000) continue;
+      if (dist < 4e6) continue;
       const ang = _v.normalize().angleTo(dir);
-      const limit = dist < 5e6 ? 0.018 : 0.008;
+      const limit = dist < 3e8 ? 0.018 : 0.008;
       if (ang < limit && ang < bestAng) { bestAng = ang; best = s; }
     }
     return best;
@@ -279,7 +279,7 @@ export class Universe {
         if (d < bestD) { bestD = d; best = s; }
       }
       const curD = camPos.distanceTo(this.system.star.pos);
-      if (best && best.id !== this.system.star.id && bestD < APPROACH_DIST && bestD < curD * 0.9) {
+      if (best && best.id !== this.system.star.id && bestD < APPROACH_DIST && bestD < curD * 0.75) {
         this.setSystem(best, true);
       }
     }
@@ -291,10 +291,10 @@ export class Universe {
     sys.sunLight.position.copy(sys.sunGroup.position);
     const d = camPos.distanceTo(sys.star.pos);
     // each sun lights its own neighbourhood; it fades for a camera leaving it
-    sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 7e5, 0, 1);
+    sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 5e7, 0, 1);
     // the corona blooms only on approach: from afar the sun mesh is the same
     // small disc as its star sprite, so the handoff has nothing to pop
-    const tg = clamp((1.7e6 - d) / 8e5, 0, 1);
+    const tg = clamp((1.1e8 - d) / 5e7, 0, 1);
     sys.sunGlow.material.opacity = tg * tg * (3 - 2 * tg);
     for (const p of sys.planets) {
       p.group.position.copy(p.posUniv).sub(camPos);
@@ -375,7 +375,9 @@ export class StarSystem {
     };
 
     for (let i = 0; i < count; i++) {
-      const orbit = 30000 * Math.pow(1.42, i) * (0.85 + rand() * 0.3);
+      // truly interplanetary spacing: hundreds of planet-radii between
+      // worlds, capped so outer orbits stay inside the system's bubble
+      const orbit = Math.min(9e5 * Math.pow(1.5, i) * (0.85 + rand() * 0.3), 1.25e7);
       const ang = rand() * Math.PI * 2;
       const incl = (rand() - 0.5) * 0.35;
       const pos = new THREE.Vector3(
@@ -391,12 +393,12 @@ export class StarSystem {
 
       // occasional moon — the parent's radius is its seed-rng's first draw
       // (mirrors Planet's constructor so specs need no Planet instance)
-      const parentR = 1300 + makeRng(seed)() * 1500;
-      if (rand() < 0.28 && parentR > 1500) {
+      const parentR = 30000 + makeRng(seed)() * 90000;
+      if (rand() < 0.28 && parentR > 55000) {
         const mAng = rand() * Math.PI * 2;
         const mPos = new THREE.Vector3(
           Math.cos(mAng), (rand() - 0.5) * 0.5, Math.sin(mAng),
-        ).normalize().multiplyScalar(parentR * (5 + rand() * 3)).add(pos);
+        ).normalize().multiplyScalar(parentR * (3 + rand() * 2)).add(pos);
         const mType = pickType();
         this._specs.push({
           seed: universe.seed + ':m:' + star.id + ':' + i,

@@ -65,11 +65,13 @@ export class Planet {
     this.type = type;
     this.cfg = TYPES[type];
 
-    // ---- dimensions -------------------------------------------------------
-    const baseR = isMoon ? 550 + rand() * 450 : 1300 + rand() * 1500;
+    // ---- dimensions: real worlds, tens of kilometres across ---------------
+    const baseR = isMoon ? 8000 + rand() * 12000 : 30000 + rand() * 90000;
     this.R = radius || baseR;
-    this.hAmp = this.R * this.cfg.relief * (0.85 + rand() * 0.5);
-    this.gravity = 9.81 * clamp(this.R / 2100, 0.45, 1.5);
+    // relief grows with the world but tops out at alpine scale
+    this.hAmp = Math.min(this.R * this.cfg.relief * (0.85 + rand() * 0.5), 2400 + rand() * 1200);
+    this.gravity = 9.81 * clamp(this.R / 70000, 0.55, 1.5);
+    this.atmoDensity = this.cfg.atmoDensity * (0.7 + rand() * 0.6);
 
     // ---- noise fields -----------------------------------------------------
     this.nA = new Simplex(makeRng(seed + ':A'));
@@ -84,6 +86,19 @@ export class Planet {
     this.mountAmp = this.hAmp * (0.55 + rand() * 0.45);
     this.detailFreq = 16 + rand() * 10;
     this.detailAmp = this.hAmp * 0.16;
+
+    // ---- regional personality: planets are NOT the same everywhere -------
+    // a very low-frequency field divides the world into provinces; each
+    // landform reads it differently, so one hemisphere can be an alpine
+    // belt while another is plains or terraced mesa country
+    this.regFreq = 0.7 + rand() * 0.9;
+    this.beltBias = (rand() - 0.5) * 0.5;           // how much of the world is rugged
+    this.plainsCalm = 0.45 + rand() * 0.45;          // how flat the calm provinces are
+    this.warpAmp = 0.22 + rand() * 0.5;              // domain warp breaks noise blobbiness
+    this.warpFreq = 1.3 + rand() * 1.9;
+    const mesaProne = type === 'desert' || type === 'barren' || type === 'exotic';
+    this.plateauAmt = mesaProne ? 0.55 + rand() * 0.45 : (rand() < 0.3 ? 0.3 + rand() * 0.4 : 0);
+    this.plateauH = this.hAmp * (0.22 + rand() * 0.2);
 
     // liquids
     this.liquid = this.cfg.liquid;
@@ -117,9 +132,9 @@ export class Planet {
       this.stripeAxis = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
     }
 
-    // LOD limits: finest cells ≈ 1.4 m
+    // LOD limits: finest cells ≈ 1.5 m even on 120 km worlds
     const rootCell = (Math.PI / 2) * this.R / GRID_CELLS;
-    this.maxLevel = clamp(Math.round(Math.log2(rootCell / 1.4)), 4, 9);
+    this.maxLevel = clamp(Math.round(Math.log2(rootCell / 1.5)), 4, 13);
     this.freqAtLevel = (lvl) => 0.4 * GRID_CELLS * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.freqAtLevel(this.maxLevel);
 
@@ -142,7 +157,7 @@ export class Planet {
 
     // materials touched by the fade-in
     this._fades = [{ mat: this.terrainMaterial, base: 1 }];
-    if (this.liquidMesh) this._fades.push({ mat: this.liquidMesh.material, base: this.liquidMesh.material.opacity });
+    if (this.liquidMat) this._fades.push({ mat: this.liquidMat, base: this.liquidMat.opacity });
     if (this.cloudMesh) this._fades.push({ mat: this.cloudMesh.material, base: this.cloudMesh.material.opacity });
     if (this.ringMesh) this._fades.push({ mat: this.ringMesh.material, base: this.ringMesh.material.opacity });
     this._atmoBaseDensity = this.atmoMesh ? this.atmoMesh.material.uniforms.density.value : 0;
@@ -167,20 +182,49 @@ export class Planet {
   height(dir, maxFreq = 1e9) {
     const x = dir.x, y = dir.y, z = dir.z;
 
-    const c = this.nA.fbm(x, y, z, this.contFreq, 4, 0.52, 2.05, maxFreq);
+    // provinces: a very low-frequency field that decides the character of
+    // each region (rugged belt vs calm plains). Constant across LODs.
+    const reg = this.nD.fbm(x + 53.1, y - 17.7, z + 29.3, this.regFreq, 2, 0.5, 2.1, maxFreq);
+    const belt = smoothstep(-0.32 + this.beltBias, 0.34 + this.beltBias, reg);
+
+    // continents are sampled through a warped domain — kills the uniform
+    // "simplex blob" look and gives coastlines real character
+    const wf = this.warpFreq, wa = this.warpAmp;
+    const ax = x + this.nB.noise(x * wf + 31.4, y * wf, z * wf) * wa;
+    const ay = y + this.nB.noise(x * wf, y * wf + 47.2, z * wf) * wa;
+    const az = z + this.nB.noise(x * wf, y * wf, z * wf + 71.7) * wa;
+    const c = this.nA.fbm(ax, ay, az, this.contFreq, 4, 0.52, 2.05, maxFreq);
     let h = c * this.contAmp;
 
     // mountains/detail keep their first octave at every LOD (fractals cut
-    // octaves internally) so the mean elevation never jumps between levels
-    const mMask = smoothstep(this.mountMaskLo, this.mountMaskHi, c);
+    // octaves internally) so the mean elevation never jumps between levels.
+    // Ranges cluster into the rugged provinces instead of covering the globe.
+    const mMask = smoothstep(this.mountMaskLo, this.mountMaskHi, c) * (0.12 + 0.88 * belt);
     if (mMask > 0.002) {
       const m = this.nB.ridged(x, y, z, this.mountFreq, 6, 0.55, 2.1, maxFreq);
       h += m * this.mountAmp * mMask;
     }
 
     {
+      // rough ground in the belts, long smooth plains elsewhere
       const d = this.nC.fbm(x, y, z, this.detailFreq, 7, 0.5, 2.2, maxFreq);
-      h += d * this.detailAmp * (0.45 + 0.55 * mMask);
+      h += d * this.detailAmp * (0.45 + 0.55 * mMask) * (1 - this.plainsCalm * (1 - belt));
+    }
+
+    // mesa country: whole provinces terraced into flat-topped plateaus
+    if (this.plateauAmt > 0) {
+      const pz = smoothstep(0.12, 0.5,
+        this.nC.fbm(x - 91.7, y + 33.3, z - 57.9, this.regFreq * 1.4, 2, 0.5, 2.1, maxFreq));
+      if (pz > 0.01) {
+        const base = this.hasLiquid ? this.seaLevel + 2 : -this.contAmp * 0.4;
+        const land = smoothstep(base, base + this.hAmp * 0.12, h);
+        if (land > 0.01) {
+          const t = h / this.plateauH;
+          const f = Math.floor(t);
+          const terraced = (f + smoothstep(0.3, 0.7, t - f)) * this.plateauH;
+          h = lerp(h, terraced, this.plateauAmt * pz * land);
+        }
+      }
     }
 
     if (this.canyonAmp > 0) {
@@ -314,9 +358,9 @@ export class Planet {
   }
 
   buildPalette(rand) {
-    const dh = (rand() - 0.5) * 0.07;
-    const ds = 0.9 + rand() * 0.3;
-    const dl = 0.92 + rand() * 0.18;
+    const dh = (rand() - 0.5) * 0.13;
+    const ds = 0.82 + rand() * 0.45;
+    const dl = 0.88 + rand() * 0.26;
     const J = (hex) => jitterColor(col(hex), rand, dh, ds, dl);
 
     const p = { slopeLo: 0.22, slopeHi: 0.5, snow: null, snowLine: 1e9, capLat: 0 };
@@ -426,18 +470,25 @@ export class Planet {
           roughness: 0.13, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
         });
       }
-      this.liquidLow = new THREE.SphereGeometry(this.seaRadius, 48, 32);
-      this.liquidHigh = new THREE.SphereGeometry(this.seaRadius, 192, 128);
-      this.liquidMesh = new THREE.Mesh(this.liquidLow, mat);
-      this.liquidMesh.renderOrder = 1;
-      this.group.add(this.liquidMesh);
+      this.liquidMat = mat;
+      // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
+      // mesh would sag metres between vertices at 100 km radius
+      this.waterLod = new ChunkedLOD({
+        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: true,
+        maxLevel: Math.min(this.maxLevel - 3, 8),
+        freqAtLevel: this.freqAtLevel,
+        height: () => 0,
+        colorAt: (dir, h, slope, f, out) => out.setRGB(1, 1, 1),
+        group: this.group,
+        terrainMaterial: mat,
+      });
     }
 
-    if (this.cfg.atmoDensity > 0.05) {
+    if (this.atmoDensity > 0.05) {
       const atmoR = R + Math.max(this.hAmp * 2.2, R * 0.05);
       this.atmoMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(atmoR, 64, 48),
-        makeAtmosphereMaterial(this.atmoColor, this.cfg.atmoDensity),
+        new THREE.SphereGeometry(atmoR, 96, 64),
+        makeAtmosphereMaterial(this.atmoColor, this.atmoDensity),
       );
       this.atmoMesh.renderOrder = 3;
       this.group.add(this.atmoMesh);
@@ -446,11 +497,13 @@ export class Planet {
       this.atmoHeight = Math.max(this.hAmp * 2.2, R * 0.03);
     }
 
-    if (this.cfg.clouds > 0.05 && rand() < 0.9) {
-      const tex = makeCloudTexture(this.nD, this.cfg.clouds);
+    // clouds are a roll of the dice per planet, with their own coverage —
+    // plenty of worlds have clear skies
+    if (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds) {
+      const tex = makeCloudTexture(this.nD, 0.3 + rand() * 0.55);
       const cloudR = R + Math.max(this.hAmp * 1.7 + 90, R * 0.02);
       this.cloudMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(cloudR, 64, 48),
+        new THREE.SphereGeometry(cloudR, 96, 64),
         new THREE.MeshLambertMaterial({
           color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
           transparent: true, alphaMap: tex, depthWrite: false, opacity: 0.92,
@@ -489,6 +542,7 @@ export class Planet {
   // camLocal: camera position in planet-local coords (f64 Vector3)
   update(camLocal, dt, focused) {
     this.lod.update(camLocal, dt);
+    if (this.waterLod) this.waterLod.update(camLocal, dt);
     if (this.appear < 1) {
       this.appear = Math.min(1, this.appear + dt / 1.2);
       this.applyAppear();
@@ -497,10 +551,6 @@ export class Planet {
       this.cloudSpin += dt * 0.0045;
       this.cloudMesh.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
-    }
-    if (this.liquidMesh) {
-      const want = focused ? this.liquidHigh : this.liquidLow;
-      if (this.liquidMesh.geometry !== want) this.liquidMesh.geometry = want;
     }
   }
 
@@ -552,6 +602,7 @@ export class Planet {
 
   dispose() {
     this.lod.dispose();
+    if (this.waterLod) this.waterLod.dispose();
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
@@ -560,8 +611,6 @@ export class Planet {
         o.material.dispose();
       }
     });
-    if (this.liquidLow) this.liquidLow.dispose();
-    if (this.liquidHigh) this.liquidHigh.dispose();
     this.terrainMaterial.dispose();
   }
 }

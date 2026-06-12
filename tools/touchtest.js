@@ -64,7 +64,7 @@ function check(cond, msg) {
   if (!cond) failed++;
 }
 
-await page.goto(`http://127.0.0.1:${port}/?seed=EUCLID`);
+await page.goto(`http://127.0.0.1:${port}/?seed=EUCLID&buildms=25`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 const W = phone.viewport.width, H = phone.viewport.height;
 const CX = W / 2, CY = H / 2;
@@ -88,13 +88,15 @@ check(Math.abs(q0[0] - q1[0]) + Math.abs(q0[1] - q1[1]) + Math.abs(q0[3] - q1[3]
 // -- pinch = fly --------------------------------------------------------------
 await page.evaluate('NMS.teleport(0, 2.2)');
 const p0 = await page.evaluate('NMS.pos()');
+const altBefore = await page.evaluate('NMS.alt()');
 await pinch(CX, CY, 90, 360);
 await sleep(1300);
 const p1 = await page.evaluate('NMS.pos()');
 const d = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
 check(d > 150, `pinch-out flies forward (moved ${d.toFixed(0)} m)`);
 const altAfter = await page.evaluate('NMS.alt()');
-check(altAfter < 5200, `altitude dropped toward planet (${altAfter.toFixed(0)} m)`);
+check(altAfter < altBefore * 0.85,
+  `altitude dropped toward planet (${(altBefore / 1000).toFixed(0)} → ${(altAfter / 1000).toFixed(0)} km)`);
 
 // -- tap a planet = travel ----------------------------------------------------
 await page.evaluate('NMS.teleport(0, 6)');

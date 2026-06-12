@@ -140,6 +140,17 @@ body { overscroll-behavior: none; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+#vignette {
+  position: fixed; inset: 0; z-index: 8;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center,
+    transparent 58%, rgba(2, 8, 14, 0.18) 82%, rgba(1, 4, 8, 0.42) 100%);
+}
+
+/* photo mode (H): hide everything but the world and the version stamp */
+.hide-hud #hud, .hide-hud #target-card, .hide-hud #altitude, .hide-hud #bottom,
+.hide-hud #labels, .hide-hud #stats, .hide-hud #crosshair { display: none !important; }
+
 #fade {
   position: fixed; inset: 0; z-index: 30;
   background: #000; opacity: 0;

@@ -292,6 +292,7 @@ export class WalkControls {
     if (this.grounded && (keys.Space || this.touchJump)) {
       this.vR = Math.sqrt(2 * p.gravity * 1.4);
       this.grounded = false;
+      this.touchJump = false;   // latched: a quick tap survives slow frames
     }
     r += this.vR * dt;
     const groundR = p.R + p.height(_u, p.fullMaxFreq) + this.eyeHeight;

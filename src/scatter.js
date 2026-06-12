@@ -178,7 +178,8 @@ export class Scatter {
         const fx = Math.floor(_v.x * Q), fy = Math.floor(_v.y * Q), fz = Math.floor(_v.z * Q);
         for (let corner = 0; corner < 8; corner++) {
           const qx = fx + (corner & 1), qy = fy + ((corner >> 1) & 1), qz = fz + (corner >> 2);
-          const ck = (qx + 512) + (qy + 512) * 1024 + (qz + 512) * 1048576;
+          // pack ±16383 per axis (Q reaches ~13.4k on 120 km worlds)
+          const ck = (qx + 16384) + (qy + 16384) * 32768 + (qz + 16384) * 1073741824;
           if (this.seen.has(ck)) continue;
           this.seen.add(ck);
           // only cells on the planet's surface shell carry a prop

@@ -60,14 +60,17 @@ export function pendingChunks() {
   return n;
 }
 
-export function flushChunkQueue(budget = 8) {
+// budget is in MILLISECONDS: build as many chunks as fit, so refinement
+// speed tracks the hardware instead of starving on big worlds
+export function flushChunkQueue(budgetMs = 7) {
   if (buildQueue.length === 0) return 0;
   for (const e of buildQueue) {
     e.prio = e.dead ? Infinity : e.lod.nodeDistance(e) / e.size;
   }
   buildQueue.sort((a, b) => a.prio - b.prio);
+  const t0 = performance.now();
   let built = 0;
-  while (built < budget && buildQueue.length) {
+  while (buildQueue.length && (built === 0 || performance.now() - t0 < budgetMs)) {
     const node = buildQueue.shift();
     node.queued = false;
     if (node.dead || node.mesh) continue;
@@ -128,6 +131,11 @@ export class ChunkedLOD {
   update(camLocal, dt = 0.016) {
     this.camLocal.copy(camLocal);
     this._dt = dt;
+    // a planet that fills the screen must never show a polygonal limb:
+    // force a minimum subdivision depth from its apparent size
+    const d = Math.max(camLocal.length() - this.planet.R, 1);
+    const ang = this.planet.R / d;
+    this._forceLevel = ang > 1.2 ? 3 : ang > 0.45 ? 2 : ang > 0.15 ? 1 : 0;
     for (const root of this.roots) this.process(root);
   }
 
@@ -148,7 +156,7 @@ export class ChunkedLOD {
   process(node) {
     const d = this.nodeDistance(node);
     const wantSplit = node.level < this.planet.maxLevel
-      && d < node.size * SPLIT
+      && (d < node.size * SPLIT || node.level < this._forceLevel)
       && !this.beyondHorizon(node);
 
     if (wantSplit) {
@@ -171,29 +179,35 @@ export class ChunkedLOD {
       }
       // children still building: keep this level on screen meanwhile
     } else if (node.children && d > node.size * MERGE) {
-      const leavesOnly = node.children.every((c) => !c.children);
-      if (leavesOnly && node.mesh) {
-        // animate children back into the parent's shape, then swap — no pop
-        if (!node.mergePending) {
-          node.mergePending = true;
-          for (const c of node.children) c.morphTo = 1;
-        }
-        const done = node.children.every((c) => !c.mesh || c.morph >= 0.999);
-        if (done) {
-          this.disposeChildren(node);
-        } else {
-          if (node.mesh) node.mesh.visible = false;
-          for (const c of node.children) {
-            if (c.mesh) c.mesh.visible = true;
-            this.advanceMorph(c);
+      // far behind us the morph theatre is sub-pixel: collapse instantly so
+      // departing a planet frees its thousands of chunks at once
+      if (node.mesh && d > node.size * MERGE * 2.5) {
+        this.disposeChildren(node);
+      } else {
+        const leavesOnly = node.children.every((c) => !c.children);
+        if (leavesOnly && node.mesh) {
+          // animate children back into the parent's shape, then swap — no pop
+          if (!node.mergePending) {
+            node.mergePending = true;
+            for (const c of node.children) c.morphTo = 1;
           }
+          const done = node.children.every((c) => !c.mesh || c.morph >= 0.999);
+          if (done) {
+            this.disposeChildren(node);
+          } else {
+            if (node.mesh) node.mesh.visible = false;
+            for (const c of node.children) {
+              if (c.mesh) c.mesh.visible = true;
+              this.advanceMorph(c);
+            }
+            return;
+          }
+        } else if (!leavesOnly) {
+          // grandchildren must collapse first; keep recursing
+          if (node.mesh) node.mesh.visible = false;
+          for (const c of node.children) this.process(c);
           return;
         }
-      } else if (!leavesOnly) {
-        // grandchildren must collapse first; keep recursing
-        if (node.mesh) node.mesh.visible = false;
-        for (const c of node.children) this.process(c);
-        return;
       }
     }
 
@@ -251,11 +265,13 @@ export class ChunkedLOD {
     const skirtDrop = p.R * cellAngle * 2.5 + 6;
     // non-root chunks carry their parent's shape as a morph target, so LOD
     // transitions can relax between levels instead of popping
-    const hasMorph = node.level > 0;
+    const hasMorph = node.level > 0 && !p.noMorph;
     const coarseFreq = hasMorph ? p.freqAtLevel(node.level - 1) : 0;
 
     const gridVerts = (N + 1) * (N + 1);
-    const skirtVerts = 4 * (N + 1);
+    // flat liquid surfaces skip skirts — they'd show as a grid through the
+    // transparency, and a level surface can't crack visibly anyway
+    const skirtVerts = p.noSkirt ? 0 : 4 * (N + 1);
     const total = gridVerts + skirtVerts;
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
@@ -300,10 +316,12 @@ export class ChunkedLOD {
 
     // skirt vertices: copies of the border ring, pulled toward planet center
     const edges = [];
-    for (let i = 0; i <= N; i++) edges.push(i);                        // j = 0
-    for (let i = 0; i <= N; i++) edges.push(N * (N + 1) + i);          // j = N
-    for (let j = 0; j <= N; j++) edges.push(j * (N + 1));              // i = 0
-    for (let j = 0; j <= N; j++) edges.push(j * (N + 1) + N);          // i = N
+    if (!p.noSkirt) {
+      for (let i = 0; i <= N; i++) edges.push(i);                      // j = 0
+      for (let i = 0; i <= N; i++) edges.push(N * (N + 1) + i);        // j = N
+      for (let j = 0; j <= N; j++) edges.push(j * (N + 1));            // i = 0
+      for (let j = 0; j <= N; j++) edges.push(j * (N + 1) + N);        // i = N
+    }
 
     for (let s = 0; s < edges.length; s++) {
       const src = edges[s], dst = gridVerts + s;
@@ -336,10 +354,22 @@ export class ChunkedLOD {
         indices.push(g0, g1, s0, s0, g1, s1, g0, s0, g1, g1, s0, s1);
       }
     };
-    skirtEdge(0, N + 1, (s) => s);
-    skirtEdge(N + 1, N + 1, (s) => N * (N + 1) + s);
-    skirtEdge(2 * (N + 1), N + 1, (s) => s * (N + 1));
-    skirtEdge(3 * (N + 1), N + 1, (s) => s * (N + 1) + N);
+    if (!p.noSkirt) {
+      skirtEdge(0, N + 1, (s) => s);
+      skirtEdge(N + 1, N + 1, (s) => N * (N + 1) + s);
+      skirtEdge(2 * (N + 1), N + 1, (s) => s * (N + 1));
+      skirtEdge(3 * (N + 1), N + 1, (s) => s * (N + 1) + N);
+    }
+
+    // store vertices relative to the chunk's own center: on 100 km planets
+    // the f32 GPU subtraction (planet offset + huge local vertex) would
+    // otherwise lose centimetres and make geometry shimmer near the camera
+    const ax = node.centerPos.x, ay = node.centerPos.y, az = node.centerPos.z;
+    for (let i = 0; i < total; i++) {
+      positions[i * 3] -= ax;
+      positions[i * 3 + 1] -= ay;
+      positions[i * 3 + 2] -= az;
+    }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -356,6 +386,7 @@ export class ChunkedLOD {
     if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
+    mesh.position.copy(node.centerPos);
     if (hasMorph && mesh.morphTargetInfluences) mesh.morphTargetInfluences[0] = node.morph;
     mesh.visible = false;
     node.mesh = mesh;

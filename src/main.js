@@ -9,7 +9,7 @@ import { Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks } from './quadtree.js';
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
-import { WarpStreaks } from './effects.js';
+import { WarpStreaks, SkyDome, Ship } from './effects.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord, systemName } from './names.js';
@@ -26,6 +26,7 @@ window.addEventListener('error', (e) => {
 const qs = new URLSearchParams(location.search);
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
+const BUILD_MS = Number(qs.get('buildms')) || 0;
 
 document.getElementById('version').textContent = 'v' + VERSION;
 console.info(`No Man's Sky three.js v${VERSION}`);
@@ -44,7 +45,7 @@ document.getElementById('app').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.0);
 const BASE_FOV = 62;
-const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.12, 2.5e7);
+const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.12, 3.2e9);
 scene.add(camera);
 
 const ambient = new THREE.AmbientLight(0x506080, 0.09);
@@ -87,7 +88,12 @@ let lastBuildFrame = 0;
 let universe = new Universe(SEED, scene);
 const scatter = new Scatter();
 const warpStreaks = new WarpStreaks(scene);
+const skyDome = new SkyDome(scene);
+const ship = new Ship(scene);
 let warpIntensity = 0;
+let envInAtmo = 0;       // exported by the ambience pass for audio/effects
+let envDay = 1;
+let envUnderwater = false;
 const prevNavPos = new THREE.Vector3();
 const _velActual = new THREE.Vector3();
 
@@ -100,6 +106,7 @@ const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _sky = new THREE.Color();
 const _c2 = new THREE.Color();
+const _zenithMul = new THREE.Color(0.3, 0.42, 0.78);
 
 function lookQuatAt(fromUniv, targetUniv, out, upHint) {
   _m.lookAt(fromUniv, targetUniv, upHint || _v3.set(0, 1, 0));
@@ -149,6 +156,7 @@ renderer.domElement.addEventListener('pointerdown', () => {
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyL') tryLand();
   if (e.code === 'KeyT') takeoff();
+  if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
   if (e.code === 'Escape' && state === 'flyto') {
     tweens.length = 0;
     setState('space');
@@ -290,10 +298,11 @@ function warpTo(star) {
   ui.setTarget(null);
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
+  // arrive outside the outermost orbit (capped at 480 km), aimed at the sun
   const arriveDir = startPos.clone().sub(star.pos).normalize();
-  const endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 35, 180000));
+  const endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 35, 1.55e7));
   const dist = startPos.distanceTo(endPos);
-  const dur = clamp(5.5 + dist / 5e6, 6.5, 11);
+  const dur = clamp(5.5 + dist / 4e7, 6.5, 12);
   const targetQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
   const SPOOL = 0.07;
   let swapped = false;
@@ -415,11 +424,12 @@ function spawn() {
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
 function ambience() {
   let inAtmo = 0, day = 1, skyStrength = 0;
+  envUnderwater = false;
   scene.fog.density = 0;
   if (nearest) {
     const p = nearest;
     const x = clamp(nearestAlt / (p.atmoHeight * 2.4), 0, 1);
-    inAtmo = (1 - smoothstep(0.25, 1, x)) * p.cfg.atmoDensity;
+    inAtmo = (1 - smoothstep(0.25, 1, x)) * p.atmoDensity;
     _up.copy(nav.pos).sub(p.posUniv).normalize();
     // the sun that matters is the one this planet orbits
     const sunDir = nearest.sunDirLocal || universe.system.sunDirFrom(nav.pos, _v);
@@ -434,6 +444,7 @@ function ambience() {
     // submerged?
     const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
     if (p.hasLiquid && camR < p.seaRadius + 0.4) {
+      envUnderwater = true;
       if (!p.liquidColorLin) p.liquidColorLin = p.liquidColor.clone().convertSRGBToLinear();
       _sky.copy(p.liquidColorLin).multiplyScalar(0.25 + 0.55 * day);
       if (p.liquid === 'lava') _sky.set(1.2, 0.25, 0.02);
@@ -447,14 +458,22 @@ function ambience() {
     hemi.intensity = inAtmo * 1.15 * (0.12 + 0.88 * day);
     hemi.color.copy(p.skyColorLin || _sky);
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
+
+    // the sky dome: horizon glow, deeper zenith, sun halo
+    _c2.copy(p.skyColorLin).multiply(_zenithMul);
+    skyDome.update(_up, sunDir, p.skyColorLin, _c2,
+      envUnderwater ? 0 : inAtmo * (0.04 + 0.96 * day));
   } else {
     hemi.intensity = 0;
+    skyDome.update(_up, _up, _sky, _sky, 0);
   }
   renderer.setClearColor(_sky.multiplyScalar(nearest ? 1 : 0));
   if (!nearest) renderer.setClearColor(0x000000);
   universe.setStarDimming(clamp(skyStrength * 1.25, 0, 1));
   headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 6 : 0;
   ambient.intensity = 0.09 + inAtmo * 0.16;
+  envInAtmo = inAtmo;
+  envDay = day;
 }
 
 // ---- labels ---------------------------------------------------------------------
@@ -484,7 +503,7 @@ function updateLabels() {
         y: (-_v.y * 0.5 + 0.5) * window.innerHeight - 14 - pxR,
         name: p.name,
         sub: p.isMoon ? 'moon' : p.typeLabel.toLowerCase(),
-        dim: dist > 220000,
+        dim: dist > 2.5e7,
         key: i,
       });
     }
@@ -517,7 +536,7 @@ function frame() {
 
   // controls / state integration
   if (state === 'space') {
-    spaceCtl.speedScale = clamp(nearestAlt * 0.55, 4, 55000);
+    spaceCtl.speedScale = clamp(nearestAlt * 0.55, 4, 3e6);
     spaceCtl.update(dt);
     // never fly into the ground
     if (nearest && nearestAlt < 3) {
@@ -559,8 +578,9 @@ function frame() {
     _v.copy(nav.pos).sub(nearest.posUniv).length() < nearest.seaRadius + 2
     ? 'DIVE — walk the seabed' : 'LAND — walk the surface (L)');
 
-  // chunk builds (budgeted per frame; geomorph sampling makes each ~2× dearer)
-  const built = flushChunkQueue(state === 'walk' ? 5 : 9);
+  // chunk builds: a per-frame millisecond budget (overridable for slow
+  // software-rendered test environments via ?buildms=)
+  const built = flushChunkQueue(BUILD_MS || (state === 'walk' ? 6 : 9));
   if (built > 0) lastBuildFrame = frameNo;
 
   // camera-relative placement
@@ -568,12 +588,26 @@ function frame() {
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
 
+  // atmospheric buffeting: fast flight through air rattles the camera
+  const trueSpd = _velActual.length();
+  if (envInAtmo > 0.05 && trueSpd > 220 && (state === 'space' || state === 'flyto')) {
+    const amp = Math.min(1, trueSpd / 3200) * envInAtmo * 0.45;
+    camera.position.set(
+      (Math.random() - 0.5) * amp,
+      (Math.random() - 0.5) * amp,
+      (Math.random() - 0.5) * amp,
+    );
+  }
+
+  // the ship flies just ahead of the camera whenever we're in flight
+  ship.update(dt, nav, state, trueSpd, warpIntensity);
+
   // HUD
   if (focusPlanet) ui.setTargetDist(nav.pos.distanceTo(focusPlanet.posUniv) - focusPlanet.R);
   else if (focusStar) ui.setTargetDist(nav.pos.distanceTo(focusStar.pos));
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
     : state === 'space' ? nav.vel.length() : _velActual.length();
-  ui.setAltitude(nearest && nearestAlt < 5e5 ? Math.max(0, nearestAlt) : null, spd);
+  ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
   updateLabels();
 
   statAcc += dt;
@@ -654,6 +688,31 @@ window.NMS = {
     _v3.crossVectors(sunDir, dir).normalize();
     if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
     walkCtl.enter(p, _v2, _v3);
+    // face the most open horizon, not whatever wall happens to be there
+    if (yawDeg === 0) {
+      const up = _v.copy(dir);
+      // same frame convention as WalkControls: east = Y×up, north = up×east
+      const e1 = new THREE.Vector3();
+      if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
+      else e1.set(0, -up.z, up.y).normalize();
+      const e2 = new THREE.Vector3().crossVectors(up, e1);
+      const eyeR = _v2.length();
+      let bestYaw = 0, bestScore = -Infinity;
+      const probe = new THREE.Vector3();
+      for (let k = 0; k < 8; k++) {
+        const yaw = (k / 8) * Math.PI * 2;
+        const fx = Math.cos(yaw), fy = Math.sin(yaw);
+        let score = 0;
+        for (const dd of [150, 450, 1100]) {
+          probe.copy(up).multiplyScalar(eyeR)
+            .addScaledVector(e2, fx * dd).addScaledVector(e1, fy * dd)
+            .normalize();
+          score += (eyeR - (p.R + p.height(probe, 64))) / dd;   // openness
+        }
+        if (score > bestScore) { bestScore = score; bestYaw = yaw; }
+      }
+      walkCtl.yaw = bestYaw;
+    }
     walkCtl.yaw += yawDeg * Math.PI / 180;
     walkCtl.update(0.001);
     nav.pos.copy(p.posUniv).add(walkCtl.posLocal);

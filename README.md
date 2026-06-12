@@ -31,7 +31,11 @@ Optional URL params: `?seed=ANYTHING` (a different universe), `&nolock=1` (no po
 | **WASD** | gentle strafing | walk (**shift** run, **space** jump) |
 | **L** / Land button | land when low enough | — |
 | **T** | — | take off |
+| **H** | photo mode (hide the HUD) | photo mode |
 | **Esc** | abort fly-to | release mouse |
+
+Your ship flies just ahead of the camera in space — it banks into turns and its engines
+glow with speed; it fades out when you step onto a planet.
 
 ### Touch (phones / tablets)
 
@@ -97,9 +101,13 @@ That makes interstellar travel seamless in both modes:
   lingers until it's genuinely out of sight. The dot you watched resolves into the same
   sun you arrive at.
 
-Scale is NMS-style compressed (suns ~5–9 km radius, planets orbiting 30–300 km out,
-systems ~1,300 km apart) so that sister planets hang visibly in each other's skies and
-crossing between stars is minutes, not lifetimes.
+Scale: planets are **30–120 km in radius** (moons 8–20 km) with kilometre-high regional
+terrain — domain-warped continents, mountain belts, terraced mesa provinces, calm plains.
+Planets orbit 900–12,500 km from their suns (200–400 km radius), stars sit ~60,000 km
+apart. Big enough that descending to a world and crossing it on foot feels planetary;
+compressed enough that interplanetary hops are minutes and warps cross the gulf in
+seconds. Chunk-local vertex origins and float64 universe coordinates keep millimetre
+precision at these scales; a second flat chunked LOD renders each planet's seas.
 
 ## Source map
 
