@@ -203,41 +203,57 @@ export class Ship {
     this.glowA = add(new THREE.CylinderGeometry(0.3, 0.36, 0.3, 8), engineGlowMat, 1.15, -0.2, 4.0, -Math.PI / 2);
     this.glowB = add(new THREE.CylinderGeometry(0.3, 0.36, 0.3, 8), engineGlowMat, -1.15, -0.2, 4.0, -Math.PI / 2);
 
-    g.visible = false;
+    g.traverse((m) => { m.castShadow = true; });
     this.group = g;
     scene.add(g);
 
     this.smQuat = new THREE.Quaternion();
     this.roll = 0;
-    this.vis = 0;
     this.engineMat = engineGlowMat;
+
+    // when you land, the ship sets down on a pad beside you and waits
+    this.parkedPosUniv = null;
+    this.parkedQuat = new THREE.Quaternion();
+    this.parkAmt = 0;
+  }
+
+  setParked(posUniv, quat) {
+    this.parkedPosUniv = posUniv.clone();
+    this.parkedQuat.copy(quat);
   }
 
   update(dt, nav, state, speed, warp) {
-    const flying = state === 'space' || state === 'flyto' || state === 'warp'
-      || state === 'takeoff' || state === 'landing';
-    this.vis = Math.max(0, Math.min(1, this.vis + (flying ? 1 : -1) * dt * 2.5));
-    this.group.visible = this.vis > 0.02;
-    if (!this.group.visible) return;
+    const wantsPark = (state === 'walk' || state === 'landing') && !!this.parkedPosUniv;
+    this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
 
-    // the ship's nose lags the camera a touch, which reads as mass
+    // formation pose: nose lags the camera a touch, which reads as mass
     this.smQuat.slerp(nav.quat, 1 - Math.exp(-dt * 6));
-    // bank into turns: how much yaw is still pending between ship and camera
     _sq.copy(this.smQuat).invert().multiply(nav.quat);
     const rollTarget = Math.max(-0.55, Math.min(0.55, -_sq.y * 14));
     this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * 5));
-
     _sf.set(0, 0, -1).applyQuaternion(this.smQuat);   // forward
     _su.set(0, 1, 0).applyQuaternion(this.smQuat);
-    this.group.position.copy(_sf).multiplyScalar(19).addScaledVector(_su, -4.6);
-    this.group.quaternion.copy(this.smQuat)
-      .multiply(_sq.setFromAxisAngle(_sv.set(0, 0, 1), this.roll));
-    this.group.scale.setScalar(this.vis);
+    _sv.copy(_sf).multiplyScalar(19).addScaledVector(_su, -4.6);   // formation offset
+    const formQuat = _sq2.copy(this.smQuat)
+      .multiply(_sq.setFromAxisAngle(_sr.set(0, 0, 1), this.roll));
 
-    const burn = 1.2 + Math.min(1.6, speed / 1.5e6 + warp * 1.4) * 2.6;
-    this.engineMat.emissiveIntensity = burn;
-    const stretch = 1 + Math.min(8, speed / 4e5 + warp * 7);
+    if (this.parkedPosUniv && this.parkAmt > 0.002) {
+      // glide between flying formation and the landing pad
+      _sp.copy(this.parkedPosUniv).sub(nav.pos);      // camera-relative pad
+      const e = this.parkAmt * this.parkAmt * (3 - 2 * this.parkAmt);
+      this.group.position.lerpVectors(_sv, _sp, e);
+      this.group.quaternion.copy(formQuat).slerp(this.parkedQuat, e);
+    } else {
+      this.group.position.copy(_sv);
+      this.group.quaternion.copy(formQuat);
+    }
+
+    const burnK = 1 - this.parkAmt;
+    this.engineMat.emissiveIntensity = 0.15 + (1.2 + Math.min(1.6, speed / 1.5e6 + warp * 1.4) * 2.6) * burnK;
+    const stretch = 1 + Math.min(8, speed / 4e5 + warp * 7) * burnK;
     this.glowA.scale.set(1, stretch, 1);
     this.glowB.scale.set(1, stretch, 1);
   }
 }
+const _sq2 = new THREE.Quaternion();
+const _sp = new THREE.Vector3();

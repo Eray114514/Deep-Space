@@ -40,6 +40,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.7 : 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -52,6 +54,23 @@ const ambient = new THREE.AmbientLight(0x506080, 0.09);
 const hemi = new THREE.HemisphereLight(0x88aaff, 0x223311, 0);
 const headlamp = new THREE.PointLight(0xffeed0, 0, 110, 1.4);
 scene.add(ambient, hemi, headlamp);
+
+// near a surface the (shadowless) point sun crossfades into this
+// shadow-casting directional light that follows the camera
+const sunShadow = new THREE.DirectionalLight(0xffffff, 0);
+sunShadow.castShadow = true;
+sunShadow.visible = false;
+const SHADOW_MAP = window.matchMedia('(pointer: coarse)').matches ? 1024 : 2048;
+sunShadow.shadow.mapSize.set(SHADOW_MAP, SHADOW_MAP);
+sunShadow.shadow.camera.near = 100;
+sunShadow.shadow.camera.far = 8500;
+sunShadow.shadow.camera.left = sunShadow.shadow.camera.bottom = -300;
+sunShadow.shadow.camera.right = sunShadow.shadow.camera.top = 300;
+sunShadow.shadow.bias = -0.0002;
+sunShadow.shadow.normalBias = 2.0;
+scene.add(sunShadow, sunShadow.target);
+let shadowBlend = 0;
+const sunDirCam = new THREE.Vector3(0, 1, 0);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -243,6 +262,34 @@ function flyToPlanet(planet) {
   }, () => setState('space'));
 }
 
+// set the ship down on flat, dry ground ~22 m from where the player lands
+function parkShipNear(planet, landDir) {
+  const up = _v.copy(landDir);
+  const e1 = new THREE.Vector3();
+  if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
+  else e1.set(0, -up.z, up.y).normalize();
+  const e2 = new THREE.Vector3().crossVectors(up, e1);
+  const h0 = planet.height(landDir, planet.fullMaxFreq);
+  const cand = new THREE.Vector3();
+  let best = null, bestH = 0, bestScore = Infinity;
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2;
+    cand.copy(up)
+      .addScaledVector(e1, Math.cos(a) * 22 / planet.R)
+      .addScaledVector(e2, Math.sin(a) * 22 / planet.R)
+      .normalize();
+    const h = planet.height(cand, planet.fullMaxFreq);
+    if (planet.hasLiquid && h < planet.seaLevel + 1) continue;
+    const score = Math.abs(h - h0);
+    if (score < bestScore) { bestScore = score; best = cand.clone(); bestH = h; }
+  }
+  if (!best) { best = landDir.clone(); bestH = h0; }
+  const padUniv = planet.posUniv.clone().addScaledVector(best, planet.R + bestH + 1.3);
+  // nose pointed at the player
+  _v2.copy(landDir).sub(best).normalize();
+  ship.setParked(padUniv, horizonQuat(best, _v2, new THREE.Quaternion()));
+}
+
 function tryLand() {
   if (state !== 'space' || !nearest || nearestAlt > 420) return;
   const planet = nearest;
@@ -254,6 +301,7 @@ function tryLand() {
   _v2.set(0, 0, -1).applyQuaternion(startQuat);
   const endQuat = horizonQuat(dirLocal, _v2, new THREE.Quaternion());
   if (!window.NMS_NOLOCK && !IS_TOUCH) renderer.domElement.requestPointerLock();
+  parkShipNear(planet, dirLocal);
   setState('landing');
   ui.showLand(false);
   nav.vel.set(0, 0, 0);
@@ -471,9 +519,12 @@ function ambience() {
   if (!nearest) renderer.setClearColor(0x000000);
   universe.setStarDimming(clamp(skyStrength * 1.25, 0, 1));
   headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 6 : 0;
-  ambient.intensity = 0.09 + inAtmo * 0.16;
+  ambient.intensity = 0.09 + inAtmo * 0.24;   // fill so cast shadows aren't pitch black
   envInAtmo = inAtmo;
   envDay = day;
+  // hand the sun over to the shadow-casting light near the ground
+  shadowBlend = nearest ? 1 - smoothstep(1200, 3500, nearestAlt) : 0;
+  if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirLocal);
 }
 
 // ---- labels ---------------------------------------------------------------------
@@ -588,6 +639,18 @@ function frame() {
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
 
+  // sun → shadow-light crossfade (after updateRelative, which sets intensities)
+  sunShadow.visible = shadowBlend > 0.02;
+  if (sunShadow.visible) {
+    const sysLight = universe.system.sunLight;
+    sunShadow.intensity = sysLight.intensity * shadowBlend;
+    sunShadow.color.copy(sysLight.color);
+    sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
+    sunShadow.target.position.set(0, 0, 0);
+    sysLight.intensity *= 1 - shadowBlend;
+    if (universe.fadingSystem) universe.fadingSystem.sunLight.intensity *= 1 - shadowBlend;
+  }
+
   // atmospheric buffeting: fast flight through air rattles the camera
   const trueSpd = _velActual.length();
   if (envInAtmo > 0.05 && trueSpd > 220 && (state === 'space' || state === 'flyto')) {
@@ -683,6 +746,7 @@ window.NMS = {
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
     const dir = p.scenicDir(sunDir);
+    parkShipNear(p, dir);
     const ground = p.surfaceRadius(dir);
     _v2.copy(dir).multiplyScalar(ground + 1.7);
     _v3.crossVectors(sunDir, dir).normalize();
@@ -721,6 +785,20 @@ window.NMS = {
     spaceCtl.focus = p;
     ui.setTarget(p, 0);
     setState('walk');
+    return true;
+  },
+  // aim the walker at the parked ship (testing the landing pad)
+  faceShip() {
+    if (state !== 'walk' || !ship.parkedPosUniv) return false;
+    _v.copy(ship.parkedPosUniv).sub(nav.pos);
+    _up.copy(nav.pos).sub(walkCtl.planet.posUniv).normalize();
+    const e1 = new THREE.Vector3();
+    if (Math.abs(_up.y) < 0.93) e1.set(_up.z, 0, -_up.x).normalize();
+    else e1.set(0, -_up.z, _up.y).normalize();
+    const e2 = new THREE.Vector3().crossVectors(_up, e1);
+    walkCtl.yaw = Math.atan2(_v.dot(e1), _v.dot(e2));
+    walkCtl.pitch = -0.04;
+    walkCtl.update(0.001);
     return true;
   },
   lookYaw(deg) {

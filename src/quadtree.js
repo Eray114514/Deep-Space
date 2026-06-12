@@ -388,6 +388,8 @@ export class ChunkedLOD {
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
     mesh.position.copy(node.centerPos);
     if (hasMorph && mesh.morphTargetInfluences) mesh.morphTargetInfluences[0] = node.morph;
+    mesh.castShadow = !p.noShadow;
+    mesh.receiveShadow = true;
     mesh.visible = false;
     node.mesh = mesh;
     p.group.add(mesh);

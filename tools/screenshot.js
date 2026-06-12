@@ -92,6 +92,9 @@ try {
   await page.evaluate('NMS.tryLand()');
   await page.waitForFunction('window.NMS.state === "walk"', null, { timeout: 60000 });
   await shot(`10-landed-${dry.type}`);
+  // the ship should be parked on its pad beside us
+  await page.evaluate('NMS.faceShip()');
+  await shot('10b-parked-ship');
 } catch (e) {
   errors.push('landing flow failed: ' + e);
   console.error('landing flow failed');

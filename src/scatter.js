@@ -110,6 +110,8 @@ export class Scatter {
       const im = new THREE.InstancedMesh(GEO[kind], mat, capFor(kind));
       im.count = 0;
       im.frustumCulled = false;
+      im.castShadow = true;
+      im.receiveShadow = true;
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       planet.group.add(im);
       this.meshes[kind] = im;

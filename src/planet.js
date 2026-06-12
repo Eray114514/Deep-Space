@@ -221,7 +221,10 @@ export class Planet {
         if (land > 0.01) {
           const t = h / this.plateauH;
           const f = Math.floor(t);
-          const terraced = (f + smoothstep(0.3, 0.7, t - f)) * this.plateauH;
+          // cliff sharpness is LOD-gated: coarse levels see gentle ramps,
+          // close up the mesa edges crispen
+          const w = Math.min(0.5, 0.2 + 10 / maxFreq);
+          const terraced = (f + smoothstep(0.5 - w, 0.5 + w, t - f)) * this.plateauH;
           h = lerp(h, terraced, this.plateauAmt * pz * land);
         }
       }
@@ -229,9 +232,14 @@ export class Planet {
 
     if (this.canyonAmp > 0) {
       const cv = this.nD.fbm(x, y, z, this.canyonFreq, 4, 0.5, 2.3, maxFreq);
-      const t = 1 - Math.abs(cv) / this.canyonWidth;
+      // a coarse LOD cannot resolve a sharp gorge: widen the channel and
+      // shallow it in proportion, so the carved volume (and the silhouette)
+      // stays consistent while the slopes stay below the sampling rate
+      const cw = Math.max(this.canyonWidth, 2.5 / maxFreq);
+      const depthScale = this.canyonWidth / cw;
+      const t = 1 - Math.abs(cv) / cw;
       if (t > 0) {
-        const tt = t * t * (3 - 2 * t);
+        const tt = t * t * (3 - 2 * t) * depthScale;
         let band;
         if (this.hasLiquid) {
           // carve channels from just above the sea up into the lowlands -> rivers/lakes
@@ -258,14 +266,14 @@ export class Planet {
       h += Math.max(0, b) * this.blobAmp;
     }
 
-    if (this.duneAmp > 0 && this.duneFreq <= maxFreq * 5) {
+    if (this.duneAmp > 0 && this.duneFreq <= maxFreq * 1.5) {
       const wob = this.nC.noise(x * 9, y * 9, z * 9) * 2.5;
       const tdt = (x * this.duneAxis.x + y * this.duneAxis.y + z * this.duneAxis.z) * this.duneFreq + wob;
       const flat = 1 - smoothstep(this.hAmp * 0.25, this.hAmp * 0.6, Math.abs(h));
       h += (1 - Math.abs(Math.sin(tdt))) * this.duneAmp * flat;
     }
 
-    if (this.spikeAmp > 0 && this.spikeFreq * 2 <= maxFreq) {
+    if (this.spikeAmp > 0 && this.spikeFreq * 3 <= maxFreq) {
       const w = worley3(x * this.spikeFreq, y * this.spikeFreq, z * this.spikeFreq, (this.intSeed ^ 0x51ce) | 0);
       const sp = Math.max(0, 1 - w.d * 1.45);
       if ((w.h & 7) < 3) h += sp * sp * sp * this.spikeAmp * (0.4 + (w.h % 97) / 97 * 0.6);
@@ -474,7 +482,7 @@ export class Planet {
       // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
       // mesh would sag metres between vertices at 100 km radius
       this.waterLod = new ChunkedLOD({
-        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: true,
+        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: true, noShadow: true,
         maxLevel: Math.min(this.maxLevel - 3, 8),
         freqAtLevel: this.freqAtLevel,
         height: () => 0,
