@@ -10,6 +10,11 @@ import { flushChunkQueue, pendingChunks } from './quadtree.js';
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
 import { WarpStreaks, SkyDome, Ship } from './effects.js';
+import { tickShaders } from './shaders.js';
+import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord, systemName } from './names.js';
@@ -72,10 +77,30 @@ scene.add(sunShadow, sunShadow.target);
 let shadowBlend = 0;
 const sunDirCam = new THREE.Vector3(0, 1, 0);
 
+// ---- post-processing: HDR bloom (sun, lava, engines, stars) -----------------
+// MSAA render target keeps antialiasing; OutputPass applies tone mapping/sRGB
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, {
+  samples: IS_TOUCH ? 2 : 4, type: THREE.HalfFloatType,
+}));
+composer.addPass(new RenderPass(scene, camera));
+// threshold above 1.0: only genuinely HDR pixels bloom (sun, lava, engines,
+// specular glints) — daytime sky must NOT veil the terrain
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+let usePost = qs.get('post') !== '0';
+renderer.info.autoReset = false;   // accumulate across composer passes
+function sizePost() {
+  composer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.7 : 2));
+  composer.setSize(window.innerWidth, window.innerHeight);
+}
+sizePost();
+
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  sizePost();
   updateStarProj();
 });
 
@@ -126,6 +151,11 @@ const _q = new THREE.Quaternion();
 const _sky = new THREE.Color();
 const _c2 = new THREE.Color();
 const _zenithMul = new THREE.Color(0.3, 0.42, 0.78);
+const _horC = new THREE.Color();
+const _warmA = new THREE.Color();
+const _warmB = new THREE.Color();
+const _warmC = new THREE.Color();
+let envSunset = 0;
 
 function lookQuatAt(fromUniv, targetUniv, out, upHint) {
   _m.lookAt(fromUniv, targetUniv, upHint || _v3.set(0, 1, 0));
@@ -176,6 +206,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyL') tryLand();
   if (e.code === 'KeyT') takeoff();
   if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
+  if (e.code === 'KeyB') usePost = !usePost;                           // bloom toggle
   if (e.code === 'Escape' && state === 'flyto') {
     tweens.length = 0;
     setState('space');
@@ -484,10 +515,18 @@ function ambience() {
     day = smoothstep(-0.22, 0.28, _up.dot(sunDir));
 
     if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone().convertSRGBToLinear();
-    skyStrength = inAtmo * (0.035 + 0.965 * day);
+    // dense atmospheres read as thicker fog, NOT as an overbright sky —
+    // sky luminance stays below the bloom threshold
+    skyStrength = Math.min(inAtmo, 1) * (0.035 + 0.965 * day) * 0.92;
     _sky.copy(p.skyColorLin).multiplyScalar(skyStrength);
 
-    let fogDensity = inAtmo * lerp(0.00014, 0.00002, clamp(nearestAlt / 1900, 0, 1)) * (0.25 + 0.75 * day);
+    // golden hour: sun near the horizon reddens sky, fog and light
+    const sunElev = _up.dot(sunDir);
+    envSunset = (1 - smoothstep(0.12, 0.38, sunElev))
+      * smoothstep(-0.22, -0.04, sunElev) * inAtmo;
+    _sky.lerp(_warmA.setRGB(0.55, 0.2, 0.08).multiplyScalar(Math.max(skyStrength, 0.12)), envSunset * 0.45);
+
+    let fogDensity = inAtmo * lerp(0.00005, 0.00001, clamp(nearestAlt / 2500, 0, 1)) * (0.25 + 0.75 * day);
 
     // submerged?
     const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
@@ -508,12 +547,14 @@ function ambience() {
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
 
     // the sky dome: horizon glow, deeper zenith, sun halo
+    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.0, 0.42, 0.16), envSunset * 0.75);
     _c2.copy(p.skyColorLin).multiply(_zenithMul);
-    skyDome.update(_up, sunDir, p.skyColorLin, _c2,
-      envUnderwater ? 0 : inAtmo * (0.04 + 0.96 * day));
+    skyDome.update(_up, sunDir, _horC, _c2,
+      envUnderwater ? 0 : Math.min(inAtmo, 1) * (0.04 + 0.96 * day), envSunset);
   } else {
     hemi.intensity = 0;
-    skyDome.update(_up, _up, _sky, _sky, 0);
+    envSunset = 0;
+    skyDome.update(_up, _up, _sky, _sky, 0, 0);
   }
   renderer.setClearColor(_sky.multiplyScalar(nearest ? 1 : 0));
   if (!nearest) renderer.setClearColor(0x000000);
@@ -644,7 +685,8 @@ function frame() {
   if (sunShadow.visible) {
     const sysLight = universe.system.sunLight;
     sunShadow.intensity = sysLight.intensity * shadowBlend;
-    sunShadow.color.copy(sysLight.color);
+    sunShadow.color.copy(sysLight.color)
+      .lerp(_warmC.setRGB(1, 0.45, 0.2), envSunset * 0.55);
     sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
     sunShadow.target.position.set(0, 0, 0);
     sysLight.intensity *= 1 - shadowBlend;
@@ -682,7 +724,10 @@ function frame() {
     ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued`);
   }
 
-  renderer.render(scene, camera);
+  tickShaders(dt);
+  renderer.info.reset();
+  if (usePost) composer.render();
+  else renderer.render(scene, camera);
   prevNavPos.copy(nav.pos);
   if (frameNo === 3) ui.setLoading(false);
 }

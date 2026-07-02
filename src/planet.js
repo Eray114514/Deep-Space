@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
+import { applyTerrainDetail, applyWaterWaves } from './shaders.js';
 
 export const TYPES = {
   lush:   { label: 'Lush',      weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
@@ -151,6 +152,9 @@ export class Planet {
     this.terrainMaterial = new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 1.0, metalness: 0.0,
     });
+    // close-up grain (albedo + micro-normals): rocky worlds get more of it
+    const detailK = { desert: 0.3, barren: 0.34, lava: 0.3, exotic: 0.26, ice: 0.18 }[type] ?? 0.22;
+    applyTerrainDetail(this.terrainMaterial, detailK);
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;
@@ -479,6 +483,7 @@ export class Planet {
         });
       }
       this.liquidMat = mat;
+      if (this.liquid === 'water' || this.liquid === 'toxic') applyWaterWaves(mat);
       // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
       // mesh would sag metres between vertices at 100 km radius
       this.waterLod = new ChunkedLOD({
@@ -508,7 +513,8 @@ export class Planet {
     // clouds are a roll of the dice per planet, with their own coverage —
     // plenty of worlds have clear skies
     if (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds) {
-      const tex = makeCloudTexture(this.nD, 0.3 + rand() * 0.55);
+      const coverage = 0.3 + rand() * 0.55;
+      const tex = makeCloudTexture(this.nD, coverage);
       const cloudR = R + Math.max(this.hAmp * 1.7 + 90, R * 0.02);
       this.cloudMesh = new THREE.Mesh(
         new THREE.SphereGeometry(cloudR, 96, 64),
@@ -519,6 +525,20 @@ export class Planet {
       );
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
+      // a second, thinner deck drifting at its own pace gives depth
+      if (coverage > 0.45) {
+        const tex2 = makeCloudTexture(this.nC, coverage * 0.6);
+        this.cloudMesh2 = new THREE.Mesh(
+          new THREE.SphereGeometry(cloudR + this.hAmp * 0.9, 96, 64),
+          new THREE.MeshLambertMaterial({
+            color: 0xffffff, transparent: true, alphaMap: tex2,
+            depthWrite: false, opacity: 0.5,
+          }),
+        );
+        this.cloudMesh2.renderOrder = 2;
+        this.group.add(this.cloudMesh2);
+        this.cloudSpin2 = rand() * Math.PI * 2;
+      }
     }
 
     if (!this.isMoon && rand() < 0.24) {
@@ -559,6 +579,11 @@ export class Planet {
       this.cloudSpin += dt * 0.0045;
       this.cloudMesh.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
+    }
+    if (this.cloudMesh2) {
+      this.cloudSpin2 += dt * 0.0028;
+      this.cloudMesh2.quaternion.copy(this.axisQuat)
+        .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
     }
   }
 
@@ -668,7 +693,7 @@ function makeAtmosphereMaterial(color, density) {
 }
 
 function makeCloudTexture(simplex, coverage) {
-  const W = 384, H = 192;
+  const W = 448, H = 224;
   const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
   if (!canvas) return null;
   canvas.width = W; canvas.height = H;
@@ -681,8 +706,9 @@ function makeCloudTexture(simplex, coverage) {
     for (let i = 0; i < W; i++) {
       const th = (i / W) * Math.PI * 2;
       const cx = Math.cos(th) * cr, cz = Math.sin(th) * cr;
-      let v = simplex.fbm(cx + 5, cy + 5, cz - 5, 4.2, 5, 0.55, 2.3, 1e9);
-      v = smoothstep(0.62 - coverage * 0.22, 0.85 - coverage * 0.15, v * 0.5 + 0.5);
+      let v = simplex.fbm(cx + 5, cy + 5, cz - 5, 4.2, 6, 0.55, 2.3, 1e9);
+      v = smoothstep(0.62 - coverage * 0.22, 0.88 - coverage * 0.15, v * 0.5 + 0.5);
+      v = Math.pow(v, 1.35);              // cauliflower edges, puffy cores
       const k = (j * W + i) * 4;
       d[k] = d[k + 1] = d[k + 2] = 255;
       d[k + 3] = (v * 255) | 0;

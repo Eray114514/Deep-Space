@@ -144,13 +144,14 @@ export class SkyDome {
     scene.add(this.mesh);
   }
 
-  update(up, sunDir, horizon, zenith, alpha) {
+  update(up, sunDir, horizon, zenith, alpha, sunset = 0) {
     const u = this.mat.uniforms;
     u.uUp.value.copy(up);
     u.uSunDir.value.copy(sunDir);
     u.uHorizon.value.copy(horizon);
     u.uZenith.value.copy(zenith);
     u.uAlpha.value = alpha;
+    u.uSunTint.value.setRGB(1.0, 0.92 - sunset * 0.6, 0.78 - sunset * 0.68);
     this.mesh.visible = alpha > 0.01;
   }
 }

@@ -64,7 +64,9 @@ function check(cond, msg) {
   if (!cond) failed++;
 }
 
-await page.goto(`http://127.0.0.1:${port}/?seed=EUCLID&buildms=25`);
+// post=0: this suite verifies gestures; visuals are the desktop suite's job,
+// and SwiftShader can't afford bloom on a phone viewport
+await page.goto(`http://127.0.0.1:${port}/?seed=EUCLID&buildms=25&post=0`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 const W = phone.viewport.width, H = phone.viewport.height;
 const CX = W / 2, CY = H / 2;
@@ -105,12 +107,18 @@ try {
   await page.waitForFunction('window.NMS.idle()', null, { timeout: 120000 });
 } catch { console.warn('tap-settle timeout (continuing)'); }
 await sleep(300);
+await page.evaluate(`window.__evt = [];
+  for (const t of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+    window.addEventListener(t, (e) => window.__evt.push(
+      [t, e.pointerId, Math.round(e.clientX), Math.round(e.clientY), Math.round(performance.now())]), true);
+  }`);
 await tap(CX, CY);                       // the planet fills the view center
 await sleep(400);
 const tapState = await page.evaluate('NMS.state');
 check(tapState === 'flyto', 'tap on planet starts fly-to');
 if (tapState !== 'flyto') {
   console.log('  debug __lastClick:', JSON.stringify(await page.evaluate('window.__lastClick || null')));
+  console.log('  debug events:', JSON.stringify(await page.evaluate('window.__evt')));
 }
 await page.evaluate('NMS.teleport(0, 2.2)');   // cancel via teleport
 
@@ -158,11 +166,11 @@ const st = await page.evaluate('NMS.state');
 check(st === 'takeoff' || st === 'space', `take-off button lifts off (state=${st})`);
 try {
   // the 1.5 s tween needs many frames; SwiftShader fps makes that wall-clock slow
-  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 30000 });
+  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 90000 });
   check(await page.evaluate('document.getElementById("touch-ui").classList.contains("hidden")'),
     'joystick hides after take-off');
 } catch {
-  check(false, 'take-off completed within 30 s');
+  check(false, 'take-off completed within 90 s');
 }
 await sleep(600);
 await page.screenshot({ path: `${OUT}/phone-03-takeoff.png` });

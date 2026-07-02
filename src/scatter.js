@@ -4,6 +4,23 @@
 
 import * as THREE from 'three';
 import { hash3i, hashFloat } from './rng.js';
+import { applyWindSway } from './shaders.js';
+
+// wind strength per prop kind (0 = rigid)
+const SWAY = { grass: 0.055, tree: 0.02, trunkTree: 0.014, blob: 0.02, cactus: 0.008 };
+
+function coniferGeo(tiers, height, girth) {
+  // tiered silhouette via lathe — reads as a conifer, not a traffic cone
+  const pts = [new THREE.Vector2(0, 0)];
+  for (let t = 0; t < tiers; t++) {
+    const y0 = (t / tiers) * height * 0.82;
+    const y1 = ((t + 1) / tiers) * height * 0.82;
+    pts.push(new THREE.Vector2(girth * (1 - t / tiers) * (t ? 1.0 : 1.15), y0 + height * 0.04));
+    pts.push(new THREE.Vector2(girth * (1 - (t + 0.75) / tiers) * 0.55, y1));
+  }
+  pts.push(new THREE.Vector2(0, height));
+  return new THREE.LatheGeometry(pts, 7);
+}
 
 const CELL_M = 9;            // metres per scatter cell (approx)
 const RANGE = 24;            // cells of radius around the camera
@@ -26,6 +43,7 @@ const _q = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _m = new THREE.Matrix4();
+const _ic = new THREE.Color();
 const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
@@ -36,8 +54,8 @@ function baseGeo() {
   return {
     rock: new THREE.IcosahedronGeometry(0.7, 0),
     boulder: shift(new THREE.DodecahedronGeometry(1.4, 0), 0.6),
-    tree: shift(new THREE.ConeGeometry(1.0, 4.4, 6), 2.1),
-    trunkTree: shift(new THREE.ConeGeometry(1.35, 6.2, 7), 2.9),
+    tree: coniferGeo(3, 4.6, 1.15),
+    trunkTree: coniferGeo(4, 6.6, 1.4),
     crystal: shift(new THREE.OctahedronGeometry(1, 0), 0.9),
     grass: shift(new THREE.ConeGeometry(0.07, 0.65, 4), 0.3),
     blob: shift(new THREE.SphereGeometry(0.9, 6, 5), 0.5),
@@ -107,6 +125,7 @@ export class Scatter {
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
       });
+      if (SWAY[kind]) applyWindSway(mat, SWAY[kind]);
       const im = new THREE.InstancedMesh(GEO[kind], mat, capFor(kind));
       im.count = 0;
       im.frustumCulled = false;
@@ -193,6 +212,7 @@ export class Scatter {
     for (const kind in this.meshes) {
       this.meshes[kind].count = counts[kind];
       this.meshes[kind].instanceMatrix.needsUpdate = true;
+      if (this.meshes[kind].instanceColor) this.meshes[kind].instanceColor.needsUpdate = true;
     }
   }
 
@@ -245,6 +265,10 @@ export class Scatter {
       const sc = (s0 + (s1 - s0) * hashFloat(hc, 2)) * edge;
       _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
       _m.compose(_v2, _q, _s);
+      // no two plants quite the same colour
+      _ic.setRGB(1, 1, 1).offsetHSL(
+        (hashFloat(hc, 0) - 0.5) * 0.05, 0, (hashFloat(hc, 1) - 0.5) * 0.16);
+      im.setColorAt(counts[kind], _ic);
       im.setMatrixAt(counts[kind]++, _m);
     }
   }

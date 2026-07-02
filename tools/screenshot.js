@@ -28,7 +28,7 @@ page.on('pageerror', (e) => { errors.push(String(e)); console.error('PAGEERROR:'
 page.on('console', (m) => { if (m.type() === 'error') console.error('CONSOLE:', m.text().slice(0, 300)); });
 
 console.log(`seed=${SEED} → http://127.0.0.1:${port}`);
-await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(SEED)}&nolock=1&buildms=30`);
+await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(SEED)}&nolock=1&buildms=45`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 
 async function shot(name, timeout = 150000) {

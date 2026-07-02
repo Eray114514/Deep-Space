@@ -167,6 +167,25 @@ export class Universe {
       spr.scale.set(s, s, 1);
       this.nebulas.add(spr);
     }
+    // the Milky Way: a faint glowing band along the galactic disc plane
+    const bandTilt = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler((rand() - 0.5) * 0.35, 0, (rand() - 0.5) * 0.35));
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.6e9, 4.5e8),
+        new THREE.MeshBasicMaterial({
+          map: this.glowTex, transparent: true, opacity: 0.045 + rand() * 0.035,
+          color: new THREE.Color().setHSL(0.08 + rand() * 0.5, 0.25, 0.72),
+          blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+          side: THREE.DoubleSide,
+        }),
+      );
+      mesh.position.set(Math.cos(a) * 2.2e9, (rand() - 0.5) * 6e7, Math.sin(a) * 2.2e9)
+        .applyQuaternion(bandTilt);
+      mesh.lookAt(0, 0, 0);
+      this.nebulas.add(mesh);
+    }
     this.nebulas.renderOrder = -9;
     this.scene.add(this.nebulas);
   }
@@ -327,7 +346,10 @@ export class Universe {
       this.nearStarsMesh.geometry.dispose();
     }
     if (this.starMaterial) this.starMaterial.dispose();
-    for (const n of this.nebulas.children) n.material.dispose();
+    for (const n of this.nebulas.children) {
+      n.material.dispose();
+      if (n.geometry) n.geometry.dispose();
+    }
     this.glowTex.dispose();
   }
 }

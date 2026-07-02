@@ -8,7 +8,7 @@ import * as THREE from 'three';
 export const GRID_CELLS = 20;          // quads per chunk edge
 const SPLIT = 4.0;                     // split when dist < size * SPLIT
 const MERGE = 5.2;                     // merge when dist > size * MERGE
-const MORPH_TIME = 0.45;               // seconds for a LOD transition to relax
+const MORPH_TIME = 0.7;                // seconds for a LOD transition to relax
 
 const FACE_FN = [
   (u, v, out) => out.set(1, v, -u),
@@ -363,7 +363,10 @@ export class ChunkedLOD {
 
     // store vertices relative to the chunk's own center: on 100 km planets
     // the f32 GPU subtraction (planet offset + huge local vertex) would
-    // otherwise lose centimetres and make geometry shimmer near the camera
+    // otherwise lose centimetres and make geometry shimmer near the camera.
+    // aLocal keeps the ORIGINAL planet-local position: the detail shaders
+    // need coordinates that don't move with camera-relative rebasing.
+    const aLocal = new Float32Array(positions);
     const ax = node.centerPos.x, ay = node.centerPos.y, az = node.centerPos.z;
     for (let i = 0; i < total; i++) {
       positions[i * 3] -= ax;
@@ -375,6 +378,7 @@ export class ChunkedLOD {
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
       geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];
