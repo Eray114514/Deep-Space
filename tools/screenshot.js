@@ -103,8 +103,8 @@ try {
 // 11: warp to a neighbouring star system
 try {
   await page.evaluate('NMS.takeoff()');
-  // the 1.5 s tween can take ~20 s of wall time under SwiftShader build load
-  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 60000 });
+  // the 1.5 s tween can take minutes of wall time under SwiftShader build load
+  await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 150000 });
   const target = await page.evaluate('NMS.warpToStar()');   // state flips to 'warp' synchronously
   console.log('warping to', target);
   // catch the flight at full burn: streaks, fov stretch, stars rushing past

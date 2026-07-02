@@ -152,9 +152,11 @@ export class Planet {
     this.terrainMaterial = new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 1.0, metalness: 0.0,
     });
-    // close-up grain (albedo + micro-normals): rocky worlds get more of it
+    // close-up grain (albedo + micro-normals): rocky worlds get more of it;
+    // living worlds get stronger continental tint drift (dry-brown swathes)
     const detailK = { desert: 0.3, barren: 0.34, lava: 0.3, exotic: 0.26, ice: 0.18 }[type] ?? 0.22;
-    applyTerrainDetail(this.terrainMaterial, this, detailK);
+    const macroK = { lush: 0.5, ocean: 0.45, ice: 0.2, toxic: 0.35 }[type] ?? 0.3;
+    applyTerrainDetail(this.terrainMaterial, this, detailK, macroK);
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;
@@ -382,7 +384,9 @@ export class Planet {
   }
 
   buildPalette(rand) {
-    const dh = (rand() - 0.5) * 0.13;
+    // vivid types can drift far; living worlds keep believable hues
+    const hueSpan = (this.type === 'lush' || this.type === 'ocean') ? 0.05 : 0.13;
+    const dh = (rand() - 0.5) * hueSpan;
     const ds = 0.82 + rand() * 0.45;
     const dl = 0.88 + rand() * 0.26;
     const J = (hex) => jitterColor(col(hex), rand, dh, ds, dl);
@@ -390,17 +394,18 @@ export class Planet {
     const p = { slopeLo: 0.22, slopeHi: 0.5, snow: null, snowLine: 1e9, capLat: 0 };
     switch (this.type) {
       case 'lush':
-        p.sea = stops([[0, J('#04173a')], [0.45, J('#0a3f74')], [0.8, J('#16638a')], [1, J('#3fa18e')]]);
-        p.land = stops([[0, J('#cabb7c')], [0.05, J('#88b04b')], [0.22, J('#549337')], [0.45, J('#3f7a30')],
-                        [0.62, J('#737d4a')], [0.78, J('#7d7266')], [1, J('#8d8377')]]);
-        p.forest = J('#2e7227'); p.rock = J('#6b6358');
-        p.snow = J('#f4f8fb'); p.snowLine = this.hAmp * (0.55 + rand() * 0.2); p.capLat = 0.8;
+        // remote-sensing greens: olive, sage, moss — never crayon
+        p.sea = stops([[0, J('#050f26')], [0.45, J('#0a2f55')], [0.8, J('#175a75')], [1, J('#4e8f83')]]);
+        p.land = stops([[0, J('#b3a478')], [0.06, J('#8f9459')], [0.22, J('#5f7a42')], [0.45, J('#4a5f38')],
+                        [0.62, J('#6b6a48')], [0.78, J('#77695a')], [1, J('#877e6f')]]);
+        p.forest = J('#2e4527'); p.rock = J('#6b6156');
+        p.snow = J('#eef2f6'); p.snowLine = this.hAmp * (0.55 + rand() * 0.2); p.capLat = 0.8;
         break;
       case 'ocean':
-        p.sea = stops([[0, J('#031430')], [0.5, J('#08366b')], [0.82, J('#15648e')], [1, J('#49b3ac')]]);
-        p.land = stops([[0, J('#d8c98c')], [0.12, J('#bdb168')], [0.3, J('#5d9c46')], [0.6, J('#47753a')], [1, J('#6f6f5a')]]);
-        p.forest = J('#2f6b33'); p.rock = J('#6f685c');
-        p.snow = J('#eef4f8'); p.snowLine = this.hAmp * 0.7; p.capLat = 0.74;
+        p.sea = stops([[0, J('#041124')], [0.5, J('#082c52')], [0.82, J('#135273')], [1, J('#3f8f88')]]);
+        p.land = stops([[0, J('#c2b183')], [0.12, J('#a29a62')], [0.3, J('#657e49')], [0.6, J('#4c5f3d')], [1, J('#6c6b56')]]);
+        p.forest = J('#2f4a2c'); p.rock = J('#6f685c');
+        p.snow = J('#e8eef4'); p.snowLine = this.hAmp * 0.7; p.capLat = 0.74;
         break;
       case 'desert':
         p.land = stops([[0, J('#d8b069')], [0.2, J('#cf9a52')], [0.42, J('#bd7d40')], [0.6, J('#a26035')],
@@ -456,17 +461,27 @@ export class Planet {
     }
   }
 
-  // simple biome classification used by the prop scatter system
+  // Biome classification for the prop scatter system. CRITICAL: this must
+  // mirror the same elevation/moisture bands that colorAt paints, or the
+  // ground you see from orbit lies about what grows on it up close.
   biomeAt(dir, h) {
     if (this.hasLiquid && h < this.seaLevel + 1.5) return 'shore';
-    const tl = h - (this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85);
     switch (this.type) {
       case 'lush': case 'ocean': {
-        if (this.pal.snowLine < 1e8 && h > this.pal.snowLine) return 'snow';
+        if (this.pal.snowLine < 1e8 && h > this.pal.snowLine * 0.92) return 'snow';
+        const t0 = this.seaLevel;
+        const tl = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
+        if (tl > 0.6) return 'rock';                 // olive-brown high country: bare
         const moist = this.nC.fbm(dir.x + 11.3, dir.y - 4.1, dir.z + 7.7, 2.4, 3, 0.5, 2.15, 64);
-        return moist > 0.12 ? 'forest' : 'grass';
+        if (tl > 0.45) return moist > 0.25 ? 'grass' : 'rock';
+        // forests only where the palette actually darkens green
+        if (moist > 0.14 && tl > 0.05) return 'forest';
+        return moist > -0.12 ? 'grass' : 'dryland';  // tan zones get dry tufts
       }
-      case 'desert': return tl > this.hAmp * 0.5 ? 'rock' : 'sand';
+      case 'desert': {
+        const tl = h + this.contAmp * 0.85;
+        return tl > this.hAmp * 1.1 ? 'rock' : 'sand';
+      }
       case 'ice': return 'ice';
       case 'lava': return h < this.seaLevel + this.hAmp * 0.2 ? 'ember' : 'ash';
       case 'barren': return 'regolith';

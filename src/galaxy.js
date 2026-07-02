@@ -81,15 +81,24 @@ function makeStarPointsMaterial() {
   });
 }
 
-function glowTexture(size = 128, inner = 0.0) {
+function glowTexture(size = 128, inner = 0.0, tight = false) {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const g = ctx.createRadialGradient(size / 2, size / 2, size * 0.02, size / 2, size / 2, size / 2);
-  g.addColorStop(0, 'rgba(255,255,255,1)');
-  g.addColorStop(0.18, 'rgba(255,255,255,0.85)');
-  g.addColorStop(0.5, `rgba(255,255,255,${0.18 + inner})`);
-  g.addColorStop(1, 'rgba(255,255,255,0)');
+  if (tight) {
+    // a compact corona: bright core, fast falloff — the star's blowout is
+    // bloom's job, and bloom is correctly occluded by planets
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.12, 'rgba(255,255,255,0.6)');
+    g.addColorStop(0.35, 'rgba(255,255,255,0.12)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+  } else {
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.18, 'rgba(255,255,255,0.85)');
+    g.addColorStop(0.5, `rgba(255,255,255,${0.18 + inner})`);
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+  }
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
   return new THREE.CanvasTexture(canvas);
@@ -105,6 +114,7 @@ export class Universe {
     scene.add(this.group);
 
     this.glowTex = glowTexture();
+    this.glowTexTight = glowTexture(128, 0, true);
     this.buildSkybox();
 
     this.nearStarsMesh = null;
@@ -351,6 +361,7 @@ export class Universe {
       if (n.geometry) n.geometry.dispose();
     }
     this.glowTex.dispose();
+    this.glowTexTight.dispose();
   }
 }
 
@@ -366,14 +377,18 @@ export class StarSystem {
 
     // --- the sun ---
     this.sunGroup = new THREE.Group();
-    const sunMat = new THREE.MeshBasicMaterial({ color: star.color, fog: false });
+    // HDR disc: values above 1 make bloom do the blowout, and screen-space
+    // bloom is properly occluded by planets — no giant sprite to wash them
+    const sunMat = new THREE.MeshBasicMaterial({
+      color: star.color.clone().multiplyScalar(4), fog: false,
+    });
     this.sunMesh = new THREE.Mesh(new THREE.SphereGeometry(star.radius, 48, 32), sunMat);
     this.sunGroup.add(this.sunMesh);
     this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: universe.glowTex, color: star.color.clone().lerp(new THREE.Color(0xffffff), 0.3),
+      map: universe.glowTexTight, color: star.color.clone().lerp(new THREE.Color(0xffffff), 0.3),
       transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
     }));
-    this.sunGlow.scale.setScalar(star.radius * 14);
+    this.sunGlow.scale.setScalar(star.radius * 7);
     this.sunGroup.add(this.sunGlow);
     this.sunLight = new THREE.PointLight(0xffffff, 3.2, 0, 0);
     this.sunLight.color.copy(star.color.clone().lerp(new THREE.Color(0xffffff), 0.7));

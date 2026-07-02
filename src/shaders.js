@@ -57,7 +57,7 @@ function blankTexture() {
 // Per-vertex biome weights (aMat) blend rock strata against organic mottle,
 // micro-normals give relief, and the planet's own cloud layer casts moving
 // shadows via one extra texture sample.
-export function applyTerrainDetail(material, planet, strength = 0.2, scale1 = 1 / 26, scale2 = 1 / 3.2) {
+export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.4, scale1 = 1 / 26, scale2 = 1 / 3.2) {
   const tex = detailTexture();
   if (!tex) return;
   material.onBeforeCompile = (shader) => {
@@ -65,6 +65,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, scale1 = 1 
     const cloudTex = planet.cloudShadowTex || blankTexture();
     shader.uniforms.uDetailTex = { value: tex };
     shader.uniforms.uDetailK = { value: strength };
+    shader.uniforms.uMacroK = { value: macroK };
     shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
     shader.uniforms.uCloudTex = { value: cloudTex };
     shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.42 : 0 };
@@ -92,6 +93,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, scale1 = 1 
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
         uniform float uDetailK;
+        uniform float uMacroK;
         uniform vec2 uDetailS;
         uniform sampler2D uCloudTex;
         uniform float uCloudK;
@@ -124,6 +126,12 @@ export function applyTerrainDetail(material, planet, strength = 0.2, scale1 = 1 
           // vegetated ground gets broad organic mottling
           d += (triDetail(vLocalPos, w, uDetailS.y * 0.32, 0) - 0.5) * vMat.y * 0.75;
           diffuseColor.rgb *= 1.0 + d * uDetailK;
+          // continental-scale tint drift: real land is patchy at every
+          // scale — dry-brown swathes break up the uniform green
+          float macro = triDetail(vLocalPos, w, 0.0013, 0)
+                      + triDetail(vLocalPos, w, 0.00028, 1) - 1.0;
+          float mw = clamp(macro * 1.5 + 0.5, 0.0, 1.0) * uMacroK;
+          diffuseColor.rgb *= mix(vec3(1.0), vec3(1.09, 0.99, 0.84), mw);
           // per-pixel snowline: crisp caps from orbit, no vertex banding
           if (uSnowK > 0.5) {
             vec3 nd = normalize(vLocalPos);

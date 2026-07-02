@@ -78,6 +78,7 @@ const RECIPES = {
   slime:    [['blob', 0.2, 0.6, 2.0], ['crystal', 0.05, 0.5, 1.4], ['grass', 0.25, 1.0, 1.8]],
   weird:    [['crystal', 0.14, 0.7, 2.6], ['blob', 0.1, 0.8, 2.2]],
   shore:    [['rock', 0.03, 0.2, 0.7]],
+  dryland:  [['grass', 0.3, 0.7, 1.3], ['rock', 0.04, 0.3, 0.9]],
 };
 
 function propColors(planet) {
@@ -93,13 +94,13 @@ function propColors(planet) {
     cactus: new THREE.Color(0x3f7a33).convertSRGBToLinear(),
   };
   switch (planet.type) {
-    case 'lush': base.grass = p.land[2].c.clone().multiplyScalar(1.5); break;
-    case 'ocean': base.grass = p.land[2].c.clone().multiplyScalar(1.3); break;
-    case 'toxic': base.grass = p.land[1].c.clone().multiplyScalar(1.2); base.crystal = (p.blotch || p.rock).clone().multiplyScalar(1.4); break;
+    case 'toxic': base.crystal = (p.blotch || p.rock).clone().multiplyScalar(1.4); break;
     case 'ice': base.crystal = new THREE.Color(0x9fd0f0).convertSRGBToLinear(); break;
     case 'exotic': base.crystal = p.land[p.land.length - 1].c.clone().multiplyScalar(1.3); break;
   }
-  if (!base.grass) base.grass = new THREE.Color(0x6a8a40).convertSRGBToLinear();
+  // grass material is WHITE: each tuft's instance colour is sampled from
+  // the ground beneath it, so groundcover can never contradict the terrain
+  base.grass = new THREE.Color(1, 1, 1);
   if (!base.crystal) base.crystal = new THREE.Color(0xb0d8f0).convertSRGBToLinear();
   return base;
 }
@@ -120,7 +121,10 @@ export class Scatter {
     const colors = propColors(planet);
     for (const kind of Object.keys(GEO)) {
       // a touch of self-light keeps the stylized props readable in shadow
-      const glow = kind === 'crystal' ? 0.35 : (kind === 'rock' || kind === 'boulder') ? 0.08 : 0.3;
+      // (grass excluded: its colour is per-instance, a white emissive would wash it)
+      const glow = kind === 'crystal' ? 0.35
+        : (kind === 'rock' || kind === 'boulder') ? 0.08
+        : kind === 'grass' ? 0.0 : 0.3;
       const mat = new THREE.MeshStandardMaterial({
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
@@ -265,9 +269,17 @@ export class Scatter {
       const sc = (s0 + (s1 - s0) * hashFloat(hc, 2)) * edge;
       _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
       _m.compose(_v2, _q, _s);
-      // no two plants quite the same colour
-      _ic.setRGB(1, 1, 1).offsetHSL(
-        (hashFloat(hc, 0) - 0.5) * 0.05, 0, (hashFloat(hc, 1) - 0.5) * 0.16);
+      if (kind === 'grass') {
+        // tufts wear the colour of the ground they grow from (slightly
+        // brightened) — dry tan land grows dry tan grass, not green
+        p.colorAt(_jd, hh, 0.08, 64, _ic);
+        _ic.multiplyScalar(1.35).offsetHSL(
+          (hashFloat(hc, 0) - 0.5) * 0.04, 0.03, (hashFloat(hc, 1) - 0.5) * 0.1);
+      } else {
+        // no two plants quite the same colour
+        _ic.setRGB(1, 1, 1).offsetHSL(
+          (hashFloat(hc, 0) - 0.5) * 0.05, 0, (hashFloat(hc, 1) - 0.5) * 0.16);
+      }
       im.setColorAt(counts[kind], _ic);
       im.setMatrixAt(counts[kind]++, _m);
     }

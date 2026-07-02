@@ -68,7 +68,7 @@ export class SpaceControls {
     if (this.pointers.size === 1) {
       this._drag = {
         id: e.pointerId, button: e.button, touch: e.pointerType === 'touch',
-        moved: 0, t: performance.now(),
+        moved: 0,
       };
     } else {
       this._drag = null;             // a second finger means it's not a tap
@@ -130,9 +130,10 @@ export class SpaceControls {
       this._pinchMid = this.midpointOf([...this.pointers.values()]);
     }
     if (!this._drag || this._drag.id !== e.pointerId) return;
+    // press-and-release without movement IS a click, however long it took —
+    // time-based windows get inflated by slow frames and eat valid taps
     const thresh = this._drag.touch ? 14 : 7;        // fingers wobble more than mice
-    // generous time window: one long frame (chunk builds, GC) must not eat a tap
-    const wasClick = this._drag.moved < thresh && performance.now() - this._drag.t < 700;
+    const wasClick = this._drag.moved < thresh;
     const btn = this._drag.button;
     this._drag = null;
     if (wasClick && btn === 0 && this.onClick) this.onClick(e.clientX, e.clientY);
