@@ -276,6 +276,9 @@ export class ChunkedLOD {
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
     const colors = new Float32Array(total * 3);
+    // per-vertex material weights: x = rockiness, y = vegetation —
+    // the detail shader blends strata vs organic mottle with these
+    const aMat = p.pal ? new Float32Array(total * 2) : null;
     const dPos = hasMorph ? new Float32Array(total * 3) : null;
     const dNrm = hasMorph ? new Float32Array(total * 3) : null;
     const dCol = hasMorph ? new Float32Array(total * 3) : null;
@@ -296,6 +299,13 @@ export class ChunkedLOD {
         positions[idx * 3 + 2] = _p0.z;
         normals[idx * 3] = _n.x; normals[idx * 3 + 1] = _n.y; normals[idx * 3 + 2] = _n.z;
         colors[idx * 3] = _col.r; colors[idx * 3 + 1] = _col.g; colors[idx * 3 + 2] = _col.b;
+
+        if (aMat) {
+          const slope = Math.max(0, 1 - _n.dot(_dirV));
+          const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
+          aMat[idx * 2] = Math.min(1, Math.max(0, sl));
+          aMat[idx * 2 + 1] = Math.min(1, Math.max(0, (_col.g - Math.max(_col.r, _col.b)) * 3.5));
+        }
 
         if (hasMorph) {
           // the same vertex as the parent level sees it (coarser cutoff,
@@ -331,6 +341,7 @@ export class ChunkedLOD {
       positions[dst * 3] = px * k; positions[dst * 3 + 1] = py * k; positions[dst * 3 + 2] = pz * k;
       normals[dst * 3] = normals[src * 3]; normals[dst * 3 + 1] = normals[src * 3 + 1]; normals[dst * 3 + 2] = normals[src * 3 + 2];
       colors[dst * 3] = colors[src * 3]; colors[dst * 3 + 1] = colors[src * 3 + 1]; colors[dst * 3 + 2] = colors[src * 3 + 2];
+      if (aMat) { aMat[dst * 2] = aMat[src * 2]; aMat[dst * 2 + 1] = aMat[src * 2 + 1]; }
       if (hasMorph) {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
         dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
@@ -379,6 +390,7 @@ export class ChunkedLOD {
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
+    if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 2));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
       geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];

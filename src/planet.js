@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves } from './shaders.js';
+import { applyTerrainDetail, applyWaterWaves, applyCloudField } from './shaders.js';
 
 export const TYPES = {
   lush:   { label: 'Lush',      weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
@@ -154,7 +154,7 @@ export class Planet {
     });
     // close-up grain (albedo + micro-normals): rocky worlds get more of it
     const detailK = { desert: 0.3, barren: 0.34, lava: 0.3, exotic: 0.26, ice: 0.18 }[type] ?? 0.22;
-    applyTerrainDetail(this.terrainMaterial, detailK);
+    applyTerrainDetail(this.terrainMaterial, this, detailK);
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;
@@ -210,9 +210,10 @@ export class Planet {
     }
 
     {
-      // rough ground in the belts, long smooth plains elsewhere
-      const d = this.nC.fbm(x, y, z, this.detailFreq, 7, 0.5, 2.2, maxFreq);
-      h += d * this.detailAmp * (0.45 + 0.55 * mMask) * (1 - this.plainsCalm * (1 - belt));
+      // eroded hillsides: rugged crests, smooth carved flanks —
+      // rough in the belts, long calm plains elsewhere
+      const d = this.nC.fbmEroded(x, y, z, this.detailFreq, 6, 0.5, 2.2, maxFreq, 3.2);
+      h += d * this.detailAmp * 1.25 * (0.45 + 0.55 * mMask) * (1 - this.plainsCalm * (1 - belt));
     }
 
     // mesa country: whole provinces terraced into flat-topped plateaus
@@ -254,6 +255,23 @@ export class Planet {
           // dry slot canyons through the midlands
           band = smoothstep(-this.hAmp * 0.3, 0, h) * (1 - smoothstep(this.hAmp * 0.45, this.hAmp * 0.8, h));
           h -= tt * this.canyonAmp * band;
+        }
+      }
+
+      // tributaries: a finer branching carve feeding the main channels,
+      // so valleys form dendritic drainage networks like real watersheds
+      const cv2 = this.nD.fbm(x + 7.7, y - 3.3, z + 1.1, this.canyonFreq * 3.1, 3, 0.5, 2.25, maxFreq);
+      const cw2 = Math.max(this.canyonWidth * 0.55, 2.5 / maxFreq);
+      const t2 = 1 - Math.abs(cv2) / cw2;
+      if (t2 > 0) {
+        const tt2 = t2 * t2 * (3 - 2 * t2) * (this.canyonWidth * 0.55 / cw2);
+        if (this.hasLiquid) {
+          const band2 = smoothstep(this.seaLevel - this.hAmp * 0.35, this.seaLevel + 3, h) *
+                        (1 - smoothstep(this.seaLevel + this.hAmp * 0.22, this.seaLevel + this.hAmp * 0.5, h));
+          h -= tt2 * (Math.max(0, h - this.seaLevel) * 0.55 + this.hAmp * 0.02) * band2;
+        } else {
+          const band2 = smoothstep(-this.hAmp * 0.25, 0, h) * (1 - smoothstep(this.hAmp * 0.4, this.hAmp * 0.7, h));
+          h -= tt2 * this.canyonAmp * 0.4 * band2;
         }
       }
     }
@@ -349,15 +367,9 @@ export class Planet {
       // steep ground turns to bare rock
       out.lerp(p.rock, smoothstep(p.slopeLo, p.slopeHi, slope));
 
-      // snowline (lower near the poles), then polar caps
-      if (p.snow) {
-        const lat = Math.abs(y) + this.nA.noise(x * 3.1 + 9, y * 3.1, z * 3.1) * 0.06;
-        const sl = p.snowLine * (1 - 0.65 * smoothstep(0.45, 0.95, lat));
-        let f = smoothstep(sl, sl + this.hAmp * 0.1, h);
-        if (p.capLat) f = Math.max(f, smoothstep(p.capLat, p.capLat + 0.07, lat));
-        f *= 1 - smoothstep(0.55, 0.8, slope) * 0.85;
-        out.lerp(p.snow, f);
-      }
+      // NOTE: the snowline is applied per-FRAGMENT in the terrain shader
+      // (see shaders.js) — per-vertex snow quantized into visible blocks
+      // at orbital LODs. Same formula, evaluated per-pixel.
     }
 
     // fine tonal speckle, LOD-gated like everything else
@@ -514,27 +526,26 @@ export class Planet {
     // plenty of worlds have clear skies
     if (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds) {
       const coverage = 0.3 + rand() * 0.55;
-      const tex = makeCloudTexture(this.nD, coverage);
+      // the visible clouds are shader-procedural (resolution-independent);
+      // this small texture only serves the terrain's cast cloud shadows
+      this.cloudShadowTex = makeCloudTexture(this.nD, coverage);
       const cloudR = R + Math.max(this.hAmp * 1.7 + 90, R * 0.02);
-      this.cloudMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(cloudR, 96, 64),
-        new THREE.MeshLambertMaterial({
-          color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
-          transparent: true, alphaMap: tex, depthWrite: false, opacity: 0.92,
-        }),
-      );
+      const cmat = new THREE.MeshLambertMaterial({
+        color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
+        transparent: true, depthWrite: false, opacity: 0.92,
+      });
+      applyCloudField(cmat, coverage, rand() * 7, rand() * 7, rand() * 7);
+      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 96, 64), cmat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
       // a second, thinner deck drifting at its own pace gives depth
       if (coverage > 0.45) {
-        const tex2 = makeCloudTexture(this.nC, coverage * 0.6);
+        const cmat2 = new THREE.MeshLambertMaterial({
+          color: 0xffffff, transparent: true, depthWrite: false, opacity: 0.5,
+        });
+        applyCloudField(cmat2, coverage * 0.6, rand() * 7, rand() * 7, rand() * 7);
         this.cloudMesh2 = new THREE.Mesh(
-          new THREE.SphereGeometry(cloudR + this.hAmp * 0.9, 96, 64),
-          new THREE.MeshLambertMaterial({
-            color: 0xffffff, transparent: true, alphaMap: tex2,
-            depthWrite: false, opacity: 0.5,
-          }),
-        );
+          new THREE.SphereGeometry(cloudR + this.hAmp * 0.9, 96, 64), cmat2);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
         this.cloudSpin2 = rand() * Math.PI * 2;
@@ -579,6 +590,12 @@ export class Planet {
       this.cloudSpin += dt * 0.0045;
       this.cloudMesh.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
+      // keep terrain cloud-shadows tracking the drifting deck
+      const sh = this.terrainMaterial.userData.shader;
+      if (sh) {
+        _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
+        sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
+      }
     }
     if (this.cloudMesh2) {
       this.cloudSpin2 += dt * 0.0028;
@@ -636,6 +653,7 @@ export class Planet {
   dispose() {
     this.lod.dispose();
     if (this.waterLod) this.waterLod.dispose();
+    if (this.cloudShadowTex) this.cloudShadowTex.dispose();
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
@@ -650,6 +668,8 @@ export class Planet {
 
 const _dir = new THREE.Vector3();
 const _q = new THREE.Quaternion();
+const _q2 = new THREE.Quaternion();
+const _m4 = new THREE.Matrix4();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function makeAtmosphereMaterial(color, density) {
@@ -693,7 +713,7 @@ function makeAtmosphereMaterial(color, density) {
 }
 
 function makeCloudTexture(simplex, coverage) {
-  const W = 448, H = 224;
+  const W = 512, H = 256;
   const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
   if (!canvas) return null;
   canvas.width = W; canvas.height = H;
@@ -706,7 +726,9 @@ function makeCloudTexture(simplex, coverage) {
     for (let i = 0; i < W; i++) {
       const th = (i / W) * Math.PI * 2;
       const cx = Math.cos(th) * cr, cz = Math.sin(th) * cr;
-      let v = simplex.fbm(cx + 5, cy + 5, cz - 5, 4.2, 6, 0.55, 2.3, 1e9);
+      // cap octaves at the texture's own resolution: finer noise would
+      // alias into hard per-texel blocks once thresholded
+      let v = simplex.fbm(cx + 5, cy + 5, cz - 5, 4.2, 6, 0.55, 2.3, 45);
       v = smoothstep(0.62 - coverage * 0.22, 0.88 - coverage * 0.15, v * 0.5 + 0.5);
       v = Math.pow(v, 1.35);              // cauliflower edges, puffy cores
       const k = (j * W + i) * 4;
@@ -715,6 +737,11 @@ function makeCloudTexture(simplex, coverage) {
     }
   }
   ctx.putImageData(img, 0, 0);
+  // soften: thresholded noise leaves near-binary texels that read as hard
+  // squares from orbit; a subpixel blur turns them back into vapour
+  ctx.filter = 'blur(1.4px)';
+  ctx.drawImage(canvas, 0, 0);
+  ctx.filter = 'none';
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   return tex;
