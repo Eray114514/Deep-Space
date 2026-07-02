@@ -152,6 +152,7 @@ const _sky = new THREE.Color();
 const _c2 = new THREE.Color();
 const _zenithMul = new THREE.Color(0.3, 0.42, 0.78);
 const _horC = new THREE.Color();
+const _cloudCol = new THREE.Color();
 const _warmA = new THREE.Color();
 const _warmB = new THREE.Color();
 const _warmC = new THREE.Color();
@@ -528,6 +529,14 @@ function ambience() {
 
     let fogDensity = inAtmo * lerp(0.00005, 0.00001, clamp(nearestAlt / 2500, 0, 1)) * (0.25 + 0.75 * day);
 
+    // flying through a cloud deck: local density whites out the world
+    const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
+    if (transit > 0.004) {
+      fogDensity += transit * 0.0045;
+      _sky.lerp(_cloudCol.setRGB(0.6, 0.64, 0.7).multiplyScalar(0.2 + 0.8 * day),
+        Math.min(1, transit * 1.5));
+    }
+
     // submerged?
     const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
     if (p.hasLiquid && camR < p.seaRadius + 0.4) {
@@ -757,6 +766,7 @@ window.NMS = {
     return universe.system.planets.map((p, i) => ({
       i, name: p.name, type: p.type, R: Math.round(p.R), isMoon: !!p.isMoon,
       hasLiquid: p.hasLiquid, liquid: p.liquid,
+      cloudAlt: p.cloudBands && p.cloudBands.length ? Math.round(p.cloudBands[0].r - p.R) : 0,
     }));
   },
   // place the camera near planet i at alt = R*altFactor, on the sunlit side

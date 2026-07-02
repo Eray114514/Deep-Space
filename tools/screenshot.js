@@ -58,6 +58,12 @@ await shot('03-orbit');
 await page.evaluate('NMS.teleport(0, 0.05, {horizon: true})');
 await shot('04-low-flight');
 
+// 4b: inside the cloud deck — the transit white-out, not a hard shell pop
+if (planets[0].cloudAlt) {
+  await page.evaluate(`NMS.teleport(0, ${(planets[0].cloudAlt / planets[0].R).toFixed(5)}, {horizon: true, pitch: -0.05})`);
+  await shot('04b-cloud-transit');
+}
+
 // 5..6: standing on the surface
 await page.evaluate('NMS.land(0)');
 await shot('05-surface');

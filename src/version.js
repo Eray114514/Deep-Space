@@ -1,3 +1,3 @@
 // Bumped on every pushed change — shown bottom-left so you can always tell
 // which build you are looking at (stale caches lie).
-export const VERSION = '0.12.0';
+export const VERSION = '0.13.0';

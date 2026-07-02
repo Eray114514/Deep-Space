@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves, applyCloudField } from './shaders.js';
+import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU } from './shaders.js';
 
 export const TYPES = {
   lush:   { label: 'Lush',      weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
@@ -587,6 +587,7 @@ export class Planet {
       // mesh would sag metres between vertices at 100 km radius
       this.waterLod = new ChunkedLOD({
         R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: true, noShadow: true,
+        gridCells: 12,
         maxLevel: Math.min(this.maxLevel - 3, 8),
         freqAtLevel: this.freqAtLevel,
         height: () => 0,
@@ -611,6 +612,7 @@ export class Planet {
 
     // clouds are a roll of the dice per planet, with their own coverage —
     // plenty of worlds have clear skies
+    this.cloudBands = [];
     if (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds) {
       const coverage = 0.3 + rand() * 0.55;
       // the visible clouds are shader-procedural (resolution-independent);
@@ -621,21 +623,33 @@ export class Planet {
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.92,
       });
-      applyCloudField(cmat, coverage, rand() * 7, rand() * 7, rand() * 7);
+      const o1 = [rand() * 7, rand() * 7, rand() * 7];
+      applyCloudField(cmat, coverage, o1[0], o1[1], o1[2]);
       this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 96, 64), cmat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
+      this.cloudBands.push({
+        r: cloudR, mesh: this.cloudMesh, opacity: 0.92,
+        cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
+        ox: o1[0], oy: o1[1], oz: o1[2],
+      });
       // a second, thinner deck drifting at its own pace gives depth
       if (coverage > 0.45) {
         const cmat2 = new THREE.MeshLambertMaterial({
           color: 0xffffff, transparent: true, depthWrite: false, opacity: 0.5,
         });
-        applyCloudField(cmat2, coverage * 0.6, rand() * 7, rand() * 7, rand() * 7);
+        const o2 = [rand() * 7, rand() * 7, rand() * 7];
+        applyCloudField(cmat2, coverage * 0.6, o2[0], o2[1], o2[2]);
         this.cloudMesh2 = new THREE.Mesh(
           new THREE.SphereGeometry(cloudR + this.hAmp * 0.9, 96, 64), cmat2);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
         this.cloudSpin2 = rand() * Math.PI * 2;
+        this.cloudBands.push({
+          r: cloudR + this.hAmp * 0.9, mesh: this.cloudMesh2, opacity: 0.5,
+          cov0: 0.55 - coverage * 0.6 * 0.24, cov1: 0.86 - coverage * 0.6 * 0.14,
+          ox: o2[0], oy: o2[1], oz: o2[2],
+        });
       }
     }
 
@@ -665,10 +679,38 @@ export class Planet {
     if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(dirLocal);
   }
 
+  // How deep in a cloud the camera is (0..1): drives transit white-out fog.
+  // Samples the same field the shader draws, in the deck's rotated frame.
+  cloudTransit(camLocal) {
+    if (!this.cloudBands.length) return 0;
+    const camR = camLocal.length();
+    let t = 0;
+    for (const b of this.cloudBands) {
+      const prox = 1 - Math.min(1, Math.abs(camR - b.r) / 900);
+      if (prox <= 0) continue;
+      _dir.copy(camLocal).multiplyScalar(1 / camR)
+        .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
+      const d = cloudDensityCPU(_dir, b.cov0, b.cov1, b.ox, b.oy, b.oz);
+      t = Math.max(t, prox * d * b.opacity);
+    }
+    return t;
+  }
+
   // camLocal: camera position in planet-local coords (f64 Vector3)
   update(camLocal, dt, focused) {
     this.lod.update(camLocal, dt);
     if (this.waterLod) this.waterLod.update(camLocal, dt);
+    // shells vanish near their own altitude so you fly through, not pop through
+    if (this.cloudBands.length) {
+      const camR = camLocal.length();
+      for (const b of this.cloudBands) {
+        const sh = b.mesh.material.userData.shader;
+        if (sh) {
+          const x = Math.min(1, Math.max(0, (Math.abs(camR - b.r) - 200) / 1400));
+          sh.uniforms.uCamProx.value = x * x * (3 - 2 * x);
+        }
+      }
+    }
     if (this.appear < 1) {
       this.appear = Math.min(1, this.appear + dt / 1.2);
       this.applyAppear();

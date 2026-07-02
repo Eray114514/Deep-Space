@@ -13,6 +13,23 @@ export const TIME = { value: 0 };
 export function tickShaders(dt) { TIME.value += dt; }
 
 let _detailTex = null;
+let _detailData = null;   // kept for CPU-side sampling (cloud transit fog)
+
+// bilinear, wrapping sample of the detail texture on the CPU — must agree
+// with what the GPU sees so fog can thicken exactly where a cloud is
+export function sampleDetailCPU(u, v, ch) {
+  if (!_detailData) return 0.5;
+  const S = 256;
+  let x = (u - Math.floor(u)) * S, y = (v - Math.floor(v)) * S;
+  const x0 = x | 0, y0 = y | 0;
+  const x1 = (x0 + 1) % S, y1 = (y0 + 1) % S;
+  const fx = x - x0, fy = y - y0;
+  const c = ch === 0 ? 0 : 1;
+  const a = _detailData[(y0 * S + x0) * 4 + c], b = _detailData[(y0 * S + x1) * 4 + c];
+  const d = _detailData[(y1 * S + x0) * 4 + c], e = _detailData[(y1 * S + x1) * 4 + c];
+  return ((a * (1 - fx) + b * fx) * (1 - fy) + (d * (1 - fx) + e * fx) * fy) / 255;
+}
+
 export function detailTexture() {
   if (_detailTex || typeof document === 'undefined') return _detailTex;
   const S = 256;
@@ -37,10 +54,23 @@ export function detailTexture() {
     }
   }
   ctx.putImageData(img, 0, 0);
+  _detailData = img.data;
   _detailTex = new THREE.CanvasTexture(canvas);
   _detailTex.wrapS = _detailTex.wrapT = THREE.RepeatWrapping;
   _detailTex.colorSpace = THREE.NoColorSpace;
   return _detailTex;
+}
+
+// CPU twin of the GLSL cloudFbm below — same octaves, same channels
+export function cloudDensityCPU(d, cov0, cov1, ox, oy, oz) {
+  let f = sampleDetailCPU(d.x * 0.55 + ox, d.y * 0.55 + oy, 1) * 0.5;
+  f += sampleDetailCPU(d.y * 1.15 + oy, d.z * 1.15 + oz, 0) * 0.25;
+  f += sampleDetailCPU(d.z * 2.35 + oz, d.x * 2.35 + ox, 1) * 0.125;
+  f += sampleDetailCPU(d.x * 4.8 - ox, d.y * 4.8 - oz, 0) * 0.0625;
+  f /= 0.9375;
+  const t = Math.min(1, Math.max(0, (f - cov0) / Math.max(cov1 - cov0, 1e-5)));
+  const s = t * t * (3 - 2 * t);
+  return Math.pow(s, 1.3);
 }
 
 let _blankTex = null;
@@ -153,6 +183,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         varying vec3 vLocalNrm;
         varying vec2 vMat;
         varying vec4 vExtra;
+        float gSnowW = 0.0;
         float triDetail(vec3 p, vec3 w, float s, int ch) {
           vec2 a = texture2D(uDetailTex, p.yz * s).rg;
           vec2 b = texture2D(uDetailTex, p.zx * s).rg;
@@ -217,6 +248,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             sw = max(sw, smoothstep(uSnowCap, uSnowCap + 0.07, lat));
             sw *= 1.0 - smoothstep(0.55, 0.8, slope) * 0.85;
             diffuseColor.rgb = mix(diffuseColor.rgb, uSnowColor, sw);
+            gSnowW = sw;
           }
 
           // ---- the cloud deck overhead casts drifting shadows
@@ -225,6 +257,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           float cvv = 1.0 - acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
           diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
         }`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        // snow glints; everything else stays matte
+        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.42, 0.05, 1.0);`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
           // micro-relief: bend the shading normal with the same detail field —
@@ -286,6 +321,10 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
     shader.uniforms.uCov0 = { value: 0.55 - coverage * 0.24 };
     shader.uniforms.uCov1 = { value: 0.86 - coverage * 0.14 };
     shader.uniforms.uCOff = { value: new THREE.Vector3(offX, offY, offZ) };
+    // the shell fades away as the camera nears its own altitude — the
+    // transit white-out fog takes over, so you fly THROUGH, never POP through
+    shader.uniforms.uCamProx = { value: 1 };
+    material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         varying vec3 vCDir;`)
@@ -297,6 +336,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
         uniform float uCov0;
         uniform float uCov1;
         uniform vec3 uCOff;
+        uniform float uCamProx;
         varying vec3 vCDir;
         float cloudFbm(vec3 d) {
           float f = texture2D(uCloudNoise, d.xy * 0.55 + uCOff.xy).g * 0.5;
@@ -308,7 +348,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
       .replace('#include <alphamap_fragment>', `#include <alphamap_fragment>
         {
           float a = smoothstep(uCov0, uCov1, cloudFbm(normalize(vCDir)));
-          diffuseColor.a *= pow(a, 1.3);
+          diffuseColor.a *= pow(a, 1.3) * uCamProx;
         }`);
   };
   material.customProgramCacheKey = () => 'cloud-field';

@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 
-export const GRID_CELLS = 20;          // quads per chunk edge
+export const GRID_CELLS = 24;          // quads per chunk edge
 const SPLIT = 4.0;                     // split when dist < size * SPLIT
 const MERGE = 5.2;                     // merge when dist > size * MERGE
 const MORPH_TIME = 0.7;                // seconds for a LOD transition to relax
@@ -259,7 +259,8 @@ export class ChunkedLOD {
 
   buildNodeMesh(node) {
     const p = this.planet;
-    const N = GRID_CELLS;
+    // flat liquid surfaces don't need dense grids — p.gridCells overrides
+    const N = p.gridCells || GRID_CELLS;
     const cellAngle = (Math.PI / 2) / (N * (1 << node.level));
     const maxFreq = p.freqAtLevel(node.level);
     const eps = cellAngle * 0.5;

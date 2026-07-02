@@ -81,8 +81,9 @@ for (const type of Object.keys(TYPES)) {
     for (const r of p.lod.roots) walk(r);
     return m;
   };
-  for (let it = 0; it < 80; it++) {
+  for (let it = 0; it < 130; it++) {
     p.lod.update(cam, 0.05);
+    if (p.waterLod) p.waterLod.update(cam, 0.05);
     flushChunkQueue(400);
     maxInfSeen = Math.max(maxInfSeen, scanInfluence());
   }
