@@ -77,18 +77,43 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uSnowBand = { value: planet.hAmp * 0.1 };
     shader.uniforms.uSnowCap = { value: pal && pal.capLat ? pal.capLat : 9.0 };
     shader.uniforms.uPlanetR = { value: planet.R };
+    // the whole palette, evaluated per-pixel
+    const U = planet.palU;
+    shader.uniforms.uLandT = { value: U.landT };
+    shader.uniforms.uLandC = { value: U.landC };
+    shader.uniforms.uLandN = { value: U.landN };
+    shader.uniforms.uSeaT = { value: U.seaT };
+    shader.uniforms.uSeaC = { value: U.seaC };
+    shader.uniforms.uSeaN = { value: U.seaN };
+    shader.uniforms.uHasSea = { value: U.hasSea };
+    shader.uniforms.uT0 = { value: U.t0 };
+    shader.uniforms.uTSpan = { value: U.tSpan };
+    shader.uniforms.uSeaDepthSpan = { value: U.seaDepthSpan };
+    shader.uniforms.uRockC = { value: U.rock };
+    shader.uniforms.uSlopeLo = { value: U.slopeLo };
+    shader.uniforms.uSlopeHi = { value: U.slopeHi };
+    shader.uniforms.uForestC = { value: U.forest };
+    shader.uniforms.uBlotchC = { value: U.blotch };
+    shader.uniforms.uStripeA = { value: U.stripeA };
+    shader.uniforms.uStripeB = { value: U.stripeB };
+    shader.uniforms.uStripeK = { value: U.stripeK };
+    shader.uniforms.uExtraC = { value: U.extraC };
+    shader.uniforms.uExtraMode = { value: U.extraMode };
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec3 aLocal;
         attribute vec2 aMat;
+        attribute vec4 aExtra;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
-        varying vec2 vMat;`)
+        varying vec2 vMat;
+        varying vec4 vExtra;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vLocalPos = aLocal;
         vLocalNrm = normal;
-        vMat = aMat;`);
+        vMat = aMat;
+        vExtra = aExtra;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
@@ -104,9 +129,30 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uSnowBand;
         uniform float uSnowCap;
         uniform float uPlanetR;
+        uniform float uLandT[7];
+        uniform vec3 uLandC[7];
+        uniform float uLandN;
+        uniform float uSeaT[7];
+        uniform vec3 uSeaC[7];
+        uniform float uSeaN;
+        uniform float uHasSea;
+        uniform float uT0;
+        uniform float uTSpan;
+        uniform float uSeaDepthSpan;
+        uniform vec3 uRockC;
+        uniform float uSlopeLo;
+        uniform float uSlopeHi;
+        uniform vec3 uForestC;
+        uniform vec3 uBlotchC;
+        uniform vec3 uStripeA;
+        uniform vec3 uStripeB;
+        uniform float uStripeK;
+        uniform float uExtraMode;
+        uniform vec3 uExtraC;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
         varying vec2 vMat;
+        varying vec4 vExtra;
         float triDetail(vec3 p, vec3 w, float s, int ch) {
           vec2 a = texture2D(uDetailTex, p.yz * s).rg;
           vec2 b = texture2D(uDetailTex, p.zx * s).rg;
@@ -116,35 +162,65 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
+          // ---- the palette, per-pixel: exact height & slope, so coasts,
+          // depth gradients and rock bands stay crisp at every distance
+          vec3 nd = normalize(vLocalPos);
+          float hgt = length(vLocalPos) - uPlanetR;
+          float slope = 1.0 - clamp(dot(normalize(vLocalNrm), nd), 0.0, 1.0);
+          vec3 base;
+          if (uHasSea > 0.5 && hgt < uT0) {
+            float t = clamp(1.0 - (uT0 - hgt) / uSeaDepthSpan, 0.0, 1.0);
+            base = uSeaC[0];
+            for (int i = 1; i < 7; i++) {
+              if (float(i) >= uSeaN) break;
+              base = mix(base, uSeaC[i],
+                clamp((t - uSeaT[i - 1]) / max(uSeaT[i] - uSeaT[i - 1], 1e-5), 0.0, 1.0));
+            }
+          } else {
+            float t = clamp((hgt - uT0) / uTSpan, 0.0, 1.0);
+            base = uLandC[0];
+            for (int i = 1; i < 7; i++) {
+              if (float(i) >= uLandN) break;
+              base = mix(base, uLandC[i],
+                clamp((t - uLandT[i - 1]) / max(uLandT[i] - uLandT[i - 1], 1e-5), 0.0, 1.0));
+            }
+            base = mix(base, uForestC, vExtra.x);
+            base = mix(base, uBlotchC, vExtra.y);
+            if (uStripeK > 0.001) base = mix(base, mix(uStripeA, uStripeB, vExtra.z), uStripeK);
+            if (uExtraMode > 2.5) base *= 1.0 + (vExtra.w - 0.5) * 0.2;
+            else if (uExtraMode > 0.5) base = mix(base, uExtraC, vExtra.w);
+            base = mix(base, uRockC, smoothstep(uSlopeLo, uSlopeHi, slope));
+          }
+          diffuseColor.rgb = base;
+
+          // ---- micro grain, biome-styled
           vec3 w = pow(abs(normalize(vLocalNrm)), vec3(4.0));
           w /= (w.x + w.y + w.z);
           float grain = (triDetail(vLocalPos, w, uDetailS.x, 0) - 0.5)
                       + (triDetail(vLocalPos, w, uDetailS.y, 1) - 0.5) * 0.8;
-          // rocky ground shows sedimentary strata banded by altitude
           float strat = texture2D(uDetailTex, vec2(length(vLocalPos) * 0.055, 0.31)).r - 0.5;
           float d = mix(grain, grain * 0.5 + strat * 1.15, vMat.x);
-          // vegetated ground gets broad organic mottling
           d += (triDetail(vLocalPos, w, uDetailS.y * 0.32, 0) - 0.5) * vMat.y * 0.75;
           diffuseColor.rgb *= 1.0 + d * uDetailK;
-          // continental-scale tint drift: real land is patchy at every
-          // scale — dry-brown swathes break up the uniform green
+
+          // ---- continental-scale tint drift: dry-brown swathes
           float macro = triDetail(vLocalPos, w, 0.0013, 0)
                       + triDetail(vLocalPos, w, 0.00028, 1) - 1.0;
           float mw = clamp(macro * 1.5 + 0.5, 0.0, 1.0) * uMacroK;
           diffuseColor.rgb *= mix(vec3(1.0), vec3(1.09, 0.99, 0.84), mw);
-          // per-pixel snowline: crisp caps from orbit, no vertex banding
+
+          // ---- per-pixel snowline: crisp caps from orbit
           if (uSnowK > 0.5) {
-            vec3 nd = normalize(vLocalPos);
             float lat = abs(nd.y) + (texture2D(uDetailTex, nd.xz * 2.0 + nd.y).r - 0.5) * 0.12;
             float sl = uSnowLine * (1.0 - 0.65 * smoothstep(0.45, 0.95, lat));
-            float sw = smoothstep(sl, sl + uSnowBand, length(vLocalPos) - uPlanetR);
+            float sw = smoothstep(sl, sl + uSnowBand, hgt);
             sw = max(sw, smoothstep(uSnowCap, uSnowCap + 0.07, lat));
-            float steep = 1.0 - clamp(dot(normalize(vLocalNrm), nd), 0.0, 1.0);
-            sw *= 1.0 - smoothstep(0.55, 0.8, steep) * 0.85;
+            sw *= 1.0 - smoothstep(0.55, 0.8, slope) * 0.85;
             diffuseColor.rgb = mix(diffuseColor.rgb, uSnowColor, sw);
           }
-          // the cloud deck overhead casts drifting shadows
-          vec3 cd = uCloudMat * normalize(vLocalPos);
+
+          // ---- the cloud deck overhead casts drifting shadows
+          vec3 cd = uCloudMat * nd;
           float cu = 0.5 + atan(cd.z, -cd.x) * 0.15915494;
           float cvv = 1.0 - acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
           diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
@@ -164,7 +240,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           normal = normalize(normal + (tang * gx + bitn * gy) * uDetailK * (1.1 + vMat.x * 1.2));
         }`);
   };
-  material.customProgramCacheKey = () => 'terrain-detail-v2';
+  material.customProgramCacheKey = () => 'terrain-palette-v3';
 }
 
 // Living water: two scrolling noise scales perturb the shading normal.

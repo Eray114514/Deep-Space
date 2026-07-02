@@ -28,15 +28,16 @@ const _p0 = new THREE.Vector3();
 const _p1 = new THREE.Vector3();
 const _p2 = new THREE.Vector3();
 const _n = new THREE.Vector3();
-const _col = new THREE.Color();
 const _dirV = new THREE.Vector3();
 const _cP = new THREE.Vector3();
 const _cN = new THREE.Vector3();
-const _cC = new THREE.Color();
+const _ex = new THREE.Vector4();
 const _camDir = new THREE.Vector3();
 
-// position/normal/color of the surface at one LOD cutoff
-function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm, outCol) {
+// position/normal of the surface at one LOD cutoff; height and slope are
+// left in _ss for the caller (colors are the fragment shader's job now)
+const _ss = { h: 0, slope: 0 };
+function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
   const h = p.height(dir, maxFreq);
   outPos.copy(dir).multiplyScalar(p.R + h);
   if (Math.abs(dir.y) < 0.95) _t1.set(-dir.z, 0, dir.x).normalize();
@@ -47,8 +48,8 @@ function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm, outCol) {
   _d2.copy(dir).addScaledVector(_t2, eps).normalize();
   _p2.copy(_d2).multiplyScalar(p.R + p.height(_d2, maxFreq));
   outNrm.crossVectors(_p1.sub(outPos), _p2.sub(outPos)).normalize();
-  const slope = Math.max(0, 1 - outNrm.dot(dir));
-  p.colorAt(dir, h, slope, maxFreq, outCol);
+  _ss.h = h;
+  _ss.slope = Math.max(0, 1 - outNrm.dot(dir));
 }
 
 // ---- global build scheduler -------------------------------------------------
@@ -275,13 +276,14 @@ export class ChunkedLOD {
     const total = gridVerts + skirtVerts;
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
-    const colors = new Float32Array(total * 3);
     // per-vertex material weights: x = rockiness, y = vegetation —
     // the detail shader blends strata vs organic mottle with these
     const aMat = p.pal ? new Float32Array(total * 2) : null;
+    // low-frequency tint masks (forest/blotch/stripe/extra) — the actual
+    // palette is evaluated per-pixel in the fragment shader
+    const aExtra = p.extrasAt ? new Float32Array(total * 4) : null;
     const dPos = hasMorph ? new Float32Array(total * 3) : null;
     const dNrm = hasMorph ? new Float32Array(total * 3) : null;
-    const dCol = hasMorph ? new Float32Array(total * 3) : null;
 
     const faceFn = FACE_FN[node.face];
 
@@ -292,34 +294,35 @@ export class ChunkedLOD {
         const idx = j * (N + 1) + i;
 
         faceFn(u, v, _dirV).normalize();
-        sampleSurface(p, _dirV, maxFreq, eps, _p0, _n, _col);
+        sampleSurface(p, _dirV, maxFreq, eps, _p0, _n);
+        const h = _ss.h, slope = _ss.slope;
 
         positions[idx * 3] = _p0.x;
         positions[idx * 3 + 1] = _p0.y;
         positions[idx * 3 + 2] = _p0.z;
         normals[idx * 3] = _n.x; normals[idx * 3 + 1] = _n.y; normals[idx * 3 + 2] = _n.z;
-        colors[idx * 3] = _col.r; colors[idx * 3 + 1] = _col.g; colors[idx * 3 + 2] = _col.b;
 
+        if (aExtra) {
+          p.extrasAt(_dirV, h, maxFreq, _ex);
+          aExtra[idx * 4] = _ex.x; aExtra[idx * 4 + 1] = _ex.y;
+          aExtra[idx * 4 + 2] = _ex.z; aExtra[idx * 4 + 3] = _ex.w;
+        }
         if (aMat) {
-          const slope = Math.max(0, 1 - _n.dot(_dirV));
           const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
           aMat[idx * 2] = Math.min(1, Math.max(0, sl));
-          aMat[idx * 2 + 1] = Math.min(1, Math.max(0, (_col.g - Math.max(_col.r, _col.b)) * 3.5));
+          aMat[idx * 2 + 1] = aExtra ? Math.min(1, _ex.x * 1.4) : 0;
         }
 
         if (hasMorph) {
           // the same vertex as the parent level sees it (coarser cutoff,
           // parent's sampling eps) — stored relative to the fine vertex
-          sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN, _cC);
+          sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
           dPos[idx * 3] = _cP.x - _p0.x;
           dPos[idx * 3 + 1] = _cP.y - _p0.y;
           dPos[idx * 3 + 2] = _cP.z - _p0.z;
           dNrm[idx * 3] = _cN.x - _n.x;
           dNrm[idx * 3 + 1] = _cN.y - _n.y;
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
-          dCol[idx * 3] = _cC.r - _col.r;
-          dCol[idx * 3 + 1] = _cC.g - _col.g;
-          dCol[idx * 3 + 2] = _cC.b - _col.b;
         }
       }
     }
@@ -340,12 +343,14 @@ export class ChunkedLOD {
       const k = (len - skirtDrop) / len;
       positions[dst * 3] = px * k; positions[dst * 3 + 1] = py * k; positions[dst * 3 + 2] = pz * k;
       normals[dst * 3] = normals[src * 3]; normals[dst * 3 + 1] = normals[src * 3 + 1]; normals[dst * 3 + 2] = normals[src * 3 + 2];
-      colors[dst * 3] = colors[src * 3]; colors[dst * 3 + 1] = colors[src * 3 + 1]; colors[dst * 3 + 2] = colors[src * 3 + 2];
       if (aMat) { aMat[dst * 2] = aMat[src * 2]; aMat[dst * 2 + 1] = aMat[src * 2 + 1]; }
+      if (aExtra) {
+        aExtra[dst * 4] = aExtra[src * 4]; aExtra[dst * 4 + 1] = aExtra[src * 4 + 1];
+        aExtra[dst * 4 + 2] = aExtra[src * 4 + 2]; aExtra[dst * 4 + 3] = aExtra[src * 4 + 3];
+      }
       if (hasMorph) {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
         dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
-        dCol[dst * 3] = dCol[src * 3]; dCol[dst * 3 + 1] = dCol[src * 3 + 1]; dCol[dst * 3 + 2] = dCol[src * 3 + 2];
       }
     }
 
@@ -388,13 +393,12 @@ export class ChunkedLOD {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
     if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 2));
+    if (aExtra) geo.setAttribute('aExtra', new THREE.BufferAttribute(aExtra, 4));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
       geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];
-      geo.morphAttributes.color = [new THREE.BufferAttribute(dCol, 3)];
       geo.morphTargetsRelative = true;
     }
     geo.setIndex(indices);

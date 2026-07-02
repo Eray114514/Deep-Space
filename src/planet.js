@@ -149,8 +149,9 @@ export class Planet {
     // ---- scene objects ----------------------------------------------------
     this.group = new THREE.Group();
     this.group.name = 'planet:' + name;
+    // no vertex colors: the palette is evaluated per-pixel in the shader
     this.terrainMaterial = new THREE.MeshStandardMaterial({
-      vertexColors: true, roughness: 1.0, metalness: 0.0,
+      roughness: 1.0, metalness: 0.0,
     });
     // close-up grain (albedo + micro-normals): rocky worlds get more of it;
     // living worlds get stronger continental tint drift (dry-brown swathes)
@@ -383,6 +384,42 @@ export class Planet {
     return out;
   }
 
+  // Low-frequency tint masks baked per-vertex (they're smooth, so vertex
+  // resolution is fine): x=forest, y=blotch, z=stripe phase, w=ember/
+  // crevasse/strata. The fragment shader applies the actual colors.
+  extrasAt(dir, h, maxFreq, out) {
+    out.set(0, 0, 0, 0);
+    const p = this.pal;
+    if (this.hasLiquid && h < this.seaLevel && this.liquid !== 'lava') return out;
+    const x = dir.x, y = dir.y, z = dir.z;
+    const t0 = this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85;
+    const tl = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
+
+    if (p.forest && tl > 0.04 && tl < 0.55) {
+      const moist = this.nC.fbm(x + 11.3, y - 4.1, z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
+      out.x = smoothstep(0.05, 0.3, moist) * smoothstep(0.04, 0.1, tl)
+        * (1 - smoothstep(0.4, 0.55, tl)) * 0.85;
+    }
+    if (p.blotch) {
+      const b = this.nD.billow(x - 17, y + 5, z, 5.5, 3, 0.5, 2.1, maxFreq);
+      out.y = smoothstep(0.18, 0.5, b) * 0.7;
+    }
+    if (p.stripes) {
+      const d = x * this.stripeAxis.x + y * this.stripeAxis.y + z * this.stripeAxis.z;
+      out.z = Math.sin(d * this.stripeFreq + this.nA.noise(x * 4, y * 4, z * 4) * 1.9) * 0.5 + 0.5;
+    }
+    if (this.liquid === 'lava') {
+      const f = 1 - smoothstep(this.seaLevel + 2, this.seaLevel + this.hAmp * 0.22, h);
+      out.w = f * f;
+    } else if (p.crevasse) {
+      out.w = smoothstep(0.52, 0.8, this.nB.ridged(x, y, z, 11, 3, 0.55, 2.1, maxFreq)) * 0.6;
+    } else if (p.strata) {
+      const moist = this.nC.fbm(x + 11.3, y - 4.1, z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
+      out.w = Math.sin(h * 0.55 + moist * 2.0) * 0.5 + 0.5;
+    }
+    return out;
+  }
+
   buildPalette(rand) {
     // vivid types can drift far; living worlds keep believable hues
     const hueSpan = (this.type === 'lush' || this.type === 'ocean') ? 0.05 : 0.13;
@@ -449,6 +486,41 @@ export class Planet {
     if (p.stripes) for (const s of p.stripes) lin(s.c);
     for (const k of ['forest', 'rock', 'snow', 'blotch', 'crevasse', 'ember']) lin(p[k]);
     this.pal = p;
+
+    // the palette as shader uniforms: the terrain fragment shader evaluates
+    // the full gradient per-PIXEL, so coastlines and rock bands stay crisp
+    // from orbit and colors can't pop between LODs
+    const MAXS = 7;
+    const pad = (stops) => {
+      const t = new Array(MAXS).fill(1);
+      const c = [];
+      for (let i = 0; i < MAXS; i++) {
+        const s = stops[Math.min(i, stops.length - 1)];
+        t[i] = s.t;
+        c.push(s.c);
+      }
+      return { t, c, n: stops.length };
+    };
+    const landU = pad(p.land);
+    const seaU = pad(p.sea || p.land);
+    const black = new THREE.Color(0, 0, 0);
+    this.palU = {
+      landT: landU.t, landC: landU.c, landN: landU.n,
+      seaT: seaU.t, seaC: seaU.c, seaN: seaU.n,
+      hasSea: this.hasLiquid && this.liquid !== 'lava' ? 1 : 0,
+      rock: p.rock,
+      slopeLo: p.slopeLo, slopeHi: p.slopeHi,
+      t0: this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85,
+      tSpan: this.hAmp * 1.15 - (this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85),
+      seaDepthSpan: this.hAmp * 0.85,
+      forest: p.forest || black,
+      blotch: p.blotch || black,
+      stripeA: p.stripes ? p.stripes[0].c : black,
+      stripeB: p.stripes ? p.stripes[p.stripes.length - 1].c : black,
+      stripeK: p.stripes ? 0.55 : 0,
+      extraC: this.liquid === 'lava' ? p.ember : (p.crevasse || black),
+      extraMode: this.liquid === 'lava' || p.crevasse ? 1 : (p.strata ? 3 : 0),
+    };
 
     // liquid & atmosphere colors
     this.atmoColor = col(this.cfg.atmo).convertSRGBToLinear();
