@@ -53,8 +53,10 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, fadeIn = false }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, fadeIn = false, sunDir = null }) {
     this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
+    // known at construction so even the root chunks bake sun shadows
+    this.sunDirLocal = sunDir ? sunDir.clone() : null;
     this.seed = seed;
     this.name = name;
     this.isMoon = isMoon;
@@ -679,6 +681,29 @@ export class Planet {
     if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(dirLocal);
   }
 
+  // Ray-marched sun visibility over the (coarse) heightfield — after
+  // glacial-valley: mountains cast kilometre-long soft shadows across
+  // valleys. Suns never move relative to their planets, so this bakes
+  // per-vertex at chunk build and never goes stale.
+  sunVis(dir, h) {
+    const sd = this.sunDirLocal;
+    if (!sd) return 1;
+    if (sd.dot(dir) < -0.03) return 1;   // night side: no direct light anyway
+    _mp.copy(dir).multiplyScalar(this.R + h + 2);
+    let vis = 1;
+    let t = 70;
+    for (let i = 0; i < 8; i++) {
+      _msp.copy(_mp).addScaledVector(sd, t);
+      const r = _msp.length();
+      _msd.copy(_msp).multiplyScalar(1 / r);
+      const pen = (this.R + this.height(_msd, 24)) - r;   // >0: inside terrain
+      if (pen > 0) vis = Math.min(vis, Math.max(0, 1 - pen / (t * 0.055)));
+      if (vis <= 0) return 0;
+      t *= 1.85;
+    }
+    return vis;
+  }
+
   // How deep in a cloud the camera is (0..1): drives transit white-out fog.
   // Samples the same field the shader draws, in the deck's rotated frame.
   cloudTransit(camLocal) {
@@ -804,6 +829,9 @@ const _dir = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _m4 = new THREE.Matrix4();
+const _mp = new THREE.Vector3();
+const _msp = new THREE.Vector3();
+const _msd = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function makeAtmosphereMaterial(color, density) {

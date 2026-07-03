@@ -460,6 +460,7 @@ export class StarSystem {
     const planet = new Planet({
       seed: s.seed, name: s.name, posUniv: s.pos, type: s.type, isMoon: s.isMoon,
       fadeIn: this._deferred,
+      sunDir: _v.copy(this.star.pos).sub(s.pos).normalize(),
     });
     planet.orbitIndex = s.orbitIndex;
     if (s.parentSpec >= 0) planet.parentPlanet = this.planets[s.parentSpec];

@@ -554,6 +554,12 @@ function ambience() {
     scene.fog.color.copy(_sky);
     scene.fog.density = fogDensity;
 
+    // valley mist tracks the live fog/sky tint (sunset mist comes free)
+    const tsh = p.terrainMaterial.userData.shader;
+    if (tsh && tsh.uniforms.uMistColor) {
+      tsh.uniforms.uMistColor.value.copy(_sky).multiplyScalar(1.06);
+    }
+
     hemi.intensity = inAtmo * 1.15 * (0.12 + 0.88 * day);
     hemi.color.copy(p.skyColorLin || _sky);
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);

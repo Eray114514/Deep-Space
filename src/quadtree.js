@@ -278,9 +278,10 @@ export class ChunkedLOD {
     const total = gridVerts + skirtVerts;
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
-    // per-vertex material weights: x = rockiness, y = vegetation —
-    // the detail shader blends strata vs organic mottle with these
-    const aMat = p.pal ? new Float32Array(total * 2) : null;
+    // per-vertex material weights: x = rockiness, y = vegetation,
+    // z = baked ray-marched sun visibility (long mountain shadows)
+    const aMat = p.pal ? new Float32Array(total * 3) : null;
+    if (aMat) aMat.fill(1);
     // low-frequency tint masks (forest/blotch/stripe/extra) — the actual
     // palette is evaluated per-pixel in the fragment shader
     const aExtra = p.extrasAt ? new Float32Array(total * 4) : null;
@@ -311,8 +312,8 @@ export class ChunkedLOD {
         }
         if (aMat) {
           const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
-          aMat[idx * 2] = Math.min(1, Math.max(0, sl));
-          aMat[idx * 2 + 1] = aExtra ? Math.min(1, _ex.x * 1.4) : 0;
+          aMat[idx * 3] = Math.min(1, Math.max(0, sl));
+          aMat[idx * 3 + 1] = aExtra ? Math.min(1, _ex.x * 1.4) : 0;
         }
 
         if (hasMorph) {
@@ -325,6 +326,32 @@ export class ChunkedLOD {
           dNrm[idx * 3] = _cN.x - _n.x;
           dNrm[idx * 3 + 1] = _cN.y - _n.y;
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
+        }
+      }
+    }
+
+    // baked sun shadows: march on a half-resolution subgrid (shadows are
+    // broad and soft) and bilinearly upsample — quarter the march cost
+    if (aMat && p.sunVis && p.sunDirLocal) {
+      const SN = N / 2;
+      const sub = new Float32Array((SN + 1) * (SN + 1));
+      for (let sj = 0; sj <= SN; sj++) {
+        const v = node.v0 + (node.v1 - node.v0) * ((sj * 2) / N);
+        for (let si = 0; si <= SN; si++) {
+          const u = node.u0 + (node.u1 - node.u0) * ((si * 2) / N);
+          faceFn(u, v, _dirV).normalize();
+          const idx = (sj * 2) * (N + 1) + si * 2;
+          const hh = Math.hypot(positions[idx * 3], positions[idx * 3 + 1], positions[idx * 3 + 2]) - p.R;
+          sub[sj * (SN + 1) + si] = p.sunVis(_dirV, hh);
+        }
+      }
+      for (let j = 0; j <= N; j++) {
+        const fj = j / 2, j0 = Math.min(SN - 1, fj | 0), tj = fj - j0;
+        for (let i = 0; i <= N; i++) {
+          const fi = i / 2, i0 = Math.min(SN - 1, fi | 0), ti = fi - i0;
+          const a = sub[j0 * (SN + 1) + i0], b = sub[j0 * (SN + 1) + i0 + 1];
+          const c = sub[(j0 + 1) * (SN + 1) + i0], d = sub[(j0 + 1) * (SN + 1) + i0 + 1];
+          aMat[(j * (N + 1) + i) * 3 + 2] = (a * (1 - ti) + b * ti) * (1 - tj) + (c * (1 - ti) + d * ti) * tj;
         }
       }
     }
@@ -345,7 +372,11 @@ export class ChunkedLOD {
       const k = (len - skirtDrop) / len;
       positions[dst * 3] = px * k; positions[dst * 3 + 1] = py * k; positions[dst * 3 + 2] = pz * k;
       normals[dst * 3] = normals[src * 3]; normals[dst * 3 + 1] = normals[src * 3 + 1]; normals[dst * 3 + 2] = normals[src * 3 + 2];
-      if (aMat) { aMat[dst * 2] = aMat[src * 2]; aMat[dst * 2 + 1] = aMat[src * 2 + 1]; }
+      if (aMat) {
+        aMat[dst * 3] = aMat[src * 3];
+        aMat[dst * 3 + 1] = aMat[src * 3 + 1];
+        aMat[dst * 3 + 2] = aMat[src * 3 + 2];
+      }
       if (aExtra) {
         aExtra[dst * 4] = aExtra[src * 4]; aExtra[dst * 4 + 1] = aExtra[src * 4 + 1];
         aExtra[dst * 4 + 2] = aExtra[src * 4 + 2]; aExtra[dst * 4 + 3] = aExtra[src * 4 + 3];
@@ -396,7 +427,7 @@ export class ChunkedLOD {
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
-    if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 2));
+    if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 3));
     if (aExtra) geo.setAttribute('aExtra', new THREE.BufferAttribute(aExtra, 4));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];

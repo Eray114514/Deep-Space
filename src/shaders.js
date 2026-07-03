@@ -129,15 +129,20 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uStripeK = { value: U.stripeK };
     shader.uniforms.uExtraC = { value: U.extraC };
     shader.uniforms.uExtraMode = { value: U.extraMode };
+    shader.uniforms.uMistK = {
+      value: (planet.hasLiquid ? 0.26 : 0.1) * Math.min(planet.atmoDensity || 0.4, 1),
+    };
+    shader.uniforms.uMistH = { value: planet.hAmp * 0.12 };
+    shader.uniforms.uMistColor = { value: planet.skyColor.clone().convertSRGBToLinear() };
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec3 aLocal;
-        attribute vec2 aMat;
+        attribute vec3 aMat;
         attribute vec4 aExtra;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
-        varying vec2 vMat;
+        varying vec3 vMat;
         varying vec4 vExtra;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vLocalPos = aLocal;
@@ -179,9 +184,12 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uStripeK;
         uniform float uExtraMode;
         uniform vec3 uExtraC;
+        uniform float uMistK;
+        uniform float uMistH;
+        uniform vec3 uMistColor;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
-        varying vec2 vMat;
+        varying vec3 vMat;
         varying vec4 vExtra;
         float gSnowW = 0.0;
         float triDetail(vec3 p, vec3 w, float s, int ch) {
@@ -224,6 +232,10 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           }
           diffuseColor.rgb = base;
 
+          // ---- baked ray-marched sun shadows: mountains shade whole
+          // valleys, kilometres beyond the realtime shadow map's reach
+          diffuseColor.rgb *= mix(0.42, 1.0, vMat.z);
+
           // ---- micro grain, biome-styled
           vec3 w = pow(abs(normalize(vLocalNrm)), vec3(4.0));
           w /= (w.x + w.y + w.z);
@@ -260,6 +272,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         // snow glints; everything else stays matte
         roughnessFactor = clamp(roughnessFactor - gSnowW * 0.42, 0.05, 1.0);`)
+      .replace('#include <fog_fragment>', `
+        #ifdef USE_FOG
+        {
+          // valley mist: haze pools in the low country and thickens with
+          // distance — the depth cue that sells scale from altitude
+          float mist = uMistK
+            * smoothstep(uMistH, 0.0, (length(vLocalPos) - uPlanetR) - uT0)
+            * (1.0 - exp(-vFogDepth * 3.2e-4));
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, uMistColor, clamp(mist, 0.0, 0.6));
+        }
+        #endif
+        #include <fog_fragment>`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
           // micro-relief: bend the shading normal with the same detail field —
