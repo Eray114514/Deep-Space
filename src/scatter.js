@@ -9,6 +9,26 @@ import { applyWindSway } from './shaders.js';
 // wind strength per prop kind (0 = rigid)
 const SWAY = { grass: 0.055, tree: 0.02, trunkTree: 0.014, blob: 0.02, cactus: 0.008 };
 
+// jagged rock: displace a subdivided solid by hashed per-vertex noise —
+// crags instead of platonic dice
+function craggyGeo(base, amount, seed) {
+  const pos = base.attributes.position;
+  const seen = new Map();   // co-located verts must move together
+  for (let i = 0; i < pos.count; i++) {
+    const key = pos.getX(i).toFixed(3) + ',' + pos.getY(i).toFixed(3) + ',' + pos.getZ(i).toFixed(3);
+    let k = seen.get(key);
+    if (k === undefined) {
+      const h = hash3i(Math.round(pos.getX(i) * 97), Math.round(pos.getY(i) * 89),
+        Math.round(pos.getZ(i) * 83), seed);
+      k = 1 + (hashFloat(h, 0) - 0.35) * amount;
+      seen.set(key, k);
+    }
+    pos.setXYZ(i, pos.getX(i) * k, pos.getY(i) * k, pos.getZ(i) * k);
+  }
+  base.computeVertexNormals();
+  return base;
+}
+
 function coniferGeo(tiers, height, girth) {
   // tiered silhouette via lathe — reads as a conifer, not a traffic cone
   const pts = [new THREE.Vector2(0, 0)];
@@ -52,10 +72,11 @@ const Y = new THREE.Vector3(0, 1, 0);
 function baseGeo() {
   const shift = (g, y) => { g.translate(0, y, 0); return g; };
   return {
-    rock: new THREE.IcosahedronGeometry(0.7, 0),
-    boulder: shift(new THREE.DodecahedronGeometry(1.4, 0), 0.6),
-    tree: coniferGeo(3, 4.6, 1.15),
-    trunkTree: coniferGeo(4, 6.6, 1.4),
+    rock: craggyGeo(new THREE.IcosahedronGeometry(0.7, 1), 0.75, 101),
+    boulder: shift(craggyGeo(new THREE.IcosahedronGeometry(1.4, 1), 0.6, 202), 0.9),
+    tree: shift(coniferGeo(3, 4.6, 1.15), 0.7),
+    trunkTree: shift(coniferGeo(4, 6.6, 1.4), 0.9),
+    trunk: shift(new THREE.CylinderGeometry(0.09, 0.16, 1.1, 5), 0.0),
     crystal: shift(new THREE.OctahedronGeometry(1, 0), 0.9),
     grass: shift(new THREE.ConeGeometry(0.07, 0.65, 4), 0.3),
     blob: shift(new THREE.SphereGeometry(0.9, 6, 5), 0.5),
@@ -88,6 +109,7 @@ function propColors(planet) {
     boulder: p.rock.clone().multiplyScalar(0.85),
     tree: (p.forest || p.rock).clone().multiplyScalar(2.1),
     trunkTree: (p.forest || p.rock).clone().multiplyScalar(1.6),
+    trunk: new THREE.Color(0x5d4531).convertSRGBToLinear(),
     crystal: null,
     grass: null,
     blob: (p.blotch || p.rock).clone(),
@@ -282,6 +304,16 @@ export class Scatter {
       }
       im.setColorAt(counts[kind], _ic);
       im.setMatrixAt(counts[kind]++, _m);
+
+      // every canopy stands on a trunk (same transform, own mesh)
+      if (kind === 'tree' || kind === 'trunkTree') {
+        const tm = this.meshes.trunk;
+        if (tm && counts.trunk < capFor('trunk')) {
+          tm.setColorAt(counts.trunk, _ic.setRGB(1, 1, 1)
+            .offsetHSL(0, 0, (hashFloat(hc, 2) - 0.5) * 0.15));
+          tm.setMatrixAt(counts.trunk++, _m);
+        }
+      }
     }
   }
 }

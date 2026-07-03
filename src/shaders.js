@@ -324,6 +324,8 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
     // the shell fades away as the camera nears its own altitude — the
     // transit white-out fog takes over, so you fly THROUGH, never POP through
     shader.uniforms.uCamProx = { value: 1 };
+    // sun direction in the deck's own (rotating) frame, for self-shadowing
+    shader.uniforms.uCSun = { value: new THREE.Vector3(0, 1, 0) };
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
@@ -337,6 +339,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
         uniform float uCov1;
         uniform vec3 uCOff;
         uniform float uCamProx;
+        uniform vec3 uCSun;
         varying vec3 vCDir;
         float cloudFbm(vec3 d) {
           float f = texture2D(uCloudNoise, d.xy * 0.55 + uCOff.xy).g * 0.5;
@@ -347,8 +350,15 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
         }`)
       .replace('#include <alphamap_fragment>', `#include <alphamap_fragment>
         {
-          float a = smoothstep(uCov0, uCov1, cloudFbm(normalize(vCDir)));
+          vec3 nd = normalize(vCDir);
+          float a = smoothstep(uCov0, uCov1, cloudFbm(nd));
           diffuseColor.a *= pow(a, 1.3) * uCamProx;
+          // volumetric look from one extra tap: density INCREASING toward
+          // the sun means we're in a cloud's shadowed core; decreasing
+          // means a sunlit edge. Thick cores also darken (their own bulk).
+          float aSun = smoothstep(uCov0, uCov1, cloudFbm(normalize(nd + uCSun * 0.05)));
+          float self = clamp(1.0 - (aSun - a) * 1.9, 0.42, 1.18);
+          diffuseColor.rgb *= self * (1.0 - a * 0.22);
         }`);
   };
   material.customProgramCacheKey = () => 'cloud-field';

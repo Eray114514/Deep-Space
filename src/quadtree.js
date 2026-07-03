@@ -5,7 +5,8 @@
 
 import * as THREE from 'three';
 
-export const GRID_CELLS = 24;          // quads per chunk edge
+export let GRID_CELLS = 24;            // quads per chunk edge
+export function setGridCells(n) { GRID_CELLS = n; }   // quality presets
 const SPLIT = 4.0;                     // split when dist < size * SPLIT
 const MERGE = 5.2;                     // merge when dist > size * MERGE
 const MORPH_TIME = 0.7;                // seconds for a LOD transition to relax

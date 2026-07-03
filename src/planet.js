@@ -700,7 +700,8 @@ export class Planet {
   update(camLocal, dt, focused) {
     this.lod.update(camLocal, dt);
     if (this.waterLod) this.waterLod.update(camLocal, dt);
-    // shells vanish near their own altitude so you fly through, not pop through
+    // shells vanish near their own altitude so you fly through, not pop through;
+    // each deck also gets the sun direction in its own rotating frame
     if (this.cloudBands.length) {
       const camR = camLocal.length();
       for (const b of this.cloudBands) {
@@ -708,6 +709,10 @@ export class Planet {
         if (sh) {
           const x = Math.min(1, Math.max(0, (Math.abs(camR - b.r) - 200) / 1400));
           sh.uniforms.uCamProx.value = x * x * (3 - 2 * x);
+          if (this.sunDirLocal) {
+            sh.uniforms.uCSun.value.copy(this.sunDirLocal)
+              .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
+          }
         }
       }
     }

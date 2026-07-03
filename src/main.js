@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { Universe } from './galaxy.js';
-import { flushChunkQueue, pendingChunks } from './quadtree.js';
+import { flushChunkQueue, pendingChunks, setGridCells } from './quadtree.js';
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
 import { WarpStreaks, SkyDome, Ship } from './effects.js';
@@ -32,6 +32,9 @@ const qs = new URLSearchParams(location.search);
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
+// ?quality=low for integrated GPUs: coarser grids, no bloom, lower res
+const QUALITY_LOW = qs.get('quality') === 'low';
+if (QUALITY_LOW) setGridCells(18);
 
 document.getElementById('version').textContent = 'v' + VERSION;
 console.info(`No Man's Sky three.js v${VERSION}`);
@@ -42,7 +45,7 @@ const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches || navigator.max
 // ---- renderer ---------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.7 : 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY_LOW ? 1.25 : IS_TOUCH ? 1.7 : 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
@@ -88,7 +91,7 @@ composer.addPass(new RenderPass(scene, camera));
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
 composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
-let usePost = qs.get('post') !== '0';
+let usePost = qs.get('post') !== '0' && !QUALITY_LOW;
 renderer.info.autoReset = false;   // accumulate across composer passes
 function sizePost() {
   composer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.7 : 2));
