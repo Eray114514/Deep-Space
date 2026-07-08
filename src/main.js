@@ -920,12 +920,23 @@ window.NMS = {
         const yaw = pinSun ? Math.atan2(sunH.dot(e1), sunH.dot(e2)) : (k / 8) * Math.PI * 2;
         const fx = Math.cos(yaw), fy = Math.sin(yaw);
         let s = 0;
-        // toward a horizon sun, probe FAR too — a 2 km ridge eats the sunset
-        for (const dd of (pinSun ? [120, 350, 900, 2600, 6000] : [120, 350, 900])) {
-          probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
-          s += (h - p.height(probe, 128)) / dd;        // terrain falls away = open
+        if (pinSun) {
+          // the sun sits at elevation ~0.11 — the SKYLINE toward it must stay
+          // lower. Walk the whole ray: point probes miss ridges between them.
+          let maxEl = -1;
+          for (let dd = 250; dd <= 6000; dd += 250) {
+            probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
+            const el = (p.height(probe, 128) - h) / dd;
+            if (el > maxEl) maxEl = el;
+          }
+          s = -Math.max(0, maxEl - 0.06) * 400;
+        } else {
+          for (const dd of [120, 350, 900]) {
+            probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
+            s += (h - p.height(probe, 128)) / dd;      // terrain falls away = open
+          }
+          s -= (fx * e2.dot(sunH) + fy * e1.dot(sunH)) * 1.9;   // lit faces ahead
         }
-        s -= (fx * e2.dot(sunH) + fy * e1.dot(sunH)) * 1.9;   // lit faces ahead
         if (s > yawScore) { yawScore = s; yawBest = yaw; }
       }
       score += yawScore * 8;   // the view matters more than the footing
