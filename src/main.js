@@ -580,6 +580,9 @@ function ambience() {
   renderer.setClearColor(_sky.multiplyScalar(nearest ? 1 : 0));
   if (!nearest) renderer.setClearColor(0x000000);
   universe.setStarDimming(clamp(skyStrength * 1.25, 0, 1));
+  // a horizon sun seen through air dims and reddens — otherwise sunsets are
+  // a white bloom explosion swallowing a third of the sky
+  universe.setSunExtinction(nearest ? envSunset : 0);
   headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 6 : 0;
   ambient.intensity = 0.09 + inAtmo * 0.24;   // fill so cast shadows aren't pitch black
   envInAtmo = inAtmo;

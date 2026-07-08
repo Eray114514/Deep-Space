@@ -33,6 +33,7 @@ const STAR_CLASSES = [
 ];
 
 const _v = new THREE.Vector3();
+const _extC = new THREE.Color();
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
 // fall off with true distance (computed in view space, where the f64 group
@@ -324,7 +325,7 @@ export class Universe {
     // the corona blooms only on approach: from afar the sun mesh is the same
     // small disc as its star sprite, so the handoff has nothing to pop
     const tg = clamp((1.1e8 - d) / 5e7, 0, 1);
-    sys.sunGlow.material.opacity = tg * tg * (3 - 2 * tg);
+    sys.sunGlow.material.opacity = tg * tg * (3 - 2 * tg) * (sys.glowExt ?? 1);
     for (const p of sys.planets) {
       p.group.position.copy(p.posUniv).sub(camPos);
     }
@@ -334,6 +335,14 @@ export class Universe {
     this.relativizeSystem(this.system, camPos);
     if (this.fadingSystem) this.relativizeSystem(this.fadingSystem, camPos);
     if (this.nearStarsMesh) this.nearStarsMesh.position.copy(camPos).negate();
+  }
+
+  // x: 0 in space → 1 with the sun on the horizon seen through atmosphere.
+  // Extinction pulls the HDR disc under the bloom threshold and reddens it —
+  // a horizon sun is an ember, not a flashbulb.
+  setSunExtinction(x) {
+    if (this.system) this.system.setSunExtinction(x);
+    if (this.fadingSystem) this.fadingSystem.setSunExtinction(0);
   }
 
   setStarDimming(f) {
@@ -382,17 +391,21 @@ export class StarSystem {
     const sunMat = new THREE.MeshBasicMaterial({
       color: star.color.clone().multiplyScalar(4), fog: false,
     });
+    this.sunBaseC = sunMat.color.clone();
     this.sunMesh = new THREE.Mesh(new THREE.SphereGeometry(star.radius, 48, 32), sunMat);
     this.sunGroup.add(this.sunMesh);
     this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
       map: universe.glowTexTight, color: star.color.clone().lerp(new THREE.Color(0xffffff), 0.3),
       transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
     }));
+    this.glowBaseC = this.sunGlow.material.color.clone();
+    this.glowExt = 1;
     this.sunGlow.scale.setScalar(star.radius * 7);
     this.sunGroup.add(this.sunGlow);
     this.sunLight = new THREE.PointLight(0xffffff, 3.2, 0, 0);
     this.sunLight.color.copy(star.color.clone().lerp(new THREE.Color(0xffffff), 0.7));
     universe.group.add(this.sunGroup, this.sunLight);
+    this._ext = -1;
 
     // --- planets ---
     this.planets = [];
@@ -468,6 +481,16 @@ export class StarSystem {
     this.planets.push(planet);
     this.universe.group.add(planet.group);
     return !this.built;
+  }
+
+  setSunExtinction(x) {
+    if (Math.abs(x - this._ext) < 0.004) return;   // colors only change on need
+    this._ext = x;
+    this.sunMesh.material.color.copy(this.sunBaseC).multiplyScalar(1 - 0.82 * x)
+      .lerp(_extC.setRGB(1.35, 0.42, 0.12), x * 0.75);
+    this.sunGlow.material.color.copy(this.glowBaseC)
+      .lerp(_extC.setRGB(1.0, 0.45, 0.18), x * 0.8);
+    this.glowExt = 1 - 0.75 * x;
   }
 
   sunDirFrom(pos, out) {
