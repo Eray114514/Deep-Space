@@ -818,51 +818,59 @@ window.NMS = {
     if (bias === 'night') prefer = sunDir.clone().negate();
     else if (bias === 'sunset') { prefer = null; ring = sunDir; }
     const dir = p.scenicDir(prefer, ring);
+    // scenicDir scores the REGION at km scale — it cannot see the cliff wall
+    // 20 m from the spawn. Micro-refine within ~500 m: flat footing plus at
+    // least one open view of sun-LIT faces (sun behind the shoulder), and
+    // remember which yaw that was. At sunset the view is pinned into the sun.
+    // Same frame convention as WalkControls: east = Y×up, north = up×east.
+    const frame = (u, a, b) => {
+      if (Math.abs(u.y) < 0.93) a.set(u.z, 0, -u.x).normalize();
+      else a.set(0, -u.z, u.y).normalize();
+      b.crossVectors(u, a);
+    };
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
+    const cand = new THREE.Vector3(), probe = new THREE.Vector3(), sunH = new THREE.Vector3();
+    const bestSpot = dir.clone();
+    let bestSpotScore = -Infinity, bestYaw = 0;
+    for (let ci = 0; ci < 24; ci++) {
+      const rr = 0.005 * Math.sqrt(ci / 24), ga = ci * 2.399963229728653;
+      frame(dir, e1, e2);
+      cand.copy(dir).addScaledVector(e1, Math.cos(ga) * rr).addScaledVector(e2, Math.sin(ga) * rr).normalize();
+      const h = p.height(cand, 128);
+      if (p.hasLiquid && h - p.seaLevel < 2) continue;
+      frame(cand, e1, e2);
+      sunH.copy(sunDir).addScaledVector(cand, -sunDir.dot(cand));
+      if (sunH.lengthSq() > 1e-4) sunH.normalize(); else sunH.set(0, 0, 0);
+      const st = 10 / p.R;
+      const hx = p.height(probe.copy(cand).addScaledVector(e1, st).normalize(), 128);
+      const hy = p.height(probe.copy(cand).addScaledVector(e2, st).normalize(), 128);
+      let score = -(Math.abs(hx - h) + Math.abs(hy - h)) * 1.2;   // flat footing
+      const pinSun = bias === 'sunset' && sunH.lengthSq() > 0.5;
+      let yawBest = 0, yawScore = -Infinity;
+      for (let k = 0, kn = pinSun ? 1 : 8; k < kn; k++) {
+        const yaw = pinSun ? Math.atan2(sunH.dot(e1), sunH.dot(e2)) : (k / 8) * Math.PI * 2;
+        const fx = Math.cos(yaw), fy = Math.sin(yaw);
+        let s = 0;
+        for (const dd of [120, 350, 900]) {
+          probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
+          s += (h - p.height(probe, 128)) / dd;        // terrain falls away = open
+        }
+        s -= (fx * e2.dot(sunH) + fy * e1.dot(sunH)) * 1.9;   // lit faces ahead
+        if (s > yawScore) { yawScore = s; yawBest = yaw; }
+      }
+      score += yawScore * 8;   // the view matters more than the footing
+      if (score > bestSpotScore) { bestSpotScore = score; bestSpot.copy(cand); bestYaw = yawBest; }
+    }
+    dir.copy(bestSpot);
     parkShipNear(p, dir);
     const ground = p.surfaceRadius(dir);
     _v2.copy(dir).multiplyScalar(ground + 1.7);
     _v3.crossVectors(sunDir, dir).normalize();
     if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
     walkCtl.enter(p, _v2, _v3);
-    // at sunset, the postcard is the sun itself: look straight into it
-    if (yawDeg === 0 && bias === 'sunset') {
-      const up = _v.copy(dir);
-      const e1 = new THREE.Vector3();
-      if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
-      else e1.set(0, -up.z, up.y).normalize();
-      const e2 = new THREE.Vector3().crossVectors(up, e1);
-      const sunH = sunDir.clone().addScaledVector(up, -sunDir.dot(up)).normalize();
-      walkCtl.yaw = Math.atan2(sunH.dot(e1), sunH.dot(e2));
-      walkCtl.pitch = 0.02;
-    } else if (yawDeg === 0) {
-      // face the most open horizon, not whatever wall happens to be there —
-      // and keep the sun behind the shoulder so the vista shows LIT faces,
-      // not its own shadow side
-      const up = _v.copy(dir);
-      // same frame convention as WalkControls: east = Y×up, north = up×east
-      const e1 = new THREE.Vector3();
-      if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
-      else e1.set(0, -up.z, up.y).normalize();
-      const e2 = new THREE.Vector3().crossVectors(up, e1);
-      const sunH = sunDir.clone().addScaledVector(up, -sunDir.dot(up));
-      if (sunH.lengthSq() > 1e-4) sunH.normalize(); else sunH.set(0, 0, 0);
-      const eyeR = _v2.length();
-      let bestYaw = 0, bestScore = -Infinity;
-      const probe = new THREE.Vector3();
-      for (let k = 0; k < 8; k++) {
-        const yaw = (k / 8) * Math.PI * 2;
-        const fx = Math.cos(yaw), fy = Math.sin(yaw);
-        let score = 0;
-        for (const dd of [150, 450, 1100]) {
-          probe.copy(up).multiplyScalar(eyeR)
-            .addScaledVector(e2, fx * dd).addScaledVector(e1, fy * dd)
-            .normalize();
-          score += (eyeR - (p.R + p.height(probe, 64))) / dd;   // openness
-        }
-        score -= (fx * e2.dot(sunH) + fy * e1.dot(sunH)) * 1.6;  // down-sun view
-        if (score > bestScore) { bestScore = score; bestYaw = yaw; }
-      }
+    if (yawDeg === 0) {
       walkCtl.yaw = bestYaw;
+      if (bias === 'sunset') walkCtl.pitch = 0.02;   // keep the low sun in frame
     }
     walkCtl.yaw += yawDeg * Math.PI / 180;
     walkCtl.update(0.001);
