@@ -26,7 +26,7 @@ const browser = await chromium.launch({
 
 const errors = [];
 const landedTypes = new Set();   // across all seeds: walk each type only once
-let dove = false;
+let dove = false, moonShot = false;
 
 for (const seed of SEEDS) {
   const dir = `${OUT}/${seed}`;
@@ -78,8 +78,9 @@ for (const seed of SEEDS) {
       await page.evaluate(`NMS.teleport(${p.i}, 0.5)`);
       await shot(`${tag}-orbit`);
     }
-    if (!landedTypes.has(p.type) && lands < LANDS_PER_SEED) {
-      landedTypes.add(p.type);
+    const landKey = p.type + (p.isMoon ? '-moon' : '');   // a moon is its own setting
+    if (!landedTypes.has(landKey) && lands < LANDS_PER_SEED) {
+      landedTypes.add(landKey);
       lands++;
       await page.evaluate(`NMS.teleport(${p.i}, 0.06, {horizon: true})`);
       await shot(`${tag}-low`);
@@ -125,12 +126,6 @@ for (const seed of SEEDS) {
     // pitch into the lamp pool — the first angle faces open (unlit) horizon
     await page.evaluate('NMS.lookPitch(-32); NMS.lookYaw(20);');
     await shot('83-night-headlamp-b');
-    if (moon) {
-      await page.evaluate(`NMS.land(${moon.i})`);
-      await shot(`84-moon-${moon.type}-surface`);
-      await page.evaluate('NMS.lookYaw(150)');
-      await shot('84-moon-surface-b');
-    }
   } else {
     if (divable && (!dove || divable.liquid === 'toxic')) {
       dove = true;
@@ -140,6 +135,16 @@ for (const seed of SEEDS) {
     const s = reps.find((p) => p.hasLiquid && !p.isMoon) || planets[0];
     await page.evaluate(`NMS.land(${s.i}, 0, 'sunset')`);
     await shot('86-sunset-shore');
+  }
+
+  // a moon surface, whichever seed first has one (they're their own worlds:
+  // tiny radius, sharp horizon, usually airless skies)
+  if (moon && !moonShot) {
+    moonShot = true;
+    await page.evaluate(`NMS.land(${moon.i})`);
+    await shot(`84-moon-${moon.type}-surface`);
+    await page.evaluate('NMS.faceShip()');
+    await shot('84-moon-surface-ship');
   }
 
   await page.close();
