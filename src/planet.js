@@ -778,7 +778,9 @@ export class Planet {
 
   // a pleasant landing spot: dry, gentle ground, daylight if preferDir is
   // given (the sun direction), and ideally a view — relief or a shoreline.
-  scenicDir(preferDir = null) {
+  // ringDir pins the spot to sun-elevation ≈ 4° above the horizon instead —
+  // maximizing dot with a perpendicular is far too sloppy for golden hour.
+  scenicDir(preferDir = null, ringDir = null) {
     const rand = makeRng(this.seed + ':scenic');
     let best = null, bestScore = -1e9;
     const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), s = new THREE.Vector3();
@@ -809,6 +811,7 @@ export class Planet {
       score += (hMax - hMin) * 1.4;
       score -= Math.abs(_dir.y) * this.hAmp * 0.3;                // temperate latitudes
       if (preferDir) score += _dir.dot(preferDir) * this.hAmp * 3.0; // land in daylight
+      if (ringDir) score -= Math.abs(_dir.dot(ringDir) - 0.07) * this.hAmp * 9.0;
       if (score > bestScore) { bestScore = score; best = _dir.clone(); }
     }
     return best || new THREE.Vector3(1, 0, 0);

@@ -814,24 +814,30 @@ window.NMS = {
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
-    let prefer = sunDir;
-    if (bias === 'night') {
-      prefer = sunDir.clone().negate();
-    } else if (bias === 'sunset') {
-      const ref = Math.abs(sunDir.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
-      prefer = new THREE.Vector3().crossVectors(sunDir, ref).normalize();
-    }
-    const dir = p.scenicDir(prefer);
+    let prefer = sunDir, ring = null;
+    if (bias === 'night') prefer = sunDir.clone().negate();
+    else if (bias === 'sunset') { prefer = null; ring = sunDir; }
+    const dir = p.scenicDir(prefer, ring);
     parkShipNear(p, dir);
     const ground = p.surfaceRadius(dir);
     _v2.copy(dir).multiplyScalar(ground + 1.7);
     _v3.crossVectors(sunDir, dir).normalize();
     if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
     walkCtl.enter(p, _v2, _v3);
-    // face the most open horizon, not whatever wall happens to be there —
-    // and keep the sun behind the shoulder so the vista shows LIT faces,
-    // not its own shadow side
-    if (yawDeg === 0) {
+    // at sunset, the postcard is the sun itself: look straight into it
+    if (yawDeg === 0 && bias === 'sunset') {
+      const up = _v.copy(dir);
+      const e1 = new THREE.Vector3();
+      if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
+      else e1.set(0, -up.z, up.y).normalize();
+      const e2 = new THREE.Vector3().crossVectors(up, e1);
+      const sunH = sunDir.clone().addScaledVector(up, -sunDir.dot(up)).normalize();
+      walkCtl.yaw = Math.atan2(sunH.dot(e1), sunH.dot(e2));
+      walkCtl.pitch = 0.02;
+    } else if (yawDeg === 0) {
+      // face the most open horizon, not whatever wall happens to be there —
+      // and keep the sun behind the shoulder so the vista shows LIT faces,
+      // not its own shadow side
       const up = _v.copy(dir);
       // same frame convention as WalkControls: east = Y×up, north = up×east
       const e1 = new THREE.Vector3();
