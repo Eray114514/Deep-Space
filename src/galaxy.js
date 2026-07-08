@@ -33,6 +33,7 @@ const STAR_CLASSES = [
 ];
 
 const _v = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
@@ -335,6 +336,21 @@ export class Universe {
     this.relativizeSystem(this.system, camPos);
     if (this.fadingSystem) this.relativizeSystem(this.fadingSystem, camPos);
     if (this.nearStarsMesh) this.nearStarsMesh.position.copy(camPos).negate();
+    // nebula/band opacity = star dimming × (for the band PLANES) an edge-on
+    // fade — an additive plane viewed edge-on concentrates into a hard
+    // bright line slicing the sky
+    const dim = 1 - (this._starDim || 0);
+    for (const n of this.nebulas.children) {
+      if (n.userData.baseOp === undefined) n.userData.baseOp = n.material.opacity;
+      let k = 1;
+      if (n.isMesh) {
+        _v.copy(n.position).sub(camPos).normalize();
+        _v2.set(0, 0, 1).applyQuaternion(n.quaternion);
+        const face = Math.abs(_v.dot(_v2));
+        k = face * face;
+      }
+      n.material.opacity = n.userData.baseOp * k * dim;
+    }
   }
 
   // x: 0 in space → 1 with the sun on the horizon seen through atmosphere.
@@ -347,12 +363,9 @@ export class Universe {
 
   setStarDimming(f) {
     // f: 0 in deep space -> 1 inside a bright daytime atmosphere
+    // (nebula/band opacity is applied per-frame in updateRelative)
     if (this.starMaterial) this.starMaterial.uniforms.uDim.value = f;
-    for (const n of this.nebulas.children) {
-      n.material.opacity = n.userData.baseOp === undefined
-        ? (n.userData.baseOp = n.material.opacity)
-        : n.userData.baseOp * (1 - f);
-    }
+    this._starDim = f;
   }
 
   dispose() {
