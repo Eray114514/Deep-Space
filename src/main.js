@@ -147,6 +147,7 @@ const _velActual = new THREE.Vector3();
 // ---- temps ------------------------------------------------------------------
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _ex4 = new THREE.Vector4();
 const _v3 = new THREE.Vector3();
 const _up = new THREE.Vector3();
 const _m = new THREE.Matrix4();
@@ -908,6 +909,10 @@ window.NMS = {
       const hx = p.height(probe.copy(cand).addScaledVector(e1, st).normalize(), 128);
       const hy = p.height(probe.copy(cand).addScaledVector(e2, st).normalize(), 128);
       let score = -(Math.abs(hx - h) + Math.abs(hy - h)) * 1.2;   // flat footing
+      // don't spawn INSIDE a grove — trees are invisible to height probes;
+      // clearing edges score naturally (view keeps the trees, feet stay free)
+      p.extrasAt(cand, h, 128, _ex4);
+      score -= _ex4.x * 14;
       const pinSun = bias === 'sunset' && sunH.lengthSq() > 0.5;
       let yawBest = 0, yawScore = -Infinity;
       for (let k = 0, kn = pinSun ? 1 : 8; k < kn; k++) {
