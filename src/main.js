@@ -912,7 +912,8 @@ window.NMS = {
         const yaw = pinSun ? Math.atan2(sunH.dot(e1), sunH.dot(e2)) : (k / 8) * Math.PI * 2;
         const fx = Math.cos(yaw), fy = Math.sin(yaw);
         let s = 0;
-        for (const dd of [120, 350, 900]) {
+        // toward a horizon sun, probe FAR too — a 2 km ridge eats the sunset
+        for (const dd of (pinSun ? [120, 350, 900, 2600, 6000] : [120, 350, 900])) {
           probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
           s += (h - p.height(probe, 128)) / dd;        // terrain falls away = open
         }

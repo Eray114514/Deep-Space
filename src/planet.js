@@ -811,7 +811,7 @@ export class Planet {
       score += (hMax - hMin) * 1.4;
       score -= Math.abs(_dir.y) * this.hAmp * 0.3;                // temperate latitudes
       if (preferDir) score += _dir.dot(preferDir) * this.hAmp * 3.0; // land in daylight
-      if (ringDir) score -= Math.abs(_dir.dot(ringDir) - 0.07) * this.hAmp * 9.0;
+      if (ringDir) score -= Math.abs(_dir.dot(ringDir) - 0.11) * this.hAmp * 9.0;
       if (score > bestScore) { bestScore = score; best = _dir.clone(); }
     }
     return best || new THREE.Vector3(1, 0, 0);
