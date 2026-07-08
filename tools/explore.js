@@ -11,7 +11,8 @@ import { chromium } from 'playwright';
 
 const SEEDS = (process.env.SEEDS || 'EUCLID,ATLAS-7,VOYAGER-3').split(',');
 const OUT = process.env.OUT || 'screenshots/explore';
-const LANDS_PER_SEED = 3;   // full landings are the slow part under SwiftShader
+const LANDS_PER_SEED = Number(process.env.LANDS || 3);   // full landings are the slow part under SwiftShader
+const SKIP_ORBITS = process.env.SKIP_ORBITS === '1';     // reshoots: orbits rarely change
 
 const { server, port } = await startServer(0);
 const browser = await chromium.launch({
@@ -73,8 +74,10 @@ for (const seed of SEEDS) {
   for (const p of reps) {
     const tag = `${String(n).padStart(2, '0')}-${p.type}${p.isMoon ? '-moon' : ''}`;
     n++;
-    await page.evaluate(`NMS.teleport(${p.i}, 0.5)`);
-    await shot(`${tag}-orbit`);
+    if (!SKIP_ORBITS) {
+      await page.evaluate(`NMS.teleport(${p.i}, 0.5)`);
+      await shot(`${tag}-orbit`);
+    }
     if (!landedTypes.has(p.type) && lands < LANDS_PER_SEED) {
       landedTypes.add(p.type);
       lands++;
