@@ -805,6 +805,53 @@ window.NMS = {
     ui.setTarget(p, nav.pos.distanceTo(p.posUniv));
     return true;
   },
+  // hover low over a sunlit stretch of coastline, facing out to sea —
+  // the water-depth-gradient showcase (a scenic dir is often inland)
+  coast(i, alt = 1400) {
+    const p = universe.system.planets[i];
+    if (!p || !p.hasLiquid) return false;
+    tweens.length = 0;
+    if (walkCtl.active) walkCtl.exit();
+    setState('space');
+    const sunDir = p.sunDirLocal.clone();
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), s = new THREE.Vector3();
+    const cand = new THREE.Vector3(), seaward = new THREE.Vector3();
+    let best = null, bestScore = -Infinity;
+    const rr = 2500 / p.R;
+    const ring = (u, cb) => {          // 8 samples 2.5 km around u
+      if (Math.abs(u.y) < 0.93) e1.set(u.z, 0, -u.x).normalize();
+      else e1.set(0, -u.z, u.y).normalize();
+      e2.crossVectors(u, e1);
+      for (let j = 0; j < 8; j++) {
+        const a = (j / 8) * Math.PI * 2, cx = Math.cos(a), cy = Math.sin(a);
+        s.copy(u).addScaledVector(e1, cx * rr).addScaledVector(e2, cy * rr).normalize();
+        cb(p.height(s, 64) < p.seaLevel, cx, cy);
+      }
+    };
+    for (let k = 0; k < 1400; k++) {
+      const y = 1 - (2 * (k + 0.5)) / 1400;
+      const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+      cand.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+      if (cand.dot(sunDir) < 0.2) continue;                 // day side only
+      let wet = 0;
+      ring(cand, (w) => { if (w) wet++; });
+      const score = -Math.abs(wet - 4) * 1.5 + cand.dot(sunDir);
+      if (score > bestScore) { bestScore = score; best = cand.clone(); }
+    }
+    if (!best || bestScore < -3.5) return false;
+    seaward.set(0, 0, 0);
+    ring(best, (w, cx, cy) => {        // e1/e2 are best's frame after this
+      if (w) seaward.addScaledVector(e1, cx).addScaledVector(e2, cy);
+    });
+    if (seaward.lengthSq() < 0.01) seaward.copy(e1);
+    nav.pos.copy(p.posUniv).addScaledVector(best, p.R + p.seaLevel + alt);
+    nav.vel.set(0, 0, 0);
+    horizonQuat(best, seaward, nav.quat);
+    nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), -0.32));
+    focusPlanet = p; spaceCtl.focus = p;
+    ui.setTarget(p, nav.pos.distanceTo(p.posUniv));
+    return true;
+  },
   // instantly stand on planet i at its scenic spot (no pointer lock).
   // bias picks the lighting: 'sunset' lands on the terminator ring, 'night'
   // on the far side (headlamp comes on), default lands in full daylight.

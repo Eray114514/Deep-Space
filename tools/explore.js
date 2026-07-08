@@ -98,9 +98,10 @@ for (const seed of SEEDS) {
   const divable = planets.find((p) => p.liquid === 'toxic') || wet;
   const moon = planets.find((p) => p.isMoon);
 
-  // the shoreline skim: depth-graded shallows seen from the air (any seed with water)
+  // the shoreline skim: depth-graded shallows seen from the air (any seed
+  // with water) — coast() hunts an actual sunlit coastline, facing seaward
   if (wet) {
-    await page.evaluate(`NMS.teleport(${wet.i}, 0.015, {horizon: true, pitch: -0.35})`);
+    await page.evaluate(`NMS.coast(${wet.i})`);
     await shot('80-shoreline-skim');
   }
 
