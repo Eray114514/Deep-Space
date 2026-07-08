@@ -129,8 +129,11 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uStripeK = { value: U.stripeK };
     shader.uniforms.uExtraC = { value: U.extraC };
     shader.uniforms.uExtraMode = { value: U.extraMode };
+    // mist pools over WATER worlds; magma seas get a whisper of heat haze,
+    // not lake fog (basins on lava planets drowned in red soup otherwise)
+    const mistBase = planet.liquid === 'lava' ? 0.05 : (planet.hasLiquid ? 0.26 : 0.1);
     shader.uniforms.uMistK = {
-      value: (planet.hasLiquid ? 0.26 : 0.1) * Math.min(planet.atmoDensity || 0.4, 1),
+      value: mistBase * Math.min(planet.atmoDensity || 0.4, 1),
     };
     shader.uniforms.uMistH = { value: planet.hAmp * 0.12 };
     shader.uniforms.uMistColor = { value: planet.skyColor.clone().convertSRGBToLinear() };
