@@ -322,7 +322,8 @@ function parkShipNear(planet, landDir) {
       const ha = planet.height(s.copy(cand).addScaledVector(e1, st).normalize(), planet.fullMaxFreq);
       const hb = planet.height(s.copy(cand).addScaledVector(e2, st).normalize(), planet.fullMaxFreq);
       const slope = (Math.abs(ha - h) + Math.abs(hb - h)) / 6;
-      const score = slope * 30 + rad * 0.012;      // flat beats near
+      const score = slope * 30 + rad * 0.03;       // flat beats near — but a
+      // gentle 4° pad 22 m away beats a runway 170 m out (ship stays IN frame)
       if (score < bestScore) {
         bestScore = score; best = cand.clone();
         bestH = Math.max(h, ha, hb);               // clear the whole footprint
