@@ -882,14 +882,15 @@ window.NMS = {
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
-    const want = Math.max(8, Math.min(p.hAmp * 0.25, 15));
+    const want = Math.max(12, Math.min(p.hAmp * 0.25, 18));
     let best = null, bestScore = -Infinity;
     for (let k = 0; k < 900; k++) {           // golden-spiral sphere sweep
       const y = 1 - (2 * (k + 0.5)) / 900;
       const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
       _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
-      const depth = p.seaLevel - p.height(_v, 64);
-      if (depth < 6) continue;
+      // fine-ish band: the coarse field can sit metres below the real seabed
+      const depth = p.seaLevel - p.height(_v, 128);
+      if (depth < 10) continue;
       const score = -Math.abs(depth - want) + _v.dot(sunDir) * 25;
       if (score > bestScore) { bestScore = score; best = _v.clone(); }
     }
