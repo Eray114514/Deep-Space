@@ -958,8 +958,9 @@ window.NMS = {
       const y = 1 - (2 * (k + 0.5)) / 900;
       const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
       _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
-      // fine-ish band: the coarse field can sit metres below the real seabed
-      const depth = p.seaLevel - p.height(_v, 128);
+      // FULL band: octaves past 128 move terrain by ±tens of metres, which
+      // is the entire dive depth — coarse sampling kept surfacing us
+      const depth = p.seaLevel - p.height(_v, p.fullMaxFreq);
       if (depth < 10) continue;
       const score = -Math.abs(depth - want) + _v.dot(sunDir) * 25;
       if (score > bestScore) { bestScore = score; best = _v.clone(); }
