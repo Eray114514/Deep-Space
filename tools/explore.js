@@ -122,7 +122,8 @@ for (const seed of SEEDS) {
     const s = planets.find((p) => !p.isMoon) || planets[0];
     await page.evaluate(`NMS.land(${s.i}, 0, 'night')`);
     await shot('83-night-headlamp');
-    await page.evaluate('NMS.lookYaw(140)');
+    // pitch into the lamp pool — the first angle faces open (unlit) horizon
+    await page.evaluate('NMS.lookPitch(-32); NMS.lookYaw(20);');
     await shot('83-night-headlamp-b');
     if (moon) {
       await page.evaluate(`NMS.land(${moon.i})`);
