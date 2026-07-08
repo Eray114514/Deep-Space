@@ -35,16 +35,21 @@ for (const seed of SEEDS) {
   page.on('console', (m) => { if (m.type() === 'error') console.error('CONSOLE:', m.text().slice(0, 300)); });
 
   console.log(`\n=== ${seed} → http://127.0.0.1:${port} ===`);
-  await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(seed)}&nolock=1&buildms=45`);
+  // headless doesn't care about frame pacing: let terrain builds eat most of
+  // every frame so big systems actually settle inside the shot timeout
+  await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(seed)}&nolock=1&buildms=120`);
   await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 
-  async function shot(name, timeout = 150000) {
+  async function shot(name, timeout = 240000) {
     try {
       await page.waitForFunction('window.NMS.idle()', null, { timeout });
     } catch {
-      console.warn(`${name}: settle timeout (continuing)`);
+      const st = await page.evaluate('window.NMS.stats()');
+      console.warn(`${name}: settle timeout (continuing, ${st.pending} queued)`);
     }
-    await page.waitForTimeout(350);
+    // on foot, give the scatter props a beat to finish their grow-in
+    const walking = await page.evaluate('window.NMS.state');
+    await page.waitForTimeout(walking === 'walk' ? 1300 : 350);
     await page.screenshot({ path: `${dir}/${name}.png` });
     const stats = await page.evaluate('window.NMS.stats()');
     console.log(`✓ ${seed}/${name}  [${stats.calls} draws, ${(stats.tris / 1e6).toFixed(2)}Mtri, alt=${Math.round(stats.alt)}]`);
