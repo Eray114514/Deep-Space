@@ -82,8 +82,10 @@ for (const seed of SEEDS) {
       await shot(`${tag}-low`);
       await page.evaluate(`NMS.land(${p.i})`);
       await shot(`${tag}-surface`);
-      await page.evaluate('NMS.lookYaw(135)');
-      await shot(`${tag}-surface-b`);
+      // second angle: the parked ship — always something in frame, and it
+      // shows the landing pad in every biome
+      await page.evaluate('NMS.faceShip()');
+      await shot(`${tag}-surface-ship`);
     }
   }
 

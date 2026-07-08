@@ -320,6 +320,12 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
       : new THREE.Color(0.4, 0.75, 0.8);
     shader.uniforms.uDeepC = { value: deep };
     shader.uniforms.uShallowC = { value: shallow };
+    // grazing angles mirror the sky instead of showing the deep diffuse —
+    // without this, water toward the horizon reads as a near-black sheet
+    const sky = planet && planet.skyColor
+      ? planet.skyColor.clone().convertSRGBToLinear().multiplyScalar(0.6)
+      : new THREE.Color(0.25, 0.4, 0.55);
+    shader.uniforms.uSkyC = { value: sky };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec3 aLocal;
@@ -336,6 +342,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform float uWaveS;
         uniform vec3 uDeepC;
         uniform vec3 uShallowC;
+        uniform vec3 uSkyC;
         varying vec3 vLocalPos;
         varying float vDepth;`)
       .replace('#include <color_fragment>', `#include <color_fragment>
@@ -345,6 +352,11 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           diffuseColor.rgb = mix(uShallowC, uDeepC, ab);
           // shorelines fade in instead of cutting a hard waterline
           diffuseColor.a *= mix(0.22, 1.0, 1.0 - exp(-dep * 0.12));
+          // Fresnel: at grazing angles the surface turns into a sky mirror
+          // (abs() so the DoubleSide underside behaves when submerged)
+          float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition))), 5.0);
+          diffuseColor.rgb = mix(diffuseColor.rgb, uSkyC, fres * 0.65);
+          diffuseColor.a = mix(diffuseColor.a, min(1.0, diffuseColor.a * 2.2 + 0.25), fres);
         }`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {

@@ -828,7 +828,9 @@ window.NMS = {
     _v3.crossVectors(sunDir, dir).normalize();
     if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
     walkCtl.enter(p, _v2, _v3);
-    // face the most open horizon, not whatever wall happens to be there
+    // face the most open horizon, not whatever wall happens to be there —
+    // and keep the sun behind the shoulder so the vista shows LIT faces,
+    // not its own shadow side
     if (yawDeg === 0) {
       const up = _v.copy(dir);
       // same frame convention as WalkControls: east = Y×up, north = up×east
@@ -836,6 +838,8 @@ window.NMS = {
       if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
       else e1.set(0, -up.z, up.y).normalize();
       const e2 = new THREE.Vector3().crossVectors(up, e1);
+      const sunH = sunDir.clone().addScaledVector(up, -sunDir.dot(up));
+      if (sunH.lengthSq() > 1e-4) sunH.normalize(); else sunH.set(0, 0, 0);
       const eyeR = _v2.length();
       let bestYaw = 0, bestScore = -Infinity;
       const probe = new THREE.Vector3();
@@ -849,6 +853,7 @@ window.NMS = {
             .normalize();
           score += (eyeR - (p.R + p.height(probe, 64))) / dd;   // openness
         }
+        score -= (fx * e2.dot(sunH) + fy * e1.dot(sunH)) * 1.6;  // down-sun view
         if (score > bestScore) { bestScore = score; bestYaw = yaw; }
       }
       walkCtl.yaw = bestYaw;
