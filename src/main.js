@@ -318,7 +318,10 @@ function parkShipNear(planet, landDir) {
     const score = Math.abs(h - h0);
     if (score < bestScore) { bestScore = score; best = cand.clone(); bestH = h; }
   }
-  if (!best) { best = landDir.clone(); bestH = h0; }
+  if (!best) {   // everything around is wet (e.g. a dive) — park 22 m out anyway
+    cand.copy(up).addScaledVector(e1, 22 / planet.R).normalize();
+    best = cand.clone(); bestH = planet.height(cand, planet.fullMaxFreq);
+  }
   const padUniv = planet.posUniv.clone().addScaledVector(best, planet.R + bestH + 1.3);
   // nose pointed at the player
   _v2.copy(landDir).sub(best).normalize();
@@ -802,14 +805,23 @@ window.NMS = {
     ui.setTarget(p, nav.pos.distanceTo(p.posUniv));
     return true;
   },
-  // instantly stand on planet i at its scenic spot (no pointer lock)
-  land(i, yawDeg = 0) {
+  // instantly stand on planet i at its scenic spot (no pointer lock).
+  // bias picks the lighting: 'sunset' lands on the terminator ring, 'night'
+  // on the far side (headlamp comes on), default lands in full daylight.
+  land(i, yawDeg = 0, bias = null) {
     const p = universe.system.planets[i];
     if (!p) return false;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
-    const dir = p.scenicDir(sunDir);
+    let prefer = sunDir;
+    if (bias === 'night') {
+      prefer = sunDir.clone().negate();
+    } else if (bias === 'sunset') {
+      const ref = Math.abs(sunDir.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+      prefer = new THREE.Vector3().crossVectors(sunDir, ref).normalize();
+    }
+    const dir = p.scenicDir(prefer);
     parkShipNear(p, dir);
     const ground = p.surfaceRadius(dir);
     _v2.copy(dir).multiplyScalar(ground + 1.7);
@@ -847,6 +859,41 @@ window.NMS = {
     nav.quat.copy(walkCtl.quat);
     focusPlanet = p;
     spaceCtl.focus = p;
+    ui.setTarget(p, 0);
+    setState('walk');
+    return true;
+  },
+  // stand on the seabed of planet i, eyes underwater (water-depth checks).
+  // Picks a sunlit spot ~15 m down so light still reads through the surface.
+  dive(i) {
+    const p = universe.system.planets[i];
+    if (!p || !p.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) return false;
+    window.NMS_NOLOCK = true;
+    tweens.length = 0;
+    const sunDir = p.sunDirLocal.clone();
+    const want = Math.max(8, Math.min(p.hAmp * 0.25, 15));
+    let best = null, bestScore = -Infinity;
+    for (let k = 0; k < 900; k++) {           // golden-spiral sphere sweep
+      const y = 1 - (2 * (k + 0.5)) / 900;
+      const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+      _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+      const depth = p.seaLevel - p.height(_v, 64);
+      if (depth < 6) continue;
+      const score = -Math.abs(depth - want) + _v.dot(sunDir) * 25;
+      if (score > bestScore) { bestScore = score; best = _v.clone(); }
+    }
+    if (!best) return false;
+    parkShipNear(p, best);
+    const ground = p.surfaceRadius(best);
+    _v2.copy(best).multiplyScalar(ground + 1.7);
+    _v3.crossVectors(sunDir, best).normalize();
+    if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
+    walkCtl.enter(p, _v2, _v3);
+    walkCtl.pitch = 0.3;                      // tilt up toward the surface glow
+    walkCtl.update(0.001);
+    nav.pos.copy(p.posUniv).add(walkCtl.posLocal);
+    nav.quat.copy(walkCtl.quat);
+    focusPlanet = p; spaceCtl.focus = p;
     ui.setTarget(p, 0);
     setState('walk');
     return true;

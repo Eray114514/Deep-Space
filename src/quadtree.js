@@ -285,6 +285,8 @@ export class ChunkedLOD {
     // low-frequency tint masks (forest/blotch/stripe/extra) — the actual
     // palette is evaluated per-pixel in the fragment shader
     const aExtra = p.extrasAt ? new Float32Array(total * 4) : null;
+    // water depth beneath each sea-surface vertex (Beer–Lambert absorption)
+    const aDepth = p.bakeDepth ? new Float32Array(total) : null;
     const dPos = hasMorph ? new Float32Array(total * 3) : null;
     const dNrm = hasMorph ? new Float32Array(total * 3) : null;
 
@@ -310,6 +312,7 @@ export class ChunkedLOD {
           aExtra[idx * 4] = _ex.x; aExtra[idx * 4 + 1] = _ex.y;
           aExtra[idx * 4 + 2] = _ex.z; aExtra[idx * 4 + 3] = _ex.w;
         }
+        if (aDepth) aDepth[idx] = p.bakeDepth(_dirV);
         if (aMat) {
           const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
           aMat[idx * 3] = Math.min(1, Math.max(0, sl));
@@ -429,6 +432,7 @@ export class ChunkedLOD {
     geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
     if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 3));
     if (aExtra) geo.setAttribute('aExtra', new THREE.BufferAttribute(aExtra, 4));
+    if (aDepth) geo.setAttribute('aDepth', new THREE.BufferAttribute(aDepth, 1));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
       geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];

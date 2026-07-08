@@ -584,7 +584,7 @@ export class Planet {
         });
       }
       this.liquidMat = mat;
-      if (this.liquid === 'water' || this.liquid === 'toxic') applyWaterWaves(mat);
+      if (this.liquid === 'water' || this.liquid === 'toxic') applyWaterWaves(mat, this);
       // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
       // mesh would sag metres between vertices at 100 km radius
       this.waterLod = new ChunkedLOD({
@@ -594,6 +594,11 @@ export class Planet {
         freqAtLevel: this.freqAtLevel,
         height: () => 0,
         colorAt: (dir, h, slope, f, out) => out.setRGB(1, 1, 1),
+        // water knows how deep the terrain lies beneath every vertex —
+        // the shader turns that into Beer–Lambert absorption
+        bakeDepth: (this.liquid === 'water' || this.liquid === 'toxic')
+          ? (dir) => Math.max(0, this.seaLevel - this.height(dir, 128))
+          : null,
         group: this.group,
         terrainMaterial: mat,
       });

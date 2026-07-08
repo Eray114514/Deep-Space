@@ -302,26 +302,50 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
   material.customProgramCacheKey = () => 'terrain-palette-v3';
 }
 
-// Living water: two scrolling noise scales perturb the shading normal.
-export function applyWaterWaves(material, waveScale = 1 / 14) {
+// Living water: scrolling normal perturbation, plus Beer–Lambert depth
+// absorption — the terrain depth beneath each vertex is baked at build, so
+// deeps go dark, shallows glow, and shorelines fade in softly.
+export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   const tex = detailTexture();
   if (!tex) return;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDetailTex = { value: tex };
     shader.uniforms.uTime = TIME;
     shader.uniforms.uWaveS = { value: waveScale };
+    const deep = planet && planet.pal && planet.pal.sea
+      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor.clone().convertSRGBToLinear(), 0.4)
+      : new THREE.Color(0.02, 0.08, 0.15);
+    const shallow = planet
+      ? planet.liquidColor.clone().convertSRGBToLinear().lerp(new THREE.Color(1, 1, 1), 0.3)
+      : new THREE.Color(0.4, 0.75, 0.8);
+    shader.uniforms.uDeepC = { value: deep };
+    shader.uniforms.uShallowC = { value: shallow };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec3 aLocal;
-        varying vec3 vLocalPos;`)
+        attribute float aDepth;
+        varying vec3 vLocalPos;
+        varying float vDepth;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        vLocalPos = aLocal;`);
+        vLocalPos = aLocal;
+        vDepth = aDepth;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
         uniform float uTime;
         uniform float uWaveS;
-        varying vec3 vLocalPos;`)
+        uniform vec3 uDeepC;
+        uniform vec3 uShallowC;
+        varying vec3 vLocalPos;
+        varying float vDepth;`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        {
+          float dep = max(vDepth, 0.0);
+          float ab = 1.0 - exp(-dep * 0.05);          // absorption e-fold ~20 m
+          diffuseColor.rgb = mix(uShallowC, uDeepC, ab);
+          // shorelines fade in instead of cutting a hard waterline
+          diffuseColor.a *= mix(0.22, 1.0, 1.0 - exp(-dep * 0.12));
+        }`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
           vec2 uv1 = vLocalPos.xy * uWaveS + vec2(uTime * 0.021, uTime * -0.013);
@@ -331,7 +355,7 @@ export function applyWaterWaves(material, waveScale = 1 / 14) {
           normal = normalize(normal + vec3(g.x, g.y, 0.0) * 0.55);
         }`);
   };
-  material.customProgramCacheKey = () => 'water-waves';
+  material.customProgramCacheKey = () => 'water-depth-waves';
 }
 
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
