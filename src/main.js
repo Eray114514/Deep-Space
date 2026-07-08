@@ -594,7 +594,9 @@ function ambience() {
   // a horizon sun seen through air dims and reddens — otherwise sunsets are
   // a white bloom explosion swallowing a third of the sky
   universe.setSunExtinction(nearest ? envSunset : 0);
-  headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 6 : 0;
+  // candela-scale: with physical decay, ~2 units of intensity is invisible —
+  // a real lamp needs tens of candela to paint a pool on the ground
+  headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 80 : 0;
   ambient.intensity = 0.09 + inAtmo * 0.24;   // fill so cast shadows aren't pitch black
   envInAtmo = inAtmo;
   envDay = day;
