@@ -991,7 +991,10 @@ window.NMS = {
     else e1.set(0, -_up.z, _up.y).normalize();
     const e2 = new THREE.Vector3().crossVectors(_up, e1);
     walkCtl.yaw = Math.atan2(_v.dot(e1), _v.dot(e2));
-    walkCtl.pitch = -0.04;
+    // pitch to where the ship actually IS — flat pads can sit well below
+    // a scenic cliff-perch spawn (slightly above so it rides the lower third)
+    const dh = Math.hypot(_v.dot(e1), _v.dot(e2));
+    walkCtl.pitch = clamp(Math.atan2(_v.dot(_up), Math.max(dh, 1)) + 0.05, -0.9, 0.35);
     walkCtl.update(0.001);
     return true;
   },
