@@ -304,19 +304,30 @@ function parkShipNear(planet, landDir) {
   if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
   else e1.set(0, -up.z, up.y).normalize();
   const e2 = new THREE.Vector3().crossVectors(up, e1);
-  const h0 = planet.height(landDir, planet.fullMaxFreq);
-  const cand = new THREE.Vector3();
+  const cand = new THREE.Vector3(), s = new THREE.Vector3();
+  // scenic landings favour cliff perches — hunt outward until the ground is
+  // genuinely FLAT, or the ship sits level on a slope with its nose in the air
   let best = null, bestH = 0, bestScore = Infinity;
-  for (let k = 0; k < 8; k++) {
-    const a = (k / 8) * Math.PI * 2;
-    cand.copy(up)
-      .addScaledVector(e1, Math.cos(a) * 22 / planet.R)
-      .addScaledVector(e2, Math.sin(a) * 22 / planet.R)
-      .normalize();
-    const h = planet.height(cand, planet.fullMaxFreq);
-    if (planet.hasLiquid && h < planet.seaLevel + 1) continue;
-    const score = Math.abs(h - h0);
-    if (score < bestScore) { bestScore = score; best = cand.clone(); bestH = h; }
+  for (const rad of [22, 48, 95, 170]) {
+    for (let k = 0; k < 10; k++) {
+      const a = (k / 10) * Math.PI * 2;
+      cand.copy(up)
+        .addScaledVector(e1, Math.cos(a) * rad / planet.R)
+        .addScaledVector(e2, Math.sin(a) * rad / planet.R)
+        .normalize();
+      const h = planet.height(cand, planet.fullMaxFreq);
+      if (planet.hasLiquid && h < planet.seaLevel + 1) continue;
+      const st = 6 / planet.R;   // slope over the ship's own footprint
+      const ha = planet.height(s.copy(cand).addScaledVector(e1, st).normalize(), planet.fullMaxFreq);
+      const hb = planet.height(s.copy(cand).addScaledVector(e2, st).normalize(), planet.fullMaxFreq);
+      const slope = (Math.abs(ha - h) + Math.abs(hb - h)) / 6;
+      const score = slope * 30 + rad * 0.012;      // flat beats near
+      if (score < bestScore) {
+        bestScore = score; best = cand.clone();
+        bestH = Math.max(h, ha, hb);               // clear the whole footprint
+      }
+    }
+    if (best && bestScore < 1.4) break;            // flat enough, stop early
   }
   if (!best) {   // everything around is wet (e.g. a dive) — park 22 m out anyway
     cand.copy(up).addScaledVector(e1, 22 / planet.R).normalize();
