@@ -122,12 +122,13 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
       varying vec3 vDir;
 
       // the SAME coverage fbm the impostor deck, terrain shadows and the CPU
-      // transit fog use — one sky, everywhere
+      // transit fog use — one sky, everywhere. Explicit LOD: implicit
+      // derivatives are UNDEFINED in the divergent march loop and flicker.
       float cloudFbm(vec3 d) {
-        float f = texture2D(uCloudNoise, d.xy * 0.55 + uCOff.xy).g * 0.5;
-        f += texture2D(uCloudNoise, d.yz * 1.15 + uCOff.yz).r * 0.25;
-        f += texture2D(uCloudNoise, d.zx * 2.35 + uCOff.zx).g * 0.125;
-        f += texture2D(uCloudNoise, d.xy * 4.8 - uCOff.xz).r * 0.0625;
+        float f = textureLod(uCloudNoise, d.xy * 0.55 + uCOff.xy, 0.0).g * 0.5;
+        f += textureLod(uCloudNoise, d.yz * 1.15 + uCOff.yz, 0.0).r * 0.25;
+        f += textureLod(uCloudNoise, d.zx * 2.35 + uCOff.zx, 0.0).g * 0.125;
+        f += textureLod(uCloudNoise, d.xy * 4.8 - uCOff.xz, 0.0).r * 0.0625;
         return f / 0.9375;
       }
 
@@ -149,9 +150,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
         // puffy bottoms, wispy tops; thicker coverage climbs higher
         float prof = smoothstep(0.0, 0.16, h) * (1.0 - smoothstep(0.45 + 0.4 * cov, 1.0, h));
         vec3 q = uSpin * local * ${(1 / 5200).toFixed(9)};
-        vec2 n = texture(uNoise3, q).rg;
+        vec2 n = textureLod(uNoise3, q, 0.0).rg;
         float d = clamp(cov * prof - (1.0 - n.r) * 0.42, 0.0, 1.0);
-        float ero = texture(uNoise3, q * 3.7).g;
+        float ero = textureLod(uNoise3, q * 3.7, 0.0).g;
         d = clamp(d - ero * 0.3 * (1.0 - d), 0.0, 1.0);
         return d;
       }
