@@ -15,6 +15,7 @@ import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
+import { GTAOPass } from '../vendor/jsm/postprocessing/GTAOPass.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord, systemName } from './names.js';
@@ -89,6 +90,19 @@ const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, 
   samples: IS_TOUCH ? 2 : 4, type: THREE.HalfFloatType,
 }));
 composer.addPass(new RenderPass(scene, camera));
+// EXPERIMENTAL ?gtao=1: ground-truth ambient occlusion for contact shadows
+// on cliffs and props. Off by default: the logarithmic depth buffer skews
+// its view-space reconstruction at distance — evaluate before trusting.
+if (qs.get('gtao') === '1' && !QUALITY_LOW) {
+  const gtaoPass = new GTAOPass(scene, camera, 1, 1);
+  gtaoPass.output = GTAOPass.OUTPUT.Default;
+  gtaoPass.updateGtaoMaterial({
+    radius: 3.0, distanceExponent: 1.2, thickness: 1.5,
+    scale: 1.15, samples: 12, distanceFallOff: 1,
+  });
+  gtaoPass.blendIntensity = 0.85;
+  composer.addPass(gtaoPass);
+}
 // threshold above 1.0: only genuinely HDR pixels bloom (sun, lava, engines,
 // specular glints) — daytime sky must NOT veil the terrain
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
