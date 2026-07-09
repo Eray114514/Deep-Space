@@ -726,8 +726,10 @@ export class Planet {
     return t;
   }
 
-  // camLocal: camera position in planet-local coords (f64 Vector3)
-  update(camLocal, dt, focused) {
+  // camLocal: camera position in planet-local coords (f64 Vector3).
+  // animDt drives scenery-in-motion (cloud drift); the seam test freezes it
+  // to zero so static frames are pixel-comparable — LOD morphs keep dt.
+  update(camLocal, dt, focused, animDt = dt) {
     this.lod.update(camLocal, dt);
     if (this.waterLod) this.waterLod.update(camLocal, dt);
     // shells vanish near their own altitude so you fly through, not pop through;
@@ -751,7 +753,7 @@ export class Planet {
       this.applyAppear();
     }
     if (this.cloudMesh) {
-      this.cloudSpin += dt * 0.0045;
+      this.cloudSpin += animDt * 0.0045;
       this.cloudMesh.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
       // keep terrain cloud-shadows tracking the drifting deck
@@ -762,7 +764,7 @@ export class Planet {
       }
     }
     if (this.cloudMesh2) {
-      this.cloudSpin2 += dt * 0.0028;
+      this.cloudSpin2 += animDt * 0.0028;
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
     }

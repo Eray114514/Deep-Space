@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { hash3i, hashFloat } from './rng.js';
-import { applyWindSway } from './shaders.js';
+import { applyWindSway, GROW } from './shaders.js';
 
 // wind strength per prop kind (0 = rigid)
 const SWAY = { grass: 0.055, tree: 0.02, trunkTree: 0.014, blob: 0.02, cactus: 0.008 };
@@ -151,7 +151,7 @@ export class Scatter {
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
       });
-      if (SWAY[kind]) applyWindSway(mat, SWAY[kind]);
+      applyWindSway(mat, SWAY[kind] || 0);   // 0 sway still wires the grow scale
       const im = new THREE.InstancedMesh(GEO[kind], mat, capFor(kind));
       im.count = 0;
       im.frustumCulled = false;
@@ -186,6 +186,10 @@ export class Scatter {
   update(planet, camLocal, alt) {
     if (planet !== this.planet) this.setPlanet(alt < SHOW_BELOW_ALT ? planet : null);
     if (!this.planet) return;
+    // climbing away: props shrink to nothing across a 200 m band instead of
+    // blinking out (all at once!) the moment an altitude line is crossed
+    const g = Math.max(0, Math.min(1, (SHOW_BELOW_ALT - alt) / 200));
+    GROW.value = g * g * (3 - 2 * g);
     if (alt > SHOW_BELOW_ALT) { this.hideAll(); this.lastKey = ''; return; }
 
     const p = this.planet;

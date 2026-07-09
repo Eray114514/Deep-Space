@@ -11,6 +11,20 @@ const SPLIT = 4.0;                     // split when dist < size * SPLIT
 const MERGE = 5.2;                     // merge when dist > size * MERGE
 const MORPH_TIME = 0.7;                // seconds for a LOD transition to relax
 
+// seam instrumentation: every level change that is NOT hidden behind a morph
+// gets counted with its apparent size — the seam test asserts these stay
+// sub-pixel. (A pop nobody can resolve is not a pop.)
+export const lodStats = {
+  instantCollapses: 0, worstCollapsePx: 0,
+  hardSwaps: 0, worstSwapPx: 0,
+};
+export function lodStatsReset() {
+  lodStats.instantCollapses = 0; lodStats.worstCollapsePx = 0;
+  lodStats.hardSwaps = 0; lodStats.worstSwapPx = 0;
+}
+let PX_PER_RAD = 900;                  // set by main from the real projection
+export function setPxPerRad(v) { PX_PER_RAD = v; }
+
 const FACE_FN = [
   (u, v, out) => out.set(1, v, -u),
   (u, v, out) => out.set(-1, v, u),
@@ -148,7 +162,9 @@ export class ChunkedLOD {
 
   advanceMorph(node) {
     if (node.morph === node.morphTo) return;
-    const step = this._dt / MORPH_TIME;
+    // small on screen → faster morph: the transition is equally invisible
+    // but chunks free sooner when departing a planet
+    const step = (this._dt / MORPH_TIME) * (node.pxBoost || 1);
     const m = node.morph < node.morphTo
       ? Math.min(node.morphTo, node.morph + step)
       : Math.max(node.morphTo, node.morph - step);
@@ -157,15 +173,24 @@ export class ChunkedLOD {
 
   process(node) {
     const d = this.nodeDistance(node);
+    const px = (node.size / Math.max(d, 1)) * PX_PER_RAD;   // apparent size
+    node.pxBoost = Math.min(12, Math.max(1, 24 / Math.max(px, 0.01)));
+    const beyond = this.beyondHorizon(node);
     const wantSplit = node.level < this.planet.maxLevel
       && (d < node.size * SPLIT || node.level < this._forceLevel)
-      && !this.beyondHorizon(node);
+      && !beyond;
+    const wantMerge = d > node.size * MERGE || beyond;
 
-    if (wantSplit) {
-      if (!node.children) this.createChildren(node);
+    if (wantSplit && !node.children) this.createChildren(node);
+
+    if (node.children) {
       let ready = true;
       for (const c of node.children) if (!c.mesh) { ready = false; break; }
-      if (ready) {
+
+      // The DISPLAYED level owns the hysteresis: once children are on screen
+      // (splitActive) they stay on screen until a true merge — swapping
+      // levels anywhere inside the SPLIT..MERGE band is an instant pop.
+      if (ready && (wantSplit || (node.splitActive && !wantMerge))) {
         if (node.mergePending) {            // re-approached mid-merge: refine again
           node.mergePending = false;
           for (const c of node.children) c.morphTo = 0;
@@ -179,37 +204,50 @@ export class ChunkedLOD {
         for (const c of node.children) this.process(c);
         return;
       }
-      // children still building: keep this level on screen meanwhile
-    } else if (node.children && d > node.size * MERGE) {
-      // far behind us the morph theatre is sub-pixel: collapse instantly so
-      // departing a planet frees its thousands of chunks at once
-      if (node.mesh && d > node.size * MERGE * 2.5) {
-        this.disposeChildren(node);
-      } else {
-        const leavesOnly = node.children.every((c) => !c.children);
-        if (leavesOnly && node.mesh) {
-          // animate children back into the parent's shape, then swap — no pop
-          if (!node.mergePending) {
-            node.mergePending = true;
-            for (const c of node.children) c.morphTo = 1;
-          }
-          const done = node.children.every((c) => !c.mesh || c.morph >= 0.999);
-          if (done) {
-            this.disposeChildren(node);
-          } else {
-            if (node.mesh) node.mesh.visible = false;
-            for (const c of node.children) {
-              if (c.mesh) c.mesh.visible = true;
-              this.advanceMorph(c);
+
+      if (node.splitActive && wantMerge && node.mesh) {
+        // truly sub-pixel: swap at once — nobody can resolve it, and departing
+        // a planet must free its thousands of chunks quickly
+        if (px < 4) {
+          for (const c of node.children) {
+            if (c.mesh && c.mesh.visible) {
+              lodStats.instantCollapses++;
+              lodStats.worstCollapsePx = Math.max(lodStats.worstCollapsePx, px);
+              break;
             }
+          }
+          this.disposeChildren(node);
+        } else {
+          const leavesOnly = node.children.every((c) => !c.children);
+          if (leavesOnly) {
+            // animate children back into the parent's shape, then swap — no pop
+            if (!node.mergePending) {
+              node.mergePending = true;
+              for (const c of node.children) c.morphTo = 1;
+            }
+            const done = node.children.every((c) => !c.mesh || c.morph >= 0.999);
+            if (done) {
+              this.disposeChildren(node);
+            } else {
+              node.mesh.visible = false;
+              for (const c of node.children) {
+                c.pxBoost = node.pxBoost;
+                if (c.mesh) c.mesh.visible = true;
+                this.advanceMorph(c);
+              }
+              return;
+            }
+          } else {
+            // grandchildren must collapse first; keep recursing
+            node.mesh.visible = false;
+            for (const c of node.children) this.process(c);
             return;
           }
-        } else if (!leavesOnly) {
-          // grandchildren must collapse first; keep recursing
-          if (node.mesh) node.mesh.visible = false;
-          for (const c of node.children) this.process(c);
-          return;
         }
+      } else if (!node.splitActive && node.children && !wantSplit) {
+        // children were built for a split that never displayed (fast flyby):
+        // dropping them changes nothing on screen
+        this.disposeChildren(node);
       }
     }
 
@@ -222,6 +260,15 @@ export class ChunkedLOD {
       this.advanceMorph(node);
     }
     if (node.children) {
+      // any child still visible at this point is an unmorphed level swap —
+      // count it so the seam test can fail loudly
+      for (const c of node.children) {
+        if (c.mesh && c.mesh.visible) {
+          lodStats.hardSwaps++;
+          lodStats.worstSwapPx = Math.max(lodStats.worstSwapPx, px);
+          break;
+        }
+      }
       for (const c of node.children) this.hideSubtree(c);
     }
   }

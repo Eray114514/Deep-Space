@@ -428,17 +428,24 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
 }
 
 // Wind: vegetation bends with a per-instance phase, stronger toward the tip.
+// all scatter props share this scale: 1 on the ground, easing to 0 as the
+// camera climbs out — thousands of props must never blink out in one frame
+export const GROW = { value: 1 };
+
 export function applyWindSway(material, amount) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = TIME;
+    shader.uniforms.uGrow = GROW;
     shader.uniforms.uSway = { value: amount };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
+        uniform float uGrow;
         uniform float uSway;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         #ifdef USE_INSTANCING
         {
+          transformed *= uGrow;
           vec3 ip = instanceMatrix[3].xyz;
           float ph = ip.x * 0.61 + ip.y * 0.53 + ip.z * 0.47;
           float k = uSway * max(transformed.y, 0.0);

@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { Universe } from './galaxy.js';
-import { flushChunkQueue, pendingChunks, setGridCells } from './quadtree.js';
+import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
 import { WarpStreaks, SkyDome, Ship } from './effects.js';
@@ -32,6 +32,9 @@ const qs = new URLSearchParams(location.search);
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
+// ?freeze=1: stop scenery-in-motion (waves, sway, cloud drift) so the seam
+// test can pixel-compare static frames — any residual change is LOD activity
+const FREEZE = qs.get('freeze') === '1';
 // ?quality=low for integrated GPUs: coarser grids, no bloom, lower res
 const QUALITY_LOW = qs.get('quality') === 'low';
 if (QUALITY_LOW) setGridCells(18);
@@ -107,11 +110,13 @@ window.addEventListener('resize', () => {
   updateStarProj();
 });
 
-// star sprites need the projection factor to match suns' true angular size
+// star sprites need the projection factor to match suns' true angular size;
+// the LOD's seam accounting needs the same pixels-per-radian scale
 function updateStarProj() {
+  const pxPerRad = window.innerHeight / (2 * Math.tan(BASE_FOV * Math.PI / 360));
+  setPxPerRad(pxPerRad);
   if (universe.starMaterial) {
-    universe.starMaterial.uniforms.uProj.value =
-      window.innerHeight / (2 * Math.tan(BASE_FOV * Math.PI / 360));
+    universe.starMaterial.uniforms.uProj.value = pxPerRad;
   }
 }
 
@@ -694,7 +699,7 @@ function frame() {
   universe.update(nav.pos, state === 'space' || state === 'flyto');
   for (const p of universe.planets()) {
     _v.copy(nav.pos).sub(p.posUniv);
-    p.update(_v, dt, p === nearest);
+    p.update(_v, dt, p === nearest, FREEZE ? 0 : dt);
   }
   if (nearest) {
     _v.copy(nav.pos).sub(nearest.posUniv);
@@ -763,7 +768,7 @@ function frame() {
     ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued`);
   }
 
-  tickShaders(dt);
+  if (!FREEZE) tickShaders(dt);
   renderer.info.reset();
   if (usePost) composer.render();
   else renderer.render(scene, camera);
@@ -1066,6 +1071,10 @@ window.NMS = {
   isTouch: IS_TOUCH,
   walkSpeed: () => walkCtl.hSpeed.length(),
   warp: () => warpIntensity,
+  // seam accounting: unmorphed LOD level changes with their apparent size
+  lod: () => ({ ...lodStats }),
+  lodReset: () => { lodStatsReset(); return true; },
+  shipVisible(v) { ship.group.visible = v; return true; },
   // internals, for the headless diagnosis harness
   get _internals() { return { universe, scene, renderer, nav, camera }; },
 };
