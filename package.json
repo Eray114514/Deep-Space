@@ -1,6 +1,6 @@
 {
   "name": "no-mans-sky-threejs",
-  "version": "0.16.16",
+  "version": "0.16.17",
   "description": "A fully procedural explorable universe in the browser, inspired by No Man's Sky. Stars, planets with consistent terrain from orbit to on-foot, all generated from a seed.",
   "type": "module",
   "scripts": {

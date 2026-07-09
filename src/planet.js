@@ -784,6 +784,7 @@ export class Planet {
     const rand = makeRng(this.seed + ':scenic');
     let best = null, bestScore = -1e9;
     const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), s = new THREE.Vector3();
+    const sunH = new THREE.Vector3();
     for (let i = 0; i < 200; i++) {
       _dir.set(rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1);
       if (_dir.lengthSq() < 0.05 || _dir.lengthSq() > 1) continue;
@@ -811,7 +812,22 @@ export class Planet {
       score += (hMax - hMin) * 1.4;
       score -= Math.abs(_dir.y) * this.hAmp * 0.3;                // temperate latitudes
       if (preferDir) score += _dir.dot(preferDir) * this.hAmp * 3.0; // land in daylight
-      if (ringDir) score -= Math.abs(_dir.dot(ringDir) - 0.11) * this.hAmp * 9.0;
+      if (ringDir) {
+        score -= Math.abs(_dir.dot(ringDir) - 0.11) * this.hAmp * 9.0;
+        // …and the sun must actually CLEAR the skyline from this REGION —
+        // a fine scan around a blocked spot can't escape a 2 km ridge
+        sunH.copy(ringDir).addScaledVector(_dir, -ringDir.dot(_dir));
+        if (sunH.lengthSq() > 1e-4) {
+          sunH.normalize();
+          let maxEl = -1;
+          for (let dd = 400; dd <= 6000; dd += 700) {
+            s.copy(_dir).addScaledVector(sunH, dd / this.R).normalize();
+            const el = (this.height(s, 64) - h) / dd;
+            if (el > maxEl) maxEl = el;
+          }
+          score -= Math.max(0, maxEl - 0.05) * this.hAmp * 30.0;
+        }
+      }
       if (score > bestScore) { bestScore = score; best = _dir.clone(); }
     }
     return best || new THREE.Vector3(1, 0, 0);
