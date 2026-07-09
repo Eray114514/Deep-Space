@@ -8,7 +8,15 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU } from './shaders.js';
+import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU, detailTexture } from './shaders.js';
+import { makeCloudVolumeMaterial } from './clouds.js';
+
+// volumetric clouds are the default in the browser; ?vclouds=0 and
+// ?quality=low fall back to the flat decks (node/sanity has no location
+// and falls back too — the volume is render-only, never simulation)
+const VCLOUDS = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('vclouds') !== '0'
+  && new URLSearchParams(location.search).get('quality') !== 'low';
 
 export const TYPES = {
   lush:   { label: 'Lush',      weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
@@ -640,18 +648,42 @@ export class Planet {
         cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
         ox: o1[0], oy: o1[1], oz: o1[2],
       });
-      // a second, thinner deck drifting at its own pace gives depth
-      if (coverage > 0.45) {
+      // the second deck's dice roll ALWAYS happens (the rng stream must not
+      // depend on render flags), but with volumetrics on we spend it there
+      const o2 = coverage > 0.45
+        ? [rand() * 7, rand() * 7, rand() * 7, rand() * Math.PI * 2] : null;
+      if (VCLOUDS) {
+        // TRUE volumetric clouds: a raymarched shell around the SAME coverage
+        // field the deck, the terrain shadows and the transit fog use. The
+        // flat deck remains the far-view impostor and crossfades out on
+        // approach as the volume takes over.
+        const thick = Math.max(this.hAmp * 1.1, R * 0.006, 900);
+        const band = {
+          rIn: cloudR - thick * 0.45, rOut: cloudR + thick * 0.55,
+          cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
+          ox: o1[0], oy: o1[1], oz: o1[2],
+          tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
+        };
+        this.volCloudMat = makeCloudVolumeMaterial(this, band, detailTexture(), 3.2e9);
+        this.volCloudMat.uniforms.uAmbC.value
+          .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.6);
+        this.volCloudMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(band.rOut, 48, 32), this.volCloudMat);
+        this.volCloudMesh.renderOrder = 2;
+        this.volCloudMesh.frustumCulled = false;   // BackSide shell straddles the frustum
+        this.volCloudMesh.visible = false;
+        this.group.add(this.volCloudMesh);
+      } else if (o2) {
+        // a second, thinner deck drifting at its own pace gives depth
         const cmat2 = new THREE.MeshLambertMaterial({
           color: 0xffffff, transparent: true, depthWrite: false, opacity: 0.5,
         });
-        const o2 = [rand() * 7, rand() * 7, rand() * 7];
         applyCloudField(cmat2, coverage * 0.6, o2[0], o2[1], o2[2]);
         this.cloudMesh2 = new THREE.Mesh(
           new THREE.SphereGeometry(cloudR + this.hAmp * 0.9, 96, 64), cmat2);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
-        this.cloudSpin2 = rand() * Math.PI * 2;
+        this.cloudSpin2 = o2[3];
         this.cloudBands.push({
           r: cloudR + this.hAmp * 0.9, mesh: this.cloudMesh2, opacity: 0.5,
           cov0: 0.55 - coverage * 0.6 * 0.24, cov1: 0.86 - coverage * 0.6 * 0.14,
@@ -757,10 +789,21 @@ export class Planet {
       this.cloudMesh.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
       // keep terrain cloud-shadows tracking the drifting deck
+      _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
       const sh = this.terrainMaterial.userData.shader;
-      if (sh) {
-        _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
-        sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
+      if (sh) sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
+      if (this.volCloudMesh) {
+        // the volume takes over from the flat impostor as you approach
+        const camR = camLocal.length();
+        const e = smoothstep(6, 3.5, camR / this.R);
+        const u = this.volCloudMat.uniforms;
+        u.uEngage.value = e;
+        u.uCenter.value.copy(camLocal).negate();
+        u.uSpin.value.setFromMatrix4(_m4);          // same drift as the shadows
+        if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
+        this.volCloudMesh.visible = e > 0.01;
+        this.cloudMesh.material.opacity = 0.92 * (1 - e);
+        this.cloudMesh.visible = e < 0.995;
       }
     }
     if (this.cloudMesh2) {
