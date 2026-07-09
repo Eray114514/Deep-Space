@@ -64,9 +64,10 @@ function check(cond, msg) {
   if (!cond) failed++;
 }
 
-// post=0: this suite verifies gestures; visuals are the desktop suite's job,
-// and SwiftShader can't afford bloom on a phone viewport
-await page.goto(`http://127.0.0.1:${port}/?seed=EUCLID&buildms=25&post=0`);
+// post=0 & vclouds=0: this suite verifies gestures; visuals are the desktop
+// suite's job, and SwiftShader can't afford bloom or the volumetric raymarch
+// on a phone viewport (heavy frames coarsen the synthesized joystick drags)
+await page.goto(`http://127.0.0.1:${port}/?seed=EUCLID&buildms=25&post=0&vclouds=0`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 const W = phone.viewport.width, H = phone.viewport.height;
 const CX = W / 2, CY = H / 2;
