@@ -125,7 +125,7 @@ function floraEmissive(mat) {
   mat.customProgramCacheKey = () => (key ? key.call(mat) : '') + '-flora';
 }
 // self-light per flora kind (keeps vegetation readable in shadow; pods glow)
-const FLORA_GLOW = { tree0: 0.16, tree1: 0.16, shrub: 0.14, pod: 0.55, grass: 0.05 };
+const FLORA_GLOW = { tree0: 0.16, tree1: 0.16, shrub: 0.14, pod: 0.55, grass: 0.09 };
 
 export class Scatter {
   constructor() {
@@ -322,8 +322,8 @@ export class Scatter {
         // tufts wear the colour of the ground they grow from (slightly
         // brightened) — dry tan land grows dry tan grass, not green
         p.colorAt(_jd, hh, 0.08, 64, _ic);
-        _ic.multiplyScalar(1.35).offsetHSL(
-          (hashFloat(hc, 0) - 0.5) * 0.04, 0.03, (hashFloat(hc, 1) - 0.5) * 0.1);
+        _ic.multiplyScalar(1.5).offsetHSL(
+          (hashFloat(hc, 0) - 0.5) * 0.04, 0.05, 0.02 + (hashFloat(hc, 1) - 0.5) * 0.1);
       } else {
         // no two plants quite the same colour
         _ic.setRGB(1, 1, 1).offsetHSL(
