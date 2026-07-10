@@ -891,13 +891,15 @@ window.NMS = {
   },
   // instantly stand on planet i at its scenic spot (no pointer lock).
   // bias picks the lighting: 'sunset' lands on the terminator ring, 'night'
-  // on the far side (headlamp comes on), default lands in full daylight.
+  // on the far side (headlamp comes on), 'meadow' seeks flat vegetated
+  // ground facing the tree line, default lands in full daylight.
   land(i, yawDeg = 0, bias = null) {
     const p = universe.system.planets[i];
     if (!p) return false;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
+    const meadow = bias === 'meadow';
     let prefer = sunDir, ring = null;
     if (bias === 'night') prefer = sunDir.clone().negate();
     else if (bias === 'sunset') { prefer = null; ring = sunDir; }
@@ -916,8 +918,11 @@ window.NMS = {
     const cand = new THREE.Vector3(), probe = new THREE.Vector3(), sunH = new THREE.Vector3();
     const bestSpot = dir.clone();
     let bestSpotScore = -Infinity, bestYaw = 0;
-    for (let ci = 0; ci < 24; ci++) {
-      const rr = 0.005 * Math.sqrt(ci / 24), ga = ci * 2.399963229728653;
+    // meadow: cast a much wider net — the scenic region often centres on a
+    // scarp, and the nearest flat vegetated ground can be a km away
+    const CANDS = meadow ? 48 : 24;
+    for (let ci = 0; ci < CANDS; ci++) {
+      const rr = (meadow ? 0.02 : 0.005) * Math.sqrt(ci / CANDS), ga = ci * 2.399963229728653;
       frame(dir, e1, e2);
       cand.copy(dir).addScaledVector(e1, Math.cos(ga) * rr).addScaledVector(e2, Math.sin(ga) * rr).normalize();
       const h = p.height(cand, 128);
@@ -928,11 +933,16 @@ window.NMS = {
       const st = 10 / p.R;
       const hx = p.height(probe.copy(cand).addScaledVector(e1, st).normalize(), 128);
       const hy = p.height(probe.copy(cand).addScaledVector(e2, st).normalize(), 128);
-      let score = -(Math.abs(hx - h) + Math.abs(hy - h)) * 1.2;   // flat footing
+      let score = -(Math.abs(hx - h) + Math.abs(hy - h)) * (meadow ? 2.0 : 1.2);   // flat footing
       // don't spawn INSIDE a grove — trees are invisible to height probes;
       // clearing edges score naturally (view keeps the trees, feet stay free)
       p.extrasAt(cand, h, 128, _ex4);
-      score -= _ex4.x * 14;
+      score -= _ex4.x * (meadow ? 2 : 14);
+      if (meadow) {
+        const b = p.biomeAt(cand, h);
+        score += (b === 'grass' || b === 'forest' || b === 'dryland'
+          || b === 'slime' || b === 'weird') ? 10 : -10;
+      }
       const pinSun = bias === 'sunset' && sunH.lengthSq() > 0.5;
       let yawBest = 0, yawScore = -Infinity;
       for (let k = 0, kn = pinSun ? 1 : 8; k < kn; k++) {
@@ -955,6 +965,14 @@ window.NMS = {
             s += (h - p.height(probe, 128)) / dd;      // terrain falls away = open
           }
           s -= (fx * e2.dot(sunH) + fy * e1.dot(sunH)) * 1.9;   // lit faces ahead
+          if (meadow) {
+            // and face the vegetation: forest mask sampled a few steps out
+            for (const dd of [70, 180]) {
+              probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
+              p.extrasAt(probe, p.height(probe, 128), 128, _ex4);
+              s += _ex4.x * 2.2;
+            }
+          }
         }
         if (s > yawScore) { yawScore = s; yawBest = yaw; }
       }
