@@ -179,7 +179,7 @@ function buildTree(rng, pal, canopyColor) {
       parts.push(place(blob(rng, h * 0.045, pal.accent), top.x + t.top.x, top.y + t.top.y, top.z + t.top.z));
     }
   }
-  return mergeGeos(parts);
+  return shadeVertical(mergeGeos(parts), 0.62, 1.16);
 }
 
 function buildShrub(rng, pal) {
@@ -194,7 +194,7 @@ function buildShrub(rng, pal) {
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.55 + rng() * 0.6));
     parts.push(place(f, 0, 0.02, 0, _q.clone()));
   }
-  return mergeGeos(parts);
+  return shadeVertical(mergeGeos(parts), 0.7, 1.15);
 }
 
 function buildPodPlant(rng, pal) {
@@ -208,22 +208,51 @@ function buildPodPlant(rng, pal) {
     parts.push(...t.parts);
     parts.push(place(blob(rng, 0.2 + rng() * 0.16, pal.accent), t.top.x, t.top.y + 0.08, t.top.z));
   }
-  return { geo: mergeGeos(parts), glow: pal.accent.clone() };
+  return { geo: shadeVertical(mergeGeos(parts), 0.78, 1.1), glow: pal.accent.clone() };
 }
 
 function buildGrassTuft(rng) {
-  // real blades (white — each instance is tinted from the ground beneath it)
+  // real blades (white — each instance is tinted per-planet at placement).
+  // The baked root→tip brightness gradient is what makes grass read as
+  // grass instead of spikes: dark at the soil, light where the sun sits.
   const white = new THREE.Color(1, 1, 1);
   const parts = [];
-  const n = 5 + (rng() * 3) | 0;
+  const n = 7 + (rng() * 3) | 0;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rng();
-    const f = frond(rng, 0.55 + rng() * 0.4, 0.06, 0.8 + rng() * 0.8, white);
+    const len = 0.55 + rng() * 0.45;
+    const f = frond(rng, len, 0.055, 0.8 + rng() * 0.9, white);
+    const pos = f.attributes.position, col = f.attributes.color;
+    for (let v = 0; v < pos.count; v++) {
+      const t = Math.max(0, Math.min(1, pos.getY(v) / len));
+      const k = 0.45 + 0.75 * t;
+      col.setXYZ(v, col.getX(v) * k, col.getY(v) * k, col.getZ(v) * k);
+    }
     _q.setFromAxisAngle(Y, a).multiply(
-      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.25 + rng() * 0.35));
-    parts.push(place(f, (rng() - 0.5) * 0.14, 0, (rng() - 0.5) * 0.14, _q.clone()));
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.22 + rng() * 0.4));
+    parts.push(place(f, (rng() - 0.5) * 0.22, 0, (rng() - 0.5) * 0.22, _q.clone()));
   }
   return mergeGeos(parts);
+}
+
+// fake ambient occlusion, baked: plants darken toward the ground and
+// brighten toward the crown — flat-shaded solids stop reading as bare
+// untextured primitives the moment they carry a light gradient
+function shadeVertical(geo, k0 = 0.68, k1 = 1.14) {
+  const pos = geo.attributes.position, col = geo.attributes.color;
+  let yMin = Infinity, yMax = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y < yMin) yMin = y;
+    if (y > yMax) yMax = y;
+  }
+  const span = Math.max(1e-4, yMax - yMin);
+  for (let i = 0; i < pos.count; i++) {
+    const t = (pos.getY(i) - yMin) / span;
+    const k = k0 + (k1 - k0) * Math.sqrt(t);
+    col.setXYZ(i, col.getX(i) * k, col.getY(i) * k, col.getZ(i) * k);
+  }
+  return geo;
 }
 
 function floraPalette(planet, rng) {
@@ -252,5 +281,8 @@ export function buildFlora(planet) {
     pod: pod.geo,
     podGlow: pod.glow,
     grass: buildGrassTuft(rng),
+    // meadows lean toward the planet's canopy colour instead of bare dirt —
+    // the ground tint alone made grass vanish on dark soils
+    grassTint: pal.canopy.clone().offsetHSL(0, 0.12, 0.14),
   };
 }

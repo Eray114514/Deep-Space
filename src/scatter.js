@@ -9,7 +9,7 @@ import { applyWindSway, GROW } from './shaders.js';
 import { buildFlora } from './flora.js';
 
 // wind strength per prop kind (0 = rigid)
-const SWAY = { grass: 0.06, shrub: 0.05, pod: 0.03, tree0: 0.012, tree1: 0.012, blob: 0.02, cactus: 0.008 };
+const SWAY = { grass: 0.08, shrub: 0.05, pod: 0.03, tree0: 0.012, tree1: 0.012, blob: 0.02, cactus: 0.008 };
 
 // jagged rock: displace a subdivided solid by hashed per-vertex noise —
 // crags instead of platonic dice
@@ -299,8 +299,7 @@ export class Scatter {
     _ce2.crossVectors(_up, _ce1);
 
     // grass grows in little clumps; everything else stands alone
-    // (each tuft is already 4–6 blades, so 2 tufts per cell reads dense)
-    const copies = kind === 'grass' ? 2 : 1;
+    const copies = kind === 'grass' ? 3 : 1;
     for (let c = 0; c < copies && counts[kind] < capFor(kind); c++) {
       const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
       // jitter inside the cell, then re-sample ground height there
@@ -319,11 +318,11 @@ export class Scatter {
       _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
       _m.compose(_v2, _q, _s);
       if (kind === 'grass') {
-        // tufts wear the colour of the ground they grow from (slightly
-        // brightened) — dry tan land grows dry tan grass, not green
+        // tufts blend the ground colour with the planet's canopy tint: they
+        // still belong to the terrain, but read as living growth on any soil
         p.colorAt(_jd, hh, 0.08, 64, _ic);
-        _ic.multiplyScalar(1.5).offsetHSL(
-          (hashFloat(hc, 0) - 0.5) * 0.04, 0.05, 0.02 + (hashFloat(hc, 1) - 0.5) * 0.1);
+        _ic.lerp(this.flora.grassTint, 0.5).multiplyScalar(1.35).offsetHSL(
+          (hashFloat(hc, 0) - 0.5) * 0.05, 0.06, (hashFloat(hc, 1) - 0.5) * 0.12);
       } else {
         // no two plants quite the same colour
         _ic.setRGB(1, 1, 1).offsetHSL(
