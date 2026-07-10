@@ -11,7 +11,7 @@
     "touchtest": "node tools/touchtest.js"
   },
   "devDependencies": {
-    "playwright": "^1.60.0",
+    "playwright": "1.56.0",
     "pngjs": "^7.0.0",
     "three": "^0.170.0"
   },
