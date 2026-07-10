@@ -1,13 +1,15 @@
-// Surface props: low-poly trees, rocks, crystals, grass scattered around the
-// camera when near the ground. Placement is a pure function of (planet seed,
-// surface cell) — walk away and come back, the same rock is waiting.
+// Surface props: alien flora (seeded per-planet species from flora.js) plus
+// rocks and crystals, scattered around the camera when near the ground.
+// Placement is a pure function of (planet seed, surface cell) — walk away
+// and come back, the same tree is waiting.
 
 import * as THREE from 'three';
 import { hash3i, hashFloat } from './rng.js';
 import { applyWindSway, GROW } from './shaders.js';
+import { buildFlora } from './flora.js';
 
 // wind strength per prop kind (0 = rigid)
-const SWAY = { grass: 0.055, tree: 0.02, trunkTree: 0.014, blob: 0.02, cactus: 0.008 };
+const SWAY = { grass: 0.06, shrub: 0.05, pod: 0.03, tree0: 0.012, tree1: 0.012, blob: 0.02, cactus: 0.008 };
 
 // jagged rock: displace a subdivided solid by hashed per-vertex noise —
 // crags instead of platonic dice
@@ -29,25 +31,12 @@ function craggyGeo(base, amount, seed) {
   return base;
 }
 
-function coniferGeo(tiers, height, girth) {
-  // tiered silhouette via lathe — reads as a conifer, not a traffic cone
-  const pts = [new THREE.Vector2(0, 0)];
-  for (let t = 0; t < tiers; t++) {
-    const y0 = (t / tiers) * height * 0.82;
-    const y1 = ((t + 1) / tiers) * height * 0.82;
-    pts.push(new THREE.Vector2(girth * (1 - t / tiers) * (t ? 1.0 : 1.15), y0 + height * 0.04));
-    pts.push(new THREE.Vector2(girth * (1 - (t + 0.75) / tiers) * 0.55, y1));
-  }
-  pts.push(new THREE.Vector2(0, height));
-  return new THREE.LatheGeometry(pts, 7);
-}
-
 const CELL_M = 9;            // metres per scatter cell (approx)
 const RANGE = 24;            // cells of radius around the camera
 // instance caps sized ABOVE the densest possible biome in range — a kind
 // that saturates its cap renders an anchor-dependent subset, which shows
 // up as props sliding around while you walk
-const CAPS = { grass: 6000, default: 2000 };
+const CAPS = { grass: 8000, shrub: 2600, tree0: 1500, tree1: 1500, pod: 1200, default: 2000 };
 export function capFor(kind) { return CAPS[kind] ?? CAPS.default; }
 const SHOW_BELOW_ALT = 600;  // metres
 
@@ -68,38 +57,36 @@ const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 
-// shared geometries (unit-ish size, origin at base)
+// shared mineral geometries (unit-ish size, origin at base) — vegetation is
+// per-planet (seeded species built by flora.js in setPlanet)
 function baseGeo() {
   const shift = (g, y) => { g.translate(0, y, 0); return g; };
   return {
     rock: craggyGeo(new THREE.IcosahedronGeometry(0.7, 1), 0.75, 101),
     boulder: shift(craggyGeo(new THREE.IcosahedronGeometry(1.4, 1), 0.6, 202), 0.9),
-    tree: shift(coniferGeo(3, 4.6, 1.15), 0.7),
-    trunkTree: shift(coniferGeo(4, 6.6, 1.4), 0.9),
-    trunk: shift(new THREE.CylinderGeometry(0.09, 0.16, 1.1, 5), 0.0),
     crystal: shift(new THREE.OctahedronGeometry(1, 0), 0.9),
-    grass: shift(new THREE.ConeGeometry(0.07, 0.65, 4), 0.3),
     blob: shift(new THREE.SphereGeometry(0.9, 6, 5), 0.5),
     cactus: shift(new THREE.CylinderGeometry(0.28, 0.36, 2.4, 6), 1.2),
   };
 }
 let GEO = null;
+const FLORA_KINDS = ['tree0', 'tree1', 'shrub', 'pod', 'grass'];
 
-// per-biome prop recipes: [kind, density 0..1, minScale, maxScale, tumble?]
+// per-biome prop recipes: [kind, density 0..1, minScale, maxScale]
 const RECIPES = {
-  grass:    [['grass', 0.85, 0.8, 1.6], ['tree', 0.05, 0.6, 1.1], ['rock', 0.05, 0.3, 0.9]],
-  forest:   [['trunkTree', 0.5, 0.7, 1.15], ['tree', 0.3, 0.5, 1.0], ['rock', 0.04, 0.3, 0.8], ['grass', 0.3, 0.8, 1.4]],
-  snow:     [['rock', 0.07, 0.3, 1.0], ['boulder', 0.02, 0.5, 1.2]],
-  sand:     [['cactus', 0.05, 0.7, 1.5], ['rock', 0.06, 0.3, 1.0]],
+  grass:    [['grass', 0.78, 0.9, 1.7], ['shrub', 0.1, 0.7, 1.4], ['tree0', 0.05, 0.7, 1.2], ['pod', 0.02, 0.8, 1.4], ['rock', 0.03, 0.3, 0.9]],
+  forest:   [['tree0', 0.4, 0.7, 1.3], ['tree1', 0.16, 0.6, 1.15], ['shrub', 0.15, 0.8, 1.5], ['grass', 0.22, 0.8, 1.5], ['rock', 0.03, 0.3, 0.8]],
+  snow:     [['tree1', 0.05, 0.6, 1.2], ['rock', 0.07, 0.3, 1.0], ['boulder', 0.02, 0.5, 1.2]],
+  sand:     [['cactus', 0.05, 0.7, 1.5], ['shrub', 0.025, 0.5, 1.0], ['rock', 0.06, 0.3, 1.0]],
   rock:     [['rock', 0.18, 0.4, 1.3], ['boulder', 0.05, 0.6, 1.6]],
   regolith: [['rock', 0.16, 0.3, 1.4], ['boulder', 0.05, 0.5, 2.0]],
   ice:      [['crystal', 0.06, 0.6, 1.8], ['rock', 0.07, 0.3, 1.0]],
   ash:      [['rock', 0.12, 0.3, 1.2], ['boulder', 0.03, 0.5, 1.5]],
   ember:    [['rock', 0.06, 0.3, 1.0]],
-  slime:    [['blob', 0.2, 0.6, 2.0], ['crystal', 0.05, 0.5, 1.4], ['grass', 0.25, 1.0, 1.8]],
-  weird:    [['crystal', 0.14, 0.7, 2.6], ['blob', 0.1, 0.8, 2.2]],
-  shore:    [['rock', 0.03, 0.2, 0.7]],
-  dryland:  [['grass', 0.3, 0.7, 1.3], ['rock', 0.04, 0.3, 0.9]],
+  slime:    [['pod', 0.12, 0.9, 1.8], ['blob', 0.16, 0.6, 2.0], ['grass', 0.2, 1.0, 1.8], ['crystal', 0.04, 0.5, 1.4]],
+  weird:    [['tree1', 0.12, 0.9, 2.0], ['crystal', 0.11, 0.7, 2.6], ['pod', 0.08, 1.0, 2.0], ['blob', 0.06, 0.8, 2.2]],
+  shore:    [['rock', 0.03, 0.2, 0.7], ['shrub', 0.02, 0.5, 1.0]],
+  dryland:  [['grass', 0.3, 0.7, 1.3], ['shrub', 0.06, 0.6, 1.2], ['rock', 0.04, 0.3, 0.9]],
 };
 
 function propColors(planet) {
@@ -107,11 +94,7 @@ function propColors(planet) {
   const base = {
     rock: p.rock.clone(),
     boulder: p.rock.clone().multiplyScalar(0.85),
-    tree: (p.forest || p.rock).clone().multiplyScalar(2.1),
-    trunkTree: (p.forest || p.rock).clone().multiplyScalar(1.6),
-    trunk: new THREE.Color(0x5d4531).convertSRGBToLinear(),
     crystal: null,
-    grass: null,
     blob: (p.blotch || p.rock).clone(),
     cactus: new THREE.Color(0x3f7a33).convertSRGBToLinear(),
   };
@@ -120,17 +103,35 @@ function propColors(planet) {
     case 'ice': base.crystal = new THREE.Color(0x9fd0f0).convertSRGBToLinear(); break;
     case 'exotic': base.crystal = p.land[p.land.length - 1].c.clone().multiplyScalar(1.3); break;
   }
-  // grass material is WHITE: each tuft's instance colour is sampled from
-  // the ground beneath it, so groundcover can never contradict the terrain
-  base.grass = new THREE.Color(1, 1, 1);
   if (!base.crystal) base.crystal = new THREE.Color(0xb0d8f0).convertSRGBToLinear();
   return base;
 }
+
+// flora carries its colour per-vertex, so a flat material.emissive can't
+// follow it — patch the emissive term to inherit the vertex/instance tint.
+// Pods then glow in their own accent colour at night for free.
+function floraEmissive(mat) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    if (prev) prev(shader, renderer);
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+      #ifdef USE_COLOR
+        totalEmissiveRadiance *= vColor;
+      #endif`);
+  };
+  const key = mat.customProgramCacheKey;
+  mat.customProgramCacheKey = () => (key ? key.call(mat) : '') + '-flora';
+}
+// self-light per flora kind (keeps vegetation readable in shadow; pods glow)
+const FLORA_GLOW = { tree0: 0.16, tree1: 0.16, shrub: 0.14, pod: 0.55, grass: 0.05 };
 
 export class Scatter {
   constructor() {
     if (!GEO) GEO = baseGeo();
     this.planet = null;
+    this.flora = null;  // per-planet species geometries
     this.meshes = {};   // kind -> InstancedMesh
     this.lastKey = '';
     this.seen = new Set();
@@ -143,25 +144,42 @@ export class Scatter {
     const colors = propColors(planet);
     for (const kind of Object.keys(GEO)) {
       // a touch of self-light keeps the stylized props readable in shadow
-      // (grass excluded: its colour is per-instance, a white emissive would wash it)
       const glow = kind === 'crystal' ? 0.35
-        : (kind === 'rock' || kind === 'boulder') ? 0.08
-        : kind === 'grass' ? 0.0 : 0.3;
+        : (kind === 'rock' || kind === 'boulder') ? 0.08 : 0.3;
       const mat = new THREE.MeshStandardMaterial({
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
       });
       applyWindSway(mat, SWAY[kind] || 0);   // 0 sway still wires the grow scale
-      const im = new THREE.InstancedMesh(GEO[kind], mat, capFor(kind));
-      im.count = 0;
-      im.frustumCulled = false;
-      im.castShadow = true;
-      im.receiveShadow = true;
-      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      planet.group.add(im);
-      this.meshes[kind] = im;
+      this.addMesh(planet, kind, GEO[kind], mat);
+    }
+    // this world's own species: geometry seeded by the planet, colours baked
+    // per-vertex (material stays white; instance colour adds per-plant drift)
+    this.flora = buildFlora(planet);
+    for (const kind of FLORA_KINDS) {
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xffffff, vertexColors: true, roughness: 0.9,
+        flatShading: true, side: THREE.DoubleSide,
+      });
+      mat.emissive.setScalar(FLORA_GLOW[kind]);
+      applyWindSway(mat, SWAY[kind] || 0);
+      floraEmissive(mat);
+      const im = this.addMesh(planet, kind, this.flora[kind], mat);
+      if (kind === 'grass') im.castShadow = false;   // invisible; halves its cost
     }
     this.lastKey = '';
+  }
+
+  addMesh(planet, kind, geo, mat) {
+    const im = new THREE.InstancedMesh(geo, mat, capFor(kind));
+    im.count = 0;
+    im.frustumCulled = false;
+    im.castShadow = true;
+    im.receiveShadow = true;
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    planet.group.add(im);
+    this.meshes[kind] = im;
+    return im;
   }
 
   clear() {
@@ -172,6 +190,10 @@ export class Scatter {
         im.material.dispose();
         im.dispose();
       }
+    }
+    if (this.flora) {
+      for (const k of FLORA_KINDS) this.flora[k].dispose();
+      this.flora = null;
     }
     this.meshes = {};
     this.planet = null;
@@ -277,7 +299,8 @@ export class Scatter {
     _ce2.crossVectors(_up, _ce1);
 
     // grass grows in little clumps; everything else stands alone
-    const copies = kind === 'grass' ? 3 : 1;
+    // (each tuft is already 4–6 blades, so 2 tufts per cell reads dense)
+    const copies = kind === 'grass' ? 2 : 1;
     for (let c = 0; c < copies && counts[kind] < capFor(kind); c++) {
       const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
       // jitter inside the cell, then re-sample ground height there
@@ -308,16 +331,6 @@ export class Scatter {
       }
       im.setColorAt(counts[kind], _ic);
       im.setMatrixAt(counts[kind]++, _m);
-
-      // every canopy stands on a trunk (same transform, own mesh)
-      if (kind === 'tree' || kind === 'trunkTree') {
-        const tm = this.meshes.trunk;
-        if (tm && counts.trunk < capFor('trunk')) {
-          tm.setColorAt(counts.trunk, _ic.setRGB(1, 1, 1)
-            .offsetHSL(0, 0, (hashFloat(hc, 2) - 0.5) * 0.15));
-          tm.setMatrixAt(counts.trunk++, _m);
-        }
-      }
     }
   }
 }
