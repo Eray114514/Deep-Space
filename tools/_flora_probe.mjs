@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
 
 const SEEDS = (process.env.SEEDS || 'EUCLID,ATLAS-7,VOYAGER-3').split(',');
 const OUT = process.env.OUT || 'screenshots/flora';
-const WANT = ['lush', 'toxic', 'exotic', 'desert', 'ice', 'ash'];
+const WANT = (process.env.WANT || 'lush,toxic,exotic,desert,ice,lava').split(',');
 
 await mkdir(OUT, { recursive: true });
 const { server, port } = await startServer(0);
@@ -43,12 +43,16 @@ for (const seed of SEEDS) {
     probed.add(p.type);
     lands++;
     await page.evaluate(`NMS.land(${p.i})`);
-    await shot(`${seed}-${p.type}-a`);
-    await page.evaluate('NMS.lookYaw(130)');
-    await shot(`${seed}-${p.type}-b`, 30000);
-    await page.evaluate('NMS.lookYaw(110); NMS.lookPitch(-26);');
-    await shot(`${seed}-${p.type}-c-ground`, 30000);
-    await page.evaluate('NMS.lookPitch(26)');
+    // sweep the full horizon: landings sit in clearings, so any single yaw
+    // can face bare rock while the vegetation stands behind the camera
+    await shot(`${seed}-${p.type}-y0`);
+    for (const y of [90, 180, 270]) {
+      await page.evaluate('NMS.lookYaw(90)');
+      await shot(`${seed}-${p.type}-y${y}`, 30000);
+    }
+    await page.evaluate('NMS.lookPitch(-24)');
+    await shot(`${seed}-${p.type}-ground`, 30000);
+    await page.evaluate('NMS.lookPitch(24)');
   }
   await page.close();
 }

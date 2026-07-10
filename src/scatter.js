@@ -83,7 +83,7 @@ const RECIPES = {
   ice:      [['crystal', 0.06, 0.6, 1.8], ['rock', 0.07, 0.3, 1.0]],
   ash:      [['rock', 0.12, 0.3, 1.2], ['boulder', 0.03, 0.5, 1.5]],
   ember:    [['rock', 0.06, 0.3, 1.0]],
-  slime:    [['pod', 0.12, 0.9, 1.8], ['blob', 0.16, 0.6, 2.0], ['grass', 0.2, 1.0, 1.8], ['crystal', 0.04, 0.5, 1.4]],
+  slime:    [['pod', 0.14, 1.0, 2.0], ['tree1', 0.05, 0.8, 1.6], ['blob', 0.14, 0.6, 2.0], ['grass', 0.2, 1.0, 1.8], ['crystal', 0.03, 0.5, 1.4]],
   weird:    [['tree1', 0.12, 0.9, 2.0], ['crystal', 0.11, 0.7, 2.6], ['pod', 0.08, 1.0, 2.0], ['blob', 0.06, 0.8, 2.2]],
   shore:    [['rock', 0.03, 0.2, 0.7], ['shrub', 0.02, 0.5, 1.0]],
   dryland:  [['grass', 0.3, 0.7, 1.3], ['shrub', 0.06, 0.6, 1.2], ['rock', 0.04, 0.3, 0.9]],
@@ -96,7 +96,7 @@ function propColors(planet) {
     boulder: p.rock.clone().multiplyScalar(0.85),
     crystal: null,
     blob: (p.blotch || p.rock).clone(),
-    cactus: new THREE.Color(0x3f7a33).convertSRGBToLinear(),
+    cactus: new THREE.Color(0x55a04a).convertSRGBToLinear(),
   };
   switch (planet.type) {
     case 'toxic': base.crystal = (p.blotch || p.rock).clone().multiplyScalar(1.4); break;

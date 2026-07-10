@@ -126,7 +126,8 @@ function frond(rng, len, wid, curl, color) {
 
 function buildTree(rng, pal, canopyColor) {
   const style = ['orbs', 'cap', 'fronds', 'tentacles', 'orbs', 'cap'][(rng() * 6) | 0];
-  const h = 2.3 + rng() * 3.2;
+  let h = 3.2 + rng() * 4.2;
+  if (rng() < 0.18) h *= 1.6;        // some worlds grow giants
   const leanX = (rng() - 0.5) * 0.65, leanZ = (rng() - 0.5) * 0.65;
   const bulb = rng() < 0.35 ? 1.8 + rng() : 1;      // some trunks are bulbous
   const r0 = (0.05 + h * 0.028) * bulb, r1 = r0 * (0.22 + rng() * 0.2);
@@ -184,7 +185,7 @@ function buildTree(rng, pal, canopyColor) {
 function buildShrub(rng, pal) {
   const parts = [];
   const n = 6 + (rng() * 4) | 0;
-  const len = 0.55 + rng() * 0.5;
+  const len = 0.7 + rng() * 0.6;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rng() * 0.7;
     const f = frond(rng, len * (0.8 + rng() * 0.4), len * 0.16, 1.2 + rng() * 0.9,
@@ -197,14 +198,15 @@ function buildShrub(rng, pal) {
 }
 
 function buildPodPlant(rng, pal) {
+  // person-height glowing bulbs on bent stalks — a landmark, not a pebble
   const parts = [];
-  const n = 1 + (rng() * 2.4) | 0;
+  const n = 2 + (rng() * 2.4) | 0;
   for (let i = 0; i < n; i++) {
-    const h = 0.55 + rng() * 0.6;
-    const t = bentTube(rng, pal, h, 0.03, 0.018,
+    const h = 1.0 + rng() * 1.0;
+    const t = bentTube(rng, pal, h, 0.05, 0.03,
       (rng() - 0.5) * 0.9, (rng() - 0.5) * 0.9, pal.trunk, 4, 5);
     parts.push(...t.parts);
-    parts.push(place(blob(rng, 0.1 + rng() * 0.07, pal.accent), t.top.x, t.top.y + 0.05, t.top.z));
+    parts.push(place(blob(rng, 0.2 + rng() * 0.16, pal.accent), t.top.x, t.top.y + 0.08, t.top.z));
   }
   return { geo: mergeGeos(parts), glow: pal.accent.clone() };
 }
@@ -213,10 +215,10 @@ function buildGrassTuft(rng) {
   // real blades (white — each instance is tinted from the ground beneath it)
   const white = new THREE.Color(1, 1, 1);
   const parts = [];
-  const n = 4 + (rng() * 2) | 0;
+  const n = 5 + (rng() * 3) | 0;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rng();
-    const f = frond(rng, 0.5 + rng() * 0.3, 0.05, 0.8 + rng() * 0.8, white);
+    const f = frond(rng, 0.55 + rng() * 0.4, 0.06, 0.8 + rng() * 0.8, white);
     _q.setFromAxisAngle(Y, a).multiply(
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.25 + rng() * 0.35));
     parts.push(place(f, (rng() - 0.5) * 0.14, 0, (rng() - 0.5) * 0.14, _q.clone()));
