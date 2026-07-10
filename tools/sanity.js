@@ -81,11 +81,15 @@ for (const type of Object.keys(TYPES)) {
     for (const r of p.lod.roots) walk(r);
     return m;
   };
-  for (let it = 0; it < 130; it++) {
+  // converge-or-timeout: LOD prefetch builds ~40% more chunks near the
+  // surface, so heavy worlds need more passes — but exit as soon as the
+  // queue drains and every morph has relaxed
+  for (let it = 0; it < 240; it++) {
     p.lod.update(cam, 0.05);
     if (p.waterLod) p.waterLod.update(cam, 0.05);
     flushChunkQueue(400);
     maxInfSeen = Math.max(maxInfSeen, scanInfluence());
+    if (it > 20 && pendingChunks() === 0 && scanInfluence() < 0.01) break;
   }
   const tRefine = performance.now() - t1;
 

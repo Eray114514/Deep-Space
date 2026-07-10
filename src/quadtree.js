@@ -111,7 +111,10 @@ function makeNode(lod, face, level, ix, iy) {
     centerPos: new THREE.Vector3(),
     children: null, mesh: null, queued: false, dead: false,
     // geomorph state: 1 = parent's shape, 0 = own full detail
-    morph: 1, morphTo: 0, splitActive: false, mergePending: false,
+    // born settled at the parent's shape; the split path explicitly starts
+    // the 1→0 relax when (and only when) the node is actually displayed —
+    // prefetched-but-undisplayed children must not read as pending morphs
+    morph: 1, morphTo: 1, splitActive: false, mergePending: false,
   };
   FACE_FN[face]((u0 + node.u1) / 2, (v0 + node.v1) / 2, node.centerDir);
   node.centerDir.normalize();
@@ -185,9 +188,11 @@ export class ChunkedLOD {
       && !beyond;
     const wantMerge = d > node.size * MERGE || beyond;
 
-    if (!node.children && !beyond && node.level < this.planet.maxLevel
-      && (d < node.size * PREFETCH || node.level < this._forceLevel)) {
-      this.createChildren(node);
+    if (!node.children && !beyond && node.level < this.planet.maxLevel) {
+      // prefetch exists to feed morphs; water (noMorph) swaps sub-pixel and
+      // creates at the display threshold like before
+      const reach = this.planet.noMorph ? SPLIT : PREFETCH;
+      if (d < node.size * reach || node.level < this._forceLevel) this.createChildren(node);
     }
 
     if (node.children) {
