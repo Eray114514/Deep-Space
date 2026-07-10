@@ -232,7 +232,9 @@ export class FarFlora {
             .addScaledVector(_ce1, (hashFloat(h0, 1) - 0.5) * cellAng)
             .addScaledVector(_ce2, (hashFloat(h0, 2) - 0.5) * cellAng)
             .normalize();
-          const hh = p.height(_jd, 128);
+          // full terrain frequency: a coarse height differs from the drawn
+          // surface by tens of metres — trees planted with it are BURIED
+          const hh = p.height(_jd, p.fullMaxFreq);
           if (p.hasLiquid && hh < p.seaLevel + 0.6) continue;
           _p.copy(_jd).multiplyScalar(p.R + hh - 0.4);
           _q.setFromUnitVectors(Y, _jd);

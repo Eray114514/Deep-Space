@@ -14,6 +14,7 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 const errors = [];
 page.on('pageerror', (e) => { errors.push(String(e)); console.error('PAGEERROR:', String(e).split('\n')[0]); });
+page.on('console', (m) => { if (m.type() === 'error') console.error('CONSOLE:', m.text().slice(0, 200)); });
 
 await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(SEED)}&nolock=1&buildms=120`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
@@ -28,7 +29,7 @@ async function shot(name, timeout = 240000) {
 
 // deep space: nebulae + galaxy band (no planet in frame)
 await page.evaluate('NMS.teleport(0, 2.5)');
-await page.evaluate('NMS.lookYaw(180); NMS.lookPitch(20);');
+await page.evaluate('NMS.lookYaw(115); NMS.lookPitch(35);');
 await shot('01-space-sky');
 
 // the approach: the same forests must be there at EVERY altitude
