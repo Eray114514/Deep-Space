@@ -38,6 +38,9 @@ await page.evaluate('NMS.teleport(0, 0.028, {horizon: true})');
 await shot('03-approach-2km');
 await page.evaluate('NMS.teleport(0, 0.006, {horizon: true})');
 await shot('04-low-500m');
+const far = await page.evaluate('NMS.stats().far');
+console.log(`far instances rendered: ${far}`);
+if (far < 500) { errors.push(`far tier suspiciously empty (${far})`); }
 
 // on foot in a meadow: grass + near/far tiers together
 await page.evaluate("NMS.land(0, 0, 'meadow')");

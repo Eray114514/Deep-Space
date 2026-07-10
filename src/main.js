@@ -817,7 +817,11 @@ window.NMS = {
     const info = renderer.info.render;
     let chunks = 0;
     for (const p of universe.planets()) chunks += p.lod.countChunks();
-    return { frame: frameNo, calls: info.calls, tris: info.triangles, chunks, pending: pendingChunks(), state, alt: nearestAlt };
+    return {
+      frame: frameNo, calls: info.calls, tris: info.triangles, chunks,
+      pending: pendingChunks(), state, alt: nearestAlt,
+      far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
+    };
   },
   planets() {
     return universe.system.planets.map((p, i) => ({

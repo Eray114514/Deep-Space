@@ -18,14 +18,16 @@ import { buildFlora } from './flora.js';
 const TILE_M = 1024;         // metres per cache tile
 const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
 const RADIUS = 4.4;          // tiles of reach around the camera (~4.5 km)
-const CAP = 16000;           // per species
+const CAP = 24000;           // per species
 const SHOW_BELOW = 16000;    // m altitude; fade starts at 10 km
 
-// per-biome proxy density (fraction of cells carrying a tree) and which
-// species: mirrors the near-tier RECIPES tree densities
+// per-biome CLUMP probability per 32 m cell and the tree0 share. One proxy
+// stands for several near-tier trees (they inflate with distance), so these
+// chase the near tier's per-m² density as far as the instance budget allows —
+// a 12× density cliff at the bubble edge reads as "the forest ends here"
 const FAR_DENSITY = {
-  forest: [0.56, 0.72], grass: [0.06, 0.95], snow: [0.045, 0.0],
-  slime: [0.05, 0.0], weird: [0.12, 0.0], dryland: [0.02, 0.9],
+  forest: [0.8, 0.72], grass: [0.32, 0.95], snow: [0.42, 0.0],
+  slime: [0.38, 0.0], weird: [0.5, 0.0], dryland: [0.1, 0.9],
 };
 
 const _dir = new THREE.Vector3();
@@ -58,9 +60,10 @@ function applyFarFade(mat, uniforms) {
         {
           float d = distance(instanceMatrix[3].xyz, uCamL);
           float g = smoothstep(150.0, 205.0, d) * (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
-          // distant proxies inflate into grove-blobs: canopies must OVERLAP
-          // on far hillsides or a forest thins into scattered specks
-          g *= 1.0 + 1.1 * smoothstep(500.0, 2200.0, d);
+          // proxies stand for clumps: slightly large at the handoff, and
+          // inflating further with distance so far canopies OVERLAP — a
+          // forest must stay a forest on a hillside 3 km away
+          g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
           transformed *= g;
         }
         #endif`);
@@ -140,6 +143,7 @@ export class FarFlora {
     const key = kx + ':' + ky + ':' + kz;
     if (key !== this.lastKey) {
       this.lastKey = key;
+      this.anchorK = [kx, ky, kz];
       const want = new Set();
       _anchor.set(kx, ky, kz).normalize();
       frame(_anchor, _e1, _e2);
@@ -250,7 +254,16 @@ export class FarFlora {
   repack() {
     this.dirty = false;
     if (!this.meshes) return;
-    const keys = [...this.tiles.keys()].sort((a, b) => a - b);
+    // nearest tiles pack first: if a fully-forested world overflows the
+    // instance budget, the holes appear at the far rim, never underfoot
+    const [ax, ay, az] = this.anchorK || [0, 0, 0];
+    const dist2 = (k) => {
+      const qx = (k % 1024) - 512;
+      const qy = (Math.floor(k / 1024) % 1024) - 512;
+      const qz = Math.floor(k / 1048576) - 512;
+      return (qx - ax) * (qx - ax) + (qy - ay) * (qy - ay) + (qz - az) * (qz - az);
+    };
+    const keys = [...this.tiles.keys()].sort((a, b) => (dist2(a) - dist2(b)) || (a - b));
     let n0 = 0, n1 = 0;
     const a0 = this.meshes[0].instanceMatrix.array;
     const a1 = this.meshes[1].instanceMatrix.array;
