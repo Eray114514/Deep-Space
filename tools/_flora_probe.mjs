@@ -42,9 +42,8 @@ for (const seed of SEEDS) {
     if (p.isMoon || probed.has(p.type) || !WANT.includes(p.type) || lands >= 3) continue;
     probed.add(p.type);
     lands++;
-    await page.evaluate(`NMS.land(${p.i})`);
-    // sweep the full horizon: landings sit in clearings, so any single yaw
-    // can face bare rock while the vegetation stands behind the camera
+    await page.evaluate(`NMS.land(${p.i}, 0, 'meadow')`);
+    // sweep the full horizon: any single yaw can face away from the flora
     await shot(`${seed}-${p.type}-y0`);
     for (const y of [90, 180, 270]) {
       await page.evaluate('NMS.lookYaw(90)');
@@ -53,6 +52,13 @@ for (const seed of SEEDS) {
     await page.evaluate('NMS.lookPitch(-24)');
     await shot(`${seed}-${p.type}-ground`, 30000);
     await page.evaluate('NMS.lookPitch(24)');
+    if (p.type === 'toxic') {
+      // night side: pod plants glow their accent colour in the lamp pool
+      await page.evaluate(`NMS.land(${p.i}, 0, 'night')`);
+      await shot(`${seed}-${p.type}-night`);
+      await page.evaluate('NMS.lookYaw(120)');
+      await shot(`${seed}-${p.type}-night-b`, 30000);
+    }
   }
   await page.close();
 }
