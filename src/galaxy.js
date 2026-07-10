@@ -106,6 +106,51 @@ function glowTexture(size = 128, inner = 0.0, tight = false) {
   return new THREE.CanvasTexture(canvas);
 }
 
+// cloudy blotch texture: dozens of soft blobs accumulated, then masked so
+// the rim fades out — reads as nebula gas / a galaxy streak instead of the
+// perfect-circle lens halo a plain radial gradient produces
+function cloudTexture(rand, size = 256, band = false) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = band ? size / 2 : size;
+  const H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const blobs = band ? 110 : 55;
+  for (let i = 0; i < blobs; i++) {
+    const bx = rand() * size;
+    const by = band ? H * (0.5 + (rand() - 0.5) * 0.6) : rand() * H;
+    const br = (band ? 0.04 + rand() * 0.1 : 0.06 + rand() * 0.15) * size;
+    const g = ctx.createRadialGradient(bx, by, 0, bx, by, br);
+    g.addColorStop(0, `rgba(255,255,255,${0.05 + rand() * 0.1})`);
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, H);
+  }
+  ctx.globalCompositeOperation = 'destination-in';
+  if (band) {
+    let g = ctx.createLinearGradient(0, 0, 0, H);      // soft vertical profile
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.5, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, H);
+    g = ctx.createLinearGradient(0, 0, size, 0);       // ends fade → segments blend
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.25, 'rgba(0,0,0,1)');
+    g.addColorStop(0.75, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, H);
+  } else {
+    const g = ctx.createRadialGradient(size / 2, H / 2, size * 0.08, size / 2, H / 2, size * 0.5);
+    g.addColorStop(0, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, H);
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
 export class Universe {
   constructor(seedStr, scene) {
     this.seed = seedStr;
@@ -167,27 +212,33 @@ export class Universe {
     this.nebulas = new THREE.Group();
     const nCount = 4 + ((rand() * 3) | 0);
     for (let i = 0; i < nCount; i++) {
+      // each nebula gets its own blotchy texture — a shared radial gradient
+      // made them read as identical circular halos pinned to the sky
       const mat = new THREE.SpriteMaterial({
-        map: this.glowTex, transparent: true, opacity: 0.10 + rand() * 0.10,
+        map: cloudTexture(rand), transparent: true, opacity: 0.08 + rand() * 0.08,
         color: new THREE.Color().setHSL(rand(), 0.7, 0.55),
+        rotation: rand() * Math.PI * 2,
         blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
       });
       const spr = new THREE.Sprite(mat);
       _v.set(rand() * 2 - 1, (rand() * 2 - 1) * 0.5, rand() * 2 - 1).normalize().multiplyScalar(1.8e9);
       spr.position.copy(_v);
       const s = (1.2 + rand() * 2.2) * 6.5e8;
-      spr.scale.set(s, s, 1);
+      spr.scale.set(s, s * (0.55 + rand() * 0.5), 1);   // gas clouds aren't round
       this.nebulas.add(spr);
     }
-    // the Milky Way: a faint glowing band along the galactic disc plane
+    // the Milky Way: a faint streaky band along the galactic disc plane —
+    // segments share one noise texture whose ends fade so they blend into a
+    // continuous river of light instead of a ring of separate blobs
+    const bandTex = cloudTexture(rand, 256, true);
     const bandTilt = new THREE.Quaternion().setFromEuler(
       new THREE.Euler((rand() - 0.5) * 0.35, 0, (rand() - 0.5) * 0.35));
     for (let i = 0; i < 12; i++) {
       const a = (i / 12) * Math.PI * 2;
       const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(1.6e9, 4.5e8),
+        new THREE.PlaneGeometry(1.6e9, 4.2e8),
         new THREE.MeshBasicMaterial({
-          map: this.glowTex, transparent: true, opacity: 0.045 + rand() * 0.035,
+          map: bandTex, transparent: true, opacity: 0.055 + rand() * 0.035,
           color: new THREE.Color().setHSL(0.08 + rand() * 0.5, 0.25, 0.72),
           blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
           side: THREE.DoubleSide,
@@ -378,7 +429,10 @@ export class Universe {
       this.nearStarsMesh.geometry.dispose();
     }
     if (this.starMaterial) this.starMaterial.dispose();
+    const seenTex = new Set();
     for (const n of this.nebulas.children) {
+      const tex = n.material.map;
+      if (tex && tex !== this.glowTex && !seenTex.has(tex)) { seenTex.add(tex); tex.dispose(); }
       n.material.dispose();
       if (n.geometry) n.geometry.dispose();
     }
