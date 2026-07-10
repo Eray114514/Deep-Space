@@ -9,6 +9,10 @@ export let GRID_CELLS = 24;            // quads per chunk edge
 export function setGridCells(n) { GRID_CELLS = n; }   // quality presets
 const SPLIT = 4.0;                     // split when dist < size * SPLIT
 const MERGE = 5.2;                     // merge when dist > size * MERGE
+const PREFETCH = 5.0;                  // BUILD children this early — by the
+                                       // time they're wanted on screen the
+                                       // morph starts at once, while chunks
+                                       // are still small enough not to notice
 const MORPH_TIME = 0.7;                // seconds for a LOD transition to relax
 
 // seam instrumentation: every level change that is NOT hidden behind a morph
@@ -181,7 +185,10 @@ export class ChunkedLOD {
       && !beyond;
     const wantMerge = d > node.size * MERGE || beyond;
 
-    if (wantSplit && !node.children) this.createChildren(node);
+    if (!node.children && !beyond && node.level < this.planet.maxLevel
+      && (d < node.size * PREFETCH || node.level < this._forceLevel)) {
+      this.createChildren(node);
+    }
 
     if (node.children) {
       let ready = true;
@@ -244,9 +251,11 @@ export class ChunkedLOD {
             return;
           }
         }
-      } else if (!node.splitActive && node.children && !wantSplit) {
-        // children were built for a split that never displayed (fast flyby):
-        // dropping them changes nothing on screen
+      } else if (!node.splitActive && node.children && !wantSplit
+        && d > node.size * (PREFETCH + 0.4)) {
+        // children were built for a split that never displayed (fast flyby)
+        // and we're beyond the prefetch band: dropping them changes nothing
+        // on screen (inside the band they stay warm, ready for the approach)
         this.disposeChildren(node);
       }
     }
