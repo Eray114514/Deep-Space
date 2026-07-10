@@ -16,7 +16,7 @@ import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
 
 const TILE_M = 1024;         // metres per cache tile
-const CELL_M = 42.7;         // metres per proxy-tree cell (24 per tile edge)
+const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
 const RADIUS = 4.4;          // tiles of reach around the camera (~4.5 km)
 const CAP = 16000;           // per species
 const SHOW_BELOW = 16000;    // m altitude; fade starts at 10 km
@@ -58,6 +58,9 @@ function applyFarFade(mat, uniforms) {
         {
           float d = distance(instanceMatrix[3].xyz, uCamL);
           float g = smoothstep(150.0, 205.0, d) * (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
+          // distant proxies inflate into grove-blobs: canopies must OVERLAP
+          // on far hillsides or a forest thins into scattered specks
+          g *= 1.0 + 1.1 * smoothstep(500.0, 2200.0, d);
           transformed *= g;
         }
         #endif`);

@@ -36,7 +36,7 @@ const RANGE = 24;            // cells of radius around the camera
 // instance caps sized ABOVE the densest possible biome in range — a kind
 // that saturates its cap renders an anchor-dependent subset, which shows
 // up as props sliding around while you walk
-const CAPS = { grass: 8000, shrub: 2600, tree0: 1500, tree1: 1500, pod: 1200, default: 2000 };
+const CAPS = { grass: 10000, shrub: 2600, tree0: 1500, tree1: 1500, pod: 1200, default: 2000 };
 export function capFor(kind) { return CAPS[kind] ?? CAPS.default; }
 const SHOW_BELOW_ALT = 600;  // metres
 
@@ -299,7 +299,7 @@ export class Scatter {
     _ce2.crossVectors(_up, _ce1);
 
     // grass grows in little clumps; everything else stands alone
-    const copies = kind === 'grass' ? 3 : 1;
+    const copies = kind === 'grass' ? 4 : 1;
     for (let c = 0; c < copies && counts[kind] < capFor(kind); c++) {
       const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
       // jitter inside the cell, then re-sample ground height there

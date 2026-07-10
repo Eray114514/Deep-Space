@@ -27,8 +27,8 @@ async function shot(name, timeout = 240000) {
 }
 
 // deep space: nebulae + galaxy band (no planet in frame)
-await page.evaluate('NMS.teleport(0, 8)');
-await page.evaluate('NMS.lookYaw(160); NMS.lookPitch(25);');
+await page.evaluate('NMS.teleport(0, 2.5)');
+await page.evaluate('NMS.lookYaw(180); NMS.lookPitch(20);');
 await shot('01-space-sky');
 
 // the approach: the same forests must be there at EVERY altitude
