@@ -9,6 +9,7 @@ import { Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
+import { FarFlora } from './farflora.js';
 import { WarpStreaks, SkyDome, Ship } from './effects.js';
 import { tickShaders } from './shaders.js';
 import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
@@ -153,6 +154,9 @@ let lastBuildFrame = 0;
 // ---- world ------------------------------------------------------------------
 let universe = new Universe(SEED, scene);
 const scatter = new Scatter();
+// far tier: proxy trees to the horizon (?farflora=0 spares SwiftShader tests)
+const FARFLORA = qs.get('farflora') !== '0';
+const farFlora = new FarFlora();
 const warpStreaks = new WarpStreaks(scene);
 const skyDome = new SkyDome(scene);
 const ship = new Ship(scene);
@@ -718,6 +722,9 @@ function frame() {
   if (nearest) {
     _v.copy(nav.pos).sub(nearest.posUniv);
     scatter.update(nearest, _v, nearestAlt);
+    if (FARFLORA) farFlora.update(nearest, _v, nearestAlt);
+  } else if (farFlora.planet) {
+    farFlora.clear();
   }
 
   ambience();
@@ -803,7 +810,8 @@ window.NMS = {
   seed: () => SEED,
   frame: () => frameNo,
   idle() {
-    return frameNo > 10 && pendingChunks() === 0 && frameNo - lastBuildFrame > 8;
+    return frameNo > 10 && pendingChunks() === 0 && farFlora.pending() === 0
+      && frameNo - lastBuildFrame > 8;
   },
   stats() {
     const info = renderer.info.render;

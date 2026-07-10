@@ -154,12 +154,15 @@ export class Scatter {
       this.addMesh(planet, kind, GEO[kind], mat);
     }
     // this world's own species: geometry seeded by the planet, colours baked
-    // per-vertex (material stays white; instance colour adds per-plant drift)
-    this.flora = buildFlora(planet);
+    // per-vertex (material stays white; instance colour adds per-plant drift).
+    // The planet owns the geometries — the far tier shares them.
+    this.flora = planet.flora || (planet.flora = buildFlora(planet));
     for (const kind of FLORA_KINDS) {
       const mat = new THREE.MeshStandardMaterial({
         color: 0xffffff, vertexColors: true, roughness: 0.9,
-        flatShading: true, side: THREE.DoubleSide,
+        // grass carries hand-authored up-normals (field-soft lighting) that
+        // flat shading would discard
+        flatShading: kind !== 'grass', side: THREE.DoubleSide,
       });
       mat.emissive.setScalar(FLORA_GLOW[kind]);
       applyWindSway(mat, SWAY[kind] || 0);
@@ -191,10 +194,7 @@ export class Scatter {
         im.dispose();
       }
     }
-    if (this.flora) {
-      for (const k of FLORA_KINDS) this.flora[k].dispose();
-      this.flora = null;
-    }
+    this.flora = null;   // geometries are planet-owned (planet.dispose frees them)
     this.meshes = {};
     this.planet = null;
     this.lastKey = '';

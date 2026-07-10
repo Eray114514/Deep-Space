@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { Planet, TYPES } from '../src/planet.js';
 import { flushChunkQueue, pendingChunks } from '../src/quadtree.js';
 import { Scatter, capFor } from '../src/scatter.js';
+import { FarFlora } from '../src/farflora.js';
 
 const dir = new THREE.Vector3();
 const col = new THREE.Color();
@@ -198,6 +199,23 @@ for (const type of Object.keys(TYPES)) {
       .map(([k, v]) => `${k}:${v}`).join(' ');
     console.log(`         scatter walk: ${rebuilds} rebuilds, ${totChecked} interior checks, worst kept ${(worstKept * 100).toFixed(1)}%  peaks[${peakStr}]`);
     scatter.clear();
+
+    // far tier: proxy forests must be non-empty over vegetated ground and
+    // bit-identical between two independent builds at the same spot
+    const farCam = walkDir.clone().multiplyScalar(p.R + p.height(walkDir, p.fullMaxFreq) + 300);
+    const buildFar = () => {
+      const ff = new FarFlora();
+      for (let i = 0; i < 200 && (i < 2 || ff.pending() > 0); i++) ff.update(p, farCam, 300);
+      const counts = [ff.meshes[0].count, ff.meshes[1].count];
+      const sig = ff.meshes[0].instanceMatrix.array.slice(0, counts[0] * 16).join(',');
+      ff.clear();
+      return { counts, sig };
+    };
+    const fa = buildFar(), fb = buildFar();
+    check(fa.counts[0] + fa.counts[1] > 100, `${type}: far flora suspiciously sparse (${fa.counts})`);
+    check(fa.counts[0] === fb.counts[0] && fa.counts[1] === fb.counts[1] && fa.sig === fb.sig,
+      `${type}: far flora not deterministic (${fa.counts} vs ${fb.counts})`);
+    console.log(`         far flora: ${fa.counts[0]}+${fa.counts[1]} proxy trees in reach`);
   }
   let leafTris = 0;
   for (const r of p.lod.roots) {

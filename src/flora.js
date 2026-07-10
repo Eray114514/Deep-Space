@@ -179,7 +179,35 @@ function buildTree(rng, pal, canopyColor) {
       parts.push(place(blob(rng, h * 0.045, pal.accent), top.x + t.top.x, top.y + t.top.y, top.z + t.top.z));
     }
   }
-  return shadeVertical(mergeGeos(parts), 0.62, 1.16);
+  return { geo: shadeVertical(mergeGeos(parts), 0.62, 1.16), style, h };
+}
+
+// a ~40-triangle stand-in with the species' silhouette and colours — the far
+// tier draws thousands of these out to the horizon so a forest is a forest
+// from any altitude, not a bubble that grows around the camera
+function buildFarTree(rng, pal, style, h, canopyColor) {
+  const parts = [];
+  const r0 = 0.06 + h * 0.03;
+  const trunk = new THREE.CylinderGeometry(r0 * 0.55, r0 * 1.15, h, 5, 1);
+  trunk.translate(0, h * 0.5, 0);
+  paint(trunk, pal.trunk, rng, 0.06);
+  parts.push(trunk);
+  let canopy;
+  if (style === 'cap') {
+    canopy = new THREE.ConeGeometry(h * 0.42, h * 0.32, 7);
+    canopy.translate(0, h * 1.0, 0);
+  } else if (style === 'fronds') {
+    canopy = new THREE.ConeGeometry(h * 0.34, h * 0.44, 6);
+    canopy.rotateX(Math.PI);
+    canopy.translate(0, h * 1.06, 0);
+  } else {           // orbs / tentacles read as a lumpy ball from afar
+    canopy = new THREE.IcosahedronGeometry(h * 0.36, 0);
+    canopy.scale(1, 0.82, 1);
+    canopy.translate(0, h * 1.0, 0);
+  }
+  paint(canopy, canopyColor, rng, 0.09);
+  parts.push(canopy);
+  return shadeVertical(mergeGeos(parts), 0.6, 1.15);
 }
 
 function buildShrub(rng, pal) {
@@ -232,7 +260,13 @@ function buildGrassTuft(rng) {
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.22 + rng() * 0.4));
     parts.push(place(f, (rng() - 0.5) * 0.22, 0, (rng() - 0.5) * 0.22, _q.clone()));
   }
-  return mergeGeos(parts);
+  const g = mergeGeos(parts);
+  // blades light like the field, not like spinning planes: every normal
+  // points straight up (instance rotation aligns it to the terrain), so a
+  // meadow shades softly with the ground instead of flickering dark/bright
+  const nrm = g.attributes.normal;
+  for (let i = 0; i < nrm.count; i++) nrm.setXYZ(i, 0, 1, 0);
+  return g;
 }
 
 // fake ambient occlusion, baked: plants darken toward the ground and
@@ -255,7 +289,10 @@ function shadeVertical(geo, k0 = 0.68, k1 = 1.14) {
   return geo;
 }
 
-function floraPalette(planet, rng) {
+// planet.js caches this at construction (planet.floraPal) so the terrain
+// palette can borrow the canopy colour BEFORE it gets blended — deriving it
+// twice from a mutated base would drift the species colours
+export function floraPalette(planet, rng) {
   const base = (planet.pal.forest || planet.pal.land[Math.min(2, planet.pal.land.length - 1)].c).clone();
   // alien hue drift: exotic/toxic worlds shift hard, lush worlds sometimes
   const shift = planet.type === 'exotic' ? 0.15 + rng() * 0.5
@@ -272,11 +309,13 @@ function floraPalette(planet, rng) {
 // every geometry here is a pure function of the planet seed
 export function buildFlora(planet) {
   const rng = makeRng(planet.seed + ':flora');
-  const pal = floraPalette(planet, rng);
+  const pal = planet.floraPal || floraPalette(planet, rng);
   const pod = buildPodPlant(rng, pal);
+  const t0 = buildTree(rng, pal, pal.canopy);
+  const t1 = buildTree(rng, pal, pal.canopy2);
   return {
-    tree0: buildTree(rng, pal, pal.canopy),
-    tree1: buildTree(rng, pal, pal.canopy2),
+    tree0: t0.geo,
+    tree1: t1.geo,
     shrub: buildShrub(rng, pal),
     pod: pod.geo,
     podGlow: pod.glow,
@@ -284,5 +323,8 @@ export function buildFlora(planet) {
     // meadows lean toward the planet's canopy colour instead of bare dirt —
     // the ground tint alone made grass vanish on dark soils
     grassTint: pal.canopy.clone().offsetHSL(0, 0.12, 0.14),
+    // horizon-range proxies for the far tier
+    far0: buildFarTree(rng, pal, t0.style, t0.h, pal.canopy),
+    far1: buildFarTree(rng, pal, t1.style, t1.h, pal.canopy2),
   };
 }

@@ -10,6 +10,7 @@ import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
 import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU, detailTexture } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
+import { floraPalette } from './flora.js';
 
 // volumetric clouds are the default in the browser; ?vclouds=0 and
 // ?quality=low fall back to the flat decks (node/sanity has no location
@@ -497,6 +498,14 @@ export class Planet {
     for (const k of ['forest', 'rock', 'snow', 'blotch', 'crevasse', 'ember']) lin(p[k]);
     this.pal = p;
 
+    // each world's species tint its forests: a planet covered in purple
+    // trees reads purple from ORBIT, not generic green. The flora palette
+    // derives from the pre-blend forest colour and is cached here so the
+    // species colours stay stable (own rng stream — planet rng untouched).
+    this.flora = null;    // species geometries, built lazily on approach
+    this.floraPal = floraPalette(this, makeRng(this.seed + ':flora'));
+    if (p.forest) p.forest = p.forest.clone().lerp(this.floraPal.canopy, 0.45);
+
     // the palette as shader uniforms: the terrain fragment shader evaluates
     // the full gradient per-PIXEL, so coastlines and rock bands stay crisp
     // from orbit and colors can't pop between LODs
@@ -882,6 +891,10 @@ export class Planet {
     this.lod.dispose();
     if (this.waterLod) this.waterLod.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
+    if (this.flora) {
+      for (const k in this.flora) if (this.flora[k] && this.flora[k].dispose) this.flora[k].dispose();
+      this.flora = null;
+    }
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
