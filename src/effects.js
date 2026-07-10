@@ -106,6 +106,7 @@ export class SkyDome {
         uAlpha: { value: 0 },
       },
       vertexShader: /* glsl */`
+        #include <common>
         #include <logdepthbuf_pars_vertex>
         varying vec3 vDir;
         void main() {
@@ -114,6 +115,7 @@ export class SkyDome {
           #include <logdepthbuf_vertex>
         }`,
       fragmentShader: /* glsl */`
+        #include <common>
         #include <logdepthbuf_pars_fragment>
         uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
         uniform float uAlpha;

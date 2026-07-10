@@ -805,6 +805,9 @@ frame();
 // ---- debug / test API (used by tools/screenshot.js) ----------------------------
 window.NMS = {
   version: VERSION,
+  _ff: farFlora,           // debug handle (headless diagnostics)
+  _renderer: renderer,
+  _THREE: THREE,
   get booted() { return frameNo > 3; },
   get state() { return state; },
   seed: () => SEED,

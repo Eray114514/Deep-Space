@@ -205,7 +205,9 @@ function buildFarTree(rng, pal, style, h, canopyColor) {
     canopy.scale(1, 0.82, 1);
     canopy.translate(0, h * 1.0, 0);
   }
-  paint(canopy, canopyColor, rng, 0.09);
+  // over-bright: distance fog pulls everything toward the haze colour, and
+  // canopies that match the forest-tinted ground vanish into it
+  paint(canopy, canopyColor.clone().multiplyScalar(1.6), rng, 0.09);
   parts.push(canopy);
   return shadeVertical(mergeGeos(parts), 0.6, 1.15);
 }

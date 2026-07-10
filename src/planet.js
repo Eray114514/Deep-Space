@@ -504,7 +504,9 @@ export class Planet {
     // species colours stay stable (own rng stream — planet rng untouched).
     this.flora = null;    // species geometries, built lazily on approach
     this.floraPal = floraPalette(this, makeRng(this.seed + ':flora'));
-    if (p.forest) p.forest = p.forest.clone().lerp(this.floraPal.canopy, 0.45);
+    // 0.3: enough to colour forests from orbit, while trees stay brighter
+    // than the ground they stand on (full-strength blending camouflaged them)
+    if (p.forest) p.forest = p.forest.clone().lerp(this.floraPal.canopy, 0.3);
 
     // the palette as shader uniforms: the terrain fragment shader evaluates
     // the full gradient per-PIXEL, so coastlines and rock bands stay crisp

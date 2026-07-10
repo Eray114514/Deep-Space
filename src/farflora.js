@@ -98,7 +98,7 @@ export class FarFlora {
       const mat = new THREE.MeshStandardMaterial({
         color: 0xffffff, vertexColors: true, roughness: 0.95, flatShading: true,
       });
-      mat.emissive.setScalar(0.14);
+      mat.emissive.setScalar(0.22);
       applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
       const im = new THREE.InstancedMesh(geo, mat, CAP);
       im.count = 0;
