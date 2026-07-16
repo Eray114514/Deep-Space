@@ -657,7 +657,7 @@ export class Planet {
         transparent: true, depthWrite: false, opacity: 0.88,
       });
       const o1 = [rand() * 7, rand() * 7, rand() * 7];
-      applyCloudField(cmat, coverage, o1[0], o1[1], o1[2], thick * 0.42);
+      applyCloudField(cmat, coverage, o1[0], o1[1], o1[2], thick * 0.72);
       this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 160, 96), cmat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
@@ -821,7 +821,7 @@ export class Planet {
         // over from orbit through cloud transit and supplies parallax,
         // extinction, self-shadowing and volumetric fog.
         const camR = camLocal.length();
-        const e = smoothstep(3.0, 1.12, camR / this.R);
+        const e = smoothstep(2.05, 1.12, camR / this.R);
         const u = this.volCloudMat.uniforms;
         u.uEngage.value = e;
         u.uCameraLocal.value.copy(camLocal);
@@ -838,7 +838,7 @@ export class Planet {
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
       const camR = camLocal.length();
-      const e = smoothstep(3.0, 1.12, camR / this.R);
+      const e = smoothstep(2.05, 1.12, camR / this.R);
       this.cloudMesh2.material.opacity = 0.28 * (1 - e);
     }
   }

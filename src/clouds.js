@@ -70,8 +70,10 @@ export function cloudNoiseTexture() {
   }
   _noiseTex = new THREE.Data3DTexture(data, S, S, S);
   _noiseTex.format = THREE.RGFormat;
-  _noiseTex.minFilter = _noiseTex.magFilter = THREE.LinearFilter;
+  _noiseTex.minFilter = THREE.LinearMipmapLinearFilter;
+  _noiseTex.magFilter = THREE.LinearFilter;
   _noiseTex.wrapS = _noiseTex.wrapT = _noiseTex.wrapR = THREE.RepeatWrapping;
+  _noiseTex.generateMipmaps = true;
   _noiseTex.needsUpdate = true;
   return _noiseTex;
 }
@@ -148,8 +150,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         // through the whole shell. Shift it laterally with altitude so anvils,
         // shelves and tilted billows replace the former vertical curtains.
         vec3 coverageDir = normalize(radial
-          + tangentA * bend * 0.055
-          + tangentB * (bend * bend - 0.08) * 0.045);
+          + tangentA * bend * 0.02
+          + tangentB * (bend * bend - 0.08) * 0.015);
         vec3 sd = uSpin * coverageDir;
         float cov = smoothstep(uCov0, uCov1, cloudFbm(sd)) * covScale;
         if (cov < 0.01) return 0.0;
@@ -165,7 +167,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         vec3 q = uSpin * radial * (uRin / 26000.0)
           + vec3(0.37, 0.71, 0.53) * (h * 2.7)
           + warp * 1.4;
-        vec2 n = textureLod(uNoise3, q, 0.0).rg;
+        vec2 n = textureLod(uNoise3, q, 0.8).rg;
         // Locally varied floor and ceiling prevent a single hard lower edge.
         float floorH = 0.025 + (1.0 - n.g) * 0.13;
         float ceilH = 0.48 + cov * 0.38 + (n.r - 0.5) * 0.18;
@@ -173,7 +175,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
           * (1.0 - smoothstep(ceilH - 0.18, ceilH, h));
         float cells = smoothstep(0.34, 0.72, n.r);
         float d = cov * prof * cells;
-        float ero = textureLod(uNoise3, q * 3.15, 0.0).g;
+        float ero = textureLod(uNoise3, q * 3.15, 1.25).g;
         d = clamp(d - (1.0 - ero) * 0.22 * (1.0 - d), 0.0, 1.0);
         return smoothstep(0.035, 0.58, d);
       }

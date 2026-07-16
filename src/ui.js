@@ -173,6 +173,14 @@ export class UI {
       this.els.labels.appendChild(el);
       this.labelPool.push(el);
     }
+    const occupied = [];
+    for (const id of ['brand', 'compass', 'target-card', 'hud', 'resource-strip']) {
+      const node = document.getElementById(id);
+      if (!node || getComputedStyle(node).display === 'none') continue;
+      const r = node.getBoundingClientRect();
+      occupied.push({ left: r.left - 6, top: r.top - 6, right: r.right + 6, bottom: r.bottom + 6 });
+    }
+    const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
     for (let i = 0; i < this.labelPool.length; i++) {
       const el = this.labelPool[i];
       if (i >= items.length) { el.style.display = 'none'; continue; }
@@ -185,7 +193,19 @@ export class UI {
       const w = Math.max(80, el.offsetWidth || 80);
       const h = Math.max(24, el.offsetHeight || 24);
       const x = Math.max(8, Math.min(window.innerWidth - w - 8, it.x));
-      const y = Math.max(72, Math.min(window.innerHeight - h - 72, it.y));
+      let y = Math.max(72, Math.min(window.innerHeight - h - 72, it.y));
+      let rect = { left: x, top: y, right: x + w, bottom: y + h };
+      let tries = 0;
+      while (occupied.some((other) => intersects(rect, other)) && tries < 6) {
+        y = Math.min(window.innerHeight - h - 72, y + h + 5);
+        rect = { left: x, top: y, right: x + w, bottom: y + h };
+        tries++;
+      }
+      if (occupied.some((other) => intersects(rect, other)) && it.dim) {
+        el.style.display = 'none';
+        continue;
+      }
+      occupied.push(rect);
       el.style.transform = `translate(${x.toFixed(0)}px, ${y.toFixed(0)}px)`;
     }
   }
