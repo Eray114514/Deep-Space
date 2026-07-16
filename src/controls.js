@@ -30,6 +30,8 @@ export class SpaceControls {
     this.onClick = onClick;
     this.enabled = true;
     this.speedScale = 1000;          // set per-frame by main from altitude
+    this.atmosphereFactor = 0;
+    this.boosting = false;
     this.wheelImpulse = 0;
     this.focus = null;               // planet (for RMB orbit / two-finger orbit)
 
@@ -42,11 +44,13 @@ export class SpaceControls {
     this._onPointerMove = (e) => this.pointerMove(e);
     this._onPointerUp = (e) => this.pointerUp(e);
     this._onWheel = (e) => this.wheel(e);
+    this._onLockedMove = (e) => this.lockedMove(e);
     dom.addEventListener('pointerdown', this._onPointerDown);
     dom.addEventListener('pointermove', this._onPointerMove);
     dom.addEventListener('pointerup', this._onPointerUp);
     dom.addEventListener('pointercancel', this._onPointerUp);
     dom.addEventListener('wheel', this._onWheel, { passive: false });
+    document.addEventListener('mousemove', this._onLockedMove);
     dom.addEventListener('contextmenu', (e) => e.preventDefault());
   }
 
@@ -63,6 +67,10 @@ export class SpaceControls {
 
   pointerDown(e) {
     if (!this.enabled) return;
+    if (e.button === 2) this.boosting = true;
+    if (!window.NMS_NOLOCK && e.pointerType !== 'touch' && document.pointerLockElement !== this.dom) {
+      this.dom.requestPointerLock();
+    }
     try { this.dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointers */ }
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (this.pointers.size === 1) {
@@ -81,6 +89,7 @@ export class SpaceControls {
 
   pointerMove(e) {
     if (!this.enabled || !this.pointers.has(e.pointerId)) return;
+    if (document.pointerLockElement === this.dom && e.pointerType !== 'touch') return;
     const prev = this.pointers.get(e.pointerId);
     const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
     prev.x = e.clientX; prev.y = e.clientY;
@@ -100,15 +109,18 @@ export class SpaceControls {
 
     if (this._drag && this._drag.id === e.pointerId) {
       this._drag.moved += Math.abs(dx) + Math.abs(dy);
-      if (this._drag.button === 2 && this.focus) {
-        this.orbit(dx, dy);
-      } else {
-        // free look
-        this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -dx * 0.0026));
-        this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -dy * 0.0026));
-        this.nav.quat.normalize();
-      }
+      // drag-look fallback for nolock mode and touch.
+      this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -dx * 0.0026));
+      this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -dy * 0.0026));
+      this.nav.quat.normalize();
     }
+  }
+
+  lockedMove(e) {
+    if (!this.enabled || document.pointerLockElement !== this.dom) return;
+    this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -e.movementX * 0.0019));
+    this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -e.movementY * 0.0019));
+    this.nav.quat.normalize();
   }
 
   orbit(dx, dy) {
@@ -124,6 +136,7 @@ export class SpaceControls {
   }
 
   pointerUp(e) {
+    if (e.button === 2) this.boosting = false;
     this.pointers.delete(e.pointerId);
     if (this.pointers.size === 2) {
       this._pinchDist = this.pinchDistOf([...this.pointers.values()]);
@@ -151,9 +164,10 @@ export class SpaceControls {
     nav.vel.multiplyScalar(Math.exp(-dt * 2.4));
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);
-      nav.vel.addScaledVector(_f, this.wheelImpulse * 0.012 * this.speedScale);
+      const wheelGain = 0.012 * (1 - this.atmosphereFactor * 0.68);
+      nav.vel.addScaledVector(_f, this.wheelImpulse * wheelGain * this.speedScale);
       this.wheelImpulse = 0;
-      const maxV = this.speedScale * 18;
+      const maxV = this.speedScale * (18 - this.atmosphereFactor * 13);
       if (nav.vel.length() > maxV) nav.vel.setLength(maxV);
     } else {
       this.wheelImpulse = 0;
@@ -166,6 +180,13 @@ export class SpaceControls {
         _f.set(r, 0, -f).normalize().applyQuaternion(nav.quat);
         nav.vel.addScaledVector(_f, this.speedScale * 2.2 * dt);
       }
+      if (this.boosting || keys.ShiftLeft) {
+        _f.set(0, 0, -1).applyQuaternion(nav.quat);
+        const boostAcceleration = this.speedScale * (this.atmosphereFactor > 0.05 ? 4.2 : 10.5);
+        nav.vel.addScaledVector(_f, boostAcceleration * dt);
+        const boostLimit = this.speedScale * (this.atmosphereFactor > 0.05 ? 5 : 16);
+        if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
+      }
     }
     nav.pos.addScaledVector(nav.vel, dt);
   }
@@ -175,6 +196,7 @@ export class SpaceControls {
     this.dom.removeEventListener('pointermove', this._onPointerMove);
     this.dom.removeEventListener('pointerup', this._onPointerUp);
     this.dom.removeEventListener('wheel', this._onWheel);
+    document.removeEventListener('mousemove', this._onLockedMove);
   }
 }
 

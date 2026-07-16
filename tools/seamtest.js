@@ -25,6 +25,7 @@ const PX_LIMIT = 4.5;          // biggest allowed hard-swap apparent size
 await mkdir(OUT, { recursive: true });
 const { server, port } = await startServer(0);
 const browser = await chromium.launch({
+  executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || chromium.executablePath(),
   args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl', '--disable-gpu-sandbox'],
 });
 const page = await browser.newPage({ viewport: { width: 960, height: 540 } });

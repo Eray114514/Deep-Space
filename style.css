@@ -1,9 +1,10 @@
 :root {
-  --fg: #cfe8f4;
-  --fg-dim: #7fa3b4;
-  --accent: #66e0c2;
-  --panel: rgba(8, 20, 28, 0.55);
-  --border: rgba(127, 200, 230, 0.25);
+  --fg: #d9f2f6;
+  --fg-dim: #76949d;
+  --accent: #75eef3;
+  --gold: #f0b650;
+  --panel: rgba(2, 15, 22, 0.76);
+  --border: rgba(104, 232, 239, 0.46);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -25,18 +26,42 @@ body { overscroll-behavior: none; }
 
 .panel {
   position: fixed;
-  background: var(--panel);
+  background:
+    linear-gradient(115deg, rgba(12, 47, 59, 0.64), rgba(2, 13, 20, 0.88) 55%),
+    var(--panel);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 10px 14px;
-  backdrop-filter: blur(6px);
+  border-radius: 0;
+  padding: 16px 20px;
+  backdrop-filter: blur(12px);
   pointer-events: auto;
+  touch-action: none;
   user-select: none;
+  box-shadow: inset 0 0 42px rgba(63, 211, 223, 0.04), 0 18px 55px rgba(0, 0, 0, 0.28);
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
 }
 
-#hud { top: 16px; left: 16px; min-width: 200px; z-index: 10; }
-#hud #sys-name { font-size: 17px; font-weight: 600; color: var(--accent); text-transform: uppercase; }
-#hud .sub, .panel .sub { font-size: 11px; color: var(--fg-dim); margin-top: 3px; }
+#brand {
+  position: fixed; left: 42px; top: 34px; z-index: 10;
+  min-width: 124px; padding: 12px 18px;
+  color: #e9fcff; font: 700 22px/1 ui-monospace, "Cascadia Mono", monospace;
+  letter-spacing: 0.12em; text-shadow: 0 0 14px rgba(117, 238, 243, 0.35);
+}
+#brand::before, #brand::after {
+  content: ""; position: absolute; width: 18px; height: 18px;
+  border-color: var(--accent); opacity: 0.85;
+}
+#brand::before { left: 0; top: 0; border-left: 2px solid; border-top: 2px solid; }
+#brand::after { right: 0; bottom: 0; border-right: 2px solid; border-bottom: 2px solid; }
+#brand i { color: var(--accent); font-style: normal; margin: 0 8px; }
+#brand b { font-weight: 500; }
+
+#hud { left: 36px; bottom: 40px; width: 340px; min-height: 138px; z-index: 10; }
+#hud::before {
+  content: "FLIGHT STATUS"; position: absolute; right: 18px; top: 16px;
+  color: rgba(164, 202, 209, 0.52); font: 9px ui-monospace, monospace; letter-spacing: 0.24em;
+}
+#hud #sys-name { font: 600 12px ui-monospace, monospace; color: var(--accent); text-transform: uppercase; letter-spacing: 0.16em; }
+#hud .sub, .panel .sub { font: 10px ui-monospace, monospace; color: var(--fg-dim); margin-top: 7px; letter-spacing: 0.08em; }
 #new-universe {
   margin-top: 8px; padding: 4px 8px; font-size: 11px;
   background: transparent; color: var(--fg-dim);
@@ -44,15 +69,19 @@ body { overscroll-behavior: none; }
 }
 #new-universe:hover { color: var(--accent); border-color: var(--accent); }
 
-#target-card { top: 16px; right: 16px; min-width: 210px; text-align: right; z-index: 10; }
-#target-card #tc-name { font-size: 16px; font-weight: 600; color: #fff; }
-#target-card .dist { margin-top: 6px; font-size: 14px; color: var(--accent); font-variant-numeric: tabular-nums; }
+#target-card { top: 82px; right: 34px; width: 390px; min-height: 132px; text-align: right; z-index: 10; padding: 25px 28px 18px; }
+#target-card::before {
+  content: "ACTIVE DIRECTIVE 01"; position: absolute; right: 28px; top: 13px;
+  color: var(--accent); font: 9px ui-monospace, monospace; letter-spacing: 0.18em;
+}
+#target-card #tc-name { margin-top: 14px; font-size: 20px; font-weight: 600; color: #f2fbff; letter-spacing: 0.06em; }
+#target-card .dist { margin-top: 11px; font: 14px ui-monospace, monospace; color: var(--gold); font-variant-numeric: tabular-nums; }
 
 #altitude {
-  position: fixed; top: 110px; right: 16px;
-  font-size: 12px; color: var(--fg-dim);
+  position: fixed; left: 56px; bottom: 64px;
+  font: 14px ui-monospace, monospace; color: #e5f9fb;
   font-variant-numeric: tabular-nums;
-  text-align: right; z-index: 10;
+  text-align: left; z-index: 11;
   text-shadow: 0 1px 3px #000;
   white-space: pre;
 }
@@ -63,9 +92,9 @@ body { overscroll-behavior: none; }
   z-index: 10; pointer-events: none;
 }
 #hint {
-  font-size: 12px; color: var(--fg-dim);
-  background: rgba(0, 0, 0, 0.35);
-  padding: 6px 14px; border-radius: 14px;
+  font: 11px ui-monospace, monospace; color: var(--fg-dim);
+  background: linear-gradient(90deg, transparent, rgba(1, 10, 15, 0.72), transparent);
+  padding: 8px 34px; border-radius: 0;
   text-align: center;
   text-shadow: 0 1px 2px #000;
 }
@@ -85,11 +114,22 @@ body { overscroll-behavior: none; }
 }
 
 #crosshair {
-  position: fixed; left: 50%; top: 50%; width: 6px; height: 6px;
-  margin: -3px 0 0 -3px; border-radius: 50%;
-  background: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.8);
+  position: fixed; left: 50%; top: 50%; width: 76px; height: 76px;
+  margin: -38px 0 0 -38px; border-radius: 50%;
+  border: 1px solid rgba(117, 238, 243, 0.36);
+  background: radial-gradient(circle, #fff 0 2px, transparent 3px);
+  box-shadow: 0 0 18px rgba(76, 224, 235, 0.06);
   z-index: 10; pointer-events: none;
+}
+#crosshair::before {
+  content: ""; position: absolute; inset: 26px;
+  border: 1px solid rgba(117, 238, 243, 0.9);
+  transform: rotate(45deg);
+}
+#crosshair::after {
+  content: ""; position: absolute; left: 34px; top: -8px; width: 8px; height: 1px;
+  background: var(--accent);
+  box-shadow: 0 91px 0 var(--accent), -46px 45px 0 var(--accent), 46px 45px 0 var(--accent);
 }
 
 #labels { position: fixed; inset: 0; z-index: 5; pointer-events: none; overflow: hidden; }
@@ -113,7 +153,7 @@ body { overscroll-behavior: none; }
 
 #stats {
   position: fixed; bottom: 22px; left: 10px;
-  font-size: 10px; color: rgba(160, 190, 205, 0.6);
+  font-size: 9px; color: rgba(160, 190, 205, 0.28);
   z-index: 10; pointer-events: none; white-space: pre;
 }
 
@@ -148,7 +188,7 @@ body { overscroll-behavior: none; }
 }
 
 /* photo mode (H): hide everything but the world and the version stamp */
-.hide-hud #hud, .hide-hud #target-card, .hide-hud #altitude, .hide-hud #bottom,
+.hide-hud #brand, .hide-hud #hud, .hide-hud #target-card, .hide-hud #altitude, .hide-hud #bottom,
 .hide-hud #labels, .hide-hud #stats, .hide-hud #crosshair { display: none !important; }
 
 #fade {
@@ -157,6 +197,31 @@ body { overscroll-behavior: none; }
   pointer-events: none;
   transition: opacity 0.6s;
 }
+
+#pause-overlay {
+  position: fixed; inset: 0; z-index: 35;
+  display: grid; place-items: center;
+  background: radial-gradient(circle, rgba(2, 14, 20, 0.28), rgba(0, 3, 7, 0.76));
+  backdrop-filter: blur(7px);
+}
+.pause-panel {
+  width: min(440px, 86vw); padding: 34px 40px 38px;
+  text-align: center; color: var(--fg);
+  background: linear-gradient(135deg, rgba(10, 44, 55, 0.9), rgba(2, 12, 18, 0.95));
+  border: 1px solid var(--border);
+  clip-path: polygon(0 0, calc(100% - 24px) 0, 100% 24px, 100% 100%, 24px 100%, 0 calc(100% - 24px));
+  box-shadow: 0 22px 90px rgba(0, 0, 0, 0.55);
+}
+.pause-panel span { font: 9px ui-monospace, monospace; letter-spacing: 0.24em; color: var(--accent); }
+.pause-panel h2 { margin-top: 18px; font-size: 28px; letter-spacing: 0.18em; font-weight: 500; }
+.pause-panel p { margin-top: 10px; color: var(--fg-dim); font-size: 12px; }
+#resume-btn {
+  margin-top: 28px; width: 220px; padding: 13px 18px;
+  color: #eaffff; background: rgba(44, 175, 187, 0.24);
+  border: 1px solid var(--accent); cursor: pointer;
+  font: 600 12px ui-monospace, monospace; letter-spacing: 0.18em;
+}
+#resume-btn:hover { background: rgba(65, 220, 231, 0.36); box-shadow: 0 0 30px rgba(91, 229, 238, 0.18); }
 
 /* ---- touch controls ---- */
 #touch-ui { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
@@ -190,15 +255,25 @@ body { overscroll-behavior: none; }
 
 /* ---- small screens ---- */
 @media (max-width: 760px) {
-  #hud { top: 8px; left: 8px; min-width: 0; padding: 7px 10px; }
-  #hud #sys-name { font-size: 13px; }
+  #brand { left: 8px; top: 8px; transform: scale(0.75); transform-origin: top left; }
+  #hud {
+    top: auto; right: auto; bottom: 12px; left: 8px;
+    width: 176px; min-width: 0; min-height: 0; padding: 9px 10px;
+  }
+  #hud::before { display: none; }
+  #hud #sys-name { font-size: 11px; padding-right: 0; }
   #hud .sub { display: none; }
   #new-universe { margin-top: 4px; font-size: 10px; padding: 3px 6px; }
-  #target-card { top: 8px; right: 8px; min-width: 0; padding: 7px 10px; }
+  #target-card {
+    top: 8px; right: 8px; bottom: auto; left: auto;
+    width: min(236px, calc(100vw - 16px)); min-width: 0; min-height: 0;
+    padding: 20px 12px 9px;
+  }
+  #target-card::before { right: 12px; top: 8px; font-size: 7px; }
   #target-card #tc-name { font-size: 13px; }
   #target-card #tc-info { display: none; }
   #target-card .dist { font-size: 12px; margin-top: 2px; }
-  #altitude { top: 78px; right: 8px; font-size: 10px; }
+  #altitude { top: 82px; right: 18px; bottom: auto; left: auto; font-size: 10px; }
   #hint { font-size: 10px; padding: 5px 10px; max-width: 86vw; }
   #bottom { bottom: 14px; }
   #land-btn { font-size: 13px; padding: 12px 20px; }

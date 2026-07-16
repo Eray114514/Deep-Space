@@ -175,3 +175,32 @@ Pending / next (in owner's priority order):
 Known cosmetic issues (logged, not blocking): faint parallel streaks over
 horizon suns; moon landings can spawn in dense forest; ice plains featureless
 up close.
+
+## 6. Deep Space rebuild acceptance criteria (v0.21+)
+
+These project-specific requirements override older prototype constraints such
+as "no assets" where they conflict.
+
+- The opening and every warp arrival frame a large planet as a dominant,
+  oppressive-scale body while keeping the Asterion S-9 clearly readable.
+- Main planets are world-scale procedural bodies, not shared texture spheres.
+  Every seed/type owns its terrain, palette, relief, liquids, atmosphere,
+  clouds, flora and surface scatter, and orbit/flight/walking sample the same
+  deterministic world functions.
+- Atmosphere has playable thickness: crossing the outer glow leads to a long
+  high-altitude overlook, then an above-cloud phase, cloud transit and only
+  later low flight. Speed management may compress travel time but must not
+  visually teleport between these layers.
+- Desktop flight is mouse-steered with no inverted vertical axis. W/S provide
+  thrust/brake and RMB or Shift provides stable boost. Boost feedback comes
+  from acceleration, engine emission, FOV, streaks and audio—not random camera
+  jitter.
+- Escape, pointer-lock loss and browser visibility changes pause safely.
+  Returning to the game must reacquire input without freezing simulation.
+- Warp is a visible directed flight with charge-up, spatial streaking/folding,
+  a sustained high-speed middle and a deliberate planetary arrival reveal.
+- The shipped presentation includes the detailed GLB ship, designed HUD and
+  procedural WebAudio. Debug-looking controls must not dominate the playfield.
+- Screenshot review is authoritative. Cloud columns, shell barcodes, mosaic
+  clouds, obvious sphere curvature near the ground and flat repeated planet
+  surfaces are release-blocking visual defects even if automated tests pass.

@@ -8,8 +8,8 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU, detailTexture } from './shaders.js';
-import { makeCloudVolumeMaterial } from './clouds.js';
+import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU } from './shaders.js';
+import { makeCloudPuffField } from './clouds.js';
 import { floraPalette } from './flora.js';
 
 // volumetric clouds are the default in the browser; ?vclouds=0 and
@@ -77,13 +77,18 @@ export class Planet {
     this.type = type;
     this.cfg = TYPES[type];
 
-    // ---- dimensions: real worlds, tens of kilometres across ---------------
-    const baseR = isMoon ? 8000 + rand() * 12000 : 30000 + rand() * 90000;
+    // ---- dimensions: compressed planetary worlds, not gameplay marbles ----
+    // Main planets are hundreds of kilometres in radius. This keeps low flight
+    // visually flat while altitude-scaled controls preserve a short approach.
+    const baseR = isMoon ? 28000 + rand() * 72000 : 160000 + rand() * 240000;
     this.R = radius || baseR;
-    // relief grows with the world but tops out at alpine scale
-    this.hAmp = Math.min(this.R * this.cfg.relief * (0.85 + rand() * 0.5), 2400 + rand() * 1200);
-    this.gravity = 9.81 * clamp(this.R / 70000, 0.55, 1.5);
+    // Relief grows with the world and can form kilometre-scale mountain belts.
+    this.hAmp = Math.min(this.R * this.cfg.relief * (0.85 + rand() * 0.5), 7000 + rand() * 6000);
+    this.gravity = 9.81 * clamp(this.R / 250000, 0.55, 1.5);
     this.atmoDensity = this.cfg.atmoDensity * (0.7 + rand() * 0.6);
+    this.atmoFraction = (isMoon ? 0.055 : 0.09) + rand() * (isMoon ? 0.025 : 0.045);
+    this.cloudBaseFraction = (isMoon ? 0.022 : 0.035) + rand() * (isMoon ? 0.016 : 0.025);
+    this.cloudThicknessFraction = (isMoon ? 0.008 : 0.012) + rand() * (isMoon ? 0.008 : 0.016);
 
     // ---- noise fields -----------------------------------------------------
     this.nA = new Simplex(makeRng(seed + ':A'));
@@ -624,7 +629,7 @@ export class Planet {
     }
 
     if (this.atmoDensity > 0.05) {
-      const atmoR = R + Math.max(this.hAmp * 2.2, R * 0.05);
+      const atmoR = R + Math.max(this.hAmp * 3.2, R * this.atmoFraction);
       this.atmoMesh = new THREE.Mesh(
         new THREE.SphereGeometry(atmoR, 96, 64),
         makeAtmosphereMaterial(this.atmoColor, this.atmoDensity),
@@ -633,7 +638,7 @@ export class Planet {
       this.group.add(this.atmoMesh);
       this.atmoHeight = atmoR - R;
     } else {
-      this.atmoHeight = Math.max(this.hAmp * 2.2, R * 0.03);
+      this.atmoHeight = Math.max(this.hAmp * 3.2, R * this.atmoFraction * 0.72);
     }
 
     // clouds are a roll of the dice per planet, with their own coverage —
@@ -644,7 +649,7 @@ export class Planet {
       // the visible clouds are shader-procedural (resolution-independent);
       // this small texture only serves the terrain's cast cloud shadows
       this.cloudShadowTex = makeCloudTexture(this.nD, coverage);
-      const cloudR = R + Math.max(this.hAmp * 1.7 + 90, R * 0.02);
+      const cloudR = R + Math.max(this.hAmp * 2.0 + 1500, R * this.cloudBaseFraction);
       const cmat = new THREE.MeshLambertMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.92,
@@ -656,6 +661,7 @@ export class Planet {
       this.group.add(this.cloudMesh);
       this.cloudBands.push({
         r: cloudR, mesh: this.cloudMesh, opacity: 0.92,
+        halfThickness: Math.max(this.hAmp * 0.8, R * this.cloudThicknessFraction * 0.5, 1800),
         cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
         ox: o1[0], oy: o1[1], oz: o1[2],
       });
@@ -664,26 +670,19 @@ export class Planet {
       const o2 = coverage > 0.45
         ? [rand() * 7, rand() * 7, rand() * 7, rand() * Math.PI * 2] : null;
       if (VCLOUDS) {
-        // TRUE volumetric clouds: a raymarched shell around the SAME coverage
-        // field the deck, the terrain shadows and the transit fog use. The
-        // flat deck remains the far-view impostor and crossfades out on
-        // approach as the volume takes over.
-        const thick = Math.max(this.hAmp * 1.1, R * 0.006, 900);
+        // The far deck supplies global weather; deterministic spatial cloud
+        // clusters supply close parallax and real separation through the
+        // atmosphere without a screen-space raymarch curtain.
+        const thick = Math.max(this.hAmp * 1.5, R * this.cloudThicknessFraction, 3500);
         const band = {
           rIn: cloudR - thick * 0.45, rOut: cloudR + thick * 0.55,
           cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
           ox: o1[0], oy: o1[1], oz: o1[2],
           tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         };
-        this.volCloudMat = makeCloudVolumeMaterial(this, band, detailTexture(), 3.2e9);
-        this.volCloudMat.uniforms.uAmbC.value
-          .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.6);
-        this.volCloudMesh = new THREE.Mesh(
-          new THREE.SphereGeometry(band.rOut, 48, 32), this.volCloudMat);
-        this.volCloudMesh.renderOrder = 2;
-        this.volCloudMesh.frustumCulled = false;   // BackSide shell straddles the frustum
-        this.volCloudMesh.visible = false;
-        this.group.add(this.volCloudMesh);
+        this.localCloudField = makeCloudPuffField(this, band, this.seed);
+        this.localCloudField.visible = false;
+        this.group.add(this.localCloudField);
       } else if (o2) {
         // a second, thinner deck drifting at its own pace gives depth
         const cmat2 = new THREE.MeshLambertMaterial({
@@ -697,6 +696,7 @@ export class Planet {
         this.cloudSpin2 = o2[3];
         this.cloudBands.push({
           r: cloudR + this.hAmp * 0.9, mesh: this.cloudMesh2, opacity: 0.5,
+          halfThickness: Math.max(this.hAmp * 0.65, R * this.cloudThicknessFraction * 0.42, 1400),
           cov0: 0.55 - coverage * 0.6 * 0.24, cov1: 0.86 - coverage * 0.6 * 0.14,
           ox: o2[0], oy: o2[1], oz: o2[2],
         });
@@ -759,7 +759,7 @@ export class Planet {
     const camR = camLocal.length();
     let t = 0;
     for (const b of this.cloudBands) {
-      const prox = 1 - Math.min(1, Math.abs(camR - b.r) / 900);
+      const prox = 1 - Math.min(1, Math.abs(camR - b.r) / (b.halfThickness || 1800));
       if (prox <= 0) continue;
       _dir.copy(camLocal).multiplyScalar(1 / camR)
         .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
@@ -782,7 +782,8 @@ export class Planet {
       for (const b of this.cloudBands) {
         const sh = b.mesh.material.userData.shader;
         if (sh) {
-          const x = Math.min(1, Math.max(0, (Math.abs(camR - b.r) - 200) / 1400));
+          const fadeWidth = Math.max(1800, (b.halfThickness || 1800) * 1.35);
+          const x = Math.min(1, Math.max(0, (Math.abs(camR - b.r) - 250) / fadeWidth));
           sh.uniforms.uCamProx.value = x * x * (3 - 2 * x);
           if (this.sunDirLocal) {
             sh.uniforms.uCSun.value.copy(this.sunDirLocal)
@@ -803,18 +804,22 @@ export class Planet {
       _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
       const sh = this.terrainMaterial.userData.shader;
       if (sh) sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
-      if (this.volCloudMesh) {
-        // the volume takes over from the flat impostor as you approach
+      if (this.localCloudField) {
+        // Local puffs appear in near orbit while the global deck stays faintly
+        // present as a coherent low-frequency weather layer.
         const camR = camLocal.length();
-        const e = smoothstep(6, 3.5, camR / this.R);
-        const u = this.volCloudMat.uniforms;
+        // From orbit the analytic cloud deck is cleaner and cheaper. The
+        // raymarched volume takes over only in near orbit, before the camera
+        // reaches the atmosphere, so the handoff remains invisible without
+        // producing a barcode-like grazing shell around the planetary limb.
+        const e = smoothstep(1.8, 1.16, camR / this.R);
+        const u = this.localCloudField.material.uniforms;
         u.uEngage.value = e;
-        u.uCenter.value.copy(camLocal).negate();
-        u.uSpin.value.setFromMatrix4(_m4);          // same drift as the shadows
+        u.uPointScale.value = typeof window === 'undefined' ? 720 : window.innerHeight;
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
-        this.volCloudMesh.visible = e > 0.01;
-        this.cloudMesh.material.opacity = 0.92 * (1 - e);
-        this.cloudMesh.visible = e < 0.995;
+        this.localCloudField.visible = e > 0.04;
+        this.cloudMesh.material.opacity = 0.92 * (1 - e * 0.62);
+        this.cloudMesh.visible = true;
       }
     }
     if (this.cloudMesh2) {

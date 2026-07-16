@@ -14,12 +14,13 @@ export function tickShaders(dt) { TIME.value += dt; }
 
 let _detailTex = null;
 let _detailData = null;   // kept for CPU-side sampling (cloud transit fog)
+const DETAIL_SIZE = 512;
 
 // bilinear, wrapping sample of the detail texture on the CPU — must agree
 // with what the GPU sees so fog can thicken exactly where a cloud is
 export function sampleDetailCPU(u, v, ch) {
   if (!_detailData) return 0.5;
-  const S = 256;
+  const S = DETAIL_SIZE;
   let x = (u - Math.floor(u)) * S, y = (v - Math.floor(v)) * S;
   const x0 = x | 0, y0 = y | 0;
   const x1 = (x0 + 1) % S, y1 = (y0 + 1) % S;
@@ -32,7 +33,7 @@ export function sampleDetailCPU(u, v, ch) {
 
 export function detailTexture() {
   if (_detailTex || typeof document === 'undefined') return _detailTex;
-  const S = 256;
+  const S = DETAIL_SIZE;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = S;
   const ctx = canvas.getContext('2d');

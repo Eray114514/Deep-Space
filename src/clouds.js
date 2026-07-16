@@ -7,9 +7,19 @@
 // so the seam test's static frames stay static.
 
 import * as THREE from 'three';
-import { hash3i, hashFloat } from './rng.js';
+import { hash3i, hashFloat, makeRng } from './rng.js';
 
 let _noiseTex = null;
+let _cloudSpriteTex = null;
+
+function cloudSpriteTexture() {
+  if (_cloudSpriteTex) return _cloudSpriteTex;
+  _cloudSpriteTex = new THREE.TextureLoader().load('/public/assets/cloud-cumulus-atlas-2x2-v1.png');
+  _cloudSpriteTex.colorSpace = THREE.SRGBColorSpace;
+  _cloudSpriteTex.minFilter = THREE.LinearMipmapLinearFilter;
+  _cloudSpriteTex.magFilter = THREE.LinearFilter;
+  return _cloudSpriteTex;
+}
 
 // wrapped-lattice value noise → guaranteed tiling in all three axes
 function valueNoise3(x, y, z, N, seed) {
@@ -43,10 +53,11 @@ function worley3(x, y, z, N, seed) {
   return Math.min(1, Math.sqrt(best));
 }
 
-// 48³ RG texture: R = perlin-worley base lobes, G = high-frequency erosion
+// 64³ RG texture: R = perlin-worley base lobes, G = high-frequency erosion.
+// The larger volume removes the chunky cellular blocks visible from orbit.
 export function cloudNoiseTexture() {
   if (_noiseTex) return _noiseTex;
-  const S = 48;
+  const S = 64;
   const data = new Uint8Array(S * S * S * 2);
   for (let z = 0; z < S; z++) {
     for (let y = 0; y < S; y++) {
@@ -77,6 +88,101 @@ export function cloudNoiseTexture() {
 
 // logDepthBufFC for the manual fragment-depth write (camera.far is fixed)
 export function logDepthFC(far) { return 2.0 / (Math.log(far + 1.0) / Math.LN2); }
+
+// Close-range cloud volume made from deterministic spatial puffs. The global
+// analytic shell remains responsible for the planet-scale weather pattern;
+// these clusters provide parallax, bottoms, gaps and thickness in atmosphere.
+// This avoids the screen-space streaking that a long transparent ray march
+// produces on several browser/driver combinations.
+export function makeCloudPuffField(planet, band, seed) {
+  const rand = makeRng(`${seed}:cloud-puffs`);
+  const positions = [];
+  const sizes = [];
+  const shades = [];
+  const dir = new THREE.Vector3();
+  const thick = band.rOut - band.rIn;
+  const baseSize = Math.max(7000, Math.min(18000, planet.R * 0.043));
+  const clusterCount = Math.round(620 + planet.cfg.clouds * 480);
+
+  for (let c = 0; c < clusterCount; c++) {
+    const y = rand() * 2 - 1;
+    const a = rand() * Math.PI * 2;
+    const xz = Math.sqrt(Math.max(0, 1 - y * y));
+    const h = Math.pow(rand(), 1.55);
+    const r = band.rIn + thick * (0.08 + h * 0.84);
+    dir.set(Math.cos(a) * xz, y, Math.sin(a) * xz).multiplyScalar(r);
+    positions.push(dir.x, dir.y, dir.z);
+    sizes.push(baseSize * (0.58 + rand() * 1.02) * (1 - h * 0.22));
+    shades.push(rand());
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1));
+  geometry.setAttribute('aShade', new THREE.Float32BufferAttribute(shades, 1));
+
+  const material = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    uniforms: {
+      uEngage: { value: 0 },
+      uPointScale: { value: typeof window === 'undefined' ? 720 : window.innerHeight },
+      uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+      uTint: { value: new THREE.Color(band.tint || 0xffffff) },
+      uCloudSprite: { value: cloudSpriteTexture() },
+    },
+    vertexShader: /* glsl */`
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
+      attribute float aSize;
+      attribute float aShade;
+      uniform float uPointScale;
+      uniform vec3 uSunDir;
+      varying float vShade;
+      varying float vLight;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vShade = aShade;
+        vLight = dot(normalize(position), normalize(uSunDir)) * 0.5 + 0.5;
+        gl_PointSize = clamp(aSize * uPointScale / max(1.0, -mv.z), 1.5, 360.0);
+        gl_Position = projectionMatrix * mv;
+        #include <logdepthbuf_vertex>
+      }`,
+    fragmentShader: /* glsl */`
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
+      uniform float uEngage;
+      uniform vec3 uTint;
+      uniform sampler2D uCloudSprite;
+      varying float vShade;
+      varying float vLight;
+      void main() {
+        #include <logdepthbuf_fragment>
+        vec2 uv = gl_PointCoord - 0.5;
+        float ang = (vShade - 0.5) * 0.34;
+        mat2 rot = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
+        uv = rot * uv;
+        if (fract(vShade * 31.7) > 0.5) uv.x = -uv.x;
+        uv += 0.5;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) discard;
+        float atlasId = min(3.0, floor(vShade * 4.0));
+        vec2 cell = vec2(mod(atlasId, 2.0), floor(atlasId * 0.5));
+        uv = uv * 0.5 + cell * 0.5;
+        vec4 texel = texture2D(uCloudSprite, uv);
+        float mask = texel.a;
+        float light = mix(0.48, 1.06, vLight);
+        vec3 color = texel.rgb * uTint * light * mix(0.88, 1.08, vShade);
+        float alpha = mask * uEngage * 0.5;
+        if (alpha < 0.008) discard;
+        gl_FragColor = vec4(color, alpha);
+      }`,
+  });
+  const points = new THREE.Points(geometry, material);
+  points.renderOrder = 2;
+  points.frustumCulled = false;
+  return points;
+}
 
 export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
   const thick = band.rOut - band.rIn;
@@ -144,16 +250,42 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
       float densityAt(vec3 local, float covScale) {
         float r = length(local);
         float h = clamp((r - uRin) / (uRout - uRin), 0.0, 1.0);
-        vec3 sd = uSpin * (local / r);
+        vec3 radial = local / r;
+        vec3 tangentA = normalize(cross(radial,
+          abs(radial.y) < 0.88 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+        vec3 tangentB = normalize(cross(radial, tangentA));
+        float bend = h - 0.42;
+        // A cloud footprint must not be the same 2D mask extruded straight
+        // through the whole shell. Shift it laterally with altitude so anvils,
+        // shelves and tilted billows replace the former vertical curtains.
+        vec3 coverageDir = normalize(radial
+          + tangentA * bend * 0.055
+          + tangentB * (bend * bend - 0.08) * 0.045);
+        vec3 sd = uSpin * coverageDir;
         float cov = smoothstep(uCov0, uCov1, cloudFbm(sd)) * covScale;
         if (cov < 0.01) return 0.0;
-        // puffy bottoms, wispy tops; thicker coverage climbs higher
-        float prof = smoothstep(0.0, 0.16, h) * (1.0 - smoothstep(0.45 + 0.4 * cov, 1.0, h));
-        vec3 q = uSpin * local * ${(1 / 5200).toFixed(9)};
+        vec3 warp = vec3(
+          textureLod(uCloudNoise, sd.yz * 3.1 + uCOff.xy, 0.0).r,
+          textureLod(uCloudNoise, sd.zx * 3.7 + uCOff.yz, 0.0).g,
+          textureLod(uCloudNoise, sd.xy * 4.3 - uCOff.xz, 0.0).r
+        ) - 0.5;
+        // Domain-warp the volume cells sideways. Raw planet-local sampling
+        // aligns cellular lobes radially and reads as repeated cloud columns
+        // from below; this bends them into irregular anvils and billows.
+        vec3 bentLocal = local
+          + tangentA * bend * (uRout - uRin) * 1.7
+          + tangentB * sin(h * 3.14159) * (uRout - uRin) * 0.45;
+        vec3 q = uSpin * bentLocal * ${(1 / 7200).toFixed(9)} + warp * 4.1;
         vec2 n = textureLod(uNoise3, q, 0.0).rg;
-        float d = clamp(cov * prof - (1.0 - n.r) * 0.42, 0.0, 1.0);
+        // Locally varied floor and ceiling prevent a single hard lower edge.
+        float floorH = 0.025 + (1.0 - n.g) * 0.13;
+        float ceilH = 0.48 + cov * 0.38 + (n.r - 0.5) * 0.18;
+        float prof = smoothstep(floorH, floorH + 0.14, h)
+          * (1.0 - smoothstep(ceilH - 0.18, ceilH, h));
+        float cells = smoothstep(0.34, 0.72, n.r);
+        float d = cov * prof * cells;
         float ero = textureLod(uNoise3, q * 3.7, 0.0).g;
-        d = clamp(d - ero * 0.3 * (1.0 - d), 0.0, 1.0);
+        d = clamp(d - (1.0 - ero) * 0.22 * (1.0 - d), 0.0, 1.0);
         return d;
       }
 
@@ -180,7 +312,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
 
         float seg = t1 - t0;
         float thick = uRout - uRin;
-        int STEPS = int(clamp(seg / (thick * 0.09), 14.0, 36.0));
+        int STEPS = int(clamp(seg / (thick * 0.045), 28.0, 72.0));
         float dt = seg / float(STEPS);
         float jitter = hash12(gl_FragCoord.xy);
         float t = t0 + dt * jitter;
@@ -192,14 +324,12 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
 
         vec3 col = vec3(0.0);
         float T = 1.0;
-        float tEntry = -1.0;
-        for (int i = 0; i < 40; i++) {
+        for (int i = 0; i < 76; i++) {
           if (i >= STEPS || T < 0.02) break;
           vec3 p = dir * t;
           vec3 local = p - uCenter;
           float d = densityAt(local, 1.0);
           if (d > 0.003) {
-            if (tEntry < 0.0) tEntry = t;
             // short sun march: how buried is this sample?
             float od = 0.0;
             float ls = thick * 0.35;
@@ -219,9 +349,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, far) {
         float alpha = (1.0 - T) * uEngage;
         if (alpha < 0.004) discard;
 
-        // depth of the first REAL sample, so terrain correctly occludes far
-        // clouds while the deck overhead still draws in front of mountains
-        float w = max((tEntry > 0.0 ? tEntry : t0), 0.001);
+        // Use the continuous front-shell entry depth. Quantising depth to the
+        // first occupied ray step produced the vertical barcode artefacts seen
+        // at grazing angles even when density itself was smooth.
+        float w = max(t0, 0.001);
         gl_FragDepth = log2(1.0 + w) * uLogFC * 0.5;
         gl_FragColor = vec4(col, alpha);
       }`,

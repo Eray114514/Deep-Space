@@ -72,21 +72,21 @@ export class UI {
 
   setSystem(name, planetCount, seed) {
     this.els.system.textContent = name;
-    this.els.planetCount.textContent = `${planetCount} bodies charted`;
-    this.els.seed.textContent = `seed · ${seed}`;
+    this.els.planetCount.textContent = `已测绘天体 · ${planetCount}`;
+    this.els.seed.textContent = `星域种子 · ${seed}`;
   }
 
   setTarget(planet, dist) {
     if (!planet) { this.els.card.classList.add('hidden'); return; }
     this.els.card.classList.remove('hidden');
     this.els.cardName.textContent = planet.name;
-    this.els.cardType.textContent = (planet.isMoon ? 'Moon · ' : 'Planet · ') + planet.typeLabel;
+    this.els.cardType.textContent = (planet.isMoon ? '卫星 · ' : '行星 · ') + planet.typeLabel;
     const bits = [`r ${(planet.R / 1000).toFixed(1)} km`, `g ${(planet.gravity / 9.81).toFixed(2)}`];
-    if (planet.liquid === 'water') bits.push('water');
-    if (planet.liquid === 'lava') bits.push('magma seas');
-    if (planet.liquid === 'ice') bits.push('ice sheets');
-    if (planet.liquid === 'toxic') bits.push('toxic seas');
-    if (planet.cloudMesh) bits.push('clouds');
+    if (planet.liquid === 'water') bits.push('液态水');
+    if (planet.liquid === 'lava') bits.push('岩浆海');
+    if (planet.liquid === 'ice') bits.push('冰盖');
+    if (planet.liquid === 'toxic') bits.push('毒性海洋');
+    if (planet.cloudMesh) bits.push('云层');
     this.els.cardInfo.textContent = bits.join(' · ');
     this.setTargetDist(dist);
   }
@@ -94,8 +94,8 @@ export class UI {
   setStarTarget(name, dist, sub) {
     this.els.card.classList.remove('hidden');
     this.els.cardName.textContent = name;
-    this.els.cardType.textContent = `Star system — ${sub}`;
-    this.els.cardInfo.textContent = 'an unexplored system awaits';
+    this.els.cardType.textContent = `恒星系 · ${sub}`;
+    this.els.cardInfo.textContent = '未测绘星域 · 再次确认以启动跃迁';
     this.setTargetDist(dist);
   }
 
@@ -110,7 +110,7 @@ export class UI {
     this.els.altitude.classList.remove('hidden');
     const a = alt > 9999 ? `${(alt / 1000).toFixed(1)} km` : `${alt.toFixed(0)} m`;
     const s = speed > 1000 ? `${(speed / 1000).toFixed(1)} km/s` : `${speed.toFixed(0)} m/s`;
-    this.els.altitude.textContent = `ALT ${a}   SPD ${s}`;
+    this.els.altitude.textContent = `高度 ${a}   速度 ${s}`;
   }
 
   setHint(text) {

@@ -22,6 +22,7 @@ import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord, systemName } from './names.js';
 import { makeRng } from './rng.js';
 import { VERSION } from './version.js';
+import { FlightAudio } from './audio.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -60,7 +61,7 @@ document.getElementById('app').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.0);
 const BASE_FOV = 62;
-const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.12, 3.2e9);
+const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.12, 1.2e11);
 scene.add(camera);
 
 const ambient = new THREE.AmbientLight(0x506080, 0.09);
@@ -150,6 +151,8 @@ let nearest = null;
 let nearestAlt = Infinity;
 let frameNo = 0;
 let lastBuildFrame = 0;
+let paused = false;
+let boostVisual = 0;
 
 // ---- world ------------------------------------------------------------------
 let universe = new Universe(SEED, scene);
@@ -160,6 +163,7 @@ const farFlora = new FarFlora();
 const warpStreaks = new WarpStreaks(scene);
 const skyDome = new SkyDome(scene);
 const ship = new Ship(scene);
+const audio = new FlightAudio();
 let warpIntensity = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
@@ -225,19 +229,27 @@ const spaceCtl = new SpaceControls(renderer.domElement, nav, { onClick: handleCl
 const walkCtl = new WalkControls(renderer.domElement);
 
 renderer.domElement.addEventListener('pointerdown', () => {
+  audio.unlock();
   if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && !IS_TOUCH) {
     renderer.domElement.requestPointerLock();
   }
 });
 
 window.addEventListener('keydown', (e) => {
+  audio.unlock();
   if (e.code === 'KeyL') tryLand();
   if (e.code === 'KeyT') takeoff();
   if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
   if (e.code === 'KeyB') usePost = !usePost;                           // bloom toggle
-  if (e.code === 'Escape' && state === 'flyto') {
-    tweens.length = 0;
-    setState('space');
+  if (e.code === 'Escape') {
+    if (state === 'flyto') {
+      tweens.length = 0;
+      setState('space');
+    } else if (paused) {
+      resumeGame();
+    } else if (!['warp', 'landing', 'takeoff'].includes(state)) {
+      pauseGame();
+    }
   }
 });
 
@@ -252,6 +264,39 @@ const ui = new UI({
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
   onJump: (down) => { walkCtl.touchJump = down; },
   onTakeoff: () => takeoff(),
+});
+const pauseOverlay = document.getElementById('pause-overlay');
+document.getElementById('resume-btn').addEventListener('click', resumeGame);
+
+function pauseGame() {
+  if (paused) return;
+  paused = true;
+  spaceCtl.enabled = false;
+  pauseOverlay.classList.remove('hidden');
+  audio.setPaused(true);
+  if (document.pointerLockElement) document.exitPointerLock();
+}
+
+async function resumeGame() {
+  if (!paused) return;
+  if (!window.NMS_NOLOCK && !IS_TOUCH && (state === 'space' || state === 'walk')) {
+    try { await renderer.domElement.requestPointerLock(); } catch { return; }
+  }
+  paused = false;
+  await audio.unlock();
+  audio.setPaused(false);
+  spaceCtl.enabled = state === 'space';
+  pauseOverlay.classList.add('hidden');
+}
+
+document.addEventListener('pointerlockchange', () => {
+  if (!window.NMS_NOLOCK && !IS_TOUCH && !document.pointerLockElement
+      && !paused && (state === 'space' || state === 'walk')) {
+    pauseGame();
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && !paused && !['warp', 'landing', 'takeoff'].includes(state)) pauseGame();
 });
 
 // universe → app notifications (system handoffs during warp / manual flight)
@@ -273,7 +318,7 @@ function wireUniverse(u) {
 function setState(s) {
   state = s;
   spaceCtl.enabled = s === 'space';
-  ui.setCrosshair(s === 'walk');
+  ui.setCrosshair(s === 'walk' || s === 'space');
   ui.showTouchUI(IS_TOUCH && s === 'walk');
   const hints = IS_TOUCH ? {
     space: '<b>drag</b> look · <b>pinch</b> fly · <b>tap</b> a planet or a far star · <b>two-finger drag</b> orbit',
@@ -283,12 +328,12 @@ function setState(s) {
     takeoff: 'lifting off…',
     warp: 'warping…',
   } : {
-    space: '<b>scroll</b> fly · <b>drag</b> look · <b>click</b> a planet or a far star · <b>right-drag</b> orbit',
-    flyto: 'travelling… <b>Esc</b> to abort',
-    landing: 'descending…',
-    walk: '<b>WASD</b> move · <b>shift</b> run · <b>space</b> jump · <b>T</b> take off',
-    takeoff: 'lifting off…',
-    warp: 'warping…',
+    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>左键</b> 标记',
+    flyto: '自动接近中… <b>Esc</b> 中止',
+    landing: '正在执行降落程序…',
+    walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · <b>T</b> 起飞',
+    takeoff: '垂直起飞中…',
+    warp: '空间折叠中…',
   };
   ui.setHint(hints[s] || '');
 }
@@ -420,14 +465,16 @@ function warpTo(star) {
   ui.setTarget(null);
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
-  // arrive outside the outermost orbit (capped at 480 km), aimed at the sun
+  // Begin with a safe stellar-system arrival point. Once the destination
+  // system exists, the trajectory is redirected toward its hero planet.
   const arriveDir = startPos.clone().sub(star.pos).normalize();
-  const endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 35, 1.55e7));
+  let endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 100, 2.2e9));
   const dist = startPos.distanceTo(endPos);
-  const dur = clamp(5.5 + dist / 4e7, 6.5, 12);
-  const targetQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
-  const SPOOL = 0.07;
+  const dur = clamp(8.5 + dist / 8e8, 10, 18);
+  let targetQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
+  const SPOOL = 0.12;
   let swapped = false;
+  let arrivalPlanetName = null;
   nav.vel.set(0, 0, 0);
   warpStreaks.reset(_v.copy(star.pos).sub(startPos).normalize());
 
@@ -445,10 +492,19 @@ function warpTo(star) {
       const ramp = smoothstep(0, 0.2, kf) * (1 - smoothstep(0.78, 0.97, kf));
       camera.fov = BASE_FOV - 4 + 30 * ramp;
       warpIntensity = ramp;
-      if (kf >= 0.32 && !swapped) {
-        // swap systems mid-flight; the new planets build one per frame
+      if (kf >= 0.04 && !swapped) {
+        // Swap early enough that the real destination can materialise during
+        // the tunnel, then converge on a large planet for the exit reveal.
         swapped = true;
-        universe.setSystem(star, true);
+        const destination = universe.setSystem(star, true);
+        const hero = destination._specs.find((spec) => !spec.isMoon);
+        if (hero) {
+          const heroRadius = 160000 + makeRng(hero.seed)() * 240000;
+          const revealDirection = startPos.clone().sub(hero.pos).normalize();
+          endPos = hero.pos.clone().addScaledVector(revealDirection, heroRadius * 2.55);
+          targetQuat = lookQuatAt(startPos, hero.pos, new THREE.Quaternion());
+          arrivalPlanetName = hero.name;
+        }
       }
     }
     camera.updateProjectionMatrix();
@@ -456,6 +512,15 @@ function warpTo(star) {
     camera.fov = BASE_FOV;
     camera.updateProjectionMatrix();
     warpIntensity = 0;
+    if (arrivalPlanetName) {
+      const arrivalPlanet = universe.system.planets.find((planet) => planet.name === arrivalPlanetName);
+      if (arrivalPlanet) {
+        focusPlanet = arrivalPlanet;
+        spaceCtl.focus = arrivalPlanet;
+        ui.setTarget(arrivalPlanet, nav.pos.distanceTo(arrivalPlanet.posUniv));
+        lookQuatAt(nav.pos, arrivalPlanet.posUniv, nav.quat);
+      }
+    }
     setState('space');
   });
 }
@@ -532,7 +597,7 @@ function spawn() {
   const sunDir = sys.sunDirFrom(planet.posUniv, _v).clone();
   const side = _v2.crossVectors(sunDir, _v3.set(0, 1, 0)).normalize();
   const dir = sunDir.clone().addScaledVector(side, 0.85).normalize();
-  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * 3.6);
+  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * 2.45);
   lookQuatAt(nav.pos, planet.posUniv, nav.quat);
   nav.quat.multiply(_q.setFromAxisAngle(_v3.set(0, 1, 0), 0.18));
   nav.vel.set(0, 0, 0);
@@ -673,6 +738,12 @@ function frame() {
   requestAnimationFrame(frame);
   const dt = clamp(clock.getDelta(), 0.0001, 0.05);
   frameNo++;
+  if (paused) {
+    renderer.info.reset();
+    if (usePost) composer.render();
+    else renderer.render(scene, camera);
+    return;
+  }
 
   // nearest body & altitude
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet : null;
@@ -690,7 +761,13 @@ function frame() {
 
   // controls / state integration
   if (state === 'space') {
-    spaceCtl.speedScale = clamp(nearestAlt * 0.55, 4, 3e6);
+    const atmosphereFactor = nearest
+      ? 1 - smoothstep(0.65, 1.55, nearestAlt / Math.max(nearest.atmoHeight, 1))
+      : 0;
+    spaceCtl.atmosphereFactor = atmosphereFactor;
+    spaceCtl.speedScale = atmosphereFactor > 0
+      ? clamp(nearestAlt * 0.035 + 45, 45, 1800)
+      : clamp(nearestAlt * 0.55, 4, 3e6);
     spaceCtl.update(dt);
     // never fly into the ground
     if (nearest && nearestAlt < 3) {
@@ -707,9 +784,16 @@ function frame() {
   }
   stepTweens(dt);
 
+  const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft) ? 1 : 0;
+  boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 4.8 : 7.5)));
+  if (state === 'space' && warpIntensity < 0.01) {
+    camera.fov += ((BASE_FOV + boostVisual * 6.5) - camera.fov) * (1 - Math.exp(-dt * 4.5));
+    camera.updateProjectionMatrix();
+  }
+
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
-  warpStreaks.update(dt, _velActual, warpIntensity);
+  warpStreaks.update(dt, _velActual, warpIntensity, boostVisual);
   // a deferred system (warp or manual approach) materializes one planet/frame
   if (universe.system && !universe.system.built) universe.system.buildNext();
 
@@ -758,19 +842,29 @@ function frame() {
     if (universe.fadingSystem) universe.fadingSystem.sunLight.intensity *= 1 - shadowBlend;
   }
 
-  // atmospheric buffeting: fast flight through air rattles the camera
+  // Atmospheric buffeting is coherent, not per-frame random noise. Random
+  // offsets made right-click acceleration read as a broken flight model.
   const trueSpd = _velActual.length();
   if (envInAtmo > 0.05 && trueSpd > 220 && (state === 'space' || state === 'flyto')) {
-    const amp = Math.min(1, trueSpd / 3200) * envInAtmo * 0.45;
+    const amp = Math.min(1, trueSpd / 3200) * envInAtmo * (0.16 + boostVisual * 0.08);
+    const t = clock.elapsedTime;
     camera.position.set(
-      (Math.random() - 0.5) * amp,
-      (Math.random() - 0.5) * amp,
-      (Math.random() - 0.5) * amp,
+      Math.sin(t * 17.3) * amp,
+      Math.sin(t * 21.7 + 1.2) * amp * 0.65,
+      Math.sin(t * 13.1 + 2.4) * amp * 0.35,
     );
   }
 
   // the ship flies just ahead of the camera whenever we're in flight
-  ship.update(dt, nav, state, trueSpd, warpIntensity);
+  ship.update(dt, nav, state, trueSpd, warpIntensity, boostVisual);
+  audio.update({
+    state,
+    speed: trueSpd,
+    atmosphere: envInAtmo,
+    boosting: boostVisual > 0.12,
+    warp: warpIntensity,
+    paused,
+  });
 
   // HUD
   if (focusPlanet) ui.setTargetDist(nav.pos.distanceTo(focusPlanet.posUniv) - focusPlanet.R);
@@ -810,6 +904,7 @@ window.NMS = {
   _THREE: THREE,
   get booted() { return frameNo > 3; },
   get state() { return state; },
+  get paused() { return paused; },
   seed: () => SEED,
   frame: () => frameNo,
   idle() {
@@ -823,6 +918,7 @@ window.NMS = {
     return {
       frame: frameNo, calls: info.calls, tris: info.triangles, chunks,
       pending: pendingChunks(), state, alt: nearestAlt,
+      paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },

@@ -9,7 +9,7 @@ import { clamp } from './noise.js';
 import { Planet, TYPES } from './planet.js';
 import { systemName, planetName, moonName } from './names.js';
 
-export const CELL = 6e7;               // metres between star lattice cells
+export const CELL = 4e9;               // metres between star lattice cells
 const STAR_PROB = 0.42;
 // the visible star field: a galactic disc (dense) with a sparse halo above
 // and below — every rendered dot is a real, warpable system
@@ -21,8 +21,8 @@ const HALO_PROB = 0.10;                // halo keeps this fraction of stars
 // seamless interstellar flight: approaching a star instantiates its system
 // while its planets are still sub-pixel; the system you leave lingers until
 // it is genuinely out of sight
-const APPROACH_DIST = 1.2e8;
-const FADE_DIST = 1.5e8;
+const APPROACH_DIST = 7e9;
+const FADE_DIST = 9e9;
 
 const STAR_CLASSES = [
   { c: 0xfff4e0, w: 4 },   // warm white
@@ -57,13 +57,13 @@ function makeStarPointsMaterial() {
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
         float dist = length(mv.xyz);
         // a star's sprite tracks the TRUE angular size of its sun
-        // (radius = aSize * 3e5 m), so flying close resolves the dot into
+        // (radius = aSize * 6e6 m), so flying close resolves the dot into
         // the same disc the real sun mesh has when the system instantiates
-        float discPx = 2.0 * 3.0e5 * aSize * uProj / dist;
-        gl_PointSize = clamp(max(2.2 * aSize, discPx), 2.2, 34.0) * uPixelRatio;
+        float discPx = 2.0 * 6.0e6 * aSize * uProj / dist;
+        gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
         // apparent magnitude falls with distance; only the very edge fades out
-        vBright = clamp(3.0e8 / dist, 0.5, 1.0)
-                * (1.0 - smoothstep(1.15e9, 1.38e9, dist));
+        vBright = clamp(2.2e10 / dist, 0.42, 1.0)
+                * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: /* glsl */`
@@ -201,7 +201,7 @@ export class Universe {
       id: `${ix},${iy},${iz}`,
       ix, iy, iz, pos,
       color: new THREE.Color(color),
-      radius: 2e5 + hashFloat(h, 2) * 2e5,
+      radius: 4e6 + hashFloat(h, 2) * 6e6,
     };
   }
 
@@ -304,7 +304,7 @@ export class Universe {
     }
     this.nearStarsList = list;
     // stars worth proximity-checking every frame for manual approach
-    this.candidates = list.filter((s) => s.pos.distanceTo(camPos) < 3.5e8);
+    this.candidates = list.filter((s) => s.pos.distanceTo(camPos) < 1.2e10);
 
     if (this.nearStarsMesh) {
       this.scene.remove(this.nearStarsMesh);
@@ -316,7 +316,7 @@ export class Universe {
     list.forEach((s, i) => {
       pos[i * 3] = s.pos.x; pos[i * 3 + 1] = s.pos.y; pos[i * 3 + 2] = s.pos.z;
       col[i * 3] = s.color.r; col[i * 3 + 1] = s.color.g; col[i * 3 + 2] = s.color.b;
-      siz[i] = s.radius / 3e5;           // 0.66..1.33 apparent-size jitter
+      siz[i] = s.radius / 6e6;           // true stellar radius scale
     });
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -336,9 +336,9 @@ export class Universe {
     for (const s of this.nearStarsList) {
       _v.copy(s.pos).sub(origin);
       const dist = _v.length();
-      if (dist < 4e6) continue;
+      if (dist < 4e8) continue;
       const ang = _v.normalize().angleTo(dir);
-      const limit = dist < 3e8 ? 0.018 : 0.008;
+      const limit = dist < 3e10 ? 0.018 : 0.008;
       if (ang < limit && ang < bestAng) { bestAng = ang; best = s; }
     }
     return best;
@@ -373,10 +373,10 @@ export class Universe {
     sys.sunLight.position.copy(sys.sunGroup.position);
     const d = camPos.distanceTo(sys.star.pos);
     // each sun lights its own neighbourhood; it fades for a camera leaving it
-    sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 5e7, 0, 1);
+    sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 3e9, 0, 1);
     // the corona blooms only on approach: from afar the sun mesh is the same
     // small disc as its star sprite, so the handoff has nothing to pop
-    const tg = clamp((1.1e8 - d) / 5e7, 0, 1);
+    const tg = clamp((4.2e9 - d) / 2.2e9, 0, 1);
     sys.sunGlow.material.opacity = tg * tg * (3 - 2 * tg) * (sys.glowExt ?? 1);
     for (const p of sys.planets) {
       p.group.position.copy(p.posUniv).sub(camPos);
@@ -494,7 +494,7 @@ export class StarSystem {
     for (let i = 0; i < count; i++) {
       // truly interplanetary spacing: hundreds of planet-radii between
       // worlds, capped so outer orbits stay inside the system's bubble
-      const orbit = Math.min(9e5 * Math.pow(1.5, i) * (0.85 + rand() * 0.3), 1.25e7);
+      const orbit = Math.min(6e7 * Math.pow(1.68, i) * (0.85 + rand() * 0.3), 1.6e9);
       const ang = rand() * Math.PI * 2;
       const incl = (rand() - 0.5) * 0.35;
       const pos = new THREE.Vector3(
@@ -510,12 +510,12 @@ export class StarSystem {
 
       // occasional moon — the parent's radius is its seed-rng's first draw
       // (mirrors Planet's constructor so specs need no Planet instance)
-      const parentR = 30000 + makeRng(seed)() * 90000;
-      if (rand() < 0.28 && parentR > 55000) {
+      const parentR = 160000 + makeRng(seed)() * 240000;
+      if (rand() < 0.28 && parentR > 230000) {
         const mAng = rand() * Math.PI * 2;
         const mPos = new THREE.Vector3(
           Math.cos(mAng), (rand() - 0.5) * 0.5, Math.sin(mAng),
-        ).normalize().multiplyScalar(parentR * (3 + rand() * 2)).add(pos);
+        ).normalize().multiplyScalar(parentR * (4.2 + rand() * 3.2)).add(pos);
         const mType = pickType();
         this._specs.push({
           seed: universe.seed + ':m:' + star.id + ':' + i,

@@ -1,22 +1,32 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>No Man's Sky · three.js — a procedural universe</title>
+  <title>深空 · 连续宇宙</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="style.css" />
   <script type="importmap">
-    { "imports": { "three": "./vendor/three.module.js" } }
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./node_modules/three/examples/jsm/"
+      }
+    }
   </script>
 </head>
 <body>
   <div id="app"></div>
 
+  <div id="brand">
+    <span>AF</span><i>//</i><b>S9</b>
+  </div>
+
   <div id="hud" class="panel">
     <div id="sys-name">—</div>
     <div id="sys-planets" class="sub">—</div>
     <div id="sys-seed" class="sub">—</div>
-    <button id="new-universe" title="Generate a new universe">⟲ new universe</button>
+    <button id="new-universe" title="生成新的宇宙种子">⟲ 重构星域</button>
   </div>
 
   <div id="target-card" class="panel hidden">
@@ -56,6 +66,14 @@
 
   <div id="vignette"></div>
   <div id="fade"></div>
+  <div id="pause-overlay" class="hidden">
+    <div class="pause-panel">
+      <span>FLIGHT CONTROL SUSPENDED</span>
+      <h2>姿态锁定</h2>
+      <p>导航与推进系统已暂停</p>
+      <button id="resume-btn">返回游戏</button>
+    </div>
+  </div>
   <div id="err" class="hidden"></div>
 
   <script type="module" src="src/main.js"></script>

@@ -1,3 +1,8 @@
 node_modules/
 screenshots/
+dist/
+test-results/
+tmp/
+/public/assets/cloud-cumulus-sprite.png
+/public/assets/cloud-cumulus-sprite-v1.png
 *.log

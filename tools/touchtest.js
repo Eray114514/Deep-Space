@@ -12,6 +12,7 @@ const { server, port } = await startServer(0);
 
 const phone = devices['Pixel 7'];
 const browser = await chromium.launch({
+  executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || chromium.executablePath(),
   args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl'],
 });
 // deviceScaleFactor 1: SwiftShader can't push a real phone's pixel count;

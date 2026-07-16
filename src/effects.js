@@ -4,13 +4,19 @@
 // read as a light tunnel instead of single-frame noise.
 
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const _dir = new THREE.Vector3();
 const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
 const _p = new THREE.Vector3();
+const _warpQ = new THREE.Quaternion();
+const _warpM = new THREE.Matrix4();
+const _warpScale = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
+const Z = new THREE.Vector3(0, 0, 1);
 
 const PARALLAX = 0.012;            // fraction of true speed applied to streaks
 
@@ -37,6 +43,41 @@ export class WarpStreaks {
     this.lines.renderOrder = 6;
     this.lines.visible = false;
     scene.add(this.lines);
+
+    this.ringCount = 18;
+    this.ringTravel = 0;
+    const ringGeometry = new THREE.TorusGeometry(1, 0.022, 6, 72);
+    const ringMaterial = new THREE.MeshBasicMaterial({
+      color: 0x8cecff,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    });
+    this.rings = new THREE.InstancedMesh(ringGeometry, ringMaterial, this.ringCount);
+    this.rings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.rings.frustumCulled = false;
+    this.rings.renderOrder = 5;
+    this.rings.visible = false;
+    scene.add(this.rings);
+
+    this.foldTunnel = new THREE.Mesh(
+      new THREE.CylinderGeometry(1800, 11000, 52000, 72, 16, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x276b8a,
+        transparent: true,
+        opacity: 0,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        fog: false,
+      }),
+    );
+    this.foldTunnel.frustumCulled = false;
+    this.foldTunnel.renderOrder = 4;
+    this.foldTunnel.visible = false;
+    scene.add(this.foldTunnel);
   }
 
   scatter(streak) {
@@ -53,21 +94,33 @@ export class WarpStreaks {
     _e1.crossVectors(_dir, Math.abs(_dir.y) < 0.9 ? Y : X).normalize();
     _e2.crossVectors(_dir, _e1);
     for (const s of this.streaks) this.scatter(s);
+    this.ringTravel = 0;
   }
 
-  // vel: true velocity vector (m/s); intensity 0..1
-  update(dt, vel, intensity) {
-    if (intensity <= 0.01) { this.lines.visible = false; return; }
+  // vel: true velocity vector (m/s); intensity = warp, boost = local pulse
+  update(dt, vel, intensity, boost = 0) {
+    const lineIntensity = Math.max(intensity, boost * 0.34);
+    if (lineIntensity <= 0.01) {
+      this.lines.visible = false;
+      this.rings.visible = false;
+      this.foldTunnel.visible = false;
+      this.wasActive = false;
+      return;
+    }
     const speed = vel.length();
     if (speed < 1) { this.lines.visible = false; return; }
+    if (!this.wasActive) this.reset(_dir.copy(vel).multiplyScalar(1 / speed));
+    this.wasActive = true;
     this.lines.visible = true;
-    this.lines.material.opacity = Math.min(1, intensity) * 0.8;
+    this.lines.material.opacity = Math.min(1, lineIntensity) * 0.8;
+    this.rings.visible = intensity > 0.01;
+    this.foldTunnel.visible = intensity > 0.01;
 
     _dir.copy(vel).multiplyScalar(1 / speed);
     _e1.crossVectors(_dir, Math.abs(_dir.y) < 0.9 ? Y : X).normalize();
     _e2.crossVectors(_dir, _e1);
     const step = speed * dt * PARALLAX;
-    const len = Math.min(300 + speed * 0.0022, 14000) * Math.max(0.25, intensity);
+    const len = Math.min(300 + speed * 0.0022, 14000) * Math.max(0.22, lineIntensity);
 
     for (let i = 0; i < this.count; i++) {
       const s = this.streaks[i];
@@ -78,12 +131,39 @@ export class WarpStreaks {
       this.positions[i * 6 + 3] = _p.x; this.positions[i * 6 + 4] = _p.y; this.positions[i * 6 + 5] = _p.z;
     }
     this.lines.geometry.attributes.position.needsUpdate = true;
+
+    _warpQ.setFromUnitVectors(Z, _dir);
+    if (intensity <= 0.01) return;
+    this.ringTravel += dt * (2200 + intensity * 12500);
+    const ringRange = 48000;
+    for (let i = 0; i < this.ringCount; i++) {
+      const base = (i / this.ringCount) * ringRange;
+      const distance = 900 + ((base - this.ringTravel) % ringRange + ringRange) % ringRange;
+      const radius = 260 + distance * (0.065 + intensity * 0.045);
+      _p.copy(_dir).multiplyScalar(distance);
+      _warpScale.setScalar(radius);
+      _warpM.compose(_p, _warpQ, _warpScale);
+      this.rings.setMatrixAt(i, _warpM);
+    }
+    this.rings.instanceMatrix.needsUpdate = true;
+    this.rings.material.opacity = intensity * 0.16;
+
+    this.foldTunnel.position.copy(_dir).multiplyScalar(24500);
+    this.foldTunnel.quaternion.setFromUnitVectors(Y, _dir);
+    this.foldTunnel.scale.setScalar(0.85 + intensity * 0.3);
+    this.foldTunnel.material.opacity = intensity * 0.028;
   }
 
   dispose() {
     this.lines.geometry.dispose();
     this.lines.material.dispose();
+    this.rings.geometry.dispose();
+    this.rings.material.dispose();
+    this.foldTunnel.geometry.dispose();
+    this.foldTunnel.material.dispose();
     if (this.lines.parent) this.lines.parent.remove(this.lines);
+    if (this.rings.parent) this.rings.parent.remove(this.rings);
+    if (this.foldTunnel.parent) this.foldTunnel.parent.remove(this.foldTunnel);
   }
 }
 
@@ -213,6 +293,10 @@ export class Ship {
     this.smQuat = new THREE.Quaternion();
     this.roll = 0;
     this.engineMat = engineGlowMat;
+    this.loadedEmissives = [];
+    this.loadedGear = [];
+    this.loadedRamp = [];
+    this.loadHeroShip();
 
     // when you land, the ship sets down on a pad beside you and waits
     this.parkedPosUniv = null;
@@ -220,12 +304,52 @@ export class Ship {
     this.parkAmt = 0;
   }
 
+  loadHeroShip() {
+    const loader = new GLTFLoader();
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    loader.load('/public/assets/asterion-s9-rebuilt-20260716.glb', (gltf) => {
+      const hero = gltf.scene;
+      this.loadedEmissives = [];
+      this.loadedGear = [];
+      this.loadedRamp = [];
+      hero.traverse((object) => {
+        if (/^(LANDING_GEAR_ROOT|Gear_)/.test(object.name)) this.loadedGear.push(object);
+        if (/^(BOARDING_RAMP_ROOT|Ramp_)/.test(object.name)) this.loadedRamp.push(object);
+        if (!object.isMesh) return;
+        object.castShadow = true;
+        object.receiveShadow = true;
+        object.material = Array.isArray(object.material)
+          ? object.material.map((material) => material.clone())
+          : object.material.clone();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) {
+          if (!material.isMeshStandardMaterial) continue;
+          material.color.multiplyScalar(0.72);
+          material.roughness = Math.max(material.roughness, 0.3);
+          if (material.emissiveMap || /Engine|Emission/i.test(material.name)) {
+            material.toneMapped = true;
+            this.loadedEmissives.push(material);
+          }
+        }
+      });
+      hero.rotation.y = Math.PI;
+      hero.scale.setScalar(0.48);
+      this.group.clear();
+      this.group.add(hero);
+      for (const part of this.loadedGear) part.visible = false;
+      for (const part of this.loadedRamp) part.visible = false;
+      this.heroLoaded = true;
+    }, undefined, (error) => {
+      console.error('ASTERION S-9 failed to load; keeping procedural fallback', error);
+    });
+  }
+
   setParked(posUniv, quat) {
     this.parkedPosUniv = posUniv.clone();
     this.parkedQuat.copy(quat);
   }
 
-  update(dt, nav, state, speed, warp) {
+  update(dt, nav, state, speed, warp, boost = 0) {
     const wantsPark = (state === 'walk' || state === 'landing') && !!this.parkedPosUniv;
     this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
 
@@ -252,8 +376,15 @@ export class Ship {
     }
 
     const burnK = 1 - this.parkAmt;
-    this.engineMat.emissiveIntensity = 0.15 + (1.2 + Math.min(1.6, speed / 1.5e6 + warp * 1.4) * 2.6) * burnK;
-    const stretch = 1 + Math.min(8, speed / 4e5 + warp * 7) * burnK;
+    this.engineMat.emissiveIntensity = 0.15 + (1.2 + Math.min(1.8, speed / 1.5e6 + warp * 1.4 + boost * 0.7) * 2.6) * burnK;
+    for (const material of this.loadedEmissives) {
+      material.emissiveIntensity = 1.15 + Math.min(3.2, speed / 7e5 + warp * 2.2 + boost * 1.2) * burnK;
+    }
+    const gearVisible = this.parkAmt > 0.42;
+    const rampVisible = state === 'walk' && this.parkAmt > 0.88;
+    for (const part of this.loadedGear) part.visible = gearVisible;
+    for (const part of this.loadedRamp) part.visible = rampVisible;
+    const stretch = 1 + Math.min(9, speed / 4e5 + warp * 7 + boost * 2.8) * burnK;
     this.glowA.scale.set(1, stretch, 1);
     this.glowB.scale.set(1, stretch, 1);
   }
