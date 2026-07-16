@@ -199,6 +199,14 @@ as "no assets" where they conflict.
   Returning to the game must reacquire input without freezing simulation.
 - Warp is a visible directed flight with charge-up, spatial streaking/folding,
   a sustained high-speed middle and a deliberate planetary arrival reveal.
+- The galaxy map is a full 3D navigation mode, not a list or flat minimap. It
+  exposes a local stellar network, routes, filters, target analysis and a
+  deterministic planetary-system view, and confirmed targets feed the same
+  visible warp flow.
+- Close and orbital clouds use a real 3D density field with spherical-shell
+  ray intersection, ray-marched extinction and sun lighting. Image billboards
+  are not an acceptable final cloud implementation; the analytic deck is only
+  a distant LOD for the volumetric field.
 - The shipped presentation includes the detailed GLB ship, designed HUD and
   procedural WebAudio. Debug-looking controls must not dominate the playfield.
 - Screenshot review is authoritative. Cloud columns, shell barcodes, mosaic

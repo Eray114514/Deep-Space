@@ -13,12 +13,17 @@ export class UI {
       fade: $('fade'), labels: $('labels'), stats: $('stats'),
       loading: $('loading'), loadingText: $('loading-text'),
       altitude: $('altitude'), newBtn: $('new-universe'),
+      altitudeValue: $('altitude-value'), altitudeUnit: $('altitude-unit'),
+      speedValue: $('speed-value'), speedUnit: $('speed-unit'),
+      headingCardinal: $('heading-cardinal'), headingDegrees: $('heading-degrees'),
+      starMapBtn: $('star-map-btn'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       btnJump: $('btn-jump'), btnTakeoff: $('btn-takeoff'),
     };
     this.labelPool = [];
     this.els.land.addEventListener('click', () => this.cb.onLand && this.cb.onLand());
     this.els.newBtn.addEventListener('click', () => this.cb.onNewUniverse && this.cb.onNewUniverse());
+    this.els.starMapBtn.addEventListener('click', () => this.cb.onStarMap && this.cb.onStarMap());
     this.setupTouch();
   }
 
@@ -103,21 +108,36 @@ export class UI {
     this.els.cardDist.textContent = dist == null ? '' :
       dist > 10000 ? `${(dist / 1000).toFixed(0)} km` :
       dist > 1000 ? `${(dist / 1000).toFixed(1)} km` : `${dist.toFixed(0)} m`;
+    const progress = dist == null ? 0 : Math.max(0.03, Math.min(1, 1 - Math.log10(1 + Math.max(0, dist)) / 8));
+    this.els.card.style.setProperty('--target-progress', `${(progress * 100).toFixed(1)}%`);
   }
 
   setAltitude(alt, speed) {
     if (alt == null) { this.els.altitude.classList.add('hidden'); return; }
     this.els.altitude.classList.remove('hidden');
-    const a = alt > 9999 ? `${(alt / 1000).toFixed(1)} km` : `${alt.toFixed(0)} m`;
-    const s = speed > 1000 ? `${(speed / 1000).toFixed(1)} km/s` : `${speed.toFixed(0)} m/s`;
-    this.els.altitude.textContent = `高度 ${a}   速度 ${s}`;
+    this.els.altitudeValue.textContent = alt > 9999 ? (alt / 1000).toFixed(1) : alt.toFixed(0);
+    this.els.altitudeUnit.textContent = alt > 9999 ? 'km' : 'm';
+    this.els.speedValue.textContent = speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0);
+    this.els.speedUnit.textContent = speed > 1000 ? 'km/s' : 'm/s';
   }
 
-  setHint(text) {
+  setHeading(degrees) {
+    const d = ((degrees % 360) + 360) % 360;
+    const names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    this.els.headingCardinal.textContent = names[Math.round(d / 45) % 8];
+    this.els.headingDegrees.textContent = `${String(Math.round(d)).padStart(3, '0')}°`;
+  }
+
+  setHint(text, persistent = false) {
     if (this._hint === text) return;
     this._hint = text;
+    clearTimeout(this._hintTimer);
     this.els.hint.innerHTML = text || '';
     this.els.hint.classList.toggle('hidden', !text);
+    this.els.hint.classList.remove('hint-faded');
+    if (text && !persistent) {
+      this._hintTimer = setTimeout(() => this.els.hint.classList.add('hint-faded'), 8000);
+    }
   }
 
   showLand(show, text = 'LAND — walk the surface') {
@@ -158,11 +178,15 @@ export class UI {
       if (i >= items.length) { el.style.display = 'none'; continue; }
       const it = items[i];
       el.style.display = '';
-      el.style.transform = `translate(${it.x.toFixed(0)}px, ${it.y.toFixed(0)}px)`;
       el.classList.toggle('dim', !!it.dim);
       el._key = it.key;
       el.children[1].textContent = it.name;
       el.children[2].textContent = it.sub || '';
+      const w = Math.max(80, el.offsetWidth || 80);
+      const h = Math.max(24, el.offsetHeight || 24);
+      const x = Math.max(8, Math.min(window.innerWidth - w - 8, it.x));
+      const y = Math.max(72, Math.min(window.innerHeight - h - 72, it.y));
+      el.style.transform = `translate(${x.toFixed(0)}px, ${y.toFixed(0)}px)`;
     }
   }
 }

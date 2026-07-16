@@ -377,7 +377,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
 // with an analytic threshold. A baked cloud texture shows its texels as
 // hard squares from orbit; this is smooth at every distance.
-export function applyCloudField(material, coverage, offX, offY, offZ) {
+export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0) {
   const tex = detailTexture();
   if (!tex) return;
   material.onBeforeCompile = (shader) => {
@@ -385,6 +385,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
     shader.uniforms.uCov0 = { value: 0.55 - coverage * 0.24 };
     shader.uniforms.uCov1 = { value: 0.86 - coverage * 0.14 };
     shader.uniforms.uCOff = { value: new THREE.Vector3(offX, offY, offZ) };
+    shader.uniforms.uCloudRelief = { value: relief };
     // the shell fades away as the camera nears its own altitude — the
     // transit white-out fog takes over, so you fly THROUGH, never POP through
     shader.uniforms.uCamProx = { value: 1 };
@@ -393,9 +394,22 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
-        varying vec3 vCDir;`)
+        uniform sampler2D uCloudNoise;
+        uniform float uCov0;
+        uniform float uCov1;
+        uniform vec3 uCOff;
+        uniform float uCloudRelief;
+        varying vec3 vCDir;
+        float cloudVertexFbm(vec3 d) {
+          float f = texture2D(uCloudNoise, d.xy * 0.55 + uCOff.xy).g * 0.5;
+          f += texture2D(uCloudNoise, d.yz * 1.15 + uCOff.yz).r * 0.25;
+          f += texture2D(uCloudNoise, d.zx * 2.35 + uCOff.zx).g * 0.125;
+          return f / 0.875;
+        }`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        vCDir = normalize(position);`);
+        vCDir = normalize(position);
+        float vertexCloud = smoothstep(uCov0, uCov1, cloudVertexFbm(vCDir));
+        transformed += vCDir * uCloudRelief * pow(vertexCloud, 1.15);`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
@@ -416,13 +430,16 @@ export function applyCloudField(material, coverage, offX, offY, offZ) {
         {
           vec3 nd = normalize(vCDir);
           float a = smoothstep(uCov0, uCov1, cloudFbm(nd));
-          diffuseColor.a *= pow(a, 1.3) * uCamProx;
+          // Dense orbital cores must read as kilometres of suspended water,
+          // not translucent paint on the planet. A sub-linear response keeps
+          // broad opaque bodies while retaining soft procedural edges.
+          diffuseColor.a *= pow(a, 0.95) * uCamProx;
           // volumetric look from one extra tap: density INCREASING toward
           // the sun means we're in a cloud's shadowed core; decreasing
           // means a sunlit edge. Thick cores also darken (their own bulk).
           float aSun = smoothstep(uCov0, uCov1, cloudFbm(normalize(nd + uCSun * 0.05)));
           float self = clamp(1.0 - (aSun - a) * 1.9, 0.42, 1.18);
-          diffuseColor.rgb *= self * (1.0 - a * 0.22);
+          diffuseColor.rgb *= self * (1.0 - a * 0.3);
         }`);
   };
   material.customProgramCacheKey = () => 'cloud-field';

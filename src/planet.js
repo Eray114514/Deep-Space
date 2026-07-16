@@ -8,8 +8,8 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU } from './shaders.js';
-import { makeCloudPuffField } from './clouds.js';
+import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU, detailTexture } from './shaders.js';
+import { makeCloudVolumeMaterial } from './clouds.js';
 import { floraPalette } from './flora.js';
 
 // volumetric clouds are the default in the browser; ?vclouds=0 and
@@ -182,6 +182,7 @@ export class Planet {
     this._fades = [{ mat: this.terrainMaterial, base: 1 }];
     if (this.liquidMat) this._fades.push({ mat: this.liquidMat, base: this.liquidMat.opacity });
     if (this.cloudMesh) this._fades.push({ mat: this.cloudMesh.material, base: this.cloudMesh.material.opacity });
+    if (this.cloudMesh2) this._fades.push({ mat: this.cloudMesh2.material, base: this.cloudMesh2.material.opacity });
     if (this.ringMesh) this._fades.push({ mat: this.ringMesh.material, base: this.ringMesh.material.opacity });
     this._atmoBaseDensity = this.atmoMesh ? this.atmoMesh.material.uniforms.density.value : 0;
     if (this.appear < 1) this.applyAppear();
@@ -650,17 +651,18 @@ export class Planet {
       // this small texture only serves the terrain's cast cloud shadows
       this.cloudShadowTex = makeCloudTexture(this.nD, coverage);
       const cloudR = R + Math.max(this.hAmp * 2.0 + 1500, R * this.cloudBaseFraction);
+      const thick = Math.max(this.hAmp * 1.5, R * this.cloudThicknessFraction, 3500);
       const cmat = new THREE.MeshLambertMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
-        transparent: true, depthWrite: false, opacity: 0.92,
+        transparent: true, depthWrite: false, opacity: 0.88,
       });
       const o1 = [rand() * 7, rand() * 7, rand() * 7];
-      applyCloudField(cmat, coverage, o1[0], o1[1], o1[2]);
-      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 96, 64), cmat);
+      applyCloudField(cmat, coverage, o1[0], o1[1], o1[2], thick * 0.42);
+      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 160, 96), cmat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
       this.cloudBands.push({
-        r: cloudR, mesh: this.cloudMesh, opacity: 0.92,
+        r: cloudR, mesh: this.cloudMesh, opacity: 0.88,
         halfThickness: Math.max(this.hAmp * 0.8, R * this.cloudThicknessFraction * 0.5, 1800),
         cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
         ox: o1[0], oy: o1[1], oz: o1[2],
@@ -673,31 +675,41 @@ export class Planet {
         // The far deck supplies global weather; deterministic spatial cloud
         // clusters supply close parallax and real separation through the
         // atmosphere without a screen-space raymarch curtain.
-        const thick = Math.max(this.hAmp * 1.5, R * this.cloudThicknessFraction, 3500);
         const band = {
           rIn: cloudR - thick * 0.45, rOut: cloudR + thick * 0.55,
           cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
           ox: o1[0], oy: o1[1], oz: o1[2],
           tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         };
-        this.localCloudField = makeCloudPuffField(this, band, this.seed);
-        this.localCloudField.visible = false;
-        this.group.add(this.localCloudField);
-      } else if (o2) {
-        // a second, thinner deck drifting at its own pace gives depth
+        this.volCloudMat = makeCloudVolumeMaterial(this, band, detailTexture());
+        this.volCloudMat.uniforms.uAmbC.value
+          .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.58);
+        this.volCloudMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(band.rOut, 128, 80), this.volCloudMat);
+        this.volCloudMesh.renderOrder = 2;
+        this.volCloudMesh.frustumCulled = false;
+        this.volCloudMesh.visible = false;
+        this.group.add(this.volCloudMesh);
+      }
+      if (o2) {
+        // A physically separate upper deck remains visible from space. Its
+        // offset pattern and altitude make cloud edges parallax against the
+        // lower weather layer instead of reading as one painted film.
         const cmat2 = new THREE.MeshLambertMaterial({
-          color: 0xffffff, transparent: true, depthWrite: false, opacity: 0.5,
+          color: this.type === 'toxic' ? 0xd4efaa : 0xf4f8ff,
+          transparent: true, depthWrite: false, opacity: 0.28,
         });
-        applyCloudField(cmat2, coverage * 0.6, o2[0], o2[1], o2[2]);
+        applyCloudField(cmat2, coverage * 0.42, o2[0], o2[1], o2[2], thick * 0.24);
+        const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
-          new THREE.SphereGeometry(cloudR + this.hAmp * 0.9, 96, 64), cmat2);
+          new THREE.SphereGeometry(upperR, 128, 80), cmat2);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
         this.cloudSpin2 = o2[3];
         this.cloudBands.push({
-          r: cloudR + this.hAmp * 0.9, mesh: this.cloudMesh2, opacity: 0.5,
+          r: upperR, mesh: this.cloudMesh2, opacity: 0.28,
           halfThickness: Math.max(this.hAmp * 0.65, R * this.cloudThicknessFraction * 0.42, 1400),
-          cov0: 0.55 - coverage * 0.6 * 0.24, cov1: 0.86 - coverage * 0.6 * 0.14,
+          cov0: 0.55 - coverage * 0.42 * 0.24, cov1: 0.86 - coverage * 0.42 * 0.14,
           ox: o2[0], oy: o2[1], oz: o2[2],
         });
       }
@@ -804,21 +816,20 @@ export class Planet {
       _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
       const sh = this.terrainMaterial.userData.shader;
       if (sh) sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
-      if (this.localCloudField) {
-        // Local puffs appear in near orbit while the global deck stays faintly
-        // present as a coherent low-frequency weather layer.
+      if (this.volCloudMesh) {
+        // The analytic shell is a distant LOD only. A real density field takes
+        // over from orbit through cloud transit and supplies parallax,
+        // extinction, self-shadowing and volumetric fog.
         const camR = camLocal.length();
-        // From orbit the analytic cloud deck is cleaner and cheaper. The
-        // raymarched volume takes over only in near orbit, before the camera
-        // reaches the atmosphere, so the handoff remains invisible without
-        // producing a barcode-like grazing shell around the planetary limb.
-        const e = smoothstep(1.8, 1.16, camR / this.R);
-        const u = this.localCloudField.material.uniforms;
+        const e = smoothstep(3.0, 1.12, camR / this.R);
+        const u = this.volCloudMat.uniforms;
         u.uEngage.value = e;
-        u.uPointScale.value = typeof window === 'undefined' ? 720 : window.innerHeight;
+        u.uCameraLocal.value.copy(camLocal);
+        u.uSpin.value.setFromMatrix4(_m4);
+        u.uFrame.value = (u.uFrame.value + 1) % 4096;
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
-        this.localCloudField.visible = e > 0.04;
-        this.cloudMesh.material.opacity = 0.92 * (1 - e * 0.62);
+        this.volCloudMesh.visible = e > 0.01;
+        this.cloudMesh.material.opacity = 0.88 * (1 - e);
         this.cloudMesh.visible = true;
       }
     }
@@ -826,6 +837,9 @@ export class Planet {
       this.cloudSpin2 += animDt * 0.0028;
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
+      const camR = camLocal.length();
+      const e = smoothstep(3.0, 1.12, camR / this.R);
+      this.cloudMesh2.material.opacity = 0.28 * (1 - e);
     }
   }
 

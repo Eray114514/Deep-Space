@@ -6,6 +6,7 @@
   <title>深空 · 连续宇宙</title>
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="src/starmap.css" />
   <script type="importmap">
     {
       "imports": {
@@ -22,21 +23,47 @@
     <span>AF</span><i>//</i><b>S9</b>
   </div>
 
+  <div id="compass">
+    <span class="compass-tick"></span>
+    <b id="heading-cardinal">N</b>
+    <strong id="heading-degrees">000°</strong>
+    <span class="compass-tick"></span>
+  </div>
+
   <div id="hud" class="panel">
-    <div id="sys-name">—</div>
-    <div id="sys-planets" class="sub">—</div>
-    <div id="sys-seed" class="sub">—</div>
-    <button id="new-universe" title="生成新的宇宙种子">⟲ 重构星域</button>
+    <div class="hud-kicker"><span>ASTERION S-9</span><b>FLIGHT STATUS</b></div>
+    <div class="hud-system">
+      <strong id="sys-name">—</strong>
+      <span id="sys-planets">—</span>
+      <span id="sys-seed">—</span>
+    </div>
+    <div id="altitude" class="telemetry hidden">
+      <div><span>速度</span><strong id="speed-value">0</strong><em id="speed-unit">m/s</em></div>
+      <div><span>高度</span><strong id="altitude-value">0</strong><em id="altitude-unit">m</em></div>
+    </div>
+    <div class="ship-status">
+      <div><span>船体</span><i><b style="--level:100%"></b></i><em>100</em></div>
+      <div><span>护盾</span><i><b style="--level:79%"></b></i><em>79</em></div>
+      <div><span>生命</span><i><b style="--level:100%"></b></i><em>100</em></div>
+    </div>
+    <div class="hud-actions">
+      <button id="star-map-btn" title="打开 3D 银河星图"><span>星图</span><kbd>M</kbd></button>
+    </div>
   </div>
 
   <div id="target-card" class="panel hidden">
+    <div class="target-kicker">ACTIVE DIRECTIVE 01</div>
     <div id="tc-name">—</div>
     <div id="tc-type" class="sub">—</div>
     <div id="tc-info" class="sub">—</div>
     <div id="tc-dist" class="dist">—</div>
+    <div class="target-progress"><i></i><b></b></div>
   </div>
 
-  <div id="altitude" class="hidden"></div>
+  <div id="resource-strip">
+    <span>FE <b>18</b></span><span>CR <b>0</b></span><span>BIO <b>0</b></span>
+    <strong>跃迁电池 <b>READY</b></strong>
+  </div>
 
   <div id="labels"></div>
 
@@ -71,7 +98,11 @@
       <span>FLIGHT CONTROL SUSPENDED</span>
       <h2>姿态锁定</h2>
       <p>导航与推进系统已暂停</p>
-      <button id="resume-btn">返回游戏</button>
+      <div class="pause-actions">
+        <button id="resume-btn">返回游戏</button>
+        <button id="pause-map-btn">银河星图</button>
+        <button id="new-universe" title="生成新的宇宙种子">重构星域</button>
+      </div>
     </div>
   </div>
   <div id="err" class="hidden"></div>

@@ -23,6 +23,7 @@ import { makeWord, systemName } from './names.js';
 import { makeRng } from './rng.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
+import { StarMap } from './starmap.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -32,6 +33,7 @@ window.addEventListener('error', (e) => {
 });
 
 const qs = new URLSearchParams(location.search);
+document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
@@ -153,6 +155,7 @@ let frameNo = 0;
 let lastBuildFrame = 0;
 let paused = false;
 let boostVisual = 0;
+let starMap = null;
 
 // ---- world ------------------------------------------------------------------
 let universe = new Universe(SEED, scene);
@@ -237,6 +240,17 @@ renderer.domElement.addEventListener('pointerdown', () => {
 
 window.addEventListener('keydown', (e) => {
   audio.unlock();
+  if (e.code === 'KeyM' || e.code === 'Tab') {
+    e.preventDefault();
+    if (starMap?.isOpen) closeStarMap();
+    else if (!paused && !['warp', 'landing', 'takeoff', 'flyto'].includes(state)) openStarMap();
+    return;
+  }
+  if (starMap?.isOpen) {
+    if (e.code === 'Escape') closeStarMap();
+    e.preventDefault();
+    return;
+  }
   if (e.code === 'KeyL') tryLand();
   if (e.code === 'KeyT') takeoff();
   if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
@@ -256,7 +270,15 @@ window.addEventListener('keydown', (e) => {
 // ---- UI ---------------------------------------------------------------------
 const ui = new UI({
   onLand: tryLand,
-  onNewUniverse: () => newUniverse(),
+  onNewUniverse: () => {
+    if (paused) {
+      paused = false;
+      document.getElementById('pause-overlay').classList.add('hidden');
+      audio.setPaused(false);
+    }
+    newUniverse();
+  },
+  onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
   onLabelClick: (idx) => {
     const p = universe.planets()[idx];
     if (p) clickPlanet(p);
@@ -265,8 +287,57 @@ const ui = new UI({
   onJump: (down) => { walkCtl.touchJump = down; },
   onTakeoff: () => takeoff(),
 });
+starMap = new StarMap({
+  getUniverse: () => universe,
+  getNav: () => nav,
+  getSeed: () => SEED,
+  getState: () => state,
+  onRequestClose: () => closeStarMap(),
+  onWarpTarget: (star) => {
+    closeStarMap(false);
+    warpTo(star);
+  },
+});
 const pauseOverlay = document.getElementById('pause-overlay');
 document.getElementById('resume-btn').addEventListener('click', resumeGame);
+document.getElementById('pause-map-btn').addEventListener('click', async () => {
+  if (paused) {
+    paused = false;
+    pauseOverlay.classList.add('hidden');
+    audio.setPaused(true);
+  }
+  openStarMap();
+});
+
+function clearFlightInput() {
+  for (const code in keys) keys[code] = false;
+  spaceCtl.boosting = false;
+  spaceCtl.wheelImpulse = 0;
+  nav.vel.set(0, 0, 0);
+  walkCtl.hSpeed.set(0, 0, 0);
+}
+
+function openStarMap() {
+  if (!starMap || starMap.isOpen || paused || ['warp', 'landing', 'takeoff', 'flyto'].includes(state)) return;
+  clearFlightInput();
+  spaceCtl.enabled = false;
+  audio.setPaused(true);
+  ui.setCrosshair(false);
+  starMap.open();
+  if (document.pointerLockElement) document.exitPointerLock();
+}
+
+async function closeStarMap(restoreInput = true) {
+  if (!starMap?.isOpen) return;
+  starMap.close();
+  clearFlightInput();
+  audio.setPaused(false);
+  spaceCtl.enabled = state === 'space';
+  ui.setCrosshair(state === 'space' || state === 'walk');
+  if (restoreInput && !window.NMS_NOLOCK && !IS_TOUCH && (state === 'space' || state === 'walk')) {
+    try { await renderer.domElement.requestPointerLock(); } catch { /* next click can reacquire */ }
+  }
+}
 
 function pauseGame() {
   if (paused) return;
@@ -291,12 +362,15 @@ async function resumeGame() {
 
 document.addEventListener('pointerlockchange', () => {
   if (!window.NMS_NOLOCK && !IS_TOUCH && !document.pointerLockElement
-      && !paused && (state === 'space' || state === 'walk')) {
+      && !paused && !starMap?.isOpen && (state === 'space' || state === 'walk')) {
     pauseGame();
   }
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && !paused && !['warp', 'landing', 'takeoff'].includes(state)) pauseGame();
+  if (document.hidden && !paused && !['warp', 'landing', 'takeoff'].includes(state)) {
+    if (starMap?.isOpen) closeStarMap(false);
+    pauseGame();
+  }
 });
 
 // universe → app notifications (system handoffs during warp / manual flight)
@@ -317,25 +391,25 @@ function wireUniverse(u) {
 
 function setState(s) {
   state = s;
-  spaceCtl.enabled = s === 'space';
+  spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
   ui.setCrosshair(s === 'walk' || s === 'space');
   ui.showTouchUI(IS_TOUCH && s === 'walk');
   const hints = IS_TOUCH ? {
-    space: '<b>drag</b> look · <b>pinch</b> fly · <b>tap</b> a planet or a far star · <b>two-finger drag</b> orbit',
-    flyto: 'travelling…',
-    landing: 'descending…',
-    walk: '<b>stick</b> move (push far to run) · <b>drag</b> look · <b>⤊</b> jump · <b>🚀</b> take off',
-    takeoff: 'lifting off…',
-    warp: 'warping…',
+    space: '<b>单指</b> 转向 · <b>双指缩放</b> 推进 · <b>轻触</b> 标记目标 · <b>M</b> 星图',
+    flyto: '自动接近中…',
+    landing: '正在执行降落程序…',
+    walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>⤊</b> 跳跃 · <b>🚀</b> 起飞',
+    takeoff: '垂直起飞中…',
+    warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>左键</b> 标记',
+    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · <b>T</b> 起飞',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   };
-  ui.setHint(hints[s] || '');
+  ui.setHint(hints[s] || '', !['space', 'walk'].includes(s));
 }
 
 // ---- actions ------------------------------------------------------------------
@@ -738,7 +812,7 @@ function frame() {
   requestAnimationFrame(frame);
   const dt = clamp(clock.getDelta(), 0.0001, 0.05);
   frameNo++;
-  if (paused) {
+  if (paused || starMap?.isOpen) {
     renderer.info.reset();
     if (usePost) composer.render();
     else renderer.render(scene, camera);
@@ -872,6 +946,8 @@ function frame() {
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
     : state === 'space' ? nav.vel.length() : _velActual.length();
   ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
+  _v.set(0, 0, -1).applyQuaternion(nav.quat);
+  ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
   updateLabels();
 
   statAcc += dt;
@@ -1206,6 +1282,20 @@ window.NMS = {
     }
     if (s) warpTo(s);
     return s ? s.id : null;
+  },
+  openStarMap: () => { openStarMap(); return true; },
+  closeStarMap: () => { closeStarMap(false); return true; },
+  get starMapOpen() { return !!starMap?.isOpen; },
+  selectStarMapTarget(id) {
+    const star = universe.nearStarsList.find((item) => item.id === id);
+    if (!star || !starMap?.isOpen) return null;
+    starMap.selectStar(star, false);
+    return star.id;
+  },
+  setStarMapMode(mode) {
+    if (!starMap?.isOpen || !['galaxy', 'system'].includes(mode)) return false;
+    starMap.setMode(mode);
+    return true;
   },
   setSeed: (s) => newUniverse(s),
   pos: () => nav.pos.toArray(),

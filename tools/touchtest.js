@@ -75,7 +75,7 @@ const CX = W / 2, CY = H / 2;
 
 // -- detection & layout ------------------------------------------------------
 check(await page.evaluate('NMS.isTouch'), 'touch mode detected');
-check((await page.evaluate('document.getElementById("hint").textContent')).includes('pinch'),
+check((await page.evaluate('document.getElementById("hint").textContent')).includes('双指'),
   'touch hints shown');
 check(await page.evaluate('document.getElementById("touch-ui").classList.contains("hidden")'),
   'joystick hidden in space');
