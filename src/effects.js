@@ -439,61 +439,63 @@ export class ShipWeapons {
       length: 1,
     }));
 
-    const boltGeometry = new THREE.CylinderGeometry(0.09, 0.16, 5.5, 8, 1, true);
-    boltGeometry.rotateX(Math.PI / 2);
-    const boltMaterial = new THREE.MeshBasicMaterial({
-      color: 0x8af5ff,
+    // A short, needle-like tracer reads as a projectile. The previous tapered
+    // cylinder could stretch to almost 100 m and looked like an energy cone.
+    const glowGeometry = new THREE.BoxGeometry(0.12, 0.12, 3.4);
+    const glowMaterial = new THREE.MeshBasicMaterial({
+      color: 0x32dfff,
       transparent: true,
-      opacity: 0.96,
+      opacity: 0.62,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       toneMapped: false,
     });
-    this.mesh = new THREE.InstancedMesh(boltGeometry, boltMaterial, maxBolts);
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = 5;
-    this.mesh.count = 0;
-    scene.add(this.mesh);
+    this.glowMesh = new THREE.InstancedMesh(glowGeometry, glowMaterial, maxBolts);
+    this.glowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.glowMesh.frustumCulled = false;
+    this.glowMesh.renderOrder = 4;
+    this.glowMesh.count = 0;
+    scene.add(this.glowMesh);
 
-    const flashGeometry = new THREE.SphereGeometry(0.42, 10, 6);
-    this.flashMaterial = new THREE.MeshBasicMaterial({
-      color: 0xc4fbff,
+    const coreGeometry = new THREE.BoxGeometry(0.035, 0.035, 2.8);
+    const coreMaterial = new THREE.MeshBasicMaterial({
+      color: 0xf4feff,
       transparent: true,
-      opacity: 0,
+      opacity: 0.98,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       toneMapped: false,
     });
-    this.flashGroup = new THREE.Group();
-    this.flashA = new THREE.Mesh(flashGeometry, this.flashMaterial);
-    this.flashB = new THREE.Mesh(flashGeometry, this.flashMaterial);
-    this.flashGroup.add(this.flashA, this.flashB);
-    this.flashGroup.visible = false;
-    this.flashLife = 0;
-    this.flashPosA = new THREE.Vector3();
-    this.flashPosB = new THREE.Vector3();
-    scene.add(this.flashGroup);
+    this.coreMesh = new THREE.InstancedMesh(coreGeometry, coreMaterial, maxBolts);
+    this.coreMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.coreMesh.frustumCulled = false;
+    this.coreMesh.renderOrder = 5;
+    this.coreMesh.count = 0;
+    scene.add(this.coreMesh);
   }
 
-  fire(nav, speedScale) {
-    _weaponForward.set(0, 0, -1).applyQuaternion(nav.quat).normalize();
-    _weaponRight.set(1, 0, 0).applyQuaternion(nav.quat).normalize();
-    _weaponUp.set(0, 1, 0).applyQuaternion(nav.quat).normalize();
-    const muzzleSpeed = Math.max(420, speedScale * 6.4);
-    _weaponPos.copy(nav.pos).addScaledVector(_weaponForward, 20.5).addScaledVector(_weaponUp, -3.4);
+  fire(nav, speedScale, ship) {
+    // Bind the hardpoints to the rendered ship, including its smoothing, bank
+    // and acceleration lunge. Universe position = camera + relative ship pose.
+    const shipQuat = ship?.group?.quaternion || nav.quat;
+    _weaponForward.set(0, 0, -1).applyQuaternion(shipQuat).normalize();
+    _weaponRight.set(1, 0, 0).applyQuaternion(shipQuat).normalize();
+    _weaponUp.set(0, 1, 0).applyQuaternion(shipQuat).normalize();
+    _weaponPos.copy(nav.pos);
+    if (ship?.group) _weaponPos.add(ship.group.position);
+    else _weaponPos.addScaledVector(_weaponForward, 19).addScaledVector(_weaponUp, -4.6);
+    // The rebuilt Asterion's paired emitters sit just inboard of the wingtips.
+    _weaponPos.addScaledVector(_weaponForward, 1.35).addScaledVector(_weaponUp, -0.15);
+    const muzzleSpeed = Math.max(780, speedScale * 10.5);
 
     for (const side of [-1, 1]) {
       const bolt = this.bolts[this.cursor];
       this.cursor = (this.cursor + 1) % this.maxBolts;
-      bolt.pos.copy(_weaponPos).addScaledVector(_weaponRight, side * 4.35);
+      bolt.pos.copy(_weaponPos).addScaledVector(_weaponRight, side * 2.5);
       bolt.vel.copy(nav.vel).addScaledVector(_weaponForward, muzzleSpeed);
-      bolt.life = bolt.maxLife = 2.1;
-      bolt.length = THREE.MathUtils.clamp(muzzleSpeed * 0.004, 1.0, 18.0);
-      if (side < 0) this.flashPosA.copy(bolt.pos);
-      else this.flashPosB.copy(bolt.pos);
+      bolt.life = bolt.maxLife = 1.65;
+      bolt.length = THREE.MathUtils.clamp(muzzleSpeed * 0.0018, 1.0, 2.4);
     }
-    this.flashLife = 0.085;
     this.shotsFired++;
   }
 
@@ -519,21 +521,14 @@ export class ShipWeapons {
       const fade = THREE.MathUtils.clamp(bolt.life / 0.16, 0, 1);
       _weaponScale.set(fade, fade, bolt.length);
       _weaponMatrix.compose(_weaponPos, _weaponQuat, _weaponScale);
-      this.mesh.setMatrixAt(active++, _weaponMatrix);
+      this.glowMesh.setMatrixAt(active, _weaponMatrix);
+      this.coreMesh.setMatrixAt(active++, _weaponMatrix);
     }
-    this.mesh.count = active;
-    if (active) this.mesh.instanceMatrix.needsUpdate = true;
-
-    this.flashLife = Math.max(0, this.flashLife - dt);
-    this.flashGroup.visible = this.flashLife > 0;
-    if (this.flashGroup.visible) {
-      const k = this.flashLife / 0.085;
-      this.flashMaterial.opacity = k * 0.95;
-      this.flashA.position.copy(this.flashPosA).sub(nav.pos);
-      this.flashB.position.copy(this.flashPosB).sub(nav.pos);
-      const s = 0.75 + (1 - k) * 1.9;
-      this.flashA.scale.setScalar(s);
-      this.flashB.scale.setScalar(s);
+    this.glowMesh.count = active;
+    this.coreMesh.count = active;
+    if (active) {
+      this.glowMesh.instanceMatrix.needsUpdate = true;
+      this.coreMesh.instanceMatrix.needsUpdate = true;
     }
     return active;
   }

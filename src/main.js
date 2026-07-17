@@ -1067,7 +1067,7 @@ function frame() {
   const weaponTrigger = state === 'space' && (spaceCtl.firing || spaceCtl.firePressed);
   weaponCooldown -= dt;
   if (weaponTrigger && weaponCooldown <= 0) {
-    weapons.fire(nav, spaceCtl.speedScale);
+    weapons.fire(nav, spaceCtl.speedScale, ship);
     audio.cue('fire');
     weaponCooldown = 0.13;
   } else if (!weaponTrigger) {
@@ -1188,8 +1188,8 @@ function frame() {
   ui.setFlightTelemetry({
     speed: spd,
     speedLimit: spaceCtl.speedScale * (pulseActive
-      ? 9.6 + (1 - spaceCtl.atmosphereFactor) * 5.6
-      : 4.8 + (1 - spaceCtl.atmosphereFactor) * 2.8),
+      ? 13.92 + (1 - spaceCtl.atmosphereFactor) * 8.12
+      : 6.96 + (1 - spaceCtl.atmosphereFactor) * 4.06),
     boost: boostVisual,
     atmosphere: envInAtmo,
     pulse: pulseVisual,
@@ -1592,7 +1592,7 @@ window.NMS = {
   },
   fireWeapon() {
     if (state !== 'space') return false;
-    weapons.fire(nav, spaceCtl.speedScale);
+    weapons.fire(nav, spaceCtl.speedScale, ship);
     audio.cue('fire');
     return true;
   },

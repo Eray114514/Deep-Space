@@ -221,15 +221,15 @@ export class SpaceControls {
       if (pulsing) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
         // Pulse cruise is an explicit 2× tier above RMB/Shift boost.
-        const pulseAcceleration = this.speedScale * (4.8 + (1 - this.atmosphereFactor) * 3.6);
+        const pulseAcceleration = this.speedScale * (6.96 + (1 - this.atmosphereFactor) * 5.22);
         nav.vel.addScaledVector(_f, pulseAcceleration * dt);
-        const pulseLimit = this.speedScale * (9.6 + (1 - this.atmosphereFactor) * 5.6);
+        const pulseLimit = this.speedScale * (13.92 + (1 - this.atmosphereFactor) * 8.12);
         if (nav.vel.length() > pulseLimit) nav.vel.setLength(pulseLimit);
       } else if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        const boostAcceleration = this.speedScale * (2.4 + (1 - this.atmosphereFactor) * 1.8);
+        const boostAcceleration = this.speedScale * (3.48 + (1 - this.atmosphereFactor) * 2.61);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);
-        const boostLimit = this.speedScale * (4.8 + (1 - this.atmosphereFactor) * 2.8);
+        const boostLimit = this.speedScale * (6.96 + (1 - this.atmosphereFactor) * 4.06);
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
       }
     }
