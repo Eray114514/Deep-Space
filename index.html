@@ -37,7 +37,8 @@
     <div class="flight-tick tick-right"></div>
     <div class="flight-readout flight-speed"><strong id="speed-value">0</strong><span id="speed-unit">m/s</span><small>速度</small></div>
     <div class="flight-readout flight-altitude"><strong id="altitude-value">0</strong><span id="altitude-unit">m</span><small>高度</small></div>
-    <div class="flight-boost"><kbd>RMB</kbd><span>加力推进</span></div>
+    <div class="flight-action flight-fire"><span>能量脉冲炮</span><kbd>LMB</kbd></div>
+    <div class="flight-action flight-boost"><kbd>RMB</kbd><span>加力推进</span></div>
   </div>
 
   <section id="hud" aria-label="飞船推进状态">
@@ -125,6 +126,7 @@
     </div>
   </section>
 
+  <div id="pulse-fx"></div>
   <div id="vignette"></div>
   <div id="fade"></div>
   <div id="pause-overlay" class="hidden">
@@ -141,6 +143,6 @@
   </div>
   <div id="err" class="hidden"></div>
 
-  <script type="module" src="src/main.js?v=0.25.4"></script>
+  <script type="module" src="src/main.js?v=0.26.5"></script>
 </body>
 </html>

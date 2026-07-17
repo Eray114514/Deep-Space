@@ -10,13 +10,14 @@ import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, 
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
-import { WarpStreaks, SkyDome, Ship, SHIP_FOREGROUND_LAYER } from './effects.js';
+import { WarpStreaks, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
 import { tickShaders } from './shaders.js';
 import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { GTAOPass } from '../vendor/jsm/postprocessing/GTAOPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord, systemName } from './names.js';
@@ -50,7 +51,8 @@ document.getElementById('version').textContent = 'v' + VERSION;
 console.info(`No Man's Sky three.js v${VERSION}`);
 
 // touch-first device? (gestures replace wheel/keys, virtual stick for walking)
-const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+const IS_TOUCH = qs.get('desktop') !== '1'
+  && (window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0);
 
 // ---- renderer ---------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({
@@ -60,7 +62,11 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
 const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.35 : 2.0;
-let renderDpr = Math.min(window.devicePixelRatio, MAX_DPR);
+// Mild supersampling on <=1440p desktop protects the hero ship even when the
+// OS reports DPR 1. Very high-resolution displays stay at native scale.
+const DESKTOP_DPR_FLOOR = !QUALITY_LOW && !IS_TOUCH
+  && window.innerWidth * window.innerHeight <= 2560 * 1440 ? 1.25 : 1;
+let renderDpr = Math.min(Math.max(window.devicePixelRatio, DESKTOP_DPR_FLOOR), MAX_DPR);
 renderer.setPixelRatio(renderDpr);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
@@ -136,6 +142,10 @@ composer.addPass(foregroundPass);
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
 composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
+// Final-image morphological AA catches the thin diagonal silhouette and
+// texture edges that MSAA misses after bloom/volume compositing.
+const smaaPass = !QUALITY_LOW && !IS_TOUCH ? new SMAAPass(1, 1) : null;
+if (smaaPass) composer.addPass(smaaPass);
 // The volume pass needs the composer even when decorative bloom is disabled.
 bloomPass.enabled = qs.get('post') !== '0' && !QUALITY_LOW;
 let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
@@ -155,7 +165,14 @@ window.addEventListener('resize', () => {
 });
 
 function setRenderDpr(next) {
-  const dpr = clamp(next, Math.min(1, window.devicePixelRatio), Math.min(window.devicePixelRatio, MAX_DPR));
+  // The hero ship is a high-frequency foreground asset; dropping below the
+  // display's normal desktop scaling makes its wing silhouette visibly stair-
+  // stepped even with post AA. Low quality remains an explicit opt-in.
+  const qualityFloor = QUALITY_LOW || IS_TOUCH
+    ? Math.min(1, window.devicePixelRatio)
+    : Math.max(DESKTOP_DPR_FLOOR, Math.min(1.35, window.devicePixelRatio));
+  const qualityCeiling = Math.max(qualityFloor, Math.min(window.devicePixelRatio, MAX_DPR));
+  const dpr = clamp(next, qualityFloor, qualityCeiling);
   if (Math.abs(dpr - renderDpr) < 0.04) return;
   renderDpr = dpr;
   renderer.setPixelRatio(renderDpr);
@@ -194,6 +211,10 @@ let pulseVisual = 0;
 let pulseFuel = 100;
 let pulseActive = false;
 let pulseEngaged = false;
+let pulseRechargeDelay = 0;
+let weaponCooldown = 0;
+let weaponVisual = 0;
+let activeBolts = 0;
 let starMap = null;
 
 // ---- world ------------------------------------------------------------------
@@ -204,8 +225,12 @@ const FARFLORA = qs.get('farflora') !== '0';
 const farFlora = new FarFlora();
 const warpStreaks = new WarpStreaks(scene);
 const skyDome = new SkyDome(scene);
-const ship = new Ship(scene);
+const ship = new Ship(scene, {
+  anisotropy: Math.min(16, renderer.capabilities.getMaxAnisotropy()),
+});
+const weapons = new ShipWeapons(scene);
 const audio = new FlightAudio();
+const pulseFx = document.getElementById('pulse-fx');
 let warpIntensity = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
@@ -370,6 +395,8 @@ document.getElementById('pause-map-btn').addEventListener('click', async () => {
 function clearFlightInput() {
   for (const code in keys) keys[code] = false;
   spaceCtl.boosting = false;
+  spaceCtl.firing = false;
+  spaceCtl.firePressed = false;
   spaceCtl.pulseDrive = false;
   pulseActive = false;
   pulseEngaged = false;
@@ -457,6 +484,8 @@ function setState(s) {
     pulseActive = false;
     pulseEngaged = false;
     spaceCtl.pulseDrive = false;
+    spaceCtl.firing = false;
+    spaceCtl.firePressed = false;
   }
   spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
   ui.setCrosshair(s === 'walk' || s === 'space');
@@ -470,7 +499,7 @@ function setState(s) {
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>F</b> 脉冲巡航 · <b>M/TAB</b> 星图',
+    space: '<b>鼠标</b> 船头 · <b>LMB</b> 射击 · <b>W/S</b> 推进/制动 · <b>RMB/SHIFT</b> 加力 · <b>F</b> 脉冲巡航 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
@@ -983,7 +1012,10 @@ function frame() {
     if (!pulseAllowed || pulseFuel <= 0.01) pulseEngaged = false;
     pulseActive = pulseEngaged && pulseFuel > 0.01 && pulseAllowed;
     spaceCtl.pulseDrive = pulseActive;
-    if (pulseActive) pulseFuel = Math.max(0, pulseFuel - dt * 6.5);
+    if (pulseActive) {
+      pulseFuel = Math.max(0, pulseFuel - dt * 6.5);
+      pulseRechargeDelay = 1.4;
+    }
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
       // A distance-shaped radial cap preserves the scale of the world and
@@ -1022,18 +1054,43 @@ function frame() {
   }
   stepTweens(dt);
 
+  // The ship reactor recharges pulse energy after a short thermal cooldown.
+  // Recharge continues while landed so pulse fuel can never become a dead-end
+  // resource that requires restarting the session.
+  if (!pulseActive) {
+    pulseRechargeDelay = Math.max(0, pulseRechargeDelay - dt);
+    if (pulseRechargeDelay <= 0 && pulseFuel < 100) {
+      pulseFuel = Math.min(100, pulseFuel + dt * 4.5);
+    }
+  }
+
+  const weaponTrigger = state === 'space' && (spaceCtl.firing || spaceCtl.firePressed);
+  weaponCooldown -= dt;
+  if (weaponTrigger && weaponCooldown <= 0) {
+    weapons.fire(nav, spaceCtl.speedScale);
+    audio.cue('fire');
+    weaponCooldown = 0.13;
+  } else if (!weaponTrigger) {
+    weaponCooldown = Math.min(weaponCooldown, 0);
+  }
+  spaceCtl.firePressed = false;
+
   const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
   boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
   pulseVisual += ((pulseActive ? 1 : 0) - pulseVisual) * (1 - Math.exp(-dt * (pulseActive ? 4.5 : 7)));
+  weaponVisual += ((weaponTrigger ? 1 : 0) - weaponVisual) * (1 - Math.exp(-dt * 16));
   if (state === 'space' && warpIntensity < 0.01) {
-    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 3.5) - camera.fov)
+    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 14.0) - camera.fov)
       * (1 - Math.exp(-dt * 6.2));
     camera.updateProjectionMatrix();
   }
+  pulseFx.style.opacity = (pulseVisual * 0.78).toFixed(3);
+  pulseFx.style.transform = `scale(${(1.08 + pulseVisual * 0.06).toFixed(3)})`;
+  document.body.classList.toggle('weapon-firing', weaponVisual > 0.12);
 
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
-  warpStreaks.update(dt, _velActual, warpIntensity, Math.max(boostVisual, pulseVisual * 0.9));
+  warpStreaks.update(dt, _velActual, warpIntensity, Math.max(boostVisual, pulseVisual * 1.8));
   // a deferred system (warp or manual approach) materializes one planet/frame
   if (universe.system && !universe.system.built) universe.system.buildNext();
 
@@ -1078,6 +1135,7 @@ function frame() {
   universe.updateRelative(nav.pos);
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
+  activeBolts = weapons.update(dt, nav, nearest);
 
   // sun → shadow-light crossfade (after updateRelative, which sets intensities)
   sunShadow.visible = shadowBlend > 0.02;
@@ -1104,9 +1162,14 @@ function frame() {
       Math.sin(t * 13.1 + 2.4) * amp * 0.35,
     );
   }
+  if (pulseVisual > 0.01 && state === 'space') {
+    const t = clock.elapsedTime;
+    camera.position.x += Math.sin(t * 29.0) * 0.045 * pulseVisual;
+    camera.position.y += Math.sin(t * 37.0 + 0.8) * 0.028 * pulseVisual;
+  }
 
   // the ship flies just ahead of the camera whenever we're in flight
-  ship.update(dt, nav, state, trueSpd, warpIntensity, Math.max(boostVisual, pulseVisual));
+  ship.update(dt, nav, state, trueSpd, warpIntensity, Math.max(boostVisual, pulseVisual * 1.3));
   audio.update({
     state,
     speed: trueSpd,
@@ -1125,12 +1188,13 @@ function frame() {
   ui.setFlightTelemetry({
     speed: spd,
     speedLimit: spaceCtl.speedScale * (pulseActive
-      ? 7.4 + (1 - spaceCtl.atmosphereFactor) * 3.6
+      ? 9.6 + (1 - spaceCtl.atmosphereFactor) * 5.6
       : 4.8 + (1 - spaceCtl.atmosphereFactor) * 2.8),
     boost: boostVisual,
     atmosphere: envInAtmo,
     pulse: pulseVisual,
     pulseFuel,
+    pulseRecharging: !pulseActive && pulseRechargeDelay <= 0 && pulseFuel < 99.995,
   });
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
   ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
@@ -1154,7 +1218,7 @@ function frame() {
     const info = renderer.info.render;
     let chunks = 0;
     for (const p of universe.planets()) chunks += p.lod.countChunks();
-    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued · ${renderDpr.toFixed(2)}×`);
+    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
   }
 
   // Slow adaptation avoids reallocating render targets during momentary LOD
@@ -1207,6 +1271,8 @@ window.NMS = {
       frame: frameNo, calls: info.calls, tris: info.triangles, chunks,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
+      pulse: pulseActive, pulseFuel: Math.round(pulseFuel * 10) / 10,
+      firing: spaceCtl.firing, bolts: activeBolts,
       gpu: gpuName, dpr: renderDpr,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
@@ -1518,6 +1584,18 @@ window.NMS = {
   isTouch: IS_TOUCH,
   walkSpeed: () => walkCtl.hSpeed.length(),
   warp: () => warpIntensity,
+  pulseFuel: () => pulseFuel,
+  setPulse(active) {
+    pulseEngaged = !!active && pulseFuel > 0.01
+      && (!nearest || nearestAlt > nearest.atmoHeight * 1.08);
+    return pulseEngaged;
+  },
+  fireWeapon() {
+    if (state !== 'space') return false;
+    weapons.fire(nav, spaceCtl.speedScale);
+    audio.cue('fire');
+    return true;
+  },
   // seam accounting: unmorphed LOD level changes with their apparent size
   lod: () => ({ ...lodStats }),
   lodReset: () => { lodStatsReset(); return true; },

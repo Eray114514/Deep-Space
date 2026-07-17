@@ -192,6 +192,9 @@ export class FlightAudio {
       this.tone({ from: 660, to: 880, duration: 0.3, gain: 0.08, delay: 0.2, lowpass: 2200 });
     } else if (kind === 'denied') {
       this.tone({ from: 180, to: 118, duration: 0.22, gain: 0.075, lowpass: 700 });
+    } else if (kind === 'fire') {
+      this.tone({ from: 880, to: 210, duration: 0.105, gain: 0.075, type: 'sawtooth', lowpass: 2600 });
+      this.noiseBurst({ duration: 0.075, gain: 0.035, from: 2500, to: 900, q: 1.1 });
     }
   }
 

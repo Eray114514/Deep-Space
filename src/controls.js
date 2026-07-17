@@ -32,6 +32,8 @@ export class SpaceControls {
     this.speedScale = 1000;          // set per-frame by main from altitude
     this.atmosphereFactor = 0;
     this.boosting = false;
+    this.firing = false;
+    this.firePressed = false;
     this.pulseDrive = false;
     this.wheelImpulse = 0;
     this.focus = null;               // planet (for RMB orbit / two-finger orbit)
@@ -46,8 +48,9 @@ export class SpaceControls {
     this._onPointerUp = (e) => this.pointerUp(e);
     this._onGlobalPointerUp = (e) => {
       if (e.button === 2 || !(e.buttons & 2)) this.boosting = false;
+      if (e.button === 0 || !(e.buttons & 1)) this.firing = false;
     };
-    this._onBlur = () => { this.boosting = false; };
+    this._onBlur = () => { this.boosting = false; this.firing = false; };
     this._onWheel = (e) => this.wheel(e);
     this._onLockedMove = (e) => this.lockedMove(e);
     dom.addEventListener('pointerdown', this._onPointerDown);
@@ -78,6 +81,10 @@ export class SpaceControls {
       e.preventDefault();
       this.boosting = true;
     }
+    if (e.button === 0 && e.pointerType !== 'touch') {
+      this.firing = true;
+      this.firePressed = true;
+    }
     if (!window.NMS_NOLOCK && e.pointerType !== 'touch' && document.pointerLockElement !== this.dom) {
       this.dom.requestPointerLock();
     }
@@ -99,7 +106,10 @@ export class SpaceControls {
 
   pointerMove(e) {
     if (!this.enabled || !this.pointers.has(e.pointerId)) return;
-    if (e.pointerType !== 'touch') this.boosting = !!(e.buttons & 2);
+    if (e.pointerType !== 'touch') {
+      this.boosting = !!(e.buttons & 2);
+      this.firing = !!(e.buttons & 1);
+    }
     if (document.pointerLockElement === this.dom && e.pointerType !== 'touch') return;
     const prev = this.pointers.get(e.pointerId);
     const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
@@ -148,6 +158,7 @@ export class SpaceControls {
 
   pointerUp(e) {
     if (e.button === 2) this.boosting = false;
+    if (e.button === 0) this.firing = false;
     this.pointers.delete(e.pointerId);
     if (this.pointers.size === 2) {
       this._pinchDist = this.pinchDistOf([...this.pointers.values()]);
@@ -158,9 +169,15 @@ export class SpaceControls {
     // time-based windows get inflated by slow frames and eat valid taps
     const thresh = this._drag.touch ? 14 : 7;        // fingers wobble more than mice
     const wasClick = this._drag.moved < thresh;
+    const wasTouch = this._drag.touch;
     const btn = this._drag.button;
     this._drag = null;
-    if (wasClick && btn === 0 && this.onClick) this.onClick(e.clientX, e.clientY);
+    // Desktop LMB belongs exclusively to weapons. Keeping the old target-click
+    // side effect here could switch to fly-to before a quick shot reached the
+    // next simulation frame. Touch taps still mark/select planets.
+    if (wasClick && btn === 0 && wasTouch && this.onClick) {
+      this.onClick(e.clientX, e.clientY);
+    }
   }
 
   wheel(e) {
@@ -203,9 +220,10 @@ export class SpaceControls {
       }
       if (pulsing) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        const pulseAcceleration = this.speedScale * (5.2 + (1 - this.atmosphereFactor) * 2.6);
+        // Pulse cruise is an explicit 2× tier above RMB/Shift boost.
+        const pulseAcceleration = this.speedScale * (4.8 + (1 - this.atmosphereFactor) * 3.6);
         nav.vel.addScaledVector(_f, pulseAcceleration * dt);
-        const pulseLimit = this.speedScale * (7.4 + (1 - this.atmosphereFactor) * 3.6);
+        const pulseLimit = this.speedScale * (9.6 + (1 - this.atmosphereFactor) * 5.6);
         if (nav.vel.length() > pulseLimit) nav.vel.setLength(pulseLimit);
       } else if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);

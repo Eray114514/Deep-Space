@@ -90,10 +90,14 @@ button { color: inherit; }
 .flight-readout small { grid-column: 1 / -1; color: var(--ui-cyan); font: 9px/1 var(--ui-font); letter-spacing: .16em; }
 .flight-speed { left: 15%; text-align: right; }
 .flight-altitude { right: 15%; }
-.flight-boost {
-  position: absolute; right: 13%; top: 27%; display: flex; align-items: center; gap: 8px;
+.flight-action {
+  position: absolute; top: 27%; display: flex; align-items: center; gap: 8px;
   color: rgba(235,239,234,.72); font-size: 11px;
 }
+.flight-fire { left: 13%; }
+.flight-boost { right: 13%; }
+body.weapon-firing .flight-fire { color: var(--ui-cyan); text-shadow: 0 0 12px rgba(119,212,223,.72); }
+body.weapon-firing #crosshair { box-shadow: 0 0 0 4px rgba(10,20,24,.2), 0 0 18px rgba(119,212,223,.66); }
 kbd {
   padding: 4px 7px; color: var(--ui-white); background: rgba(7,14,18,.46);
   border: 1px solid rgba(238,241,236,.65); border-radius: 6px;
@@ -185,6 +189,7 @@ kbd {
 }
 #resource-strip b { color: var(--ui-white); font-weight: 500; }
 #resource-strip strong { color: var(--ui-gold); font-weight: 500; }
+#resource-strip .pulse-recharging { color: var(--ui-cyan); }
 
 #walk-hud { display: none; }
 .ui-walk #walk-hud { display: block; }
@@ -264,6 +269,14 @@ kbd {
 .hero-copy button:hover, .hero-copy button:focus-visible { background: var(--ui-cyan); outline: 0; }
 .hero-copy small { display: block; margin-top: 11px; color: rgba(232,236,232,.42); font: 8px/1 var(--ui-mono); }
 
+#pulse-fx {
+  position: fixed; z-index: 7; inset: -5%; pointer-events: none; opacity: 0;
+  background:
+    repeating-conic-gradient(from 0deg at 50% 50%, transparent 0 4.8deg, rgba(105,224,255,.09) 5deg 5.25deg, transparent 5.5deg 9.5deg),
+    radial-gradient(ellipse at center, transparent 0 54%, rgba(90,207,240,.09) 76%, rgba(2,18,31,.5) 100%);
+  mask-image: radial-gradient(ellipse at center, transparent 0 34%, #000 66%, #000 100%);
+  transform: scale(1.08); transition: opacity .12s linear; mix-blend-mode: screen;
+}
 #vignette { position: fixed; z-index: 7; inset: 0; pointer-events: none; background: radial-gradient(ellipse, transparent 62%, rgba(0,4,7,.32) 100%); }
 #fade { position: fixed; z-index: 30; inset: 0; opacity: 0; background: #000; pointer-events: none; transition: opacity .6s; }
 
@@ -307,7 +320,7 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #target-card #tc-info, #target-card .target-progress { display: none; }
   #flight-ring { width: 88vw; top: 49%; }
   .flight-readout strong { font-size: 19px; }
-  .flight-boost { display: none; }
+  .flight-action { display: none; }
   #hud { left: 8px; bottom: 7px; width: 52vw; padding: 7px 9px; transform: none; }
   .drive-header { padding-bottom: 4px; }
   .drive-telemetry { gap: 4px; margin-top: 5px; }

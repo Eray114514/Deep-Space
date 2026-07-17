@@ -134,7 +134,8 @@ export class UI {
     this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
   }
 
-  setFlightTelemetry({ speed = 0, speedLimit = 1, boost = 0, atmosphere = 0, pulse = 0, pulseFuel = 100 }) {
+  setFlightTelemetry({ speed = 0, speedLimit = 1, boost = 0, atmosphere = 0,
+    pulse = 0, pulseFuel = 100, pulseRecharging = false }) {
     const speedK = Math.max(0, Math.min(1, speed / Math.max(1, speedLimit)));
     const boostK = Math.max(0, Math.min(1, boost));
     const atmoK = Math.max(0, Math.min(1, atmosphere));
@@ -148,7 +149,8 @@ export class UI {
     this.els.driveSpeedFill.style.width = `${Math.max(3, speedK * 100).toFixed(1)}%`;
     this.els.driveBoostFill.style.width = `${(Math.max(boostK, pulseK) * 100).toFixed(1)}%`;
     this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
-    this._setText(this.els.pulseFuel, `${Math.ceil(Math.max(0, pulseFuel))}%`);
+    this._setText(this.els.pulseFuel, `${Math.ceil(Math.max(0, pulseFuel))}%${pulseRecharging ? ' ↑' : ''}`);
+    this.els.pulseFuel.parentElement.classList.toggle('pulse-recharging', pulseRecharging);
   }
 
   _setText(el, value) { if (el.textContent !== value) el.textContent = value; }

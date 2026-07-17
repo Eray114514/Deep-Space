@@ -253,7 +253,7 @@ const _sr = new THREE.Vector3();
 export const SHIP_FOREGROUND_LAYER = 3;
 
 export class Ship {
-  constructor(scene) {
+  constructor(scene, { anisotropy = 1 } = {}) {
     const g = new THREE.Group();
     const hull = new THREE.MeshStandardMaterial({ color: 0xc9ced8, metalness: 0.6, roughness: 0.38 });
     const accent = new THREE.MeshStandardMaterial({ color: 0xb8452a, metalness: 0.4, roughness: 0.5 });
@@ -300,6 +300,7 @@ export class Ship {
     this.loadedEmissives = [];
     this.loadedGear = [];
     this.loadedRamp = [];
+    this.anisotropy = anisotropy;
     this.loadHeroShip();
 
     // when you land, the ship sets down on a pad beside you and waits
@@ -328,6 +329,12 @@ export class Ship {
           : object.material.clone();
         const materials = Array.isArray(object.material) ? object.material : [object.material];
         for (const material of materials) {
+          for (const slot of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap']) {
+            const texture = material[slot];
+            if (!texture) continue;
+            texture.anisotropy = Math.max(texture.anisotropy || 1, this.anisotropy);
+            texture.needsUpdate = true;
+          }
           if (!material.isMeshStandardMaterial) continue;
           material.color.multiplyScalar(0.72);
           material.roughness = Math.max(material.roughness, 0.3);
@@ -402,3 +409,132 @@ export class Ship {
 }
 const _sq2 = new THREE.Quaternion();
 const _sp = new THREE.Vector3();
+
+// ============================================================================
+// Twin energy cannons. Bolts live in universe coordinates and are packed into
+// one instanced draw each frame, so holding LMB does not allocate meshes or
+// create a draw call per projectile.
+// ============================================================================
+
+const _weaponForward = new THREE.Vector3();
+const _weaponRight = new THREE.Vector3();
+const _weaponUp = new THREE.Vector3();
+const _weaponPos = new THREE.Vector3();
+const _weaponDir = new THREE.Vector3();
+const _weaponQuat = new THREE.Quaternion();
+const _weaponScale = new THREE.Vector3();
+const _weaponMatrix = new THREE.Matrix4();
+const WEAPON_AXIS = new THREE.Vector3(0, 0, 1);
+
+export class ShipWeapons {
+  constructor(scene, maxBolts = 40) {
+    this.maxBolts = maxBolts;
+    this.cursor = 0;
+    this.shotsFired = 0;
+    this.bolts = Array.from({ length: maxBolts }, () => ({
+      pos: new THREE.Vector3(),
+      vel: new THREE.Vector3(),
+      life: 0,
+      maxLife: 1,
+      length: 1,
+    }));
+
+    const boltGeometry = new THREE.CylinderGeometry(0.09, 0.16, 5.5, 8, 1, true);
+    boltGeometry.rotateX(Math.PI / 2);
+    const boltMaterial = new THREE.MeshBasicMaterial({
+      color: 0x8af5ff,
+      transparent: true,
+      opacity: 0.96,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.mesh = new THREE.InstancedMesh(boltGeometry, boltMaterial, maxBolts);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 5;
+    this.mesh.count = 0;
+    scene.add(this.mesh);
+
+    const flashGeometry = new THREE.SphereGeometry(0.42, 10, 6);
+    this.flashMaterial = new THREE.MeshBasicMaterial({
+      color: 0xc4fbff,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.flashGroup = new THREE.Group();
+    this.flashA = new THREE.Mesh(flashGeometry, this.flashMaterial);
+    this.flashB = new THREE.Mesh(flashGeometry, this.flashMaterial);
+    this.flashGroup.add(this.flashA, this.flashB);
+    this.flashGroup.visible = false;
+    this.flashLife = 0;
+    this.flashPosA = new THREE.Vector3();
+    this.flashPosB = new THREE.Vector3();
+    scene.add(this.flashGroup);
+  }
+
+  fire(nav, speedScale) {
+    _weaponForward.set(0, 0, -1).applyQuaternion(nav.quat).normalize();
+    _weaponRight.set(1, 0, 0).applyQuaternion(nav.quat).normalize();
+    _weaponUp.set(0, 1, 0).applyQuaternion(nav.quat).normalize();
+    const muzzleSpeed = Math.max(420, speedScale * 6.4);
+    _weaponPos.copy(nav.pos).addScaledVector(_weaponForward, 20.5).addScaledVector(_weaponUp, -3.4);
+
+    for (const side of [-1, 1]) {
+      const bolt = this.bolts[this.cursor];
+      this.cursor = (this.cursor + 1) % this.maxBolts;
+      bolt.pos.copy(_weaponPos).addScaledVector(_weaponRight, side * 4.35);
+      bolt.vel.copy(nav.vel).addScaledVector(_weaponForward, muzzleSpeed);
+      bolt.life = bolt.maxLife = 2.1;
+      bolt.length = THREE.MathUtils.clamp(muzzleSpeed * 0.004, 1.0, 18.0);
+      if (side < 0) this.flashPosA.copy(bolt.pos);
+      else this.flashPosB.copy(bolt.pos);
+    }
+    this.flashLife = 0.085;
+    this.shotsFired++;
+  }
+
+  update(dt, nav, planet = null) {
+    let active = 0;
+    for (const bolt of this.bolts) {
+      if (bolt.life <= 0) continue;
+      bolt.life -= dt;
+      if (bolt.life <= 0) continue;
+      bolt.pos.addScaledVector(bolt.vel, dt);
+      if (planet) {
+        _weaponPos.copy(bolt.pos).sub(planet.posUniv);
+        // Cheap ocean/core interception only. Sampling procedural terrain for
+        // every projectile at 60 fps would cost more than the weapon itself.
+        if (_weaponPos.length() <= planet.R + Math.max(0, planet.seaLevel || 0)) {
+          bolt.life = 0;
+          continue;
+        }
+      }
+      _weaponPos.copy(bolt.pos).sub(nav.pos);
+      _weaponDir.copy(bolt.vel).normalize();
+      _weaponQuat.setFromUnitVectors(WEAPON_AXIS, _weaponDir);
+      const fade = THREE.MathUtils.clamp(bolt.life / 0.16, 0, 1);
+      _weaponScale.set(fade, fade, bolt.length);
+      _weaponMatrix.compose(_weaponPos, _weaponQuat, _weaponScale);
+      this.mesh.setMatrixAt(active++, _weaponMatrix);
+    }
+    this.mesh.count = active;
+    if (active) this.mesh.instanceMatrix.needsUpdate = true;
+
+    this.flashLife = Math.max(0, this.flashLife - dt);
+    this.flashGroup.visible = this.flashLife > 0;
+    if (this.flashGroup.visible) {
+      const k = this.flashLife / 0.085;
+      this.flashMaterial.opacity = k * 0.95;
+      this.flashA.position.copy(this.flashPosA).sub(nav.pos);
+      this.flashB.position.copy(this.flashPosB).sub(nav.pos);
+      const s = 0.75 + (1 - k) * 1.9;
+      this.flashA.scale.setScalar(s);
+      this.flashB.scale.setScalar(s);
+    }
+    return active;
+  }
+}
