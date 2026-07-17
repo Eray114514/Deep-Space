@@ -199,9 +199,9 @@ export class SpaceControls {
       }
       if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        const boostAcceleration = this.speedScale * (18 + (1 - this.atmosphereFactor) * 10);
+        const boostAcceleration = this.speedScale * (2.4 + (1 - this.atmosphereFactor) * 1.8);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);
-        const boostLimit = this.speedScale * (12 + (1 - this.atmosphereFactor) * 18);
+        const boostLimit = this.speedScale * (4.8 + (1 - this.atmosphereFactor) * 2.8);
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
       }
     }

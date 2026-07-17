@@ -258,17 +258,21 @@ function lineLoop(radius, color, opacity = 0.22, segments = 128) {
 
 function makePointTexture() {
   const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 64;
+  canvas.width = canvas.height = 32;
   const context = canvas.getContext('2d');
-  const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+  const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
   gradient.addColorStop(0, 'rgba(255,255,255,1)');
-  gradient.addColorStop(0.18, 'rgba(255,255,255,1)');
-  gradient.addColorStop(0.48, 'rgba(255,255,255,.42)');
+  gradient.addColorStop(0.34, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.48, 'rgba(255,255,255,.82)');
+  gradient.addColorStop(0.68, 'rgba(255,255,255,.12)');
   gradient.addColorStop(1, 'rgba(255,255,255,0)');
   context.fillStyle = gradient;
-  context.fillRect(0, 0, 64, 64);
+  context.fillRect(0, 0, 32, 32);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
   return texture;
 }
 
@@ -413,7 +417,7 @@ export class StarMap {
     this.camera.position.set(0, 110, 0.01);
     this.camera.up.set(0, 0, -1);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.16;
@@ -618,7 +622,7 @@ export class StarMap {
       }), 3,
     ));
     const starLight = new THREE.Points(pointGeometry, new THREE.PointsMaterial({
-      size: 10,
+      size: 5.5,
       sizeAttenuation: false,
       map: this.starTexture,
       vertexColors: true,
@@ -699,7 +703,7 @@ export class StarMap {
     const backdropGeometry = new THREE.BufferGeometry();
     backdropGeometry.setAttribute('position', new THREE.Float32BufferAttribute(backdropPositions, 3));
     this.world.add(new THREE.Points(backdropGeometry, new THREE.PointsMaterial({
-      size: 2.2,
+      size: 1.8,
       sizeAttenuation: false,
       map: this.starTexture,
       color: 0xdce3df,

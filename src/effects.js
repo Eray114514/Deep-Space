@@ -250,6 +250,8 @@ const _sf = new THREE.Vector3();
 const _su = new THREE.Vector3();
 const _sr = new THREE.Vector3();
 
+export const SHIP_FOREGROUND_LAYER = 3;
+
 export class Ship {
   constructor(scene) {
     const g = new THREE.Group();
@@ -262,6 +264,7 @@ export class Ship {
 
     const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) => {
       const m = new THREE.Mesh(geo, mat);
+      m.layers.enable(SHIP_FOREGROUND_LAYER);
       m.position.set(x, y, z);
       m.rotation.set(rx, ry, rz);
       m.scale.set(sx, sy, sz);
@@ -286,7 +289,8 @@ export class Ship {
     this.glowA = add(new THREE.CylinderGeometry(0.3, 0.36, 0.3, 8), engineGlowMat, 1.15, -0.2, 4.0, -Math.PI / 2);
     this.glowB = add(new THREE.CylinderGeometry(0.3, 0.36, 0.3, 8), engineGlowMat, -1.15, -0.2, 4.0, -Math.PI / 2);
 
-    g.traverse((m) => { m.castShadow = true; });
+    g.layers.enable(SHIP_FOREGROUND_LAYER);
+    g.traverse((m) => { m.castShadow = true; m.layers.enable(SHIP_FOREGROUND_LAYER); });
     this.group = g;
     scene.add(g);
 
@@ -313,6 +317,7 @@ export class Ship {
       this.loadedGear = [];
       this.loadedRamp = [];
       hero.traverse((object) => {
+        object.layers.enable(SHIP_FOREGROUND_LAYER);
         if (/^(LANDING_GEAR_ROOT|Gear_)/.test(object.name)) this.loadedGear.push(object);
         if (/^(BOARDING_RAMP_ROOT|Ramp_)/.test(object.name)) this.loadedRamp.push(object);
         if (!object.isMesh) return;
@@ -360,7 +365,13 @@ export class Ship {
     this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * 5));
     _sf.set(0, 0, -1).applyQuaternion(this.smQuat);   // forward
     _su.set(0, 1, 0).applyQuaternion(this.smQuat);
-    _sv.copy(_sf).multiplyScalar(19).addScaledVector(_su, -4.6);   // formation offset
+    this.thrustPose = this.thrustPose ?? 0;
+    this.thrustPose += (boost - this.thrustPose) * (1 - Math.exp(-dt * 4.2));
+    // During acceleration the ship visibly lunges away from the camera. This
+    // gives thrust a foreground reference instead of making only the universe
+    // appear to slide toward a stationary model.
+    _sv.copy(_sf).multiplyScalar(19 + this.thrustPose * 3.2)
+      .addScaledVector(_su, -4.6 + this.thrustPose * 0.35);   // formation offset
     const formQuat = _sq2.copy(this.smQuat)
       .multiply(_sq.setFromAxisAngle(_sr.set(0, 0, 1), this.roll));
 

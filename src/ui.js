@@ -21,6 +21,8 @@ export class UI {
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       btnJump: $('btn-jump'), btnTakeoff: $('btn-takeoff'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
+      driveMode: $('drive-mode'), driveSpeed: $('drive-speed'), driveBoost: $('drive-boost'), driveAtmo: $('drive-atmo'),
+      driveSpeedFill: $('drive-speed-fill'), driveBoostFill: $('drive-boost-fill'), driveAtmoFill: $('drive-atmo-fill'),
     };
     this.labelPool = [];
     this._labelNext = 0;
@@ -137,6 +139,19 @@ export class UI {
     this._setText(this.els.altitudeUnit, alt > 9999 ? 'km' : 'm');
     this._setText(this.els.speedValue, speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0));
     this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
+  }
+
+  setFlightTelemetry({ speed = 0, speedLimit = 1, boost = 0, atmosphere = 0 }) {
+    const speedK = Math.max(0, Math.min(1, speed / Math.max(1, speedLimit)));
+    const boostK = Math.max(0, Math.min(1, boost));
+    const atmoK = Math.max(0, Math.min(1, atmosphere));
+    this._setText(this.els.driveMode, boostK > 0.12 ? '加力' : atmoK > 0.42 ? '大气内' : '巡航');
+    this._setText(this.els.driveSpeed, speed > 1000 ? `${(speed / 1000).toFixed(1)} km/s` : `${speed.toFixed(0)} m/s`);
+    this._setText(this.els.driveBoost, boostK > 0.12 ? `${Math.round(boostK * 100)}%` : '待命');
+    this._setText(this.els.driveAtmo, `${Math.round(atmoK * 100)}%`);
+    this.els.driveSpeedFill.style.width = `${Math.max(3, speedK * 100).toFixed(1)}%`;
+    this.els.driveBoostFill.style.width = `${(boostK * 100).toFixed(1)}%`;
+    this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
   }
 
   _setText(el, value) { if (el.textContent !== value) el.textContent = value; }

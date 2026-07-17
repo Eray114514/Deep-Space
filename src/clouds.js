@@ -97,6 +97,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
       uRin: { value: band.rIn },
       uRout: { value: band.rOut },
+      uGroundR: { value: planet.R + Math.max(0, planet.seaLevel || 0) },
       uSunC: { value: new THREE.Color(1, 0.98, 0.94) },
       uAmbC: { value: new THREE.Color(0.35, 0.42, 0.55) },
       uTint: { value: new THREE.Color(band.tint || 0xffffff) },
@@ -115,7 +116,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
       precision highp sampler3D;
       uniform sampler3D uNoise3;
       uniform sampler2D uCloudNoise;
-      uniform float uCov0, uCov1, uRin, uRout, uEngage, uFrame;
+      uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame;
       uniform vec3 uCOff, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
       uniform mat3 uSpin;
       varying vec3 vDirection;
@@ -202,6 +203,15 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         float t1 = (inner.x > 0.0) ? inner.x : outer.y;
         float camR = length(uCameraLocal);
         if (camR < uRin && inner.y > 0.0) { t0 = max(inner.y, 0.0); t1 = outer.y; }
+        // From below the cloud base, rays aimed into the planet reach terrain
+        // before reaching any cloud. Without this occlusion test the far-side
+        // shell was integrated over the foreground and looked like a full-
+        // screen cloud card.
+        vec2 ground = sphereHits(uCameraLocal, uGroundR, dir);
+        if (ground.x > 0.0) {
+          if (ground.x <= t0) discard;
+          t1 = min(t1, ground.x);
+        }
         t1 = min(t1, t0 + (uRout - uRin) * 6.5);   // grazing rays: bounded cost
         if (t1 <= t0) discard;
 

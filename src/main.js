@@ -10,7 +10,7 @@ import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, 
 import { SpaceControls, WalkControls, keys } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
-import { WarpStreaks, SkyDome, Ship } from './effects.js';
+import { WarpStreaks, SkyDome, Ship, SHIP_FOREGROUND_LAYER } from './effects.js';
 import { tickShaders } from './shaders.js';
 import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
@@ -25,6 +25,7 @@ import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
 import { StarMap } from './starmap.js';
 import { VolumetricPass } from './volumetric-pass.js';
+import { ForegroundPass } from './foreground-pass.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -122,6 +123,8 @@ if (qs.get('gtao') === '1' && !QUALITY_LOW) {
   gtaoPass.blendIntensity = 0.85;
   composer.addPass(gtaoPass);
 }
+const foregroundPass = new ForegroundPass(scene, camera, SHIP_FOREGROUND_LAYER);
+composer.addPass(foregroundPass);
 // threshold above 1.0: only genuinely HDR pixels bloom (sun, lava, engines,
 // specular glints) — daytime sky must NOT veil the terrain
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
@@ -940,14 +943,32 @@ function frame() {
       // and the high-altitude descent inexplicably slow.
       const h = Math.max(nearest.atmoHeight, 1);
       const alt = Math.max(0, nearestAlt);
-      const surfaceScale = clamp(90 + Math.pow(alt, 0.72) * 1.1, 90, 3100);
-      const orbitalScale = clamp(1400 + alt * 0.32, 1400, 3e6);
-      const orbitalBlend = smoothstep(0.34, 2.2, alt / h);
+      const surfaceScale = clamp(38 + Math.pow(alt, 0.58) * 0.32, 38, 620);
+      const orbitalScale = clamp(650 + alt * 0.018, 650, 120000);
+      const orbitalBlend = smoothstep(0.72, 3.5, alt / h);
       spaceCtl.speedScale = lerp(surfaceScale, orbitalScale, orbitalBlend);
     } else {
-      spaceCtl.speedScale = 3e6;
+      spaceCtl.speedScale = 120000;
+    }
+    if (nearest) {
+      // Planet approach is intentionally much slower than tangential flight.
+      // A distance-shaped radial cap preserves the scale of the world and
+      // guarantees a long high-altitude descent instead of crossing hundreds
+      // of kilometres in a few frames. Clamp once BEFORE integration so a
+      // velocity accumulated in deep space cannot cross the atmosphere in one
+      // frame; the second clamp catches this frame's new boost impulse.
+      _v.copy(nav.pos).sub(nearest.posUniv).normalize();
+      const inwardSpeed = -nav.vel.dot(_v);
+      const safeInward = 55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6;
+      if (inwardSpeed > safeInward) nav.vel.addScaledVector(_v, inwardSpeed - safeInward);
     }
     spaceCtl.update(dt);
+    if (nearest) {
+      _v.copy(nav.pos).sub(nearest.posUniv).normalize();
+      const inwardSpeed = -nav.vel.dot(_v);
+      const safeInward = 55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6;
+      if (inwardSpeed > safeInward) nav.vel.addScaledVector(_v, inwardSpeed - safeInward);
+    }
     // never fly into the ground
     if (nearest && nearestAlt < 3) {
       _v.copy(nav.pos).sub(nearest.posUniv).normalize();
@@ -966,7 +987,7 @@ function frame() {
   const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
   boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
   if (state === 'space' && warpIntensity < 0.01) {
-    camera.fov += ((BASE_FOV + boostVisual * 11.5) - camera.fov) * (1 - Math.exp(-dt * 6.2));
+    camera.fov += ((BASE_FOV + boostVisual * 6.5) - camera.fov) * (1 - Math.exp(-dt * 6.2));
     camera.updateProjectionMatrix();
   }
 
@@ -1061,6 +1082,12 @@ function frame() {
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
     : state === 'space' ? nav.vel.length() : _velActual.length();
   ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
+  ui.setFlightTelemetry({
+    speed: spd,
+    speedLimit: spaceCtl.speedScale * (4.8 + (1 - spaceCtl.atmosphereFactor) * 2.8),
+    boost: boostVisual,
+    atmosphere: envInAtmo,
+  });
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
   ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
   updateLabels();
@@ -1069,6 +1096,13 @@ function frame() {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     volumePass.setActivePlanet(nearest, nav.pos, motion);
   }
+  foregroundPass.enabled = VOLUME_ENABLED && ['space', 'flyto', 'landing', 'takeoff', 'boarding'].includes(state);
+  ambient.layers.enable(SHIP_FOREGROUND_LAYER);
+  hemi.layers.enable(SHIP_FOREGROUND_LAYER);
+  headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
+  sunShadow.layers.enable(SHIP_FOREGROUND_LAYER);
+  universe.system?.sunLight?.layers.enable(SHIP_FOREGROUND_LAYER);
+  universe.fadingSystem?.sunLight?.layers.enable(SHIP_FOREGROUND_LAYER);
 
   statAcc += dt;
   if (statAcc > 0.5) {
@@ -1454,5 +1488,11 @@ if (qs.get('scene') === 'walk') {
   requestAnimationFrame(() => {
     window.NMS.land(Number(qs.get('planet') || 0), 0, qs.get('bias') || 'meadow');
     if (qs.get('face') === 'ship') window.NMS.faceShip();
+  });
+}
+
+if (qs.get('scene') === 'lowflight') {
+  requestAnimationFrame(() => {
+    window.NMS.coast(Number(qs.get('planet') || 0), Number(qs.get('alt') || 800));
   });
 }

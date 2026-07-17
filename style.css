@@ -117,48 +117,41 @@ kbd {
 
 #hud {
   position: fixed; z-index: 10; left: 34px; bottom: 30px;
-  width: 305px; padding: 14px 15px 12px;
+  width: 258px; padding: 11px 13px 10px;
   color: var(--ui-white); background: rgba(5,15,20,.58);
   border-left: 1px solid var(--ui-line); border-bottom: 1px solid var(--ui-line);
   transform: perspective(500px) rotateY(3deg); transform-origin: left bottom;
   pointer-events: none;
 }
-.ship-power-bars { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; height: 70px; align-items: end; }
-.ship-power-bars i {
-  position: relative; display: block; height: 100%; border: 1px solid rgba(225,232,228,.68);
-  background: linear-gradient(to top, rgba(119,212,223,.82) 0 var(--level), transparent var(--level));
-}
-.ship-power-bars i::after {
-  content: ""; position: absolute; inset: 6px 5px; opacity: .48;
-  background: repeating-linear-gradient(to top, transparent 0 6px, rgba(2,10,15,.9) 6px 9px);
-}
-.ship-power-bars i.active { border-color: var(--ui-gold); background: linear-gradient(to top, var(--ui-gold) 0 var(--level), transparent var(--level)); }
-.ship-power-labels { display: grid; grid-template-columns: repeat(6,1fr); gap: 6px; margin-top: 5px; text-align: center; }
-.ship-power-labels span, .ship-power-labels strong { font-size: 9px; font-weight: 500; color: var(--ui-dim); }
-.ship-power-labels strong { color: var(--ui-gold); }
+.drive-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 7px; border-bottom: 1px solid var(--ui-line-soft); }
+.drive-header span { color: var(--ui-dim); font: 8px/1 var(--ui-mono); letter-spacing: .16em; }
+.drive-header strong { color: var(--ui-gold); font: 600 9px/1 var(--ui-font); letter-spacing: .12em; }
+.drive-telemetry { display: grid; gap: 7px; margin-top: 8px; }
+.drive-telemetry > div { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; }
+.drive-telemetry label { color: var(--ui-dim); font-size: 9px; }
+.drive-telemetry b { color: var(--ui-white); font: 500 9px/1 var(--ui-mono); }
+.drive-telemetry i { grid-column: 1 / -1; height: 3px; overflow: hidden; background: rgba(225,231,227,.12); }
+.drive-telemetry i span { display: block; width: 0; height: 100%; background: var(--ui-cyan); box-shadow: 0 0 8px rgba(119,212,223,.45); transition: width .12s linear; }
+#drive-boost-fill { background: var(--ui-gold); }
+#drive-atmo-fill { background: rgba(155,190,226,.8); }
 .hud-system { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--ui-line-soft); }
 #sys-name { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; letter-spacing: .12em; }
 #sys-planets, #sys-seed { color: rgba(229,233,229,.52); font: 8px/1 var(--ui-mono); }
 
 #ship-integrity {
   position: fixed; z-index: 10; right: 34px; bottom: 31px;
-  width: 260px; min-height: 154px; padding: 13px 15px;
+  width: 210px; min-height: 76px; padding: 11px 13px;
   background: rgba(5,15,20,.58); border-right: 1px solid var(--ui-line); border-bottom: 1px solid var(--ui-line);
   transform: perspective(500px) rotateY(-3deg); transform-origin: right bottom;
   pointer-events: none;
 }
-.integrity-orbit {
-  display: grid; place-items: center; width: 92px; height: 92px; margin: 0 auto;
-  border: 1px solid rgba(119,212,223,.66); border-radius: 50%;
-  box-shadow: 0 0 0 6px rgba(119,212,223,.07), 0 0 0 9px rgba(225,232,228,.18);
-}
-.integrity-orbit span { padding: 5px 9px; background: rgba(3,9,12,.86); border-bottom: 1px solid var(--ui-line); font: 700 18px/1 var(--ui-mono); }
-.integrity-copy { position: absolute; left: 15px; bottom: 29px; display: grid; }
-.integrity-copy strong { color: var(--ui-dim); font-size: 13px; }
-.integrity-copy span { color: rgba(225,231,227,.42); font: 7px/1 var(--ui-mono); }
-.integrity-line { position: absolute; left: 15px; right: 15px; bottom: 13px; height: 7px; background: rgba(225,231,227,.13); }
+.integrity-copy { display: flex; justify-content: space-between; align-items: baseline; }
+.integrity-copy strong { color: var(--ui-dim); font-size: 11px; }
+.integrity-copy strong b { color: var(--ui-white); font: 700 16px/1 var(--ui-mono); }
+.integrity-copy span { color: rgba(225,231,227,.48); font: 8px/1 var(--ui-mono); }
+.integrity-line { position: absolute; left: 13px; right: 13px; top: 35px; height: 5px; background: rgba(225,231,227,.13); }
 .integrity-line i { display: block; width: var(--level); height: 100%; background: var(--ui-gold); }
-.ship-status { position: absolute; right: 15px; bottom: 30px; display: flex; gap: 10px; color: var(--ui-dim); font-size: 9px; }
+.ship-status { position: absolute; left: 13px; right: 13px; bottom: 11px; display: flex; justify-content: space-between; color: var(--ui-dim); font-size: 8px; }
 .ship-status b { color: var(--ui-white); font-weight: 500; }
 
 #star-map-btn {
@@ -187,7 +180,7 @@ kbd {
 .target-progress b { position: absolute; top: -2px; left: var(--target-progress); width: 5px; height: 5px; background: var(--ui-gold); }
 
 #resource-strip {
-  position: fixed; z-index: 10; right: 34px; bottom: 194px; display: flex; gap: 10px;
+  position: fixed; z-index: 10; right: 34px; bottom: 119px; display: flex; gap: 10px;
   color: rgba(231,235,232,.5); font: 8px/1 var(--ui-mono); pointer-events: none;
 }
 #resource-strip b { color: var(--ui-white); font-weight: 500; }
@@ -301,7 +294,7 @@ kbd {
   #flight-ring { width: min(72vw,560px); }
   #hud { width: 240px; left: 14px; bottom: 14px; }
   #ship-integrity { right: 14px; bottom: 14px; width: 210px; }
-  #resource-strip { right: 14px; bottom: 176px; }
+  #resource-strip { right: 14px; bottom: 105px; }
   #target-card { right: 14px; width: min(280px,42vw); }
 }
 
@@ -315,19 +308,17 @@ kbd {
   #flight-ring { width: 88vw; top: 49%; }
   .flight-readout strong { font-size: 19px; }
   .flight-boost { display: none; }
-  #hud { left: 8px; right: 8px; bottom: 7px; width: auto; height: 58px; padding: 7px 10px; transform: none; }
-  .ship-power-bars { float: left; width: 48%; height: 28px; gap: 3px; }
-  .ship-power-labels { float: left; width: 48%; clear: left; gap: 3px; }
-  .ship-power-labels span, .ship-power-labels strong { font-size: 6px; }
-  .hud-system { float: right; width: 47%; margin: 0; padding: 3px 0 0 8px; border-top: 0; border-left: 1px solid var(--ui-line-soft); }
-  #ship-integrity { right: 8px; bottom: 72px; width: 112px; min-height: 55px; padding: 6px 8px; transform: none; }
-  .integrity-orbit { width: 38px; height: 38px; margin: 0; }
-  .integrity-orbit span { font-size: 10px; }
-  .integrity-copy { left: 53px; top: 10px; bottom: auto; }
-  .integrity-copy span, .ship-status { display: none; }
-  .integrity-line { left: 53px; right: 8px; bottom: 13px; height: 4px; }
+  #hud { left: 8px; bottom: 7px; width: 52vw; padding: 7px 9px; transform: none; }
+  .drive-header { padding-bottom: 4px; }
+  .drive-telemetry { gap: 4px; margin-top: 5px; }
+  .drive-telemetry > div { gap: 2px 6px; }
+  .drive-telemetry > div:nth-child(3), .hud-system { display: none; }
+  #ship-integrity { right: 8px; bottom: 7px; width: 38vw; min-height: 68px; padding: 7px 8px; transform: none; }
+  .integrity-copy span { display: none; }
+  .integrity-line { left: 8px; right: 8px; top: 31px; }
+  .ship-status { left: 8px; right: 8px; bottom: 8px; }
   #resource-strip { display: none; }
-  #bottom { bottom: 70px; }
+  #bottom { bottom: 88px; }
   #hint { max-width: 84vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .walk-radar { left: 15px; bottom: 20px; width: 120px; height: 120px; }
   .walk-vitals { right: 15px; bottom: 22px; grid-template-columns: auto 80px auto; }
