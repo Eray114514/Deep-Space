@@ -37,6 +37,8 @@ window.addEventListener('error', (e) => {
 
 const qs = new URLSearchParams(location.search);
 document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
+const DEV_SERVER = window.__NMS_DEV_SERVER__ === true;
+document.body.classList.toggle('dev-runtime', DEV_SERVER);
 let SEED = qs.get('seed') || 'EUCLID';
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
@@ -954,14 +956,26 @@ function updateLabels() {
 // ---- main loop --------------------------------------------------------------------
 const clock = new THREE.Clock();
 let statAcc = 0;
+let devFpsElapsed = 0;
+let devFpsFrames = 0;
 let pauseFrameRendered = false;
 let perfEmaMs = 16.7;
 let dprAcc = 0;
 
 function frame() {
   requestAnimationFrame(frame);
-  const dt = clamp(clock.getDelta(), 0.0001, 0.05);
+  const rawDt = clock.getDelta();
+  const dt = clamp(rawDt, 0.0001, 0.05);
   frameNo++;
+  if (DEV_SERVER) {
+    devFpsElapsed += rawDt;
+    devFpsFrames++;
+    if (devFpsElapsed >= 0.45) {
+      ui.setDevFps(devFpsFrames / devFpsElapsed);
+      devFpsElapsed = 0;
+      devFpsFrames = 0;
+    }
+  }
   // The map owns an opaque full-screen WebGL surface and its own RAF. Rendering
   // the universe underneath doubled GPU work for pixels nobody could see.
   if (starMap?.isOpen) return;

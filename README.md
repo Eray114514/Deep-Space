@@ -5,7 +5,8 @@ eight archetypes (lush, oceanic, desert, frozen, volcanic, barren, toxic, exotic
 oceans, rivers, ice caps, craters, dunes, magma seas, clouds, rings and moons — and you
 can scroll from interstellar space down to the surface and **walk on any of them**.
 
-No build step. One dependency (three.js, vendored).
+The game runs directly during development and can also produce a self-contained
+static deployment in `dist/`.
 
 ![surface](docs/05-surface.png)
 
@@ -16,6 +17,15 @@ Any static file server works:
 ```bash
 npm run dev          # → http://127.0.0.1:8000
 # or: python3 -m http.server
+```
+
+`npm run dev` injects a development-only marker, so a small live FPS readout is
+always visible in the top-left. It is omitted when serving the production build.
+
+```bash
+npm test             # syntax and version-contract checks
+npm run test:terrain # heavier procedural terrain/LOD checks
+npm run build        # verified static output → dist/
 ```
 
 Optional URL params: `?seed=ANYTHING` (a different universe), `&nolock=1` (no pointer lock).

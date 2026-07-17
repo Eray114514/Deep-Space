@@ -6,6 +6,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const DEV_BOOTSTRAP = '<script>window.__NMS_DEV_SERVER__=true;</script>';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -26,7 +27,12 @@ export function startServer(port = 0) {
         if (p === '/') p = '/index.html';
         const file = normalize(join(ROOT, p));
         if (!file.startsWith(ROOT)) { res.writeHead(403); res.end(); return; }
-        const data = await readFile(file);
+        let data = await readFile(file);
+        // The runtime uses this explicit marker instead of guessing from the
+        // hostname, so a production build served on a LAN never grows dev UI.
+        if (extname(file).toLowerCase() === '.html') {
+          data = Buffer.from(data.toString('utf8').replace('</head>', `  ${DEV_BOOTSTRAP}\n</head>`));
+        }
         res.writeHead(200, {
           'content-type': MIME[extname(file).toLowerCase()] || 'application/octet-stream',
           'cache-control': 'no-store',

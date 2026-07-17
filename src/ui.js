@@ -10,7 +10,7 @@ export class UI {
       card: $('target-card'), cardName: $('tc-name'), cardType: $('tc-type'),
       cardInfo: $('tc-info'), cardDist: $('tc-dist'),
       hint: $('hint'), land: $('land-btn'), crosshair: $('crosshair'),
-      fade: $('fade'), labels: $('labels'), stats: $('stats'),
+      fade: $('fade'), labels: $('labels'), stats: $('stats'), devFps: $('dev-fps'),
       loading: $('loading'), loadingText: $('loading-text'),
       altitude: $('flight-ring'), newBtn: $('new-universe'),
       altitudeValue: $('altitude-value'), altitudeUnit: $('altitude-unit'),
@@ -225,6 +225,8 @@ export class UI {
   }
 
   setStats(text) { this.els.stats.textContent = text; }
+
+  setDevFps(fps) { this.els.devFps.textContent = `${Math.max(0, Math.round(fps))} FPS`; }
 
   // items: [{x, y, name, sub, dim, key}]
   updateLabels(items) {

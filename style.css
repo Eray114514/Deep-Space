@@ -243,6 +243,8 @@ kbd {
 
 #stats { position: fixed; z-index: 12; left: 10px; bottom: 20px; display: none; color: rgba(200,220,220,.42); font: 8px/1.2 var(--ui-mono); white-space: pre; }
 .debug-hud #stats { display: block; }
+#dev-fps { position: fixed; z-index: 60; left: 8px; top: 7px; display: none; color: rgba(190,220,224,.38); font: 9px/1 var(--ui-mono); letter-spacing: .04em; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.65); }
+.dev-runtime #dev-fps { display: block; }
 #version { position: fixed; z-index: 12; left: 9px; bottom: 7px; color: rgba(200,220,220,.34); font: 8px/1 var(--ui-mono); }
 #performance-notice {
   position: fixed; z-index: 18; right: 18px; top: 18px; max-width: min(320px,72vw); padding: 8px 11px;
