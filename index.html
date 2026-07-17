@@ -16,11 +16,11 @@
     }
   </script>
 </head>
-<body>
+<body class="ui-space">
   <div id="app"></div>
 
-  <div id="brand">
-    <span>AF</span><i>//</i><b>S9</b>
+  <div id="brand" aria-label="Asterion flight computer">
+    <span>AF</span><i>//</i><b>S9</b><small id="brand-system">DEEP SPACE</small>
   </div>
 
   <div id="compass">
@@ -30,29 +30,42 @@
     <span class="compass-tick"></span>
   </div>
 
-  <div id="hud" class="panel">
-    <div class="hud-kicker"><span>ASTERION S-9</span><b>FLIGHT STATUS</b></div>
+  <div id="flight-ring" aria-hidden="true">
+    <div class="flight-arc arc-outer"></div>
+    <div class="flight-arc arc-inner"></div>
+    <div class="flight-tick tick-left"></div>
+    <div class="flight-tick tick-right"></div>
+    <div class="flight-readout flight-speed"><strong id="speed-value">0</strong><span id="speed-unit">m/s</span><small>速度</small></div>
+    <div class="flight-readout flight-altitude"><strong id="altitude-value">0</strong><span id="altitude-unit">m</span><small>高度</small></div>
+    <div class="flight-boost"><kbd>RMB</kbd><span>加力推进</span></div>
+  </div>
+
+  <section id="hud" class="ship-power" aria-label="飞船动力分配">
+    <div class="ship-power-bars" aria-hidden="true">
+      <i style="--level:72%"></i><i style="--level:48%"></i><i style="--level:18%"></i>
+      <i class="active" style="--level:84%"></i><i style="--level:62%"></i><i style="--level:91%"></i>
+    </div>
+    <div class="ship-power-labels"><span>跃迁</span><span>武器</span><span>辅助</span><strong>引擎</strong><span>护盾</span><span>重力</span></div>
     <div class="hud-system">
       <strong id="sys-name">—</strong>
       <span id="sys-planets">—</span>
       <span id="sys-seed">—</span>
     </div>
-    <div id="altitude" class="telemetry hidden">
-      <div><span>速度</span><strong id="speed-value">0</strong><em id="speed-unit">m/s</em></div>
-      <div><span>高度</span><strong id="altitude-value">0</strong><em id="altitude-unit">m</em></div>
-    </div>
-    <div class="ship-status">
-      <div><span>船体</span><i><b style="--level:100%"></b></i><em>100</em></div>
-      <div><span>护盾</span><i><b style="--level:79%"></b></i><em>79</em></div>
-      <div><span>生命</span><i><b style="--level:100%"></b></i><em>100</em></div>
-    </div>
-    <div class="hud-actions">
-      <button id="star-map-btn" title="打开 3D 银河星图"><span>星图</span><kbd>M</kbd></button>
-    </div>
-  </div>
+  </section>
 
-  <div id="target-card" class="panel hidden">
-    <div class="target-kicker">ACTIVE DIRECTIVE 01</div>
+  <section id="ship-integrity" aria-label="飞船状态">
+    <div class="integrity-orbit"><span>100</span></div>
+    <div class="integrity-copy"><strong>船体</strong><span>ASTERION S-9</span></div>
+    <div class="integrity-line"><i style="--level:100%"></i></div>
+    <div class="ship-status" aria-label="护盾与生命">
+      <span>护盾 <b>79</b></span><span>生命 <b>100</b></span>
+    </div>
+  </section>
+
+  <button id="star-map-btn" title="打开银河星图"><span>银河星图</span><kbd>M</kbd></button>
+
+  <div id="target-card" class="hidden">
+    <div class="target-kicker">导航目标</div>
     <div id="tc-name">—</div>
     <div id="tc-type" class="sub">—</div>
     <div id="tc-info" class="sub">—</div>
@@ -67,6 +80,17 @@
 
   <div id="labels"></div>
 
+  <section id="walk-hud" aria-label="地表探索状态">
+    <div class="walk-radar">
+      <div class="walk-orbit"></div>
+      <strong id="walk-system">未知星球</strong>
+      <span><b>O₂</b> 100</span>
+    </div>
+    <div class="walk-vitals">
+      <span>生命维持</span><i><b style="--level:100%"></b></i><strong>100</strong>
+    </div>
+  </section>
+
   <div id="bottom">
     <button id="land-btn" class="hidden">LAND — walk the surface</button>
     <div id="hint" class="hidden"></div>
@@ -75,13 +99,14 @@
   <div id="crosshair" class="hidden"></div>
   <div id="stats"></div>
   <div id="version"></div>
+  <div id="performance-notice" class="hidden" role="status" aria-live="polite"></div>
 
   <div id="touch-ui" class="hidden">
     <div id="joystick">
       <div id="joystick-knob"></div>
     </div>
-    <button id="btn-jump" class="touch-btn">⤊</button>
-    <button id="btn-takeoff" class="touch-btn">🚀</button>
+    <button id="btn-jump" class="touch-btn">跳跃</button>
+    <button id="btn-takeoff" class="touch-btn">起飞</button>
   </div>
 
   <div id="loading">
@@ -90,6 +115,16 @@
       <div id="loading-text">generating universe…</div>
     </div>
   </div>
+
+  <section id="hero-overlay" class="hidden" aria-label="启动深空">
+    <div class="hero-copy">
+      <span>ASTERION FLIGHT PROGRAM</span>
+      <h1>深空</h1>
+      <p>连续宇宙导航已就绪</p>
+      <button id="hero-start-btn">进入深空</button>
+      <small>建议开启音效 · 佩戴耳机</small>
+    </div>
+  </section>
 
   <div id="vignette"></div>
   <div id="fade"></div>

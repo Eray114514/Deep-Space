@@ -12,18 +12,29 @@ export class UI {
       hint: $('hint'), land: $('land-btn'), crosshair: $('crosshair'),
       fade: $('fade'), labels: $('labels'), stats: $('stats'),
       loading: $('loading'), loadingText: $('loading-text'),
-      altitude: $('altitude'), newBtn: $('new-universe'),
+      altitude: $('flight-ring'), newBtn: $('new-universe'),
       altitudeValue: $('altitude-value'), altitudeUnit: $('altitude-unit'),
       speedValue: $('speed-value'), speedUnit: $('speed-unit'),
       headingCardinal: $('heading-cardinal'), headingDegrees: $('heading-degrees'),
       starMapBtn: $('star-map-btn'),
+      brandSystem: $('brand-system'), walkSystem: $('walk-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       btnJump: $('btn-jump'), btnTakeoff: $('btn-takeoff'),
+      performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
     };
     this.labelPool = [];
+    this._labelNext = 0;
+    this._hudRectStamp = 0;
+    this._hudRects = [];
+    window.addEventListener('resize', () => { this._hudRectStamp = 0; });
     this.els.land.addEventListener('click', () => this.cb.onLand && this.cb.onLand());
     this.els.newBtn.addEventListener('click', () => this.cb.onNewUniverse && this.cb.onNewUniverse());
     this.els.starMapBtn.addEventListener('click', () => this.cb.onStarMap && this.cb.onStarMap());
+    this.els.heroStart.addEventListener('click', () => {
+      this.els.hero.classList.add('hidden');
+      this.cb.onStart?.();
+      window.dispatchEvent(new CustomEvent('game-user-start'));
+    });
     this.setupTouch();
   }
 
@@ -79,6 +90,8 @@ export class UI {
     this.els.system.textContent = name;
     this.els.planetCount.textContent = `已测绘天体 · ${planetCount}`;
     this.els.seed.textContent = `星域种子 · ${seed}`;
+    if (this.els.brandSystem) this.els.brandSystem.textContent = name;
+    if (this.els.walkSystem) this.els.walkSystem.textContent = name;
   }
 
   setTarget(planet, dist) {
@@ -113,19 +126,26 @@ export class UI {
   }
 
   setAltitude(alt, speed) {
-    if (alt == null) { this.els.altitude.classList.add('hidden'); return; }
-    this.els.altitude.classList.remove('hidden');
-    this.els.altitudeValue.textContent = alt > 9999 ? (alt / 1000).toFixed(1) : alt.toFixed(0);
-    this.els.altitudeUnit.textContent = alt > 9999 ? 'km' : 'm';
-    this.els.speedValue.textContent = speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0);
-    this.els.speedUnit.textContent = speed > 1000 ? 'km/s' : 'm/s';
+    if (alt == null) {
+      this._setText(this.els.altitudeValue, '—');
+      this._setText(this.els.altitudeUnit, '');
+      this._setText(this.els.speedValue, Number.isFinite(speed) ? (speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0)) : '0');
+      this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
+      return;
+    }
+    this._setText(this.els.altitudeValue, alt > 9999 ? (alt / 1000).toFixed(1) : alt.toFixed(0));
+    this._setText(this.els.altitudeUnit, alt > 9999 ? 'km' : 'm');
+    this._setText(this.els.speedValue, speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0));
+    this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
   }
+
+  _setText(el, value) { if (el.textContent !== value) el.textContent = value; }
 
   setHeading(degrees) {
     const d = ((degrees % 360) + 360) % 360;
     const names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    this.els.headingCardinal.textContent = names[Math.round(d / 45) % 8];
-    this.els.headingDegrees.textContent = `${String(Math.round(d)).padStart(3, '0')}°`;
+    this._setText(this.els.headingCardinal, names[Math.round(d / 45) % 8]);
+    this._setText(this.els.headingDegrees, `${String(Math.round(d)).padStart(3, '0')}°`);
   }
 
   setHint(text, persistent = false) {
@@ -133,6 +153,16 @@ export class UI {
     this._hint = text;
     clearTimeout(this._hintTimer);
     this.els.hint.innerHTML = text || '';
+    // setState is intentionally kept out of the DOM API. The two gameplay
+    // hints are stable state signals and let the HUD switch presentation
+    // without changing the runtime integration contract.
+    if (text && (/WASD|摇杆/.test(text))) {
+      document.body.classList.add('ui-walk');
+      document.body.classList.remove('ui-space');
+    } else if (text && (/鼠标|单指/.test(text))) {
+      document.body.classList.add('ui-space');
+      document.body.classList.remove('ui-walk');
+    }
     this.els.hint.classList.toggle('hidden', !text);
     this.els.hint.classList.remove('hint-faded');
     if (text && !persistent) {
@@ -141,8 +171,29 @@ export class UI {
   }
 
   showLand(show, text = 'LAND — walk the surface') {
-    this.els.land.textContent = text;
+    this.els.land.textContent = text.startsWith('DIVE') ? '潜入并离开飞船' :
+      text.startsWith('LAND') ? '着陆并离开飞船  [L]' : text;
     this.els.land.classList.toggle('hidden', !show);
+  }
+
+  showHero(show = true, subtitle = '') {
+    this.els.hero.classList.toggle('hidden', !show);
+    const copy = this.els.hero.querySelector('p');
+    if (subtitle) copy.textContent = subtitle;
+    if (show) queueMicrotask(() => this.els.heroStart.focus());
+  }
+
+  setPerformanceNotice(text, timeout = 8000) {
+    clearTimeout(this._performanceNoticeTimer);
+    const notice = this.els.performanceNotice;
+    notice.textContent = text || '';
+    notice.classList.toggle('hidden', !text);
+    notice.classList.remove('notice-fade');
+    if (!text || timeout <= 0) return;
+    this._performanceNoticeTimer = setTimeout(() => {
+      notice.classList.add('notice-fade');
+      setTimeout(() => notice.classList.add('hidden'), 700);
+    }, timeout);
   }
 
   setCrosshair(show) { this.els.crosshair.classList.toggle('hidden', !show); }
@@ -163,6 +214,9 @@ export class UI {
 
   // items: [{x, y, name, sub, dim, key}]
   updateLabels(items) {
+    const now = performance.now();
+    if (now < this._labelNext) return;
+    this._labelNext = now + 72; // DOM labels do not need the WebGL frame rate
     while (this.labelPool.length < items.length) {
       const el = document.createElement('div');
       el.className = 'planet-label';
@@ -173,13 +227,17 @@ export class UI {
       this.els.labels.appendChild(el);
       this.labelPool.push(el);
     }
-    const occupied = [];
-    for (const id of ['brand', 'compass', 'target-card', 'hud', 'resource-strip']) {
-      const node = document.getElementById(id);
-      if (!node || getComputedStyle(node).display === 'none') continue;
-      const r = node.getBoundingClientRect();
-      occupied.push({ left: r.left - 6, top: r.top - 6, right: r.right + 6, bottom: r.bottom + 6 });
+    if (now - this._hudRectStamp > 500) {
+      this._hudRectStamp = now;
+      this._hudRects = [];
+      for (const id of ['brand', 'compass', 'target-card', 'hud', 'ship-integrity', 'resource-strip', 'walk-hud']) {
+        const node = document.getElementById(id);
+        if (!node || node.offsetParent === null) continue;
+        const r = node.getBoundingClientRect();
+        this._hudRects.push({ left: r.left - 6, top: r.top - 6, right: r.right + 6, bottom: r.bottom + 6 });
+      }
     }
+    const occupied = this._hudRects.slice();
     const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
     for (let i = 0; i < this.labelPool.length; i++) {
       const el = this.labelPool[i];
@@ -188,10 +246,11 @@ export class UI {
       el.style.display = '';
       el.classList.toggle('dim', !!it.dim);
       el._key = it.key;
-      el.children[1].textContent = it.name;
-      el.children[2].textContent = it.sub || '';
-      const w = Math.max(80, el.offsetWidth || 80);
-      const h = Math.max(24, el.offsetHeight || 24);
+      if (el.children[1].textContent !== it.name) el.children[1].textContent = it.name;
+      const sub = it.sub || '';
+      if (el.children[2].textContent !== sub) el.children[2].textContent = sub;
+      const w = Math.min(250, Math.max(80, 34 + Math.max(it.name.length * 9, sub.length * 6)));
+      const h = 34;
       const x = Math.max(8, Math.min(window.innerWidth - w - 8, it.x));
       let y = Math.max(72, Math.min(window.innerHeight - h - 72, it.y));
       let rect = { left: x, top: y, right: x + w, bottom: y + h };

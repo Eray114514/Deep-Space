@@ -28,6 +28,88 @@ const TYPE_LABELS = {
   exotic: '异象世界',
 };
 
+function starSurfaceMaterial(color) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uColor: { value: color.clone() },
+    },
+    vertexShader: `
+      varying vec3 vLocal;
+      varying vec3 vNormalW;
+      varying vec3 vView;
+      void main() {
+        vLocal = normalize(position);
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vNormalW = normalize(mat3(modelMatrix) * normal);
+        vView = normalize(cameraPosition - world.xyz);
+        gl_Position = projectionMatrix * viewMatrix * world;
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform vec3 uColor;
+      varying vec3 vLocal;
+      varying vec3 vNormalW;
+      varying vec3 vView;
+      float hash(vec3 p) {
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
+      float noise(vec3 p) {
+        vec3 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),f.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);
+      }
+      float fbm(vec3 p) {
+        float s = 0.0, a = 0.55;
+        for (int i = 0; i < 4; i++) { s += a * noise(p); p = p * 2.03 + 7.1; a *= 0.48; }
+        return s;
+      }
+      void main() {
+        vec3 flow = vLocal * 4.2 + vec3(uTime * 0.035, -uTime * 0.022, uTime * 0.018);
+        float cells = fbm(flow) * 0.72 + fbm(flow * 2.35 - uTime * 0.015) * 0.28;
+        float hot = smoothstep(0.42, 0.9, cells);
+        float limb = pow(clamp(dot(normalize(vNormalW), normalize(vView)), 0.0, 1.0), 0.32);
+        vec3 amber = mix(uColor * 0.65, vec3(1.0, 0.43, 0.08), 0.38);
+        vec3 core = mix(amber, vec3(1.55, 1.16, 0.54), hot);
+        gl_FragColor = vec4(core * (0.85 + cells * 1.45) * (0.72 + limb * 0.45), 1.0);
+      }
+    `,
+    toneMapped: false,
+  });
+}
+
+function starCoronaMaterial(color) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: color.clone() } },
+    vertexShader: `
+      varying vec3 vNormalW;
+      varying vec3 vView;
+      void main() {
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vNormalW = normalize(mat3(modelMatrix) * normal);
+        vView = normalize(cameraPosition - world.xyz);
+        gl_Position = projectionMatrix * viewMatrix * world;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      varying vec3 vNormalW;
+      varying vec3 vView;
+      void main() {
+        float rim = pow(1.0 - clamp(dot(normalize(vNormalW), normalize(vView)), 0.0, 1.0), 2.25);
+        gl_FragColor = vec4(uColor * (1.5 + rim), rim * 0.42);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+}
+
 function starClass(star) {
   const c = star.color;
   if (c.b > c.r * 1.08) return { code: 'A', label: '蓝白主序星', temp: '7,500–10,000 K' };
@@ -41,6 +123,23 @@ function distanceText(metres) {
   if (metres < 1e9) return `${(metres / 1e6).toFixed(0)} 千公里`;
   if (metres < AU * 0.15) return `${(metres / 1e9).toFixed(2)} 百万公里`;
   return `${(metres / AU).toFixed(3)} AU`;
+}
+
+function planetProfile(body) {
+  const rand = makeRng(body.seed + ':ui-profile');
+  const gravity = (0.48 + Math.min(1.12, body.radius / 310_000) + rand() * 0.18).toFixed(2);
+  const profiles = {
+    lush: ['温和', '标准 氧气', '丰富', '丰富', ['H₂O', 'Fe', 'Ar', 'C']],
+    ocean: ['湿润', '富氧', '海洋', '稀疏', ['H₂O', 'Cl', 'Ar', 'Cu']],
+    desert: ['炎热', '稀薄 CO₂', '稀少', '稀少', ['Si', 'Fe', 'He₃', 'Al']],
+    ice: ['严寒', '冰晶氮气', '稀少', '冻原', ['H₂O', 'N', 'Ar', 'Pb']],
+    lava: ['极端高温', '硫化物', '无', '无', ['Fe', 'Ni', 'S', 'Co']],
+    barren: ['寒冷', '近真空', '无', '无', ['Fe', 'Pb', 'Al', 'He₃']],
+    toxic: ['腐蚀性', '剧毒', '危险', '异常', ['Cl', 'Ar', 'F', 'Si']],
+    exotic: ['异常', '未知', '未知', '未知', ['Au', 'Xe', 'Ir', '???']],
+  };
+  const [temp, atmo, fauna, flora, resources] = profiles[body.type] || profiles.barren;
+  return { gravity, temp, atmo, fauna, flora, resources };
 }
 
 function previewSystem(seed, star, currentSystem) {
@@ -202,88 +301,82 @@ export class StarMap {
     root.className = 'hidden';
     root.setAttribute('aria-label', '3D 星图');
     root.innerHTML = `
-      <div class="sm-scanlines"></div>
-      <header class="sm-header">
-        <div class="sm-title">
-          <span class="sm-kicker">ASTROMETRICS / NAVIGATION ARRAY</span>
-          <h1>银河星图</h1>
+      <main class="sm-viewport">
+        <div id="sm-canvas"></div>
+        <div class="sm-coordinate-grid" aria-hidden="true"></div>
+        <div id="sm-label-layer" aria-label="星图标记"></div>
+        <div class="sm-map-frame" aria-hidden="true"></div>
+      </main>
+
+      <nav class="sm-nav-rail" aria-label="星图导航">
+        <button id="sm-close" class="sm-back" aria-label="返回飞行">返回</button>
+        <button class="active" data-sm-mode="galaxy">星图</button>
+        <button data-sm-mode="system">星系</button>
+      </nav>
+
+      <section class="sm-galaxy-tools">
+        <label class="sm-search"><span>搜索星系</span><input id="sm-search" type="search" maxlength="32" autocomplete="off" placeholder="星系名称 / 坐标" /></label>
+        <div class="sm-filter-grid">
+          <button class="active" data-sm-filter="all">全部</button>
+          <button data-sm-filter="habitable">宜居</button>
+          <button data-sm-filter="anomaly">异常</button>
+          <button data-sm-filter="frontier">边界</button>
         </div>
-        <nav class="sm-tabs" aria-label="星图视图">
-          <button class="active" data-sm-mode="galaxy">恒星网络</button>
-          <button data-sm-mode="system">行星体系</button>
-        </nav>
-        <div class="sm-header-status">
-          <span>航路同步</span><strong id="sm-sync">100%</strong>
-          <button id="sm-close" aria-label="关闭星图">关闭 <kbd>M</kbd></button>
+        <div class="sm-map-meta"><span id="sm-sector">—</span><b id="sm-count">—</b></div>
+      </section>
+
+      <section class="sm-system-panel sm-panel">
+        <header><span>系统</span><b id="sm-target-code">NO TARGET</b></header>
+        <div class="sm-system-title"><small>代号</small><h1 id="sm-target-name">选择一个恒星系</h1></div>
+        <div class="sm-system-grade"><span>等级</span><strong>1</strong></div>
+        <div class="sm-star-orb"><div id="sm-star-core"></div></div>
+        <dl class="sm-data-grid">
+          <div><dt>恒星类型</dt><dd id="sm-star-type">—</dd></div>
+          <div><dt>航行距离</dt><dd id="sm-distance">—</dd></div>
+          <div><dt>表面温度</dt><dd id="sm-temperature">—</dd></div>
+          <div><dt>天体数量</dt><dd id="sm-planets">—</dd></div>
+        </dl>
+        <div class="sm-explore"><span>勘查</span><i><b></b></i><strong>34%</strong></div>
+        <div id="sm-body-list" class="sm-body-list"><div class="sm-empty">选择恒星以解算行星轨道</div></div>
+        <div class="sm-actions">
+          <button id="sm-inspect" disabled>查看星系</button>
+          <button id="sm-warp" disabled><span>设定航线</span><small id="sm-warp-state">等待目标</small></button>
         </div>
-      </header>
-      <div class="sm-layout">
-        <aside class="sm-sidebar sm-left">
-          <div class="sm-section-label">星域筛选</div>
-          <div class="sm-filter-grid">
-            <button class="active" data-sm-filter="all"><i></i>全部航路</button>
-            <button data-sm-filter="habitable"><i></i>宜居候选</button>
-            <button data-sm-filter="anomaly"><i></i>资源异常</button>
-            <button data-sm-filter="frontier"><i></i>远征边界</button>
-          </div>
-          <label class="sm-search">
-            <span>搜索星系</span>
-            <input id="sm-search" type="search" maxlength="32" autocomplete="off" placeholder="输入星系名称…" />
-          </label>
-          <div class="sm-sector">
-            <div><span>当前星区</span><strong id="sm-sector">—</strong></div>
-            <div><span>显示节点</span><strong id="sm-count">—</strong></div>
-            <div><span>导航层级</span><strong>本地星群</strong></div>
-          </div>
-          <div class="sm-legend">
-            <div class="sm-section-label">恒星分类</div>
-            <span><i class="sm-dot sm-a"></i>A / F 蓝白星</span>
-            <span><i class="sm-dot sm-g"></i>G 黄矮星</span>
-            <span><i class="sm-dot sm-k"></i>K 橙矮星</span>
-            <span><i class="sm-dot sm-m"></i>M 红矮星</span>
-          </div>
-        </aside>
-        <main class="sm-viewport">
-          <div id="sm-canvas"></div>
-          <div class="sm-reticle" aria-hidden="true"></div>
-          <div class="sm-axis"><span>Y+</span><span>X / Z 平面</span></div>
-          <div id="sm-view-caption">拖动旋转 · 滚轮缩放 · 单击选择</div>
-        </main>
-        <aside class="sm-sidebar sm-right">
-          <div class="sm-section-label">目标分析</div>
-          <div class="sm-object-title">
-            <span id="sm-target-code">NO TARGET</span>
-            <h2 id="sm-target-name">选择一个恒星系</h2>
-          </div>
-          <div class="sm-star-orb"><div id="sm-star-core"></div></div>
-          <dl class="sm-data-grid">
-            <div><dt>恒星类型</dt><dd id="sm-star-type">—</dd></div>
-            <div><dt>航行距离</dt><dd id="sm-distance">—</dd></div>
-            <div><dt>表面温度</dt><dd id="sm-temperature">—</dd></div>
-            <div><dt>天体数量</dt><dd id="sm-planets">—</dd></div>
-          </dl>
-          <div class="sm-section-label sm-body-heading">行星测绘</div>
-          <div id="sm-body-list" class="sm-body-list">
-            <div class="sm-empty">选择恒星以解算行星轨道</div>
-          </div>
-          <div class="sm-actions">
-            <button id="sm-inspect" disabled>展开行星体系</button>
-            <button id="sm-warp" class="sm-primary" disabled>
-              <span>设为跃迁目标</span><small id="sm-warp-state">等待目标</small>
-            </button>
-          </div>
-        </aside>
-      </div>
-      <footer class="sm-footer">
-        <div><kbd>拖动</kbd> 旋转视角 <kbd>滚轮</kbd> 缩放 <kbd>单击</kbd> 选择</div>
-        <div id="sm-route-status"><i></i>航路网络在线</div>
-        <div><kbd>Tab / M</kbd> 返回飞行</div>
-      </footer>`;
+      </section>
+
+      <section id="sm-planet-panel" class="sm-planet-panel sm-panel" aria-live="polite">
+        <header><span>天体资料</span><b id="sm-body-kind">未测绘</b></header>
+        <h2 id="sm-body-name">—</h2>
+        <p id="sm-body-system">—</p>
+        <dl>
+          <div><dt>类型</dt><dd id="sm-body-type">—</dd></div>
+          <div><dt>重力</dt><dd id="sm-body-gravity">—</dd></div>
+          <div><dt>温度</dt><dd id="sm-body-temp">—</dd></div>
+          <div><dt>大气层</dt><dd id="sm-body-atmo">—</dd></div>
+          <div><dt>动物</dt><dd id="sm-body-fauna">—</dd></div>
+          <div><dt>植物</dt><dd id="sm-body-flora">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="sm-faction-panel sm-panel"><span>阵营</span><strong>联合殖民地</strong></section>
+
+      <section id="sm-resource-panel" class="sm-resource-panel sm-panel">
+        <header><span>资源</span><b>(0/5)</b></header>
+        <div id="sm-resource-list"></div>
+        <p>特征：<span id="sm-body-features">不明 (0/3)</span></p>
+        <button type="button">扫描 <kbd>R</kbd></button>
+      </section>
+
+      <div id="sm-view-caption">拖动平移 · 滚轮缩放 · 单击选择</div>
+      <div id="sm-route-status"><i></i>航路网络在线</div>
+      <footer class="sm-footer"><span>任务 <kbd>L</kbd></span><span>显示位置 <kbd>V</kbd></span><span>设定航线 <kbd>X</kbd></span><span>返回 <kbd>Tab</kbd></span></footer>
+      <span id="sm-sync" class="sm-sync">航路同步 100%</span>`;
     document.body.appendChild(root);
     this.root = root;
     const $ = (selector) => root.querySelector(selector);
     this.els = {
       canvas: $('#sm-canvas'),
+      labelLayer: $('#sm-label-layer'),
       close: $('#sm-close'),
       sync: $('#sm-sync'),
       sector: $('#sm-sector'),
@@ -302,28 +395,38 @@ export class StarMap {
       warp: $('#sm-warp'),
       warpState: $('#sm-warp-state'),
       routeStatus: $('#sm-route-status'),
+      systemPanel: $('.sm-system-panel'),
+      planetPanel: $('#sm-planet-panel'),
+      resourcePanel: $('#sm-resource-panel'),
+      bodyKind: $('#sm-body-kind'), bodyName: $('#sm-body-name'), bodySystem: $('#sm-body-system'),
+      bodyType: $('#sm-body-type'), bodyGravity: $('#sm-body-gravity'), bodyTemp: $('#sm-body-temp'),
+      bodyAtmo: $('#sm-body-atmo'), bodyFauna: $('#sm-body-fauna'), bodyFlora: $('#sm-body-flora'),
+      resourceList: $('#sm-resource-list'), bodyFeatures: $('#sm-body-features'),
     };
   }
 
   buildRenderer() {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x01060b);
-    this.scene.fog = new THREE.FogExp2(0x01060b, 0.0052);
-    this.camera = new THREE.PerspectiveCamera(46, 1, 0.1, 500);
-    this.camera.position.set(0, 58, 112);
+    this.scene.background = new THREE.Color(0x10171b);
+    this.scene.fog = new THREE.FogExp2(0x10171b, 0.0038);
+    this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 500);
+    this.camera.position.set(0, 110, 0.01);
+    this.camera.up.set(0, 0, -1);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.6));
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.35;
+    this.renderer.toneMappingExposure = 1.16;
     this.els.canvas.appendChild(this.renderer.domElement);
     this.starTexture = makePointTexture();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.075;
-    this.controls.enablePan = false;
-    this.controls.rotateSpeed = 0.62;
+    this.controls.enableRotate = false;
+    this.controls.enablePan = true;
+    this.controls.screenSpacePanning = true;
+    this.controls.panSpeed = 1.05;
     this.controls.zoomSpeed = 0.8;
     this.controls.minDistance = 24;
     this.controls.maxDistance = 210;
@@ -377,6 +480,10 @@ export class StarMap {
       this.pointerStart = null;
       if (moved < 7) this.pick(event);
     });
+    canvas.addEventListener('pointermove', (event) => this.hoverPick(event));
+    canvas.addEventListener('pointerleave', () => {
+      if (!this.selectedPlanet) this.root.classList.remove('planet-focus');
+    });
   }
 
   open() {
@@ -386,6 +493,8 @@ export class StarMap {
     document.body.classList.add('starmap-open');
     this.previewCache.clear();
     this.mode = 'galaxy';
+    this.root.classList.add('mode-galaxy');
+    this.root.classList.remove('mode-system', 'planet-focus');
     this.selectedStar = this.getUniverse().system.star;
     this.resize();
     this.buildGalaxy();
@@ -405,14 +514,17 @@ export class StarMap {
   setMode(mode) {
     if (mode === 'system' && !this.selectedStar) return;
     this.mode = mode;
+    this.root.classList.toggle('mode-galaxy', mode === 'galaxy');
+    this.root.classList.toggle('mode-system', mode === 'system');
+    if (mode === 'galaxy') this.root.classList.remove('planet-focus');
     this.root.querySelectorAll('[data-sm-mode]').forEach((button) => {
       button.classList.toggle('active', button.dataset.smMode === mode);
     });
     if (mode === 'galaxy') {
-      this.els.caption.textContent = '拖动旋转 · 滚轮缩放 · 单击选择';
+      this.els.caption.textContent = '拖动平移 · 滚轮缩放 · 单击选择';
       this.buildGalaxy();
     } else {
-      this.els.caption.textContent = '行星轨道为对数比例 · 单击天体读取资料';
+      this.els.caption.textContent = '固定星系视角 · 悬浮天体读取资料 · 单击锁定';
       this.buildSystem();
     }
   }
@@ -423,6 +535,9 @@ export class StarMap {
     this.world = new THREE.Group();
     this.scene.add(this.world);
     this.pickables = [];
+    this.labelData = [];
+    this.systemLabelData = [];
+    this.els.labelLayer.replaceChildren();
     this.controls.target.set(0, 0, 0);
   }
 
@@ -462,7 +577,10 @@ export class StarMap {
     const maxDistance = Math.max(...stars.map((star) => star.pos.distanceTo(nav.pos)), 1);
     const scale = 78 / maxDistance;
     this.visibleStars = stars;
-    this.mapPositions = stars.map((star) => star.pos.clone().sub(current.pos).multiplyScalar(scale));
+    this.mapPositions = stars.map((star) => {
+      const delta = star.pos.clone().sub(current.pos).multiplyScalar(scale);
+      return new THREE.Vector3(delta.x, 0, delta.z);
+    });
 
     const nodeGeometry = new THREE.IcosahedronGeometry(0.72, 1);
     const nodeMaterial = new THREE.MeshBasicMaterial({
@@ -557,36 +675,57 @@ export class StarMap {
       color: 0x5b8b99, transparent: true, opacity: 0.12,
     })));
 
-    this.camera.position.set(0, 58, 112);
+    this.camera.position.set(0, 118, 0.01);
+    this.camera.up.set(0, 0, -1);
     this.controls.minDistance = 28;
-    this.controls.maxDistance = 210;
+    this.controls.maxDistance = 190;
+    this.controls.target.set(0, 0, 0);
     this.controls.update();
     this.els.count.textContent = `${stars.length} / ${STAR_LIMIT}`;
     this.els.sector.textContent = current.id;
     this.els.routeStatus.innerHTML = `<i></i>${stars.length ? '航路网络在线' : '无匹配航路'}`;
+    this.buildGalaxyLabels(stars, current);
     this.updateSelectionMarker();
   }
 
   buildSystem() {
     this.resetWorld();
     const preview = this.systemPreview(this.selectedStar);
+    const backdropRng = makeRng(this.getSeed() + ':system-backdrop:' + this.selectedStar.id);
+    const backdropPositions = [];
+    for (let i = 0; i < 520; i++) {
+      backdropPositions.push((backdropRng() - .5) * 190, -2.5, (backdropRng() - .5) * 150);
+    }
+    const backdropGeometry = new THREE.BufferGeometry();
+    backdropGeometry.setAttribute('position', new THREE.Float32BufferAttribute(backdropPositions, 3));
+    this.world.add(new THREE.Points(backdropGeometry, new THREE.PointsMaterial({
+      size: 2.2,
+      sizeAttenuation: false,
+      map: this.starTexture,
+      color: 0xdce3df,
+      transparent: true,
+      opacity: .55,
+      depthWrite: false,
+      toneMapped: false,
+    })));
+    for (let i = 0; i < 20; i++) {
+      const contour = lineLoop(12 + i * 3.25, 0xa5aaa3, 0.045 + (i % 4) * .012, 128);
+      contour.scale.z = .72 + Math.sin(i * 1.73) * .08;
+      contour.position.x = Math.sin(i * 2.13) * 1.8;
+      contour.position.z = Math.cos(i * 1.61) * 1.4;
+      this.world.add(contour);
+    }
     const starColor = this.selectedStar.color.clone().multiplyScalar(2.3);
     const sun = new THREE.Mesh(
-      new THREE.SphereGeometry(3.2, 32, 20),
-      new THREE.MeshBasicMaterial({ color: starColor }),
+      new THREE.SphereGeometry(7.6, 40, 28),
+      starSurfaceMaterial(starColor),
     );
-    sun.userData = { kind: 'sun', star: this.selectedStar };
+    sun.userData = { kind: 'sun', star: this.selectedStar, starSurface: true };
     this.world.add(sun);
     this.pickables.push(sun);
     const glow = new THREE.Mesh(
-      new THREE.SphereGeometry(4.25, 24, 16),
-      new THREE.MeshBasicMaterial({
-        color: this.selectedStar.color,
-        transparent: true,
-        opacity: 0.15,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
+      new THREE.SphereGeometry(10.4, 32, 22),
+      starCoronaMaterial(this.selectedStar.color),
     );
     this.world.add(glow);
 
@@ -634,10 +773,168 @@ export class StarMap {
       this.world.add(pivot);
       this.pickables.push(mesh);
     }
-    this.camera.position.set(0, 48, 66);
+    this.camera.position.set(0, 82, 0.01);
+    this.camera.up.set(0, 0, -1);
     this.controls.minDistance = 18;
     this.controls.maxDistance = 105;
+    this.controls.target.set(0, 0, 0);
     this.controls.update();
+    this.systemLabelData = [...primaryMeshes.values()].map((mesh) => ({ object: mesh, body: mesh.userData.body }));
+    this.buildSystemLabels();
+    if (this.selectedPlanet) this.showPlanet(this.selectedPlanet, true);
+  }
+
+  buildGalaxyLabels(stars, current) {
+    const candidates = stars
+      .map((star, index) => ({ star, index, distance: this.mapPositions[index].lengthSq() }))
+      .filter((item) => item.star.id === current.id || item.distance < 38 * 38)
+      .sort((a, b) => (a.star.id === current.id ? -1 : b.star.id === current.id ? 1 : b.distance - a.distance));
+    // Names are landmarks, not a dump of the nearest records. Choose a
+    // spatially distributed subset like Starfield's fixed-view map.
+    const ranked = [];
+    for (const item of candidates) {
+      if (item.star.id !== current.id && ranked.some((picked) =>
+        this.mapPositions[picked.index].distanceTo(this.mapPositions[item.index]) < 9)) continue;
+      ranked.push(item);
+      if (ranked.length >= 10) break;
+    }
+    this.labelData = ranked.map(({ star, index }) => {
+      const button = document.createElement('button');
+      button.className = 'sm-map-label sm-star-label';
+      button.innerHTML = '<i></i><strong></strong><small></small>';
+      button.children[0].style.setProperty('--label-color', `#${star.color.getHexString()}`);
+      button.children[1].textContent = this.systemPreview(star).name;
+      button.children[2].textContent = star.id === current.id ? '当前位置' : starClass(star).code;
+      button.classList.toggle('current', star.id === current.id);
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.selectStar(star);
+      });
+      this.els.labelLayer.appendChild(button);
+      return {
+        button, position: this.mapPositions[index], star,
+        width: Math.min(230, 34 + this.systemPreview(star).name.length * 10),
+        height: star.id === current.id ? 43 : 34,
+        priority: star.id === current.id ? 100 : 10,
+      };
+    });
+  }
+
+  buildSystemLabels() {
+    this.labelData = this.systemLabelData.map(({ object, body }) => {
+      const button = document.createElement('button');
+      button.className = 'sm-map-label sm-body-label';
+      button.innerHTML = '<i></i><strong></strong><small></small>';
+      button.children[0].style.setProperty('--label-color', `#${new THREE.Color(TYPE_COLORS[body.type] || 0xb8c0c0).getHexString()}`);
+      button.children[1].textContent = body.name;
+      button.children[2].textContent = TYPE_LABELS[body.type] || body.type;
+      button.addEventListener('pointerenter', () => this.showPlanet(body, false));
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.selectedPlanet = body;
+        this.showPlanet(body, true);
+      });
+      this.els.labelLayer.appendChild(button);
+      return {
+        button, object, body,
+        width: Math.min(210, 34 + body.name.length * 10), height: 32,
+        priority: body === this.selectedPlanet ? 90 : body.isMoon ? 5 : 20,
+      };
+    });
+  }
+
+  updateMapLabels() {
+    if (!this.labelData?.length) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const point = new THREE.Vector3();
+    const projected = [];
+    for (const item of this.labelData) {
+      if (item.object) item.object.getWorldPosition(point);
+      else point.copy(item.position);
+      point.project(this.camera);
+      const x = (point.x * .5 + .5) * rect.width;
+      const y = (-point.y * .5 + .5) * rect.height;
+      const visible = point.z > -1 && point.z < 1
+        && x > rect.width * 0.13 && y > rect.height * 0.12
+        && x + item.width < rect.width * 0.94 && y + item.height < rect.height * 0.88;
+      item.button.hidden = !visible;
+      if (!visible) continue;
+      projected.push({ item, x, y });
+    }
+    projected.sort((a, b) => (b.item.priority || 0) - (a.item.priority || 0));
+    const occupied = [];
+    if (this.mode === 'system') {
+      const blockers = [this.els.systemPanel];
+      if (this.root.classList.contains('planet-focus')) blockers.push(this.els.planetPanel, this.els.resourcePanel);
+      for (const blocker of blockers) {
+        const bounds = blocker?.getBoundingClientRect();
+        if (!bounds || bounds.width < 2 || bounds.height < 2) continue;
+        occupied.push({
+          left: bounds.left - rect.left - 10,
+          top: bounds.top - rect.top - 10,
+          right: bounds.right - rect.left + 10,
+          bottom: bounds.bottom - rect.top + 10,
+        });
+      }
+    }
+    const blockerCount = occupied.length;
+    for (const entry of projected) {
+      const { item, x, y } = entry;
+      const box = { left: x - 6, top: y - 7, right: x + item.width, bottom: y + item.height };
+      const overlaps = (other) => !(box.right < other.left || box.left > other.right
+        || box.bottom < other.top || box.top > other.bottom);
+      const blockedByPanel = occupied.slice(0, blockerCount).some(overlaps);
+      const labelCollision = occupied.slice(blockerCount).some(overlaps);
+      if (blockedByPanel || (labelCollision && (item.priority || 0) < 80)) {
+        item.button.hidden = true;
+        continue;
+      }
+      item.button.hidden = false;
+      occupied.push(box);
+      item.button.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0)`;
+    }
+  }
+
+  showPlanet(body, pinned = false) {
+    if (!body) return;
+    const profile = planetProfile(body);
+    this.root.classList.add('planet-focus');
+    this.els.bodyKind.textContent = body.isMoon ? '卫星' : '行星';
+    this.els.bodyName.textContent = body.name;
+    this.els.bodySystem.textContent = this.selectedStar ? `${this.systemPreview(this.selectedStar).name}星系` : '未知星系';
+    this.els.bodyType.textContent = TYPE_LABELS[body.type] || body.type;
+    this.els.bodyGravity.textContent = `${profile.gravity} G`;
+    this.els.bodyTemp.textContent = profile.temp;
+    this.els.bodyAtmo.textContent = profile.atmo;
+    this.els.bodyFauna.textContent = profile.fauna;
+    this.els.bodyFlora.textContent = profile.flora;
+    this.els.bodyFeatures.textContent = pinned ? '部分已识别 (1/3)' : '不明 (0/3)';
+    this.els.resourceList.replaceChildren();
+    for (const resource of profile.resources) {
+      const cell = document.createElement('span');
+      cell.textContent = resource;
+      this.els.resourceList.appendChild(cell);
+    }
+  }
+
+  hoverPick(event) {
+    if (this.mode !== 'system') return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = this.raycaster.intersectObjects(this.pickables, true).find((entry) => entry.object.userData.body);
+    if (hit?.object.userData.body) {
+      this.hoveredPlanet = hit.object.userData.body;
+      this.showPlanet(this.hoveredPlanet, false);
+      this.renderer.domElement.style.cursor = 'pointer';
+    } else {
+      this.hoveredPlanet = null;
+      this.renderer.domElement.style.cursor = 'grab';
+      if (!this.selectedPlanet) this.root.classList.remove('planet-focus');
+    }
   }
 
   updateSelectionMarker() {
@@ -670,6 +967,7 @@ export class StarMap {
   selectStar(star, focus = true) {
     this.selectedStar = star;
     this.selectedPlanet = null;
+    this.root.classList.remove('planet-focus');
     const preview = this.systemPreview(star);
     const cls = starClass(star);
     const distance = star.pos.distanceTo(this.getNav().pos);
@@ -695,6 +993,7 @@ export class StarMap {
       row.children[2].textContent = `${body.isMoon ? '卫星' : TYPE_LABELS[body.type] || body.type} · ${Math.round(body.radius / 1000)} km`;
       row.addEventListener('click', () => {
         this.selectedPlanet = body;
+        this.showPlanet(body, true);
         this.els.bodyList.querySelectorAll('.sm-body-row').forEach((item) => item.classList.toggle('selected', item === row));
         if (this.mode !== 'system') this.setMode('system');
       });
@@ -733,6 +1032,7 @@ export class StarMap {
     const body = hit.object.userData.body;
     if (body) {
       this.selectedPlanet = body;
+      this.showPlanet(body, true);
       const rows = [...this.els.bodyList.querySelectorAll('.sm-body-row')];
       const preview = this.systemPreview(this.selectedStar);
       const index = preview.bodies.indexOf(body);
@@ -753,6 +1053,7 @@ export class StarMap {
     this.raf = requestAnimationFrame(() => this.animate());
     const dt = Math.min(this.clock.getDelta(), 0.05);
     this.controls.update();
+    this.updateMapLabels();
     const marker = this.world.getObjectByName('selection-marker');
     if (marker) {
       marker.rotation.z += dt * 0.34;
@@ -769,6 +1070,9 @@ export class StarMap {
         } else if (object.userData.kind === 'moonPivot') {
           object.position.copy(object.userData.parent.position);
           object.rotation.y += dt * object.userData.speed;
+        } else if (object.userData.starSurface) {
+          object.material.uniforms.uTime.value += dt;
+          object.rotation.y += dt * 0.04;
         }
       }
     }

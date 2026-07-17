@@ -10,6 +10,7 @@ import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
 import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU, detailTexture } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
+import { VOLUME_LAYER } from './volumetric-pass.js';
 import { floraPalette } from './flora.js';
 
 // volumetric clouds are the default in the browser; ?vclouds=0 and
@@ -633,9 +634,13 @@ export class Planet {
       const atmoR = R + Math.max(this.hAmp * 3.2, R * this.atmoFraction);
       this.atmoMesh = new THREE.Mesh(
         new THREE.SphereGeometry(atmoR, 96, 64),
-        makeAtmosphereMaterial(this.atmoColor, this.atmoDensity),
+        makeAtmosphereMaterial(this.atmoColor, this.atmoDensity, R, atmoR),
       );
-      this.atmoMesh.renderOrder = 3;
+      // Atmosphere is the first participating-medium layer; clouds composite
+      // over it in the shared half-resolution volume pass.
+      this.atmoMesh.renderOrder = 1;
+      if (VCLOUDS) this.atmoMesh.layers.set(VOLUME_LAYER);
+      this.atmoMesh.frustumCulled = false;
       this.group.add(this.atmoMesh);
       this.atmoHeight = atmoR - R;
     } else {
@@ -650,8 +655,18 @@ export class Planet {
       // the visible clouds are shader-procedural (resolution-independent);
       // this small texture only serves the terrain's cast cloud shadows
       this.cloudShadowTex = makeCloudTexture(this.nD, coverage);
-      const cloudR = R + Math.max(this.hAmp * 2.0 + 1500, R * this.cloudBaseFraction);
-      const thick = Math.max(this.hAmp * 1.5, R * this.cloudThicknessFraction, 3500);
+      // Keep the weather visibly inside the atmosphere. The old mountain×2
+      // base put cloud tops on (or beyond) the atmospheric boundary, producing
+      // a white crust around the limb instead of separated ground/cloud/air.
+      const cloudBaseAlt = Math.min(
+        Math.max(this.hAmp * 1.12 + 1400, R * this.cloudBaseFraction * 0.68),
+        this.atmoHeight * 0.58,
+      );
+      const cloudR = R + cloudBaseAlt;
+      const thick = Math.min(
+        Math.max(this.hAmp * 0.86, R * this.cloudThicknessFraction * 0.72, 4200),
+        this.atmoHeight * 0.38,
+      );
       const cmat = new THREE.MeshLambertMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.88,
@@ -687,6 +702,7 @@ export class Planet {
         this.volCloudMesh = new THREE.Mesh(
           new THREE.SphereGeometry(band.rOut, 128, 80), this.volCloudMat);
         this.volCloudMesh.renderOrder = 2;
+        this.volCloudMesh.layers.set(VOLUME_LAYER);
         this.volCloudMesh.frustumCulled = false;
         this.volCloudMesh.visible = false;
         this.group.add(this.volCloudMesh);
@@ -785,8 +801,16 @@ export class Planet {
   // animDt drives scenery-in-motion (cloud drift); the seam test freezes it
   // to zero so static frames are pixel-comparable — LOD morphs keep dt.
   update(camLocal, dt, focused, animDt = dt) {
+    this.lod.focused = focused;
     this.lod.update(camLocal, dt);
-    if (this.waterLod) this.waterLod.update(camLocal, dt);
+    if (this.waterLod) {
+      this.waterLod.focused = focused;
+      this.waterLod.update(camLocal, dt);
+    }
+    if (this.atmoMesh) {
+      const au = this.atmoMesh.material.uniforms;
+      if (au.uCameraLocal) au.uCameraLocal.value.copy(camLocal);
+    }
     // shells vanish near their own altitude so you fly through, not pop through;
     // each deck also gets the sun direction in its own rotating frame
     if (this.cloudBands.length) {
@@ -821,7 +845,10 @@ export class Planet {
         // over from orbit through cloud transit and supplies parallax,
         // extinction, self-shadowing and volumetric fog.
         const camR = camLocal.length();
-        const e = smoothstep(2.05, 1.12, camR / this.R);
+        // The analytic weather deck is only an extreme-distance silhouette.
+        // Once a planet is a meaningful screen presence, the actual volume
+        // owns the cloud image even from orbit.
+        const e = smoothstep(4.5, 2.2, camR / this.R);
         const u = this.volCloudMat.uniforms;
         u.uEngage.value = e;
         u.uCameraLocal.value.copy(camLocal);
@@ -830,7 +857,9 @@ export class Planet {
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
-        this.cloudMesh.visible = true;
+        // Opacity zero still submits and shades a transparent full-screen
+        // sphere. Stop drawing the distant analytic deck once volume owns it.
+        this.cloudMesh.visible = (1 - e) > 0.012;
       }
     }
     if (this.cloudMesh2) {
@@ -838,8 +867,9 @@ export class Planet {
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
       const camR = camLocal.length();
-      const e = smoothstep(2.05, 1.12, camR / this.R);
+      const e = smoothstep(4.5, 2.2, camR / this.R);
       this.cloudMesh2.material.opacity = 0.28 * (1 - e);
+      this.cloudMesh2.visible = (1 - e) > 0.012;
     }
   }
 
@@ -937,42 +967,89 @@ const _msp = new THREE.Vector3();
 const _msd = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
-function makeAtmosphereMaterial(color, density) {
+function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   return new THREE.ShaderMaterial({
     uniforms: {
       atmoColor: { value: color },
       density: { value: density },
       sunDir: { value: new THREE.Vector3(0, 1, 0) },   // planet-local, set by the system
+      uCameraLocal: { value: new THREE.Vector3() },
+      uGroundR: { value: groundR },
+      uAtmoR: { value: atmoR },
     },
     vertexShader: /* glsl */`
-      varying vec3 vNormal;
-      varying vec3 vViewPos;
-      varying vec3 vObjNormal;
+      uniform vec3 uCameraLocal;
+      varying vec3 vDirection;
       void main() {
-        vNormal = normalMatrix * normal;
-        vObjNormal = normal;
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        vViewPos = mv.xyz;
-        gl_Position = projectionMatrix * mv;
+        vDirection = position - uCameraLocal;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }`,
     fragmentShader: /* glsl */`
+      precision highp float;
       uniform vec3 atmoColor;
-      uniform float density;
-      uniform vec3 sunDir;
-      varying vec3 vNormal;
-      varying vec3 vViewPos;
-      varying vec3 vObjNormal;
+      uniform float density, uGroundR, uAtmoR;
+      uniform vec3 sunDir, uCameraLocal;
+      varying vec3 vDirection;
+
+      vec2 sphereHits(vec3 origin, float r, vec3 dir) {
+        float b = dot(origin, dir);
+        float disc = b * b - dot(origin, origin) + r * r;
+        if (disc < 0.0) return vec2(-1.0);
+        float s = sqrt(disc);
+        return vec2(-b - s, -b + s);
+      }
+
       void main() {
-        vec3 n = normalize(vNormal);
-        vec3 v = normalize(-vViewPos);
-        float rim = pow(1.0 - abs(dot(n, v)), 3.3);
-        // glow belongs to the day side
-        float lit = clamp(dot(normalize(vObjNormal), sunDir) * 0.8 + 0.42, 0.04, 1.0);
-        gl_FragColor = vec4(atmoColor, 1.0) * rim * lit * density * 0.85;
+        vec3 dir = normalize(vDirection);
+        vec2 outer = sphereHits(uCameraLocal, uAtmoR, dir);
+        if (outer.y <= 0.0) discard;
+        vec2 ground = sphereHits(uCameraLocal, uGroundR, dir);
+        float t0 = max(outer.x, 0.0);
+        float t1 = outer.y;
+        if (ground.x > t0) t1 = min(t1, ground.x);
+        if (t1 <= t0) discard;
+
+        const int STEPS = 14;
+        float dt = (t1 - t0) / float(STEPS);
+        float t = t0 + dt * 0.5;
+        float mu = dot(dir, normalize(sunDir));
+        float rayleighPhase = 0.05968 * (1.0 + mu * mu);
+        float g = 0.76;
+        float miePhase = 0.07958 * (1.0 - g * g)
+          / pow(max(0.04, 1.0 + g * g - 2.0 * g * mu), 1.5);
+        vec3 rayleighColor = mix(vec3(0.48, 0.68, 1.0),
+          max(atmoColor, vec3(0.015)), 0.58);
+        vec3 col = vec3(0.0);
+        float trans = 1.0;
+        for (int i = 0; i < STEPS; i++) {
+          vec3 p = uCameraLocal + dir * t;
+          float r = length(p);
+          float h = clamp((r - uGroundR) / max(uAtmoR - uGroundR, 1.0), 0.0, 1.0);
+          float rhoR = exp(-h * 6.2) * density;
+          float rhoM = exp(-h * 15.0) * density * 0.22;
+          vec3 radial = p / max(r, 1.0);
+          float sunMu = dot(radial, normalize(sunDir));
+          float horizon = smoothstep(-0.13, 0.055, sunMu);
+          float slant = 1.0 / max(0.16, sunMu + 0.32);
+          float sunTrans = exp(-(rhoR * 0.32 + rhoM * 1.4) * slant) * horizon;
+          // Soft multi-scatter approximation keeps the terminator and cloud
+          // shadows from turning unnaturally black while preserving sunset.
+          vec3 scatter = rayleighColor * rhoR * rayleighPhase
+            + vec3(1.0, 0.93, 0.82) * rhoM * miePhase;
+          scatter *= sunTrans + 0.075 * density * (1.0 - h);
+          float extinction = (rhoR * 0.58 + rhoM * 1.8) * dt / max(uAtmoR - uGroundR, 1.0);
+          float a = 1.0 - exp(-extinction * 0.62);
+          col += trans * a * scatter * 11.0;
+          trans *= 1.0 - a;
+          t += dt;
+        }
+        float alpha = clamp(1.0 - trans, 0.0, 0.985);
+        if (alpha < 0.001) discard;
+        gl_FragColor = vec4(col, alpha);
       }`,
     side: THREE.BackSide,
     transparent: true,
-    blending: THREE.AdditiveBlending,
+    premultipliedAlpha: true,
     depthWrite: false,
   });
 }

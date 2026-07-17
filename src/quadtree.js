@@ -84,14 +84,31 @@ export function pendingChunks() {
 // speed tracks the hardware instead of starving on big worlds
 export function flushChunkQueue(budgetMs = 7) {
   if (buildQueue.length === 0) return 0;
-  for (const e of buildQueue) {
-    e.prio = e.dead ? Infinity : e.lod.nodeDistance(e) / e.size;
-  }
-  buildQueue.sort((a, b) => a.prio - b.prio);
   const t0 = performance.now();
   let built = 0;
   while (buildQueue.length && (built === 0 || performance.now() - t0 < budgetMs)) {
-    const node = buildQueue.shift();
+    // A full sort of 1–2k moving priorities every frame cost more than the
+    // one or two chunks we normally build. Select only the best entry needed
+    // this frame; focused terrain wins over background worlds.
+    let bestIndex = -1;
+    let bestPriority = Infinity;
+    for (let i = 0; i < buildQueue.length; i++) {
+      const e = buildQueue[i];
+      if (e.dead || e.mesh) continue;
+      const focusK = e.lod.focused ? 0.18 : 1.0;
+      const prio = (e.lod.nodeDistance(e) / e.size) * focusK;
+      if (prio < bestPriority) {
+        bestPriority = prio;
+        bestIndex = i;
+      }
+    }
+    if (bestIndex < 0) {
+      buildQueue.length = 0;
+      break;
+    }
+    const node = buildQueue[bestIndex];
+    buildQueue[bestIndex] = buildQueue[buildQueue.length - 1];
+    buildQueue.pop();
     node.queued = false;
     if (node.dead || node.mesh) continue;
     node.lod.buildNodeMesh(node);
@@ -191,7 +208,10 @@ export class ChunkedLOD {
     if (!node.children && !beyond && node.level < this.planet.maxLevel) {
       // prefetch exists to feed morphs; water (noMorph) swaps sub-pixel and
       // creates at the display threshold like before
-      const reach = this.planet.noMorph ? SPLIT : PREFETCH;
+      // Focused terrain gets a modest lead for fast descents. Going much
+      // farther than this refines the whole visible cap and destroys frame
+      // time before the extra geometry is actually resolvable.
+      const reach = this.planet.noMorph ? SPLIT : (this.focused ? 5.8 : PREFETCH);
       if (d < node.size * reach || node.level < this._forceLevel) this.createChildren(node);
     }
 

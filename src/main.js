@@ -24,6 +24,7 @@ import { makeRng } from './rng.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
 import { StarMap } from './starmap.js';
+import { VolumetricPass } from './volumetric-pass.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -51,14 +52,25 @@ console.info(`No Man's Sky three.js v${VERSION}`);
 const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
 
 // ---- renderer ---------------------------------------------------------------
-const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  logarithmicDepthBuffer: true,
+  powerPreference: 'high-performance',
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY_LOW ? 1.25 : IS_TOUCH ? 1.7 : 2));
+const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.25 : 1.5;
+let renderDpr = Math.min(window.devicePixelRatio, MAX_DPR);
+renderer.setPixelRatio(renderDpr);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
+const glInfo = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
+const gpuName = glInfo
+  ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL)
+  : 'WebGL high-performance adapter';
+console.info('Renderer:', gpuName);
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.0);
@@ -91,9 +103,12 @@ const sunDirCam = new THREE.Vector3(0, 1, 0);
 // ---- post-processing: HDR bloom (sun, lava, engines, stars) -----------------
 // MSAA render target keeps antialiasing; OutputPass applies tone mapping/sRGB
 const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, {
-  samples: IS_TOUCH ? 2 : 4, type: THREE.HalfFloatType,
+  samples: IS_TOUCH ? 1 : 2, type: THREE.HalfFloatType,
 }));
 composer.addPass(new RenderPass(scene, camera));
+const VOLUME_ENABLED = !QUALITY_LOW && qs.get('vclouds') !== '0';
+const volumePass = VOLUME_ENABLED ? new VolumetricPass(scene, camera, { scale: 0.5 }) : null;
+if (volumePass) composer.addPass(volumePass);
 // EXPERIMENTAL ?gtao=1: ground-truth ambient occlusion for contact shadows
 // on cliffs and props. Off by default: the logarithmic depth buffer skews
 // its view-space reconstruction at distance — evaluate before trusting.
@@ -112,10 +127,12 @@ if (qs.get('gtao') === '1' && !QUALITY_LOW) {
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
 composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
-let usePost = qs.get('post') !== '0' && !QUALITY_LOW;
+// The volume pass needs the composer even when decorative bloom is disabled.
+bloomPass.enabled = qs.get('post') !== '0' && !QUALITY_LOW;
+let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 renderer.info.autoReset = false;   // accumulate across composer passes
 function sizePost() {
-  composer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.7 : 2));
+  composer.setPixelRatio(renderDpr);
   composer.setSize(window.innerWidth, window.innerHeight);
 }
 sizePost();
@@ -127,6 +144,15 @@ window.addEventListener('resize', () => {
   sizePost();
   updateStarProj();
 });
+
+function setRenderDpr(next) {
+  const dpr = clamp(next, Math.min(1, window.devicePixelRatio), Math.min(window.devicePixelRatio, MAX_DPR));
+  if (Math.abs(dpr - renderDpr) < 0.04) return;
+  renderDpr = dpr;
+  renderer.setPixelRatio(renderDpr);
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  sizePost();
+}
 
 // star sprites need the projection factor to match suns' true angular size;
 // the LOD's seam accounting needs the same pixels-per-radian scale
@@ -270,6 +296,17 @@ window.addEventListener('keydown', (e) => {
 
 // ---- UI ---------------------------------------------------------------------
 const ui = new UI({
+  onStart: async () => {
+    await audio.unlock();
+    audio.setPaused(false);
+    spaceCtl.enabled = state === 'space';
+    if (/Intel/i.test(gpuName)) {
+      ui.setPerformanceNotice('当前浏览器正在使用 Intel 核显；在 Windows 图形设置中将浏览器设为“高性能”可启用 RTX 独显。', 12000);
+    }
+    if (!window.NMS_NOLOCK && !IS_TOUCH && (state === 'space' || state === 'walk')) {
+      try { await renderer.domElement.requestPointerLock(); } catch { /* next canvas click retries */ }
+    }
+  },
   onLand: tryLand,
   onNewUniverse: () => {
     if (paused) {
@@ -856,17 +893,26 @@ function updateLabels() {
 // ---- main loop --------------------------------------------------------------------
 const clock = new THREE.Clock();
 let statAcc = 0;
+let pauseFrameRendered = false;
+let perfEmaMs = 16.7;
+let dprAcc = 0;
 
 function frame() {
   requestAnimationFrame(frame);
   const dt = clamp(clock.getDelta(), 0.0001, 0.05);
   frameNo++;
-  if (paused || starMap?.isOpen) {
+  // The map owns an opaque full-screen WebGL surface and its own RAF. Rendering
+  // the universe underneath doubled GPU work for pixels nobody could see.
+  if (starMap?.isOpen) return;
+  if (paused) {
+    if (pauseFrameRendered) return;
+    pauseFrameRendered = true;
     renderer.info.reset();
     if (usePost) composer.render();
     else renderer.render(scene, camera);
     return;
   }
+  pauseFrameRendered = false;
 
   // nearest body & altitude
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet : null;
@@ -888,9 +934,19 @@ function frame() {
       ? 1 - smoothstep(0.65, 1.55, nearestAlt / Math.max(nearest.atmoHeight, 1))
       : 0;
     spaceCtl.atmosphereFactor = atmosphereFactor;
-    spaceCtl.speedScale = atmosphereFactor > 0
-      ? clamp(nearestAlt * 0.035 + 45, 45, 1800)
-      : clamp(nearestAlt * 0.55, 4, 3e6);
+    if (nearest) {
+      // One continuous travel curve. The previous branch changed scale by an
+      // order of magnitude at the atmosphere boundary, making orbit feel tiny
+      // and the high-altitude descent inexplicably slow.
+      const h = Math.max(nearest.atmoHeight, 1);
+      const alt = Math.max(0, nearestAlt);
+      const surfaceScale = clamp(90 + Math.pow(alt, 0.72) * 1.1, 90, 3100);
+      const orbitalScale = clamp(1400 + alt * 0.32, 1400, 3e6);
+      const orbitalBlend = smoothstep(0.34, 2.2, alt / h);
+      spaceCtl.speedScale = lerp(surfaceScale, orbitalScale, orbitalBlend);
+    } else {
+      spaceCtl.speedScale = 3e6;
+    }
     spaceCtl.update(dt);
     // never fly into the ground
     if (nearest && nearestAlt < 3) {
@@ -953,7 +1009,8 @@ function frame() {
 
   // chunk builds: a per-frame millisecond budget (overridable for slow
   // software-rendered test environments via ?buildms=)
-  const built = flushChunkQueue(BUILD_MS || (state === 'walk' ? 6 : 9));
+  const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
+  const built = flushChunkQueue(BUILD_MS || (state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6));
   if (built > 0) lastBuildFrame = frameNo;
 
   // camera-relative placement
@@ -1008,13 +1065,29 @@ function frame() {
   ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
   updateLabels();
 
+  if (volumePass) {
+    const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
+    volumePass.setActivePlanet(nearest, nav.pos, motion);
+  }
+
   statAcc += dt;
   if (statAcc > 0.5) {
     statAcc = 0;
     const info = renderer.info.render;
     let chunks = 0;
     for (const p of universe.planets()) chunks += p.lod.countChunks();
-    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued`);
+    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued · ${renderDpr.toFixed(2)}×`);
+  }
+
+  // Slow adaptation avoids reallocating render targets during momentary LOD
+  // spikes. On a 5080 this stays at the quality ceiling; an iGPU degrades
+  // gracefully instead of silently presenting a single-digit frame rate.
+  perfEmaMs += (dt * 1000 - perfEmaMs) * 0.025;
+  dprAcc += dt;
+  if (dprAcc > 2.5 && !FREEZE) {
+    dprAcc = 0;
+    if (perfEmaMs > 20.5) setRenderDpr(renderDpr - 0.1);
+    else if (perfEmaMs < 14.2) setRenderDpr(renderDpr + 0.05);
   }
 
   if (!FREEZE) tickShaders(dt);
@@ -1028,6 +1101,9 @@ function frame() {
 wireUniverse(universe);
 spawn();
 ui.setLoading(true, 'generating universe…');
+const SHOW_HERO = qs.get('nohero') !== '1' && !window.NMS_NOLOCK;
+ui.showHero(SHOW_HERO, '从轨道俯冲至地表，或打开银河星图选择下一次跃迁。');
+if (SHOW_HERO) spaceCtl.enabled = false;
 frame();
 
 // ---- debug / test API (used by tools/screenshot.js) ----------------------------
@@ -1053,6 +1129,7 @@ window.NMS = {
       frame: frameNo, calls: info.calls, tris: info.triangles, chunks,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
+      gpu: gpuName, dpr: renderDpr,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },
@@ -1370,3 +1447,12 @@ window.NMS = {
   // internals, for the headless diagnosis harness
   get _internals() { return { universe, scene, renderer, nav, camera }; },
 };
+
+// Reproducible visual-QA poses. These are opt-in URL states and never alter
+// the normal campaign start.
+if (qs.get('scene') === 'walk') {
+  requestAnimationFrame(() => {
+    window.NMS.land(Number(qs.get('planet') || 0), 0, qs.get('bias') || 'meadow');
+    if (qs.get('face') === 'ship') window.NMS.faceShip();
+  });
+}

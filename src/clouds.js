@@ -82,6 +82,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
   const thick = band.rOut - band.rIn;
   const mat = new THREE.ShaderMaterial({
     transparent: true,
+    premultipliedAlpha: true,
     depthWrite: false,
     depthTest: true,
     side: THREE.BackSide,
@@ -153,7 +154,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
           + tangentA * bend * 0.02
           + tangentB * (bend * bend - 0.08) * 0.015);
         vec3 sd = uSpin * coverageDir;
-        float cov = smoothstep(uCov0, uCov1, cloudFbm(sd)) * covScale;
+        float cov = pow(smoothstep(uCov0, uCov1, cloudFbm(sd)), 1.42) * covScale;
         if (cov < 0.01) return 0.0;
         vec3 warp = vec3(
           textureLod(uCloudNoise, sd.yz * 3.1 + uCOff.xy, 0.0).r,
@@ -164,7 +165,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         // scale follows the planet surface while height travels through a
         // separate oblique noise axis. Sampling raw world metres here made
         // ray steps line up into long radial brush strokes.
-        vec3 q = uSpin * radial * (uRin / 26000.0)
+        // Planet-scale billows first; fine Worley erosion is added below.
+        // Using a fixed 26 km cell size repeated identical popcorn all around
+        // a large world and closed into a bright ring at the limb.
+        vec3 q = uSpin * radial * (uRin / 118000.0)
           + vec3(0.37, 0.71, 0.53) * (h * 2.7)
           + warp * 1.4;
         vec2 n = textureLod(uNoise3, q, 0.8).rg;
@@ -198,16 +202,19 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         float t1 = (inner.x > 0.0) ? inner.x : outer.y;
         float camR = length(uCameraLocal);
         if (camR < uRin && inner.y > 0.0) { t0 = max(inner.y, 0.0); t1 = outer.y; }
-        t1 = min(t1, t0 + (uRout - uRin) * 8.0);   // grazing rays: bounded cost
+        t1 = min(t1, t0 + (uRout - uRin) * 6.5);   // grazing rays: bounded cost
         if (t1 <= t0) discard;
 
         float seg = t1 - t0;
         float thick = uRout - uRin;
-        int STEPS = int(clamp(seg / (thick * 0.024), 64.0, 120.0));
+        // This material is rendered by the half-resolution temporal volume
+        // pass. A fresh jittered 44–84 sample signal reconstructs more cleanly
+        // than 120 static steps and avoids the old grazing-angle brush tails.
+        int STEPS = int(clamp(seg / (thick * 0.034), 44.0, 84.0));
         float dt = seg / float(STEPS);
-        // Static blue-noise-style jitter. Changing it every frame without a
-        // temporal reprojection buffer produces crawling brush strokes.
-        float jitter = hash12(gl_FragCoord.xy);
+        float framePhase = mod(uFrame, 16.0);
+        float jitter = hash12(gl_FragCoord.xy
+          + vec2(framePhase * 19.19, framePhase * 7.73));
         float t = t0 + dt * jitter;
 
         float sigma = 6.4 / thick;                  // extinction scale
@@ -222,21 +229,12 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
           vec3 local = uCameraLocal + dir * t;
           float d = densityAt(local, 1.0);
           if (d > 0.003) {
-            vec3 radial = normalize(local);
-            vec3 ta = normalize(cross(radial,
-              abs(radial.y) < 0.88 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-            vec3 tb = normalize(cross(radial, ta));
-            float filterR = thick * 0.028;
-            d = (d + densityAt(local + ta * filterR, 1.0)
-              + densityAt(local + tb * filterR, 1.0)) / 3.0;
-          }
-          if (d > 0.003) {
             // short sun march: how buried is this sample?
             float od = 0.0;
             float ls = thick * 0.35;
             od += densityAt(local + uSunDir * ls * 0.6, 1.0) * ls * 0.6;
             od += densityAt(local + uSunDir * ls * 1.5, 1.0) * ls * 0.9;
-            od += densityAt(local + uSunDir * ls * 3.0, 1.0) * ls * 1.5;
+            od += densityAt(local + uSunDir * ls * 2.8, 1.0) * ls * 1.3;
             float Tsun = exp(-od * sigma * 0.9);
             float powder = 1.0 - exp(-d * sigma * dt * 2.0);
             float hFrac = clamp((length(local) - uRin) / thick, 0.0, 1.0);
@@ -250,7 +248,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         float alpha = (1.0 - T) * uEngage;
         if (alpha < 0.004) discard;
 
-        gl_FragColor = vec4(col, alpha);
+        // RGB is already front-to-back integrated (premultiplied).
+        gl_FragColor = vec4(col * uEngage, alpha);
       }`,
   });
   mat.userData.band = band;
