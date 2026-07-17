@@ -24,7 +24,7 @@ for (const type of Object.keys(TYPES)) {
   });
   const tBuild = performance.now() - t0;
 
-  let min = Infinity, max = -Infinity, below = 0, nan = 0;
+  let min = Infinity, max = -Infinity, below = 0, nan = 0, snowSamples = 0, snowFlora = 0;
   const N = 4000;
   const rnd = (s => () => (s = (s * 16807) % 2147483647) / 2147483647)(42);
   for (let i = 0; i < N; i++) {
@@ -35,6 +35,10 @@ for (const type of Object.keys(TYPES)) {
     if (Number.isNaN(h)) { nan++; continue; }
     min = Math.min(min, h); max = Math.max(max, h);
     if (p.hasLiquid && h < p.seaLevel) below++;
+    if ((type === 'lush' || type === 'ocean') && p.snowWeightAt(dir, h) > 0.28) {
+      snowSamples++;
+      if (['grass', 'forest', 'dryland', 'shore'].includes(p.biomeAt(dir, h))) snowFlora++;
+    }
     p.colorAt(dir, h, 0.1, p.fullMaxFreq, col);
     if (Number.isNaN(col.r + col.g + col.b)) nan++;
   }
@@ -57,6 +61,10 @@ for (const type of Object.keys(TYPES)) {
   );
 
   check(nan === 0, `${type}: NaNs in height/color`);
+  if (type === 'lush' || type === 'ocean') {
+    check(snowSamples > 0, `${type}: snow mask produced no QA samples`);
+    check(snowFlora === 0, `${type}: ${snowFlora} snow-covered samples still select a flora biome`);
+  }
   check(max - min > p.hAmp * 0.3, `${type}: terrain suspiciously flat (${(max - min).toFixed(1)}m)`);
   check(max - min < p.hAmp * 6, `${type}: terrain wildly out of range`);
   check(worst < p.hAmp * 1.2, `${type}: far/near LOD disagree too much (${worst.toFixed(1)}m)`);

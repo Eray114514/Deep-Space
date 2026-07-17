@@ -74,9 +74,9 @@ function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
 // ---- global build scheduler -------------------------------------------------
 const buildQueue = [];
 
-export function pendingChunks() {
+export function pendingChunks(lod = null) {
   let n = 0;
-  for (const e of buildQueue) if (!e.dead) n++;
+  for (const e of buildQueue) if (!e.dead && (!lod || e.lod === lod)) n++;
   return n;
 }
 
@@ -414,8 +414,9 @@ export class ChunkedLOD {
       }
     }
 
-    // baked sun shadows: march on a half-resolution subgrid (shadows are
-    // broad and soft) and bilinearly upsample — quarter the march cost
+    // Optional static worlds may still provide a baked visibility function.
+    // Rotating planets deliberately omit it so moving sunlight never leaves
+    // stale mountain shadows in rebuilt chunks.
     if (aMat && p.sunVis && p.sunDirLocal) {
       const SN = N / 2;
       const sub = new Float32Array((SN + 1) * (SN + 1));
@@ -554,5 +555,32 @@ export class ChunkedLOD {
     };
     for (const r of this.roots) walk(r);
     return n;
+  }
+
+  debugStats() {
+    let chunks = 0, visible = 0, activeMorphs = 0;
+    let visibleMinLevel = Infinity, visibleMaxLevel = -1;
+    const walk = (node) => {
+      if (node.mesh) {
+        chunks++;
+        if (node.mesh.visible) {
+          visible++;
+          visibleMinLevel = Math.min(visibleMinLevel, node.level);
+          visibleMaxLevel = Math.max(visibleMaxLevel, node.level);
+          if (Math.abs(node.morph - node.morphTo) > 1e-4) activeMorphs++;
+        }
+      }
+      if (node.children) for (const child of node.children) walk(child);
+    };
+    for (const root of this.roots) walk(root);
+    return {
+      chunks,
+      visible,
+      visibleMinLevel: Number.isFinite(visibleMinLevel) ? visibleMinLevel : null,
+      visibleMaxLevel: visibleMaxLevel >= 0 ? visibleMaxLevel : null,
+      maxLevel: this.planet.maxLevel,
+      activeMorphs,
+      pending: pendingChunks(this),
+    };
   }
 }

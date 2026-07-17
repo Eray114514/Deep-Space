@@ -42,6 +42,37 @@ export function stabilizeHorizon(quat, surfaceUp, amount = 1) {
   return Math.abs(error);
 }
 
+// Keep an approach on the line the player is actually aiming along. The old
+// limiter removed only the inward component of velocity; at an oblique polar
+// entry that preserved all sideways momentum and bent a planet-bound path
+// into an apparent climb/fly-by. Scaling the whole vector preserves its
+// direction, while the heading convergence makes arcade flight follow the
+// crosshair whenever that crosshair ray genuinely intersects the planet.
+export function guidePlanetApproach(velocity, forward, radialOut,
+  centerDistance, targetRadius, maxInwardSpeed, dt = 0) {
+  _f.copy(forward).normalize();
+  _u.copy(radialOut).normalize();
+  const b = centerDistance * _u.dot(_f);
+  const discriminant = b * b - centerDistance * centerDistance + targetRadius * targetRadius;
+  const intersects = b < 0 && discriminant >= 0;
+
+  if (intersects && dt > 0 && velocity.lengthSq() > 1e-6) {
+    const forwardSpeed = velocity.dot(_f);
+    if (forwardSpeed > 0) {
+      _v.copy(velocity).addScaledVector(_f, -forwardSpeed);
+      const proximity = 1 - clamp((centerDistance / Math.max(targetRadius, 1) - 1) / 5, 0, 1);
+      const align = 1 - Math.exp(-dt * (1.4 + proximity * 7.2));
+      velocity.copy(_f).multiplyScalar(forwardSpeed).addScaledVector(_v, 1 - align);
+    }
+  }
+
+  const inwardSpeed = -velocity.dot(_u);
+  if (inwardSpeed > maxInwardSpeed && maxInwardSpeed > 0) {
+    velocity.multiplyScalar(maxInwardSpeed / inwardSpeed);
+  }
+  return intersects;
+}
+
 export class SpaceControls {
   constructor(dom, nav, { onClick } = {}) {
     this.dom = dom;
@@ -246,13 +277,13 @@ export class SpaceControls {
       if (pulsing) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
         // Pulse cruise is an explicit 2× tier above RMB/Shift boost.
-        const pulseAcceleration = this.speedScale * (6.96 + (1 - this.atmosphereFactor) * 5.22);
+        const pulseAcceleration = this.speedScale * (20.0 + (1 - this.atmosphereFactor) * 14.2);
         nav.vel.addScaledVector(_f, pulseAcceleration * dt);
         const pulseLimit = this.speedScale * (13.92 + (1 - this.atmosphereFactor) * 8.12);
         if (nav.vel.length() > pulseLimit) nav.vel.setLength(pulseLimit);
       } else if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        const boostAcceleration = this.speedScale * (3.48 + (1 - this.atmosphereFactor) * 2.61);
+        const boostAcceleration = this.speedScale * (10.0 + (1 - this.atmosphereFactor) * 7.1);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);
         const boostLimit = this.speedScale * (6.96 + (1 - this.atmosphereFactor) * 4.06);
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);

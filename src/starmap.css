@@ -157,8 +157,8 @@
 #starmap-overlay kbd { padding: 4px 7px; color: var(--sm-white); background: rgba(9,16,20,.6); border: 1px solid rgba(236,239,234,.64); border-radius: 6px; font: 700 10px/1 Consolas,monospace; }
 
 .starmap-open #brand, .starmap-open #compass, .starmap-open #flight-ring, .starmap-open #hud,
-.starmap-open #ship-integrity, .starmap-open #target-card, .starmap-open #resource-strip,
-.starmap-open #bottom, .starmap-open #labels, .starmap-open #stats, .starmap-open #crosshair,
+.starmap-open #ship-integrity, .starmap-open #resource-strip,
+.starmap-open #bottom, .starmap-open #stats, .starmap-open #crosshair,
 .starmap-open #vignette, .starmap-open #touch-ui, .starmap-open #walk-hud, .starmap-open #star-map-btn { display: none !important; }
 
 @media (max-width: 960px) {

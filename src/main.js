@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import { Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
-import { SpaceControls, WalkControls, keys } from './controls.js';
+import { SpaceControls, WalkControls, guidePlanetApproach, keys } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { WarpStreaks, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
@@ -20,8 +20,8 @@ import { GTAOPass } from '../vendor/jsm/postprocessing/GTAOPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
-import { makeWord, systemName } from './names.js';
-import { makeRng } from './rng.js';
+import { makeWord } from './names.js';
+import { CelestialClock, eclipseFraction } from './astronomy.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
 import { StarMap } from './starmap.js';
@@ -202,12 +202,14 @@ const nav = {
 };
 let state = 'space';
 let focusPlanet = null;
-let focusStar = null;      // far star targeted once; targeting it again warps
 let nearest = null;
 let nearestAlt = Infinity;
+let referenceBody = null;
+const referenceBodyPos = new THREE.Vector3();
 let frameNo = 0;
 let lastBuildFrame = 0;
 let paused = false;
+let photoMode = false;
 let boostVisual = 0;
 let pulseVisual = 0;
 let pulseFuel = 100;
@@ -220,7 +222,15 @@ let activeBolts = 0;
 let starMap = null;
 
 // ---- world ------------------------------------------------------------------
+const fixedTime = qs.has('time') ? Number(qs.get('time')) : null;
+let celestialClock = new CelestialClock(SEED, {
+  initialHours: Number.isFinite(fixedTime) ? fixedTime : null,
+  persist: !Number.isFinite(fixedTime),
+  frozen: FREEZE,
+});
 let universe = new Universe(SEED, scene);
+universe.timeHours = celestialClock.hours;
+universe.system.updateCelestial(celestialClock.hours);
 const scatter = new Scatter();
 // far tier: proxy trees to the horizon (?farflora=0 spares SwiftShader tests)
 const FARFLORA = qs.get('farflora') !== '0';
@@ -257,6 +267,7 @@ const _warmA = new THREE.Color();
 const _warmB = new THREE.Color();
 const _warmC = new THREE.Color();
 let envSunset = 0;
+let envEclipse = 0;
 
 function lookQuatAt(fromUniv, targetUniv, out, upHint) {
   _m.lookAt(fromUniv, targetUniv, upHint || _v3.set(0, 1, 0));
@@ -294,7 +305,7 @@ function stepTweens(dt) {
 const easeInOut = (t) => t * t * (3 - 2 * t);
 
 // ---- controls -----------------------------------------------------------------
-const spaceCtl = new SpaceControls(renderer.domElement, nav, { onClick: handleClick });
+const spaceCtl = new SpaceControls(renderer.domElement, nav);
 const walkCtl = new WalkControls(renderer.domElement);
 
 renderer.domElement.addEventListener('pointerdown', () => {
@@ -329,7 +340,10 @@ window.addEventListener('keydown', (e) => {
   }
   if (!e.repeat && (e.code === 'KeyE' || e.code === 'KeyT') && state === 'walk') boardShip();
   if (!e.repeat && e.code === 'KeyR' && state === 'walk') recallShip();
-  if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
+  if (e.code === 'KeyH') {
+    photoMode = !photoMode;
+    document.body.classList.toggle('hide-hud', photoMode);
+  }
   if (e.code === 'KeyB') usePost = !usePost;                           // bloom toggle
   if (e.code === 'Escape') {
     if (state === 'flyto') {
@@ -366,10 +380,6 @@ const ui = new UI({
     newUniverse();
   },
   onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
-  onLabelClick: (idx) => {
-    const p = universe.planets()[idx];
-    if (p) clickPlanet(p);
-  },
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
 });
 starMap = new StarMap({
@@ -377,6 +387,7 @@ starMap = new StarMap({
   getNav: () => nav,
   getSeed: () => SEED,
   getState: () => state,
+  getTime: () => celestialClock.hours,
   onRequestClose: () => closeStarMap(),
   onWarpTarget: (star) => {
     closeStarMap(false);
@@ -393,6 +404,94 @@ document.getElementById('pause-map-btn').addEventListener('click', async () => {
   }
   openStarMap();
 });
+
+function findNextSolarEvent(body, kind, commit = false) {
+  if (!body || body.isGasGiant) return null;
+  const localUp = state === 'walk' && walkCtl.planet === body
+    ? walkCtl.posLocal.clone().normalize()
+    : body.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
+  const start = celestialClock.hours;
+  const step = Math.max(0.08, Math.min(0.5, body.rotationPeriodHours / 160));
+  const limit = Math.min(240, body.rotationPeriodHours * 2.2);
+  universe.system.updateCelestial(start);
+  let previous = localUp.clone().applyQuaternion(body.frameOrientation).dot(body.sunDirWorld);
+  let found = null;
+  for (let dtHours = step; dtHours <= limit; dtHours += step) {
+    const t = start + dtHours;
+    universe.system.updateCelestial(t);
+    const value = localUp.clone().applyQuaternion(body.frameOrientation).dot(body.sunDirWorld);
+    const crossed = kind === 'sunrise' ? previous < 0 && value >= 0 : previous >= 0 && value < 0;
+    if (crossed) { found = t; break; }
+    previous = value;
+  }
+  universe.system.updateCelestial(commit && found != null ? found : start);
+  if (commit && found != null) celestialClock.set(found);
+  return found;
+}
+
+function localSolarTimeAt(body, worldPosition = null) {
+  if (!body) return null;
+  const surface = worldPosition
+    ? body.worldPositionToLocal(worldPosition, new THREE.Vector3()).normalize()
+    : new THREE.Vector3(1, 0, 0);
+  const sun = body.sunDirLocal.clone();
+  surface.y = 0; sun.y = 0;
+  if (surface.lengthSq() < 1e-7 || sun.lengthSq() < 1e-7) return body.sunDirLocal.y >= 0 ? 12 : 0;
+  surface.normalize(); sun.normalize();
+  const angle = Math.atan2(new THREE.Vector3().crossVectors(sun, surface).y, sun.dot(surface));
+  return ((12 + angle * 12 / Math.PI) % 24 + 24) % 24;
+}
+
+function findNextEclipse(body, commit = false) {
+  if (!body) return null;
+  const system = universe.system;
+  const start = celestialClock.hours;
+  const localUp = state === 'walk' && walkCtl.planet === body
+    ? walkCtl.posLocal.clone().normalize()
+    : new THREE.Vector3(0, 1, 0);
+  const observer = new THREE.Vector3();
+  const visibilityAt = (time) => {
+    system.updateCelestial(time);
+    body.localPositionToWorld(localUp.clone().multiplyScalar(body.R + 2), observer);
+    let visibility = 1;
+    for (const star of system.starViews) {
+      const blockers = system.planets.filter((p) => p !== body)
+        .map((p) => ({ position: p.posUniv, radius: p.R }));
+      visibility = Math.min(visibility, eclipseFraction(
+        observer, star.positionUniv, star.spec.radiusRender, blockers));
+    }
+    return visibility;
+  };
+  let previous = visibilityAt(start);
+  let found = null;
+  const longestOrbit = Math.max(240, ...system.spec.bodies.map((b) => b.orbit.periodHours));
+  const step = Math.max(0.25, Math.min(3, longestOrbit / 5000));
+  const limit = Math.min(longestOrbit * 1.2, 12000);
+  for (let elapsed = step; elapsed <= limit; elapsed += step) {
+    const visible = visibilityAt(start + elapsed);
+    if (previous > 0.985 && visible <= 0.985) { found = start + elapsed; break; }
+    previous = visible;
+  }
+  system.updateCelestial(commit && found != null ? found : start);
+  if (commit && found != null) celestialClock.set(found);
+  return found;
+}
+
+function waitForSolarEvent(kind) {
+  const body = walkCtl.planet || nearest || focusPlanet;
+  const found = findNextSolarEvent(body, kind, true);
+  ui.setHint(found == null ? '当前目标没有可计算的地表日照事件' : kind === 'sunrise' ? '宇宙时钟已推进至日出' : '宇宙时钟已推进至日落', true);
+}
+
+function waitForEclipse() {
+  const body = walkCtl.planet || nearest || focusPlanet;
+  const found = findNextEclipse(body, true);
+  ui.setHint(found == null ? '近期轨道窗口内没有可见食象' : '宇宙时钟已推进至下一次食象', true);
+}
+
+document.getElementById('wait-sunrise-btn').addEventListener('click', () => waitForSolarEvent('sunrise'));
+document.getElementById('wait-sunset-btn').addEventListener('click', () => waitForSolarEvent('sunset'));
+document.getElementById('wait-eclipse-btn').addEventListener('click', waitForEclipse);
 
 function clearFlightInput() {
   for (const code in keys) keys[code] = false;
@@ -465,13 +564,12 @@ document.addEventListener('visibilitychange', () => {
 
 // universe → app notifications (system handoffs during warp / manual flight)
 function wireUniverse(u) {
-  u.onSystemChange = (sys) => ui.setSystem(sys.name, sys._specs.length, SEED);
+  u.onSystemChange = (sys) => ui.setSystem(sys.name, sys._specs.length, SEED, sys.catalogId);
   u.onBeforeSystemDispose = (sys) => {
     if (walkCtl.planet && sys.planets.includes(walkCtl.planet)) return false; // not under our feet
     if (focusPlanet && sys.planets.includes(focusPlanet)) {
       focusPlanet = null;
       spaceCtl.focus = null;
-      ui.setTarget(null);
     }
     if (scatter.planet && sys.planets.includes(scatter.planet)) scatter.clear();
     return true;
@@ -493,7 +591,7 @@ function setState(s) {
   ui.setCrosshair(s === 'walk' || s === 'space');
   ui.showTouchUI(IS_TOUCH && s === 'walk');
   const hints = IS_TOUCH ? {
-    space: '<b>单指</b> 转向 · <b>双指缩放</b> 推进 · <b>轻触</b> 标记目标 · <b>M</b> 星图',
+    space: '<b>单指</b> 转向 · <b>双指缩放</b> 推进 · <b>M</b> 星图',
     flyto: '自动接近中…',
     landing: '正在执行降落程序…',
     walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
@@ -513,27 +611,22 @@ function setState(s) {
 }
 
 // ---- actions ------------------------------------------------------------------
-function clickPlanet(planet) {
-  focusPlanet = planet;
-  spaceCtl.focus = planet;
-  ui.setTarget(planet, nav.pos.distanceTo(planet.posUniv));
-  const dist = nav.pos.distanceTo(planet.posUniv) - planet.R;
-  if (dist > planet.R * 3.2) flyToPlanet(planet);
-}
-
 function flyToPlanet(planet) {
   if (state !== 'space') return;
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
-  const sunDir = planet.sunDirLocal.clone();
+  const sunDir = planet.sunDirWorld.clone();
   const fromDir = _v2.copy(startPos).sub(planet.posUniv).normalize();
   // arrive on the sunlit side, offset from straight-in for a nicer reveal
   const targetDir = fromDir.add(sunDir.multiplyScalar(1.1)).normalize();
   const endPos = planet.posUniv.clone().addScaledVector(targetDir, planet.R * 3.1);
+  const lastCenter = planet.posUniv.clone();
   const dur = clamp(startPos.distanceTo(endPos) / 65000 + 1.4, 1.8, 7);
   setState('flyto');
   nav.vel.set(0, 0, 0);
   addTween(dur, (k) => {
+    const shift = planet.posUniv.clone().sub(lastCenter);
+    startPos.add(shift); endPos.add(shift); lastCenter.copy(planet.posUniv);
     nav.pos.lerpVectors(startPos, endPos, easeInOut(k));
     lookQuatAt(nav.pos, planet.posUniv, _q);
     nav.quat.copy(startQuat).slerp(_q, Math.min(1, k * 2.4));
@@ -550,8 +643,11 @@ function parkShipNear(planet, landDir) {
   const cand = new THREE.Vector3(), s = new THREE.Vector3();
   // scenic landings favour cliff perches — hunt outward until the ground is
   // genuinely FLAT, or the ship sits level on a slope with its nose in the air
+  const landH = planet.height(up, planet.fullMaxFreq);
   let best = null, bestH = 0, bestScore = Infinity;
-  for (const rad of [22, 48, 95, 170]) {
+  // Boarding is part of the landing contract: stay within a short walk even
+  // when a scenic perch has dramatic relief around it.
+  for (const rad of [22, 28, 34, 38]) {
     for (let k = 0; k < 10; k++) {
       const a = (k / 10) * Math.PI * 2;
       cand.copy(up)
@@ -564,35 +660,42 @@ function parkShipNear(planet, landDir) {
       const ha = planet.height(s.copy(cand).addScaledVector(e1, st).normalize(), planet.fullMaxFreq);
       const hb = planet.height(s.copy(cand).addScaledVector(e2, st).normalize(), planet.fullMaxFreq);
       const slope = (Math.abs(ha - h) + Math.abs(hb - h)) / 6;
-      const score = slope * 30 + rad * 0.03;       // flat beats near — but a
-      // gentle 4° pad 22 m away beats a runway 170 m out (ship stays IN frame)
+      const clearH = Math.max(h, ha, hb);
+      const playerDistance = Math.hypot(rad, clearH - landH);
+      if (playerDistance > BOARD_DISTANCE - 3) continue;
+      const score = slope * 24 + rad * 0.03 + Math.abs(clearH - landH) * 0.08;
       if (score < bestScore) {
         bestScore = score; best = cand.clone();
-        bestH = Math.max(h, ha, hb);               // clear the whole footprint
+        bestH = clearH;                            // clear the whole footprint
       }
     }
     if (best && bestScore < 1.4) break;            // flat enough, stop early
   }
-  if (!best) {   // everything around is wet (e.g. a dive) — park 22 m out anyway
+  if (!best) {   // everything around is wet/steep — keep the ship reachable
     cand.copy(up).addScaledVector(e1, 22 / planet.R).normalize();
-    best = cand.clone(); bestH = planet.height(cand, planet.fullMaxFreq);
+    best = cand.clone();
+    bestH = clamp(planet.height(cand, planet.fullMaxFreq), landH - 28, landH + 28);
   }
-  const padUniv = planet.posUniv.clone().addScaledVector(best, planet.R + bestH + 1.3);
+  const padLocal = best.clone().multiplyScalar(planet.R + bestH + 1.3);
+  const padUniv = planet.localPositionToWorld(padLocal, new THREE.Vector3());
   // nose pointed at the player
   _v2.copy(landDir).sub(best).normalize();
-  ship.setParked(padUniv, horizonQuat(best, _v2, new THREE.Quaternion()));
+  const parkedLocalQuat = horizonQuat(best, _v2, new THREE.Quaternion());
+  const parkedWorldQuat = planet.frameOrientation.clone().multiply(parkedLocalQuat);
+  ship.parkedPlanet = planet; ship.parkedLocal = padLocal; ship.parkedLocalQuat = parkedLocalQuat;
+  ship.setParked(padUniv, parkedWorldQuat);
 }
 
 function tryLand() {
-  if (state !== 'space' || !nearest || nearestAlt > 420) return;
+  if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false || nearestAlt > 420) return;
   const planet = nearest;
-  const startPos = nav.pos.clone();
-  const startQuat = nav.quat.clone();
-  const dirLocal = _v.copy(startPos).sub(planet.posUniv).normalize().clone();
+  const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
+  const startLocalQuat = planet._invFrame.clone().multiply(nav.quat);
+  const dirLocal = startLocal.clone().normalize();
   const ground = planet.surfaceRadius(dirLocal);
-  const endPos = planet.posUniv.clone().addScaledVector(dirLocal, ground + 1.7);
-  _v2.set(0, 0, -1).applyQuaternion(startQuat);
-  const endQuat = horizonQuat(dirLocal, _v2, new THREE.Quaternion());
+  const endLocal = dirLocal.clone().multiplyScalar(ground + 1.7);
+  const viewLocal = _v2.set(0, 0, -1).applyQuaternion(startLocalQuat);
+  const endLocalQuat = horizonQuat(dirLocal, viewLocal, new THREE.Quaternion());
   if (!window.NMS_NOLOCK && !IS_TOUCH) renderer.domElement.requestPointerLock();
   parkShipNear(planet, dirLocal);
   setState('landing');
@@ -600,11 +703,12 @@ function tryLand() {
   nav.vel.set(0, 0, 0);
   addTween(1.9, (k) => {
     const e = easeInOut(k);
-    nav.pos.lerpVectors(startPos, endPos, e);
-    nav.quat.copy(startQuat).slerp(endQuat, e);
+    planet.localPositionToWorld(_v.lerpVectors(startLocal, endLocal, e), nav.pos);
+    nav.quat.copy(planet.frameOrientation)
+      .multiply(_q.copy(startLocalQuat).slerp(endLocalQuat, e));
   }, () => {
-    _v.copy(nav.pos).sub(planet.posUniv);
-    _v2.set(0, 0, -1).applyQuaternion(nav.quat);
+    planet.worldPositionToLocal(nav.pos, _v);
+    _v2.set(0, 0, -1).applyQuaternion(nav.quat).applyQuaternion(planet._invFrame);
     walkCtl.enter(planet, _v, _v2);
     setState('walk');
   });
@@ -619,7 +723,7 @@ function parkedShipDistance() {
 function recallShip() {
   if (state !== 'walk' || !walkCtl.planet) return false;
   const planet = walkCtl.planet;
-  const playerDir = _v.copy(nav.pos).sub(planet.posUniv).normalize().clone();
+  const playerDir = planet.worldPositionToLocal(nav.pos, _v).normalize().clone();
   parkShipNear(planet, playerDir);
   audio.cue('recall');
   ui.setHint('飞船已响应召回信标，并在附近安全着陆', true);
@@ -635,21 +739,23 @@ function boardShip() {
     return false;
   }
   const planet = walkCtl.planet;
-  const startPos = nav.pos.clone();
-  const targetPos = ship.parkedPosUniv.clone();
-  const up = _v.copy(targetPos).sub(planet.posUniv).normalize().clone();
-  targetPos.addScaledVector(up, 2.2);
-  const startQuat = nav.quat.clone();
-  const targetQuat = ship.parkedQuat.clone();
+  const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
+  const upLocal = ship.parkedLocal.clone().normalize();
+  const targetLocal = ship.parkedLocal.clone().addScaledVector(upLocal, 2.2);
+  const startLocalQuat = planet._invFrame.clone().multiply(nav.quat);
+  const targetLocalQuat = ship.parkedLocalQuat.clone();
   walkCtl.exit();
   nav.vel.set(0, 0, 0);
   setState('boarding');
   audio.cue('board');
   addTween(0.72, (k) => {
     const e = easeInOut(k);
-    nav.pos.lerpVectors(startPos, targetPos, e);
-    nav.quat.copy(startQuat).slerp(targetQuat, e);
-  }, () => takeoff(planet, targetPos, up));
+    planet.localPositionToWorld(_v.lerpVectors(startLocal, targetLocal, e), nav.pos);
+    nav.quat.copy(planet.frameOrientation)
+      .multiply(_q.copy(startLocalQuat).slerp(targetLocalQuat, e));
+  }, () => takeoff(planet,
+    planet.localPositionToWorld(targetLocal, new THREE.Vector3()),
+    planet.localOffsetToWorld(upLocal, new THREE.Vector3())));
   return true;
 }
 
@@ -659,16 +765,20 @@ function takeoff(planet = walkCtl.planet, launchPos = nav.pos.clone(), launchUp 
   // Keep pointer lock across boarding/takeoff. Re-acquiring it at the end of
   // an async tween is no longer inside the user's gesture and browsers reject
   // the request, leaving the ship apparently unable to steer after launch.
-  const startPos = launchPos.clone();
-  nav.pos.copy(startPos);
-  const up = launchUp ? launchUp.clone() : _v.copy(startPos).sub(planet.posUniv).normalize().clone();
-  const endPos = startPos.clone().addScaledVector(up, 420);
+  const startLocal = planet.worldPositionToLocal(launchPos, new THREE.Vector3());
+  const upLocal = launchUp
+    ? planet.worldOffsetToLocal(launchUp, new THREE.Vector3()).normalize()
+    : startLocal.clone().normalize();
+  const endLocal = startLocal.clone().addScaledVector(upLocal, 420);
+  const localQuat = planet._invFrame.clone().multiply(nav.quat);
+  planet.localPositionToWorld(startLocal, nav.pos);
   setState('takeoff');
   addTween(1.5, (k) => {
-    nav.pos.lerpVectors(startPos, endPos, easeInOut(k));
+    planet.localPositionToWorld(_v.lerpVectors(startLocal, endLocal, easeInOut(k)), nav.pos);
+    nav.quat.copy(planet.frameOrientation).multiply(localQuat);
   }, () => {
     setState('space');
-    nav.vel.copy(up).multiplyScalar(140);
+    planet.localOffsetToWorld(upLocal, nav.vel).multiplyScalar(140);
   });
   return true;
 }
@@ -680,9 +790,7 @@ function warpTo(star) {
   if (state !== 'space') return;
   setState('warp');
   focusPlanet = null;
-  focusStar = null;
   spaceCtl.focus = null;
-  ui.setTarget(null);
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
   // Begin with a safe stellar-system arrival point. Once the destination
@@ -695,6 +803,7 @@ function warpTo(star) {
   const SPOOL = 0.12;
   let swapped = false;
   let arrivalPlanetName = null;
+  let arrivalSystem = null, arrivalSpec = null, revealDirection = null;
   nav.vel.set(0, 0, 0);
   warpStreaks.reset(_v.copy(star.pos).sub(startPos).normalize());
 
@@ -707,6 +816,11 @@ function warpTo(star) {
       const kf = (k - SPOOL) / (1 - SPOOL);
       // quintic smootherstep: gentle ends, ferocious middle
       const s = kf * kf * kf * (kf * (kf * 6 - 15) + 10);
+      if (arrivalSpec) {
+        const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
+        endPos.copy(heroPos).addScaledVector(revealDirection, arrivalSpec.radius * 2.55);
+        targetQuat = lookQuatAt(nav.pos, heroPos, targetQuat);
+      }
       nav.pos.lerpVectors(startPos, endPos, s);
       nav.quat.copy(targetQuat);
       const ramp = smoothstep(0, 0.2, kf) * (1 - smoothstep(0.78, 0.97, kf));
@@ -719,10 +833,11 @@ function warpTo(star) {
         const destination = universe.setSystem(star, true);
         const hero = destination._specs.find((spec) => !spec.isMoon);
         if (hero) {
-          const heroRadius = 160000 + makeRng(hero.seed)() * 240000;
-          const revealDirection = startPos.clone().sub(hero.pos).normalize();
-          endPos = hero.pos.clone().addScaledVector(revealDirection, heroRadius * 2.55);
-          targetQuat = lookQuatAt(startPos, hero.pos, new THREE.Quaternion());
+          const heroPos = destination.frames.get(hero.bodyId).position;
+          revealDirection = startPos.clone().sub(heroPos).normalize();
+          arrivalSystem = destination; arrivalSpec = hero;
+          endPos = heroPos.clone().addScaledVector(revealDirection, hero.radius * 2.55);
+          targetQuat = lookQuatAt(startPos, heroPos, new THREE.Quaternion());
           arrivalPlanetName = hero.name;
         }
       }
@@ -737,7 +852,6 @@ function warpTo(star) {
       if (arrivalPlanet) {
         focusPlanet = arrivalPlanet;
         spaceCtl.focus = arrivalPlanet;
-        ui.setTarget(arrivalPlanet, nav.pos.distanceTo(arrivalPlanet.posUniv));
         lookQuatAt(nav.pos, arrivalPlanet.posUniv, nav.quat);
       }
     }
@@ -755,59 +869,26 @@ function newUniverse(seed) {
   tweens.length = 0;
   scatter.clear();
   universe.dispose();
+  ship.parkedPlanet = null;
+  ship.parkedLocal = null;
+  ship.parkedPosUniv = null;
+  celestialClock.save();
+  celestialClock = new CelestialClock(SEED, {
+    initialHours: Number.isFinite(fixedTime) ? fixedTime : null,
+    persist: !Number.isFinite(fixedTime),
+    frozen: FREEZE,
+  });
   universe = new Universe(SEED, scene);
+  universe.timeHours = celestialClock.hours;
+  universe.system.updateCelestial(celestialClock.hours);
   wireUniverse(universe);
   focusPlanet = null;
-  focusStar = null;
   spaceCtl.focus = null;
   warpIntensity = 0;
   camera.fov = BASE_FOV;
   camera.updateProjectionMatrix();
   setState('space');
   spawn();
-}
-
-function handleClick(cx, cy) {
-  window.__lastClick = { x: cx, y: cy, state, hit: null };
-  if (state !== 'space') return;
-  camera.updateMatrixWorld();
-  _v.set((cx / window.innerWidth) * 2 - 1, -(cy / window.innerHeight) * 2 + 1, 0.5)
-    .unproject(camera).normalize();
-  // planets: analytic ray/sphere in camera-relative space
-  let hit = null, hitDist = Infinity;
-  for (const p of universe.planets()) {
-    _v2.copy(p.posUniv).sub(nav.pos);
-    const b = _v2.dot(_v);
-    if (b <= 0) continue;
-    const r = p.R * 1.15;
-    const d2 = _v2.lengthSq() - b * b;
-    if (d2 < r * r) {
-      const t = b - Math.sqrt(r * r - d2);
-      if (t < hitDist) { hitDist = t; hit = p; }
-    }
-  }
-  window.__lastClick.hit = hit ? hit.name : null;
-  if (hit) { focusStar = null; clickPlanet(hit); return; }
-  const star = universe.pickStar(nav.pos, _v);
-  if (star) {
-    window.__lastClick.hit = '★' + star.id;
-    if (focusStar && focusStar.id === star.id) {
-      warpTo(star);
-    } else {
-      // first tap targets; the same star again warps (saves stray thumbs)
-      focusStar = star;
-      focusPlanet = null;
-      spaceCtl.focus = null;
-      const name = systemName(makeRng(SEED + ':sys:' + star.id));
-      ui.setStarTarget(name, nav.pos.distanceTo(star.pos),
-        IS_TOUCH ? 'tap again to warp' : 'click again to warp');
-    }
-    return;
-  }
-  focusPlanet = null;
-  focusStar = null;
-  spaceCtl.focus = null;
-  ui.setTarget(null);
 }
 
 // ---- spawn --------------------------------------------------------------------
@@ -823,14 +904,14 @@ function spawn() {
   nav.vel.set(0, 0, 0);
   focusPlanet = planet;
   spaceCtl.focus = planet;
-  ui.setSystem(sys.name, sys.planets.length, SEED);
-  ui.setTarget(planet, nav.pos.distanceTo(planet.posUniv));
+  ui.setSystem(sys.name, sys.planets.length, SEED, sys.catalogId);
   setState('space');
 }
 
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
 function ambience() {
   let inAtmo = 0, day = 1, skyStrength = 0;
+  envEclipse = 0;
   envUnderwater = false;
   scene.fog.density = 0;
   if (nearest) {
@@ -842,8 +923,24 @@ function ambience() {
     inAtmo = (1 - smoothstep(0.14, 1.04, x)) * p.atmoDensity;
     _up.copy(nav.pos).sub(p.posUniv).normalize();
     // the sun that matters is the one this planet orbits
-    const sunDir = nearest.sunDirLocal || universe.system.sunDirFrom(nav.pos, _v);
-    day = smoothstep(-0.22, 0.28, _up.dot(sunDir));
+    const sunDir = nearest.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v);
+    const blockers = universe.system.planets
+      .filter((body) => body !== p)
+      .map((body) => ({ position: body.posUniv, radius: body.R }));
+    let totalFlux = 0, litFlux = 0, clearLitFlux = 0;
+    for (const view of universe.system.starViews) {
+      const delta = _v2.copy(view.positionUniv).sub(nav.pos);
+      const flux = view.spec.luminositySolar / Math.max(1, delta.lengthSq());
+      const directDay = smoothstep(-0.22, 0.28, _up.dot(delta.normalize()));
+      const visibility = inAtmo > 0.02
+        ? eclipseFraction(nav.pos, view.positionUniv, view.spec.radiusRender, blockers)
+        : 1;
+      totalFlux += flux;
+      clearLitFlux += flux * directDay;
+      litFlux += flux * directDay * (0.08 + visibility * 0.92);
+    }
+    day = totalFlux > 0 ? clamp(litFlux / totalFlux, 0, 1) : 0;
+    envEclipse = clearLitFlux > 0 ? clamp(1 - litFlux / clearLitFlux, 0, 1) : 0;
 
     if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone().convertSRGBToLinear();
     // dense atmospheres read as thicker fog, NOT as an overbright sky —
@@ -887,7 +984,7 @@ function ambience() {
       tsh.uniforms.uMistColor.value.copy(_sky).multiplyScalar(1.06);
     }
 
-    hemi.intensity = inAtmo * 1.15 * (0.12 + 0.88 * day);
+    hemi.intensity = inAtmo * 1.08 * (0.025 + 0.975 * day);
     hemi.color.copy(p.skyColorLin || _sky);
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
 
@@ -910,47 +1007,12 @@ function ambience() {
   // candela-scale: with physical decay, ~2 units of intensity is invisible —
   // a real lamp needs tens of candela to paint a pool on the ground
   headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 80 : 0;
-  ambient.intensity = 0.09 + inAtmo * 0.24;   // fill so cast shadows aren't pitch black
+  ambient.intensity = 0.025 + inAtmo * (0.035 + day * 0.16);
   envInAtmo = inAtmo;
   envDay = day;
   // hand the sun over to the shadow-casting light near the ground
   shadowBlend = nearest ? 1 - smoothstep(1200, 3500, nearestAlt) : 0;
-  if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirLocal);
-}
-
-// ---- labels ---------------------------------------------------------------------
-const labelItems = [];
-function updateLabels() {
-  labelItems.length = 0;
-  const showLabels = (state === 'space' || state === 'flyto') && frameNo > 5;
-  if (showLabels) {
-    camera.updateMatrixWorld();
-    const planets = universe.planets();
-    for (let i = 0; i < planets.length; i++) {
-      const p = planets[i];
-      _v.copy(p.posUniv).sub(nav.pos);
-      const dist = _v.length();
-      if (dist < p.R * 2.2) continue;                       // too close: label is noise
-      _v2.set(0, 0, -1).applyQuaternion(nav.quat);
-      if (_v.dot(_v2) < 0) continue;                        // behind us
-      _v3.copy(p.posUniv).sub(nav.pos).multiplyScalar(1 / dist);
-      _v.copy(_v3).multiplyScalar(100).applyMatrix4(camera.matrixWorldInverse);
-      _v.applyMatrix4(camera.projectionMatrix);
-      if (Math.abs(_v.x) > 1.05 || Math.abs(_v.y) > 1.05) continue;
-      // sit the label above the planet's disc, not on it
-      const angR = Math.asin(Math.min(1, (p.R * 1.1) / dist));
-      const pxR = Math.min(angR / (camera.fov * Math.PI / 360) * (window.innerHeight / 2), window.innerHeight * 0.45);
-      labelItems.push({
-        x: (_v.x * 0.5 + 0.5) * window.innerWidth,
-        y: (-_v.y * 0.5 + 0.5) * window.innerHeight - 14 - pxR,
-        name: p.name,
-        sub: p.isMoon ? 'moon' : p.typeLabel.toLowerCase(),
-        dim: dist > 2.5e7,
-        key: i,
-      });
-    }
-  }
-  ui.updateLabels(labelItems);
+  if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirWorld);
 }
 
 // ---- main loop --------------------------------------------------------------------
@@ -965,7 +1027,10 @@ let dprAcc = 0;
 function frame() {
   requestAnimationFrame(frame);
   const rawDt = clock.getDelta();
-  const dt = clamp(rawDt, 0.0001, 0.05);
+  // Keep slow-frame input responsive without allowing a tab-resume spike to
+  // tunnel through terrain. A 100 ms ceiling still gives stable collision at
+  // the browser game's supported low-quality floor.
+  const dt = clamp(rawDt, 0.0001, 0.1);
   frameNo++;
   if (DEV_SERVER) {
     devFpsElapsed += rawDt;
@@ -989,6 +1054,20 @@ function frame() {
   }
   pauseFrameRendered = false;
 
+  // Advance the persistent universe clock only during active play. The world
+  // is updated before controls so a walker remains attached to the moving body.
+  celestialClock.update(rawDt, !photoMode);
+  const followFrame = state === 'space' && referenceBody
+    && nav.pos.distanceTo(referenceBodyPos) < Math.max(referenceBody.R * 10, referenceBody.atmoHeight * 5);
+  universe.update(nav.pos, state === 'space' || state === 'flyto', celestialClock.hours);
+  if (followFrame && universe.planets().includes(referenceBody)) {
+    nav.pos.add(_v.copy(referenceBody.posUniv).sub(referenceBodyPos));
+  }
+  if (ship.parkedPlanet && universe.planets().includes(ship.parkedPlanet) && ship.parkedLocal) {
+    ship.parkedPlanet.localPositionToWorld(ship.parkedLocal, ship.parkedPosUniv);
+    ship.parkedQuat.copy(ship.parkedPlanet.frameOrientation).multiply(ship.parkedLocalQuat);
+  }
+
   // nearest body & altitude
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet : null;
   if (!nearest) {
@@ -1002,6 +1081,8 @@ function frame() {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearestAlt = nearest.altitudeAt(_v);
   } else nearestAlt = Infinity;
+  referenceBody = nearest;
+  if (nearest) referenceBodyPos.copy(nearest.posUniv);
 
   // controls / state integration
   if (state === 'space') {
@@ -1041,35 +1122,52 @@ function frame() {
       // guarantees a long high-altitude descent instead of crossing hundreds
       // of kilometres in a few frames. Clamp once BEFORE integration so a
       // velocity accumulated in deep space cannot cross the atmosphere in one
-      // frame; the second clamp catches this frame's new boost impulse.
-      _v.copy(nav.pos).sub(nearest.posUniv).normalize();
-      const inwardSpeed = -nav.vel.dot(_v);
+      // frame. Scaling every component preserves the path instead of adding
+      // an outward kick that turns oblique/polar entries into fly-bys.
+      _v.copy(nav.pos).sub(nearest.posUniv);
+      const centerDistance = _v.length();
+      const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
+      const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
         * (pulseActive ? 1.35 : 1);
-      if (inwardSpeed > safeInward) nav.vel.addScaledVector(_v, inwardSpeed - safeInward);
+      guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
+        nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, 0);
     }
     spaceCtl.update(dt);
     if (nearest) {
-      _v.copy(nav.pos).sub(nearest.posUniv).normalize();
-      const inwardSpeed = -nav.vel.dot(_v);
+      _v.copy(nav.pos).sub(nearest.posUniv);
+      const centerDistance = _v.length();
+      const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
+      const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
         * (pulseActive ? 1.35 : 1);
-      if (inwardSpeed > safeInward) nav.vel.addScaledVector(_v, inwardSpeed - safeInward);
+      guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
+        nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, dt);
     }
     // never fly into the ground
-    if (nearest && nearestAlt < 3) {
+    if (nearest && !nearest.isGasGiant && nearestAlt < 3) {
       _v.copy(nav.pos).sub(nearest.posUniv).normalize();
-      const ground = nearest.surfaceRadius(_v);
-      nav.pos.copy(nearest.posUniv).addScaledVector(_v, ground + 3);
+      const localDir = nearest.worldOffsetToLocal(_v, _v2).normalize();
+      const localGround = localDir.multiplyScalar(nearest.surfaceRadius(localDir) + 3);
+      nearest.localPositionToWorld(localGround, nav.pos);
       const inward = Math.min(0, nav.vel.dot(_v));
       nav.vel.addScaledVector(_v, -inward);
+    }
+    if (nearest?.isGasGiant && nearestAlt < -nearest.R * 0.1) {
+      // Pressure-protection autopilot: no death loop, but the cloud dive has a
+      // strong physical consequence and temporarily takes the controls.
+      _v.copy(nav.pos).sub(nearest.posUniv).normalize();
+      nav.pos.copy(nearest.posUniv).addScaledVector(_v, nearest.R * 0.92);
+      nav.vel.addScaledVector(_v, Math.max(900, -nav.vel.dot(_v) + 900));
+      ui.setHint('压力临界 · 自动驾驶强制拉升', true);
+      pulseEngaged = false;
     }
   } else if (state === 'walk') {
     pulseActive = false;
     spaceCtl.pulseDrive = false;
     walkCtl.update(dt);
-    nav.pos.copy(walkCtl.planet.posUniv).add(walkCtl.posLocal);
-    nav.quat.copy(walkCtl.quat);
+    walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
   }
   stepTweens(dt);
 
@@ -1113,24 +1211,42 @@ function frame() {
   // a deferred system (warp or manual approach) materializes one planet/frame
   if (universe.system && !universe.system.built) universe.system.buildNext();
 
-  // world updates (proximity system swap allowed while free-flying)
-  universe.update(nav.pos, state === 'space' || state === 'flyto');
+  // Render adapters consume the already-updated simulation frames.
   for (const p of universe.planets()) {
     _v.copy(nav.pos).sub(p.posUniv);
-    p.update(_v, dt, p === nearest, FREEZE ? 0 : dt);
+    p.update(_v, dt, p === nearest, FREEZE || photoMode ? 0 : dt);
   }
-  if (nearest) {
+  if (nearest && !nearest.isGasGiant) {
     _v.copy(nav.pos).sub(nearest.posUniv);
+    nearest.worldOffsetToLocal(_v, _v);
     scatter.update(nearest, _v, nearestAlt);
     if (FARFLORA) farFlora.update(nearest, _v, nearestAlt);
-  } else if (farFlora.planet) {
-    farFlora.clear();
+  } else {
+    if (scatter.planet) scatter.clear();
+    if (farFlora.planet) farFlora.clear();
   }
 
   ambience();
+  if (nearest?.isGasGiant && nearestAlt < nearest.atmoHeight) {
+    const depth = clamp(-nearestAlt / (nearest.R * 0.1), 0, 1);
+    const pressure = 1 + depth * depth * 340;
+    const temperature = nearest.type === 'iceGiant' ? 95 + depth * 520 : 145 + depth * 1250;
+    const wind = 90 + (1 - clamp(nearestAlt / nearest.atmoHeight, 0, 1)) * 520;
+    if (state === 'space') {
+      _up.copy(nav.pos).sub(nearest.posUniv).normalize();
+      _v3.set(Math.sin(celestialClock.hours * 8.1), 0.37, Math.cos(celestialClock.hours * 6.7))
+        .projectOnPlane(_up).normalize();
+      nav.vel.addScaledVector(_v3, wind * (0.08 + depth * 0.32) * dt);
+    }
+    document.body.classList.toggle('gas-danger', depth > 0.35);
+    ui.setHint(`巨行星云层 · 风切 ${wind.toFixed(0)} m/s · ${temperature.toFixed(0)} K · 压力 ${pressure.toFixed(1)} bar · ${depth > 0.35 ? '立即拉升' : '无固体表面'}`, true);
+  } else {
+    document.body.classList.remove('gas-danger');
+  }
 
   // land prompt
-  const canLand = state === 'space' && nearest && nearestAlt < 420 && nav.vel.length() < 4000;
+  const canLand = state === 'space' && nearest && !nearest.isGasGiant && nearest.landable !== false
+    && nearestAlt < 420 && nav.vel.length() < 4000;
   ui.showLand(!!canLand, nearest && nearest.hasLiquid && nearest.liquid !== 'ice' &&
     _v.copy(nav.pos).sub(nearest.posUniv).length() < nearest.seaRadius + 2
     ? 'DIVE — walk the seabed' : 'LAND — walk the surface (L)');
@@ -1159,8 +1275,9 @@ function frame() {
   // sun → shadow-light crossfade (after updateRelative, which sets intensities)
   sunShadow.visible = shadowBlend > 0.02;
   if (sunShadow.visible) {
-    const sysLight = universe.system.sunLight;
-    sunShadow.intensity = sysLight.intensity * shadowBlend;
+    const dominantView = universe.system.dominantStarFrom(nearest?.posUniv || nav.pos);
+    const sysLight = dominantView.light;
+    sunShadow.intensity = sysLight.intensity * shadowBlend * (1 - envEclipse * 0.92);
     sunShadow.color.copy(sysLight.color)
       .lerp(_warmC.setRGB(1, 0.45, 0.2), envSunset * 0.55);
     sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
@@ -1199,8 +1316,6 @@ function frame() {
   });
 
   // HUD
-  if (focusPlanet) ui.setTargetDist(nav.pos.distanceTo(focusPlanet.posUniv) - focusPlanet.R);
-  else if (focusStar) ui.setTargetDist(nav.pos.distanceTo(focusStar.pos));
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
     : state === 'space' ? nav.vel.length() : _velActual.length();
   ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
@@ -1215,21 +1330,21 @@ function frame() {
     pulseFuel,
     pulseRecharging: !pulseActive && pulseRechargeDelay <= 0 && pulseFuel < 99.995,
   });
+  const localHours = nearest ? localSolarTimeAt(nearest, nav.pos) : null;
+  ui.setCosmicTime(celestialClock.hours, localHours);
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
   ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
-  updateLabels();
-
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
-    volumePass.setActivePlanet(nearest, nav.pos, motion);
+    volumePass.setActivePlanet(nearest?.isGasGiant ? null : nearest, nav.pos, motion);
   }
   foregroundPass.enabled = VOLUME_ENABLED && ['space', 'flyto', 'landing', 'takeoff', 'boarding'].includes(state);
   ambient.layers.enable(SHIP_FOREGROUND_LAYER);
   hemi.layers.enable(SHIP_FOREGROUND_LAYER);
   headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
   sunShadow.layers.enable(SHIP_FOREGROUND_LAYER);
-  universe.system?.sunLight?.layers.enable(SHIP_FOREGROUND_LAYER);
-  universe.fadingSystem?.sunLight?.layers.enable(SHIP_FOREGROUND_LAYER);
+  for (const view of universe.system?.starViews || []) view.light.layers.enable(SHIP_FOREGROUND_LAYER);
+  for (const view of universe.fadingSystem?.starViews || []) view.light.layers.enable(SHIP_FOREGROUND_LAYER);
 
   statAcc += dt;
   if (statAcc > 0.5) {
@@ -1251,7 +1366,7 @@ function frame() {
     else if (perfEmaMs < 14.2) setRenderDpr(renderDpr + 0.05);
   }
 
-  if (!FREEZE) tickShaders(dt);
+  if (!FREEZE && !photoMode) tickShaders(dt);
   renderer.info.reset();
   if (usePost) composer.render();
   else renderer.render(scene, camera);
@@ -1292,15 +1407,26 @@ window.NMS = {
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       pulse: pulseActive, pulseFuel: Math.round(pulseFuel * 10) / 10,
       firing: spaceCtl.firing, bolts: activeBolts,
+      cosmicHours: celestialClock.hours, timeScale: celestialClock.scale,
+      dayLight: envDay, eclipse: envEclipse,
       gpu: gpuName, dpr: renderDpr,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },
   planets() {
     return universe.system.planets.map((p, i) => ({
-      i, name: p.name, type: p.type, R: Math.round(p.R), isMoon: !!p.isMoon,
+      i, bodyId: p.bodyId, name: p.name, catalogName: p.catalogName,
+      type: p.type, typeLabel: p.typeLabel, R: Math.round(p.R), isMoon: !!p.isMoon,
+      isGasGiant: !!p.isGasGiant, landable: p.landable !== false && !p.isGasGiant,
+      rotationPeriodHours: p.spec?.rotationPeriodHours ?? null,
+      orbitPeriodHours: p.spec?.orbit?.periodHours ?? null,
+      axialTiltDeg: p.spec ? p.spec.axialTilt * 180 / Math.PI : null,
+      equilibriumK: p.spec?.equilibriumK ?? null,
+      atmosphere: p.spec?.atmosphere ?? null,
+      localSolarTime: localSolarTimeAt(p, p === nearest ? nav.pos : null),
       hasLiquid: p.hasLiquid, liquid: p.liquid,
       cloudAlt: p.cloudBands && p.cloudBands.length ? Math.round(p.cloudBands[0].r - p.R) : 0,
+      cloudCoverage: p.cloudCoverage || 0,
     }));
   },
   // place the camera near planet i at alt = R*altFactor, on the sunlit side
@@ -1312,19 +1438,20 @@ window.NMS = {
     setState('space');
     const sunDir = p.sunDirLocal.clone();
     let dir = opts.dir ? new THREE.Vector3(...opts.dir).normalize()
-      : p.scenicDir(sunDir).lerp(sunDir, 0.55).normalize();
-    nav.pos.copy(p.posUniv).addScaledVector(dir, p.R + p.R * altFactor);
+      : p.isGasGiant
+        ? sunDir.clone().add(new THREE.Vector3(0.31, 0.13, 0.19)).normalize()
+        : p.scenicDir(sunDir).lerp(sunDir, 0.55).normalize();
+    p.localPositionToWorld(dir.clone().multiplyScalar(p.R + p.R * altFactor), nav.pos);
     nav.vel.set(0, 0, 0);
     if (opts.horizon) {
       _v2.crossVectors(dir, sunDir).normalize();
-      horizonQuat(dir, _v2, nav.quat);
+      nav.quat.copy(p.frameOrientation).multiply(horizonQuat(dir, _v2, new THREE.Quaternion()));
       // negative pitch looks down at the terrain
       nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), opts.pitch ?? -0.18));
     } else {
       lookQuatAt(nav.pos, p.posUniv, nav.quat);
     }
     focusPlanet = p; spaceCtl.focus = p;
-    ui.setTarget(p, nav.pos.distanceTo(p.posUniv));
     return true;
   },
   // hover low over a sunlit stretch of coastline, facing out to sea —
@@ -1366,12 +1493,11 @@ window.NMS = {
       if (w) seaward.addScaledVector(e1, cx).addScaledVector(e2, cy);
     });
     if (seaward.lengthSq() < 0.01) seaward.copy(e1);
-    nav.pos.copy(p.posUniv).addScaledVector(best, p.R + p.seaLevel + alt);
+    p.localPositionToWorld(best.clone().multiplyScalar(p.R + p.seaLevel + alt), nav.pos);
     nav.vel.set(0, 0, 0);
-    horizonQuat(best, seaward, nav.quat);
+    nav.quat.copy(p.frameOrientation).multiply(horizonQuat(best, seaward, new THREE.Quaternion()));
     nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), -0.32));
     focusPlanet = p; spaceCtl.focus = p;
-    ui.setTarget(p, nav.pos.distanceTo(p.posUniv));
     return true;
   },
   // instantly stand on planet i at its scenic spot (no pointer lock).
@@ -1380,15 +1506,34 @@ window.NMS = {
   // ground facing the tree line, default lands in full daylight.
   land(i, yawDeg = 0, bias = null) {
     const p = universe.system.planets[i];
-    if (!p) return false;
+    if (!p || p.isGasGiant || p.landable === false) return false;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
     const meadow = bias === 'meadow';
+    const snowy = bias === 'snow';
     let prefer = sunDir, ring = null;
     if (bias === 'night') prefer = sunDir.clone().negate();
     else if (bias === 'sunset') { prefer = null; ring = sunDir; }
-    const dir = p.scenicDir(prefer, ring);
+    let dir = p.scenicDir(prefer, ring);
+    if (snowy) {
+      let bestSnow = null, bestSnowScore = -Infinity;
+      const snowProbe = new THREE.Vector3(), snowTangent = new THREE.Vector3();
+      for (let k = 0; k < 1800; k++) {
+        const y = 1 - (2 * (k + 0.5)) / 1800;
+        const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+        _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+        const h = p.height(_v, p.fullMaxFreq);
+        if (p.snowWeightAt(_v, h) <= 0.35 || (p.hasLiquid && h < p.seaLevel + 2)) continue;
+        if (Math.abs(_v.y) < 0.93) snowTangent.set(_v.z, 0, -_v.x).normalize();
+        else snowTangent.set(0, -_v.z, _v.y).normalize();
+        const nearH = p.height(snowProbe.copy(_v).addScaledVector(snowTangent, 18 / p.R).normalize(), p.fullMaxFreq);
+        const slopePenalty = Math.abs(nearH - h) / 18;
+        const score = _v.dot(sunDir) * 4 - Math.abs(h) / Math.max(p.hAmp, 1) - slopePenalty * 8;
+        if (score > bestSnowScore) { bestSnowScore = score; bestSnow = _v.clone(); }
+      }
+      if (bestSnow) dir = bestSnow;
+    }
     // scenicDir scores the REGION at km scale — it cannot see the cliff wall
     // 20 m from the spawn. Micro-refine within ~500 m: flat footing plus at
     // least one open view of sun-LIT faces (sun behind the shoulder), and
@@ -1410,15 +1555,20 @@ window.NMS = {
       const rr = (meadow ? 0.02 : 0.005) * Math.sqrt(ci / CANDS), ga = ci * 2.399963229728653;
       frame(dir, e1, e2);
       cand.copy(dir).addScaledVector(e1, Math.cos(ga) * rr).addScaledVector(e2, Math.sin(ga) * rr).normalize();
-      const h = p.height(cand, 128);
+      const sampleFreq = snowy ? p.fullMaxFreq : 128;
+      const h = p.height(cand, sampleFreq);
       if (p.hasLiquid && h - p.seaLevel < 2) continue;
+      if (snowy && p.snowWeightAt(cand, h) <= 0.28) continue;
       frame(cand, e1, e2);
       sunH.copy(sunDir).addScaledVector(cand, -sunDir.dot(cand));
       if (sunH.lengthSq() > 1e-4) sunH.normalize(); else sunH.set(0, 0, 0);
       const st = 10 / p.R;
-      const hx = p.height(probe.copy(cand).addScaledVector(e1, st).normalize(), 128);
-      const hy = p.height(probe.copy(cand).addScaledVector(e2, st).normalize(), 128);
-      let score = -(Math.abs(hx - h) + Math.abs(hy - h)) * (meadow ? 2.0 : 1.2);   // flat footing
+      const hx = p.height(probe.copy(cand).addScaledVector(e1, st).normalize(), sampleFreq);
+      const hy = p.height(probe.copy(cand).addScaledVector(e2, st).normalize(), sampleFreq);
+      const hnx = p.height(probe.copy(cand).addScaledVector(e1, -st).normalize(), sampleFreq);
+      const hny = p.height(probe.copy(cand).addScaledVector(e2, -st).normalize(), sampleFreq);
+      let score = -(Math.abs(hx - h) + Math.abs(hy - h) + Math.abs(hnx - h) + Math.abs(hny - h))
+        * (snowy ? 4.5 : meadow ? 2.0 : 1.2);   // flat footing
       // don't spawn INSIDE a grove — trees are invisible to height probes;
       // clearing edges score naturally (view keeps the trees, feet stay free)
       p.extrasAt(cand, h, 128, _ex4);
@@ -1461,7 +1611,7 @@ window.NMS = {
         }
         if (s > yawScore) { yawScore = s; yawBest = yaw; }
       }
-      score += yawScore * 8;   // the view matters more than the footing
+      score += yawScore * (snowy ? 1.25 : 8);   // snow QA favours safe footing over drama
       if (score > bestSpotScore) { bestSpotScore = score; bestSpot.copy(cand); bestYaw = yawBest; }
     }
     dir.copy(bestSpot);
@@ -1477,11 +1627,10 @@ window.NMS = {
     }
     walkCtl.yaw += yawDeg * Math.PI / 180;
     walkCtl.update(0.001);
-    nav.pos.copy(p.posUniv).add(walkCtl.posLocal);
-    nav.quat.copy(walkCtl.quat);
+    p.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
     focusPlanet = p;
     spaceCtl.focus = p;
-    ui.setTarget(p, 0);
     setState('walk');
     return true;
   },
@@ -1515,18 +1664,18 @@ window.NMS = {
     walkCtl.enter(p, _v2, _v3);
     walkCtl.pitch = 0.3;                      // tilt up toward the surface glow
     walkCtl.update(0.001);
-    nav.pos.copy(p.posUniv).add(walkCtl.posLocal);
-    nav.quat.copy(walkCtl.quat);
+    p.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
     focusPlanet = p; spaceCtl.focus = p;
-    ui.setTarget(p, 0);
     setState('walk');
     return true;
   },
   // aim the walker at the parked ship (testing the landing pad)
   faceShip() {
     if (state !== 'walk' || !ship.parkedPosUniv) return false;
-    _v.copy(ship.parkedPosUniv).sub(nav.pos);
-    _up.copy(nav.pos).sub(walkCtl.planet.posUniv).normalize();
+    const p = walkCtl.planet;
+    p.worldPositionToLocal(ship.parkedPosUniv, _v).sub(walkCtl.posLocal);
+    _up.copy(walkCtl.posLocal).normalize();
     const e1 = new THREE.Vector3();
     if (Math.abs(_up.y) < 0.93) e1.set(_up.z, 0, -_up.x).normalize();
     else e1.set(0, -_up.z, _up.y).normalize();
@@ -1554,12 +1703,104 @@ window.NMS = {
     .map((s) => ({ id: s.id, dist: Math.round(s.pos.distanceTo(nav.pos)), pos: s.pos.toArray() }))
     .sort((a, b) => a.dist - b.dist).slice(0, 50),
   starCount: () => universe.nearStarsList.length,
+  time: () => celestialClock.snapshot(),
+  setTime(hours) {
+    celestialClock.set(hours);
+    universe.update(nav.pos, false, celestialClock.hours);
+    universe.updateRelative(nav.pos);
+    return celestialClock.snapshot();
+  },
+  advanceTime(hours) {
+    celestialClock.advance(hours);
+    universe.update(nav.pos, false, celestialClock.hours);
+    universe.updateRelative(nav.pos);
+    return celestialClock.snapshot();
+  },
+  referenceState() {
+    const p = walkCtl.active ? walkCtl.planet : nearest;
+    if (!p) return null;
+    const playerLocal = p.worldPositionToLocal(nav.pos, new THREE.Vector3());
+    const playerDir = playerLocal.clone().normalize();
+    const terrainRadius = p.surfaceRadius(playerDir);
+    scene.updateMatrixWorld(true);
+    const downWorld = playerDir.clone().applyQuaternion(p.frameOrientation).negate();
+    const terrainMeshes = p.group.children.filter((object) => object.isMesh
+      && object.visible && object.geometry?.getAttribute('aLocal'));
+    const ray = new THREE.Raycaster(camera.position, downWorld, 0, 20);
+    const hit = ray.intersectObjects(terrainMeshes, false)[0] || null;
+    return {
+      bodyId: p.bodyId,
+      state,
+      playerLocal: playerLocal.toArray(),
+      playerWorld: nav.pos.toArray(),
+      eyeClearance: playerLocal.length() - terrainRadius,
+      renderedEyeClearance: hit?.distance ?? null,
+      terrainRadius,
+      frameOrientation: p.frameOrientation.toArray(),
+      shipLocal: ship.parkedPlanet === p && ship.parkedLocal ? ship.parkedLocal.toArray() : null,
+      shipWorld: ship.parkedPlanet === p && ship.parkedPosUniv ? ship.parkedPosUniv.toArray() : null,
+      shipDistance: parkedShipDistance(),
+      pending: pendingChunks(),
+      lod: p.lod.debugStats(),
+    };
+  },
+  nextEvent(bodyId, kind = 'sunrise') {
+    const body = universe.system.planets.find((p) => p.bodyId === bodyId || p.name === bodyId);
+    if (!body || !['sunrise', 'sunset', 'eclipse'].includes(kind)) return null;
+    if (kind === 'eclipse') return findNextEclipse(body);
+    return findNextSolarEvent(body, kind, false);
+  },
   system: () => ({
     id: universe.system.star.id,
     name: universe.system.name,
+    properName: universe.system.spec.properName,
+    catalogId: universe.system.spec.catalogId,
+    generationVersion: universe.system.spec.generationVersion,
+    habitableZoneAU: universe.system.spec.habitableZoneAU,
+    snowLineAU: universe.system.spec.snowLineAU,
+    stars: universe.system.spec.stars.map((star, index) => ({
+      starId: star.starId, name: star.displayName, component: star.component,
+      spectralClass: star.spectralClass, massSolar: star.massSolar,
+      radiusSolar: star.radiusSolar, radiusRender: star.radiusRender, temperatureK: star.temperatureK,
+      luminositySolar: star.luminositySolar,
+      position: universe.system.starViews[index].positionUniv.toArray(),
+    })),
+    bodies: universe.system.spec.bodies.map((body) => ({
+      bodyId: body.bodyId, parentId: body.parentId, name: body.name,
+      catalogName: body.catalogName, type: body.type, radius: body.radius,
+      landable: body.landable, equilibriumK: body.equilibriumK,
+      atmosphere: body.atmosphere,
+      rotationPeriodHours: body.rotationPeriodHours, axialTilt: body.axialTilt,
+      orbit: { ...body.orbit },
+      position: universe.system.positionAt(body.bodyId, celestialClock.hours).toArray(),
+      velocity: universe.system.velocityAt(body.bodyId, celestialClock.hours).toArray(),
+    })),
     planets: universe.system.planets.length,
     fading: universe.fadingSystem ? universe.fadingSystem.star.id : null,
   }),
+  snowAudit(i, samples = 1200) {
+    const p = universe.system.planets[i];
+    if (!p || p.isGasGiant) return null;
+    let snow = 0, violations = 0, treePotential = 0;
+    const d = new THREE.Vector3(), ex = new THREE.Vector4();
+    for (let k = 0; k < samples; k++) {
+      const y = 1 - (2 * (k + 0.5)) / samples;
+      const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+      d.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+      const h = p.height(d, 128), snowy = p.snowWeightAt(d, h) > 0.28;
+      if (!snowy) continue;
+      snow++;
+      const biome = p.biomeAt(d, h);
+      if (biome !== 'snow' && biome !== 'ice' && biome !== 'lava' && biome !== 'rock') violations++;
+      p.extrasAt(d, h, 128, ex);
+      if (biome === 'snow' && ex.x > 0) treePotential++;
+    }
+    return { samples, snow, violations, treePotential };
+  },
+  cloudAudit(i, samples = 4096) {
+    const p = universe.system.planets[i];
+    return p?.cloudAudit ? p.cloudAudit(samples) : null;
+  },
   // park the camera anywhere in universe coords (testing manual flight)
   setPosition(x, y, z, lookX, lookY, lookZ) {
     tweens.length = 0;
@@ -1644,11 +1885,11 @@ if (qs.get('scene') === 'surfaceflight') {
   if (p) {
     const up = walkCtl.posLocal.clone().normalize();
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat)
-      .projectOnPlane(up).normalize();
+      .applyQuaternion(p.frameOrientation.clone().invert()).projectOnPlane(up).normalize();
     walkCtl.exit();
-    nav.pos.copy(p.posUniv).addScaledVector(up,
-      p.surfaceRadius(up) + Number(qs.get('alt') || 18));
-    horizonQuat(up, forward, nav.quat);
+    p.localPositionToWorld(up.clone().multiplyScalar(
+      p.surfaceRadius(up) + Number(qs.get('alt') || 18)), nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(horizonQuat(up, forward, new THREE.Quaternion()));
     nav.vel.set(0, 0, 0);
     setState('space');
   }

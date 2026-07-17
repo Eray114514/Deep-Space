@@ -47,9 +47,38 @@ export function startServer(port = 0) {
   });
 }
 
+// The dev server is often left running in another terminal while a second
+// session is opened. Keep that harmless: only the CLI/dev path walks upward
+// to a free port; tests that request port 0 and callers that need an exact
+// port can continue using startServer directly.
+export async function startDevServer(preferredPort = 8000, maxFallbacks = 10) {
+  const firstPort = Number.isInteger(preferredPort) && preferredPort > 0
+    ? preferredPort
+    : 8000;
+  let lastError = null;
+  for (let offset = 0; offset <= maxFallbacks; offset++) {
+    const candidate = firstPort + offset;
+    if (candidate > 65535) break;
+    try {
+      const result = await startServer(candidate);
+      return { ...result, preferredPort: firstPort, usedFallback: offset > 0 };
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== 'EADDRINUSE') throw error;
+    }
+  }
+  throw lastError || new Error(`No free development port near ${firstPort}`);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT || 8000);
-  startServer(port).then(({ port: p }) => {
+  startDevServer(port).then(({ port: p, preferredPort, usedFallback }) => {
+    if (usedFallback) {
+      console.warn(`Port ${preferredPort} is already in use; using ${p} instead.`);
+    }
     console.log(`No Man's Sky three.js → http://127.0.0.1:${p}`);
+  }).catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
   });
 }

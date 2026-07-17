@@ -3,8 +3,10 @@ import { startServer } from './server.js';
 import { chromium } from 'playwright';
 
 const { server, port } = await startServer(0);
+const chrome = process.env.PLAYWRIGHT_EXECUTABLE_PATH
+  || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const browser = await chromium.launch({
-  executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || chromium.executablePath(),
+  executablePath: chrome,
   args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl'],
 });
 const page = await browser.newPage({ viewport: { width: 1100, height: 700 } });
@@ -54,6 +56,48 @@ try {
   check(speedBoost > Math.max(speedBefore * 1.5, speedBefore + 100),
     `RMB materially accelerates ship (${speedBefore.toFixed(0)} -> ${speedBoost.toFixed(0)} m/s)`);
   check(afterRelease < duringBoost, 'RMB release clears boost cleanly');
+
+  check(await page.evaluate(() => !document.getElementById('labels')
+      && !document.getElementById('target-card')
+      && document.querySelectorAll('.planet-label').length === 0),
+  'normal space view contains no planet identifiers or target card');
+
+  for (const [label, axis] of [
+    ['north pole', [0, 1, 0]],
+    ['south pole', [0, -1, 0]],
+    ['equator', [1, 0, 0]],
+  ]) {
+    const startAlt = await page.evaluate((localAxis) => {
+      const { universe, nav } = NMS._internals;
+      const p = universe.planets()[0];
+      const THREE = NMS._THREE;
+      const radial = p.localOffsetToWorld(new THREE.Vector3(...localAxis), new THREE.Vector3()).normalize();
+      const center = p.posUniv.clone();
+      const position = center.clone().addScaledVector(radial, p.R + p.atmoHeight * 2.2);
+      NMS.setPosition(position.x, position.y, position.z, center.x, center.y, center.z);
+      const reference = Math.abs(radial.y) < 0.9
+        ? new THREE.Vector3(0, 1, 0)
+        : new THREE.Vector3(1, 0, 0);
+      const tangent = new THREE.Vector3().crossVectors(radial, reference).normalize();
+      nav.vel.copy(radial).multiplyScalar(-2200).addScaledVector(tangent, 9000);
+      return position.distanceTo(center) - p.R;
+    }, axis);
+    await page.waitForTimeout(2600);
+    const result = await page.evaluate(() => {
+      const { universe, nav } = NMS._internals;
+      const p = universe.planets()[0];
+      const THREE = NMS._THREE;
+      const toCenter = p.posUniv.clone().sub(nav.pos).normalize();
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
+      return {
+        altitude: nav.pos.distanceTo(p.posUniv) - p.R,
+        pathErrorDeg: nav.vel.lengthSq() > 1 ? nav.vel.angleTo(forward) * 180 / Math.PI : 0,
+        aimErrorDeg: forward.angleTo(toCenter) * 180 / Math.PI,
+      };
+    });
+    check(result.altitude < startAlt && result.pathErrorDeg < 28 && result.aimErrorDeg < 2,
+      `${label} approach follows the crosshair without climbing (${Math.round(startAlt)} -> ${Math.round(result.altitude)} m, ${result.pathErrorDeg.toFixed(1)}° slip)`);
+  }
 
   await page.evaluate('NMS.land(0)');
   const recalled = await page.evaluate('NMS.recallShip()');

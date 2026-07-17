@@ -1,8 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { makeRng } from './rng.js';
-import { systemName, planetName, moonName } from './names.js';
-import { TYPES } from './planet.js';
+import { generateSystemSpec, orbitalPosition } from './astronomy.js';
 
 const AU = 149_597_870_700;
 const STAR_LIMIT = 320;
@@ -16,6 +15,8 @@ const TYPE_COLORS = {
   barren: 0x9da7ad,
   toxic: 0xb5e45d,
   exotic: 0xe47cff,
+  gasGiant: 0xd29b68,
+  iceGiant: 0x68c7df,
 };
 const TYPE_LABELS = {
   lush: '繁茂世界',
@@ -26,6 +27,8 @@ const TYPE_LABELS = {
   barren: '贫瘠世界',
   toxic: '剧毒世界',
   exotic: '异象世界',
+  gasGiant: '气态巨星',
+  iceGiant: '冰巨星',
 };
 
 function starSurfaceMaterial(color) {
@@ -125,6 +128,12 @@ function distanceText(metres) {
   return `${(metres / AU).toFixed(3)} AU`;
 }
 
+function physicalStarClass(star) {
+  const code = star.spectralClass?.[0] || 'G';
+  const labels = { O: '蓝色主序星', B: '蓝白主序星', A: '白色主序星', F: '黄白主序星', G: '黄矮星', K: '橙矮星', M: '红矮星', D: '白矮星' };
+  return { code, label: labels[code] || '恒星', temp: `${Math.round(star.temperatureK).toLocaleString('zh-CN')} K` };
+}
+
 function planetProfile(body) {
   const rand = makeRng(body.seed + ':ui-profile');
   const gravity = (0.48 + Math.min(1.12, body.radius / 310_000) + rand() * 0.18).toFixed(2);
@@ -137,101 +146,28 @@ function planetProfile(body) {
     barren: ['寒冷', '近真空', '无', '无', ['Fe', 'Pb', 'Al', 'He₃']],
     toxic: ['腐蚀性', '剧毒', '危险', '异常', ['Cl', 'Ar', 'F', 'Si']],
     exotic: ['异常', '未知', '未知', '未知', ['Au', 'Xe', 'Ir', '???']],
+    gasGiant: ['风暴云层', '氢氦大气', '无固体表面', '无', ['H₂', 'He', 'NH₃', 'CH₄']],
+    iceGiant: ['极寒', '甲烷氢氦', '无固体表面', '无', ['CH₄', 'H₂', 'He', 'H₂O']],
   };
-  const [temp, atmo, fauna, flora, resources] = profiles[body.type] || profiles.barren;
+  const [temp, defaultAtmo, fauna, flora, resources] = profiles[body.type] || profiles.barren;
+  const atmo = body.atmosphere?.composition
+    ? `${body.atmosphere.composition.join(' / ')}${body.atmosphere.pressureBar == null ? '' : ` · ${body.atmosphere.pressureBar.toFixed(2)} bar`}`
+    : defaultAtmo;
   return { gravity, temp, atmo, fauna, flora, resources };
 }
 
 function previewSystem(seed, star, currentSystem) {
-  if (currentSystem && currentSystem.star.id === star.id) {
-    return {
-      name: currentSystem.name,
-      star,
-      bodies: currentSystem._specs.map((spec, index) => ({
-        ...spec,
-        index,
-        radius: spec.isMoon
-          ? 28_000 + makeRng(spec.seed)() * 72_000
-          : 160_000 + makeRng(spec.seed)() * 240_000,
-        orbit: spec.pos.distanceTo(star.pos),
-      })),
-    };
-  }
-
-  const rand = makeRng(seed + ':sys:' + star.id);
-  const name = systemName(rand);
-  const isHome = star.id === '0,0,0';
-  const count = (isHome ? 6 : 5) + ((rand() * 4) | 0);
-  const weights = {};
-  for (const key of Object.keys(TYPES)) weights[key] = TYPES[key].weight;
-  const pickType = () => {
-    let total = 0;
-    for (const key in weights) total += weights[key];
-    let value = rand() * total;
-    for (const key in weights) {
-      value -= weights[key];
-      if (value <= 0) {
-        weights[key] *= 0.3;
-        return key;
-      }
-    }
-    return 'lush';
+  const spec = currentSystem?.star.id === star.id ? currentSystem.spec : generateSystemSpec(seed, star);
+  const indexById = new Map(spec.bodies.map((body, index) => [body.bodyId, index]));
+  return {
+    name: spec.name, catalogId: spec.catalogId, star, stars: spec.stars, binaryOrbit: spec.binaryOrbit,
+    bodies: spec.bodies.map((body, index) => ({
+      ...body, index,
+      parentSpec: body.parentId ? indexById.get(body.parentId) : -1,
+      orbitSpec: body.orbit,
+      orbit: body.orbit.renderRadius,
+    })),
   };
-
-  const bodies = [];
-  for (let i = 0; i < count; i++) {
-    const orbit = Math.min(6e7 * Math.pow(1.68, i) * (0.85 + rand() * 0.3), 1.6e9);
-    const angle = rand() * Math.PI * 2;
-    const incline = (rand() - 0.5) * 0.35;
-    const pos = new THREE.Vector3(
-      Math.cos(angle) * orbit,
-      Math.sin(incline) * orbit * 0.5,
-      Math.sin(angle) * orbit,
-    ).add(star.pos);
-    const type = i === 0 && isHome ? 'lush' : pickType();
-    const namePlanet = planetName(rand, name, i);
-    const bodySeed = seed + ':p:' + star.id + ':' + i;
-    const parentIndex = bodies.length;
-    bodies.push({
-      seed: bodySeed,
-      name: namePlanet,
-      pos,
-      type,
-      isMoon: false,
-      orbitIndex: i,
-      parentSpec: -1,
-      index: parentIndex,
-      orbit,
-      radius: 160_000 + makeRng(bodySeed)() * 240_000,
-    });
-
-    const parentR = 160_000 + makeRng(bodySeed)() * 240_000;
-    if (rand() < 0.28 && parentR > 230_000) {
-      const moonAngle = rand() * Math.PI * 2;
-      const moonY = (rand() - 0.5) * 0.5;
-      const moonOrbit = parentR * (4.2 + rand() * 3.2);
-      const moonPos = new THREE.Vector3(
-        Math.cos(moonAngle),
-        moonY,
-        Math.sin(moonAngle),
-      ).normalize().multiplyScalar(moonOrbit).add(pos);
-      const moonType = pickType();
-      const moonSeed = seed + ':m:' + star.id + ':' + i;
-      bodies.push({
-        seed: moonSeed,
-        name: moonName(rand, namePlanet),
-        pos: moonPos,
-        type: moonType,
-        isMoon: true,
-        orbitIndex: i,
-        parentSpec: parentIndex,
-        index: bodies.length,
-        orbit: moonOrbit,
-        radius: 28_000 + makeRng(moonSeed)() * 72_000,
-      });
-    }
-  }
-  return { name, star, bodies };
 }
 
 function disposeObject(root) {
@@ -277,11 +213,12 @@ function makePointTexture() {
 }
 
 export class StarMap {
-  constructor({ getUniverse, getNav, getSeed, getState, onRequestClose, onWarpTarget }) {
+  constructor({ getUniverse, getNav, getSeed, getState, getTime, onRequestClose, onWarpTarget }) {
     this.getUniverse = getUniverse;
     this.getNav = getNav;
     this.getSeed = getSeed;
     this.getState = getState;
+    this.getTime = getTime || (() => 0);
     this.onRequestClose = onRequestClose;
     this.onWarpTarget = onWarpTarget;
     this.isOpen = false;
@@ -719,19 +656,23 @@ export class StarMap {
       contour.position.z = Math.cos(i * 1.61) * 1.4;
       this.world.add(contour);
     }
-    const starColor = this.selectedStar.color.clone().multiplyScalar(2.3);
-    const sun = new THREE.Mesh(
-      new THREE.SphereGeometry(7.6, 40, 28),
-      starSurfaceMaterial(starColor),
-    );
-    sun.userData = { kind: 'sun', star: this.selectedStar, starSurface: true };
-    this.world.add(sun);
-    this.pickables.push(sun);
-    const glow = new THREE.Mesh(
-      new THREE.SphereGeometry(10.4, 32, 22),
-      starCoronaMaterial(this.selectedStar.color),
-    );
-    this.world.add(glow);
+    const timeHours = this.getTime();
+    const binaryDirection = preview.stars.length > 1
+      ? orbitalPosition(preview.binaryOrbit, timeHours, new THREE.Vector3()).normalize()
+      : new THREE.Vector3(1, 0, 0);
+    const totalMass = preview.stars.reduce((sum, star) => sum + star.massSolar, 0);
+    preview.stars.forEach((star, index) => {
+      const color = new THREE.Color(star.color);
+      const companionMass = preview.stars.length > 1 ? preview.stars[1 - index].massSolar : 0;
+      const offset = preview.stars.length > 1 ? (5.8 * companionMass / totalMass) * (index === 0 ? -1 : 1) : 0;
+      const size = 4.8 + Math.min(3.4, star.radiusRender / 3.5e6);
+      const sun = new THREE.Mesh(new THREE.SphereGeometry(size, 40, 28), starSurfaceMaterial(color.clone().multiplyScalar(2.3)));
+      sun.position.copy(binaryDirection).multiplyScalar(offset);
+      sun.userData = { kind: 'sun', star: this.selectedStar, starSurface: true };
+      this.world.add(sun); this.pickables.push(sun);
+      const glow = new THREE.Mesh(new THREE.SphereGeometry(size * 1.37, 32, 22), starCoronaMaterial(color));
+      glow.position.copy(sun.position); this.world.add(glow);
+    });
 
     const primaryMeshes = new Map();
     const primaries = preview.bodies.filter((body) => !body.isMoon);
@@ -750,9 +691,10 @@ export class StarMap {
           emissive: new THREE.Color(TYPE_COLORS[body.type] || 0x223344).multiplyScalar(0.08),
         }),
       );
-      const angle = (body.orbitIndex * 2.399963 + body.radius * 0.00001) % (Math.PI * 2);
-      mesh.position.set(Math.cos(angle) * orbitRadius, Math.sin(angle * 1.7) * 1.2, Math.sin(angle) * orbitRadius);
-      mesh.userData = { kind: 'planet', body, orbitRadius, angle, speed: 0.018 / Math.sqrt(body.orbitIndex + 1) };
+      const orbitPos = orbitalPosition(body.orbitSpec, timeHours, new THREE.Vector3())
+        .multiplyScalar(orbitRadius / body.orbitSpec.renderRadius);
+      mesh.position.copy(orbitPos);
+      mesh.userData = { kind: 'planet', body, orbitRadius, angle: Math.atan2(orbitPos.z, orbitPos.x), speed: 0 };
       this.world.add(mesh);
       this.pickables.push(mesh);
       primaryMeshes.set(body.index, mesh);
@@ -763,7 +705,7 @@ export class StarMap {
       const moonOrbit = 2.2 + Math.min(2.2, moon.orbit / 1.4e6);
       const pivot = new THREE.Group();
       pivot.position.copy(parent.position);
-      pivot.userData = { kind: 'moonPivot', parent, speed: 0.16 + moon.index * 0.006 };
+      pivot.userData = { kind: 'moonPivot', parent, speed: 0 };
       const ring = lineLoop(moonOrbit, 0x8aaeb8, 0.18, 48);
       ring.scale.y = 0.75;
       pivot.add(ring);
@@ -771,7 +713,9 @@ export class StarMap {
         new THREE.SphereGeometry(0.34 + moon.radius / 180_000, 14, 10),
         new THREE.MeshStandardMaterial({ color: TYPE_COLORS[moon.type] || 0x87939a, roughness: 0.9 }),
       );
-      mesh.position.set(moonOrbit, 0.25, 0);
+      const moonPos = orbitalPosition(moon.orbitSpec, timeHours, new THREE.Vector3())
+        .multiplyScalar(moonOrbit / moon.orbitSpec.renderRadius);
+      mesh.position.copy(moonPos); mesh.position.y += 0.25;
       mesh.userData = { kind: 'moon', body: moon };
       pivot.add(mesh);
       this.world.add(pivot);
@@ -903,9 +847,12 @@ export class StarMap {
     if (!body) return;
     const profile = planetProfile(body);
     this.root.classList.add('planet-focus');
-    this.els.bodyKind.textContent = body.isMoon ? '卫星' : '行星';
+    this.els.bodyKind.textContent = body.isMoon ? '卫星' : body.type === 'gasGiant' || body.type === 'iceGiant' ? '巨行星' : '行星';
     this.els.bodyName.textContent = body.name;
-    this.els.bodySystem.textContent = this.selectedStar ? `${this.systemPreview(this.selectedStar).name}星系` : '未知星系';
+    if (this.selectedStar) {
+      const system = this.systemPreview(this.selectedStar);
+      this.els.bodySystem.textContent = `${system.name} / ${body.catalogName}`;
+    } else this.els.bodySystem.textContent = '未知星系';
     this.els.bodyType.textContent = TYPE_LABELS[body.type] || body.type;
     this.els.bodyGravity.textContent = `${profile.gravity} G`;
     this.els.bodyTemp.textContent = profile.temp;
@@ -973,20 +920,20 @@ export class StarMap {
     this.selectedPlanet = null;
     this.root.classList.remove('planet-focus');
     const preview = this.systemPreview(star);
-    const cls = starClass(star);
+    const cls = physicalStarClass(preview.stars[0]);
     const distance = star.pos.distanceTo(this.getNav().pos);
     const primaryCount = preview.bodies.filter((body) => !body.isMoon).length;
     const moonCount = preview.bodies.length - primaryCount;
     const isCurrent = star.id === this.getUniverse().system.star.id;
     const canWarp = !isCurrent && this.getState() === 'space';
 
-    this.els.targetCode.textContent = `${cls.code}-CLASS // ${star.id}`;
+    this.els.targetCode.textContent = `${preview.catalogId} // ${cls.code}-CLASS`;
     this.els.targetName.textContent = preview.name;
     this.els.starType.textContent = cls.label;
     this.els.distance.textContent = isCurrent ? '当前位置' : distanceText(distance);
     this.els.temperature.textContent = cls.temp;
     this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount} 卫星`;
-    this.els.starCore.style.setProperty('--star-color', `#${star.color.getHexString()}`);
+    this.els.starCore.style.setProperty('--star-color', `#${new THREE.Color(preview.stars[0].color).getHexString()}`);
     this.els.bodyList.replaceChildren();
     for (const body of preview.bodies) {
       const row = document.createElement('button');

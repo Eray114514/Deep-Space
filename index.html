@@ -50,6 +50,8 @@
     </div>
     <div class="hud-system">
       <strong id="sys-name">—</strong>
+      <span id="sys-catalog">—</span>
+      <span id="cosmic-time">UT 0000:00 · ×60</span>
       <span id="sys-planets">—</span>
       <span id="sys-seed">—</span>
     </div>
@@ -65,22 +67,11 @@
 
   <button id="star-map-btn" title="打开银河星图"><span>银河星图</span><kbd>M</kbd></button>
 
-  <div id="target-card" class="hidden">
-    <div class="target-kicker">导航目标</div>
-    <div id="tc-name">—</div>
-    <div id="tc-type" class="sub">—</div>
-    <div id="tc-info" class="sub">—</div>
-    <div id="tc-dist" class="dist">—</div>
-    <div class="target-progress"><i></i><b></b></div>
-  </div>
-
   <div id="resource-strip">
     <span>FE <b>18</b></span><span>CR <b>0</b></span><span>BIO <b>0</b></span>
     <strong>脉冲燃料 <b id="pulse-fuel">100%</b></strong>
     <strong>跃迁电池 <b>READY</b></strong>
   </div>
-
-  <div id="labels"></div>
 
   <section id="walk-hud" aria-label="地表探索状态">
     <div class="walk-radar">
@@ -138,12 +129,15 @@
       <div class="pause-actions">
         <button id="resume-btn">返回游戏</button>
         <button id="pause-map-btn">银河星图</button>
+        <button id="wait-sunrise-btn">等待至下一次日出</button>
+        <button id="wait-sunset-btn">等待至下一次日落</button>
+        <button id="wait-eclipse-btn">等待至下一次食象</button>
         <button id="new-universe" title="生成新的宇宙种子">重构星域</button>
       </div>
     </div>
   </div>
   <div id="err" class="hidden"></div>
 
-  <script type="module" src="src/main.js?v=0.27.2"></script>
+  <script type="module" src="src/main.js?v=0.28.2"></script>
 </body>
 </html>

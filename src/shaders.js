@@ -62,16 +62,102 @@ export function detailTexture() {
   return _detailTex;
 }
 
-// CPU twin of the GLSL cloudFbm below — same octaves, same channels
+function smooth01(lo, hi, value) {
+  const t = Math.min(1, Math.max(0, (value - lo) / Math.max(hi - lo, 1e-6)));
+  return t * t * (3 - 2 * t);
+}
+
+function normalized(x, y, z) {
+  const k = 1 / Math.max(Math.hypot(x, y, z), 1e-6);
+  return { x: x * k, y: y * k, z: z * k };
+}
+
+function stormAtCPU(d, center, phase, radius) {
+  const ref = Math.abs(center.y) < 0.88 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+  const tangentA = normalized(
+    ref.y * center.z - ref.z * center.y,
+    ref.z * center.x - ref.x * center.z,
+    ref.x * center.y - ref.y * center.x,
+  );
+  const tangentB = normalized(
+    center.y * tangentA.z - center.z * tangentA.y,
+    center.z * tangentA.x - center.x * tangentA.z,
+    center.x * tangentA.y - center.y * tangentA.x,
+  );
+  const dot = Math.min(1, Math.max(-1, d.x * center.x + d.y * center.y + d.z * center.z));
+  const x = d.x * tangentA.x + d.y * tangentA.y + d.z * tangentA.z;
+  const y = d.x * tangentB.x + d.y * tangentB.y + d.z * tangentB.z;
+  const inv = 1 / Math.max(x * x + y * y, 1e-5);
+  const sin2 = 2 * x * y * inv, cos2 = (x * x - y * y) * inv;
+  const r = Math.sqrt(Math.max(0, 2 * (1 - dot))) / radius;
+  const shield = (1 - smooth01(0.08, 0.5, r)) * 0.58;
+  const turn = phase - r * 13;
+  const armWave = smooth01(0.66, 0.94,
+    0.5 + 0.5 * (sin2 * Math.cos(turn) + cos2 * Math.sin(turn)));
+  const arms = armWave * smooth01(0.1, 0.24, r) * (1 - smooth01(0.62, 1, r));
+  return Math.max(shield, arms);
+}
+
+function cloudSystemCPU(d, ox, oy, oz) {
+  const c1 = normalized(Math.sin(ox * 1.31 + 0.4), Math.sin(oy * 1.17 - 1.2) * 0.72,
+    Math.cos(oz * 1.43 + 0.7));
+  const ref = Math.abs(c1.y) < 0.8 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+  const cross = normalized(
+    c1.y * ref.z - c1.z * ref.y,
+    c1.z * ref.x - c1.x * ref.z,
+    c1.x * ref.y - c1.y * ref.x,
+  );
+  const c2 = normalized(cross.x + c1.x * 0.16, cross.y + c1.y * 0.16, cross.z + c1.z * 0.16);
+  return Math.max(stormAtCPU(d, c1, oz, 0.92), stormAtCPU(d, c2, ox + oy, 0.68) * 0.72);
+}
+
+function cloudSystemTexture(ox, oy, oz) {
+  const width = 192, height = 192;
+  const data = new Uint8Array(width * height);
+  const d = { x: 0, y: 0, z: 0 };
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let px = ((x + 0.5) / width) * 2 - 1;
+      let pz = ((y + 0.5) / height) * 2 - 1;
+      let py = 1 - Math.abs(px) - Math.abs(pz);
+      if (py < 0) {
+        const oldX = px;
+        px = (1 - Math.abs(pz)) * Math.sign(oldX || 1);
+        pz = (1 - Math.abs(oldX)) * Math.sign(pz || 1);
+      }
+      const inv = 1 / Math.max(Math.hypot(px, py, pz), 1e-6);
+      d.x = px * inv; d.y = py * inv; d.z = pz * inv;
+      data[y * width + x] = Math.round(cloudSystemCPU(d, ox, oy, oz) * 255);
+    }
+  }
+  const texture = new THREE.DataTexture(data, width, height, THREE.RedFormat);
+  texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.minFilter = texture.magFilter = THREE.LinearFilter;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// CPU twin of the GLSL cloud field below: ordinary distributed weather stays
+// unchanged, while one or two independently shaped large systems are unioned
+// on top instead of suppressing clear-side clouds.
 export function cloudDensityCPU(d, cov0, cov1, ox, oy, oz) {
   let f = sampleDetailCPU(d.x * 0.55 + ox, d.y * 0.55 + oy, 1) * 0.5;
   f += sampleDetailCPU(d.y * 1.15 + oy, d.z * 1.15 + oz, 0) * 0.25;
   f += sampleDetailCPU(d.z * 2.35 + oz, d.x * 2.35 + ox, 1) * 0.125;
   f += sampleDetailCPU(d.x * 4.8 - ox, d.y * 4.8 - oz, 0) * 0.0625;
   f /= 0.9375;
-  const t = Math.min(1, Math.max(0, (f - cov0) / Math.max(cov1 - cov0, 1e-5)));
-  const s = t * t * (3 - 2 * t);
-  return Math.pow(s, 1.3);
+  const base = Math.pow(smooth01(cov0, cov1, f), 1.3);
+  const system = cloudSystemCPU(d, ox, oy, oz) * smooth01(0.24, 0.68, f) * 0.86;
+  return Math.max(base, system);
+}
+
+export function cloudBaseDensityCPU(d, cov0, cov1, ox, oy, oz) {
+  let f = sampleDetailCPU(d.x * 0.55 + ox, d.y * 0.55 + oy, 1) * 0.5;
+  f += sampleDetailCPU(d.y * 1.15 + oy, d.z * 1.15 + oz, 0) * 0.25;
+  f += sampleDetailCPU(d.z * 2.35 + oz, d.x * 2.35 + ox, 1) * 0.125;
+  f += sampleDetailCPU(d.x * 4.8 - ox, d.y * 4.8 - oz, 0) * 0.0625;
+  return Math.pow(smooth01(cov0, cov1, f / 0.9375), 1.3);
 }
 
 let _blankTex = null;
@@ -380,8 +466,11 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
 export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0) {
   const tex = detailTexture();
   if (!tex) return;
+  const weatherTex = cloudSystemTexture(offX, offY, offZ);
+  material.userData.weatherSystemTexture = weatherTex;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uCloudNoise = { value: tex };
+    shader.uniforms.uWeatherSystem = { value: weatherTex };
     shader.uniforms.uCov0 = { value: 0.55 - coverage * 0.24 };
     shader.uniforms.uCov1 = { value: 0.86 - coverage * 0.14 };
     shader.uniforms.uCOff = { value: new THREE.Vector3(offX, offY, offZ) };
@@ -395,6 +484,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
+        uniform sampler2D uWeatherSystem;
         uniform float uCov0;
         uniform float uCov1;
         uniform vec3 uCOff;
@@ -405,14 +495,27 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           f += texture2D(uCloudNoise, d.yz * 1.15 + uCOff.yz).r * 0.25;
           f += texture2D(uCloudNoise, d.zx * 2.35 + uCOff.zx).g * 0.125;
           return f / 0.875;
+        }
+        float weatherSystem(vec3 d) {
+          d /= abs(d.x) + abs(d.y) + abs(d.z);
+          vec2 oct = d.xz;
+          if (d.y < 0.0) oct = (1.0 - abs(oct.yx)) * sign(oct.xy);
+          return texture2D(uWeatherSystem, oct * 0.5 + 0.5).r;
+        }
+        float cloudVertexAmount(vec3 d) {
+          float fine = cloudVertexFbm(d);
+          float base = smoothstep(uCov0, uCov1, fine);
+          float system = weatherSystem(d) * smoothstep(0.24, 0.68, fine) * 0.86;
+          return max(base, system);
         }`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vCDir = normalize(position);
-        float vertexCloud = smoothstep(uCov0, uCov1, cloudVertexFbm(vCDir));
+        float vertexCloud = cloudVertexAmount(vCDir);
         transformed += vCDir * uCloudRelief * pow(vertexCloud, 1.15);`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
+        uniform sampler2D uWeatherSystem;
         uniform float uCov0;
         uniform float uCov1;
         uniform vec3 uCOff;
@@ -425,11 +528,23 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           f += texture2D(uCloudNoise, d.zx * 2.35 + uCOff.zx).g * 0.125;
           f += texture2D(uCloudNoise, d.xy * 4.8 - uCOff.xz).r * 0.0625;
           return f / 0.9375;
+        }
+        float weatherSystem(vec3 d) {
+          d /= abs(d.x) + abs(d.y) + abs(d.z);
+          vec2 oct = d.xz;
+          if (d.y < 0.0) oct = (1.0 - abs(oct.yx)) * sign(oct.xy);
+          return texture2D(uWeatherSystem, oct * 0.5 + 0.5).r;
+        }
+        float cloudAmount(vec3 d) {
+          float fine = cloudFbm(d);
+          float base = smoothstep(uCov0, uCov1, fine);
+          float system = weatherSystem(d) * smoothstep(0.24, 0.68, fine) * 0.86;
+          return max(base, system);
         }`)
       .replace('#include <alphamap_fragment>', `#include <alphamap_fragment>
         {
           vec3 nd = normalize(vCDir);
-          float a = smoothstep(uCov0, uCov1, cloudFbm(nd));
+          float a = cloudAmount(nd);
           // Dense orbital cores must read as kilometres of suspended water,
           // not translucent paint on the planet. A sub-linear response keeps
           // broad opaque bodies while retaining soft procedural edges.
@@ -437,12 +552,12 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           // volumetric look from one extra tap: density INCREASING toward
           // the sun means we're in a cloud's shadowed core; decreasing
           // means a sunlit edge. Thick cores also darken (their own bulk).
-          float aSun = smoothstep(uCov0, uCov1, cloudFbm(normalize(nd + uCSun * 0.05)));
+          float aSun = cloudAmount(normalize(nd + uCSun * 0.05));
           float self = clamp(1.0 - (aSun - a) * 1.9, 0.42, 1.18);
           diffuseColor.rgb *= self * (1.0 - a * 0.3);
         }`);
   };
-  material.customProgramCacheKey = () => 'cloud-field';
+  material.customProgramCacheKey = () => 'cloud-field-v3-weather-systems';
 }
 
 // Wind: vegetation bends with a per-instance phase, stronger toward the tip.

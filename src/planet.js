@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudDensityCPU, detailTexture } from './shaders.js';
+import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudBaseDensityCPU, cloudDensityCPU, detailTexture } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { floraPalette } from './flora.js';
@@ -21,14 +21,14 @@ const VCLOUDS = typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('quality') !== 'low';
 
 export const TYPES = {
-  lush:   { label: 'Lush',      weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
-  ocean:  { label: 'Oceanic',   weight: 2.0, relief: 0.020, liquid: 'water', seaQ: 0.30,  atmo: 0x55aaff, sky: 0x6fb9ff, atmoDensity: 1.0, clouds: 0.7 },
-  desert: { label: 'Desert',    weight: 2.0, relief: 0.040, liquid: null,    seaQ: null,  atmo: 0xffc380, sky: 0xf7c089, atmoDensity: 0.85, clouds: 0.15 },
-  ice:    { label: 'Frozen',    weight: 2.0, relief: 0.030, liquid: 'ice',   seaQ: 0.05,  atmo: 0xbfdfff, sky: 0xcfe5ff, atmoDensity: 0.9, clouds: 0.3 },
-  lava:   { label: 'Volcanic',  weight: 1.4, relief: 0.038, liquid: 'lava',  seaQ: -0.42, atmo: 0xff8a50, sky: 0xb96a4a, atmoDensity: 0.7, clouds: 0 },
-  barren: { label: 'Barren',    weight: 1.8, relief: 0.042, liquid: null,    seaQ: null,  atmo: 0x9aa3a8, sky: 0x6f7a80, atmoDensity: 0.25, clouds: 0 },
-  toxic:  { label: 'Toxic',     weight: 1.4, relief: 0.032, liquid: 'toxic', seaQ: 0.02,  atmo: 0xa9e84e, sky: 0x9fd455, atmoDensity: 0.95, clouds: 0.3 },
-  exotic: { label: 'Exotic',    weight: 1.0, relief: 0.046, liquid: null,    seaQ: null,  atmo: 0xe87ae8, sky: 0xd98ae0, atmoDensity: 0.8, clouds: 0.12 },
+  lush:   { label: '繁茂', weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
+  ocean:  { label: '海洋', weight: 2.0, relief: 0.020, liquid: 'water', seaQ: 0.30,  atmo: 0x55aaff, sky: 0x6fb9ff, atmoDensity: 1.0, clouds: 0.7 },
+  desert: { label: '荒漠', weight: 2.0, relief: 0.040, liquid: null,    seaQ: null,  atmo: 0xffc380, sky: 0xf7c089, atmoDensity: 0.85, clouds: 0.15 },
+  ice:    { label: '冰封', weight: 2.0, relief: 0.030, liquid: 'ice',   seaQ: 0.05,  atmo: 0xbfdfff, sky: 0xcfe5ff, atmoDensity: 0.9, clouds: 0.3 },
+  lava:   { label: '火山', weight: 1.4, relief: 0.038, liquid: 'lava',  seaQ: -0.42, atmo: 0xff8a50, sky: 0xb96a4a, atmoDensity: 0.7, clouds: 0 },
+  barren: { label: '荒芜', weight: 1.8, relief: 0.042, liquid: null,    seaQ: null,  atmo: 0x9aa3a8, sky: 0x6f7a80, atmoDensity: 0.25, clouds: 0 },
+  toxic:  { label: '剧毒', weight: 1.4, relief: 0.032, liquid: 'toxic', seaQ: 0.02,  atmo: 0xa9e84e, sky: 0x9fd455, atmoDensity: 0.95, clouds: 0.3 },
+  exotic: { label: '异相', weight: 1.0, relief: 0.046, liquid: null,    seaQ: null,  atmo: 0xe87ae8, sky: 0xd98ae0, atmoDensity: 0.8, clouds: 0.12 },
 };
 
 const _c = new THREE.Color();
@@ -63,10 +63,13 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, fadeIn = false, sunDir = null }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, fadeIn = false, sunDir = null }) {
     this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
     // known at construction so even the root chunks bake sun shadows
-    this.sunDirLocal = sunDir ? sunDir.clone() : null;
+    this.sunDirWorld = sunDir ? sunDir.clone() : new THREE.Vector3(0, 1, 0);
+    this.sunDirLocal = this.sunDirWorld.clone();
+    this.frameOrientation = new THREE.Quaternion();
+    this._invFrame = new THREE.Quaternion();
     this.seed = seed;
     this.name = name;
     this.isMoon = isMoon;
@@ -77,6 +80,7 @@ export class Planet {
 
     this.type = type;
     this.cfg = TYPES[type];
+    this.atmosphere = atmosphere;
 
     // ---- dimensions: compressed planetary worlds, not gameplay marbles ----
     // Main planets are hundreds of kilometres in radius. This keeps low flight
@@ -86,7 +90,8 @@ export class Planet {
     // Relief grows with the world and can form kilometre-scale mountain belts.
     this.hAmp = Math.min(this.R * this.cfg.relief * (0.85 + rand() * 0.5), 7000 + rand() * 6000);
     this.gravity = 9.81 * clamp(this.R / 250000, 0.55, 1.5);
-    this.atmoDensity = this.cfg.atmoDensity * (0.7 + rand() * 0.6);
+    const pressureScale = atmosphere?.pressureBar == null ? 1 : clamp(Math.pow(atmosphere.pressureBar, 0.22), 0.45, 1.55);
+    this.atmoDensity = this.cfg.atmoDensity * (0.7 + rand() * 0.6) * pressureScale;
     this.atmoFraction = (isMoon ? 0.055 : 0.09) + rand() * (isMoon ? 0.025 : 0.045);
     this.cloudBaseFraction = (isMoon ? 0.022 : 0.035) + rand() * (isMoon ? 0.016 : 0.025);
     this.cloudThicknessFraction = (isMoon ? 0.008 : 0.012) + rand() * (isMoon ? 0.008 : 0.016);
@@ -417,6 +422,7 @@ export class Planet {
       const moist = this.nC.fbm(x + 11.3, y - 4.1, z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
       out.x = smoothstep(0.05, 0.3, moist) * smoothstep(0.04, 0.1, tl)
         * (1 - smoothstep(0.4, 0.55, tl)) * 0.85;
+      if (this.snowWeightAt(dir, h) > 0.28) out.x = 0;
     }
     if (p.blotch) {
       const b = this.nD.billow(x - 17, y + 5, z, 5.5, 3, 0.5, 2.1, maxFreq);
@@ -564,11 +570,21 @@ export class Planet {
   // Biome classification for the prop scatter system. CRITICAL: this must
   // mirror the same elevation/moisture bands that colorAt paints, or the
   // ground you see from orbit lies about what grows on it up close.
+  snowWeightAt(dir, h) {
+    if (!this.pal.snow || this.pal.snowLine >= 1e8) return 0;
+    // CPU counterpart of the shader snow mask. The same altitude and polar-cap
+    // logic is now authoritative for flora suitability as well as colour.
+    const lat = Math.abs(dir.y) + this.nD.noise(dir.x * 2, dir.y * 2, dir.z * 2) * 0.06;
+    const sl = this.pal.snowLine * (1 - 0.65 * smoothstep(0.45, 0.95, lat));
+    return Math.max(smoothstep(sl, sl + Math.max(18, this.hAmp * 0.045), h),
+      smoothstep(this.pal.capLat, this.pal.capLat + 0.07, lat));
+  }
+
   biomeAt(dir, h) {
+    if ((this.type === 'lush' || this.type === 'ocean') && this.snowWeightAt(dir, h) > 0.28) return 'snow';
     if (this.hasLiquid && h < this.seaLevel + 1.5) return 'shore';
     switch (this.type) {
       case 'lush': case 'ocean': {
-        if (this.pal.snowLine < 1e8 && h > this.pal.snowLine * 0.92) return 'snow';
         const t0 = this.seaLevel;
         const tl = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
         if (tl > 0.6) return 'rock';                 // olive-brown high country: bare
@@ -650,8 +666,10 @@ export class Planet {
     // clouds are a roll of the dice per planet, with their own coverage —
     // plenty of worlds have clear skies
     this.cloudBands = [];
+    this.cloudCoverage = 0;
     if (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds) {
       const coverage = 0.3 + rand() * 0.55;
+      this.cloudCoverage = coverage;
       // the visible clouds are shader-procedural (resolution-independent);
       // this small texture only serves the terrain's cast cloud shadows
       this.cloudShadowTex = makeCloudTexture(this.nD, coverage);
@@ -753,37 +771,41 @@ export class Planet {
   }
 
   setSunDir(dirLocal) {
-    this.sunDirLocal = dirLocal.clone();
-    if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(dirLocal);
+    this.sunDirWorld.copy(dirLocal);
+    this.sunDirLocal.copy(dirLocal).applyQuaternion(this._invFrame);
+    if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(this.sunDirLocal);
   }
 
-  // Ray-marched sun visibility over the (coarse) heightfield — after
-  // glacial-valley: mountains cast kilometre-long soft shadows across
-  // valleys. Suns never move relative to their planets, so this bakes
-  // per-vertex at chunk build and never goes stale.
-  sunVis(dir, h) {
-    const sd = this.sunDirLocal;
-    if (!sd) return 1;
-    if (sd.dot(dir) < -0.03) return 1;   // night side: no direct light anyway
-    _mp.copy(dir).multiplyScalar(this.R + h + 2);
-    let vis = 1;
-    let t = 70;
-    for (let i = 0; i < 8; i++) {
-      _msp.copy(_mp).addScaledVector(sd, t);
-      const r = _msp.length();
-      _msd.copy(_msp).multiplyScalar(1 / r);
-      const pen = (this.R + this.height(_msd, 24)) - r;   // >0: inside terrain
-      if (pen > 0) vis = Math.min(vis, Math.max(0, 1 - pen / (t * 0.055)));
-      if (vis <= 0) return 0;
-      t *= 1.85;
-    }
-    return vis;
+  setFrame(orientation) {
+    this.frameOrientation.copy(orientation);
+    this._invFrame.copy(orientation).invert();
+    this.group.quaternion.copy(orientation);
+    // Re-express the live stellar direction in the rotating body frame.
+    this.sunDirLocal.copy(this.sunDirWorld).applyQuaternion(this._invFrame);
+    if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(this.sunDirLocal);
+  }
+
+  worldOffsetToLocal(worldOffset, out = new THREE.Vector3()) {
+    return out.copy(worldOffset).applyQuaternion(this._invFrame);
+  }
+
+  localOffsetToWorld(localOffset, out = new THREE.Vector3()) {
+    return out.copy(localOffset).applyQuaternion(this.frameOrientation);
+  }
+
+  localPositionToWorld(localPosition, out = new THREE.Vector3()) {
+    return this.localOffsetToWorld(localPosition, out).add(this.posUniv);
+  }
+
+  worldPositionToLocal(worldPosition, out = new THREE.Vector3()) {
+    return out.copy(worldPosition).sub(this.posUniv).applyQuaternion(this._invFrame);
   }
 
   // How deep in a cloud the camera is (0..1): drives transit white-out fog.
   // Samples the same field the shader draws, in the deck's rotated frame.
   cloudTransit(camLocal) {
     if (!this.cloudBands.length) return 0;
+    camLocal = this.worldOffsetToLocal(camLocal, _msp);
     const camR = camLocal.length();
     let t = 0;
     for (const b of this.cloudBands) {
@@ -797,10 +819,30 @@ export class Planet {
     return t;
   }
 
+  cloudAudit(samples = 4096) {
+    const band = this.cloudBands[0];
+    if (!band) return { samples, baseCloud: 0, enhancedCloud: 0, gained: 0, lost: 0 };
+    const d = new THREE.Vector3();
+    let baseCloud = 0, enhancedCloud = 0, gained = 0, lost = 0;
+    for (let k = 0; k < samples; k++) {
+      const y = 1 - (2 * (k + 0.5)) / samples;
+      const r = Math.sqrt(1 - y * y), angle = k * 2.399963229728653;
+      d.set(Math.cos(angle) * r, y, Math.sin(angle) * r);
+      const base = cloudBaseDensityCPU(d, band.cov0, band.cov1, band.ox, band.oy, band.oz);
+      const enhanced = cloudDensityCPU(d, band.cov0, band.cov1, band.ox, band.oy, band.oz);
+      if (base > 0.08) baseCloud++;
+      if (enhanced > 0.08) enhancedCloud++;
+      if (enhanced > base + 0.04) gained++;
+      if (enhanced + 1e-7 < base) lost++;
+    }
+    return { samples, baseCloud, enhancedCloud, gained, lost };
+  }
+
   // camLocal: camera position in planet-local coords (f64 Vector3).
   // animDt drives scenery-in-motion (cloud drift); the seam test freezes it
   // to zero so static frames are pixel-comparable — LOD morphs keep dt.
   update(camLocal, dt, focused, animDt = dt) {
+    camLocal = this.worldOffsetToLocal(camLocal, _msp);
     this.lod.focused = focused;
     this.lod.update(camLocal, dt);
     if (this.waterLod) {
@@ -874,6 +916,7 @@ export class Planet {
   }
 
   altitudeAt(camLocal) {
+    camLocal = this.worldOffsetToLocal(camLocal, _msp);
     const r = camLocal.length();
     _dir.copy(camLocal).multiplyScalar(1 / r);
     return r - this.surfaceRadius(_dir);
@@ -951,6 +994,7 @@ export class Planet {
       if (o.material) {
         if (o.material.map) o.material.map.dispose();
         if (o.material.alphaMap) o.material.alphaMap.dispose();
+        if (o.material.userData.weatherSystemTexture) o.material.userData.weatherSystemTexture.dispose();
         o.material.dispose();
       }
     });

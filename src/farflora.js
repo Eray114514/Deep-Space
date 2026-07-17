@@ -26,7 +26,7 @@ const SHOW_BELOW = 16000;    // m altitude; fade starts at 10 km
 // chase the near tier's per-m² density as far as the instance budget allows —
 // a 12× density cliff at the bubble edge reads as "the forest ends here"
 const FAR_DENSITY = {
-  forest: [0.8, 0.72], grass: [0.32, 0.95], snow: [0.42, 0.0],
+  forest: [0.8, 0.72], grass: [0.32, 0.95], snow: [0.0, 0.0],
   slime: [0.38, 0.0], weird: [0.5, 0.0], dryland: [0.1, 0.9],
 };
 

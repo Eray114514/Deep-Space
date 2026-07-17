@@ -78,8 +78,20 @@ export function cloudNoiseTexture() {
   return _noiseTex;
 }
 
+function stormCenters(offX, offY, offZ) {
+  const a = new THREE.Vector3(
+    Math.sin(offX * 1.31 + 0.4),
+    Math.sin(offY * 1.17 - 1.2) * 0.72,
+    Math.cos(offZ * 1.43 + 0.7),
+  ).normalize();
+  const ref = Math.abs(a.y) < 0.8 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const b = new THREE.Vector3().crossVectors(a, ref).addScaledVector(a, 0.16).normalize();
+  return [a, b];
+}
+
 export function makeCloudVolumeMaterial(planet, band, detailTex) {
   const thick = band.rOut - band.rIn;
+  const [stormA, stormB] = stormCenters(band.ox, band.oy, band.oz);
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     premultipliedAlpha: true,
@@ -92,6 +104,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
       uCov0: { value: band.cov0 },
       uCov1: { value: band.cov1 },
       uCOff: { value: new THREE.Vector3(band.ox, band.oy, band.oz) },
+      uStormA: { value: stormA },
+      uStormB: { value: stormB },
       uCameraLocal: { value: new THREE.Vector3() },
       uSpin: { value: new THREE.Matrix3() },       // same rotation as the shadows
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
@@ -127,7 +141,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
       uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame;
       uniform float uDepthReady, uCameraFar;
       uniform vec2 uVolumeSize;
-      uniform vec3 uCOff, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
+      uniform vec3 uCOff, uStormA, uStormB, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
       uniform mat3 uSpin;
       varying vec3 vDirection;
       varying vec3 vViewDirection;
@@ -141,6 +155,29 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         f += textureLod(uCloudNoise, d.zx * 2.35 + uCOff.zx, 0.0).g * 0.125;
         f += textureLod(uCloudNoise, d.xy * 4.8 - uCOff.xz, 0.0).r * 0.0625;
         return f / 0.9375;
+      }
+
+      float stormAt(vec3 d, vec3 center, float phase, float radius) {
+        vec3 ref = abs(center.y) < 0.88 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 ta = normalize(cross(ref, center));
+        vec3 tb = normalize(cross(center, ta));
+        float z = clamp(dot(d, center), -1.0, 1.0);
+        float x = dot(d, ta), y = dot(d, tb);
+        float inv = 1.0 / max(x * x + y * y, 1e-5);
+        float sin2 = 2.0 * x * y * inv;
+        float cos2 = (x * x - y * y) * inv;
+        float r = sqrt(max(0.0, 2.0 * (1.0 - z))) / radius;
+        float shield = (1.0 - smoothstep(0.08, 0.5, r)) * 0.58;
+        float turn = phase - r * 13.0;
+        float arms = smoothstep(0.66, 0.94,
+          0.5 + 0.5 * (sin2 * cos(turn) + cos2 * sin(turn)));
+        arms *= smoothstep(0.1, 0.24, r) * (1.0 - smoothstep(0.62, 1.0, r));
+        return max(shield, arms);
+      }
+
+      float weatherSystem(vec3 d) {
+        return max(stormAt(d, uStormA, uCOff.z, 0.92),
+          stormAt(d, uStormB, uCOff.x + uCOff.y, 0.68) * 0.72);
       }
 
       vec2 sphereHits(vec3 origin, float r, vec3 dir) {
@@ -162,7 +199,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         return forwardDistance / forwardCos;
       }
 
-      float densityAt(vec3 local, float covScale) {
+      float densityAt(vec3 local, float covScale, float systemMask) {
         float r = length(local);
         float h = clamp((r - uRin) / (uRout - uRin), 0.0, 1.0);
         vec3 radial = local / r;
@@ -177,7 +214,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
           + tangentA * bend * 0.02
           + tangentB * (bend * bend - 0.08) * 0.015);
         vec3 sd = uSpin * coverageDir;
-        float cov = pow(smoothstep(uCov0, uCov1, cloudFbm(sd)), 1.42) * covScale;
+        float fine = cloudFbm(sd);
+        float baseWeather = pow(smoothstep(uCov0, uCov1, fine), 1.42);
+        float largeSystem = systemMask * smoothstep(0.24, 0.68, fine) * 0.86;
+        float cov = max(baseWeather, largeSystem) * covScale;
         if (cov < 0.01) return 0.0;
         vec3 warp = vec3(
           textureLod(uCloudNoise, sd.yz * 3.1 + uCOff.xy, 0.0).r,
@@ -252,6 +292,11 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         float jitter = hash12(gl_FragCoord.xy
           + vec2(framePhase * 19.19, framePhase * 7.73));
         float t = t0 + dt * jitter;
+        // A weather system spans hundreds of kilometres while this shell is
+        // only kilometres thick. Evaluate its footprint once per pixel; the
+        // 3D billows, erosion and vertical profile still vary at every step.
+        vec3 systemDir = uSpin * normalize(uCameraLocal + dir * ((t0 + t1) * 0.5));
+        float systemMask = weatherSystem(systemDir);
 
         float sigma = 6.4 / thick;                  // extinction scale
         float mu = dot(dir, uSunDir);
@@ -263,14 +308,14 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         for (int i = 0; i < 124; i++) {
           if (i >= STEPS || T < 0.02) break;
           vec3 local = uCameraLocal + dir * t;
-          float d = densityAt(local, 1.0);
+          float d = densityAt(local, 1.0, systemMask);
           if (d > 0.003) {
             // short sun march: how buried is this sample?
             float od = 0.0;
             float ls = thick * 0.35;
-            od += densityAt(local + uSunDir * ls * 0.6, 1.0) * ls * 0.6;
-            od += densityAt(local + uSunDir * ls * 1.5, 1.0) * ls * 0.9;
-            od += densityAt(local + uSunDir * ls * 2.8, 1.0) * ls * 1.3;
+            od += densityAt(local + uSunDir * ls * 0.6, 1.0, systemMask) * ls * 0.6;
+            od += densityAt(local + uSunDir * ls * 1.5, 1.0, systemMask) * ls * 0.9;
+            od += densityAt(local + uSunDir * ls * 2.8, 1.0, systemMask) * ls * 1.3;
             float Tsun = exp(-od * sigma * 0.9);
             float powder = 1.0 - exp(-d * sigma * dt * 2.0);
             float hFrac = clamp((length(local) - uRin) / thick, 0.0, 1.0);

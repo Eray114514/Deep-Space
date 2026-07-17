@@ -6,8 +6,9 @@
 import * as THREE from 'three';
 import { makeRng, strHash32, hash3i, hashFloat } from './rng.js';
 import { clamp } from './noise.js';
-import { Planet, TYPES } from './planet.js';
-import { systemName, planetName, moonName } from './names.js';
+import { Planet } from './planet.js';
+import { GasGiant } from './gas-giant.js';
+import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, orbitalVelocity, orientationAt as bodyOrientationAt } from './astronomy.js';
 
 export const CELL = 4e9;               // metres between star lattice cells
 const STAR_PROB = 0.42;
@@ -23,14 +24,6 @@ const HALO_PROB = 0.10;                // halo keeps this fraction of stars
 // it is genuinely out of sight
 const APPROACH_DIST = 7e9;
 const FADE_DIST = 9e9;
-
-const STAR_CLASSES = [
-  { c: 0xfff4e0, w: 4 },   // warm white
-  { c: 0xffd9a0, w: 3 },   // yellow-orange
-  { c: 0xffb070, w: 2 },   // orange
-  { c: 0xff8060, w: 1.2 }, // red
-  { c: 0xcfe0ff, w: 1.5 }, // blue-white
-];
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -169,6 +162,7 @@ export class Universe {
     this.candidates = [];              // stars close enough to fly to manually
     this.lastStarRebuild = new THREE.Vector3(Infinity, 0, 0);
     this.camPos = new THREE.Vector3();
+    this.timeHours = 0;
 
     this.homeStar = this.starAt(0, 0, 0, true);
     this.system = null;
@@ -194,14 +188,13 @@ export class Universe {
       (iy + 0.12 + hashFloat(h, 1) * 0.76) * CELL * 0.5,   // flattened disc feel
       (iz + 0.12 + hashFloat(h, 2) * 0.76) * CELL,
     );
-    let wsum = 0; for (const s of STAR_CLASSES) wsum += s.w;
-    let pickv = (hashFloat(h, 1) * 0.999) * wsum, color = STAR_CLASSES[0].c;
-    for (const s of STAR_CLASSES) { pickv -= s.w; if (pickv <= 0) { color = s.c; break; } }
+    const stellar = generateStellarSpec(this.seed, `${ix},${iy},${iz}`);
+    const primary = stellar.stars[0];
     return {
       id: `${ix},${iy},${iz}`,
       ix, iy, iz, pos,
-      color: new THREE.Color(color),
-      radius: 4e6 + hashFloat(h, 2) * 6e6,
+      color: new THREE.Color(primary.color),
+      radius: primary.radiusRender,
     };
   }
 
@@ -273,7 +266,7 @@ export class Universe {
         this.system.dispose();
       }
     }
-    this.system = new StarSystem(this, star, { deferred });
+    this.system = new StarSystem(this, star, { deferred, timeHours: this.timeHours });
     this.rebuildNearStars(star.pos);
     if (this.onSystemChange) this.onSystemChange(this.system);
     return this.system;
@@ -344,8 +337,11 @@ export class Universe {
     return best;
   }
 
-  update(camPos, allowSwap = false) {
+  update(camPos, allowSwap = false, timeHours = this.timeHours) {
+    this.timeHours = timeHours;
     this.camPos.copy(camPos);
+    this.system?.updateCelestial(timeHours);
+    this.fadingSystem?.updateCelestial(timeHours);
     if (camPos.distanceTo(this.lastStarRebuild) > CELL * 0.5) {
       this.rebuildNearStars(camPos);
     }
@@ -369,15 +365,15 @@ export class Universe {
 
   // camera-relative placement: camera sits at scene origin, the universe moves
   relativizeSystem(sys, camPos) {
-    sys.sunGroup.position.copy(sys.star.pos).sub(camPos);
-    sys.sunLight.position.copy(sys.sunGroup.position);
     const d = camPos.distanceTo(sys.star.pos);
-    // each sun lights its own neighbourhood; it fades for a camera leaving it
-    sys.sunLight.intensity = 3.2 * clamp((FADE_DIST - d) / 3e9, 0, 1);
-    // the corona blooms only on approach: from afar the sun mesh is the same
-    // small disc as its star sprite, so the handoff has nothing to pop
     const tg = clamp((4.2e9 - d) / 2.2e9, 0, 1);
-    sys.sunGlow.material.opacity = tg * tg * (3 - 2 * tg) * (sys.glowExt ?? 1);
+    for (const starView of sys.starViews) {
+      starView.group.position.copy(starView.positionUniv).sub(camPos);
+      starView.light.position.copy(starView.group.position);
+      starView.light.intensity = 3.2 * Math.min(2.2, Math.sqrt(starView.spec.luminositySolar))
+        * clamp((FADE_DIST - d) / 3e9, 0, 1);
+      starView.glow.material.opacity = tg * tg * (3 - 2 * tg) * (starView.glowExt ?? 1);
+    }
     for (const p of sys.planets) {
       p.group.position.copy(p.posUniv).sub(camPos);
     }
@@ -444,91 +440,39 @@ export class Universe {
 // ============================================================================
 
 export class StarSystem {
-  constructor(universe, star, { deferred = false } = {}) {
+  constructor(universe, star, { deferred = false, timeHours = 0 } = {}) {
     this.universe = universe;
     this.star = star;
-    const rand = makeRng(universe.seed + ':sys:' + star.id);
-    this.name = systemName(rand);
-    this.isHome = star.id === '0,0,0';
-
-    // --- the sun ---
-    this.sunGroup = new THREE.Group();
-    // HDR disc: values above 1 make bloom do the blowout, and screen-space
-    // bloom is properly occluded by planets — no giant sprite to wash them
-    const sunMat = new THREE.MeshBasicMaterial({
-      color: star.color.clone().multiplyScalar(4), fog: false,
+    this.spec = generateSystemSpec(universe.seed, star);
+    this.name = this.spec.name;
+    this.catalogId = this.spec.catalogId;
+    this.isHome = this.spec.isHome;
+    this.starViews = this.spec.stars.map((spec) => {
+      const group = new THREE.Group();
+      const color = new THREE.Color(spec.color);
+      const material = new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(4), fog: false });
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(spec.radiusRender, 48, 32), material);
+      group.add(mesh);
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: universe.glowTexTight, color: color.clone().lerp(new THREE.Color(0xffffff), 0.3),
+        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      }));
+      glow.scale.setScalar(spec.radiusRender * 7); group.add(glow);
+      const light = new THREE.PointLight(color.clone().lerp(new THREE.Color(0xffffff), 0.7), 3.2, 0, 0);
+      universe.group.add(group, light);
+      return { spec, group, mesh, glow, light, baseColor: material.color.clone(), glowBase: glow.material.color.clone(), glowExt: 1, positionUniv: star.pos.clone() };
     });
-    this.sunBaseC = sunMat.color.clone();
-    this.sunMesh = new THREE.Mesh(new THREE.SphereGeometry(star.radius, 48, 32), sunMat);
-    this.sunGroup.add(this.sunMesh);
-    this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: universe.glowTexTight, color: star.color.clone().lerp(new THREE.Color(0xffffff), 0.3),
-      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-    }));
-    this.glowBaseC = this.sunGlow.material.color.clone();
-    this.glowExt = 1;
-    this.sunGlow.scale.setScalar(star.radius * 7);
-    this.sunGroup.add(this.sunGlow);
-    this.sunLight = new THREE.PointLight(0xffffff, 3.2, 0, 0);
-    this.sunLight.color.copy(star.color.clone().lerp(new THREE.Color(0xffffff), 0.7));
-    universe.group.add(this.sunGroup, this.sunLight);
+    const primary = this.starViews[0];
+    this.sunGroup = primary.group; this.sunMesh = primary.mesh; this.sunGlow = primary.glow; this.sunLight = primary.light;
+    this.sunBaseC = primary.baseColor; this.glowBaseC = primary.glowBase; this.glowExt = 1;
     this._ext = -1;
-
-    // --- planets ---
     this.planets = [];
-    this._specs = [];
-    const count = (this.isHome ? 6 : 5) + ((rand() * 4) | 0);
-    const weights = {};
-    for (const k of Object.keys(TYPES)) weights[k] = TYPES[k].weight;
-
-    const pickType = () => {
-      let total = 0; for (const k in weights) total += weights[k];
-      let r = rand() * total;
-      for (const k in weights) {
-        r -= weights[k];
-        if (r <= 0) { weights[k] *= 0.3; return k; }   // discourage repeats
-      }
-      return 'lush';
-    };
-
-    for (let i = 0; i < count; i++) {
-      // truly interplanetary spacing: hundreds of planet-radii between
-      // worlds, capped so outer orbits stay inside the system's bubble
-      const orbit = Math.min(6e7 * Math.pow(1.68, i) * (0.85 + rand() * 0.3), 1.6e9);
-      const ang = rand() * Math.PI * 2;
-      const incl = (rand() - 0.5) * 0.35;
-      const pos = new THREE.Vector3(
-        Math.cos(ang) * orbit,
-        Math.sin(incl) * orbit * 0.5,
-        Math.sin(ang) * orbit,
-      ).add(star.pos);
-
-      const type = (i === 0 && this.isHome) ? 'lush' : pickType();
-      const name = planetName(rand, this.name, i);
-      const seed = universe.seed + ':p:' + star.id + ':' + i;
-      this._specs.push({ seed, name, pos, type, isMoon: false, orbitIndex: i, parentSpec: -1 });
-
-      // occasional moon — the parent's radius is its seed-rng's first draw
-      // (mirrors Planet's constructor so specs need no Planet instance)
-      const parentR = 160000 + makeRng(seed)() * 240000;
-      if (rand() < 0.28 && parentR > 230000) {
-        const mAng = rand() * Math.PI * 2;
-        const mPos = new THREE.Vector3(
-          Math.cos(mAng), (rand() - 0.5) * 0.5, Math.sin(mAng),
-        ).normalize().multiplyScalar(parentR * (4.2 + rand() * 3.2)).add(pos);
-        const mType = pickType();
-        this._specs.push({
-          seed: universe.seed + ':m:' + star.id + ':' + i,
-          name: moonName(rand, name), pos: mPos, type: mType,
-          isMoon: true, orbitIndex: i, parentSpec: this._specs.length - 1,
-        });
-      }
-    }
-
-    // a deferred system materializes one planet per call (mid-warp); a normal
-    // one is complete on construction
+    this._specs = this.spec.bodies;
+    this.frames = new Map(this._specs.map((body) => [body.bodyId, new BodyFrame(body)]));
+    this.bodyById = new Map();
     this._buildIdx = 0;
     this._deferred = deferred;
+    this.updateCelestial(timeHours);
     if (!deferred) while (this.buildNext());
   }
 
@@ -537,31 +481,92 @@ export class StarSystem {
   buildNext() {
     if (this.built) return false;
     const s = this._specs[this._buildIdx++];
-    const planet = new Planet({
-      seed: s.seed, name: s.name, posUniv: s.pos, type: s.type, isMoon: s.isMoon,
-      fadeIn: this._deferred,
-      sunDir: _v.copy(this.star.pos).sub(s.pos).normalize(),
+    const frame = this.frames.get(s.bodyId);
+    const Ctor = s.type === 'gasGiant' || s.type === 'iceGiant' ? GasGiant : Planet;
+    const planet = new Ctor({
+      seed: s.seed, name: s.name, catalogName: s.catalogName,
+      posUniv: frame.position, type: s.type, isMoon: s.isMoon, radius: s.radius,
+      atmosphere: s.atmosphere, fadeIn: this._deferred, sunDir: this.sunDirFrom(frame.position, _v).clone(),
     });
+    planet.bodyId = s.bodyId; planet.catalogName = s.catalogName; planet.properName = s.properName;
+    planet.orbit = s.orbit; planet.rotationPeriodHours = s.rotationPeriodHours;
+    planet.orbitPeriodHours = s.orbit.periodHours; planet.axialTilt = s.axialTilt;
+    planet.equilibriumK = s.equilibriumK; planet.landable = s.landable; planet.frameVelocity = frame.velocity.clone();
+    planet.spec = s;
+    planet.positionAt = (time, out = new THREE.Vector3()) => this.positionAt(s.bodyId, time, out);
+    planet.velocityAt = (time, out = new THREE.Vector3()) => this.velocityAt(s.bodyId, time, out);
+    planet.orientationAt = (time, out = new THREE.Quaternion()) => bodyOrientationAt(s, time, out);
     planet.orbitIndex = s.orbitIndex;
-    if (s.parentSpec >= 0) planet.parentPlanet = this.planets[s.parentSpec];
-    planet.setSunDir(_v.copy(this.star.pos).sub(s.pos).normalize());
+    if (s.parentId) planet.parentPlanet = this.bodyById.get(s.parentId) || null;
+    planet.setFrame(frame.orientation);
+    planet.setSunDir(this.sunDirFrom(frame.position, _v));
     this.planets.push(planet);
+    this.bodyById.set(s.bodyId, planet);
     this.universe.group.add(planet.group);
     return !this.built;
+  }
+
+  positionAt(bodyId, timeHours, out = new THREE.Vector3()) {
+    const spec = this._specs.find((body) => body.bodyId === bodyId);
+    if (!spec) return out.copy(this.star.pos);
+    orbitalPosition(spec.orbit, timeHours, out);
+    if (spec.parentId) out.add(this.positionAt(spec.parentId, timeHours, new THREE.Vector3()));
+    else out.add(this.star.pos);
+    return out;
+  }
+
+  velocityAt(bodyId, timeHours, out = new THREE.Vector3()) {
+    const spec = this._specs.find((body) => body.bodyId === bodyId);
+    if (!spec) return out.set(0, 0, 0);
+    orbitalVelocity(spec.orbit, timeHours, out);
+    if (spec.parentId) out.add(this.velocityAt(spec.parentId, timeHours, new THREE.Vector3()));
+    return out;
+  }
+
+  updateCelestial(timeHours) {
+    if (this.starViews.length === 1) {
+      this.starViews[0].positionUniv.copy(this.star.pos);
+    } else {
+      const separation = orbitalPosition(this.spec.binaryOrbit, timeHours, _v);
+      const a = this.starViews[0], b = this.starViews[1];
+      const total = a.spec.massSolar + b.spec.massSolar;
+      a.positionUniv.copy(this.star.pos).addScaledVector(separation, -b.spec.massSolar / total);
+      b.positionUniv.copy(this.star.pos).addScaledVector(separation, a.spec.massSolar / total);
+    }
+    for (const spec of this._specs) {
+      const frame = this.frames.get(spec.bodyId);
+      const parentFrame = spec.parentId ? this.frames.get(spec.parentId) : null;
+      frame.update(timeHours, parentFrame ? parentFrame.position : this.star.pos, parentFrame ? parentFrame.velocity : null);
+      const body = this.bodyById.get(spec.bodyId);
+      if (!body) continue;
+      body.posUniv.copy(frame.position); body.frameVelocity.copy(frame.velocity);
+      body.setFrame(frame.orientation); body.setSunDir(this.sunDirFrom(body.posUniv, _v));
+    }
   }
 
   setSunExtinction(x) {
     if (Math.abs(x - this._ext) < 0.004) return;   // colors only change on need
     this._ext = x;
-    this.sunMesh.material.color.copy(this.sunBaseC).multiplyScalar(1 - 0.82 * x)
-      .lerp(_extC.setRGB(1.35, 0.42, 0.12), x * 0.75);
-    this.sunGlow.material.color.copy(this.glowBaseC)
-      .lerp(_extC.setRGB(1.0, 0.45, 0.18), x * 0.8);
-    this.glowExt = 1 - 0.75 * x;
+    for (const view of this.starViews) {
+      view.mesh.material.color.copy(view.baseColor).multiplyScalar(1 - 0.82 * x)
+        .lerp(_extC.setRGB(1.35, 0.42, 0.12), x * 0.75);
+      view.glow.material.color.copy(view.glowBase).lerp(_extC.setRGB(1.0, 0.45, 0.18), x * 0.8);
+      view.glowExt = 1 - 0.75 * x;
+    }
   }
 
   sunDirFrom(pos, out) {
-    return out.copy(this.star.pos).sub(pos).normalize();
+    return out.copy(this.dominantStarFrom(pos).positionUniv).sub(pos).normalize();
+  }
+
+  dominantStarFrom(pos) {
+    let best = this.starViews[0], bestFlux = -Infinity;
+    for (const view of this.starViews) {
+      const d2 = Math.max(1, view.positionUniv.distanceToSquared(pos));
+      const flux = view.spec.luminositySolar / d2;
+      if (flux > bestFlux) { bestFlux = flux; best = view; }
+    }
+    return best;
   }
 
   dispose() {
@@ -569,11 +574,9 @@ export class StarSystem {
       this.universe.group.remove(p.group);
       p.dispose();
     }
-    this.universe.group.remove(this.sunGroup, this.sunLight);
-    this.sunMesh.geometry.dispose();
-    this.sunMesh.material.dispose();
-    for (const c of this.sunGroup.children) {
-      if (c.material && c.material !== this.sunMesh.material) c.material.dispose();
+    for (const view of this.starViews) {
+      this.universe.group.remove(view.group, view.light);
+      view.mesh.geometry.dispose(); view.mesh.material.dispose(); view.glow.material.dispose();
     }
   }
 }

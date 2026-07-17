@@ -140,7 +140,11 @@ kbd {
 #drive-atmo-fill { background: rgba(155,190,226,.8); }
 .hud-system { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--ui-line-soft); }
 #sys-name { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; letter-spacing: .12em; }
+#sys-catalog, #cosmic-time { color: rgba(155,220,226,.72); font: 8px/1 var(--ui-mono); }
+#cosmic-time { text-align: right; }
 #sys-planets, #sys-seed { color: rgba(229,233,229,.52); font: 8px/1 var(--ui-mono); }
+
+.gas-danger #vignette { box-shadow: inset 0 0 160px rgba(174,49,22,.62); }
 
 #ship-integrity {
   position: fixed; z-index: 10; right: 34px; bottom: 31px;
@@ -168,21 +172,6 @@ kbd {
 #star-map-btn:hover { color: var(--ui-white); background: rgba(22,46,52,.64); }
 #star-map-btn kbd { padding: 3px 5px; font-size: 8px; }
 
-#target-card {
-  --target-progress: 8%; position: fixed; z-index: 10; top: 72px; right: 35px;
-  width: min(310px, 32vw); min-height: 86px; padding: 11px 14px 12px 18px;
-  text-align: right; color: var(--ui-white); background: rgba(5,14,19,.52);
-  border-top: 1px solid var(--ui-line); border-right: 1px solid var(--ui-line);
-  pointer-events: none;
-}
-.target-kicker { color: var(--ui-cyan); font: 8px/1 var(--ui-mono); letter-spacing: .18em; }
-#tc-name { margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 600; }
-#target-card .sub { margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(229,234,231,.55); font: 8px/1.3 var(--ui-mono); }
-#target-card .dist { margin-top: 5px; color: var(--ui-gold); font: 11px/1 var(--ui-mono); }
-.target-progress { position: relative; height: 2px; margin-top: 7px; background: rgba(230,235,231,.15); }
-.target-progress i { display: block; width: var(--target-progress); height: 100%; background: var(--ui-cyan); }
-.target-progress b { position: absolute; top: -2px; left: var(--target-progress); width: 5px; height: 5px; background: var(--ui-gold); }
-
 #resource-strip {
   position: fixed; z-index: 10; right: 34px; bottom: 119px; display: flex; gap: 10px;
   color: rgba(231,235,232,.5); font: 8px/1 var(--ui-mono); pointer-events: none;
@@ -195,7 +184,6 @@ kbd {
 .ui-walk #walk-hud { display: block; }
 .ui-walk #flight-ring, .ui-walk #hud, .ui-walk #ship-integrity, .ui-walk #resource-strip { display: none; }
 .ui-walk #brand { opacity: .6; }
-.ui-walk #target-card { top: 31px; }
 .walk-radar {
   position: fixed; z-index: 10; left: 34px; bottom: 31px;
   width: 160px; height: 160px; border: 2px solid rgba(225,233,230,.76); border-radius: 50%;
@@ -216,17 +204,6 @@ kbd {
 .walk-vitals i { width: min(15vw,220px); height: 7px; background: rgba(232,237,233,.18); }
 .walk-vitals i b { display: block; width: var(--level); height: 100%; background: #7bbde8; box-shadow: 0 0 10px rgba(123,189,232,.45); }
 .walk-vitals strong { color: var(--ui-white); font: 600 16px/1 var(--ui-mono); }
-
-#labels { position: fixed; inset: 0; z-index: 8; overflow: hidden; pointer-events: none; }
-.planet-label {
-  position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 6px;
-  padding: 4px 6px; color: var(--ui-white); font-size: 10px; white-space: nowrap;
-  text-shadow: 0 1px 3px #000; pointer-events: auto; cursor: pointer;
-}
-.planet-label:hover { background: rgba(8,18,22,.56); }
-.planet-label.dim { opacity: .48; }
-.pl-dot { width: 6px; height: 6px; border: 1px solid var(--ui-white); border-radius: 50%; }
-.pl-sub { color: var(--ui-dim); font-size: 8px; }
 
 #bottom {
   position: fixed; z-index: 14; left: 50%; bottom: 25px; transform: translateX(-50%);
@@ -302,7 +279,7 @@ kbd {
 body.walking #app, body.walking #app * { cursor: none !important; }
 
 .hide-hud #brand, .hide-hud #compass, .hide-hud #flight-ring, .hide-hud #hud, .hide-hud #ship-integrity,
-.hide-hud #target-card, .hide-hud #resource-strip, .hide-hud #bottom, .hide-hud #labels,
+.hide-hud #resource-strip, .hide-hud #bottom,
 .hide-hud #stats, .hide-hud #crosshair, .hide-hud #walk-hud, .hide-hud #star-map-btn { display: none !important; }
 
 @media (max-width: 900px) {
@@ -310,7 +287,6 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #hud { width: 240px; left: 14px; bottom: 14px; }
   #ship-integrity { right: 14px; bottom: 14px; width: 210px; }
   #resource-strip { right: 14px; bottom: 105px; }
-  #target-card { right: 14px; width: min(280px,42vw); }
 }
 
 @media (max-width: 640px) {
@@ -318,8 +294,6 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #compass { top: 18px; width: 190px; }
   #star-map-btn { left: auto; right: 12px; top: 13px; }
   #star-map-btn span { display: none; }
-  #target-card { top: 56px; right: 10px; width: min(220px,60vw); min-height: 68px; }
-  #target-card #tc-info, #target-card .target-progress { display: none; }
   #flight-ring { width: 88vw; top: 49%; }
   .flight-readout strong { font-size: 19px; }
   .flight-action { display: none; }
