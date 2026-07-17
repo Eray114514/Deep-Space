@@ -23,6 +23,25 @@ const _m = new THREE.Matrix4();
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
+// Remove only roll around the current viewing direction. Forward/pitch remain
+// untouched, so planetary horizon assist never steals aiming from the player.
+export function stabilizeHorizon(quat, surfaceUp, amount = 1) {
+  _f.set(0, 0, -1).applyQuaternion(quat).normalize();
+  _u.set(0, 1, 0).applyQuaternion(quat).projectOnPlane(_f);
+  _v.copy(surfaceUp).projectOnPlane(_f);
+  if (_u.lengthSq() < 1e-8 || _v.lengthSq() < 1e-8) return 0;
+  _u.normalize();
+  _v.normalize();
+  const sin = clamp(_f.dot(_v2.crossVectors(_u, _v)), -1, 1);
+  const cos = clamp(_u.dot(_v), -1, 1);
+  const error = Math.atan2(sin, cos);
+  const correction = error * clamp(amount, 0, 1);
+  if (Math.abs(correction) > 1e-7) {
+    quat.premultiply(_q.setFromAxisAngle(_f, correction)).normalize();
+  }
+  return Math.abs(error);
+}
+
 export class SpaceControls {
   constructor(dom, nav, { onClick } = {}) {
     this.dom = dom;
@@ -31,6 +50,8 @@ export class SpaceControls {
     this.enabled = true;
     this.speedScale = 1000;          // set per-frame by main from altitude
     this.atmosphereFactor = 0;
+    this.surfaceUp = new THREE.Vector3(0, 1, 0);
+    this.horizonAssist = 0;
     this.boosting = false;
     this.firing = false;
     this.firePressed = false;
@@ -189,6 +210,10 @@ export class SpaceControls {
 
   update(dt) {
     const nav = this.nav;
+    if (this.horizonAssist > 0) {
+      const response = 1 - Math.exp(-dt * (0.8 + this.horizonAssist * 5.2));
+      stabilizeHorizon(nav.quat, this.surfaceUp, response * this.horizonAssist);
+    }
     const boosting = this.enabled && (this.boosting || keys.ShiftLeft || keys.ShiftRight);
     const pulsing = this.enabled && this.pulseDrive;
     // Boost has its own lower drag curve. Previously the ordinary 2.4/s

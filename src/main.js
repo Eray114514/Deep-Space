@@ -1015,12 +1015,17 @@ function frame() {
       // and the high-altitude descent inexplicably slow.
       const h = Math.max(nearest.atmoHeight, 1);
       const alt = Math.max(0, nearestAlt);
+      spaceCtl.surfaceUp.copy(nav.pos).sub(nearest.posUniv).normalize();
+      // Blend in across the atmosphere and become firm near terrain. This is
+      // a roll-only correction; pitch and heading remain player-controlled.
+      spaceCtl.horizonAssist = 1 - smoothstep(0.16, 0.95, alt / h);
       const surfaceScale = clamp(38 + Math.pow(alt, 0.58) * 0.32, 38, 620);
       const orbitalScale = clamp(650 + alt * 0.018, 650, 120000);
       const orbitalBlend = smoothstep(0.72, 3.5, alt / h);
       spaceCtl.speedScale = lerp(surfaceScale, orbitalScale, orbitalBlend);
     } else {
       spaceCtl.speedScale = 120000;
+      spaceCtl.horizonAssist = 0;
     }
     const pulseAllowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
     if (!pulseAllowed || pulseFuel <= 0.01) pulseEngaged = false;
