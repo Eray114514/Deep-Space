@@ -252,7 +252,8 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'KeyL') tryLand();
-  if (e.code === 'KeyT') takeoff();
+  if (!e.repeat && (e.code === 'KeyE' || e.code === 'KeyT') && state === 'walk') boardShip();
+  if (!e.repeat && e.code === 'KeyR' && state === 'walk') recallShip();
   if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
   if (e.code === 'KeyB') usePost = !usePost;                           // bloom toggle
   if (e.code === 'Escape') {
@@ -285,7 +286,7 @@ const ui = new UI({
   },
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
   onJump: (down) => { walkCtl.touchJump = down; },
-  onTakeoff: () => takeoff(),
+  onTakeoff: () => boardShip(),
 });
 starMap = new StarMap({
   getUniverse: () => universe,
@@ -399,13 +400,15 @@ function setState(s) {
     flyto: '自动接近中…',
     landing: '正在执行降落程序…',
     walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>⤊</b> 跳跃 · <b>🚀</b> 起飞',
+    boarding: '正在登船…',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
     space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
-    walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · <b>T</b> 起飞',
+    walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
+    boarding: '正在登船…',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   };
@@ -510,13 +513,58 @@ function tryLand() {
   });
 }
 
-function takeoff() {
-  if (state !== 'walk') return;
+const BOARD_DISTANCE = 46;
+
+function parkedShipDistance() {
+  return ship.parkedPosUniv ? ship.parkedPosUniv.distanceTo(nav.pos) : Infinity;
+}
+
+function recallShip() {
+  if (state !== 'walk' || !walkCtl.planet) return false;
   const planet = walkCtl.planet;
-  walkCtl.exit();
-  if (document.pointerLockElement) document.exitPointerLock();
+  const playerDir = _v.copy(nav.pos).sub(planet.posUniv).normalize().clone();
+  parkShipNear(planet, playerDir);
+  audio.cue('recall');
+  ui.setHint('飞船已响应召回信标，并在附近安全着陆', true);
+  return true;
+}
+
+function boardShip() {
+  if (state !== 'walk' || !walkCtl.planet) return false;
+  const dist = parkedShipDistance();
+  if (dist > BOARD_DISTANCE) {
+    ui.setHint(`飞船距离 ${Number.isFinite(dist) ? Math.round(dist) + ' m' : '未知'} · 按 <b>R</b> 召回飞船`, true);
+    audio.cue('denied');
+    return false;
+  }
+  const planet = walkCtl.planet;
   const startPos = nav.pos.clone();
-  const up = _v.copy(startPos).sub(planet.posUniv).normalize().clone();
+  const targetPos = ship.parkedPosUniv.clone();
+  const up = _v.copy(targetPos).sub(planet.posUniv).normalize().clone();
+  targetPos.addScaledVector(up, 2.2);
+  const startQuat = nav.quat.clone();
+  const targetQuat = ship.parkedQuat.clone();
+  walkCtl.exit();
+  nav.vel.set(0, 0, 0);
+  setState('boarding');
+  audio.cue('board');
+  addTween(0.72, (k) => {
+    const e = easeInOut(k);
+    nav.pos.lerpVectors(startPos, targetPos, e);
+    nav.quat.copy(startQuat).slerp(targetQuat, e);
+  }, () => takeoff(planet, targetPos, up));
+  return true;
+}
+
+function takeoff(planet = walkCtl.planet, launchPos = nav.pos.clone(), launchUp = null) {
+  if (!planet) return false;
+  if (walkCtl.active) walkCtl.exit();
+  // Keep pointer lock across boarding/takeoff. Re-acquiring it at the end of
+  // an async tween is no longer inside the user's gesture and browsers reject
+  // the request, leaving the ship apparently unable to steer after launch.
+  const startPos = launchPos.clone();
+  nav.pos.copy(startPos);
+  const up = launchUp ? launchUp.clone() : _v.copy(startPos).sub(planet.posUniv).normalize().clone();
   const endPos = startPos.clone().addScaledVector(up, 420);
   setState('takeoff');
   addTween(1.5, (k) => {
@@ -525,6 +573,7 @@ function takeoff() {
     setState('space');
     nav.vel.copy(up).multiplyScalar(140);
   });
+  return true;
 }
 
 // A warp is a flight, not a teleport: align with the target, spool up, then
@@ -858,10 +907,10 @@ function frame() {
   }
   stepTweens(dt);
 
-  const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft) ? 1 : 0;
-  boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 4.8 : 7.5)));
+  const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
+  boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
   if (state === 'space' && warpIntensity < 0.01) {
-    camera.fov += ((BASE_FOV + boostVisual * 6.5) - camera.fov) * (1 - Math.exp(-dt * 4.5));
+    camera.fov += ((BASE_FOV + boostVisual * 11.5) - camera.fov) * (1 - Math.exp(-dt * 6.2));
     camera.updateProjectionMatrix();
   }
 
@@ -892,6 +941,15 @@ function frame() {
   ui.showLand(!!canLand, nearest && nearest.hasLiquid && nearest.liquid !== 'ice' &&
     _v.copy(nav.pos).sub(nearest.posUniv).length() < nearest.seaRadius + 2
     ? 'DIVE — walk the seabed' : 'LAND — walk the surface (L)');
+
+  if (state === 'walk') {
+    const shipDist = parkedShipDistance();
+    if (shipDist <= BOARD_DISTANCE) {
+      ui.setHint(`<b>E / T</b> 登上飞船 · 距离 ${Math.max(0, Math.round(shipDist))} m`, true);
+    } else {
+      ui.setHint(`飞船距离 ${Number.isFinite(shipDist) ? Math.round(shipDist) + ' m' : '未知'} · 按 <b>R</b> 召回`, true);
+    }
+  }
 
   // chunk builds: a per-frame millisecond budget (overridable for slow
   // software-rendered test environments via ?buildms=)
@@ -1250,7 +1308,8 @@ window.NMS = {
     else nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), deg * Math.PI / 180));
   },
   flyTo: (i) => { const p = universe.system.planets[i]; if (p) { focusPlanet = p; spaceCtl.focus = p; flyToPlanet(p); } },
-  tryLand, takeoff,
+  tryLand, takeoff, boardShip, recallShip,
+  shipDistance: () => parkedShipDistance(),
   nearStars: () => universe.nearStarsList
     .map((s) => ({ id: s.id, dist: Math.round(s.pos.distanceTo(nav.pos)), pos: s.pos.toArray() }))
     .sort((a, b) => a.dist - b.dist).slice(0, 50),

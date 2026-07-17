@@ -350,7 +350,7 @@ export class Ship {
   }
 
   update(dt, nav, state, speed, warp, boost = 0) {
-    const wantsPark = (state === 'walk' || state === 'landing') && !!this.parkedPosUniv;
+    const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding') && !!this.parkedPosUniv;
     this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
 
     // formation pose: nose lags the camera a touch, which reads as mass

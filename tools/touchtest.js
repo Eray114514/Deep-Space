@@ -165,7 +165,8 @@ const toBtn = await rectOf('#btn-takeoff');
 await tap(toBtn.x, toBtn.y);
 await sleep(200);
 const st = await page.evaluate('NMS.state');
-check(st === 'takeoff' || st === 'space', `take-off button lifts off (state=${st})`);
+check(st === 'boarding' || st === 'takeoff' || st === 'space',
+  `ship button boards and lifts off (state=${st})`);
 try {
   // the 1.5 s tween needs many frames; SwiftShader fps makes that wall-clock slow
   await page.waitForFunction('window.NMS.state === "space"', null, { timeout: 90000 });

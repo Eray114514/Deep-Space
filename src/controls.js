@@ -43,6 +43,10 @@ export class SpaceControls {
     this._onPointerDown = (e) => this.pointerDown(e);
     this._onPointerMove = (e) => this.pointerMove(e);
     this._onPointerUp = (e) => this.pointerUp(e);
+    this._onGlobalPointerUp = (e) => {
+      if (e.button === 2 || !(e.buttons & 2)) this.boosting = false;
+    };
+    this._onBlur = () => { this.boosting = false; };
     this._onWheel = (e) => this.wheel(e);
     this._onLockedMove = (e) => this.lockedMove(e);
     dom.addEventListener('pointerdown', this._onPointerDown);
@@ -51,6 +55,8 @@ export class SpaceControls {
     dom.addEventListener('pointercancel', this._onPointerUp);
     dom.addEventListener('wheel', this._onWheel, { passive: false });
     document.addEventListener('mousemove', this._onLockedMove);
+    window.addEventListener('pointerup', this._onGlobalPointerUp, true);
+    window.addEventListener('blur', this._onBlur);
     dom.addEventListener('contextmenu', (e) => e.preventDefault());
   }
 
@@ -67,7 +73,10 @@ export class SpaceControls {
 
   pointerDown(e) {
     if (!this.enabled) return;
-    if (e.button === 2) this.boosting = true;
+    if (e.button === 2) {
+      e.preventDefault();
+      this.boosting = true;
+    }
     if (!window.NMS_NOLOCK && e.pointerType !== 'touch' && document.pointerLockElement !== this.dom) {
       this.dom.requestPointerLock();
     }
@@ -89,6 +98,7 @@ export class SpaceControls {
 
   pointerMove(e) {
     if (!this.enabled || !this.pointers.has(e.pointerId)) return;
+    if (e.pointerType !== 'touch') this.boosting = !!(e.buttons & 2);
     if (document.pointerLockElement === this.dom && e.pointerType !== 'touch') return;
     const prev = this.pointers.get(e.pointerId);
     const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
@@ -161,7 +171,14 @@ export class SpaceControls {
 
   update(dt) {
     const nav = this.nav;
-    nav.vel.multiplyScalar(Math.exp(-dt * 2.4));
+    const boosting = this.enabled && (this.boosting || keys.ShiftLeft || keys.ShiftRight);
+    // Boost has its own lower drag curve. Previously the ordinary 2.4/s
+    // damping cancelled most of the boost acceleration, so RMB looked active
+    // while the ship barely gained speed.
+    const drag = boosting
+      ? (0.42 + this.atmosphereFactor * 0.46)
+      : 2.4;
+    nav.vel.multiplyScalar(Math.exp(-dt * drag));
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);
       const wheelGain = 0.012 * (1 - this.atmosphereFactor * 0.68);
@@ -180,11 +197,11 @@ export class SpaceControls {
         _f.set(r, 0, -f).normalize().applyQuaternion(nav.quat);
         nav.vel.addScaledVector(_f, this.speedScale * 2.2 * dt);
       }
-      if (this.boosting || keys.ShiftLeft) {
+      if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        const boostAcceleration = this.speedScale * (this.atmosphereFactor > 0.05 ? 4.2 : 10.5);
+        const boostAcceleration = this.speedScale * (18 + (1 - this.atmosphereFactor) * 10);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);
-        const boostLimit = this.speedScale * (this.atmosphereFactor > 0.05 ? 5 : 16);
+        const boostLimit = this.speedScale * (12 + (1 - this.atmosphereFactor) * 18);
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
       }
     }
@@ -197,6 +214,8 @@ export class SpaceControls {
     this.dom.removeEventListener('pointerup', this._onPointerUp);
     this.dom.removeEventListener('wheel', this._onWheel);
     document.removeEventListener('mousemove', this._onLockedMove);
+    window.removeEventListener('pointerup', this._onGlobalPointerUp, true);
+    window.removeEventListener('blur', this._onBlur);
   }
 }
 
