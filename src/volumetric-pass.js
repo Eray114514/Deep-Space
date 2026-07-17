@@ -216,6 +216,22 @@ export class VolumetricPass extends Pass {
     const oldAlpha = renderer.getClearAlpha();
     renderer.getClearColor(_savedClear);
 
+    // The opaque scene was rendered into readBuffer immediately before this
+    // pass. Feed its logarithmic depth texture into both participating-media
+    // shaders so their ray integration terminates at terrain, flora, props and
+    // the ship instead of compositing as a screen-front layer.
+    const depthTexture = readBuffer.depthTexture || null;
+    const bindSceneDepth = (material) => {
+      const uniforms = material?.uniforms;
+      if (!uniforms?.tSceneDepth) return;
+      uniforms.tSceneDepth.value = depthTexture;
+      uniforms.uDepthReady.value = depthTexture ? 1 : 0;
+      uniforms.uCameraFar.value = this.camera.far;
+      uniforms.uVolumeSize.value.set(this.width, this.height);
+    };
+    bindSceneDepth(this.activePlanet?.atmoMesh?.material);
+    bindSceneDepth(this.activePlanet?.volCloudMat);
+
     // Render only atmospheric/cloud volume meshes into a half-resolution HDR
     // buffer. Clear alpha is important: discarded rays must stay transparent.
     this.camera.layers.set(VOLUME_LAYER);

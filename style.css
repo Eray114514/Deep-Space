@@ -281,10 +281,10 @@ kbd {
 #touch-ui { position: fixed; z-index: 20; inset: 0; pointer-events: none; }
 #joystick { position: absolute; left: 28px; bottom: 36px; width: 116px; height: 116px; border: 1px solid rgba(235,240,236,.38); border-radius: 50%; background: rgba(3,12,17,.25); pointer-events: auto; touch-action: none; }
 #joystick-knob { position: absolute; left: 34px; top: 34px; width: 48px; height: 48px; border: 1px solid var(--ui-cyan); border-radius: 50%; background: rgba(65,160,176,.22); }
-.touch-btn { position: absolute; right: 28px; width: 62px; height: 62px; border: 1px solid rgba(235,240,236,.52); border-radius: 50%; background: rgba(5,16,22,.5); pointer-events: auto; touch-action: manipulation; }
-#btn-jump { bottom: 40px; }
-#btn-takeoff { bottom: 116px; }
-.touch-btn { font-size: 10px; }
+
+/* Walking owns the mouse as a look input even before pointer lock is granted.
+   Menus live outside #app and retain their normal interactive cursor. */
+body.walking #app, body.walking #app * { cursor: none !important; }
 
 .hide-hud #brand, .hide-hud #compass, .hide-hud #flight-ring, .hide-hud #hud, .hide-hud #ship-integrity,
 .hide-hud #target-card, .hide-hud #resource-strip, .hide-hud #bottom, .hide-hud #labels,

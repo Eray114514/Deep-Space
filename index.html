@@ -44,7 +44,7 @@
     <header class="drive-header"><span>推进系统</span><strong id="drive-mode">巡航</strong></header>
     <div class="drive-telemetry">
       <div><label>推进速度</label><b id="drive-speed">0 m/s</b><i><span id="drive-speed-fill"></span></i></div>
-      <div><label>加力输出</label><b id="drive-boost">待命</b><i><span id="drive-boost-fill"></span></i></div>
+      <div><label>推进增益</label><b id="drive-boost">待命</b><i><span id="drive-boost-fill"></span></i></div>
       <div><label>大气阻力</label><b id="drive-atmo">0%</b><i><span id="drive-atmo-fill"></span></i></div>
     </div>
     <div class="hud-system">
@@ -75,6 +75,7 @@
 
   <div id="resource-strip">
     <span>FE <b>18</b></span><span>CR <b>0</b></span><span>BIO <b>0</b></span>
+    <strong>脉冲燃料 <b id="pulse-fuel">100%</b></strong>
     <strong>跃迁电池 <b>READY</b></strong>
   </div>
 
@@ -105,8 +106,6 @@
     <div id="joystick">
       <div id="joystick-knob"></div>
     </div>
-    <button id="btn-jump" class="touch-btn">跳跃</button>
-    <button id="btn-takeoff" class="touch-btn">起飞</button>
   </div>
 
   <div id="loading">
@@ -142,6 +141,6 @@
   </div>
   <div id="err" class="hidden"></div>
 
-  <script type="module" src="src/main.js"></script>
+  <script type="module" src="src/main.js?v=0.25.4"></script>
 </body>
 </html>

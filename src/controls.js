@@ -32,6 +32,7 @@ export class SpaceControls {
     this.speedScale = 1000;          // set per-frame by main from altitude
     this.atmosphereFactor = 0;
     this.boosting = false;
+    this.pulseDrive = false;
     this.wheelImpulse = 0;
     this.focus = null;               // planet (for RMB orbit / two-finger orbit)
 
@@ -172,10 +173,13 @@ export class SpaceControls {
   update(dt) {
     const nav = this.nav;
     const boosting = this.enabled && (this.boosting || keys.ShiftLeft || keys.ShiftRight);
+    const pulsing = this.enabled && this.pulseDrive;
     // Boost has its own lower drag curve. Previously the ordinary 2.4/s
     // damping cancelled most of the boost acceleration, so RMB looked active
     // while the ship barely gained speed.
-    const drag = boosting
+    const drag = pulsing
+      ? (0.18 + this.atmosphereFactor * 0.7)
+      : boosting
       ? (0.42 + this.atmosphereFactor * 0.46)
       : 2.4;
     nav.vel.multiplyScalar(Math.exp(-dt * drag));
@@ -197,7 +201,13 @@ export class SpaceControls {
         _f.set(r, 0, -f).normalize().applyQuaternion(nav.quat);
         nav.vel.addScaledVector(_f, this.speedScale * 2.2 * dt);
       }
-      if (boosting) {
+      if (pulsing) {
+        _f.set(0, 0, -1).applyQuaternion(nav.quat);
+        const pulseAcceleration = this.speedScale * (5.2 + (1 - this.atmosphereFactor) * 2.6);
+        nav.vel.addScaledVector(_f, pulseAcceleration * dt);
+        const pulseLimit = this.speedScale * (7.4 + (1 - this.atmosphereFactor) * 3.6);
+        if (nav.vel.length() > pulseLimit) nav.vel.setLength(pulseLimit);
+      } else if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
         const boostAcceleration = this.speedScale * (2.4 + (1 - this.atmosphereFactor) * 1.8);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);

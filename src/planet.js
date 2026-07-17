@@ -673,7 +673,7 @@ export class Planet {
       });
       const o1 = [rand() * 7, rand() * 7, rand() * 7];
       applyCloudField(cmat, coverage, o1[0], o1[1], o1[2], thick * 0.72);
-      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 160, 96), cmat);
+      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cmat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
       this.cloudBands.push({
@@ -700,7 +700,7 @@ export class Planet {
         this.volCloudMat.uniforms.uAmbC.value
           .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.58);
         this.volCloudMesh = new THREE.Mesh(
-          new THREE.SphereGeometry(band.rOut, 128, 80), this.volCloudMat);
+          new THREE.SphereGeometry(band.rOut, 192, 128), this.volCloudMat);
         this.volCloudMesh.renderOrder = 2;
         this.volCloudMesh.layers.set(VOLUME_LAYER);
         this.volCloudMesh.frustumCulled = false;
@@ -718,7 +718,7 @@ export class Planet {
         applyCloudField(cmat2, coverage * 0.42, o2[0], o2[1], o2[2], thick * 0.24);
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
-          new THREE.SphereGeometry(upperR, 128, 80), cmat2);
+          new THREE.SphereGeometry(upperR, 192, 128), cmat2);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
         this.cloudSpin2 = o2[3];
@@ -976,20 +976,31 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
       uCameraLocal: { value: new THREE.Vector3() },
       uGroundR: { value: groundR },
       uAtmoR: { value: atmoR },
+      tSceneDepth: { value: null },
+      uDepthReady: { value: 0 },
+      uCameraFar: { value: 1.2e11 },
+      uVolumeSize: { value: new THREE.Vector2(1, 1) },
     },
     vertexShader: /* glsl */`
       uniform vec3 uCameraLocal;
       varying vec3 vDirection;
+      varying vec3 vViewDirection;
       void main() {
         vDirection = position - uCameraLocal;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vViewDirection = viewPosition.xyz;
+        gl_Position = projectionMatrix * viewPosition;
       }`,
     fragmentShader: /* glsl */`
       precision highp float;
       uniform vec3 atmoColor;
       uniform float density, uGroundR, uAtmoR;
+      uniform sampler2D tSceneDepth;
+      uniform float uDepthReady, uCameraFar;
+      uniform vec2 uVolumeSize;
       uniform vec3 sunDir, uCameraLocal;
       varying vec3 vDirection;
+      varying vec3 vViewDirection;
 
       vec2 sphereHits(vec3 origin, float r, vec3 dir) {
         float b = dot(origin, dir);
@@ -997,6 +1008,16 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
         if (disc < 0.0) return vec2(-1.0);
         float s = sqrt(disc);
         return vec2(-b - s, -b + s);
+      }
+
+      float sceneRayLimit() {
+        if (uDepthReady < 0.5) return 1e20;
+        vec2 uv = gl_FragCoord.xy / max(uVolumeSize, vec2(1.0));
+        float depth = texture2D(tSceneDepth, clamp(uv, 0.0, 1.0)).x;
+        if (depth >= 0.999999) return 1e20;
+        float forwardDistance = pow(uCameraFar + 1.0, depth) - 1.0;
+        float forwardCos = max(-normalize(vViewDirection).z, 0.035);
+        return forwardDistance / forwardCos;
       }
 
       void main() {
@@ -1007,6 +1028,7 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
         float t0 = max(outer.x, 0.0);
         float t1 = outer.y;
         if (ground.x > t0) t1 = min(t1, ground.x);
+        t1 = min(t1, sceneRayLimit() + 1.5);
         if (t1 <= t0) discard;
 
         const int STEPS = 14;
@@ -1055,7 +1077,7 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
 }
 
 function makeCloudTexture(simplex, coverage) {
-  const W = 512, H = 256;
+  const W = 1024, H = 512;
   const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
   if (!canvas) return null;
   canvas.width = W; canvas.height = H;
@@ -1081,7 +1103,7 @@ function makeCloudTexture(simplex, coverage) {
   ctx.putImageData(img, 0, 0);
   // soften: thresholded noise leaves near-binary texels that read as hard
   // squares from orbit; a subpixel blur turns them back into vapour
-  ctx.filter = 'blur(1.4px)';
+  ctx.filter = 'blur(2.0px)';
   ctx.drawImage(canvas, 0, 0);
   ctx.filter = 'none';
   const tex = new THREE.CanvasTexture(canvas);

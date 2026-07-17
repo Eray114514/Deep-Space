@@ -98,6 +98,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
       uRin: { value: band.rIn },
       uRout: { value: band.rOut },
       uGroundR: { value: planet.R + Math.max(0, planet.seaLevel || 0) },
+      tSceneDepth: { value: null },
+      uDepthReady: { value: 0 },
+      uCameraFar: { value: 1.2e11 },
+      uVolumeSize: { value: new THREE.Vector2(1, 1) },
       uSunC: { value: new THREE.Color(1, 0.98, 0.94) },
       uAmbC: { value: new THREE.Color(0.35, 0.42, 0.55) },
       uTint: { value: new THREE.Color(band.tint || 0xffffff) },
@@ -107,19 +111,26 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
     vertexShader: /* glsl */`
       uniform vec3 uCameraLocal;
       varying vec3 vDirection;
+      varying vec3 vViewDirection;
       void main() {
         vDirection = position - uCameraLocal;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vViewDirection = viewPosition.xyz;
+        gl_Position = projectionMatrix * viewPosition;
       }`,
     fragmentShader: /* glsl */`
       precision highp float;
       precision highp sampler3D;
       uniform sampler3D uNoise3;
       uniform sampler2D uCloudNoise;
+      uniform sampler2D tSceneDepth;
       uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame;
+      uniform float uDepthReady, uCameraFar;
+      uniform vec2 uVolumeSize;
       uniform vec3 uCOff, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
       uniform mat3 uSpin;
       varying vec3 vDirection;
+      varying vec3 vViewDirection;
 
       // the SAME coverage fbm the impostor deck, terrain shadows and the CPU
       // transit fog use — one sky, everywhere. Explicit LOD: implicit
@@ -138,6 +149,17 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
         if (disc < 0.0) return vec2(-1.0);
         float s = sqrt(disc);
         return vec2(-b - s, -b + s);
+      }
+
+      float sceneRayLimit() {
+        if (uDepthReady < 0.5) return 1e20;
+        vec2 uv = gl_FragCoord.xy / max(uVolumeSize, vec2(1.0));
+        float depth = texture2D(tSceneDepth, clamp(uv, 0.0, 1.0)).x;
+        if (depth >= 0.999999) return 1e20;
+        // Three.js logarithmic depth: depth = log2(1 + clipW)/log2(1 + far).
+        float forwardDistance = pow(uCameraFar + 1.0, depth) - 1.0;
+        float forwardCos = max(-normalize(vViewDirection).z, 0.035);
+        return forwardDistance / forwardCos;
       }
 
       float densityAt(vec3 local, float covScale) {
@@ -212,6 +234,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex) {
           if (ground.x <= t0) discard;
           t1 = min(t1, ground.x);
         }
+        // Stop the ray at the first opaque scene surface. Trees, rocks,
+        // terrain and the ship now occlude the volume instead of receiving a
+        // half-resolution cloud layer over their silhouettes.
+        t1 = min(t1, sceneRayLimit() + 1.5);
         t1 = min(t1, t0 + (uRout - uRin) * 6.5);   // grazing rays: bounded cost
         if (t1 <= t0) discard;
 

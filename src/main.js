@@ -59,7 +59,7 @@ const renderer = new THREE.WebGLRenderer({
   powerPreference: 'high-performance',
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
-const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.25 : 1.5;
+const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.35 : 2.0;
 let renderDpr = Math.min(window.devicePixelRatio, MAX_DPR);
 renderer.setPixelRatio(renderDpr);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -103,12 +103,18 @@ const sunDirCam = new THREE.Vector3(0, 1, 0);
 
 // ---- post-processing: HDR bloom (sun, lava, engines, stars) -----------------
 // MSAA render target keeps antialiasing; OutputPass applies tone mapping/sRGB
-const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, {
-  samples: IS_TOUCH ? 1 : 2, type: THREE.HalfFloatType,
-}));
+const sceneTarget = new THREE.WebGLRenderTarget(1, 1, {
+  samples: IS_TOUCH ? 1 : 4,
+  type: THREE.HalfFloatType,
+  depthBuffer: true,
+  depthTexture: new THREE.DepthTexture(1, 1, THREE.UnsignedIntType),
+});
+sceneTarget.depthTexture.format = THREE.DepthFormat;
+sceneTarget.depthTexture.name = 'scene.depth';
+const composer = new EffectComposer(renderer, sceneTarget);
 composer.addPass(new RenderPass(scene, camera));
 const VOLUME_ENABLED = !QUALITY_LOW && qs.get('vclouds') !== '0';
-const volumePass = VOLUME_ENABLED ? new VolumetricPass(scene, camera, { scale: 0.5 }) : null;
+const volumePass = VOLUME_ENABLED ? new VolumetricPass(scene, camera, { scale: 0.67 }) : null;
 if (volumePass) composer.addPass(volumePass);
 // EXPERIMENTAL ?gtao=1: ground-truth ambient occlusion for contact shadows
 // on cliffs and props. Off by default: the logarithmic depth buffer skews
@@ -184,6 +190,10 @@ let frameNo = 0;
 let lastBuildFrame = 0;
 let paused = false;
 let boostVisual = 0;
+let pulseVisual = 0;
+let pulseFuel = 100;
+let pulseActive = false;
+let pulseEngaged = false;
 let starMap = null;
 
 // ---- world ------------------------------------------------------------------
@@ -281,6 +291,15 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'KeyL') tryLand();
+  if (!e.repeat && e.code === 'KeyF' && state === 'space') {
+    const allowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
+    if (!allowed) {
+      pulseEngaged = false;
+      ui.setHint('脉冲巡航受大气层干扰 · 升至外层大气后重试', true);
+    } else if (pulseFuel > 0.01) {
+      pulseEngaged = !pulseEngaged;
+    }
+  }
   if (!e.repeat && (e.code === 'KeyE' || e.code === 'KeyT') && state === 'walk') boardShip();
   if (!e.repeat && e.code === 'KeyR' && state === 'walk') recallShip();
   if (e.code === 'KeyH') document.body.classList.toggle('hide-hud');   // photo mode
@@ -325,8 +344,6 @@ const ui = new UI({
     if (p) clickPlanet(p);
   },
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
-  onJump: (down) => { walkCtl.touchJump = down; },
-  onTakeoff: () => boardShip(),
 });
 starMap = new StarMap({
   getUniverse: () => universe,
@@ -353,6 +370,9 @@ document.getElementById('pause-map-btn').addEventListener('click', async () => {
 function clearFlightInput() {
   for (const code in keys) keys[code] = false;
   spaceCtl.boosting = false;
+  spaceCtl.pulseDrive = false;
+  pulseActive = false;
+  pulseEngaged = false;
   spaceCtl.wheelImpulse = 0;
   nav.vel.set(0, 0, 0);
   walkCtl.hSpeed.set(0, 0, 0);
@@ -432,6 +452,12 @@ function wireUniverse(u) {
 
 function setState(s) {
   state = s;
+  document.body.classList.toggle('walking', s === 'walk');
+  if (s !== 'space') {
+    pulseActive = false;
+    pulseEngaged = false;
+    spaceCtl.pulseDrive = false;
+  }
   spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
   ui.setCrosshair(s === 'walk' || s === 'space');
   ui.showTouchUI(IS_TOUCH && s === 'walk');
@@ -439,12 +465,12 @@ function setState(s) {
     space: '<b>单指</b> 转向 · <b>双指缩放</b> 推进 · <b>轻触</b> 标记目标 · <b>M</b> 星图',
     flyto: '自动接近中…',
     landing: '正在执行降落程序…',
-    walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>⤊</b> 跳跃 · <b>🚀</b> 起飞',
+    walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
     boarding: '正在登船…',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>M/TAB</b> 星图',
+    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>右键/SHIFT</b> 加力 · <b>F</b> 脉冲巡航 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
@@ -778,8 +804,11 @@ function ambience() {
   scene.fog.density = 0;
   if (nearest) {
     const p = nearest;
-    const x = clamp(nearestAlt / (p.atmoHeight * 2.4), 0, 1);
-    inAtmo = (1 - smoothstep(0.25, 1, x)) * p.atmoDensity;
+    // The sky transition belongs to the actual atmospheric shell. The old
+    // 2.4× multiplier started the blue clear-color far above it and made entry
+    // feel like a long opaque loading tunnel.
+    const x = clamp(nearestAlt / Math.max(p.atmoHeight, 1), 0, 1.2);
+    inAtmo = (1 - smoothstep(0.14, 1.04, x)) * p.atmoDensity;
     _up.copy(nav.pos).sub(p.posUniv).normalize();
     // the sun that matters is the one this planet orbits
     const sunDir = nearest.sunDirLocal || universe.system.sunDirFrom(nav.pos, _v);
@@ -934,7 +963,7 @@ function frame() {
   // controls / state integration
   if (state === 'space') {
     const atmosphereFactor = nearest
-      ? 1 - smoothstep(0.65, 1.55, nearestAlt / Math.max(nearest.atmoHeight, 1))
+      ? 1 - smoothstep(0.42, 1.12, nearestAlt / Math.max(nearest.atmoHeight, 1))
       : 0;
     spaceCtl.atmosphereFactor = atmosphereFactor;
     if (nearest) {
@@ -950,6 +979,11 @@ function frame() {
     } else {
       spaceCtl.speedScale = 120000;
     }
+    const pulseAllowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
+    if (!pulseAllowed || pulseFuel <= 0.01) pulseEngaged = false;
+    pulseActive = pulseEngaged && pulseFuel > 0.01 && pulseAllowed;
+    spaceCtl.pulseDrive = pulseActive;
+    if (pulseActive) pulseFuel = Math.max(0, pulseFuel - dt * 6.5);
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
       // A distance-shaped radial cap preserves the scale of the world and
@@ -959,14 +993,16 @@ function frame() {
       // frame; the second clamp catches this frame's new boost impulse.
       _v.copy(nav.pos).sub(nearest.posUniv).normalize();
       const inwardSpeed = -nav.vel.dot(_v);
-      const safeInward = 55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6;
+      const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
+        * (pulseActive ? 1.35 : 1);
       if (inwardSpeed > safeInward) nav.vel.addScaledVector(_v, inwardSpeed - safeInward);
     }
     spaceCtl.update(dt);
     if (nearest) {
       _v.copy(nav.pos).sub(nearest.posUniv).normalize();
       const inwardSpeed = -nav.vel.dot(_v);
-      const safeInward = 55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6;
+      const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
+        * (pulseActive ? 1.35 : 1);
       if (inwardSpeed > safeInward) nav.vel.addScaledVector(_v, inwardSpeed - safeInward);
     }
     // never fly into the ground
@@ -978,6 +1014,8 @@ function frame() {
       nav.vel.addScaledVector(_v, -inward);
     }
   } else if (state === 'walk') {
+    pulseActive = false;
+    spaceCtl.pulseDrive = false;
     walkCtl.update(dt);
     nav.pos.copy(walkCtl.planet.posUniv).add(walkCtl.posLocal);
     nav.quat.copy(walkCtl.quat);
@@ -986,14 +1024,16 @@ function frame() {
 
   const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
   boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
+  pulseVisual += ((pulseActive ? 1 : 0) - pulseVisual) * (1 - Math.exp(-dt * (pulseActive ? 4.5 : 7)));
   if (state === 'space' && warpIntensity < 0.01) {
-    camera.fov += ((BASE_FOV + boostVisual * 6.5) - camera.fov) * (1 - Math.exp(-dt * 6.2));
+    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 3.5) - camera.fov)
+      * (1 - Math.exp(-dt * 6.2));
     camera.updateProjectionMatrix();
   }
 
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
-  warpStreaks.update(dt, _velActual, warpIntensity, boostVisual);
+  warpStreaks.update(dt, _velActual, warpIntensity, Math.max(boostVisual, pulseVisual * 0.9));
   // a deferred system (warp or manual approach) materializes one planet/frame
   if (universe.system && !universe.system.built) universe.system.buildNext();
 
@@ -1066,12 +1106,12 @@ function frame() {
   }
 
   // the ship flies just ahead of the camera whenever we're in flight
-  ship.update(dt, nav, state, trueSpd, warpIntensity, boostVisual);
+  ship.update(dt, nav, state, trueSpd, warpIntensity, Math.max(boostVisual, pulseVisual));
   audio.update({
     state,
     speed: trueSpd,
     atmosphere: envInAtmo,
-    boosting: boostVisual > 0.12,
+    boosting: boostVisual > 0.12 || pulseVisual > 0.12,
     warp: warpIntensity,
     paused,
   });
@@ -1084,9 +1124,13 @@ function frame() {
   ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
   ui.setFlightTelemetry({
     speed: spd,
-    speedLimit: spaceCtl.speedScale * (4.8 + (1 - spaceCtl.atmosphereFactor) * 2.8),
+    speedLimit: spaceCtl.speedScale * (pulseActive
+      ? 7.4 + (1 - spaceCtl.atmosphereFactor) * 3.6
+      : 4.8 + (1 - spaceCtl.atmosphereFactor) * 2.8),
     boost: boostVisual,
     atmosphere: envInAtmo,
+    pulse: pulseVisual,
+    pulseFuel,
   });
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
   ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
@@ -1485,14 +1529,30 @@ window.NMS = {
 // Reproducible visual-QA poses. These are opt-in URL states and never alter
 // the normal campaign start.
 if (qs.get('scene') === 'walk') {
-  requestAnimationFrame(() => {
-    window.NMS.land(Number(qs.get('planet') || 0), 0, qs.get('bias') || 'meadow');
-    if (qs.get('face') === 'ship') window.NMS.faceShip();
-  });
+  window.NMS.land(Number(qs.get('planet') || 0), Number(qs.get('yaw') || 0), qs.get('bias') || 'meadow');
+  if (qs.get('face') === 'ship') window.NMS.faceShip();
 }
 
 if (qs.get('scene') === 'lowflight') {
-  requestAnimationFrame(() => {
-    window.NMS.coast(Number(qs.get('planet') || 0), Number(qs.get('alt') || 800));
-  });
+  window.NMS.coast(Number(qs.get('planet') || 0), Number(qs.get('alt') || 800));
+}
+
+if (qs.get('scene') === 'orbit') {
+  window.NMS.teleport(Number(qs.get('planet') || 0), Number(qs.get('factor') || 0.12));
+}
+
+if (qs.get('scene') === 'surfaceflight') {
+  window.NMS.land(Number(qs.get('planet') || 0), Number(qs.get('yaw') || 0), qs.get('bias') || 'meadow');
+  const p = walkCtl.planet;
+  if (p) {
+    const up = walkCtl.posLocal.clone().normalize();
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat)
+      .projectOnPlane(up).normalize();
+    walkCtl.exit();
+    nav.pos.copy(p.posUniv).addScaledVector(up,
+      p.surfaceRadius(up) + Number(qs.get('alt') || 18));
+    horizonQuat(up, forward, nav.quat);
+    nav.vel.set(0, 0, 0);
+    setState('space');
+  }
 }
