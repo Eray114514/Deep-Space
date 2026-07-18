@@ -239,7 +239,7 @@ export class SkyDome {
 }
 
 // ============================================================================
-// The ship: a low-poly craft flying just ahead of the camera whenever
+// The ship: the Asterion S-9 GLB flies just ahead of the camera whenever
 // you're in flight — banks into turns, engines glow with speed, fades out
 // when you step onto a planet. We are no longer a disembodied camera.
 // ============================================================================
@@ -255,48 +255,12 @@ export const SHIP_FOREGROUND_LAYER = 3;
 export class Ship {
   constructor(scene, { anisotropy = 1 } = {}) {
     const g = new THREE.Group();
-    const hull = new THREE.MeshStandardMaterial({ color: 0xc9ced8, metalness: 0.6, roughness: 0.38 });
-    const accent = new THREE.MeshStandardMaterial({ color: 0xb8452a, metalness: 0.4, roughness: 0.5 });
-    const canopy = new THREE.MeshStandardMaterial({ color: 0x16242e, metalness: 0.3, roughness: 0.12 });
-    const engineGlowMat = new THREE.MeshStandardMaterial({
-      color: 0x143040, emissive: new THREE.Color(0x66ddff), emissiveIntensity: 2.2,
-    });
-
-    const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) => {
-      const m = new THREE.Mesh(geo, mat);
-      m.layers.enable(SHIP_FOREGROUND_LAYER);
-      m.position.set(x, y, z);
-      m.rotation.set(rx, ry, rz);
-      m.scale.set(sx, sy, sz);
-      g.add(m);
-      return m;
-    };
-
-    // fuselage points down -Z (three.js forward)
-    add(new THREE.CylinderGeometry(0.5, 1.05, 6.6, 8), hull, 0, 0, 0.4, -Math.PI / 2);
-    add(new THREE.ConeGeometry(0.5, 2.6, 8), hull, 0, 0, -3.6, -Math.PI / 2);
-    add(new THREE.SphereGeometry(0.62, 14, 10), canopy, 0, 0.55, -1.4, 0, 0, 0, 1, 0.62, 1.5);
-    // swept wings with a touch of dihedral
-    add(new THREE.BoxGeometry(4.2, 0.12, 1.9), hull, 2.6, -0.1, 1.5, 0, 0.32, 0.07);
-    add(new THREE.BoxGeometry(4.2, 0.12, 1.9), hull, -2.6, -0.1, 1.5, 0, -0.32, -0.07);
-    add(new THREE.BoxGeometry(0.12, 1.5, 1.6), accent, 0, 0.85, 3.0, 0.18);
-    // wingtip accents
-    add(new THREE.BoxGeometry(0.5, 0.3, 1.6), accent, 4.45, 0.05, 2.2, 0, 0.32, 0);
-    add(new THREE.BoxGeometry(0.5, 0.3, 1.6), accent, -4.45, 0.05, 2.2, 0, -0.32, 0);
-    // engines + glow
-    add(new THREE.CylinderGeometry(0.42, 0.5, 1.7, 8), hull, 1.15, -0.2, 3.1, -Math.PI / 2);
-    add(new THREE.CylinderGeometry(0.42, 0.5, 1.7, 8), hull, -1.15, -0.2, 3.1, -Math.PI / 2);
-    this.glowA = add(new THREE.CylinderGeometry(0.3, 0.36, 0.3, 8), engineGlowMat, 1.15, -0.2, 4.0, -Math.PI / 2);
-    this.glowB = add(new THREE.CylinderGeometry(0.3, 0.36, 0.3, 8), engineGlowMat, -1.15, -0.2, 4.0, -Math.PI / 2);
-
     g.layers.enable(SHIP_FOREGROUND_LAYER);
-    g.traverse((m) => { m.castShadow = true; m.layers.enable(SHIP_FOREGROUND_LAYER); });
     this.group = g;
     scene.add(g);
 
     this.smQuat = new THREE.Quaternion();
     this.roll = 0;
-    this.engineMat = engineGlowMat;
     this.loadedEmissives = [];
     this.loadedGear = [];
     this.loadedRamp = [];
@@ -352,7 +316,7 @@ export class Ship {
       for (const part of this.loadedRamp) part.visible = false;
       this.heroLoaded = true;
     }, undefined, (error) => {
-      console.error('ASTERION S-9 failed to load; keeping procedural fallback', error);
+      console.error('ASTERION S-9 GLB failed to load; ship will be invisible until it loads', error);
     });
   }
 
@@ -394,7 +358,6 @@ export class Ship {
     }
 
     const burnK = 1 - this.parkAmt;
-    this.engineMat.emissiveIntensity = 0.15 + (1.2 + Math.min(1.8, speed / 1.5e6 + warp * 1.4 + boost * 0.7) * 2.6) * burnK;
     for (const material of this.loadedEmissives) {
       material.emissiveIntensity = 1.15 + Math.min(3.2, speed / 7e5 + warp * 2.2 + boost * 1.2) * burnK;
     }
@@ -402,9 +365,6 @@ export class Ship {
     const rampVisible = state === 'walk' && this.parkAmt > 0.88;
     for (const part of this.loadedGear) part.visible = gearVisible;
     for (const part of this.loadedRamp) part.visible = rampVisible;
-    const stretch = 1 + Math.min(9, speed / 4e5 + warp * 7 + boost * 2.8) * burnK;
-    this.glowA.scale.set(1, stretch, 1);
-    this.glowB.scale.set(1, stretch, 1);
   }
 }
 const _sq2 = new THREE.Quaternion();
