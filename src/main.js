@@ -206,6 +206,11 @@ let nearest = null;
 let nearestAlt = Infinity;
 let referenceBody = null;
 const referenceBodyPos = new THREE.Vector3();
+// 上一帧 referenceBody 的本体系朝向，用于低空悬停时把飞船挂靠到行星
+// 自转坐标系。referenceBodyFrameValid 在连续跟踪同一颗天体时为真，
+// 切换目标的下一帧跳过一次增量以避免方向突变。
+const referenceBodyFramePrev = new THREE.Quaternion();
+let referenceBodyFrameValid = false;
 let frameNo = 0;
 let lastBuildFrame = 0;
 let paused = false;
@@ -1062,6 +1067,19 @@ function frame() {
   universe.update(nav.pos, state === 'space' || state === 'flyto', celestialClock.hours);
   if (followFrame && universe.planets().includes(referenceBody)) {
     nav.pos.add(_v.copy(referenceBody.posUniv).sub(referenceBodyPos));
+    // 低空范围内让飞船挂靠行星自转：每帧把 nav.pos / nav.quat 同步应用
+    // frameOrientation 的本帧增量，否则悬停找落点时地面疯狂转动、落点
+    // 追不上。仅当连续跟踪同一颗 referenceBody 时启用，避免切换目标时
+    // 一次性大旋转。
+    if (referenceBodyFrameValid) {
+      const lowOrbit = nav.pos.distanceTo(referenceBody.posUniv) - referenceBody.R
+        < Math.max(referenceBody.atmoHeight * 1.5, referenceBody.R * 1.05);
+      if (lowOrbit) {
+        const dq = _q.copy(referenceBody.frameOrientation).multiply(referenceBodyFramePrev.invert());
+        nav.pos.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
+        nav.quat.premultiply(dq);
+      }
+    }
   }
   if (ship.parkedPlanet && universe.planets().includes(ship.parkedPlanet) && ship.parkedLocal) {
     ship.parkedPlanet.localPositionToWorld(ship.parkedLocal, ship.parkedPosUniv);
@@ -1081,8 +1099,14 @@ function frame() {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearestAlt = nearest.altitudeAt(_v);
   } else nearestAlt = Infinity;
+  const prevRef = referenceBody;
   referenceBody = nearest;
-  if (nearest) referenceBodyPos.copy(nearest.posUniv);
+  if (nearest) {
+    referenceBodyPos.copy(nearest.posUniv);
+    referenceBodyFramePrev.copy(nearest.frameOrientation);
+  }
+  // 仅在连续跟踪同一颗天体时启用自转跟随，目标切换的本帧跳过增量。
+  referenceBodyFrameValid = !!nearest && nearest === prevRef;
 
   // controls / state integration
   if (state === 'space') {
