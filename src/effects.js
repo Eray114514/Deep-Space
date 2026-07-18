@@ -312,7 +312,7 @@ export class Ship {
   loadHeroShip() {
     const loader = new GLTFLoader();
     loader.setMeshoptDecoder(MeshoptDecoder);
-    loader.load('/public/assets/asterion-s9-rebuilt-20260716.glb', (gltf) => {
+    loader.load('/assets/asterion-s9-rebuilt-20260716.glb', (gltf) => {
       const hero = gltf.scene;
       this.loadedEmissives = [];
       this.loadedGear = [];

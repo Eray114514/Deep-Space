@@ -3,8 +3,8 @@ screenshots/
 dist/
 test-results/
 tmp/
-/public/assets/cloud-cumulus-sprite.png
-/public/assets/cloud-cumulus-sprite-v1.png
+/assets/cloud-cumulus-sprite.png
+/assets/cloud-cumulus-sprite-v1.png
 *.log
 
 # 本地调试/过程文档，不应进入远端

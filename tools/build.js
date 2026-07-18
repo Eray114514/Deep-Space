@@ -12,7 +12,7 @@ await mkdir(OUT, { recursive: true });
 for (const file of ['index.html', 'style.css']) {
   await cp(join(ROOT, file), join(OUT, file));
 }
-for (const folder of ['src', 'vendor', 'public']) {
+for (const folder of ['src', 'vendor', 'assets']) {
   await cp(join(ROOT, folder), join(OUT, folder), { recursive: true });
 }
 
