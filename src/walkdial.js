@@ -97,7 +97,16 @@ class SpaceExplorationDial extends HTMLElement {
     this._resizePlanet();
     this._ro = new ResizeObserver(() => this._resizePlanet());
     this._ro.observe(this);
-    this._raf = requestAnimationFrame((t) => this._tick(t));
+    // Pause the planet-canvas rAF when the page is hidden or the dial is
+    // not the active surface (player back in the cockpit). SVG state
+    // updates via setState() still render even without the rAF running —
+    // only the live day/night terminator pass needs the per-frame draw.
+    this._onVisibilityChange = () => {
+      if (document.hidden) this._pauseRaf();
+      else this._ensureRaf();
+    };
+    document.addEventListener('visibilitychange', this._onVisibilityChange);
+    this._ensureRaf();
     this.shadowRoot.querySelector('.planetHit').addEventListener('click', () => {
       this.state.planet.selected = !this.state.planet.selected;
       this._renderState();
@@ -105,8 +114,22 @@ class SpaceExplorationDial extends HTMLElement {
   }
 
   disconnectedCallback() {
-    cancelAnimationFrame(this._raf);
+    this._pauseRaf();
     this._ro?.disconnect();
+    if (this._onVisibilityChange) {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange);
+      this._onVisibilityChange = null;
+    }
+  }
+
+  _ensureRaf() {
+    if (this._raf) return;
+    if (!this._active || document.hidden) return;
+    this._raf = requestAnimationFrame((t) => this._tick(t));
+  }
+
+  _pauseRaf() {
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
   }
 
   setState(patch) {
@@ -127,6 +150,9 @@ class SpaceExplorationDial extends HTMLElement {
     if (active) {
       this._lastPlanet = 0;
       this._resizePlanet();
+      this._ensureRaf();
+    } else {
+      this._pauseRaf();
     }
     return this;
   }
@@ -309,7 +335,13 @@ class SpaceExplorationDial extends HTMLElement {
       this._lastPlanet = now;
       this._drawPlanet(now, false);
     }
-    this._raf = requestAnimationFrame((t) => this._tick(t));
+    // Stop self-rescheduling the moment there is nothing to animate.
+    // setActive(true) / visibilitychange will resume via _ensureRaf().
+    if (this._active && !document.hidden) {
+      this._raf = requestAnimationFrame((t) => this._tick(t));
+    } else {
+      this._raf = 0;
+    }
   }
 
   _drawPlanet(now, force) {

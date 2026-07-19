@@ -1,14 +1,9 @@
 // Focused regression for boarding, procedural audio unlock and RMB boost.
 import { startServer } from './server.js';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser.js';
 
 const { server, port } = await startServer(0);
-const chrome = process.env.PLAYWRIGHT_EXECUTABLE_PATH
-  || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const browser = await chromium.launch({
-  executablePath: chrome,
-  args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl'],
-});
+const browser = await launchBrowser();
 const page = await browser.newPage({ viewport: { width: 1100, height: 700 } });
 const errors = [];
 page.on('pageerror', (error) => errors.push(String(error)));

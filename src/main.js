@@ -114,6 +114,24 @@ const gpuName = glInfo
   : 'WebGL high-performance adapter';
 console.info('Renderer:', gpuName);
 
+// WebGL context-loss safety net. The renderer auto-restores most GPU
+// resources on the next render after restore, but without an explicit
+// preventDefault the canvas stays black and silent. We surface a HUD hint
+// so the player sees a transient "图形上下文已恢复" instead of an
+// unexplained freeze, and skip our own composer.render() until the
+// context is back so post-processing state stays consistent.
+let contextLost = false;
+renderer.domElement.addEventListener('webglcontextlost', (event) => {
+  event.preventDefault();
+  contextLost = true;
+  console.warn('webglcontextlost — deferring render until restored');
+}, false);
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  contextLost = false;
+  ui?.setHint('图形上下文已恢复', false);
+  console.info('webglcontextrestored — render resumed');
+}, false);
+
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.0);
 const BASE_FOV = 62;
@@ -1935,9 +1953,11 @@ function frame() {
   if (paused) {
     if (pauseFrameRendered) return;
     pauseFrameRendered = true;
-    renderer.info.reset();
-    if (usePost) composer.render();
-    else renderer.render(scene, camera);
+    if (!contextLost) {
+      renderer.info.reset();
+      if (usePost) composer.render();
+      else renderer.render(scene, camera);
+    }
     return;
   }
   pauseFrameRendered = false;
@@ -2358,8 +2378,14 @@ function frame() {
   spatialRift.updateDistortion(riftDistortionPass);
   surfaceWeapons.renderScopeView(renderer);
   renderer.info.reset();
-  if (usePost) composer.render();
-  else renderer.render(scene, camera);
+  // Skip the actual GPU work while the WebGL context is lost — Three.js
+  // no-ops render() anyway, but skipping avoids noise from the post chain
+  // trying to read stale render targets. The context-lost HUD hint is
+  // surfaced from the listener.
+  if (!contextLost) {
+    if (usePost) composer.render();
+    else renderer.render(scene, camera);
+  }
   prevNavPos.copy(nav.pos);
   if (!loadingCleared && frameNo >= 3) {
     loadingCleared = true;

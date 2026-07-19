@@ -124,6 +124,7 @@ export class SpaceControls {
     };
     this._onWheel = (e) => this.wheel(e);
     this._onLockedMove = (e) => this.lockedMove(e);
+    this._onContextMenu = (e) => e.preventDefault();
     dom.addEventListener('pointerdown', this._onPointerDown);
     dom.addEventListener('pointermove', this._onPointerMove);
     dom.addEventListener('pointerup', this._onPointerUp);
@@ -132,7 +133,7 @@ export class SpaceControls {
     document.addEventListener('mousemove', this._onLockedMove);
     window.addEventListener('pointerup', this._onGlobalPointerUp, true);
     window.addEventListener('blur', this._onBlur);
-    dom.addEventListener('contextmenu', (e) => e.preventDefault());
+    dom.addEventListener('contextmenu', this._onContextMenu);
   }
 
   midpointOf(ids) {
@@ -342,7 +343,9 @@ export class SpaceControls {
     this.dom.removeEventListener('pointerdown', this._onPointerDown);
     this.dom.removeEventListener('pointermove', this._onPointerMove);
     this.dom.removeEventListener('pointerup', this._onPointerUp);
+    this.dom.removeEventListener('pointercancel', this._onPointerUp);
     this.dom.removeEventListener('wheel', this._onWheel);
+    this.dom.removeEventListener('contextmenu', this._onContextMenu);
     document.removeEventListener('mousemove', this._onLockedMove);
     window.removeEventListener('pointerup', this._onGlobalPointerUp, true);
     window.removeEventListener('blur', this._onBlur);
@@ -483,5 +486,6 @@ export class WalkControls {
     this.dom.removeEventListener('pointermove', this._onMove);
     this.dom.removeEventListener('pointerdown', this._onDown);
     this.dom.removeEventListener('pointerup', this._onUp);
+    this.dom.removeEventListener('pointercancel', this._onUp);
   }
 }

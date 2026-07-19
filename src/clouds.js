@@ -78,6 +78,14 @@ export function cloudNoiseTexture() {
   return _noiseTex;
 }
 
+// Release the module-level 3D noise texture. For full-session teardown only
+// (context-loss recovery, hot-reload) — every cloud ShaderMaterial that
+// referenced this texture must itself be disposed first, since disposing
+// here invalidates the GPU handle for all existing references.
+export function disposeCloudNoiseTexture() {
+  if (_noiseTex) { _noiseTex.dispose(); _noiseTex = null; }
+}
+
 function stormCenters(offX, offY, offZ) {
   const a = new THREE.Vector3(
     Math.sin(offX * 1.31 + 0.4),

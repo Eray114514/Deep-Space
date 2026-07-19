@@ -62,6 +62,15 @@ export function detailTexture() {
   return _detailTex;
 }
 
+// Release the module-level GPU/CPU caches backing the procedural detail
+// texture. Intended for full-session teardown (context-loss recovery,
+// hot-reload) where every consumer of this texture is being rebuilt — the
+// next call to detailTexture() will regenerate both buffers from scratch.
+export function disposeDetailTexture() {
+  if (_detailTex) { _detailTex.dispose(); _detailTex = null; }
+  _detailData = null;
+}
+
 function smooth01(lo, hi, value) {
   const t = Math.min(1, Math.max(0, (value - lo) / Math.max(hi - lo, 1e-6)));
   return t * t * (3 - 2 * t);

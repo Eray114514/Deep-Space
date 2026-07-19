@@ -2,15 +2,10 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startServer } from './server.js';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser.js';
 
-const chrome = process.env.PLAYWRIGHT_EXECUTABLE_PATH
-  || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const { server, port } = await startServer(0);
-const browser = await chromium.launch({
-  executablePath: chrome,
-  args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl'],
-});
+const browser = await launchBrowser();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors = [];
 page.on('pageerror', (error) => errors.push(String(error)));

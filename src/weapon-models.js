@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-
+const SHARED_MATERIALS = createMaterials();
 
 function createMaterials() {
   const graphite = new THREE.MeshStandardMaterial({
@@ -350,7 +350,7 @@ function addSelectorMarks(parent, z, mats) {
 }
 
 function createCarbine() {
-  const mats = createMaterials();
+  const mats = SHARED_MATERIALS;
   const gun = new THREE.Group();
   gun.name = "KX-9 Cerberus";
   gun.userData.muzzle = new THREE.Vector3(0, 0.04, -1.52);
@@ -420,7 +420,7 @@ function createCarbine() {
 }
 
 function createMarksman() {
-  const mats = createMaterials();
+  const mats = SHARED_MATERIALS;
   const gun = new THREE.Group();
   gun.name = "M77 Sentinel";
   gun.userData.muzzle = new THREE.Vector3(0, 0.075, -1.78);
@@ -503,7 +503,7 @@ function buildMicroDotSight(parent, z, y, mats) {
 }
 
 function createSubmachineGun() {
-  const mats = createMaterials();
+  const mats = SHARED_MATERIALS;
   const gun = new THREE.Group();
   gun.name = "CX-5 Marauder";
   gun.userData.muzzle = new THREE.Vector3(0, 0.055, -1.38);
@@ -562,7 +562,7 @@ function createSubmachineGun() {
 }
 
 function createLegacyMiningLaser() {
-  const mats = createMaterials();
+  const mats = SHARED_MATERIALS;
   const gun = new THREE.Group();
   gun.name = 'HLX-3 Prospector';
   gun.userData.muzzle = new THREE.Vector3(0, 0.07, -1.61);
@@ -724,18 +724,11 @@ function createMiningLaser() {
     gun.userData.loaded = true;
   }, undefined, (error) => {
     console.error('HLX-3 model failed to load:', error);
+    const legacy = createLegacyMiningLaser();
+    gun.add(legacy);
   });
 
   return gun;
-}
-
-export function createWeaponModels() {
-  return {
-    KX9: createCarbine(),
-    M77: createMarksman(),
-    CX5: createSubmachineGun(),
-    HLX3: createMiningLaser(),
-  };
 }
 
 export function createWeaponModel(id) {

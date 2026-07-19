@@ -3,18 +3,15 @@
 // to drain; finalists receive the full traversal pass only after visual review.
 
 import { mkdir } from 'node:fs/promises';
-import { chromium } from 'playwright';
 import { startServer } from './server.js';
+import { launchBrowser } from './browser.js';
 
 const seeds = (process.env.SEEDS || 'NAVEMI-382').split(',').map((seed) => seed.trim()).filter(Boolean);
 const out = process.env.OUT || 'test-results/world-candidates';
 const galaxy = process.env.GALAXY || 'milky-way';
 const homeOnly = process.env.HOME_ONLY === '1';
 const { server, port } = await startServer(0);
-const browser = await chromium.launch({
-  ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}),
-  args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl'],
-});
+const browser = await launchBrowser();
 
 async function capture(page, path) {
   await page.screenshot({ path, timeout: 90000 });
