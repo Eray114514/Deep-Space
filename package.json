@@ -1,7 +1,7 @@
 {
-  "name": "no-mans-sky-threejs",
+  "name": "deep-space",
   "version": "0.28.5",
-  "description": "A fully procedural explorable universe in the browser, inspired by No Man's Sky. Stars, planets with consistent terrain from orbit to on-foot, all generated from a seed.",
+  "description": "A fully procedural explorable universe in the browser. Stars, planets with consistent terrain from orbit to on-foot, all generated from a seed.",
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",

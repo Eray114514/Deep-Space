@@ -76,7 +76,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (usedFallback) {
       console.warn(`Port ${preferredPort} is already in use; using ${p} instead.`);
     }
-    console.log(`No Man's Sky three.js → http://127.0.0.1:${p}`);
+    console.log(`深空 → http://127.0.0.1:${p}`);
   }).catch((error) => {
     console.error(error);
     process.exitCode = 1;

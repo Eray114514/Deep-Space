@@ -1,4 +1,4 @@
-# No Man's Sky · three.js
+# 深空
 
 A fully procedural universe in the browser. Infinite seeded star systems; planets of
 eight archetypes (lush, oceanic, desert, frozen, volcanic, barren, toxic, exotic) with

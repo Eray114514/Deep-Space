@@ -50,7 +50,7 @@ const QUALITY_LOW = qs.get('quality') === 'low';
 if (QUALITY_LOW) setGridCells(18);
 
 document.getElementById('version').textContent = 'v' + VERSION;
-console.info(`No Man's Sky three.js v${VERSION}`);
+console.info(`深空 v${VERSION}`);
 
 // touch-first device? (gestures replace wheel/keys, virtual stick for walking)
 const IS_TOUCH = qs.get('desktop') !== '1'
