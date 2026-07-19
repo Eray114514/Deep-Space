@@ -11,7 +11,7 @@ import { SystemView } from './sysview.js';
 
 const AU = 149_597_870_700;
 const STAR_LIMIT = 320;
-const GALAXY_DEFAULT_DISTANCE = 32;
+const GALAXY_DEFAULT_DISTANCE = 22;
 const GALAXY_MIN_DISTANCE = 5;
 const TYPE_COLORS = {
   lush: 0x52d7a4, ocean: 0x4ea7ff, desert: 0xe2aa65, ice: 0xb8e7ff,
@@ -237,7 +237,6 @@ export class StarMap {
     this.previewCache = new Map();
     this.discoverySeed = null;
     this.visitedSystems = new Set();
-    this.pickables = [];
     this.pointerStart = null;
     this.clock = new THREE.Clock();
 
@@ -342,7 +341,6 @@ export class StarMap {
         <div id="sm-crosshair"></div>
         <div id="sm-navArrow"></div>
         <div id="sm-nameTag"></div>
-        <div id="sm-hoverTag" hidden></div>
       </div>
       <div id="sm-loading"><div class="loadBox"><div class="loadTitle">系统星图</div><div class="loadBar"><i></i></div></div></div>`;
     document.body.appendChild(root);
@@ -371,7 +369,6 @@ export class StarMap {
       controls: $('#sm-controls'),
       leftHud: $('#sm-leftHud'), rightHud: $('#sm-rightHud'), bottomHud: $('#sm-bottomHud'),
       navArrow: $('#sm-navArrow'), nameTag: $('#sm-nameTag'),
-      hoverTag: $('#sm-hoverTag'),
       loading: $('#sm-loading'),
     };
   }
@@ -416,9 +413,6 @@ export class StarMap {
     key.position.set(20, 36, 18);
     this.scene.add(key);
 
-    this.raycaster = new THREE.Raycaster();
-    this.raycaster.params.Points.threshold = 0.6;
-    this.pointer = new THREE.Vector2();
     this._resize = () => this.resize();
     window.addEventListener('resize', this._resize);
   }
@@ -449,25 +443,6 @@ export class StarMap {
       this.pointerStart = null;
       if (moved < 7) this.pick(event);
     });
-    canvas.addEventListener('pointermove', (event) => {
-      if (this.mode !== 'galaxy' || this.pointerStart) {
-        this.els.hoverTag.hidden = true;
-        return;
-      }
-      const star = this.pickStarAt(event);
-      if (!star) {
-        this.els.hoverTag.hidden = true;
-        return;
-      }
-      const preview = this.systemPreview(star);
-      const code = preview.isBlackHoleSystem ? 'BH' : physicalStarClass(preview.stars[0]).code;
-      this.els.hoverTag.innerHTML = `<strong>${preview.properName}</strong><small>${code} · 单击查看星系</small>`;
-      this.els.hoverTag.hidden = false;
-      const left = Math.min(innerWidth - 245, event.clientX + 16);
-      const top = Math.min(innerHeight - 64, event.clientY + 16);
-      this.els.hoverTag.style.transform = `translate3d(${left}px,${top}px,0)`;
-    });
-    canvas.addEventListener('pointerleave', () => { this.els.hoverTag.hidden = true; });
   }
 
   handleKey(event) {
@@ -630,7 +605,6 @@ export class StarMap {
     this.scene.remove(this.world);
     this.world = new THREE.Group();
     this.scene.add(this.world);
-    this.pickables = [];
     this.labelData = [];
     this.els.labelLayer.replaceChildren();
   }
@@ -672,9 +646,7 @@ export class StarMap {
       transparent: true, opacity: 0.96, blending: THREE.AdditiveBlending,
       depthWrite: false, fog: false, toneMapped: false,
     }));
-    starLight.userData = { kind: 'starPoints', stars };
     this.world.add(starLight);
-    this.pickables.push(starLight);
 
     // Authored destinations must be discoverable without hunting through
     // hundreds of identical point sprites.  Keep the black hole marked at
@@ -758,6 +730,11 @@ export class StarMap {
       button.classList.toggle('selected', star.id === this.selectedStar?.id);
       button.classList.toggle('black-hole', preview.isBlackHoleSystem);
       button.title = preview.isBlackHoleSystem ? '唯一黑洞系统 · 单击查看' : `${preview.properName} · 单击查看`;
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.selectStar(star, false);
+        this.enterSystem();
+      });
       this.els.labelLayer.appendChild(button);
       return {
         button, position: this.mapPositions[index], star,
@@ -985,25 +962,26 @@ export class StarMap {
   }
 
   pickStarAt(event) {
+    if (!this.visibleStars?.length || !this.mapPositions?.length) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
-    const cameraDistance = this.camera.position.distanceTo(this.controls.target);
-    const worldPerPixel = 2 * cameraDistance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5)) / Math.max(1, rect.height);
-    this.raycaster.params.Points.threshold = worldPerPixel * 5.5;
-    this.pointer.set(
-      ((event.clientX - rect.left) / rect.width) * 2 - 1,
-      -((event.clientY - rect.top) / rect.height) * 2 + 1,
-    );
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObjects(this.pickables, true);
-    if (!hits.length) return null;
-    const hit = hits[0];
-    if (hit.object.userData.kind === 'stars' && hit.instanceId != null) {
-      return hit.object.userData.stars[hit.instanceId] || null;
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const projected = new THREE.Vector3();
+    let bestStar = null;
+    let bestDist = Infinity;
+    const maxPixelDist = 28;
+    for (let i = 0; i < this.visibleStars.length; i++) {
+      projected.copy(this.mapPositions[i]).project(this.camera);
+      if (projected.z < -1 || projected.z > 1) continue;
+      const sx = (projected.x * 0.5 + 0.5) * rect.width;
+      const sy = (-projected.y * 0.5 + 0.5) * rect.height;
+      const d = Math.hypot(sx - px, sy - py);
+      if (d < bestDist && d <= maxPixelDist) {
+        bestDist = d;
+        bestStar = this.visibleStars[i];
+      }
     }
-    if (hit.object.userData.kind === 'starPoints' && hit.index != null) {
-      return hit.object.userData.stars[hit.index] || null;
-    }
-    return null;
+    return bestStar;
   }
 
   pick(event) {

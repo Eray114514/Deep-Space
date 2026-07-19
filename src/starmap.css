@@ -255,7 +255,7 @@
   position: absolute; left: 0; top: 0; display: grid; grid-template-columns: 10px auto; grid-template-rows: auto auto;
   align-items: center; gap: 1px 6px; min-width: 52px; padding: 1px 2px;
   color: var(--ink); text-align: left; text-shadow: 0 2px 5px #000;
-  border: 0; background: transparent; pointer-events: none; transform-origin: left center;
+  border: 0; background: transparent; pointer-events: auto; cursor: pointer; transform-origin: left center;
   font-family: inherit; opacity: .82;
 }
 .sm-map-label[hidden] { display: none; }
@@ -281,17 +281,6 @@
   content: ""; position: absolute; left: 5px; bottom: -9px;
   border: 5px solid transparent; border-bottom: 0; border-top-color: var(--cyan);
 }
-
-#sm-hoverTag {
-  position: fixed; left: 0; top: 0; z-index: 24; min-width: 190px; padding: 8px 11px;
-  color: #eef5f4; background: rgba(7, 14, 17, .94); border: 1px solid rgba(151, 207, 214, .38);
-  border-left: 3px solid #83c8d2; box-shadow: 0 8px 24px rgba(0, 0, 0, .48);
-  pointer-events: none;
-}
-#sm-hoverTag[hidden] { display: none; }
-#sm-hoverTag strong, #sm-hoverTag small { display: block; white-space: nowrap; }
-#sm-hoverTag strong { font-size: 14px; line-height: 1.25; }
-#sm-hoverTag small { margin-top: 3px; color: rgba(220, 232, 232, .58); font: 10px/1.2 Consolas, monospace; }
 
 /* ---- loading --------------------------------------------------------------------- */
 #sm-loading { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; background: #0a1011; transition: opacity .7s; }
