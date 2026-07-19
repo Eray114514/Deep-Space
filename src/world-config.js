@@ -22,6 +22,9 @@ export const WORLD_CONFIG = Object.freeze({
         '0,0,0': Object.freeze({
           'planet-0': Object.freeze({
             seaLevelOffset: -420,
+            // Preserve the cloud deck that made this curated seed visually
+            // distinctive before clouds moved into the astronomy dossier.
+            cloudCoverage: 0.5136393490363844,
           }),
         }),
       }),

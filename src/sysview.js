@@ -7,10 +7,11 @@ import * as THREE from 'three';
 import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { makeRng, strHash32 } from './rng.js';
 import { orbitalPosition } from './astronomy.js';
-import { makeBlackHoleImpostorTexture } from './black-hole.js';
+import { makeAccretionMaterial, makePhotonMaterial } from './black-hole.js';
 
 const ORBIT_PLANE_Y = 0.18;
 const STAR_CENTER_Y = 1.12;
@@ -446,6 +447,44 @@ export class SystemView {
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.26, 0.82);
     this.composer.addPass(this.bloom);
+    this.lensPass = new ShaderPass({
+      uniforms: {
+        tDiffuse: { value: null },
+        uCenter: { value: new THREE.Vector2(0.5, 0.5) },
+        uRadius: { value: 0.16 },
+        uAspect: { value: 1 },
+        uStrength: { value: 0.12 },
+      },
+      vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform vec2 uCenter;
+        uniform float uRadius;
+        uniform float uAspect;
+        uniform float uStrength;
+        varying vec2 vUv;
+        void main() {
+          vec2 delta = vUv - uCenter;
+          vec2 metric = vec2(delta.x * uAspect, delta.y);
+          float radius = length(metric);
+          float normalizedRadius = radius / max(uRadius, 0.0001);
+          float shell = 1.0 - smoothstep(0.16, 1.0, normalizedRadius);
+          float coreGuard = smoothstep(0.08, 0.24, normalizedRadius);
+          float deflection = uStrength * shell * coreGuard / (normalizedRadius + 0.32);
+          vec2 warped = uCenter + delta * (1.0 + deflection);
+          vec3 color = texture2D(tDiffuse, warped).rgb;
+          float ca = deflection * 0.006;
+          if (ca > 0.0001) {
+            vec2 tangent = normalize(vec2(-metric.y / uAspect, metric.x) + vec2(0.00001));
+            color.r = texture2D(tDiffuse, warped + tangent * ca).r;
+            color.b = texture2D(tDiffuse, warped - tangent * ca).b;
+          }
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `,
+    });
+    this.lensPass.enabled = false;
+    this.composer.addPass(this.lensPass);
     this.composer.addPass(new OutputPass());
 
     this.scene.add(new THREE.HemisphereLight(0xa8b8bc, 0x0e1517, 0.62));
@@ -468,6 +507,7 @@ export class SystemView {
     this.selected = null;
     this.labelsVisible = true;
     this.preview = null;
+    this.blackHoleRecord = null;
     this.timeHours = 0;
 
     this._elapsed = 0;
@@ -588,6 +628,8 @@ export class SystemView {
     this.pickMeshes = [];
     this.starUniformsList = [];
     this.selected = null;
+    this.blackHoleRecord = null;
+    this.lensPass.enabled = false;
     this.reticle.visible = false;
     if (this.navArrow) this.navArrow.style.display = 'none';
     if (this.nameTag) this.nameTag.style.display = 'none';
@@ -607,6 +649,7 @@ export class SystemView {
     this._buildContours(outermost, preview.isBlackHoleSystem);
 
     // frame the whole system: outermost orbit decides the default distance
+    this.defaultView.elevation = preview.isBlackHoleSystem ? 0.34 : 0.557;
     this.defaultView.distance = THREE.MathUtils.clamp(outermost * 1.42, 34, 72);
     this.resetView();
     return primaryRecords;
@@ -797,19 +840,79 @@ export class SystemView {
       if (isBlackHole) {
         const mesh = new THREE.Mesh(
           new THREE.SphereGeometry(visualRadius, 72, 48),
-          new THREE.MeshBasicMaterial({ color: 0x000000 }),
+          new THREE.MeshBasicMaterial({ color: 0x000000, fog: false }),
         );
         mesh.userData.record = { kind: 'planet', body };
+        mesh.renderOrder = 8;
         group.add(mesh);
         this.pickMeshes.push(mesh);
-        const impostor = new THREE.Sprite(new THREE.SpriteMaterial({
-          map: makeBlackHoleImpostorTexture(1024), transparent: true, depthWrite: false, toneMapped: false,
-        }));
-        impostor.scale.set(visualRadius * 11.6, visualRadius * 7.25, 1);
-        impostor.renderOrder = 12;
-        group.add(impostor);
+
+        // A real spatial accretion structure replaces the old camera-facing
+        // sprite.  Dragging the system view now reveals its inclination,
+        // thickness and fixed orbital plane instead of rotating a flat image
+        // to face the viewer.
+        const discInner = visualRadius * 1.78;
+        const discOuter = visualRadius * 5.35;
+        const discMaterial = makeAccretionMaterial(discInner, discOuter, body.blackHole?.discTemperatureK || 4300);
+        discMaterial.uniforms.uIntensity.value = 0.46;
+        const disc = new THREE.Mesh(
+          new THREE.RingGeometry(discInner, discOuter, 256, 28),
+          discMaterial,
+        );
+        disc.rotation.x = -Math.PI / 2;
+        disc.rotation.z = (body.axialTilt || 0) + 0.08;
+        disc.renderOrder = 6;
+        group.add(disc);
+
+        const photonShell = new THREE.Mesh(
+          new THREE.SphereGeometry(visualRadius * 1.72, 80, 56),
+          makePhotonMaterial(),
+        );
+        photonShell.renderOrder = 10;
+        group.add(photonShell);
+
+        const photonRing = new THREE.Mesh(
+          new THREE.TorusGeometry(visualRadius * 1.58, visualRadius * 0.032, 10, 192),
+          new THREE.MeshBasicMaterial({
+            color: 0xffd39b, transparent: true, opacity: 0.38,
+            blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+          }),
+        );
+        photonRing.rotation.x = Math.PI / 2;
+        photonRing.renderOrder = 11;
+        group.add(photonRing);
+
+        // Two lifted far-side traces show the same disc light bending around
+        // the compact object. They stay in world space, so the distortion has
+        // parallax when the player rotates the preview.
+        for (const side of [-1, 1]) {
+          for (let lane = 0; lane < 4; lane++) {
+            const points = [];
+            for (let sample = 0; sample <= 96; sample++) {
+              const a = THREE.MathUtils.lerp(-1.22, 1.22, sample / 96);
+              const spread = 1 + lane * 0.085;
+              const x = Math.sin(a) * visualRadius * 2.12 * spread;
+              const y = side * (visualRadius * (1.10 + lane * 0.10) + Math.cos(a) * visualRadius * 0.55);
+              const z = -Math.cos(a) * visualRadius * (0.28 + lane * 0.035);
+              points.push(new THREE.Vector3(x, y, z));
+            }
+            const trace = new THREE.Line(
+              new THREE.BufferGeometry().setFromPoints(points),
+              new THREE.LineBasicMaterial({
+                color: side > 0 ? 0xffd6a0 : 0xff7a28,
+                transparent: true, opacity: (side > 0 ? 0.28 : 0.17) * (1 - lane * 0.14),
+                blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+              }),
+            );
+            trace.rotation.y = 0.08;
+            trace.renderOrder = 9;
+            group.add(trace);
+          }
+        }
         const record = { kind: 'planet', body, group, mesh, cloud: null, radius: visualRadius, orbitRadius, spin: 0.00018, moonPivots: [] };
         this.bodies.push(record);
+        this.blackHoleRecord = record;
+        this.lensPass.enabled = true;
         bodyMeshes.set(body.index, record);
         this._addMarker(record);
         return;
@@ -977,6 +1080,15 @@ export class SystemView {
       }
       if (record.cloud) record.cloud.rotation.y += record.spin * 80 * dt;
       for (const moon of record.moonPivots) moon.pivot.rotation.y += moon.speed * dt;
+    }
+    if (this.blackHoleRecord && this.lensPass.enabled) {
+      const center = this.blackHoleRecord.group.position.clone().project(this.camera);
+      const distance = this.camera.position.distanceTo(this.blackHoleRecord.group.position);
+      const verticalFraction = this.blackHoleRecord.radius * 3.4
+        / (2 * Math.max(1, distance) * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5)));
+      this.lensPass.uniforms.uCenter.value.set(center.x * 0.5 + 0.5, center.y * 0.5 + 0.5);
+      this.lensPass.uniforms.uRadius.value = THREE.MathUtils.clamp(verticalFraction, 0.075, 0.24);
+      this.lensPass.uniforms.uAspect.value = this.camera.aspect;
     }
     this._updateMarkers(t);
     this.composer.render();

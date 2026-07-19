@@ -17,7 +17,10 @@ assert.equal(galaxy.id, ACTIVE_GALAXY_ID, 'default galaxy must resolve explicitl
 assert.equal(galaxy.seed, 'NAVEMI-382', 'Milky Way must retain its curated seed');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: '0,0,0', bodyId: 'planet-0',
-}), { seaLevelOffset: -420 }, 'curated home-world tuning must resolve by stable IDs');
+}), {
+  seaLevelOffset: -420,
+  cloudCoverage: 0.5136393490363844,
+}, 'curated home-world tuning must preserve the selected coastline and cloud deck by stable IDs');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: 'ANOTHER-SEED', systemId: '0,0,0', bodyId: 'planet-0',
 }), {}, 'authored tuning must not leak into another seed');

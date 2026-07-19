@@ -102,6 +102,7 @@ export class SpaceControls {
     this.wheelImpulse = 0;
     this.throttleInput = 0;
     this.strafeInput = 0;
+    this.lookInput = { yaw: 0, pitch: 0 };
     this.focus = null;               // planet (for RMB orbit / two-finger orbit)
 
     // active pointers (multi-touch aware: 1 finger = look, 2 = pinch-fly + orbit)
@@ -116,7 +117,11 @@ export class SpaceControls {
       if (e.button === 2 || !(e.buttons & 2)) this.boosting = false;
       if (e.button === 0 || !(e.buttons & 1)) this.firing = false;
     };
-    this._onBlur = () => { this.boosting = false; this.firing = false; };
+    this._onBlur = () => {
+      this.boosting = false;
+      this.firing = false;
+      this.clearTransientInput();
+    };
     this._onWheel = (e) => this.wheel(e);
     this._onLockedMove = (e) => this.lockedMove(e);
     dom.addEventListener('pointerdown', this._onPointerDown);
@@ -200,6 +205,7 @@ export class SpaceControls {
       this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -dx * 0.0026));
       this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -dy * 0.0026));
       this.nav.quat.normalize();
+      this.captureLookInput(dx, dy);
     }
   }
 
@@ -208,6 +214,22 @@ export class SpaceControls {
     this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -e.movementX * 0.0019));
     this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -e.movementY * 0.0019));
     this.nav.quat.normalize();
+    this.captureLookInput(e.movementX, e.movementY);
+  }
+
+  captureLookInput(dx, dy) {
+    // This is a short-lived presentation signal, not another steering system.
+    // It lets the visible hull react only to deliberate player motion instead
+    // of mistaking horizon assist or planetary rotation for pilot input.
+    this.lookInput.yaw = clamp(this.lookInput.yaw + dx * 0.038, -1, 1);
+    this.lookInput.pitch = clamp(this.lookInput.pitch + dy * 0.038, -1, 1);
+  }
+
+  clearTransientInput() {
+    this.throttleInput = 0;
+    this.strafeInput = 0;
+    this.lookInput.yaw = 0;
+    this.lookInput.pitch = 0;
   }
 
   orbit(dx, dy) {
@@ -255,6 +277,9 @@ export class SpaceControls {
 
   update(dt) {
     const nav = this.nav;
+    const lookDecay = Math.exp(-dt * 7.5);
+    this.lookInput.yaw *= lookDecay;
+    this.lookInput.pitch *= lookDecay;
     if (this.horizonAssist > 0) {
       const response = 1 - Math.exp(-dt * (0.8 + this.horizonAssist * 5.2));
       stabilizeHorizon(nav.quat, this.surfaceUp, response * this.horizonAssist);

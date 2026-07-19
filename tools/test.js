@@ -85,12 +85,15 @@ if (dVelocity.dot(localRight) < 41.99 || aVelocity.dot(localRight) > -41.99
   throw new Error('A/D lateral thrusters are missing, too weak, or asymmetric');
 }
 
-// A stationary ship attached to a rotating planet frame must stay rigid in
-// cockpit space. This reproduces the zero-HUD-speed surface-hover shake.
+// A stationary ship attached to a rotating planet frame must stay rigid with
+// no player input, but a zero-speed player turn must still move the hull in
+// cockpit space. This separates intentional mass response from hover shake.
 const hoverShip = Object.assign(Object.create(Ship.prototype), {
   group: new THREE.Group(),
   smQuat: new THREE.Quaternion(),
-  roll: 0.24,
+  roll: 0,
+  lookYaw: 0,
+  lookPitch: 0,
   loadedEmissives: [],
   loadedGear: [],
   loadedRamp: [],
@@ -107,11 +110,38 @@ const identityQuat = new THREE.Quaternion();
 for (let i = 0; i < 120; i++) {
   hoverNav.quat.premultiply(new THREE.Quaternion().setFromAxisAngle(
     new THREE.Vector3(0, 1, 0), 0.0004));
-  hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, { throttle: 0, strafe: 0 });
+  hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, {
+    throttle: 0, strafe: 0, yaw: 0, pitch: 0,
+  });
   const cockpitRelative = hoverNav.quat.clone().invert().multiply(hoverShip.group.quaternion);
   if (cockpitRelative.angleTo(identityQuat) > 1e-7 || Math.abs(hoverShip.roll) > 1e-8) {
     throw new Error('Stationary surface hover leaves residual ship roll or orientation lag');
   }
+}
+const neutralHullPosition = hoverShip.group.position.clone()
+  .applyQuaternion(hoverNav.quat.clone().invert());
+
+for (let i = 0; i < 12; i++) {
+  hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, {
+    throttle: 0, strafe: 0, yaw: 0.8, pitch: -0.45,
+  });
+}
+const steeredRelative = hoverNav.quat.clone().invert().multiply(hoverShip.group.quaternion);
+const steeredHullPosition = hoverShip.group.position.clone()
+  .applyQuaternion(hoverNav.quat.clone().invert());
+if (steeredRelative.angleTo(identityQuat) < 0.035 || Math.abs(hoverShip.roll) < 0.05
+    || Math.abs(hoverShip.lookYaw) < 0.02 || Math.abs(hoverShip.lookPitch) < 0.01
+    || steeredHullPosition.distanceTo(neutralHullPosition) < 0.15) {
+  throw new Error('Zero-speed player steering has no visible hull mass response');
+}
+for (let i = 0; i < 120; i++) {
+  hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, {
+    throttle: 0, strafe: 0, yaw: 0, pitch: 0,
+  });
+}
+if (Math.abs(hoverShip.roll) > 1e-5 || Math.abs(hoverShip.lookYaw) > 1e-5
+    || Math.abs(hoverShip.lookPitch) > 1e-5) {
+  throw new Error('Player steering mass response does not settle after input stops');
 }
 
 // Opening another terminal while the dev server is still running must not

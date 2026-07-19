@@ -257,33 +257,29 @@
 /* galaxy-level star labels */
 .sm-map-label {
   position: absolute; left: 0; top: 0; display: grid; grid-template-columns: 10px auto; grid-template-rows: auto auto;
-  align-items: center; gap: 2px 9px; min-width: 70px; padding: 6px 8px;
+  align-items: center; gap: 1px 6px; min-width: 52px; padding: 1px 2px;
   color: var(--ink); text-align: left; text-shadow: 0 2px 5px #000;
-  border: 0; background: transparent; cursor: pointer; pointer-events: auto;
-  font-family: inherit;
+  border: 0; background: transparent; pointer-events: none; transform-origin: left center;
+  font-family: inherit; opacity: .82;
 }
 .sm-map-label[hidden] { display: none; }
-.sm-map-label:hover, .sm-map-label:focus-visible { background: rgba(235, 238, 232, .11); outline: 1px solid rgba(235, 238, 232, .36); }
 .sm-map-label i {
-  --label-color: #fff; grid-row: 1 / -1; width: 9px; height: 9px; margin-left: 1px;
-  background: var(--label-color); transform: rotate(45deg); box-shadow: 0 0 10px var(--label-color);
+  --label-color: #fff; grid-row: 1 / -1; width: 6px; height: 6px; margin-left: 1px;
+  border-radius: 50%; background: var(--label-color); box-shadow: 0 0 8px var(--label-color);
 }
-.sm-map-label strong { font-size: 15px; font-weight: 750; line-height: 1.1; white-space: nowrap; }
-.sm-map-label small { color: rgba(235, 238, 233, .52); font: 11px/1.2 Consolas, monospace; }
-.sm-map-label.current strong { font-size: 18px; }
+.sm-map-label strong { font-size: 12px; font-weight: 680; line-height: 1.08; white-space: nowrap; }
+.sm-map-label small { color: rgba(235, 238, 233, .42); font: 9px/1.1 Consolas, monospace; }
+.sm-map-label.current { opacity: 1; }
+.sm-map-label.current strong { color: #eaf8fa; font-size: 13px; }
 .sm-map-label.selected:not(.current) {
-  background: linear-gradient(90deg, rgba(118, 196, 207, .14), transparent 88%);
-  outline: 1px solid rgba(132, 204, 214, .22);
+  color: #b9eef5; opacity: 1;
 }
 .sm-map-label.black-hole {
-  color: #ffd7ad;
-  background: linear-gradient(90deg, rgba(176, 72, 21, .24), rgba(19, 9, 7, .08) 78%, transparent);
-  outline: 1px solid rgba(255, 153, 82, .28);
+  color: #ffc88f; opacity: 1;
 }
 .sm-map-label.black-hole i {
-  width: 14px; height: 14px; margin-left: -1px; border-radius: 50%; transform: none;
-  background: #010203; border: 2px solid #ffbd75;
-  box-shadow: 0 0 0 2px rgba(255, 91, 26, .20), 0 0 15px rgba(255, 116, 42, .78);
+  width: 10px; height: 10px; margin-left: -1px; background: #010203; border: 1.5px solid #ffbd75;
+  box-shadow: 0 0 0 1px rgba(255, 91, 26, .18), 0 0 12px rgba(255, 116, 42, .72);
 }
 .sm-map-label.current::after {
   content: ""; position: absolute; left: 5px; bottom: -9px;

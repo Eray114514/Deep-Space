@@ -764,6 +764,7 @@ function clearFlightInput() {
   spaceCtl.firing = false;
   spaceCtl.firePressed = false;
   spaceCtl.pulseDrive = false;
+  spaceCtl.clearTransientInput();
   pulseActive = false;
   pulseEngaged = false;
   spaceCtl.wheelImpulse = 0;
@@ -929,10 +930,19 @@ document.addEventListener('pointerlockchange', () => {
   }
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && !paused && !['warp', 'landing', 'takeoff'].includes(state)) {
-    if (starMap?.isOpen) closeStarMap(false);
-    pauseGame();
+  if (document.hidden) {
+    // Minimizing or resizing a browser window can transiently mark the page
+    // hidden.  The star map is already an input-gated, audio-paused mode, so
+    // closing it and opening the flight pause screen destroys the player's
+    // navigation context for no safety benefit.
+    if (starMap?.isOpen) {
+      clearFlightInput();
+      return;
+    }
+    if (!paused && !['warp', 'landing', 'takeoff'].includes(state)) pauseGame();
+    return;
   }
+  if (starMap?.isOpen) requestAnimationFrame(() => starMap.resize());
 });
 
 // universe → app notifications (system handoffs during warp / manual flight)
@@ -959,6 +969,7 @@ function setState(s) {
     spaceCtl.pulseDrive = false;
     spaceCtl.firing = false;
     spaceCtl.firePressed = false;
+    spaceCtl.clearTransientInput();
   }
   spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
   ui.setCrosshair(s === 'walk' || s === 'space');
@@ -2235,6 +2246,8 @@ function frame() {
   ship.update(dt, nav, state, flightSpd, warpIntensity, Math.max(boostVisual, pulseVisual * 1.3), {
     throttle: spaceCtl.throttleInput,
     strafe: spaceCtl.strafeInput,
+    yaw: spaceCtl.lookInput.yaw,
+    pitch: spaceCtl.lookInput.pitch,
   });
   audio.update({
     state,

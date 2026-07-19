@@ -11,8 +11,8 @@ import { SystemView } from './sysview.js';
 
 const AU = 149_597_870_700;
 const STAR_LIMIT = 320;
-const GALAXY_DEFAULT_DISTANCE = 70;
-const GALAXY_MIN_DISTANCE = 8;
+const GALAXY_DEFAULT_DISTANCE = 32;
+const GALAXY_MIN_DISTANCE = 5;
 const TYPE_COLORS = {
   lush: 0x52d7a4, ocean: 0x4ea7ff, desert: 0xe2aa65, ice: 0xb8e7ff,
   lava: 0xff6848, barren: 0x9da7ad, toxic: 0xb5e45d, exotic: 0xe47cff,
@@ -386,6 +386,9 @@ export class StarMap {
     this.controls.enablePan = true;
     this.controls.screenSpacePanning = true;
     this.controls.panSpeed = 1.05;
+    this.controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+    this.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+    this.controls.touches.ONE = THREE.TOUCH.PAN;
     this.controls.zoomSpeed = 1.35;
     this.controls.minDistance = GALAXY_MIN_DISTANCE;
     this.controls.maxDistance = 170;
@@ -400,7 +403,7 @@ export class StarMap {
     this.scene.add(key);
 
     this.raycaster = new THREE.Raycaster();
-    this.raycaster.params.Points.threshold = 2.2;
+    this.raycaster.params.Points.threshold = 0.6;
     this.pointer = new THREE.Vector2();
     this._resize = () => this.resize();
     window.addEventListener('resize', this._resize);
@@ -650,27 +653,6 @@ export class StarMap {
       return new THREE.Vector3(delta.x, 0, delta.z);
     });
 
-    // invisible-but-raycastable nodes
-    const nodeGeometry = new THREE.IcosahedronGeometry(0.72, 1);
-    const nodeMaterial = new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.001, depthWrite: false, fog: false, toneMapped: false,
-    });
-    const nodes = new THREE.InstancedMesh(nodeGeometry, nodeMaterial, Math.max(stars.length, 1));
-    nodes.userData.kind = 'stars';
-    const matrix = new THREE.Matrix4();
-    stars.forEach((star, index) => {
-      const position = this.mapPositions[index];
-      const size = star.id === current.id ? 2.5 : 0.72 + Math.min(0.55, star.radius / 1.8e7);
-      matrix.compose(position, new THREE.Quaternion(), new THREE.Vector3(size, size, size));
-      nodes.setMatrixAt(index, matrix);
-      nodes.setColorAt(index, star.color.clone().multiplyScalar(star.id === current.id ? 1.8 : 1.15));
-    });
-    nodes.instanceMatrix.needsUpdate = true;
-    if (nodes.instanceColor) nodes.instanceColor.needsUpdate = true;
-    nodes.userData.stars = stars;
-    this.world.add(nodes);
-    this.pickables.push(nodes);
-
     // visible starlight
     const pointGeometry = new THREE.BufferGeometry();
     pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
@@ -683,7 +665,7 @@ export class StarMap {
       }), 3,
     ));
     const starLight = new THREE.Points(pointGeometry, new THREE.PointsMaterial({
-      size: 6.8, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
+      size: 7.2, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
       transparent: true, opacity: 0.96, blending: THREE.AdditiveBlending,
       depthWrite: false, fog: false, toneMapped: false,
     }));
@@ -760,7 +742,7 @@ export class StarMap {
       })
       .sort((a, b) => b.priority - a.priority || a.distance - b.distance);
     this.labelData = candidates.map(({ star, index, preview, priority }) => {
-      const button = document.createElement('button');
+      const button = document.createElement('div');
       button.className = 'sm-map-label';
       button.innerHTML = '<i></i><strong></strong><small></small>';
       button.children[0].style.setProperty('--label-color', `#${star.color.getHexString()}`);
@@ -774,20 +756,11 @@ export class StarMap {
       button.classList.toggle('selected', star.id === this.selectedStar?.id);
       button.classList.toggle('black-hole', preview.isBlackHoleSystem);
       button.title = preview.isBlackHoleSystem ? '唯一黑洞系统 · 单击选择，双击查看' : `${preview.properName} · 单击选择，双击查看`;
-      button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        this.selectStar(star);
-      });
-      button.addEventListener('dblclick', (event) => {
-        event.stopPropagation();
-        this.selectStar(star, false);
-        this.enterSystem();
-      });
       this.els.labelLayer.appendChild(button);
       return {
         button, position: this.mapPositions[index], star,
-        width: preview.isBlackHoleSystem ? 210 : Math.min(178, 28 + preview.properName.length * 13),
-        height: star.id === current.id ? 43 : 34,
+        width: preview.isBlackHoleSystem ? 154 : Math.min(132, 20 + preview.properName.length * 10),
+        height: star.id === current.id ? 31 : 25,
         priority,
       };
     });
@@ -798,6 +771,10 @@ export class StarMap {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const point = new THREE.Vector3();
     const projected = [];
+    const cameraDistance = this.camera.position.distanceTo(this.controls.target);
+    const labelScale = THREE.MathUtils.clamp(38 / Math.max(1, cameraDistance), 0.46, 0.88);
+    const labelBudget = Math.round(THREE.MathUtils.clamp(10 + 620 / Math.max(1, cameraDistance), 14, 56));
+    this.root.style.setProperty('--galaxy-label-scale', labelScale.toFixed(3));
     for (const item of this.labelData) {
       point.copy(item.position).project(this.camera);
       const x = (point.x * 0.5 + 0.5) * rect.width;
@@ -822,6 +799,7 @@ export class StarMap {
       });
     }
     const blockerCount = occupied.length;
+    let placedLabels = 0;
     for (const entry of projected) {
       const { item, x, y } = entry;
       const box = { left: x - 6, top: y - 7, right: x + item.width, bottom: y + item.height };
@@ -829,13 +807,15 @@ export class StarMap {
         || box.bottom < other.top || box.top > other.bottom);
       const blockedByPanel = occupied.slice(0, blockerCount).some(overlaps);
       const labelCollision = occupied.slice(blockerCount).some(overlaps);
-      if (blockedByPanel || (labelCollision && (item.priority || 0) < 80)) {
+      const overBudget = placedLabels >= labelBudget && (item.priority || 0) < 80;
+      if (blockedByPanel || overBudget || (labelCollision && (item.priority || 0) < 80)) {
         item.button.hidden = true;
         continue;
       }
       item.button.hidden = false;
+      placedLabels++;
       occupied.push(box);
-      item.button.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0)`;
+      item.button.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) scale(var(--galaxy-label-scale))`;
     }
   }
 
@@ -1008,6 +988,9 @@ export class StarMap {
 
   pickStarAt(event) {
     const rect = this.renderer.domElement.getBoundingClientRect();
+    const cameraDistance = this.camera.position.distanceTo(this.controls.target);
+    const worldPerPixel = 2 * cameraDistance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5)) / Math.max(1, rect.height);
+    this.raycaster.params.Points.threshold = worldPerPixel * 4.2;
     this.pointer.set(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
       -((event.clientY - rect.top) / rect.height) * 2 + 1,

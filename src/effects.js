@@ -218,6 +218,8 @@ export class Ship {
 
     this.smQuat = new THREE.Quaternion();
     this.roll = 0;
+    this.lookYaw = 0;
+    this.lookPitch = 0;
     this.loadedEmissives = [];
     this.loadedGear = [];
     this.loadedRamp = [];
@@ -286,27 +288,32 @@ export class Ship {
     const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding') && !!this.parkedPosUniv;
     this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
 
-    // Formation pose: retain a little mass while moving, but lock exactly to
-    // the cockpit at rest. Planet-frame rotation and horizon assist are not
-    // pilot steering and must not leave the foreground ship hunting forever.
-    const stationary = state === 'space' && speed < 0.5
-      && Math.abs(flightInput?.strafe || 0) < 0.01
-      && Math.abs(flightInput?.throttle || 0) < 0.01
-      && boost < 0.01;
-    if (stationary) this.smQuat.copy(nav.quat);
-    else this.smQuat.slerp(nav.quat, 1 - Math.exp(-dt * 7.5));
-    _sq.copy(this.smQuat).invert().multiply(nav.quat);
-    const motion = THREE.MathUtils.smoothstep(speed, 8, 180);
-    const turnBank = -_sq.y * 13 * motion;
-    const strafeBank = -(flightInput?.strafe || 0) * 0.3;
-    const rollTarget = THREE.MathUtils.clamp(turnBank + strafeBank, -0.55, 0.55);
-    if (stationary) this.roll = 0;
-    else {
-      const rollResponse = Math.abs(rollTarget) > Math.abs(this.roll) ? 8.5 : 10.5;
-      this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * rollResponse));
-    }
-    _sf.set(0, 0, -1).applyQuaternion(this.smQuat);   // forward
-    _su.set(0, 1, 0).applyQuaternion(this.smQuat);
+    // The hull's mass response is driven by raw pilot intent, never by speed
+    // or by the final camera quaternion. Therefore a zero-speed mouse turn
+    // still has weight, while passive planet-frame rotation remains stable.
+    const yawInput = flightInput?.yaw || 0;
+    const pitchInput = flightInput?.pitch || 0;
+    const throttleInput = flightInput?.throttle || 0;
+    const strafeInput = flightInput?.strafe || 0;
+    const yawTarget = yawInput * 0.07;
+    const pitchTarget = pitchInput * 0.052 - throttleInput * 0.018;
+    this.lookYaw ??= 0;
+    this.lookPitch ??= 0;
+    const lookActive = Math.abs(yawInput) + Math.abs(pitchInput) > 0.03;
+    const lookResponse = lookActive ? 13 : 6.2;
+    this.lookYaw += (yawTarget - this.lookYaw) * (1 - Math.exp(-dt * lookResponse));
+    this.lookPitch += (pitchTarget - this.lookPitch) * (1 - Math.exp(-dt * lookResponse));
+
+    const rollTarget = THREE.MathUtils.clamp(
+      yawInput * 0.17 - strafeInput * 0.3, -0.55, 0.55);
+    const rollResponse = Math.abs(rollTarget) > Math.abs(this.roll) ? 9 : 7;
+    this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * rollResponse));
+
+    // smQuat is now the passive frame anchor. All visible lag is a bounded
+    // local offset below, so it cannot feed back into the navigation state.
+    this.smQuat.copy(nav.quat);
+    _sf.set(0, 0, -1).applyQuaternion(nav.quat);   // forward
+    _su.set(0, 1, 0).applyQuaternion(nav.quat);
     this.thrustPose = this.thrustPose ?? 0;
     this.thrustPose += (boost - this.thrustPose) * (1 - Math.exp(-dt * 4.2));
     // During acceleration the ship visibly lunges away from the camera. This
@@ -314,7 +321,12 @@ export class Ship {
     // appear to slide toward a stationary model.
     _sv.copy(_sf).multiplyScalar(19 + this.thrustPose * 3.2)
       .addScaledVector(_su, -4.6 + this.thrustPose * 0.35);   // formation offset
-    const formQuat = _sq2.copy(this.smQuat)
+    _sr.set(1, 0, 0).applyQuaternion(nav.quat);
+    _sv.addScaledVector(_sr, -this.lookYaw * 8.5)
+      .addScaledVector(_su, this.lookPitch * 5.5);
+    const formQuat = _sq2.copy(nav.quat)
+      .multiply(_sq.setFromAxisAngle(Y, this.lookYaw))
+      .multiply(_sq.setFromAxisAngle(X, this.lookPitch))
       .multiply(_sq.setFromAxisAngle(_sr.set(0, 0, 1), this.roll));
 
     if (this.parkedPosUniv && this.parkAmt > 0.002) {

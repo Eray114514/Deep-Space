@@ -111,7 +111,7 @@ export function makeBlackHoleImpostorTexture(size = 1024) {
   return texture;
 }
 
-function accretionMaterial(innerRadius, outerRadius, temperatureK) {
+export function makeAccretionMaterial(innerRadius, outerRadius, temperatureK) {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -122,6 +122,7 @@ function accretionMaterial(innerRadius, outerRadius, temperatureK) {
       uInner: { value: innerRadius },
       uOuter: { value: outerRadius },
       uHeat: { value: THREE.MathUtils.clamp((temperatureK - 2200) / 3200, 0, 1) },
+      uIntensity: { value: 1 },
     },
     vertexShader: /* glsl */`
       varying vec3 vLocal;
@@ -140,6 +141,7 @@ function accretionMaterial(innerRadius, outerRadius, temperatureK) {
       uniform float uInner;
       uniform float uOuter;
       uniform float uHeat;
+      uniform float uIntensity;
       varying vec3 vLocal;
       varying vec3 vWorld;
       varying vec3 vTangentWorld;
@@ -158,13 +160,13 @@ function accretionMaterial(innerRadius, outerRadius, temperatureK) {
         vec3 hot = vec3(1.5, 0.82, 0.34);
         vec3 color = mix(cool, hot, uHeat + (1.0 - radial) * 0.25);
         color *= mix(0.52, 1.75, smoothstep(-0.8, 0.8, doppler));
-        gl_FragColor = vec4(color * density, density * 0.9);
+        gl_FragColor = vec4(color * density * uIntensity, density * 0.9 * uIntensity);
       }
     `,
   });
 }
 
-function photonMaterial() {
+export function makePhotonMaterial() {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -221,7 +223,7 @@ export class BlackHole {
     horizon.renderOrder = 7;
     this.group.add(horizon);
 
-    this.photonMaterial = photonMaterial();
+    this.photonMaterial = makePhotonMaterial();
     const photonShell = new THREE.Mesh(
       new THREE.SphereGeometry(this.R * 1.72, 72, 48),
       this.photonMaterial,
@@ -231,7 +233,7 @@ export class BlackHole {
 
     const inner = this.R * 2.25;
     const outer = spec.accretionRadius;
-    this.accretionMaterial = accretionMaterial(inner, outer, spec.blackHole.discTemperatureK);
+    this.accretionMaterial = makeAccretionMaterial(inner, outer, spec.blackHole.discTemperatureK);
     const disc = new THREE.Mesh(new THREE.RingGeometry(inner, outer, 256, 18), this.accretionMaterial);
     disc.rotation.x = -Math.PI / 2;
     disc.rotation.z = spec.axialTilt;
