@@ -7,9 +7,12 @@
 import { generateSystemSpec } from '../src/astronomy.js';
 import { hash3i, hashFloat, makeRng, strHash32 } from '../src/rng.js';
 import { makeWord } from '../src/names.js';
+import { ACTIVE_GALAXY_ID, getGalaxyConfig } from '../src/world-config.js';
 
 const STAR_PROBABILITY = 0.42;
-const CANDIDATE_STREAM = 'DEEP-SPACE-CURATION-V1';
+const galaxyArg = process.argv.find((arg) => arg.startsWith('--galaxy='));
+const galaxy = getGalaxyConfig(galaxyArg?.split('=')[1] || ACTIVE_GALAXY_ID);
+const CANDIDATE_STREAM = `DEEP-SPACE-CURATION-V1:${galaxy.id}`;
 const countArg = process.argv.find((arg) => arg.startsWith('--count='));
 const topArg = process.argv.find((arg) => arg.startsWith('--top='));
 const candidateCount = Math.max(1, Number(countArg?.split('=')[1]) || 512);
@@ -93,12 +96,12 @@ function scoreSeed(seed) {
 }
 
 const candidateRng = makeRng(CANDIDATE_STREAM);
-const seeds = new Set(['EUCLID', 'ATLAS-7', 'VOYAGER-3']);
+const seeds = new Set([galaxy.seed, 'EUCLID', 'ATLAS-7', 'VOYAGER-3']);
 while (seeds.size < candidateCount) {
   seeds.add(`${makeWord(candidateRng, 2, 3).toUpperCase()}-${Math.floor(candidateRng() * 1000).toString().padStart(3, '0')}`);
 }
 
 const ranked = [...seeds].map(scoreSeed).sort((a, b) => b.score - a.score || a.seed.localeCompare(b.seed));
 console.table(ranked.slice(0, topCount));
-console.log(`\nCurated ${ranked.length} deterministic candidates with stream ${CANDIDATE_STREAM}.`);
+console.log(`\nCurated ${ranked.length} deterministic candidates for ${galaxy.name} with stream ${CANDIDATE_STREAM}.`);
 console.log('Static scores are a filter only; capture and play the finalists before changing the canonical seed.');

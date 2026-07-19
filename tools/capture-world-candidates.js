@@ -8,6 +8,8 @@ import { startServer } from './server.js';
 
 const seeds = (process.env.SEEDS || 'NAVEMI-382').split(',').map((seed) => seed.trim()).filter(Boolean);
 const out = process.env.OUT || 'test-results/world-candidates';
+const galaxy = process.env.GALAXY || 'milky-way';
+const homeOnly = process.env.HOME_ONLY === '1';
 const { server, port } = await startServer(0);
 const browser = await chromium.launch({
   ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}),
@@ -25,7 +27,11 @@ try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     const errors = [];
     page.on('pageerror', (error) => errors.push(String(error)));
-    await page.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=${encodeURIComponent(seed)}&nolock=1&nohero=1&buildms=120`);
+    const params = new URLSearchParams({ worldlab: '1', galaxy, seed, nolock: '1', nohero: '1', buildms: '120' });
+    for (const [envKey, paramKey] of [['SYSTEM', 'system'], ['BODY', 'body'], ['SEA', 'sea'], ['CLOUDS', 'clouds']]) {
+      if (process.env[envKey] != null) params.set(paramKey, process.env[envKey]);
+    }
+    await page.goto(`http://127.0.0.1:${port}/?${params}`);
     await page.waitForFunction(() => window.NMS?.booted, null, { timeout: 90000 });
     await page.waitForTimeout(1800);
     await capture(page, `${dir}/00-spawn.png`);
@@ -38,7 +44,7 @@ try {
       seenTypes.add(planet.type);
       representatives.push(planet);
     }
-    for (const [index, planet] of representatives.entries()) {
+    for (const [index, planet] of (homeOnly ? [] : representatives).entries()) {
       await page.evaluate(({ i }) => NMS.teleport(i, 0.55), planet);
       await page.waitForTimeout(900);
       const prefix = String(index + 1).padStart(2, '0');

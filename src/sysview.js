@@ -10,6 +10,7 @@ import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js
 import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { makeRng, strHash32 } from './rng.js';
 import { orbitalPosition } from './astronomy.js';
+import { makeBlackHoleImpostorTexture } from './black-hole.js';
 
 const ORBIT_PLANE_Y = 0.18;
 const STAR_CENTER_Y = 1.12;
@@ -259,6 +260,30 @@ function atmosphereMaterial(color, opacity = 0.45) {
   });
 }
 
+function blackHoleDiscMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `varying vec2 vPos;void main(){vPos=position.xy;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+    fragmentShader: `
+      uniform float uTime; varying vec2 vPos;
+      float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      void main(){
+        float r=length(vPos); float a=atan(vPos.y,vPos.x);
+        float edge=smoothstep(4.7,5.2,r)*(1.0-smoothstep(13.0,14.0,r));
+        float lanes=0.45+0.55*sin(r*7.6-a*5.0+uTime*0.9);
+        float noise=hash(vec2(floor(a*32.0),floor(r*4.0+uTime*0.2)));
+        float density=edge*(0.2+0.32*lanes+0.18*noise);
+        float doppler=0.72+0.48*cos(a-0.6);
+        vec3 color=mix(vec3(1.7,0.18,0.025),vec3(1.5,0.78,0.26),clamp((14.0-r)/9.0,0.0,1.0));
+        gl_FragColor=vec4(color*density*doppler,density*0.78);
+      }`,
+  });
+}
+
 function ringMaterial(seedStr, tint) {
   const rand = makeRng(seedStr + ':ring');
   const freq = 26 + rand() * 22, gapAt = 0.5 + rand() * 0.24, warp = 2 + rand() * 3;
@@ -303,7 +328,7 @@ function starSurfaceMaterial(color) {
 // ---------------------------------------------------------------------------
 // gravity-well contour backdrop: the survey-chart signature of the reference
 // ---------------------------------------------------------------------------
-function buildContourField(masses, fieldRadius) {
+function buildContourField(masses, fieldRadius, compactObject = false) {
   function potentialField(x, z) {
     let f = 0;
     for (const m of masses) {
@@ -320,7 +345,9 @@ function buildContourField(masses, fieldRadius) {
     return -1.78 - f * 0.62 + shear;
   }
   const group = new THREE.Group();
-  const ringCount = Math.round(THREE.MathUtils.clamp(fieldRadius * 1.08, 43, 68));
+  const ringCount = compactObject
+    ? Math.round(THREE.MathUtils.clamp(fieldRadius * 0.74, 34, 46))
+    : Math.round(THREE.MathUtils.clamp(fieldRadius * 1.08, 43, 68));
   for (let i = 0; i < ringCount; i++) {
     const base = THREE.MathUtils.lerp(4.08, fieldRadius, i / Math.max(1, ringCount - 1));
     const phase = i * 0.27;
@@ -349,9 +376,11 @@ function buildContourField(masses, fieldRadius) {
     }
     const geo = new THREE.BufferGeometry().setFromPoints(pts);
     const mat = new THREE.LineBasicMaterial({
-      color: 0xcbd4d2,
+      color: compactObject ? 0xc78352 : 0xcbd4d2,
       transparent: true,
-      opacity: 0.075 + (i / ringCount) * 0.085,
+      opacity: compactObject
+        ? 0.045 + (i / ringCount) * 0.065
+        : 0.075 + (i / ringCount) * 0.085,
       depthWrite: false,
       depthTest: true,
     });
@@ -574,8 +603,8 @@ export class SystemView {
     this._buildBackdrop(rand);
     const primaryRecords = this._buildStars(preview, timeHours);
     this._buildOrbits(preview, timeHours, anisotropy, rand);
-    const outermost = Math.max(14, ...this.bodies.map((b) => b.orbitRadius));
-    this._buildContours(outermost);
+    const outermost = Math.max(14, this.starOrbitRadiusMax || 0, ...this.bodies.map((b) => b.orbitRadius));
+    this._buildContours(outermost, preview.isBlackHoleSystem);
 
     // frame the whole system: outermost orbit decides the default distance
     this.defaultView.distance = THREE.MathUtils.clamp(outermost * 1.42, 34, 72);
@@ -623,19 +652,44 @@ export class SystemView {
     const stars = preview.stars;
     const totalMass = stars.reduce((sum, star) => sum + star.massSolar, 0);
     let separation = null;
-    if (stars.length > 1 && preview.binaryOrbit) {
+    if (!preview.isBlackHoleSystem && stars.length > 1 && preview.binaryOrbit) {
       separation = orbitalPosition(preview.binaryOrbit, timeHours, new THREE.Vector3());
     }
-    const sepScale = stars.length > 1 ? 7.4 / Math.max(preview.binaryOrbit.renderRadius, 1) : 0;
+    const sepScale = stars.length > 1 && preview.binaryOrbit
+      ? 7.4 / Math.max(preview.binaryOrbit.renderRadius, 1)
+      : 0;
+    const maxCapturedOrbit = preview.isBlackHoleSystem
+      ? Math.max(...stars.map((star) => star.orbit?.renderRadius || 1))
+      : 1;
+    this.starOrbitRadiusMax = 0;
 
     stars.forEach((starSpec, index) => {
       const color = new THREE.Color(starSpec.color);
-      const radius = stars.length > 1
+      const radius = preview.isBlackHoleSystem
+        ? 1.1 + Math.min(0.65, starSpec.radiusRender / 7e6)
+        : stars.length > 1
         ? 2.35 + Math.min(1.05, starSpec.radiusRender / 5.5e6)
         : 4.15;
       const group = new THREE.Group();
       group.position.set(0, STAR_CENTER_Y, 0);
-      if (separation) {
+      let capturedScale = 0;
+      if (preview.isBlackHoleSystem && starSpec.orbit) {
+        const orbitRadius = 15 + starSpec.orbit.renderRadius / maxCapturedOrbit * 24;
+        capturedScale = orbitRadius / starSpec.orbit.renderRadius;
+        this.starOrbitRadiusMax = Math.max(this.starOrbitRadiusMax, orbitRadius);
+        const position = orbitalPosition(starSpec.orbit, timeHours, new THREE.Vector3());
+        group.position.set(position.x * capturedScale, position.y * capturedScale + STAR_CENTER_Y, position.z * capturedScale);
+        const points = [];
+        for (let sample = 0; sample < 180; sample++) {
+          const t = timeHours + starSpec.orbit.periodHours * sample / 180;
+          const p = orbitalPosition(starSpec.orbit, t, new THREE.Vector3());
+          points.push(new THREE.Vector3(p.x * capturedScale, p.y * capturedScale + STAR_CENTER_Y, p.z * capturedScale));
+        }
+        this.world.add(new THREE.LineLoop(
+          new THREE.BufferGeometry().setFromPoints(points),
+          new THREE.LineBasicMaterial({ color: 0xffb071, transparent: true, opacity: 0.18, depthWrite: false }),
+        ));
+      } else if (separation) {
         const share = (index === 0 ? -stars[1].massSolar : stars[0].massSolar) / totalMass;
         group.position.addScaledVector(separation, share * sepScale);
       }
@@ -691,13 +745,15 @@ export class SystemView {
       }
       group.add(prominences);
 
-      records.push({ group, core, halo1, halo2, prominences, radius, uniforms });
+      records.push({ group, core, halo1, halo2, prominences, radius, uniforms, orbit: starSpec.orbit, orbitScale: capturedScale });
     });
 
     // light follows the primary, tinted by its spectral class
     const primaryColor = new THREE.Color(stars[0].color);
     this.starLight.color.copy(primaryColor).lerp(new THREE.Color(0xffffff), 0.42);
-    if (stars.length > 1 && records[1]) {
+    if (preview.isBlackHoleSystem) {
+      this.starLight.position.copy(records[0].group.position);
+    } else if (stars.length > 1 && records[1]) {
       this.starLight.position.copy(records[0].group.position).lerp(records[1].group.position, 0.5);
     } else {
       this.starLight.position.set(0, STAR_CENTER_Y, 0);
@@ -712,28 +768,52 @@ export class SystemView {
     const bodyMeshes = new Map();
 
     primaries.forEach((body, i) => {
-      const orbitRadius = 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
-      const k = orbitRadius / body.orbitSpec.renderRadius;
+      const isBlackHole = body.type === 'blackHole';
+      const orbitRadius = isBlackHole ? 0 : 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
+      const k = isBlackHole ? 0 : orbitRadius / body.orbitSpec.renderRadius;
       // true elliptical track, sampled from the same ephemeris the game uses
-      const pts = [];
-      const samples = 200;
-      for (let sIdx = 0; sIdx < samples; sIdx++) {
-        const t = timeHours + body.orbitSpec.periodHours * sIdx / samples;
-        const p = orbitalPosition(body.orbitSpec, t, new THREE.Vector3());
-        pts.push(new THREE.Vector3(p.x * k, p.y * k + ORBIT_PLANE_Y, p.z * k));
+      if (!isBlackHole) {
+        const pts = [];
+        const samples = 200;
+        for (let sIdx = 0; sIdx < samples; sIdx++) {
+          const t = timeHours + body.orbitSpec.periodHours * sIdx / samples;
+          const p = orbitalPosition(body.orbitSpec, t, new THREE.Vector3());
+          pts.push(new THREE.Vector3(p.x * k, p.y * k + ORBIT_PLANE_Y, p.z * k));
+        }
+        const line = new THREE.LineLoop(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          new THREE.LineBasicMaterial({ color: 0xe1e6e5, transparent: true, opacity: 0.12 + (i % 4) * 0.02, depthWrite: false, depthTest: true }),
+        );
+        line.renderOrder = 1;
+        this.world.add(line);
       }
-      const line = new THREE.LineLoop(
-        new THREE.BufferGeometry().setFromPoints(pts),
-        new THREE.LineBasicMaterial({ color: 0xe1e6e5, transparent: true, opacity: 0.12 + (i % 4) * 0.02, depthWrite: false, depthTest: true }),
-      );
-      line.renderOrder = 1;
-      this.world.add(line);
 
-      const visualRadius = 0.55 + Math.min(1.05, body.radius / 310_000) * 1.05;
+      const visualRadius = isBlackHole ? 2.7 : 0.55 + Math.min(1.05, body.radius / 310_000) * 1.05;
       const group = new THREE.Group();
       const pos = orbitalPosition(body.orbitSpec, timeHours, new THREE.Vector3());
       group.position.set(pos.x * k, pos.y * k + ORBIT_PLANE_Y, pos.z * k);
       this.world.add(group);
+
+      if (isBlackHole) {
+        const mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(visualRadius, 72, 48),
+          new THREE.MeshBasicMaterial({ color: 0x000000 }),
+        );
+        mesh.userData.record = { kind: 'planet', body };
+        group.add(mesh);
+        this.pickMeshes.push(mesh);
+        const impostor = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: makeBlackHoleImpostorTexture(1024), transparent: true, depthWrite: false, toneMapped: false,
+        }));
+        impostor.scale.set(visualRadius * 11.6, visualRadius * 7.25, 1);
+        impostor.renderOrder = 12;
+        group.add(impostor);
+        const record = { kind: 'planet', body, group, mesh, cloud: null, radius: visualRadius, orbitRadius, spin: 0.00018, moonPivots: [] };
+        this.bodies.push(record);
+        bodyMeshes.set(body.index, record);
+        this._addMarker(record);
+        return;
+      }
 
       const { map, emissiveMap } = bodyTextures(body, anisotropy);
       map.userData.cached = true;
@@ -831,7 +911,7 @@ export class SystemView {
     }
   }
 
-  _buildContours(outermost) {
+  _buildContours(outermost, compactObject = false) {
     const masses = [{ x: 0, z: 0, a: 8.8, s: 8.0, anisX: 0.76, anisZ: 1.18 }];
     for (const record of this.bodies) {
       masses.push({
@@ -842,7 +922,7 @@ export class SystemView {
         anisX: 1, anisZ: 1,
       });
     }
-    this.world.add(buildContourField(masses, outermost * 1.12));
+    this.world.add(buildContourField(masses, outermost * 1.12, compactObject));
   }
 
   _addMarker(record) {
@@ -883,9 +963,18 @@ export class SystemView {
       star.prominences.rotation.y = t * 0.05;
       star.halo1.material.rotation = t * 0.018;
       star.halo2.material.rotation = -t * 0.012;
+      if (star.orbit && star.orbitScale) {
+        const position = orbitalPosition(star.orbit, this.timeHours + t * 18, new THREE.Vector3());
+        star.group.position.set(position.x * star.orbitScale, position.y * star.orbitScale + STAR_CENTER_Y, position.z * star.orbitScale);
+      }
     }
     for (const record of this.bodies) {
       record.mesh.rotation.y += record.spin * 60 * dt;
+      if (record.body.type === 'blackHole') {
+        for (const child of record.group.children) {
+          if (child.material?.uniforms?.uTime) child.material.uniforms.uTime.value = t;
+        }
+      }
       if (record.cloud) record.cloud.rotation.y += record.spin * 80 * dt;
       for (const moon of record.moonPivots) moon.pivot.rotation.y += moon.speed * dt;
     }

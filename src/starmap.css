@@ -150,7 +150,7 @@
   border: 1px solid var(--line); outline: none; font-size: 13px; pointer-events: auto;
 }
 .toolRow input:focus { border-color: rgba(126, 201, 212, .6); }
-.toolFilters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 9px; }
+.toolFilters { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; margin-top: 9px; }
 .toolFilters button {
   padding: 6px 3px; color: var(--muted); background: rgba(177, 190, 192, .07);
   border: 1px solid var(--line2); cursor: pointer; font-size: 13px; pointer-events: auto;
@@ -271,10 +271,35 @@
 .sm-map-label strong { font-size: 15px; font-weight: 750; line-height: 1.1; white-space: nowrap; }
 .sm-map-label small { color: rgba(235, 238, 233, .52); font: 11px/1.2 Consolas, monospace; }
 .sm-map-label.current strong { font-size: 18px; }
+.sm-map-label.selected:not(.current) {
+  background: linear-gradient(90deg, rgba(118, 196, 207, .14), transparent 88%);
+  outline: 1px solid rgba(132, 204, 214, .22);
+}
+.sm-map-label.black-hole {
+  color: #ffd7ad;
+  background: linear-gradient(90deg, rgba(176, 72, 21, .24), rgba(19, 9, 7, .08) 78%, transparent);
+  outline: 1px solid rgba(255, 153, 82, .28);
+}
+.sm-map-label.black-hole i {
+  width: 14px; height: 14px; margin-left: -1px; border-radius: 50%; transform: none;
+  background: #010203; border: 2px solid #ffbd75;
+  box-shadow: 0 0 0 2px rgba(255, 91, 26, .20), 0 0 15px rgba(255, 116, 42, .78);
+}
 .sm-map-label.current::after {
   content: ""; position: absolute; left: 5px; bottom: -9px;
   border: 5px solid transparent; border-bottom: 0; border-top-color: var(--cyan);
 }
+
+#sm-hoverTag {
+  position: fixed; left: 0; top: 0; z-index: 24; min-width: 190px; padding: 8px 11px;
+  color: #eef5f4; background: rgba(7, 14, 17, .94); border: 1px solid rgba(151, 207, 214, .38);
+  border-left: 3px solid #83c8d2; box-shadow: 0 8px 24px rgba(0, 0, 0, .48);
+  pointer-events: none;
+}
+#sm-hoverTag[hidden] { display: none; }
+#sm-hoverTag strong, #sm-hoverTag small { display: block; white-space: nowrap; }
+#sm-hoverTag strong { font-size: 14px; line-height: 1.25; }
+#sm-hoverTag small { margin-top: 3px; color: rgba(220, 232, 232, .58); font: 10px/1.2 Consolas, monospace; }
 
 /* ---- loading --------------------------------------------------------------------- */
 #sm-loading { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; background: #0a1011; transition: opacity .7s; }

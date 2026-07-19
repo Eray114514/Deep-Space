@@ -25,6 +25,7 @@ function weighted(rand, items) {
   return items[items.length - 1];
 }
 function smoothstep(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
 function makeStar(rand, index, systemName, home = false) {
   const cls = home && index === 0 ? STELLAR_CLASSES.find((c) => c.spectral === 'G') : weighted(rand, STELLAR_CLASSES);
@@ -122,7 +123,7 @@ function atmosphereFor(type, rand) {
     lush: { composition: ['N₂', 'O₂', 'Ar', 'H₂O'], pressureBar: pressure(0.72, 1.38), greenhouseK: pressure(22, 42) },
     ocean: { composition: ['N₂', 'O₂', 'H₂O'], pressureBar: pressure(1.1, 3.2), greenhouseK: pressure(28, 58) },
     desert: { composition: ['CO₂', 'N₂', 'Ar'], pressureBar: pressure(0.12, 1.8), greenhouseK: pressure(18, 90) },
-    ice: { composition: ['N₂', 'CH₄', 'Ar'], pressureBar: pressure(0.01, 0.7), greenhouseK: pressure(2, 18) },
+    ice: { composition: ['N₂', 'CH₄', 'Ar', 'H₂O'], pressureBar: pressure(0.01, 0.7), greenhouseK: pressure(2, 18) },
     lava: { composition: ['CO₂', 'SO₂', 'Na'], pressureBar: pressure(0.08, 8), greenhouseK: pressure(45, 180) },
     barren: { composition: ['Ar', 'CO₂'], pressureBar: pressure(0.0001, 0.08), greenhouseK: pressure(0, 5) },
     toxic: { composition: ['CO₂', 'Cl₂', 'SO₂'], pressureBar: pressure(0.8, 6), greenhouseK: pressure(35, 130) },
@@ -133,7 +134,172 @@ function atmosphereFor(type, rand) {
   return profiles[type] || profiles.barren;
 }
 
+const DYNAMO_ACTIVITY = {
+  lush: 1.0, ocean: 0.92, desert: 0.58, ice: 0.34, lava: 0.74,
+  barren: 0.2, toxic: 0.68, exotic: 0.76, gasGiant: 2.5, iceGiant: 1.75,
+};
+
+const CLOUD_CHANCE = {
+  lush: 0.74, ocean: 0.9, desert: 0.2, ice: 0.5, lava: 0.08,
+  barren: 0.03, toxic: 0.72, exotic: 0.28, gasGiant: 1, iceGiant: 1,
+};
+
+function cloudCondensates(type, equilibriumK) {
+  if (type === 'gasGiant') return ['NH₃冰晶', 'H₂O冰晶'];
+  if (type === 'iceGiant') return ['CH₄冰晶', 'H₂S冰晶'];
+  if (type === 'toxic') return ['硫酸气溶胶', '硫化物'];
+  if (type === 'lava') return ['硅酸盐', '金属蒸气'];
+  if (type === 'ice') {
+    if (equilibriumK < 90) return ['N₂冰晶', 'CH₄冰晶'];
+    if (equilibriumK < 190) return ['CH₄冰晶', 'H₂O冰晶'];
+    return ['H₂O冰晶'];
+  }
+  if (type === 'desert' || type === 'barren') return ['H₂O冰晶', '尘埃'];
+  if (type === 'exotic') return ['CH₄冰晶', '有机霾'];
+  return ['H₂O液滴', 'H₂O冰晶'];
+}
+
+// One deterministic physical dossier owns the properties that used to be
+// rolled independently by astronomy, the star map and the planet renderer.
+// The model is intentionally legible rather than pretending to be a full
+// magnetohydrodynamics simulation.
+export function derivePlanetaryEnvironment(body) {
+  const rand = makeRng(`${body.seed}:environment:v1`);
+  const giant = body.type === 'gasGiant' || body.type === 'iceGiant';
+  const mass = Math.max(body.massEarth || 0.01, 0.01);
+  const rotation = Math.max(body.rotationPeriodHours || 24, 1);
+  const activity = DYNAMO_ACTIVITY[body.type] ?? 0.35;
+  const rotationFactor = Math.sqrt(clamp(24 / rotation, 0.06, 2.4));
+  const massFactor = clamp(Math.pow(mass, 0.22), 0.38, giant ? 2.2 : 1.55);
+  const lockFactor = body.tidallyLocked ? 0.58 : 1;
+  const variability = 0.78 + rand() * 0.44;
+  const strengthEarth = giant
+    ? clamp(activity * rotationFactor * massFactor * variability, 1.2, 18)
+    : clamp(activity * rotationFactor * massFactor * lockFactor * variability, 0.01, 3.5);
+  const magneticLabel = strengthEarth < 0.25 ? '微弱' : strengthEarth < 0.85 ? '中等' : '强烈';
+  const magnetosphere = {
+    strengthEarth,
+    label: magneticLabel,
+    origin: strengthEarth < 0.08 ? '感应磁层' : '内禀磁场',
+  };
+
+  let atmosphere = body.atmosphere ? {
+    ...body.atmosphere,
+    composition: [...(body.atmosphere.composition || [])],
+  } : null;
+  if (atmosphere && atmosphere.pressureBar != null) {
+    const gravityRetention = clamp(Math.pow(mass, 0.16), 0.52, 1.42);
+    const thermalRetention = clamp(310 / Math.max(body.equilibriumK || 250, 70), 0.48, 1.45);
+    // A dynamo helps on geological timescales, but gravity and temperature
+    // remain first-class: a weak field does not instantly erase an atmosphere.
+    const magneticRetention = 0.8 + 0.2 * clamp(strengthEarth, 0, 1);
+    const lockRetention = body.tidallyLocked ? 0.9 : 1;
+    const temperature = body.equilibriumK || 250;
+    const volatilePhaseRetention = body.type === 'ice'
+      ? temperature < 65 ? 0.003
+        : temperature < 90 ? 0.01 + smoothstep(65, 90, temperature) * 0.07
+          : temperature < 125 ? 0.08 + smoothstep(90, 125, temperature) * 0.72
+            : 1
+      : 1;
+    atmosphere.pressureBar = clamp(
+      atmosphere.pressureBar * gravityRetention * thermalRetention * magneticRetention * lockRetention * volatilePhaseRetention,
+      0.00005,
+      12,
+    );
+    atmosphere.state = volatilePhaseRetention < 0.1
+      ? '挥发物大部冻结沉降'
+      : volatilePhaseRetention < 0.8 ? '季节性挥发物循环' : '稳定气态层';
+  }
+
+  const pressureBar = atmosphere?.pressureBar;
+  const pressureSupport = giant
+    ? 1
+    : smoothstep(-2.7, -0.15, Math.log10(Math.max(pressureBar || 0, 0.00001)));
+  const cloudChance = clamp((CLOUD_CHANCE[body.type] ?? 0.08) * pressureSupport, 0, 1);
+  const hasClouds = giant || rand() < cloudChance;
+  const coverage = hasClouds
+    ? clamp((giant ? 0.66 : 0.18) + rand() * (giant ? 0.18 : 0.55) * (0.55 + pressureSupport * 0.45), 0, 0.85)
+    : 0;
+  const clouds = {
+    coverage,
+    probability: cloudChance,
+    condensates: cloudCondensates(body.type, body.equilibriumK || 250),
+    regime: coverage > 0.62 ? '全球云幕' : coverage > 0.36 ? '多云' : coverage > 0.05 ? '稀疏云层' : '晴空或无稳定云层',
+  };
+
+  return { atmosphere, magnetosphere, clouds };
+}
+
+function attachPlanetaryEnvironment(body) {
+  return Object.assign(body, derivePlanetaryEnvironment(body));
+}
+
+export const COMPACT_OBJECTS_VERSION = 1;
+
+// A black-hole system is a separate authored destination rather than a roll
+// inside ordinary star cells. It therefore cannot replace a selected system
+// or consume any of the legacy stellar/planetary RNG stream.
+export function generateBlackHoleSystemSpec(seed, destination) {
+  const systemId = destination.id;
+  const rand = makeRng(`${seed}:compact-objects:v${COMPACT_OBJECTS_VERSION}:${systemId}`);
+  const systemName = destination.systemName || '厄瑞玻斯观测区';
+  const massSolar = 1850 + rand() * 950;
+  const eventHorizonKm = massSolar * 2.95325;
+  const renderRadius = 2.6e6 + rand() * 8e5;
+  const centralObject = {
+    bodyId: 'black-hole-0', parentId: null, host: 'system-barycenter',
+    seed: `${seed}:bh:${systemId}:0`, name: destination.name || '厄瑞玻斯',
+    properName: destination.name || '厄瑞玻斯', catalogName: destination.catalogId || 'AF BH-001',
+    type: 'blackHole', isMoon: false, radius: renderRadius,
+    accretionRadius: renderRadius * (10.5 + rand() * 2.5),
+    orbitIndex: 0,
+    orbit: {
+      semiMajorAU: 0, renderRadius: 0, periodHours: 1e15,
+      eccentricity: 0, inclination: 0, ascendingNode: 0, phase: 0,
+    },
+    equilibriumK: null, atmosphere: null, axialTilt: rand() * Math.PI,
+    rotationPeriodHours: 0.001, rotationPhase: rand(), tidallyLocked: false,
+    massEarth: massSolar * 332946, landable: false,
+    compactObjectVersion: COMPACT_OBJECTS_VERSION,
+    blackHole: {
+      massSolar, eventHorizonKm, spin: 0.58 + rand() * 0.34,
+      accretionDisc: true, discTemperatureK: 3100 + rand() * 1700,
+    },
+  };
+
+  const stars = [];
+  const capturedCount = 3;
+  for (let i = 0; i < capturedCount; i++) {
+    const star = makeStar(rand, i, systemName, false);
+    const semiMajorAU = 34 + i * 31 + rand() * 18;
+    star.displayName = `${systemName} ${String.fromCharCode(65 + i)}`;
+    star.orbit = {
+      semiMajorAU,
+      renderRadius: 5.4e7 + i * 4.6e7,
+      periodHours: Math.sqrt(Math.pow(semiMajorAU, 3) / massSolar) * 365.25 * 24,
+      eccentricity: 0.08 + rand() * 0.24,
+      inclination: (rand() - 0.5) * 0.46,
+      ascendingNode: rand() * TAU,
+      phase: rand(),
+    };
+    stars.push(star);
+  }
+
+  return {
+    generationVersion: GENERATION_VERSION,
+    compactObjectsVersion: COMPACT_OBJECTS_VERSION,
+    systemId, name: systemName, properName: systemName,
+    latinName: 'Erebus Gravitational Observatory', nameSourceCategory: 'authored-compact-object',
+    catalogId: destination.catalogId || 'AF BH-001', isHome: false, isBlackHoleSystem: true,
+    stars, binaryOrbit: null, bodies: [], compactObjects: [centralObject],
+    habitableZoneAU: [], snowLineAU: null,
+  };
+}
+
 export function generateSystemSpec(seed, starCell) {
+  if (typeof starCell === 'object' && starCell?.kind === 'blackHole') {
+    return generateBlackHoleSystemSpec(seed, starCell);
+  }
   const id = typeof starCell === 'string' ? starCell : starCell.id;
   const rand = makeRng(`${seed}:system-spec:v${GENERATION_VERSION}:${id}`);
   const isHome = id === '0,0,0';
@@ -191,6 +357,7 @@ export function generateSystemSpec(seed, starCell) {
       massEarth: giant ? 18 + rand() * 220 : 0.35 + rand() * 5.8,
       landable: !giant,
     };
+    attachPlanetaryEnvironment(spec);
     bodies.push(spec);
 
     const moonMax = giant ? 2 + Math.floor(rand() * 3) : radius > 230000 && rand() < 0.38 ? 1 : 0;
@@ -202,7 +369,7 @@ export function generateSystemSpec(seed, starCell) {
       const moonPeriod = 34 + Math.pow(moonOrbitRadius / Math.max(radius, 1), 1.5) * 9;
       const mn = names.moons[moonNameIndex++ % names.moons.length];
       const moonType = equilibriumK < 215 ? 'ice' : (rand() < 0.58 ? 'barren' : 'exotic');
-      bodies.push({
+      const moonSpec = {
         bodyId: `${bodyId}-moon-${m}`, parentId: bodyId, host: bodyId, seed: moonSeed,
         name: mn.displayName, properName: mn.zh, latinName: mn.latin, nameSourceCategory: mn.sourceCategory,
         catalogName: `${n.zh} ${ROMAN[m] || m + 1}`,
@@ -212,7 +379,9 @@ export function generateSystemSpec(seed, starCell) {
           inclination: (rand() - 0.5) * 0.18, ascendingNode: rand() * TAU, phase: rand(), semiMajorAU: 0 },
         equilibriumK, atmosphere: atmosphereFor(moonType, moonRng), axialTilt: rand() * 0.08, rotationPeriodHours: moonPeriod,
         rotationPhase: rand(), tidallyLocked: true, massEarth: 0.01 + rand() * 0.12, landable: true,
-      });
+      };
+      attachPlanetaryEnvironment(moonSpec);
+      bodies.push(moonSpec);
     }
   }
   return {
@@ -220,6 +389,7 @@ export function generateSystemSpec(seed, starCell) {
     name: names.system.displayName, properName: baseName, latinName: names.system.latin,
     nameSourceCategory: names.system.sourceCategory,
     catalogId: names.system.catalogId, isHome, stars, binaryOrbit, bodies,
+    compactObjects: [],
     habitableZoneAU: [0.95 * Math.sqrt(totalLuminosity), 1.67 * Math.sqrt(totalLuminosity)], snowLineAU: snowLine,
   };
 }

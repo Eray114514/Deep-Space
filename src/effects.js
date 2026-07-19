@@ -282,15 +282,29 @@ export class Ship {
     this.parkedQuat.copy(quat);
   }
 
-  update(dt, nav, state, speed, warp, boost = 0) {
+  update(dt, nav, state, speed, warp, boost = 0, flightInput = null) {
     const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding') && !!this.parkedPosUniv;
     this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
 
-    // formation pose: nose lags the camera a touch, which reads as mass
-    this.smQuat.slerp(nav.quat, 1 - Math.exp(-dt * 6));
+    // Formation pose: retain a little mass while moving, but lock exactly to
+    // the cockpit at rest. Planet-frame rotation and horizon assist are not
+    // pilot steering and must not leave the foreground ship hunting forever.
+    const stationary = state === 'space' && speed < 0.5
+      && Math.abs(flightInput?.strafe || 0) < 0.01
+      && Math.abs(flightInput?.throttle || 0) < 0.01
+      && boost < 0.01;
+    if (stationary) this.smQuat.copy(nav.quat);
+    else this.smQuat.slerp(nav.quat, 1 - Math.exp(-dt * 7.5));
     _sq.copy(this.smQuat).invert().multiply(nav.quat);
-    const rollTarget = Math.max(-0.55, Math.min(0.55, -_sq.y * 14));
-    this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * 5));
+    const motion = THREE.MathUtils.smoothstep(speed, 8, 180);
+    const turnBank = -_sq.y * 13 * motion;
+    const strafeBank = -(flightInput?.strafe || 0) * 0.3;
+    const rollTarget = THREE.MathUtils.clamp(turnBank + strafeBank, -0.55, 0.55);
+    if (stationary) this.roll = 0;
+    else {
+      const rollResponse = Math.abs(rollTarget) > Math.abs(this.roll) ? 8.5 : 10.5;
+      this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * rollResponse));
+    }
     _sf.set(0, 0, -1).applyQuaternion(this.smQuat);   // forward
     _su.set(0, 1, 0).applyQuaternion(this.smQuat);
     this.thrustPose = this.thrustPose ?? 0;

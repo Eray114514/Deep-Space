@@ -31,6 +31,7 @@ import { VolumetricPass } from './volumetric-pass.js';
 import { ForegroundPass } from './foreground-pass.js';
 import { RiftDistortionShader, SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons } from './surface-weapons.js';
+import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -43,13 +44,28 @@ const qs = new URLSearchParams(location.search);
 document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
 const DEV_SERVER = window.__NMS_DEV_SERVER__ === true;
 const WORLD_LAB = DEV_SERVER && qs.get('worldlab') === '1';
-const CANONICAL_WORLD_SEED = 'NAVEMI-382';
+const GALAXY = getGalaxyConfig(WORLD_LAB ? qs.get('galaxy') || ACTIVE_GALAXY_ID : ACTIVE_GALAXY_ID);
+const GALAXY_ID = GALAXY.id;
+const CANONICAL_WORLD_SEED = GALAXY.seed;
 document.body.classList.toggle('dev-runtime', DEV_SERVER);
 let SEED = WORLD_LAB && qs.get('seed') ? qs.get('seed') : CANONICAL_WORLD_SEED;
 if (!WORLD_LAB && qs.has('seed')) {
   const canonicalUrl = new URL(location.href);
   canonicalUrl.searchParams.delete('seed');
   history.replaceState(null, '', canonicalUrl);
+}
+function createUniverse(seed) {
+  return new Universe(seed, scene, {
+    galaxyId: GALAXY_ID,
+    blackHoleSystem: GALAXY.blackHoleSystem,
+    bodyTuning: (systemId, bodyId) => resolveBodyTuning({
+      galaxyId: GALAXY_ID,
+      seed,
+      systemId,
+      bodyId,
+      worldLabParams: WORLD_LAB ? qs : null,
+    }),
+  });
 }
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
@@ -106,6 +122,11 @@ scene.add(camera);
 
 const ambient = new THREE.AmbientLight(0x506080, 0.09);
 const hemi = new THREE.HemisphereLight(0x88aaff, 0x223311, 0);
+const RIFT_FILL_INTENSITY = 0.22;
+const RIFT_ARRIVAL_ADAPTATION = 2.4;
+const riftFill = new THREE.AmbientLight(0xa8bcff, RIFT_FILL_INTENSITY);
+riftFill.visible = false;
+scene.add(riftFill);
 const headlamp = new THREE.PointLight(0xffeed0, 0, 110, 1.4);
 scene.add(ambient, hemi, headlamp);
 
@@ -235,7 +256,9 @@ const referenceBodyFramePrev = new THREE.Quaternion();
 let referenceBodyFrameValid = false;
 let frameNo = 0;
 let lastBuildFrame = 0;
+let loadingCleared = false;
 let paused = false;
+let blackHoleObservatoryOpen = false;
 let pointerLockRequest = null;
 let timeWarp = null;
 let photoMode = false;
@@ -255,15 +278,23 @@ let riftRoute = null;
 let riftPreviewSystem = null;
 let riftForcedPost = false;
 let riftBloomState = null;
+let riftArrivalFill = 0;
 const RIFT_SPAWN_DISTANCE = 780;
 const RIFT_CAPTURE_DISTANCE = 1900;
+const PLANET_ARRIVAL_FACTOR = 1.68;
+const INITIAL_ORBIT_FACTOR = 1.72;
 const riftEntranceUniv = new THREE.Vector3();
 const riftTargetUniv = new THREE.Vector3();
+const riftPreviewOriginUniv = new THREE.Vector3();
 const riftOrientation = new THREE.Quaternion();
 const riftLocalPos = new THREE.Vector3();
 const riftLocalVel = new THREE.Vector3();
 const riftInverse = new THREE.Quaternion();
 const riftAssistQuat = new THREE.Quaternion();
+const riftPortalClearColor = new THREE.Color();
+const riftPortalVisibility = [];
+let riftPortalClearAlpha = 1;
+let riftPortalFog = null;
 let dialAcc = 0;
 function walkWeatherFor(planet, localUp, sunLocal) {
   if (!planet) return 'clear';
@@ -285,7 +316,7 @@ let celestialClock = new CelestialClock(SEED, {
   persist: !Number.isFinite(fixedTime),
   frozen: FREEZE,
 });
-let universe = new Universe(SEED, scene);
+let universe = createUniverse(SEED);
 universe.timeHours = celestialClock.hours;
 universe.system.updateCelestial(celestialClock.hours);
 const scatter = new Scatter();
@@ -402,6 +433,11 @@ renderer.domElement.addEventListener('pointerdown', () => {
 
 window.addEventListener('keydown', (e) => {
   audio.unlock();
+  if (blackHoleObservatoryOpen) {
+    if (e.code === 'Escape' || e.code === 'KeyO') closeBlackHoleObservatory();
+    e.preventDefault();
+    return;
+  }
   if (e.code === 'KeyM' || e.code === 'Tab') {
     e.preventDefault();
     if (starMap?.isOpen) closeStarMap();
@@ -424,6 +460,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'KeyL') tryLand();
+  if (!e.repeat && e.code === 'KeyO') {
+    const blackHole = nearbyBlackHole();
+    if (blackHole) openBlackHoleObservatory(blackHole);
+  }
   if (!e.repeat && e.code === 'Space' && state === 'space') {
     e.preventDefault();
     const allowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
@@ -458,6 +498,7 @@ window.addEventListener('keydown', (e) => {
 // ---- UI ---------------------------------------------------------------------
 const ui = new UI({
   worldLab: WORLD_LAB,
+  galaxyName: GALAXY.name,
   onStart: async () => {
     // Pointer Lock must be requested in the original click gesture. Audio
     // resume can settle slowly on some browsers and must never hold camera
@@ -490,8 +531,12 @@ starMap = new StarMap({
   onWarpTarget: (star, bodyId = null) => {
     closeStarMap(false);
     if (star.id === universe.system.star.id) {
-      const target = universe.system.planets.find((planet) => planet.bodyId === bodyId);
+      const target = universe.system.bodyById.get(bodyId);
       if (target) {
+        if (target.isBlackHole) {
+          approachBlackHole(target);
+          return;
+        }
         focusPlanet = target;
         spaceCtl.focus = target;
         flyToPlanet(target);
@@ -507,6 +552,89 @@ const pauseOverlay = document.getElementById('pause-overlay');
 const pausePanel = pauseOverlay.querySelector('.pause-panel');
 const pauseStatus = document.getElementById('pause-status');
 const resumeButton = document.getElementById('resume-btn');
+const blackHoleObservatory = document.getElementById('black-hole-observatory');
+const blackHoleFrame = document.getElementById('black-hole-frame');
+const blackHoleClose = document.getElementById('black-hole-close');
+const blackHoleSlingshot = document.getElementById('black-hole-slingshot');
+const blackHoleTitle = document.getElementById('black-hole-title');
+const blackHoleRadius = document.getElementById('black-hole-radius');
+const blackHoleDistance = document.getElementById('black-hole-distance');
+const blackHoleSpeed = document.getElementById('black-hole-speed');
+const blackHoleTime = document.getElementById('black-hole-time');
+let blackHoleStatsTimer = null;
+let observedBlackHole = null;
+
+function nearbyBlackHole() {
+  let closest = null;
+  let distance = Infinity;
+  for (const object of universe.system?.compactObjects || []) {
+    const d = nav.pos.distanceTo(object.posUniv);
+    if (d < distance) { closest = object; distance = d; }
+  }
+  return closest && distance < closest.spec.accretionRadius * 7 ? closest : null;
+}
+
+function updateBlackHoleReadouts() {
+  const stats = blackHoleFrame.contentWindow?.BlackHoleSlingshotObservatory?.getStats?.();
+  if (!stats) return;
+  blackHoleRadius.textContent = `${stats.radiusKm.toLocaleString('zh-CN', { maximumFractionDigits: 0 })} km`;
+  blackHoleDistance.textContent = `${stats.distanceKm.toLocaleString('zh-CN', { maximumFractionDigits: 0 })} km`;
+  blackHoleSpeed.textContent = `${stats.speedC.toFixed(3)} c`;
+  blackHoleTime.textContent = `${stats.timeDilation.toFixed(3)}×`;
+}
+
+function applyBlackHoleScene(index = 0, play = true) {
+  const bridge = blackHoleFrame.contentWindow?.BlackHoleSlingshotObservatory;
+  if (!bridge) return false;
+  bridge.applyScene(index, observedBlackHole?.spec?.blackHole?.massSolar);
+  if (play) bridge.play();
+  else bridge.pause();
+  updateBlackHoleReadouts();
+  return true;
+}
+
+function openBlackHoleObservatory(blackHole = nearbyBlackHole()) {
+  if (!blackHole || blackHoleObservatoryOpen) return false;
+  blackHoleObservatoryOpen = true;
+  observedBlackHole = blackHole;
+  clearFlightInput();
+  spaceCtl.enabled = false;
+  if (document.pointerLockElement) document.exitPointerLock();
+  blackHoleTitle.textContent = `${blackHole.name} · 引力弹弓观测`;
+  blackHoleObservatory.classList.remove('hidden');
+  document.body.classList.add('black-hole-mode');
+  if (!blackHoleFrame.getAttribute('src')) blackHoleFrame.src = '/assets/vendor/black-hole/demo.html';
+  clearInterval(blackHoleStatsTimer);
+  blackHoleStatsTimer = setInterval(updateBlackHoleReadouts, 350);
+  if (!applyBlackHoleScene(0, true)) {
+    const retry = setInterval(() => {
+      if (applyBlackHoleScene(0, true) || !blackHoleObservatoryOpen) clearInterval(retry);
+    }, 250);
+  }
+  return true;
+}
+
+function closeBlackHoleObservatory() {
+  if (!blackHoleObservatoryOpen) return false;
+  blackHoleObservatoryOpen = false;
+  observedBlackHole = null;
+  clearInterval(blackHoleStatsTimer);
+  blackHoleStatsTimer = null;
+  blackHoleFrame.contentWindow?.BlackHoleSlingshotObservatory?.pause?.();
+  blackHoleObservatory.classList.add('hidden');
+  document.body.classList.remove('black-hole-mode');
+  spaceCtl.enabled = state === 'space';
+  ui.setHint('已返回驾驶舱 · 点击画面重新接管视角 · O 再次观测', true);
+  return true;
+}
+
+blackHoleClose.addEventListener('click', closeBlackHoleObservatory);
+blackHoleSlingshot.addEventListener('click', () => applyBlackHoleScene(6, true));
+window.addEventListener('message', (event) => {
+  if (event.origin !== location.origin || event.source !== blackHoleFrame.contentWindow) return;
+  if (event.data?.type === 'black-hole-observatory:bridge-ready'
+      || event.data?.type === 'black-hole-observatory:ready') applyBlackHoleScene(0, true);
+});
 resumeButton.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || !paused) return;
   // Pointer Lock can cancel the click that follows pointerdown. Complete the
@@ -795,7 +923,8 @@ document.addEventListener('pointerlockchange', () => {
     return;
   }
   if (!window.NMS_NOLOCK && pointerLockInput && !document.pointerLockElement
-      && !paused && !starMap?.isOpen && !pendingRoute && (state === 'space' || state === 'walk')) {
+      && !paused && !blackHoleObservatoryOpen && !starMap?.isOpen && !pendingRoute && !riftRoute
+      && (state === 'space' || state === 'walk')) {
     pauseGame();
   }
 });
@@ -845,7 +974,7 @@ function setState(s) {
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>LMB</b> 射击 · <b>W/S</b> 推进/制动 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲巡航 · <b>M/TAB</b> 星图',
+    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>A/D</b> 侧推 · <b>LMB</b> 射击 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲巡航 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
@@ -1029,11 +1158,49 @@ function takeoff(planet = walkCtl.planet, launchPos = nav.pos.clone(), launchUp 
   return true;
 }
 
-function routeArrival(star, bodyId = null, forwardHint = null) {
-  const systemSpec = generateSystemSpec(SEED, star);
-  const bodies = new Map(systemSpec.bodies.map((body) => [body.bodyId, body]));
+function selectRouteBody(systemSpec, bodyId = null) {
+  const systemBodies = [...systemSpec.bodies, ...(systemSpec.compactObjects || [])];
+  const bodies = new Map(systemBodies.map((body) => [body.bodyId, body]));
   let body = bodyId ? bodies.get(bodyId) : null;
   if (body?.isMoon) body = bodies.get(body.parentId) || body;
+  if (body) return body;
+
+  const typePriority = { lush: 7, ocean: 6, desert: 4, ice: 3, barren: 2, exotic: 2, toxic: 1, lava: 0 };
+  const primaries = systemBodies.filter((candidate) => !candidate.isMoon);
+  const landable = primaries.filter((candidate) => candidate.landable !== false);
+  const candidates = landable.length ? landable : primaries;
+  return candidates.reduce((best, candidate) => {
+    if (!best) return candidate;
+    const candidateScore = (typePriority[candidate.type] ?? 1) * 1e7 + candidate.radius;
+    const bestScore = (typePriority[best.type] ?? 1) * 1e7 + best.radius;
+    return candidateScore > bestScore ? candidate : best;
+  }, null);
+}
+
+function blackHoleArrivalDistance(body) {
+  return body.type === 'blackHole'
+    ? body.accretionRadius * 2.75
+    : body.radius * PLANET_ARRIVAL_FACTOR;
+}
+
+function approachBlackHole(blackHole) {
+  const direction = nav.pos.clone().sub(blackHole.posUniv);
+  if (direction.lengthSq() < 1) direction.set(0.28, 0.12, 1);
+  direction.normalize();
+  nav.pos.copy(blackHole.posUniv).addScaledVector(direction, blackHole.spec.accretionRadius * 2.75);
+  nav.vel.set(0, 0, 0);
+  lookQuatAt(nav.pos, blackHole.posUniv, nav.quat);
+  focusPlanet = null;
+  spaceCtl.focus = null;
+  ui.setHint(`已抵达 ${blackHole.name} 安全观测距离 · O 进入相对论弹弓实验`, true);
+  return true;
+}
+
+function routeArrival(star, bodyId = null, forwardHint = null) {
+  const systemSpec = generateSystemSpec(SEED, star);
+  const systemBodies = [...systemSpec.bodies, ...(systemSpec.compactObjects || [])];
+  const bodies = new Map(systemBodies.map((body) => [body.bodyId, body]));
+  const body = selectRouteBody(systemSpec, bodyId);
   const center = star.pos.clone();
   if (body) {
     const resolvePosition = (spec, out = new THREE.Vector3()) => {
@@ -1044,16 +1211,35 @@ function routeArrival(star, bodyId = null, forwardHint = null) {
     };
     resolvePosition(body, center);
   }
-  const approach = forwardHint
-    ? forwardHint.clone().normalize().negate()
-    : nav.pos.clone().sub(center).normalize();
+  let approach;
+  if (body) {
+    // Enter from the star-facing hemisphere. A technically correct nightside
+    // insertion turned the destination into a planet-sized black silhouette,
+    // which read as a failed traversal. A small polar bias keeps a readable
+    // horizon without sacrificing the physically lit approach.
+    approach = star.pos.clone().sub(center);
+    if (approach.lengthSq() < 1) {
+      approach = forwardHint
+        ? forwardHint.clone().normalize().negate()
+        : nav.pos.clone().sub(center).normalize();
+    }
+    approach.normalize();
+    const polarBias = new THREE.Vector3(0, 1, 0).projectOnPlane(approach);
+    if (polarBias.lengthSq() < 0.01) polarBias.set(1, 0, 0).projectOnPlane(approach);
+    approach.addScaledVector(polarBias.normalize(), 0.16).normalize();
+  } else {
+    approach = forwardHint
+      ? forwardHint.clone().normalize().negate()
+      : nav.pos.clone().sub(center).normalize();
+  }
   if (approach.lengthSq() < 0.5) approach.set(0, 0, 1);
-  const clearance = body ? body.radius * 2.15 : Math.max(star.radius * 72, 1.4e9);
+  const clearance = body ? blackHoleArrivalDistance(body) : Math.max(star.radius * 72, 1.4e9);
   return {
     center,
     entry: center.clone().addScaledVector(approach, clearance),
     bodyId: body?.bodyId || null,
     bodyName: body?.name || null,
+    bodyRadius: body?.type === 'blackHole' ? body.accretionRadius : body?.radius || null,
   };
 }
 
@@ -1066,8 +1252,8 @@ function formatRouteDistance(distance) {
 
 function setPendingRoute(star, bodyId = null) {
   clearPendingRoute(false);
-  pendingRoute = { star, bodyId };
   const target = routeArrival(star, bodyId);
+  pendingRoute = { star, bodyId: target.bodyId };
   pendingRoute.target = target;
   const label = target.bodyName ? `${target.bodyName} · ${generateSystemSpec(SEED, star).name}`
     : generateSystemSpec(SEED, star).name;
@@ -1086,6 +1272,12 @@ function disposeRiftPreview() {
 
 function setRiftPreviewVisible(visible) {
   if (!riftPreviewSystem) return;
+  if (visible) {
+    riftFill.intensity = RIFT_FILL_INTENSITY;
+    riftFill.visible = true;
+  } else if (riftArrivalFill <= 0) {
+    riftFill.visible = false;
+  }
   for (const view of riftPreviewSystem.starViews) {
     view.group.visible = visible;
     view.light.visible = visible;
@@ -1094,7 +1286,56 @@ function setRiftPreviewVisible(visible) {
       view.light.intensity = 3.2 * Math.min(2.2, Math.sqrt(view.spec.luminositySolar));
     }
   }
-  for (const planet of riftPreviewSystem.planets) planet.group.visible = visible;
+  for (const body of [...riftPreviewSystem.planets, ...riftPreviewSystem.compactObjects]) body.group.visible = visible;
+}
+
+function addRiftPortalHidden(object) {
+  if (!object || riftPortalVisibility.includes(object)) return;
+  riftPortalVisibility.push(object, object.visible);
+  object.visible = false;
+}
+
+function hideSystemForRiftPortal(system) {
+  if (!system || system === riftPreviewSystem) return;
+  for (const view of system.starViews) {
+    addRiftPortalHidden(view.group);
+    addRiftPortalHidden(view.light);
+  }
+  for (const body of [...system.planets, ...system.compactObjects]) addRiftPortalHidden(body.group);
+}
+
+function beginRiftPortalScene() {
+  riftPortalVisibility.length = 0;
+  hideSystemForRiftPortal(universe.system);
+  hideSystemForRiftPortal(universe.fadingSystem);
+  for (const object of [
+    skyDome.mesh,
+    ship.group,
+    weapons.glowMesh,
+    weapons.coreMesh,
+    warpStreaks.lines,
+    warpStreaks.foldTunnel,
+    sunShadow,
+    hemi,
+    ambient,
+    headlamp,
+  ]) addRiftPortalHidden(object);
+  riftPortalFog = scene.fog;
+  scene.fog = null;
+  renderer.getClearColor(riftPortalClearColor);
+  riftPortalClearAlpha = renderer.getClearAlpha();
+  renderer.setClearColor(0x000006, 1);
+  setRiftPreviewVisible(true);
+}
+
+function endRiftPortalScene() {
+  setRiftPreviewVisible(false);
+  for (let i = 0; i < riftPortalVisibility.length; i += 2) {
+    riftPortalVisibility[i].visible = riftPortalVisibility[i + 1];
+  }
+  riftPortalVisibility.length = 0;
+  scene.fog = riftPortalFog;
+  renderer.setClearColor(riftPortalClearColor, riftPortalClearAlpha);
 }
 
 function clearPendingRoute(restoreInput = true) {
@@ -1112,6 +1353,8 @@ function clearPendingRoute(restoreInput = true) {
 function beginSelectedWarp() {
   if (!pendingRoute || state !== 'space') return;
   const route = pendingRoute;
+  requestGameplayPointerLock();
+  ui.beginTravel();
   clearPendingRoute(false);
   warpTo(route.star, route.bodyId);
 }
@@ -1152,13 +1395,18 @@ function beginSelectedRift() {
   const route = pendingRoute;
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
   const arrival = routeArrival(route.star, route.bodyId, forward);
+  arrival.offset = arrival.entry.clone().sub(arrival.center);
+  arrival.quat = lookQuatAt(arrival.entry, arrival.center, new THREE.Quaternion());
+  requestGameplayPointerLock();
+  ui.beginTravel();
   clearPendingRoute(false);
   spaceCtl.enabled = true;
   ui.setCrosshair(true);
-  requestGameplayPointerLock();
   riftRoute = { ...route, arrival, arrived: false, anchorLocked: false, lastHintBand: -1 };
+  riftArrivalFill = 0;
   riftEntranceUniv.copy(nav.pos).addScaledVector(forward, RIFT_SPAWN_DISTANCE);
   riftTargetUniv.copy(arrival.entry);
+  riftPreviewOriginUniv.copy(arrival.entry);
   riftOrientation.copy(nav.quat);
   pulseEngaged = false;
   pulseActive = false;
@@ -1167,11 +1415,12 @@ function beginSelectedRift() {
   if (nav.vel.length() > 18) nav.vel.setLength(18);
   riftPreviewSystem = new StarSystem(universe, route.star, {
     deferred: true,
+    fadeInPlanets: false,
     timeHours: celestialClock.hours,
   });
-  // Stellar routes only need the destination suns. Planet routes build just
-  // far enough to include the selected body instead of constructing a second
-  // full procedural system before the opening animation can move.
+  // Build only far enough to include the selected body. Rift previews are
+  // immediately opaque: unlike a live system handoff, this isolated system is
+  // not part of the normal per-frame planet fade update.
   if (route.bodyId) {
     while (!riftPreviewSystem.bodyById.has(route.bodyId) && riftPreviewSystem.buildNext());
   }
@@ -1179,12 +1428,24 @@ function beginSelectedRift() {
   spatialRift.setTransform(
     riftEntranceUniv.clone().sub(nav.pos),
     riftOrientation,
-    riftTargetUniv.clone().sub(nav.pos),
+    _v3.set(0, 0, 0),
+    arrival.quat,
   );
   spatialRift.openPassage();
   enableRiftEffects();
   audio.cue('warp');
   ui.setHint('弦界坐标钉定 · 航道正在船头展开', true);
+}
+
+function syncRiftDestination() {
+  if (!riftRoute || !riftPreviewSystem || !riftRoute.arrival.bodyId) return;
+  riftPreviewSystem.updateCelestial(celestialClock.hours);
+  const body = riftPreviewSystem.bodyById.get(riftRoute.arrival.bodyId);
+  if (!body) return;
+  riftRoute.arrival.center.copy(body.posUniv);
+  riftRoute.arrival.entry.copy(body.posUniv).add(riftRoute.arrival.offset);
+  riftTargetUniv.copy(riftRoute.arrival.entry);
+  riftPreviewOriginUniv.copy(riftRoute.arrival.entry);
 }
 
 function updateDestinationMarker() {
@@ -1218,6 +1479,7 @@ function updateDestinationMarker() {
 
 function updateRiftRoute(dt) {
   if (!riftRoute) return;
+  if (!riftRoute.arrived) syncRiftDestination();
   spatialRift.update(dt, clock.elapsedTime);
   if (!riftRoute.arrived) {
     if (!riftRoute.anchorLocked) {
@@ -1272,29 +1534,58 @@ function updateRiftRoute(dt) {
         const band = riftLocalPos.z > 560 ? 10 : riftLocalPos.z > 110 ? 11 : 12;
         if (band !== riftRoute.lastHintBand) {
           riftRoute.lastHintBand = band;
-          ui.setHint(`航道已稳定 · 接近限速 ${speedCap} m/s · W 推进 / S 制动`, true);
+          ui.setHint(`航道已稳定 · ${riftRoute.label} · 限速 ${speedCap} m/s · W 推进 / S 制动`, true);
         }
       } else if (riftRoute.lastHintBand !== 13) {
         riftRoute.lastHintBand = 13;
-        ui.setHint('航道航速锁定 145 m/s · 将船头对准发光入口', true);
+        ui.setHint(`${riftRoute.label} · 航速锁定 145 m/s · 将船头对准发光入口`, true);
       }
     }
   }
   const entranceRender = riftEntranceUniv.clone().sub(nav.pos);
-  const targetRender = riftTargetUniv.clone().sub(nav.pos);
-  spatialRift.setTransform(entranceRender, riftOrientation, targetRender);
+  // The portal render owns a destination-local coordinate system whose entry
+  // point is the origin. The actual universe position remains in
+  // riftTargetUniv and is applied only when the ship crosses the threshold.
+  spatialRift.setTransform(entranceRender, riftOrientation, _v3.set(0, 0, 0), riftRoute.arrival.quat);
   if (!riftRoute.arrived) {
     const previousRender = prevNavPos.clone().sub(nav.pos);
     if (spatialRift.crossed(previousRender, _v3.set(0, 0, 0))) {
-      const offset = riftRoute.arrival.entry.clone().sub(nav.pos);
       nav.pos.copy(riftRoute.arrival.entry);
-      riftEntranceUniv.add(offset);
-      disposeRiftPreview();
-      const destination = universe.setSystem(riftRoute.star, true);
+      riftAssistQuat.copy(riftRoute.arrival.quat).multiply(riftOrientation.clone().invert());
+      nav.quat.premultiply(riftAssistQuat);
+      nav.vel.applyQuaternion(riftAssistQuat);
+      const destination = universe.adoptSystem(riftPreviewSystem);
+      riftPreviewSystem = null;
       destination.updateCelestial(celestialClock.hours);
+      for (const view of destination.starViews) {
+        view.group.visible = true;
+        view.light.visible = true;
+      }
+      for (const body of [...destination.planets, ...destination.compactObjects]) body.group.visible = true;
+      // Preserve the exact portal lighting across the threshold, then let the
+      // pilot's view adapt to the destination's natural light. An immediate
+      // cut made an unchanged planet read as if it vanished and reappeared.
+      riftArrivalFill = RIFT_ARRIVAL_ADAPTATION;
+      riftFill.intensity = RIFT_FILL_INTENSITY;
+      riftFill.visible = true;
+      universe.relativizeSystem(destination, nav.pos);
+      const arrivalBody = destination.bodyById.get(riftRoute.arrival.bodyId) || null;
+      if (arrivalBody) {
+        focusPlanet = arrivalBody;
+        spaceCtl.focus = arrivalBody;
+      }
+      _v2.set(0, 0, -1).applyQuaternion(riftOrientation).normalize();
+      riftEntranceUniv.copy(nav.pos).addScaledVector(_v2, -(spatialRift.depth + 90));
+      spatialRift.setTransform(
+        riftEntranceUniv.clone().sub(nav.pos),
+        riftRoute.arrival.quat,
+        _v3.set(0, 0, 0),
+        riftRoute.arrival.quat,
+      );
       spatialRift.markTraversed();
       riftRoute.arrived = true;
-      ui.setHint(`已穿越弦界航道 · ${destination.name}`, true);
+      setState('space');
+      ui.showArrival(arrivalBody?.name || destination.name, destination.name, '弦界抵达');
     }
   } else if (!spatialRift.group.visible) {
     restoreRiftEffects();
@@ -1302,13 +1593,36 @@ function updateRiftRoute(dt) {
   }
 }
 
+function updateRiftArrivalFill(dt) {
+  if (riftArrivalFill <= 0) return;
+  riftArrivalFill = Math.max(0, riftArrivalFill - dt);
+  const remaining = riftArrivalFill / RIFT_ARRIVAL_ADAPTATION;
+  const adapted = remaining * remaining * (3 - 2 * remaining);
+  riftFill.intensity = RIFT_FILL_INTENSITY * adapted;
+  if (riftArrivalFill <= 0) riftFill.visible = false;
+}
+
 function renderRiftPortal() {
   if (!riftRoute || riftRoute.arrived || !riftPreviewSystem) return;
-  riftPreviewSystem.updateCelestial(celestialClock.hours);
-  universe.relativizeSystem(riftPreviewSystem, nav.pos);
+  syncRiftDestination();
+  // The preview system is deliberately excluded from the live universe update.
+  // Prime its planet LODs from the virtual destination camera so their root
+  // chunks are visible inside the portal instead of leaving only a starfield.
+  for (const planet of riftPreviewSystem.planets) {
+    _v.copy(riftPreviewOriginUniv).sub(planet.posUniv);
+    planet.update(_v, 1 / 60, planet.bodyId === riftRoute.arrival.bodyId, 0);
+  }
+  for (const object of riftPreviewSystem.compactObjects) object.updateVisual?.(performance.now() * 0.001);
+  for (const view of riftPreviewSystem.starViews) {
+    view.group.position.copy(view.positionUniv).sub(riftPreviewOriginUniv);
+    view.light.position.copy(view.group.position);
+  }
+  for (const body of [...riftPreviewSystem.planets, ...riftPreviewSystem.compactObjects]) {
+    body.group.position.copy(body.posUniv).sub(riftPreviewOriginUniv);
+  }
   spatialRift.renderPortal({
-    beforeRender: () => setRiftPreviewVisible(true),
-    afterRender: () => setRiftPreviewVisible(false),
+    beforeRender: beginRiftPortalScene,
+    afterRender: endRiftPortalScene,
   });
 }
 
@@ -1347,7 +1661,7 @@ function warpTo(star, preferBodyId = null) {
       const s = kf * kf * kf * (kf * (kf * 6 - 15) + 10);
       if (arrivalSpec) {
         const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
-        endPos.copy(heroPos).addScaledVector(revealDirection, arrivalSpec.radius * 2.15);
+        endPos.copy(heroPos).addScaledVector(revealDirection, blackHoleArrivalDistance(arrivalSpec));
         targetQuat = lookQuatAt(nav.pos, heroPos, targetQuat);
       }
       nav.pos.lerpVectors(startPos, endPos, s);
@@ -1360,6 +1674,9 @@ function warpTo(star, preferBodyId = null) {
         // the tunnel, then converge on a large planet for the exit reveal.
         swapped = true;
         const destination = universe.setSystem(star, true);
+        if (preferBodyId) {
+          while (!destination.bodyById.has(preferBodyId) && destination.buildNext());
+        }
         // a planet chosen in the system preview becomes the arrival reveal
         let hero = null;
         if (preferBodyId) {
@@ -1371,7 +1688,7 @@ function warpTo(star, preferBodyId = null) {
           const heroPos = destination.frames.get(hero.bodyId).position;
           revealDirection = startPos.clone().sub(heroPos).normalize();
           arrivalSystem = destination; arrivalSpec = hero;
-          endPos = heroPos.clone().addScaledVector(revealDirection, hero.radius * 2.15);
+          endPos = heroPos.clone().addScaledVector(revealDirection, blackHoleArrivalDistance(hero));
           targetQuat = lookQuatAt(startPos, heroPos, new THREE.Quaternion());
           arrivalPlanetName = hero.name;
         }
@@ -1382,17 +1699,26 @@ function warpTo(star, preferBodyId = null) {
     camera.fov = BASE_FOV;
     camera.updateProjectionMatrix();
     warpIntensity = 0;
-    if (arrivalPlanetName) {
+    let arrivalDisplayName = universe.system.name;
+    if (arrivalSpec?.type === 'blackHole') {
+      const blackHole = universe.system.bodyById.get(arrivalSpec.bodyId);
+      if (blackHole) {
+        approachBlackHole(blackHole);
+        arrivalDisplayName = blackHole.name;
+      }
+    } else if (arrivalPlanetName) {
       const arrivalPlanet = universe.system.planets.find((planet) => planet.name === arrivalPlanetName);
       if (arrivalPlanet) {
         focusPlanet = arrivalPlanet;
         spaceCtl.focus = arrivalPlanet;
         lookQuatAt(nav.pos, arrivalPlanet.posUniv, nav.quat);
+        arrivalDisplayName = arrivalPlanet.name;
       }
     } else {
       ui.setHint(`已抵达 ${universe.system.name} · 星系安全入口`, true);
     }
     setState('space');
+    ui.showArrival(arrivalDisplayName, universe.system.name, '跃迁抵达');
   });
 }
 
@@ -1407,6 +1733,10 @@ function newUniverse(seed) {
   if (document.pointerLockElement) document.exitPointerLock();
   tweens.length = 0;
   clearPendingRoute(false);
+  ui.endTravel();
+  riftArrivalFill = 0;
+  riftFill.visible = false;
+  riftFill.intensity = RIFT_FILL_INTENSITY;
   disposeRiftPreview();
   riftRoute = null;
   spatialRift.group.visible = false;
@@ -1424,7 +1754,7 @@ function newUniverse(seed) {
     persist: !Number.isFinite(fixedTime),
     frozen: FREEZE,
   });
-  universe = new Universe(SEED, scene);
+  universe = createUniverse(SEED);
   universe.timeHours = celestialClock.hours;
   universe.system.updateCelestial(celestialClock.hours);
   wireUniverse(universe);
@@ -1445,7 +1775,7 @@ function spawn() {
   const sunDir = sys.sunDirFrom(planet.posUniv, _v).clone();
   const side = _v2.crossVectors(sunDir, _v3.set(0, 1, 0)).normalize();
   const dir = sunDir.clone().addScaledVector(side, 0.85).normalize();
-  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * 2.10);
+  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * INITIAL_ORBIT_FACTOR);
   lookQuatAt(nav.pos, planet.posUniv, nav.quat);
   nav.quat.multiply(_q.setFromAxisAngle(_v3.set(0, 1, 0), 0.18));
   nav.vel.set(0, 0, 0);
@@ -1623,6 +1953,10 @@ function frame() {
         const dq = _q.copy(referenceBody.frameOrientation).multiply(referenceBodyFramePrev.invert());
         nav.pos.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
         nav.quat.premultiply(dq);
+        // nav.vel is body-relative while this assist is active. Rotate it with
+        // the local frame so a held strafe/approach direction does not drift as
+        // the ground turns underneath the ship.
+        nav.vel.applyQuaternion(dq);
         if (riftRoute && !riftRoute.arrived && riftRoute.anchorLocked) {
           riftEntranceUniv.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
           riftOrientation.premultiply(dq);
@@ -1744,6 +2078,7 @@ function frame() {
   }
   stepTweens(dt);
   updateRiftRoute(dt);
+  updateRiftArrivalFill(dt);
   updateDestinationMarker();
 
   // The ship reactor recharges pulse energy after a short thermal cooldown.
@@ -1871,8 +2206,12 @@ function frame() {
   // Atmospheric buffeting is coherent, not per-frame random noise. Random
   // offsets made right-click acceleration read as a broken flight model.
   const trueSpd = _velActual.length();
-  if (envInAtmo > 0.05 && trueSpd > 220 && (state === 'space' || state === 'flyto')) {
-    const amp = Math.min(1, trueSpd / 3200) * envInAtmo * (0.16 + boostVisual * 0.08);
+  // Manual flight velocity is relative to the currently followed body. Using
+  // absolute universe displacement here made a zero-speed hover inherit the
+  // planet's rotation and falsely trigger continuous atmospheric buffeting.
+  const flightSpd = state === 'space' ? nav.vel.length() : trueSpd;
+  if (envInAtmo > 0.05 && flightSpd > 220 && (state === 'space' || state === 'flyto')) {
+    const amp = Math.min(1, flightSpd / 3200) * envInAtmo * (0.16 + boostVisual * 0.08);
     const t = clock.elapsedTime;
     camera.position.set(
       Math.sin(t * 17.3) * amp,
@@ -1893,10 +2232,13 @@ function frame() {
   }
 
   // the ship flies just ahead of the camera whenever we're in flight
-  ship.update(dt, nav, state, trueSpd, warpIntensity, Math.max(boostVisual, pulseVisual * 1.3));
+  ship.update(dt, nav, state, flightSpd, warpIntensity, Math.max(boostVisual, pulseVisual * 1.3), {
+    throttle: spaceCtl.throttleInput,
+    strafe: spaceCtl.strafeInput,
+  });
   audio.update({
     state,
-    speed: trueSpd,
+    speed: flightSpd,
     atmosphere: envInAtmo,
     boosting: boostVisual > 0.12 || pulseVisual > 0.12,
     warp: warpIntensity,
@@ -2006,7 +2348,10 @@ function frame() {
   if (usePost) composer.render();
   else renderer.render(scene, camera);
   prevNavPos.copy(nav.pos);
-  if (frameNo === 3) ui.setLoading(false);
+  if (!loadingCleared && frameNo >= 3) {
+    loadingCleared = true;
+    ui.setLoading(false);
+  }
 }
 
 wireUniverse(universe);
@@ -2027,6 +2372,7 @@ window.NMS = {
   get state() { return state; },
   get paused() { return paused; },
   seed: () => SEED,
+  galaxy: () => ({ id: GALAXY_ID, name: GALAXY.name }),
   frame: () => frameNo,
   idle() {
     return frameNo > 10 && pendingChunks() === 0 && farFlora.pending() === 0
@@ -2058,10 +2404,14 @@ window.NMS = {
       axialTiltDeg: p.spec ? p.spec.axialTilt * 180 / Math.PI : null,
       equilibriumK: p.spec?.equilibriumK ?? null,
       atmosphere: p.spec?.atmosphere ?? null,
+      magnetosphere: p.spec?.magnetosphere ?? null,
+      clouds: p.spec?.clouds ?? null,
+      seaLevel: p.hasLiquid ? p.seaLevel : null,
+      cloudCoverage: p.cloudCoverage || 0,
+      tuning: p.tuning ? { ...p.tuning } : {},
       localSolarTime: localSolarTimeAt(p, p === nearest ? nav.pos : null),
       hasLiquid: p.hasLiquid, liquid: p.liquid,
       cloudAlt: p.cloudBands && p.cloudBands.length ? Math.round(p.cloudBands[0].r - p.R) : 0,
-      cloudCoverage: p.cloudCoverage || 0,
     }));
   },
   // place the camera near planet i at alt = R*altFactor, on the sunlit side
@@ -2390,6 +2740,7 @@ window.NMS = {
     name: universe.system.name,
     properName: universe.system.spec.properName,
     catalogId: universe.system.spec.catalogId,
+    isBlackHoleSystem: !!universe.system.spec.isBlackHoleSystem,
     generationVersion: universe.system.spec.generationVersion,
     habitableZoneAU: universe.system.spec.habitableZoneAU,
     snowLineAU: universe.system.spec.snowLineAU,
@@ -2405,10 +2756,17 @@ window.NMS = {
       catalogName: body.catalogName, type: body.type, radius: body.radius,
       landable: body.landable, equilibriumK: body.equilibriumK,
       atmosphere: body.atmosphere,
+      magnetosphere: body.magnetosphere, clouds: body.clouds,
       rotationPeriodHours: body.rotationPeriodHours, axialTilt: body.axialTilt,
       orbit: { ...body.orbit },
       position: universe.system.positionAt(body.bodyId, celestialClock.hours).toArray(),
       velocity: universe.system.velocityAt(body.bodyId, celestialClock.hours).toArray(),
+    })),
+    compactObjects: (universe.system.spec.compactObjects || []).map((body) => ({
+      bodyId: body.bodyId, name: body.name, catalogName: body.catalogName,
+      type: body.type, radius: body.radius, accretionRadius: body.accretionRadius,
+      blackHole: body.blackHole, orbit: { ...body.orbit },
+      position: universe.system.positionAt(body.bodyId, celestialClock.hours).toArray(),
     })),
     planets: universe.system.planets.length,
     fading: universe.fadingSystem ? universe.fadingSystem.star.id : null,
@@ -2447,7 +2805,7 @@ window.NMS = {
     return true;
   },
   warpToStar(id) {
-    let s = id ? universe.nearStarsList.find((x) => x.id === id) : null;
+    let s = id ? [...universe.nearStarsList, ...universe.specialDestinations].find((x) => x.id === id) : null;
     if (!s) {
       let best = Infinity;
       for (const st of universe.nearStarsList) {
@@ -2462,11 +2820,23 @@ window.NMS = {
   closeStarMap: () => { closeStarMap(false); return true; },
   get starMapOpen() { return !!starMap?.isOpen; },
   selectStarMapTarget(id) {
-    const star = universe.nearStarsList.find((item) => item.id === id);
+    const star = [...universe.nearStarsList, ...universe.specialDestinations].find((item) => item.id === id);
     if (!star || !starMap?.isOpen) return null;
     starMap.selectStar(star, false);
     return star.id;
   },
+  blackHoleDestination: () => universe.specialDestinations[0]
+    ? { id: universe.specialDestinations[0].id, name: universe.specialDestinations[0].name, position: universe.specialDestinations[0].pos.toArray() }
+    : null,
+  warpToBlackHole() {
+    const destination = universe.specialDestinations[0];
+    if (!destination) return false;
+    warpTo(destination, 'black-hole-0');
+    return true;
+  },
+  openBlackHoleObservatory: () => openBlackHoleObservatory(),
+  closeBlackHoleObservatory: () => closeBlackHoleObservatory(),
+  get blackHoleObservatoryOpen() { return blackHoleObservatoryOpen; },
   setStarMapMode(mode) {
     if (!starMap?.isOpen || !['galaxy', 'system'].includes(mode)) return false;
     starMap.setMode(mode);

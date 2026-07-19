@@ -11,15 +11,19 @@ import { SystemView } from './sysview.js';
 
 const AU = 149_597_870_700;
 const STAR_LIMIT = 320;
+const GALAXY_DEFAULT_DISTANCE = 70;
+const GALAXY_MIN_DISTANCE = 8;
 const TYPE_COLORS = {
   lush: 0x52d7a4, ocean: 0x4ea7ff, desert: 0xe2aa65, ice: 0xb8e7ff,
   lava: 0xff6848, barren: 0x9da7ad, toxic: 0xb5e45d, exotic: 0xe47cff,
   gasGiant: 0xd29b68, iceGiant: 0x68c7df,
+  blackHole: 0xffb36a,
 };
 const TYPE_LABELS = {
   lush: '繁茂世界', ocean: '海洋世界', desert: '荒漠世界', ice: '冰封世界',
   lava: '火山世界', barren: '贫瘠世界', toxic: '剧毒世界', exotic: '异象世界',
   gasGiant: '气态巨星', iceGiant: '冰巨星',
+  blackHole: '恒星级黑洞',
 };
 
 function physicalStarClass(star) {
@@ -35,9 +39,10 @@ function distanceText(metres) {
 }
 
 function navigationStatus(preview) {
+  if (preview.isBlackHoleSystem) return { name: '联合引力观测禁区', coverage: 68, advisory: '极端曲率进近' };
   const primaries = preview.bodies.filter((body) => !body.isMoon);
   const habitable = primaries.filter((body) => body.type === 'lush' || body.type === 'ocean').length;
-  const anomalies = primaries.filter((body) => ['exotic', 'toxic', 'lava'].includes(body.type)).length;
+  const anomalies = primaries.filter((body) => ['exotic', 'toxic', 'lava', 'blackHole'].includes(body.type)).length;
   const giants = primaries.filter((body) => body.type === 'gasGiant' || body.type === 'iceGiant').length;
   if (preview.isHome) return { name: '联合殖民地核心区', coverage: 100, advisory: '完整航路数据' };
   if (anomalies >= 2) return { name: '异常隔离区', coverage: 22, advisory: '高风险进近' };
@@ -67,6 +72,23 @@ const RESOURCE_PROFILE = {
 const RESOURCE_POOL = ['H₂O', 'Fe', 'Cu', 'Ar', 'Ni', 'Co', 'Si', 'He₃', 'Pb', 'Al', 'C', 'NH₃', 'CH₄', 'S', 'Xe', 'Ir', 'Au', 'Cl', 'N', 'Na'];
 
 function bodyProfile(body, survey) {
+  if (body.type === 'blackHole') {
+    const hidden = (threshold, value, fallback = '数据不足') => survey >= threshold ? value : fallback;
+    const mass = body.blackHole?.massSolar;
+    return {
+      gravity: hidden(45, '无静止表面 · 潮汐梯度极强'),
+      temperature: hidden(28, `${Math.round(body.blackHole?.discTemperatureK || 0).toLocaleString('zh-CN')} K · 吸积盘峰值`),
+      atmosphere: hidden(55, '无 · 事件视界外为稀薄等离子体'),
+      magnetosphere: hidden(65, `时空曲率主导 · 自旋 ${body.blackHole?.spin.toFixed(2) ?? '—'}`),
+      fauna: '无', flora: '无', water: '无',
+      resources: ['引力透镜', 'X 射线', '相对论喷流', '时延信号', '吸积盘'],
+      knownResources: Math.min(5, Math.max(1, Math.floor(survey / 18))),
+      traits: survey >= 86
+        ? `质量 ${mass?.toFixed(2) ?? '—'} M☉ · 事件视界半径 ${body.blackHole?.eventHorizonKm.toFixed(1) ?? '—'} km`
+        : '特征：需要近距相对论测绘',
+      type: '恒星级黑洞',
+    };
+  }
   const rand = makeRng(body.seed + ':ui-profile');
   const giant = body.type === 'gasGiant' || body.type === 'iceGiant';
   const gravity = giant
@@ -75,12 +97,11 @@ function bodyProfile(body, survey) {
   const k = body.equilibriumK ?? 250;
   const tempLabel = k > 620 ? '极端高温' : k > 350 ? '炎热' : k >= 235 && k <= 330 ? '温和' : k > 190 ? '寒冷' : '严寒';
   const atmosphere = body.atmosphere?.composition
-    ? `${body.atmosphere.composition.join(' / ')}${body.atmosphere.pressureBar == null ? '' : ` · ${body.atmosphere.pressureBar.toFixed(2)} bar`}`
+    ? `${body.atmosphere.composition.join(' / ')}${body.atmosphere.pressureBar == null ? '' : ` · ${body.atmosphere.pressureBar.toFixed(3)} bar`}${body.atmosphere.state ? ` · ${body.atmosphere.state}` : ''}${body.clouds ? ` · ${body.clouds.regime}${body.clouds.coverage > 0.05 ? ` (${body.clouds.condensates.join(' / ')})` : ''}` : ''}`
     : '近真空';
-  const magneto = giant ? '强烈'
-    : body.type === 'lava' || body.type === 'barren' ? '微弱'
-    : body.type === 'lush' || body.type === 'ocean' ? (rand() < 0.5 ? '中等' : '强烈')
-    : ['微弱', '中等', '强烈'][Math.floor(rand() * 3)];
+  const magneto = body.magnetosphere
+    ? `${body.magnetosphere.label} · ${body.magnetosphere.origin} · ${body.magnetosphere.strengthEarth.toFixed(2)}×地球`
+    : giant ? '强烈' : '数据不足';
   const [faunaBase, floraBase] = BIO_PROFILE[body.type] || BIO_PROFILE.barren;
   const count = (base, max) => /^(无|未知)/.test(base) ? base : `${base} (${Math.floor(rand() * (max * 0.4))}/${max})`;
   const fauna = count(faunaBase, 3 + Math.floor(rand() * 9));
@@ -110,12 +131,13 @@ function bodyProfile(body, survey) {
 
 function previewSystem(seed, star, currentSystem) {
   const spec = currentSystem?.star.id === star.id ? currentSystem.spec : generateSystemSpec(seed, star);
-  const indexById = new Map(spec.bodies.map((body, index) => [body.bodyId, index]));
+  const allBodies = [...spec.bodies, ...(spec.compactObjects || [])];
+  const indexById = new Map(allBodies.map((body, index) => [body.bodyId, index]));
   return {
     name: spec.name, properName: spec.properName, catalogId: spec.catalogId,
-    systemId: spec.systemId, isHome: spec.isHome,
+    systemId: spec.systemId, isHome: spec.isHome, isBlackHoleSystem: !!spec.isBlackHoleSystem,
     star, stars: spec.stars, binaryOrbit: spec.binaryOrbit,
-    bodies: spec.bodies.map((body, index) => ({
+    bodies: allBodies.map((body, index) => ({
       ...body, index,
       parentSpec: body.parentId ? indexById.get(body.parentId) : -1,
       orbitSpec: body.orbit,
@@ -257,6 +279,7 @@ export class StarMap {
               <button data-sm-filter="habitable">宜居</button>
               <button data-sm-filter="anomaly">异常</button>
               <button data-sm-filter="frontier">边界</button>
+              <button data-sm-filter="blackHole">黑洞</button>
             </div>
             <div class="toolMeta"><span id="sm-sector">—</span><b id="sm-count">—</b></div>
           </section>
@@ -306,6 +329,7 @@ export class StarMap {
         <div id="sm-crosshair"></div>
         <div id="sm-navArrow"></div>
         <div id="sm-nameTag"></div>
+        <div id="sm-hoverTag" hidden></div>
       </div>
       <div id="sm-loading"><div class="loadBox"><div class="loadTitle">系统星图</div><div class="loadBar"><i></i></div></div></div>`;
     document.body.appendChild(root);
@@ -334,6 +358,7 @@ export class StarMap {
       controls: $('#sm-controls'),
       leftHud: $('#sm-leftHud'), rightHud: $('#sm-rightHud'), bottomHud: $('#sm-bottomHud'),
       navArrow: $('#sm-navArrow'), nameTag: $('#sm-nameTag'),
+      hoverTag: $('#sm-hoverTag'),
       loading: $('#sm-loading'),
     };
   }
@@ -361,9 +386,10 @@ export class StarMap {
     this.controls.enablePan = true;
     this.controls.screenSpacePanning = true;
     this.controls.panSpeed = 1.05;
-    this.controls.zoomSpeed = 0.8;
-    this.controls.minDistance = 28;
-    this.controls.maxDistance = 190;
+    this.controls.zoomSpeed = 1.35;
+    this.controls.minDistance = GALAXY_MIN_DISTANCE;
+    this.controls.maxDistance = 170;
+    this.controls.zoomToCursor = true;
     this.controls.target.set(0, 0, 0);
 
     this.world = new THREE.Group();
@@ -386,11 +412,11 @@ export class StarMap {
       button.addEventListener('click', () => {
         this.filter = button.dataset.smFilter;
         this.root.querySelectorAll('[data-sm-filter]').forEach((item) => item.classList.toggle('active', item === button));
-        if (this.mode === 'galaxy') this.buildGalaxy();
+        if (this.mode === 'galaxy') this.buildGalaxy(true);
       });
     }
     this.els.search.addEventListener('input', () => {
-      if (this.mode === 'galaxy') this.buildGalaxy();
+      if (this.mode === 'galaxy') this.buildGalaxy(true);
     });
     this.els.inspect.addEventListener('click', () => this.enterSystem());
     this.els.warpGalaxy.addEventListener('click', () => this.warpToSelection());
@@ -408,6 +434,25 @@ export class StarMap {
       this.pointerStart = null;
       if (moved < 7) this.pick(event);
     });
+    canvas.addEventListener('pointermove', (event) => {
+      if (this.mode !== 'galaxy' || this.pointerStart) {
+        this.els.hoverTag.hidden = true;
+        return;
+      }
+      const star = this.pickStarAt(event);
+      if (!star) {
+        this.els.hoverTag.hidden = true;
+        return;
+      }
+      const preview = this.systemPreview(star);
+      const code = preview.isBlackHoleSystem ? 'BH' : physicalStarClass(preview.stars[0]).code;
+      this.els.hoverTag.innerHTML = `<strong>${preview.properName}</strong><small>${code} · 单击选择 / 双击查看</small>`;
+      this.els.hoverTag.hidden = false;
+      const left = Math.min(innerWidth - 245, event.clientX + 16);
+      const top = Math.min(innerHeight - 64, event.clientY + 16);
+      this.els.hoverTag.style.transform = `translate3d(${left}px,${top}px,0)`;
+    });
+    canvas.addEventListener('pointerleave', () => { this.els.hoverTag.hidden = true; });
     canvas.addEventListener('dblclick', (event) => {
       const star = this.pickStarAt(event);
       if (star) {
@@ -423,8 +468,9 @@ export class StarMap {
     if (this.mode === 'system') {
       if (event.code === 'KeyV') this.sysview.setLabelsVisible(!this.sysview.labelsVisible);
       if (event.code === 'KeyQ') this.sysview.resetView();
-    } else if (event.code === 'Enter' || event.code === 'NumpadEnter') {
-      if (this.selectedStar) this.enterSystem();
+    } else {
+      if (event.code === 'KeyQ') this.resetGalaxyView();
+      if ((event.code === 'Enter' || event.code === 'NumpadEnter') && this.selectedStar) this.enterSystem();
     }
   }
 
@@ -451,7 +497,7 @@ export class StarMap {
     this.updateHints();
     this.els.loading.classList.add('done');
     this.resize();
-    this.buildGalaxy();
+    this.buildGalaxy(true);
     this.selectStar(this.selectedStar, false);
     this.clock.start();
     this.animate();
@@ -504,7 +550,7 @@ export class StarMap {
   updateHints() {
     const hints = this.mode === 'system'
       ? [['设定航线', 'X'], ['显示位置', 'V'], ['重置视角', 'Q'], ['返回银河', 'Esc']]
-      : [['查看星系', '⏎'], ['设定航线', 'X'], ['返回', 'Esc']];
+      : [['滚轮局部缩放', '↕'], ['重置视野', 'Q'], ['查看星系', '⏎'], ['设定航线', 'X'], ['返回', 'Esc']];
     this.els.controls.innerHTML = hints
       .map(([label, key]) => `<span class="hint">${label} <b class="key">${key}</b></span>`)
       .join('');
@@ -550,9 +596,13 @@ export class StarMap {
     const universe = this.getUniverse();
     const nav = this.getNav();
     const current = universe.system.star;
-    const source = [current, ...universe.nearStarsList]
+    const nearest = [current, ...universe.nearStarsList]
       .sort((a, b) => a.pos.distanceToSquared(nav.pos) - b.pos.distanceToSquared(nav.pos))
-      .slice(0, STAR_LIMIT);
+      .slice(0, Math.max(1, STAR_LIMIT - universe.specialDestinations.length));
+    const source = [...nearest];
+    for (const destination of universe.specialDestinations) {
+      if (!source.some((star) => star.id === destination.id)) source.push(destination);
+    }
     const query = this.els.search.value.trim().toLocaleLowerCase();
     const maxDistance = source.length ? source[source.length - 1].pos.distanceTo(nav.pos) : 1;
     return source.filter((star) => {
@@ -561,8 +611,9 @@ export class StarMap {
       const dist = star.pos.distanceTo(nav.pos);
       if (query && !preview.name.toLocaleLowerCase().includes(query) && !star.id.includes(query)) return false;
       if (this.filter === 'habitable' && !types.some((type) => type === 'lush' || type === 'ocean')) return false;
-      if (this.filter === 'anomaly' && !types.some((type) => type === 'exotic' || type === 'lava' || type === 'toxic')) return false;
+      if (this.filter === 'anomaly' && !types.some((type) => type === 'exotic' || type === 'lava' || type === 'toxic' || type === 'blackHole')) return false;
       if (this.filter === 'frontier' && dist < maxDistance * 0.58) return false;
+      if (this.filter === 'blackHole' && !preview.isBlackHoleSystem) return false;
       return true;
     });
   }
@@ -576,10 +627,17 @@ export class StarMap {
     this.pickables = [];
     this.labelData = [];
     this.els.labelLayer.replaceChildren();
-    this.controls.target.set(0, 0, 0);
   }
 
-  buildGalaxy() {
+  resetGalaxyView(focus = null) {
+    const target = focus || new THREE.Vector3();
+    this.camera.position.set(target.x, target.y + GALAXY_DEFAULT_DISTANCE, target.z + 0.01);
+    this.camera.up.set(0, 0, -1);
+    this.controls.target.copy(target);
+    this.controls.update();
+  }
+
+  buildGalaxy(resetView = false) {
     this.resetWorld();
     const nav = this.getNav();
     const current = this.getUniverse().system.star;
@@ -625,13 +683,42 @@ export class StarMap {
       }), 3,
     ));
     const starLight = new THREE.Points(pointGeometry, new THREE.PointsMaterial({
-      size: 5.5, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
+      size: 6.8, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
       transparent: true, opacity: 0.96, blending: THREE.AdditiveBlending,
       depthWrite: false, fog: false, toneMapped: false,
     }));
     starLight.userData = { kind: 'starPoints', stars };
     this.world.add(starLight);
     this.pickables.push(starLight);
+
+    // Authored destinations must be discoverable without hunting through
+    // hundreds of identical point sprites.  Keep the black hole marked at
+    // every zoom level with a compact lensing target, not a second star dot.
+    for (const destination of this.getUniverse().specialDestinations) {
+      const index = stars.findIndex((star) => star.id === destination.id);
+      if (index < 0) continue;
+      const marker = new THREE.Group();
+      marker.position.copy(this.mapPositions[index]);
+      marker.name = `special-destination:${destination.id}`;
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.softTexture, color: 0xff7f32, transparent: true, opacity: 0.38,
+        blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      }));
+      glow.scale.set(9, 9, 1);
+      marker.add(glow);
+      for (const [radius, opacity] of [[1.55, 0.92], [2.35, 0.34]]) {
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(radius, radius === 1.55 ? 0.12 : 0.055, 8, 72),
+          new THREE.MeshBasicMaterial({
+            color: 0xffb36a, transparent: true, opacity,
+            blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+          }),
+        );
+        ring.rotation.x = Math.PI / 2;
+        marker.add(ring);
+      }
+      this.world.add(marker);
+    }
 
     // faint survey range rings + a soft gravity-well glow — no route spaghetti
     for (const radius of [18, 36, 58, 78]) {
@@ -646,38 +733,47 @@ export class StarMap {
     well.position.y = -3;
     this.world.add(well);
 
-    this.camera.position.set(0, 118, 0.01);
-    this.camera.up.set(0, 0, -1);
-    this.controls.target.set(0, 0, 0);
-    this.controls.update();
+    if (resetView) {
+      const focusedResult = stars.length <= 3 && this.mapPositions.length
+        ? this.mapPositions.reduce((sum, point) => sum.add(point), new THREE.Vector3()).multiplyScalar(1 / this.mapPositions.length)
+        : null;
+      this.resetGalaxyView(focusedResult);
+    }
     this.els.count.textContent = `${stars.length} / ${STAR_LIMIT}`;
     this.els.sector.textContent = current.id;
     this.buildGalaxyLabels(stars, current);
+    if (resetView && stars.length === 1) this.selectStar(stars[0], false);
     this.updateSelectionMarker();
   }
 
   buildGalaxyLabels(stars, current) {
     const candidates = stars
-      .map((star, index) => ({ star, index, distance: this.mapPositions[index].lengthSq() }))
-      .filter((item) => item.star.id === current.id || item.distance < 38 * 38)
-      .sort((a, b) => (a.star.id === current.id ? -1 : b.star.id === current.id ? 1 : b.distance - a.distance));
-    const ranked = [];
-    for (const item of candidates) {
-      if (item.star.id !== current.id && ranked.some((picked) =>
-        this.mapPositions[picked.index].distanceTo(this.mapPositions[item.index]) < 9)) continue;
-      ranked.push(item);
-      if (ranked.length >= 10) break;
-    }
-    this.labelData = ranked.map(({ star, index }) => {
+      .map((star, index) => {
+        const preview = this.systemPreview(star);
+        const special = preview.isBlackHoleSystem;
+        const priority = special ? 1000
+          : star.id === this.selectedStar?.id ? 900
+          : star.id === current.id ? 800
+          : this.visitedSystems.has(star.id) ? 80
+          : 10;
+        return { star, index, preview, priority, distance: this.mapPositions[index].lengthSq() };
+      })
+      .sort((a, b) => b.priority - a.priority || a.distance - b.distance);
+    this.labelData = candidates.map(({ star, index, preview, priority }) => {
       const button = document.createElement('button');
       button.className = 'sm-map-label';
       button.innerHTML = '<i></i><strong></strong><small></small>';
       button.children[0].style.setProperty('--label-color', `#${star.color.getHexString()}`);
-      button.children[1].textContent = this.systemPreview(star).properName;
+      button.children[1].textContent = preview.properName;
       button.children[2].textContent = star.id === current.id
         ? '当前位置'
-        : `${physicalStarClass(this.systemPreview(star).stars[0]).code} · ${this.systemPreview(star).bodies.filter((b) => !b.isMoon).length} 行星`;
+        : preview.isBlackHoleSystem
+          ? 'BH · 唯一引力观测禁区'
+          : `${physicalStarClass(preview.stars[0]).code} · ${preview.bodies.filter((b) => !b.isMoon).length} 行星`;
       button.classList.toggle('current', star.id === current.id);
+      button.classList.toggle('selected', star.id === this.selectedStar?.id);
+      button.classList.toggle('black-hole', preview.isBlackHoleSystem);
+      button.title = preview.isBlackHoleSystem ? '唯一黑洞系统 · 单击选择，双击查看' : `${preview.properName} · 单击选择，双击查看`;
       button.addEventListener('click', (event) => {
         event.stopPropagation();
         this.selectStar(star);
@@ -690,9 +786,9 @@ export class StarMap {
       this.els.labelLayer.appendChild(button);
       return {
         button, position: this.mapPositions[index], star,
-        width: Math.min(230, 34 + this.systemPreview(star).properName.length * 16),
+        width: preview.isBlackHoleSystem ? 210 : Math.min(178, 28 + preview.properName.length * 13),
         height: star.id === current.id ? 43 : 34,
-        priority: star.id === current.id ? 100 : 10,
+        priority,
       };
     });
   }
@@ -769,11 +865,27 @@ export class StarMap {
   selectStar(star, focus = true) {
     this.selectedStar = star;
     this.selectedPlanet = null;
+    if (this.mode === 'galaxy' && this.labelData?.length) {
+      const currentId = this.getUniverse().system.star.id;
+      for (const item of this.labelData) {
+        const special = this.systemPreview(item.star).isBlackHoleSystem;
+        item.priority = special ? 1000
+          : item.star.id === star.id ? 900
+          : item.star.id === currentId ? 800
+          : this.visitedSystems.has(item.star.id) ? 80
+          : 10;
+        item.button.classList.toggle('selected', item.star.id === star.id);
+      }
+      this.updateMapLabels();
+    }
     const preview = this.systemPreview(star);
-    const cls = physicalStarClass(preview.stars[0]);
+    const cls = preview.isBlackHoleSystem
+      ? { code: 'BH', label: '黑洞系统', temp: '事件视界 · 相对论观测目标' }
+      : physicalStarClass(preview.stars[0]);
     const distance = star.pos.distanceTo(this.getNav().pos);
-    const primaryCount = preview.bodies.filter((body) => !body.isMoon).length;
+    const primaryCount = preview.bodies.filter((body) => !body.isMoon && body.type !== 'blackHole').length;
     const moonCount = preview.bodies.length - primaryCount;
+    const compactCount = preview.bodies.filter((body) => body.type === 'blackHole').length;
     const isCurrent = star.id === this.getUniverse().system.star.id;
     const canWarp = !isCurrent && this.getState() === 'space';
     const status = navigationStatus(preview);
@@ -783,7 +895,9 @@ export class StarMap {
     this.els.catalog.textContent = `代号 · ${preview.catalogId}`;
     this.els.targetName.textContent = preview.properName;
     this.els.classBox.textContent = cls.code;
-    this.els.classBox.style.background = `#${preview.stars[0] ? new THREE.Color(preview.stars[0].color).getHexString() : '#17e31a'}`;
+    this.els.classBox.style.background = preview.isBlackHoleSystem
+      ? 'radial-gradient(circle, #000 34%, #ffae67 38%, #4a1608 62%, #050709 68%)'
+      : `#${preview.stars[0] ? new THREE.Color(preview.stars[0].color).getHexString() : '#17e31a'}`;
     this.els.surveyValue.textContent = `${survey}%`;
     this.els.surveyBar.style.setProperty('--survey-progress', this.els.surveyValue.textContent);
     this.els.surveyBar.title = survey === 100 ? '已到访：完整星系数据' : `远程传感器覆盖 · ${status.advisory}`;
@@ -791,7 +905,7 @@ export class StarMap {
     this.els.faction.title = status.advisory;
     this.buildGlyph(preview);
     this.els.distance.textContent = isCurrent ? '当前位置' : distanceText(distance);
-    this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount} 卫星`;
+    this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount - compactCount} 卫星${compactCount ? ` / ${compactCount} 致密天体` : ''}`;
     this.els.temperature.textContent = cls.temp;
     this.els.inspect.disabled = false;
     this.els.warpGalaxy.disabled = !canWarp;
@@ -805,17 +919,23 @@ export class StarMap {
   }
 
   buildGlyph(preview) {
-    const primaries = preview.bodies.filter((body) => !body.isMoon).slice(0, 7);
+    const allPrimaries = preview.bodies.filter((body) => !body.isMoon);
+    const compact = allPrimaries.find((body) => body.type === 'blackHole');
+    const primaries = allPrimaries.filter((body) => body.type !== 'blackHole').slice(0, compact ? 6 : 7);
+    if (compact) primaries.push(compact);
     const starColor = new THREE.Color(preview.stars[0]?.color ?? 0xffffff);
     const binary = preview.stars.length > 1;
     const starBackground = binary
       ? `linear-gradient(100deg, #${starColor.getHexString()} 0 48%, #${new THREE.Color(preview.stars[1].color).getHexString()} 52% 100%)`
       : `#${starColor.getHexString()}`;
-    const parts = [`<i class="gMain" style="background:${starBackground};box-shadow:0 0 18px #${starColor.getHexString()}55"></i>`];
+    const mainBackground = preview.isBlackHoleSystem
+      ? 'radial-gradient(circle, #000 0 38%, #ffd3a0 41%, #ff7a32 46%, #170803 58%, #050709 70%)'
+      : starBackground;
+    const parts = [`<i class="gMain" style="background:${mainBackground};box-shadow:0 0 18px #${preview.isBlackHoleSystem ? 'ff934f' : starColor.getHexString()}88"></i>`];
     // distribute planet slots outward from the star, alternating sides
     const slots = [57, 31.5, 68, 22, 78, 12, 86];
     primaries.forEach((body, i) => {
-      const size = 10 + Math.min(16, (body.radius / 310_000) * 16) * (body.type === 'gasGiant' || body.type === 'iceGiant' ? 1.35 : 1);
+      const size = body.type === 'blackHole' ? 18 : 10 + Math.min(16, (body.radius / 310_000) * 16) * (body.type === 'gasGiant' || body.type === 'iceGiant' ? 1.35 : 1);
       const color = TYPE_COLORS[body.type] || 0x9ea7aa;
       parts.push(`<i class="gNode" role="button" data-glyph-index="${body.index}" title="${body.name}" style="left:${slots[i] ?? 90}%;width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:rgba(13,19,27,.82);border-color:#${new THREE.Color(color).getHexString()}"></i>`);
     });
@@ -874,7 +994,9 @@ export class StarMap {
     this.els.routeAction.disabled = !canWarp;
     label.textContent = !hasTarget ? '选择目标星球'
       : this.getState() !== 'space' ? '需返回飞船'
-        : isCurrent ? '自动导航至目标轨道' : '设定航线至目标轨道';
+        : this.selectedPlanet.type === 'blackHole'
+          ? isCurrent ? '前往安全观测距离' : '设定黑洞跃迁航线'
+          : isCurrent ? '自动导航至目标轨道' : '设定航线至目标轨道';
   }
 
   warpToSelection() {

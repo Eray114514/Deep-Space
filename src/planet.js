@@ -63,7 +63,7 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, fadeIn = false, sunDir = null }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, fadeIn = false, sunDir = null, tuning = null }) {
     this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
     // known at construction so even the root chunks bake sun shadows
     this.sunDirWorld = sunDir ? sunDir.clone() : new THREE.Vector3(0, 1, 0);
@@ -81,6 +81,8 @@ export class Planet {
     this.type = type;
     this.cfg = TYPES[type];
     this.atmosphere = atmosphere;
+    this.cloudProfile = clouds;
+    this.tuning = tuning ? { ...tuning } : {};
 
     // ---- dimensions: compressed planetary worlds, not gameplay marbles ----
     // Main planets are hundreds of kilometres in radius. This keeps low flight
@@ -90,7 +92,7 @@ export class Planet {
     // Relief grows with the world and can form kilometre-scale mountain belts.
     this.hAmp = Math.min(this.R * this.cfg.relief * (0.85 + rand() * 0.5), 7000 + rand() * 6000);
     this.gravity = 9.81 * clamp(this.R / 250000, 0.55, 1.5);
-    const pressureScale = atmosphere?.pressureBar == null ? 1 : clamp(Math.pow(atmosphere.pressureBar, 0.22), 0.45, 1.55);
+    const pressureScale = atmosphere?.pressureBar == null ? 1 : clamp(Math.pow(atmosphere.pressureBar, 0.22), 0.08, 1.55);
     this.atmoDensity = this.cfg.atmoDensity * (0.7 + rand() * 0.6) * pressureScale;
     this.atmoFraction = (isMoon ? 0.055 : 0.09) + rand() * (isMoon ? 0.025 : 0.045);
     this.cloudBaseFraction = (isMoon ? 0.022 : 0.035) + rand() * (isMoon ? 0.016 : 0.025);
@@ -126,7 +128,10 @@ export class Planet {
     // liquids
     this.liquid = this.cfg.liquid;
     this.hasLiquid = this.liquid !== null;
-    this.seaLevel = this.hasLiquid ? this.cfg.seaQ * this.contAmp + (rand() - 0.5) * 0.1 * this.contAmp : -1e9;
+    const seaLevelOffset = Number.isFinite(this.tuning.seaLevelOffset) ? this.tuning.seaLevelOffset : 0;
+    this.seaLevel = this.hasLiquid
+      ? this.cfg.seaQ * this.contAmp + (rand() - 0.5) * 0.1 * this.contAmp + seaLevelOffset
+      : -1e9;
     this.seaRadius = this.hasLiquid ? this.R + this.seaLevel : 0;
     // mountains grow from terrain above the waterline
     const seaC = this.hasLiquid ? this.seaLevel / this.contAmp : -0.25;
@@ -663,12 +668,18 @@ export class Planet {
       this.atmoHeight = Math.max(this.hAmp * 3.2, R * this.atmoFraction * 0.72);
     }
 
-    // clouds are a roll of the dice per planet, with their own coverage —
-    // plenty of worlds have clear skies
+    // Cloud coverage is part of the astronomy dossier. It is derived from
+    // pressure, temperature and condensates instead of being rerolled here.
     this.cloudBands = [];
     this.cloudCoverage = 0;
-    if (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds) {
-      const coverage = 0.3 + rand() * 0.55;
+    const naturalCloudCoverage = Number.isFinite(this.cloudProfile?.coverage)
+      ? clamp(this.cloudProfile.coverage, 0, 0.85)
+      : (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds ? 0.3 + rand() * 0.55 : 0);
+    const tunedCloudCoverage = Number.isFinite(this.tuning.cloudCoverage)
+      ? clamp(this.tuning.cloudCoverage, 0, 0.85)
+      : null;
+    const coverage = tunedCloudCoverage ?? naturalCloudCoverage;
+    if (coverage > 0.05) {
       this.cloudCoverage = coverage;
       // the visible clouds are shader-procedural (resolution-independent);
       // this small texture only serves the terrain's cast cloud shadows

@@ -73,6 +73,18 @@ export function guidePlanetApproach(velocity, forward, radialOut,
   return intersects;
 }
 
+export function applyFlightThrusters(velocity, quat, throttle, strafe, speedScale, dt) {
+  if (throttle) {
+    _f.set(0, 0, -1).applyQuaternion(quat);
+    velocity.addScaledVector(_f, throttle * speedScale * 3.0 * dt);
+  }
+  if (strafe) {
+    _r.set(1, 0, 0).applyQuaternion(quat);
+    velocity.addScaledVector(_r, strafe * speedScale * 4.2 * dt);
+  }
+  return velocity;
+}
+
 export class SpaceControls {
   constructor(dom, nav, { onClick } = {}) {
     this.dom = dom;
@@ -88,6 +100,8 @@ export class SpaceControls {
     this.firePressed = false;
     this.pulseDrive = false;
     this.wheelImpulse = 0;
+    this.throttleInput = 0;
+    this.strafeInput = 0;
     this.focus = null;               // planet (for RMB orbit / two-finger orbit)
 
     // active pointers (multi-touch aware: 1 finger = look, 2 = pinch-fly + orbit)
@@ -254,7 +268,9 @@ export class SpaceControls {
       ? (0.18 + this.atmosphereFactor * 0.7)
       : boosting
       ? (0.42 + this.atmosphereFactor * 0.46)
-      : 2.4;
+      // Keep some inertia in open space, while dense air still settles the
+      // ship promptly enough for a precise landing approach.
+      : (1.65 + this.atmosphereFactor * 0.75);
     nav.vel.multiplyScalar(Math.exp(-dt * drag));
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);
@@ -266,14 +282,16 @@ export class SpaceControls {
     } else {
       this.wheelImpulse = 0;
     }
-    // gentle WASD strafing as a bonus in space
+    // Keyboard thrusters complement mouse steering. A/D used to share the
+    // same weak acceleration as W/S, so lateral motion was almost invisible
+    // against a planet or at orbital speed. Give the lateral jets their own
+    // stronger authority and expose the axes to the ship presentation.
     if (this.enabled) {
       const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
       const r = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
-      if (f || r) {
-        _f.set(r, 0, -f).normalize().applyQuaternion(nav.quat);
-        nav.vel.addScaledVector(_f, this.speedScale * 2.2 * dt);
-      }
+      this.throttleInput = f;
+      this.strafeInput = r;
+      applyFlightThrusters(nav.vel, nav.quat, f, r, this.speedScale, dt);
       if (pulsing) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
         // Pulse cruise is an explicit 2× tier above RMB/Shift boost.
@@ -288,6 +306,9 @@ export class SpaceControls {
         const boostLimit = this.speedScale * (6.96 + (1 - this.atmosphereFactor) * 4.06);
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
       }
+    } else {
+      this.throttleInput = 0;
+      this.strafeInput = 0;
     }
     nav.pos.addScaledVector(nav.vel, dt);
   }

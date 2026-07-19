@@ -28,10 +28,20 @@ npm run test:terrain # heavier procedural terrain/LOD checks
 npm run build        # verified static output → dist/
 ```
 
-Released builds always use the curated `NAVEMI-382` universe. Seed overrides are a
+Released builds always use the curated `NAVEMI-382` seed for the `milky-way` galaxy. Seed overrides are a
 development-only world-lab tool: run `npm run dev`, then use
 `?worldlab=1&seed=ANYTHING`. Other useful development params include `&nolock=1`
 (no pointer lock).
+
+The current release contains one generated galaxy, `milky-way` (`银河系`). World-lab
+URLs may select a configured galaxy with `&galaxy=milky-way` and preview sparse
+body tuning with `&system=0,0,0&body=planet-0&sea=-420&clouds=0.55`. Permanent
+curation belongs in `src/world-config.js`; the procedural generators remain seed-pure.
+
+The Milky Way configuration also registers one authored compact-object destination:
+the **Erebus gravitational observatory**. Its central black hole, captured stars and
+relativistic flyby data use a separate versioned RNG namespace, so they do not reroll
+any established star system or planet.
 
 ## Controls
 
@@ -45,6 +55,7 @@ development-only world-lab tool: run `npm run dev`, then use
 | **L** / Land button | land when low enough | — |
 | **T** | — | take off |
 | **H** | photo mode (hide the HUD) | photo mode |
+| **O** | open the relativistic observatory when parked near Erebus | — |
 | **Esc** | abort fly-to | release mouse |
 
 Your ship flies just ahead of the camera in space — it banks into turns and its engines
@@ -131,6 +142,7 @@ precision at these scales; a second flat chunked LOD renders each planet's seas.
 | `src/planet.js` | planet archetypes, the `height` & `colorAt` functions, palettes, water/lava/ice, atmosphere shader, clouds, rings |
 | `src/quadtree.js` | chunked cube-sphere LOD with skirts, horizon culling, build budget |
 | `src/galaxy.js` | universe lattice, star systems, suns, skybox, nebulae |
+| `src/black-hole.js` | in-universe event horizon, photon ring and accretion-disc renderer |
 | `src/scatter.js` | instanced surface props by deterministic cell hash |
 | `src/controls.js` | space flight + spherical-gravity first-person walking |
 | `src/main.js` | state machine (space → fly-to → land → walk → take off → warp), ambience, camera-relative rendering |

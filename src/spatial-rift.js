@@ -6,7 +6,6 @@ import * as THREE from 'three';
 import { clamp, lerp, smoothstep } from './noise.js';
 
 const TAU = Math.PI * 2;
-const _origin = new THREE.Vector3();
 const _center = new THREE.Vector3();
 const _edgeX = new THREE.Vector3();
 const _edgeY = new THREE.Vector3();
@@ -136,6 +135,7 @@ export class SpatialRift {
     this.traversed = false;
     this.handoffActive = false;
     this.handoffFade = 0;
+    this.handoffElapsed = 0;
     this.stability = 0;
     this.animating = false;
     this.animFrom = 0;
@@ -159,6 +159,13 @@ export class SpatialRift {
     this.portalRT.texture.generateMipmaps = false;
     this.textureMatrix = new THREE.Matrix4();
     this.offsetMatrix = new THREE.Matrix4();
+    this.sourceFrameMatrix = new THREE.Matrix4();
+    this.targetFrameMatrix = new THREE.Matrix4();
+    this.inverseSourceMatrix = new THREE.Matrix4();
+    this.sourceQuaternion = new THREE.Quaternion();
+    this.targetQuaternion = new THREE.Quaternion();
+    this.frameRotation = new THREE.Quaternion();
+    this.unitScale = new THREE.Vector3(1, 1, 1);
     this.biasMatrix = new THREE.Matrix4().set(
       0.5, 0, 0, 0.5,
       0, 0.5, 0, 0.5,
@@ -265,6 +272,8 @@ export class SpatialRift {
         uAlpha: { value: alpha }, uPhase: { value: phase }, uBrightness: { value: brightness },
       },
       vertexShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_vertex>
         attribute float aAcross; attribute float aAngle; attribute float aRand;
         varying float vAcross; varying float vAngle; varying float vRand;
         uniform float uTime; uniform float uOpen; uniform float uTension; uniform float uBurst; uniform float uPhase;
@@ -277,9 +286,12 @@ export class SpatialRift {
           p.xy *= 1.0 + uBurst * .018;
           vAcross = aAcross; vAngle = aAngle; vRand = aRand;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+          #include <logdepthbuf_vertex>
         }
       `,
       fragmentShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
         varying float vAcross; varying float vAngle; varying float vRand;
         uniform float uTime; uniform float uOpen; uniform float uTension; uniform float uBurst;
         uniform float uAlpha; uniform float uPhase; uniform float uBrightness;
@@ -288,6 +300,7 @@ export class SpatialRift {
           return pow(max(c, 0.0), vec3(.72));
         }
         void main() {
+          #include <logdepthbuf_fragment>
           float core = pow(max(0.0, sin(vAcross * 3.1415926)), .38);
           float f1 = pow(max(0.0, sin(vAngle * 13.0 - uTime * 2.15 + uPhase + vRand * 2.0)), 12.0);
           float f2 = pow(max(0.0, sin(vAngle * 29.0 + uTime * 1.45 - uPhase)), 22.0);
@@ -326,6 +339,8 @@ export class SpatialRift {
       toneMapped: false,
       uniforms: { uTime: { value: 0 }, uOpen: { value: 0 }, uTension: { value: 0 }, uBurst: { value: 0 } },
       vertexShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_vertex>
         attribute float aAngle; attribute float aDepth;
         varying float vAngle; varying float vDepth; varying vec3 vN;
         uniform float uTime; uniform float uOpen; uniform float uTension; uniform float uBurst;
@@ -336,13 +351,17 @@ export class SpatialRift {
           p.xy *= 1.0 + uBurst * .016 * (1.0 - aDepth);
           vAngle = aAngle; vDepth = aDepth; vN = normalize(normalMatrix * normal);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+          #include <logdepthbuf_vertex>
         }
       `,
       fragmentShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
         varying float vAngle; varying float vDepth; varying vec3 vN;
         uniform float uTime; uniform float uOpen; uniform float uTension; uniform float uBurst;
         vec3 spectral(float t) { return .58 + .42 * cos(6.28318 * (vec3(t) + vec3(0., .33, .67))); }
         void main() {
+          #include <logdepthbuf_fragment>
           float l1 = pow(max(0.0, sin(vAngle * 17.0 - vDepth * 29.0 - uTime * 2.1)), 18.0);
           float l2 = pow(max(0.0, sin(vAngle * 31.0 + vDepth * 41.0 + uTime * 1.3)), 28.0);
           float ribs = pow(max(0.0, sin(vDepth * 25.0 - vAngle * 3.0)), 20.0);
@@ -375,8 +394,13 @@ export class SpatialRift {
     this.visual.add(exitRim);
 
     this.portalMat = new THREE.ShaderMaterial({
-      transparent: true,
+      // The destination is a real opaque window. Treating this plane as a
+      // blended surface let nearby source-system planets bleed through it and
+      // visually sit on top of the tunnel wall. The irregular silhouette is
+      // still cut out in the fragment shader; only the luminous rim blends.
+      transparent: false,
       depthWrite: true,
+      depthTest: true,
       side: THREE.DoubleSide,
       toneMapped: false,
       uniforms: {
@@ -386,6 +410,8 @@ export class SpatialRift {
         uHalfSize: { value: new THREE.Vector2(this.width * 0.5, this.height * 0.5) },
       },
       vertexShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_vertex>
         uniform mat4 uTextureMatrix;
         varying vec4 vProj; varying vec2 vLocal;
         void main() {
@@ -393,9 +419,12 @@ export class SpatialRift {
           vProj = uTextureMatrix * world;
           vLocal = position.xy;
           gl_Position = projectionMatrix * viewMatrix * world;
+          #include <logdepthbuf_vertex>
         }
       `,
       fragmentShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
         uniform sampler2D tPortal; uniform float uOpen; uniform float uTension; uniform float uBurst;
         uniform float uTime; uniform vec2 uHalfSize;
         varying vec4 vProj; varying vec2 vLocal;
@@ -405,11 +434,12 @@ export class SpatialRift {
             + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0);
         }
         void main() {
+          #include <logdepthbuf_fragment>
           vec2 p = vLocal / uHalfSize;
           float a = atan(p.y, p.x), r = length(p), b = boundary(a) * .965;
           float aa = max(fwidth(r) * 1.6, .002);
           float mask = 1.0 - smoothstep(b - aa, b + aa, r);
-          if (mask < .002 || uOpen < .035) discard;
+          if (mask < .45 || uOpen < .035) discard;
           vec2 uv = vProj.xy / max(vProj.w, 1e-5);
           float edge = smoothstep(b - .25, b, r);
           float wave = sin(a * 19.0 - uTime * 1.8) + sin(a * 7.0 + uTime * 1.15);
@@ -425,7 +455,8 @@ export class SpatialRift {
           col += vec3(.22, .42, .92) * pow(edge, 3.0) * uTension * .24;
           col += vec3(.72, .42, 1.05) * pow(edge, 2.0) * uBurst * .34;
           float reveal = smoothstep(.055, .20, uOpen) + uTension * .045;
-          gl_FragColor = vec4(col, mask * clamp(reveal, 0.0, 1.0));
+          if (reveal < .035) discard;
+          gl_FragColor = vec4(col, 1.0);
         }
       `,
     });
@@ -452,16 +483,18 @@ export class SpatialRift {
     return Math.exp(-x * x);
   }
 
-  setTransform(position, quaternion, targetAnchor) {
+  setTransform(position, quaternion, targetAnchor, targetQuaternion = quaternion) {
     this.group.position.copy(position);
     this.group.quaternion.copy(quaternion);
     if (targetAnchor) this.targetAnchor.copy(targetAnchor);
+    if (targetQuaternion) this.targetQuaternion.copy(targetQuaternion);
   }
 
   openPassage() {
     this.traversed = false;
     this.handoffActive = false;
     this.handoffFade = 0;
+    this.handoffElapsed = 0;
     this.portalSurface.visible = true;
     this.group.visible = true;
     this.setOpen(1);
@@ -486,6 +519,7 @@ export class SpatialRift {
     this.traversed = true;
     this.handoffActive = true;
     this.handoffFade = 0;
+    this.handoffElapsed = 0;
   }
 
   crossed(previousRenderPosition, currentRenderPosition) {
@@ -493,11 +527,20 @@ export class SpatialRift {
     this.group.updateMatrixWorld(true);
     this.visual.worldToLocal(_localPrev.copy(previousRenderPosition));
     this.visual.worldToLocal(_localCurr.copy(currentRenderPosition));
-    const crossed = _localPrev.z > -this.depth && _localCurr.z <= -this.depth;
-    if (!crossed) return false;
-    const angle = Math.atan2(_localCurr.y / (this.height * 0.5), _localCurr.x / (this.width * 0.5));
-    const radius = Math.hypot(_localCurr.x / (this.width * 0.5), _localCurr.y / (this.height * 0.5));
-    return radius <= this.contour(angle) * 0.8;
+    const planeZ = -this.depth;
+    const crossed = _localPrev.z > planeZ && _localCurr.z <= planeZ;
+    // A slow frame can leave both samples just behind the surface. Keep a
+    // short catch volume behind the visible window so traversal never depends
+    // on observing one exact frame at the plane.
+    const justPassed = _localCurr.z <= planeZ && _localCurr.z >= planeZ - 180;
+    if (!crossed && !justPassed) return false;
+    const span = _localCurr.z - _localPrev.z;
+    const t = crossed && Math.abs(span) > 1e-6 ? clamp((planeZ - _localPrev.z) / span, 0, 1) : 1;
+    const hitX = lerp(_localPrev.x, _localCurr.x, t);
+    const hitY = lerp(_localPrev.y, _localCurr.y, t);
+    const angle = Math.atan2(hitY / (this.height * 0.5), hitX / (this.width * 0.5));
+    const radius = Math.hypot(hitX / (this.width * 0.5), hitY / (this.height * 0.5));
+    return radius <= this.contour(angle) * 0.96;
   }
 
   update(dt, time) {
@@ -514,9 +557,8 @@ export class SpatialRift {
     }
 
     if (this.handoffActive) {
-      this.group.updateMatrixWorld(true);
-      const cameraLocal = this.visual.worldToLocal(_origin.clone());
-      if (cameraLocal.z < -this.depth - 28) this.handoffFade = clamp(this.handoffFade + dt / 0.72, 0, 1);
+      this.handoffElapsed += dt;
+      if (this.handoffElapsed > 0.08) this.handoffFade = clamp(this.handoffFade + dt / 0.68, 0, 1);
       if (this.handoffFade >= 1) {
         this.handoffActive = false;
         this.group.visible = false;
@@ -560,10 +602,14 @@ export class SpatialRift {
     this.mainCamera.updateMatrixWorld(true);
     this.group.updateMatrixWorld(true);
     const sourceSurface = this.visual.localToWorld(_center.set(0, 0, -this.depth));
-    const offset = _edgeX.copy(this.targetAnchor).sub(sourceSurface);
-    this.offsetMatrix.makeTranslation(offset.x, offset.y, offset.z);
-    this.portalCamera.position.copy(this.mainCamera.position).add(offset);
-    this.portalCamera.quaternion.copy(this.mainCamera.quaternion);
+    this.group.getWorldQuaternion(this.sourceQuaternion);
+    this.sourceFrameMatrix.compose(sourceSurface, this.sourceQuaternion, this.unitScale);
+    this.targetFrameMatrix.compose(this.targetAnchor, this.targetQuaternion, this.unitScale);
+    this.inverseSourceMatrix.copy(this.sourceFrameMatrix).invert();
+    this.offsetMatrix.copy(this.targetFrameMatrix).multiply(this.inverseSourceMatrix);
+    this.portalCamera.position.copy(this.mainCamera.position).applyMatrix4(this.offsetMatrix);
+    this.frameRotation.copy(this.targetQuaternion).multiply(this.sourceQuaternion.clone().invert());
+    this.portalCamera.quaternion.copy(this.frameRotation).multiply(this.mainCamera.quaternion);
     this.portalCamera.scale.copy(this.mainCamera.scale);
     this.portalCamera.fov = this.mainCamera.fov;
     this.portalCamera.aspect = this.mainCamera.aspect;

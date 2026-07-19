@@ -8,6 +8,7 @@ import { makeRng, strHash32, hash3i, hashFloat } from './rng.js';
 import { clamp } from './noise.js';
 import { Planet } from './planet.js';
 import { GasGiant } from './gas-giant.js';
+import { BlackHole } from './black-hole.js';
 import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, orbitalVelocity, orientationAt as bodyOrientationAt } from './astronomy.js';
 
 export const CELL = 4e9;               // metres between star lattice cells
@@ -145,8 +146,11 @@ function cloudTexture(rand, size = 256, band = false) {
 }
 
 export class Universe {
-  constructor(seedStr, scene) {
+  constructor(seedStr, scene, { galaxyId = 'milky-way', bodyTuning = null, blackHoleSystem = null } = {}) {
     this.seed = seedStr;
+    this.galaxyId = galaxyId;
+    this.bodyTuning = bodyTuning;
+    this.blackHoleSystem = blackHoleSystem;
     this.scene = scene;
     this.galaxySeed = strHash32(seedStr + ':galaxy');
     this.group = new THREE.Group();           // current system lives here
@@ -163,6 +167,18 @@ export class Universe {
     this.lastStarRebuild = new THREE.Vector3(Infinity, 0, 0);
     this.camPos = new THREE.Vector3();
     this.timeHours = 0;
+
+    this.specialDestinations = blackHoleSystem ? [{
+      ...blackHoleSystem,
+      kind: 'blackHole',
+      pos: new THREE.Vector3(
+        blackHoleSystem.positionCells[0] * CELL,
+        blackHoleSystem.positionCells[1] * CELL * 0.5,
+        blackHoleSystem.positionCells[2] * CELL,
+      ),
+      color: new THREE.Color(0xffa45f),
+      radius: 1.45e7,
+    }] : [];
 
     this.homeStar = this.starAt(0, 0, 0, true);
     this.system = null;
@@ -272,6 +288,23 @@ export class Universe {
     return this.system;
   }
 
+  // Promote a system that was already built for a spatial-window preview.
+  // Reusing the same scene graph keeps the destination planet's scale, LOD
+  // and ephemeris continuous across the threshold instead of destroying it
+  // and briefly showing an empty deferred system after traversal.
+  adoptSystem(prepared) {
+    if (!prepared || prepared.universe !== this) throw new Error('Cannot adopt a foreign star system');
+    if (prepared === this.system) return prepared;
+    if (this.system) {
+      this.disposeFading();
+      this.fadingSystem = this.system;
+    }
+    this.system = prepared;
+    this.rebuildNearStars(prepared.star.pos);
+    if (this.onSystemChange) this.onSystemChange(prepared);
+    return prepared;
+  }
+
   disposeFading() {
     if (!this.fadingSystem) return;
     if (this.onBeforeSystemDispose && this.onBeforeSystemDispose(this.fadingSystem) === false) return;
@@ -293,6 +326,11 @@ export class Universe {
           const s = this.starAt(cx + dx, cy + dy, cz + dz);
           if (s && s.id !== this.system.star.id) list.push(s);
         }
+      }
+    }
+    for (const destination of this.specialDestinations) {
+      if (destination.id !== this.system.star.id && !list.some((star) => star.id === destination.id)) {
+        list.push(destination);
       }
     }
     this.nearStarsList = list;
@@ -374,8 +412,9 @@ export class Universe {
         * clamp((FADE_DIST - d) / 3e9, 0, 1);
       starView.glow.material.opacity = tg * tg * (3 - 2 * tg) * (starView.glowExt ?? 1);
     }
-    for (const p of sys.planets) {
+    for (const p of [...sys.planets, ...sys.compactObjects]) {
       p.group.position.copy(p.posUniv).sub(camPos);
+      p.updateVisual?.(performance.now() * 0.001);
     }
   }
 
@@ -440,7 +479,7 @@ export class Universe {
 // ============================================================================
 
 export class StarSystem {
-  constructor(universe, star, { deferred = false, timeHours = 0 } = {}) {
+  constructor(universe, star, { deferred = false, fadeInPlanets = deferred, timeHours = 0 } = {}) {
     this.universe = universe;
     this.star = star;
     this.spec = generateSystemSpec(universe.seed, star);
@@ -467,11 +506,13 @@ export class StarSystem {
     this.sunBaseC = primary.baseColor; this.glowBaseC = primary.glowBase; this.glowExt = 1;
     this._ext = -1;
     this.planets = [];
-    this._specs = this.spec.bodies;
+    this.compactObjects = [];
+    this._specs = [...this.spec.bodies, ...(this.spec.compactObjects || [])];
     this.frames = new Map(this._specs.map((body) => [body.bodyId, new BodyFrame(body)]));
     this.bodyById = new Map();
     this._buildIdx = 0;
     this._deferred = deferred;
+    this._fadeInPlanets = fadeInPlanets;
     this.updateCelestial(timeHours);
     if (!deferred) while (this.buildNext());
   }
@@ -482,11 +523,25 @@ export class StarSystem {
     if (this.built) return false;
     const s = this._specs[this._buildIdx++];
     const frame = this.frames.get(s.bodyId);
+    if (s.type === 'blackHole') {
+      const blackHole = new BlackHole({ spec: s, posUniv: frame.position, fadeIn: this._fadeInPlanets });
+      blackHole.orbit = s.orbit;
+      blackHole.orbitPeriodHours = s.orbit.periodHours;
+      blackHole.positionAt = (time, out = new THREE.Vector3()) => this.positionAt(s.bodyId, time, out);
+      blackHole.velocityAt = (time, out = new THREE.Vector3()) => this.velocityAt(s.bodyId, time, out);
+      blackHole.frameVelocity.copy(frame.velocity);
+      this.compactObjects.push(blackHole);
+      this.bodyById.set(s.bodyId, blackHole);
+      this.universe.group.add(blackHole.group);
+      return !this.built;
+    }
     const Ctor = s.type === 'gasGiant' || s.type === 'iceGiant' ? GasGiant : Planet;
     const planet = new Ctor({
       seed: s.seed, name: s.name, catalogName: s.catalogName,
       posUniv: frame.position, type: s.type, isMoon: s.isMoon, radius: s.radius,
-      atmosphere: s.atmosphere, fadeIn: this._deferred, sunDir: this.sunDirFrom(frame.position, _v).clone(),
+      atmosphere: s.atmosphere, clouds: s.clouds,
+      fadeIn: this._fadeInPlanets, sunDir: this.sunDirFrom(frame.position, _v).clone(),
+      tuning: this.universe.bodyTuning?.(this.star.id, s.bodyId) || null,
     });
     planet.bodyId = s.bodyId; planet.catalogName = s.catalogName; planet.properName = s.properName;
     planet.orbit = s.orbit; planet.rotationPeriodHours = s.rotationPeriodHours;
@@ -524,7 +579,11 @@ export class StarSystem {
   }
 
   updateCelestial(timeHours) {
-    if (this.starViews.length === 1) {
+    if (this.spec.isBlackHoleSystem) {
+      for (const view of this.starViews) {
+        orbitalPosition(view.spec.orbit, timeHours, view.positionUniv).add(this.star.pos);
+      }
+    } else if (this.starViews.length === 1) {
       this.starViews[0].positionUniv.copy(this.star.pos);
     } else {
       const separation = orbitalPosition(this.spec.binaryOrbit, timeHours, _v);
@@ -577,6 +636,10 @@ export class StarSystem {
     for (const view of this.starViews) {
       this.universe.group.remove(view.group, view.light);
       view.mesh.geometry.dispose(); view.mesh.material.dispose(); view.glow.material.dispose();
+    }
+    for (const object of this.compactObjects) {
+      this.universe.group.remove(object.group);
+      object.dispose();
     }
   }
 }

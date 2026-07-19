@@ -32,7 +32,8 @@ if (!runtimeVersion || pkg.version !== runtimeVersion || lock.version !== runtim
 
 const THREE = await import('three');
 const { startDevServer, startServer } = await import('./server.js');
-const { guidePlanetApproach, stabilizeHorizon } = await import('../src/controls.js');
+const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon } = await import('../src/controls.js');
+const { Ship } = await import('../src/effects.js');
 const rolled = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 1.2);
 const forwardBefore = new THREE.Vector3(0, 0, -1).applyQuaternion(rolled);
 stabilizeHorizon(rolled, new THREE.Vector3(0, 1, 0), 1);
@@ -74,6 +75,45 @@ for (const result of approachResults.slice(1)) {
   }
 }
 
+// A/D must produce equal, opposite lateral thrust in the ship's local frame.
+const thrustQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.2, 0.7, -0.1));
+const localRight = new THREE.Vector3(1, 0, 0).applyQuaternion(thrustQuat);
+const dVelocity = applyFlightThrusters(new THREE.Vector3(), thrustQuat, 0, 1, 100, 0.1).clone();
+const aVelocity = applyFlightThrusters(new THREE.Vector3(), thrustQuat, 0, -1, 100, 0.1).clone();
+if (dVelocity.dot(localRight) < 41.99 || aVelocity.dot(localRight) > -41.99
+    || dVelocity.clone().add(aVelocity).length() > 1e-8) {
+  throw new Error('A/D lateral thrusters are missing, too weak, or asymmetric');
+}
+
+// A stationary ship attached to a rotating planet frame must stay rigid in
+// cockpit space. This reproduces the zero-HUD-speed surface-hover shake.
+const hoverShip = Object.assign(Object.create(Ship.prototype), {
+  group: new THREE.Group(),
+  smQuat: new THREE.Quaternion(),
+  roll: 0.24,
+  loadedEmissives: [],
+  loadedGear: [],
+  loadedRamp: [],
+  parkedPosUniv: null,
+  parkedQuat: new THREE.Quaternion(),
+  parkAmt: 0,
+});
+const hoverNav = {
+  pos: new THREE.Vector3(),
+  quat: new THREE.Quaternion(),
+  vel: new THREE.Vector3(),
+};
+const identityQuat = new THREE.Quaternion();
+for (let i = 0; i < 120; i++) {
+  hoverNav.quat.premultiply(new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 1, 0), 0.0004));
+  hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, { throttle: 0, strafe: 0 });
+  const cockpitRelative = hoverNav.quat.clone().invert().multiply(hoverShip.group.quaternion);
+  if (cockpitRelative.angleTo(identityQuat) > 1e-7 || Math.abs(hoverShip.roll) > 1e-8) {
+    throw new Error('Stationary surface hover leaves residual ship roll or orientation lag');
+  }
+}
+
 // Opening another terminal while the dev server is still running must not
 // turn into an EADDRINUSE dead end. Occupy a real ephemeral port and prove the
 // CLI helper selects a neighbouring one without disturbing the first server.
@@ -89,4 +129,4 @@ try {
   occupied.server.close();
 }
 
-console.log(`PASS: ${sourceFiles.length} modules parse; version ${runtimeVersion}, polar approach guidance, horizon stabilization, and dev-port fallback are valid.`);
+console.log(`PASS: ${sourceFiles.length} modules parse; version ${runtimeVersion}, flight controls, stationary hover, polar approach guidance, horizon stabilization, and dev-port fallback are valid.`);

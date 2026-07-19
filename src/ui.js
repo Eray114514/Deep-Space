@@ -22,6 +22,8 @@ export class UI {
       brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
+      arrivalTitle: $('arrival-title'), arrivalKicker: $('arrival-kicker'),
+      arrivalName: $('arrival-name'), arrivalSystem: $('arrival-system'),
       heroSeed: $('hero-seed'), heroBuild: $('hero-build'),
       driveMode: $('drive-mode'), driveSpeed: $('drive-speed'), driveBoost: $('drive-boost'), driveAtmo: $('drive-atmo'),
       driveSpeedFill: $('drive-speed-fill'), driveBoostFill: $('drive-boost-fill'), driveAtmoFill: $('drive-atmo-fill'),
@@ -88,7 +90,10 @@ export class UI {
   setSystem(name, planetCount, seed, catalogId = '', showSeed = false) {
     this.els.system.textContent = name;
     this.els.planetCount.textContent = `已测绘天体 · ${planetCount}`;
-    this.els.seed.textContent = showSeed ? `世界实验种子 · ${seed}` : '正式宇宙 · 深空';
+    const galaxyName = this.cb.galaxyName || '银河系';
+    this.els.seed.textContent = showSeed
+      ? `银河实验 · ${galaxyName} / ${seed}`
+      : `银河 · ${galaxyName}`;
     if (this.els.systemCatalog) this.els.systemCatalog.textContent = catalogId;
     if (this.els.brandSystem) this.els.brandSystem.textContent = name;
   }
@@ -210,6 +215,41 @@ export class UI {
   showRouteChoice(show, name = '') {
     this.els.routeChoice.classList.toggle('hidden', !show);
     if (show) this._setText(this.els.routeChoiceName, name || '未命名星系');
+  }
+
+  beginTravel() {
+    clearTimeout(this._arrivalTimer);
+    clearTimeout(this._arrivalHideTimer);
+    this.els.arrivalTitle.classList.add('hidden');
+    this.els.arrivalTitle.classList.remove('arrival-visible');
+    document.body.classList.add('travel-cinematic');
+  }
+
+  showArrival(name, systemName = '', kicker = '抵达') {
+    clearTimeout(this._arrivalTimer);
+    clearTimeout(this._arrivalHideTimer);
+    document.body.classList.add('travel-cinematic');
+    this._setText(this.els.arrivalKicker, kicker);
+    this._setText(this.els.arrivalName, name || systemName || '未知星域');
+    this._setText(this.els.arrivalSystem, systemName && systemName !== name ? systemName : '航行坐标已确认');
+    this.els.arrivalTitle.classList.remove('hidden');
+    this.els.arrivalTitle.classList.remove('arrival-visible');
+    requestAnimationFrame(() => this.els.arrivalTitle.classList.add('arrival-visible'));
+    this._arrivalTimer = setTimeout(() => {
+      this.els.arrivalTitle.classList.remove('arrival-visible');
+      this._arrivalHideTimer = setTimeout(() => {
+        this.els.arrivalTitle.classList.add('hidden');
+        document.body.classList.remove('travel-cinematic');
+      }, 700);
+    }, 2800);
+  }
+
+  endTravel() {
+    clearTimeout(this._arrivalTimer);
+    clearTimeout(this._arrivalHideTimer);
+    this.els.arrivalTitle.classList.add('hidden');
+    this.els.arrivalTitle.classList.remove('arrival-visible');
+    document.body.classList.remove('travel-cinematic');
   }
 
   setDestinationMarker({ show = false, name = '', distance = '', x = 0, y = 0, behind = false } = {}) {
