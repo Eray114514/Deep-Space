@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
+import { Planet } from '../src/planet.js';
 import {
   BodyFrame,
   CelestialClock,
@@ -112,6 +113,50 @@ assert(curatedIceWorld, 'NAVEMI-382 should retain a physically supported weak-fi
 const frozenOuterWorld = curatedSystem.bodies.find((body) => body.bodyId === 'planet-7');
 assert(frozenOuterWorld.atmosphere.pressureBar < 0.002 && frozenOuterWorld.clouds.coverage === 0,
   'extreme cold should collapse the outer ice world atmosphere instead of preserving an arbitrary cloud deck');
+
+const curatedHomeSpec = curatedSystem.bodies.find((body) => body.bodyId === 'planet-0');
+const curatedHomeTuning = resolveBodyTuning({
+  galaxyId: galaxy.id,
+  seed: galaxy.seed,
+  systemId: curatedSystem.systemId,
+  bodyId: curatedHomeSpec.bodyId,
+});
+const curatedHomePlanet = new Planet({
+  seed: curatedHomeSpec.seed,
+  name: curatedHomeSpec.name,
+  posUniv: new THREE.Vector3(),
+  type: curatedHomeSpec.type,
+  isMoon: curatedHomeSpec.isMoon,
+  radius: curatedHomeSpec.radius,
+  atmosphere: curatedHomeSpec.atmosphere,
+  clouds: curatedHomeSpec.clouds,
+  tuning: curatedHomeTuning,
+});
+assert.equal(curatedHomePlanet.cloudCoverage, curatedHomeTuning.cloudCoverage,
+  'the curated home world must retain its selected cloud deck');
+assert.equal(curatedHomePlanet.ringMesh, undefined,
+  'cloud dossier metadata must not shift the legacy RNG stream and add a ring to the home world');
+assert.equal(curatedHomePlanet.seaLevel - curatedHomePlanet.naturalSeaLevel, -420,
+  'sea-level tuning must move the liquid surface by the authored amount');
+assert(Math.abs(curatedHomePlanet.mountMaskLo - 0.03490702388808131) < 1e-12,
+  'sea-level tuning must not reshape the selected terrain provinces');
+const terrainFingerprint = [
+  new THREE.Vector3(1, 0, 0),
+  new THREE.Vector3(0, 1, 0),
+  new THREE.Vector3(0, 0, 1),
+  new THREE.Vector3(1, 1, 1).normalize(),
+].map((dir) => curatedHomePlanet.height(dir, curatedHomePlanet.fullMaxFreq));
+const legacyTerrainFingerprint = [
+  -1349.0379876540412,
+  -159.09969411609043,
+  -78.33918052684972,
+  2866.6725245280663,
+];
+for (let i = 0; i < terrainFingerprint.length; i++) {
+  assert(Math.abs(terrainFingerprint[i] - legacyTerrainFingerprint[i]) < 1e-8,
+    `curated home terrain sample ${i} drifted from the selected world`);
+}
+curatedHomePlanet.dispose();
 
 const homeWorld = home.bodies.find((body) => !body.isMoon);
 assert.equal(homeWorld.type, 'lush');

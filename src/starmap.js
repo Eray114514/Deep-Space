@@ -188,6 +188,23 @@ function makePointTexture() {
   return texture;
 }
 
+function makeSelectionTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 64;
+  const context = canvas.getContext('2d');
+  context.strokeStyle = 'rgba(126,211,222,.9)';
+  context.lineWidth = 4;
+  context.beginPath();
+  context.arc(32, 32, 20, 0, Math.PI * 2);
+  context.stroke();
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
+}
+
 function makeSoftDisc(size = 256, rgb = '215,200,170') {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
@@ -266,10 +283,6 @@ export class StarMap {
                 <div class="metaRow"><span>天体数量</span><b id="sm-planets">—</b></div>
                 <div class="metaRow"><span>表面温度</span><b id="sm-temperature">—</b></div>
               </div>
-              <div class="galaxyActions">
-                <button id="sm-inspect" type="button" disabled>查看星系 <kbd>⏎</kbd></button>
-                <button id="sm-warpGalaxy" type="button" disabled>设为星际目的地 <kbd>X</kbd></button>
-              </div>
             </div>
           </section>
           <section id="sm-galaxyTools" class="panel">
@@ -342,7 +355,7 @@ export class StarMap {
       classBox: $('#sm-class'), glyph: $('#sm-systemGlyph'),
       surveyBar: $('#sm-surveyBar'), surveyValue: $('#sm-surveyValue'),
       galaxyMeta: $('#sm-galaxyMeta'), distance: $('#sm-distance'), planets: $('#sm-planets'),
-      temperature: $('#sm-temperature'), inspect: $('#sm-inspect'), warpGalaxy: $('#sm-warpGalaxy'),
+      temperature: $('#sm-temperature'),
       galaxyTools: $('#sm-galaxyTools'), search: $('#sm-search'), sector: $('#sm-sector'), count: $('#sm-count'),
       planetLeft: $('#sm-planetLeft'), planetRight: $('#sm-planetRight'),
       detailName: $('#sm-detailName'), detailSystem: $('#sm-detailSystem'),
@@ -377,6 +390,7 @@ export class StarMap {
     this.renderer.toneMappingExposure = 1.1;
     this.els.canvas.appendChild(this.renderer.domElement);
     this.starTexture = makePointTexture();
+    this.selectionTexture = makeSelectionTexture();
     this.softTexture = makeSoftDisc();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -421,8 +435,6 @@ export class StarMap {
     this.els.search.addEventListener('input', () => {
       if (this.mode === 'galaxy') this.buildGalaxy(true);
     });
-    this.els.inspect.addEventListener('click', () => this.enterSystem());
-    this.els.warpGalaxy.addEventListener('click', () => this.warpToSelection());
     this.els.routeAction.addEventListener('click', (event) => {
       event.stopPropagation();
       this.warpToSelection();
@@ -449,31 +461,23 @@ export class StarMap {
       }
       const preview = this.systemPreview(star);
       const code = preview.isBlackHoleSystem ? 'BH' : physicalStarClass(preview.stars[0]).code;
-      this.els.hoverTag.innerHTML = `<strong>${preview.properName}</strong><small>${code} · 单击选择 / 双击查看</small>`;
+      this.els.hoverTag.innerHTML = `<strong>${preview.properName}</strong><small>${code} · 单击查看星系</small>`;
       this.els.hoverTag.hidden = false;
       const left = Math.min(innerWidth - 245, event.clientX + 16);
       const top = Math.min(innerHeight - 64, event.clientY + 16);
       this.els.hoverTag.style.transform = `translate3d(${left}px,${top}px,0)`;
     });
     canvas.addEventListener('pointerleave', () => { this.els.hoverTag.hidden = true; });
-    canvas.addEventListener('dblclick', (event) => {
-      const star = this.pickStarAt(event);
-      if (star) {
-        this.selectStar(star, false);
-        this.enterSystem();
-      }
-    });
   }
 
   handleKey(event) {
     if (event.code === 'Escape') { this.goBack(); return; }
-    if (event.code === 'KeyX') { this.warpToSelection(); return; }
     if (this.mode === 'system') {
+      if (event.code === 'KeyX') { this.warpToSelection(); return; }
       if (event.code === 'KeyV') this.sysview.setLabelsVisible(!this.sysview.labelsVisible);
       if (event.code === 'KeyQ') this.sysview.resetView();
     } else {
       if (event.code === 'KeyQ') this.resetGalaxyView();
-      if ((event.code === 'Enter' || event.code === 'NumpadEnter') && this.selectedStar) this.enterSystem();
     }
   }
 
@@ -520,12 +524,14 @@ export class StarMap {
     this.mode = 'galaxy';
     this.root.classList.add('mode-galaxy');
     this.root.classList.remove('mode-system');
+    this.selectedStar = this.getUniverse().system.star;
     this.sysview.selectBody(null);
     this.selectedPlanet = null;
     this.updateRail();
     this.updateHints();
     this.resize();
     this.buildGalaxy();
+    this.selectStar(this.selectedStar, false);
   }
 
   async enterSystem() {
@@ -535,14 +541,11 @@ export class StarMap {
     this.root.classList.add('mode-system');
     this.updateRail();
     this.updateHints();
-    this.els.loading.classList.remove('done');
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const preview = this.systemPreview(this.selectedStar);
     this.sysview.buildSystem(preview, this.getTime());
     this.updateSystemPanel(preview);
     this.onBodySelect(null);
     this.resize();
-    this.els.loading.classList.add('done');
   }
 
   updateRail() {
@@ -553,7 +556,7 @@ export class StarMap {
   updateHints() {
     const hints = this.mode === 'system'
       ? [['设定航线', 'X'], ['显示位置', 'V'], ['重置视角', 'Q'], ['返回银河', 'Esc']]
-      : [['滚轮局部缩放', '↕'], ['重置视野', 'Q'], ['查看星系', '⏎'], ['设定航线', 'X'], ['返回', 'Esc']];
+      : [['点击恒星', 'LMB'], ['拖动星图', 'LMB'], ['滚轮缩放', '↕'], ['重置视野', 'Q'], ['返回', 'Esc']];
     this.els.controls.innerHTML = hints
       .map(([label, key]) => `<span class="hint">${label} <b class="key">${key}</b></span>`)
       .join('');
@@ -724,7 +727,6 @@ export class StarMap {
     this.els.count.textContent = `${stars.length} / ${STAR_LIMIT}`;
     this.els.sector.textContent = current.id;
     this.buildGalaxyLabels(stars, current);
-    if (resetView && stars.length === 1) this.selectStar(stars[0], false);
     this.updateSelectionMarker();
   }
 
@@ -755,7 +757,7 @@ export class StarMap {
       button.classList.toggle('current', star.id === current.id);
       button.classList.toggle('selected', star.id === this.selectedStar?.id);
       button.classList.toggle('black-hole', preview.isBlackHoleSystem);
-      button.title = preview.isBlackHoleSystem ? '唯一黑洞系统 · 单击选择，双击查看' : `${preview.properName} · 单击选择，双击查看`;
+      button.title = preview.isBlackHoleSystem ? '唯一黑洞系统 · 单击查看' : `${preview.properName} · 单击查看`;
       this.els.labelLayer.appendChild(button);
       return {
         button, position: this.mapPositions[index], star,
@@ -829,16 +831,16 @@ export class StarMap {
     if (this.mode !== 'galaxy' || !this.selectedStar || !this.visibleStars) return;
     const index = this.visibleStars.findIndex((star) => star.id === this.selectedStar.id);
     if (index < 0) return;
-    const marker = new THREE.Mesh(
-      new THREE.TorusGeometry(2.1, 0.055, 8, 64),
-      new THREE.MeshBasicMaterial({
-        color: 0x6fd3e0, transparent: true, opacity: 0.92,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+    const marker = new THREE.Points(
+      new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)),
+      new THREE.PointsMaterial({
+        color: 0xffffff, size: 16, sizeAttenuation: false, map: this.selectionTexture,
+        transparent: true, opacity: 0.84, blending: THREE.AdditiveBlending,
+        depthWrite: false, fog: false, toneMapped: false,
       }),
     );
     marker.name = 'selection-marker';
     marker.position.copy(this.mapPositions[index]);
-    marker.rotation.x = Math.PI / 2;
     this.world.add(marker);
   }
 
@@ -867,7 +869,6 @@ export class StarMap {
     const moonCount = preview.bodies.length - primaryCount;
     const compactCount = preview.bodies.filter((body) => body.type === 'blackHole').length;
     const isCurrent = star.id === this.getUniverse().system.star.id;
-    const canWarp = !isCurrent && this.getState() === 'space';
     const status = navigationStatus(preview);
     const survey = this.surveyPercent(preview, status);
 
@@ -887,9 +888,6 @@ export class StarMap {
     this.els.distance.textContent = isCurrent ? '当前位置' : distanceText(distance);
     this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount - compactCount} 卫星${compactCount ? ` / ${compactCount} 致密天体` : ''}`;
     this.els.temperature.textContent = cls.temp;
-    this.els.inspect.disabled = false;
-    this.els.warpGalaxy.disabled = !canWarp;
-    this.els.warpGalaxy.innerHTML = `${isCurrent ? '当前星系' : this.getState() !== 'space' ? '需返回飞船' : '设为星际目的地'} <kbd>X</kbd>`;
     this.updateSelectionMarker();
     if (focus && this.mode === 'galaxy' && this.visibleStars) {
       const index = this.visibleStars.findIndex((item) => item.id === star.id);
@@ -990,7 +988,7 @@ export class StarMap {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const cameraDistance = this.camera.position.distanceTo(this.controls.target);
     const worldPerPixel = 2 * cameraDistance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5)) / Math.max(1, rect.height);
-    this.raycaster.params.Points.threshold = worldPerPixel * 4.2;
+    this.raycaster.params.Points.threshold = worldPerPixel * 5.5;
     this.pointer.set(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
       -((event.clientY - rect.top) / rect.height) * 2 + 1,
@@ -1010,7 +1008,9 @@ export class StarMap {
 
   pick(event) {
     const star = this.pickStarAt(event);
-    if (star) this.selectStar(star);
+    if (!star) return;
+    this.selectStar(star, false);
+    this.enterSystem();
   }
 
   // ---- frame / layout -----------------------------------------------------------
@@ -1058,7 +1058,7 @@ export class StarMap {
     this.els.planetRight.style.height = `${rightDetailHeight}px`;
     this.els.traitText.style.marginTop = rightDetailHeight < 220 ? '62px' : '82px';
     // galaxy tools sit below the (taller) galaxy-mode system panel
-    this.els.galaxyTools.style.top = '442px';
+    this.els.galaxyTools.style.top = '392px';
   }
 
   animate() {
@@ -1068,11 +1068,6 @@ export class StarMap {
     if (this.mode === 'galaxy') {
       this.controls.update();
       this.updateMapLabels();
-      const marker = this.world.getObjectByName('selection-marker');
-      if (marker) {
-        marker.rotation.z += dt * 0.34;
-        marker.scale.setScalar(1 + Math.sin(performance.now() * 0.0025) * 0.08);
-      }
       this.renderer.render(this.scene, this.camera);
     } else {
       this.sysview.frame(dt);

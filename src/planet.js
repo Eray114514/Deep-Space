@@ -129,12 +129,16 @@ export class Planet {
     this.liquid = this.cfg.liquid;
     this.hasLiquid = this.liquid !== null;
     const seaLevelOffset = Number.isFinite(this.tuning.seaLevelOffset) ? this.tuning.seaLevelOffset : 0;
-    this.seaLevel = this.hasLiquid
-      ? this.cfg.seaQ * this.contAmp + (rand() - 0.5) * 0.1 * this.contAmp + seaLevelOffset
+    // Water-level curation must not rewrite the selected terrain. Mountain
+    // placement was historically derived from the generated shoreline, so
+    // retain that reference while moving only the rendered liquid surface.
+    this.naturalSeaLevel = this.hasLiquid
+      ? this.cfg.seaQ * this.contAmp + (rand() - 0.5) * 0.1 * this.contAmp
       : -1e9;
+    this.seaLevel = this.hasLiquid ? this.naturalSeaLevel + seaLevelOffset : -1e9;
     this.seaRadius = this.hasLiquid ? this.R + this.seaLevel : 0;
     // mountains grow from terrain above the waterline
-    const seaC = this.hasLiquid ? this.seaLevel / this.contAmp : -0.25;
+    const seaC = this.hasLiquid ? this.naturalSeaLevel / this.contAmp : -0.25;
     this.mountMaskLo = seaC + 0.05;
     this.mountMaskHi = seaC + 0.45;
 
@@ -672,9 +676,15 @@ export class Planet {
     // pressure, temperature and condensates instead of being rerolled here.
     this.cloudBands = [];
     this.cloudCoverage = 0;
+    // Consume the legacy cloud roll even when an astronomy profile or authored
+    // override owns the result. Effects later in this constructor historically
+    // shared this stream; skipping these draws made curated planets gain rings
+    // merely because cloud metadata was introduced.
+    const legacyHasClouds = this.cfg.clouds > 0.05 && rand() < this.cfg.clouds;
+    const legacyCloudCoverage = legacyHasClouds ? 0.3 + rand() * 0.55 : 0;
     const naturalCloudCoverage = Number.isFinite(this.cloudProfile?.coverage)
       ? clamp(this.cloudProfile.coverage, 0, 0.85)
-      : (this.cfg.clouds > 0.05 && rand() < this.cfg.clouds ? 0.3 + rand() * 0.55 : 0);
+      : legacyCloudCoverage;
     const tunedCloudCoverage = Number.isFinite(this.tuning.cloudCoverage)
       ? clamp(this.tuning.cloudCoverage, 0, 0.85)
       : null;
