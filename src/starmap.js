@@ -34,6 +34,18 @@ function distanceText(metres) {
   return `${(metres / AU).toFixed(3)} AU`;
 }
 
+function navigationStatus(preview) {
+  const primaries = preview.bodies.filter((body) => !body.isMoon);
+  const habitable = primaries.filter((body) => body.type === 'lush' || body.type === 'ocean').length;
+  const anomalies = primaries.filter((body) => ['exotic', 'toxic', 'lava'].includes(body.type)).length;
+  const giants = primaries.filter((body) => body.type === 'gasGiant' || body.type === 'iceGiant').length;
+  if (preview.isHome) return { name: '联合殖民地核心区', coverage: 100, advisory: '完整航路数据' };
+  if (anomalies >= 2) return { name: '异常隔离区', coverage: 22, advisory: '高风险进近' };
+  if (habitable > 0) return { name: '边境测绘署观测区', coverage: 52, advisory: '生态保护进近' };
+  if (giants >= 2) return { name: '自由勘探协定区', coverage: 40, advisory: '强引力井' };
+  return { name: '无登记管辖星域', coverage: 30, advisory: '标准星系入口' };
+}
+
 const BIO_PROFILE = {
   lush: ['丰富', '繁盛'], ocean: ['丰富 · 海洋', '繁盛'], desert: ['稀少', '稀少'],
   ice: ['稀少', '冻原'], lava: ['无', '无'], barren: ['无', '无'],
@@ -54,7 +66,7 @@ const RESOURCE_PROFILE = {
 };
 const RESOURCE_POOL = ['H₂O', 'Fe', 'Cu', 'Ar', 'Ni', 'Co', 'Si', 'He₃', 'Pb', 'Al', 'C', 'NH₃', 'CH₄', 'S', 'Xe', 'Ir', 'Au', 'Cl', 'N', 'Na'];
 
-function bodyProfile(body) {
+function bodyProfile(body, survey) {
   const rand = makeRng(body.seed + ':ui-profile');
   const giant = body.type === 'gasGiant' || body.type === 'iceGiant';
   const gravity = giant
@@ -80,14 +92,18 @@ function bodyProfile(body) {
   }
   const traitCount = 2 + Math.floor(rand() * 3);
   const traits = rand() < 0.3 ? `特征：已发现 (1/${traitCount})` : `特征：不明 (0/${traitCount})`;
+  const knownResources = Math.min(5, survey >= 100 ? 5 : Math.max(1, Math.floor(survey / 18)));
+  const hidden = (threshold, value, fallback = '数据不足') => survey >= threshold ? value : fallback;
   return {
-    gravity: `${gravity} g`,
-    temperature: `${Math.round(k)} K · ${tempLabel}`,
-    atmosphere, magnetosphere: magneto, fauna, flora,
-    water: WATER_PROFILE[body.type] || '不明',
-    resources: resources.slice(0, 5),
-    traits,
-    survey: Math.round(15 + rand() * 65),
+    gravity: hidden(45, `${gravity} g`),
+    temperature: hidden(28, `${Math.round(k)} K · ${tempLabel}`),
+    atmosphere: hidden(55, atmosphere),
+    magnetosphere: hidden(65, magneto),
+    fauna: hidden(78, fauna, '需要近地生物扫描'),
+    flora: hidden(78, flora, '需要近地生物扫描'),
+    water: hidden(50, WATER_PROFILE[body.type] || '不明'),
+    resources: resources.slice(0, 5), knownResources,
+    traits: survey >= 86 ? traits : `特征：待识别 (0/${traitCount})`,
     type: TYPE_LABELS[body.type] || body.type,
   };
 }
@@ -97,6 +113,7 @@ function previewSystem(seed, star, currentSystem) {
   const indexById = new Map(spec.bodies.map((body, index) => [body.bodyId, index]));
   return {
     name: spec.name, properName: spec.properName, catalogId: spec.catalogId,
+    systemId: spec.systemId, isHome: spec.isHome,
     star, stars: spec.stars, binaryOrbit: spec.binaryOrbit,
     bodies: spec.bodies.map((body, index) => ({
       ...body, index,
@@ -179,6 +196,8 @@ export class StarMap {
     this.selectedStar = null;
     this.selectedPlanet = null;
     this.previewCache = new Map();
+    this.discoverySeed = null;
+    this.visitedSystems = new Set();
     this.pickables = [];
     this.pointerStart = null;
     this.clock = new THREE.Clock();
@@ -218,7 +237,7 @@ export class StarMap {
               <div class="level"><strong>谱型</strong><span id="sm-class">·</span></div>
             </div>
             <div id="sm-systemGlyph"></div>
-            <div id="sm-survey"><div class="label">勘查</div><div class="bar" id="sm-surveyBar"></div><div class="barValue" id="sm-surveyValue">—</div></div>
+            <div id="sm-survey"><div class="label">数据完整度</div><div class="bar" id="sm-surveyBar"></div><div class="barValue" id="sm-surveyValue">—</div></div>
             <div id="sm-galaxyMeta">
               <div class="metaRows">
                 <div class="metaRow"><span>航行距离</span><b id="sm-distance">—</b></div>
@@ -227,7 +246,7 @@ export class StarMap {
               </div>
               <div class="galaxyActions">
                 <button id="sm-inspect" type="button" disabled>查看星系 <kbd>⏎</kbd></button>
-                <button id="sm-warpGalaxy" type="button" disabled>设定航线 <kbd>X</kbd></button>
+                <button id="sm-warpGalaxy" type="button" disabled>设为星际目的地 <kbd>X</kbd></button>
               </div>
             </div>
           </section>
@@ -244,7 +263,7 @@ export class StarMap {
           <section id="sm-planetLeft" class="panel planetInfo" aria-hidden="true">
             <div class="detailTitle"><div class="name" id="sm-detailName">—</div><div class="system" id="sm-detailSystem">—</div></div>
             <div class="detailSurvey">
-              <div class="detailSurveyTop"><span>勘查</span><span id="sm-detailSurveyValue">0%</span></div>
+              <div class="detailSurveyTop"><span>数据完整度</span><span id="sm-detailSurveyValue">0%</span></div>
               <div class="bar" id="sm-detailSurveyBar"></div>
             </div>
             <div class="detailRows">
@@ -274,7 +293,7 @@ export class StarMap {
           </section>
         </div>
         <div id="sm-rightHud" class="hudAnchor">
-          <section id="sm-faction" class="panel"><div class="small">阵营</div><div class="panelRule"></div><div class="big">联合殖民地</div></section>
+          <section id="sm-faction" class="panel"><div class="small">管辖 / 航行状态</div><div class="panelRule"></div><div class="big" id="sm-factionName">—</div></section>
           <section id="sm-planetRight" class="panel planetInfo" aria-hidden="true">
             <div class="resourceHead"><span>资源</span><span id="sm-resourceCount">(0/5)</span></div>
             <div class="resourceTiles" id="sm-resourceTiles"></div>
@@ -311,6 +330,7 @@ export class StarMap {
       routeAction: $('#sm-routeAction'),
       resourceCount: $('#sm-resourceCount'), resourceTiles: $('#sm-resourceTiles'),
       traitText: $('#sm-traitText'),
+      factionName: $('#sm-factionName'), faction: $('#sm-faction'),
       controls: $('#sm-controls'),
       leftHud: $('#sm-leftHud'), rightHud: $('#sm-rightHud'), bottomHud: $('#sm-bottomHud'),
       navArrow: $('#sm-navArrow'), nameTag: $('#sm-nameTag'),
@@ -419,6 +439,8 @@ export class StarMap {
     this.root.classList.remove('hidden');
     document.body.classList.add('starmap-open');
     this.previewCache.clear();
+    this.refreshDiscoveryState();
+    this.markSystemVisited(this.getUniverse().system.star.id);
     this.mode = 'galaxy';
     this.root.classList.add('mode-galaxy');
     this.root.classList.remove('mode-system');
@@ -489,6 +511,34 @@ export class StarMap {
   }
 
   // ---- data -------------------------------------------------------------------
+  refreshDiscoveryState() {
+    const seed = this.getSeed();
+    if (this.discoverySeed === seed) return;
+    this.discoverySeed = seed;
+    try {
+      const saved = JSON.parse(localStorage.getItem(`astral-frontier:${seed}:visited-systems`) || '[]');
+      this.visitedSystems = new Set(Array.isArray(saved) ? saved : []);
+    } catch {
+      this.visitedSystems = new Set();
+    }
+  }
+
+  markSystemVisited(id) {
+    this.refreshDiscoveryState();
+    if (this.visitedSystems.has(id)) return;
+    this.visitedSystems.add(id);
+    try {
+      localStorage.setItem(`astral-frontier:${this.discoverySeed}:visited-systems`, JSON.stringify([...this.visitedSystems]));
+    } catch { /* private browsing can deny persistence */ }
+  }
+
+  surveyPercent(preview, status = navigationStatus(preview)) {
+    this.refreshDiscoveryState();
+    if (this.visitedSystems.has(preview.systemId)) return 100;
+    const rand = makeRng(`${this.getSeed()}:remote-survey:${preview.systemId}`);
+    return Math.round(THREE.MathUtils.clamp(status.coverage + (rand() - 0.5) * 14, 18, 72));
+  }
+
   systemPreview(star) {
     if (!this.previewCache.has(star.id)) {
       this.previewCache.set(star.id, previewSystem(this.getSeed(), star, this.getUniverse().system));
@@ -726,22 +776,26 @@ export class StarMap {
     const moonCount = preview.bodies.length - primaryCount;
     const isCurrent = star.id === this.getUniverse().system.star.id;
     const canWarp = !isCurrent && this.getState() === 'space';
-    const surveyRand = makeRng(this.getSeed() + ':survey:' + star.id);
+    const status = navigationStatus(preview);
+    const survey = this.surveyPercent(preview, status);
 
     this.els.targetCode.textContent = `${preview.catalogId} // ${cls.code}-CLASS`;
     this.els.catalog.textContent = `代号 · ${preview.catalogId}`;
     this.els.targetName.textContent = preview.properName;
     this.els.classBox.textContent = cls.code;
     this.els.classBox.style.background = `#${preview.stars[0] ? new THREE.Color(preview.stars[0].color).getHexString() : '#17e31a'}`;
-    this.els.surveyValue.textContent = `${Math.round(20 + surveyRand() * 45)}%`;
+    this.els.surveyValue.textContent = `${survey}%`;
     this.els.surveyBar.style.setProperty('--survey-progress', this.els.surveyValue.textContent);
+    this.els.surveyBar.title = survey === 100 ? '已到访：完整星系数据' : `远程传感器覆盖 · ${status.advisory}`;
+    this.els.factionName.textContent = status.name;
+    this.els.faction.title = status.advisory;
     this.buildGlyph(preview);
     this.els.distance.textContent = isCurrent ? '当前位置' : distanceText(distance);
     this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount} 卫星`;
     this.els.temperature.textContent = cls.temp;
     this.els.inspect.disabled = false;
     this.els.warpGalaxy.disabled = !canWarp;
-    this.els.warpGalaxy.innerHTML = `${isCurrent ? '当前星系' : this.getState() !== 'space' ? '需返回飞船' : '设定航线'} <kbd>X</kbd>`;
+    this.els.warpGalaxy.innerHTML = `${isCurrent ? '当前星系' : this.getState() !== 'space' ? '需返回飞船' : '设为星际目的地'} <kbd>X</kbd>`;
     this.updateSelectionMarker();
     if (focus && this.mode === 'galaxy' && this.visibleStars) {
       const index = this.visibleStars.findIndex((item) => item.id === star.id);
@@ -790,10 +844,13 @@ export class StarMap {
       panel.setAttribute('aria-hidden', has ? 'false' : 'true');
     }
     if (!has) return;
-    const profile = bodyProfile(body);
+    const systemSurvey = this.surveyPercent(this.systemPreview(this.selectedStar));
+    const signalBonus = body.isMoon ? -10 : (body.type === 'gasGiant' || body.type === 'iceGiant') ? 14 : 4;
+    const survey = systemSurvey === 100 ? 100 : Math.round(THREE.MathUtils.clamp(systemSurvey + signalBonus, 12, 82));
+    const profile = bodyProfile(body, survey);
     this.els.detailName.textContent = body.name;
-    this.els.detailSurveyValue.textContent = `${profile.survey}%`;
-    this.els.detailSurveyBar.style.setProperty('--survey-progress', `${profile.survey}%`);
+    this.els.detailSurveyValue.textContent = `${survey}%`;
+    this.els.detailSurveyBar.style.setProperty('--survey-progress', `${survey}%`);
     this.els.detailType.textContent = profile.type;
     this.els.detailGravity.textContent = profile.gravity;
     this.els.detailTemperature.textContent = profile.temperature;
@@ -802,24 +859,27 @@ export class StarMap {
     this.els.detailFauna.textContent = profile.fauna;
     this.els.detailFlora.textContent = profile.flora;
     this.els.detailWater.textContent = profile.water;
-    this.els.resourceCount.textContent = `(0/${profile.resources.length})`;
+    this.els.resourceCount.textContent = `(${profile.knownResources}/${profile.resources.length})`;
     this.els.resourceTiles.innerHTML = profile.resources
-      .map((value) => `<div class="resourceTile">${value}</div>`).join('');
+      .map((value, index) => `<div class="resourceTile${index >= profile.knownResources ? ' unknown' : ''}">${index < profile.knownResources ? value : '未识别'}</div>`).join('');
     this.els.traitText.textContent = profile.traits;
     this.updateRouteAction();
   }
 
   updateRouteAction() {
     const isCurrent = this.selectedStar && this.selectedStar.id === this.getUniverse().system.star.id;
-    const canWarp = !isCurrent && this.getState() === 'space';
+    const hasTarget = !!this.selectedPlanet;
+    const canWarp = hasTarget && this.getState() === 'space';
     const label = this.els.routeAction.querySelector('.routeActionLabel');
     this.els.routeAction.disabled = !canWarp;
-    label.textContent = isCurrent ? '当前星系' : this.getState() !== 'space' ? '需返回飞船' : '设定航线';
+    label.textContent = !hasTarget ? '选择目标星球'
+      : this.getState() !== 'space' ? '需返回飞船'
+        : isCurrent ? '自动导航至目标轨道' : '设定航线至目标轨道';
   }
 
   warpToSelection() {
     if (!this.selectedStar) return;
-    if (this.selectedStar.id === this.getUniverse().system.star.id) return;
+    if (this.selectedStar.id === this.getUniverse().system.star.id && !this.selectedPlanet) return;
     if (this.getState() !== 'space') return;
     this.onWarpTarget?.(this.selectedStar, this.selectedPlanet?.bodyId || null);
   }

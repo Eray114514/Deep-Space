@@ -1,6 +1,6 @@
 {
   "name": "deep-space",
-  "version": "0.29.0",
+  "version": "0.33.0",
   "description": "A fully procedural explorable universe in the browser. Stars, planets with consistent terrain from orbit to on-foot, all generated from a seed.",
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "test": "node tools/test.js && node tools/astronomytest.js",
     "test:terrain": "node tools/sanity.js",
     "test:gameplay": "node tools/gameplaytest.js",
+    "test:pointerlock": "node tools/pointerlocktest.js",
     "test:astronomy:browser": "node tools/astroplaytest.js",
     "build": "npm test && node tools/build.js",
     "shots": "node tools/screenshot.js",

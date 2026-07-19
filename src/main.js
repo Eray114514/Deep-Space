@@ -5,7 +5,7 @@
 // (atmosphere, fog, day/night, star dimming).
 
 import * as THREE from 'three';
-import { Universe } from './galaxy.js';
+import { StarSystem, Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
 import { SpaceControls, WalkControls, guidePlanetApproach, keys } from './controls.js';
 import { Scatter } from './scatter.js';
@@ -16,18 +16,20 @@ import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from '../vendor/jsm/postprocessing/GTAOPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord } from './names.js';
-import { CelestialClock, eclipseFraction } from './astronomy.js';
+import { CelestialClock, TIME_SCALE, eclipseFraction, generateSystemSpec, orbitalPosition } from './astronomy.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
 import { VolumetricPass } from './volumetric-pass.js';
 import { ForegroundPass } from './foreground-pass.js';
+import { RiftDistortionShader, SpatialRift } from './spatial-rift.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -56,6 +58,12 @@ console.info(`深空 v${VERSION}`);
 // touch-first device? (gestures replace wheel/keys, virtual stick for walking)
 const IS_TOUCH = qs.get('desktop') !== '1'
   && (window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0);
+// Hybrid Windows devices can report touch support while the player is using a
+// mouse. Pointer Lock follows the active input modality, not hardware support.
+let pointerLockInput = !IS_TOUCH;
+window.addEventListener('pointerdown', (event) => {
+  pointerLockInput = event.pointerType !== 'touch';
+}, true);
 
 // ---- renderer ---------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({
@@ -140,6 +148,9 @@ if (qs.get('gtao') === '1' && !QUALITY_LOW) {
 }
 const foregroundPass = new ForegroundPass(scene, camera, SHIP_FOREGROUND_LAYER);
 composer.addPass(foregroundPass);
+const riftDistortionPass = new ShaderPass(RiftDistortionShader);
+riftDistortionPass.enabled = false;
+composer.addPass(riftDistortionPass);
 // threshold above 1.0: only genuinely HDR pixels bloom (sun, lava, engines,
 // specular glints) — daytime sky must NOT veil the terrain
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
@@ -152,6 +163,7 @@ if (smaaPass) composer.addPass(smaaPass);
 // The volume pass needs the composer even when decorative bloom is disabled.
 bloomPass.enabled = qs.get('post') !== '0' && !QUALITY_LOW;
 let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
+let spatialRift = null;
 renderer.info.autoReset = false;   // accumulate across composer passes
 function sizePost() {
   composer.setPixelRatio(renderDpr);
@@ -164,6 +176,7 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   sizePost();
+  spatialRift?.resize(window.innerWidth, window.innerHeight, renderDpr);
   updateStarProj();
 });
 
@@ -215,10 +228,13 @@ let referenceBodyFrameValid = false;
 let frameNo = 0;
 let lastBuildFrame = 0;
 let paused = false;
+let pointerLockRequest = null;
+let timeWarp = null;
 let photoMode = false;
 let boostVisual = 0;
 let pulseVisual = 0;
-let pulseFuel = 100;
+const PULSE_FUEL_MAX = 140;
+let pulseFuel = PULSE_FUEL_MAX;
 let pulseActive = false;
 let pulseEngaged = false;
 let pulseRechargeDelay = 0;
@@ -226,6 +242,13 @@ let weaponCooldown = 0;
 let weaponVisual = 0;
 let activeBolts = 0;
 let starMap = null;
+let pendingRoute = null;
+let riftRoute = null;
+let riftPreviewSystem = null;
+let riftForcedPost = false;
+const riftEntranceUniv = new THREE.Vector3();
+const riftTargetUniv = new THREE.Vector3();
+const riftOrientation = new THREE.Quaternion();
 let dialAcc = 0;
 const WALK_WEATHER = { lush: 'rain', ocean: 'rain', ice: 'snow', toxic: 'storm', lava: 'storm' };
 
@@ -248,6 +271,8 @@ const skyDome = new SkyDome(scene);
 const ship = new Ship(scene, {
   anisotropy: Math.min(16, renderer.capabilities.getMaxAnisotropy()),
 });
+spatialRift = new SpatialRift({ scene, renderer, mainCamera: camera });
+spatialRift.resize(window.innerWidth, window.innerHeight, renderDpr);
 const weapons = new ShipWeapons(scene);
 const audio = new FlightAudio();
 const pulseFx = document.getElementById('pulse-fx');
@@ -318,7 +343,7 @@ const walkCtl = new WalkControls(renderer.domElement);
 
 renderer.domElement.addEventListener('pointerdown', () => {
   audio.unlock();
-  if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && !IS_TOUCH) {
+  if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && pointerLockInput) {
     renderer.domElement.requestPointerLock();
   }
 });
@@ -336,8 +361,19 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     return;
   }
+  if (pendingRoute && state === 'space' && (e.code === 'Digit1' || e.code === 'Numpad1')) {
+    e.preventDefault();
+    beginSelectedWarp();
+    return;
+  }
+  if (pendingRoute && state === 'space' && (e.code === 'Digit2' || e.code === 'Numpad2')) {
+    e.preventDefault();
+    beginSelectedRift();
+    return;
+  }
   if (e.code === 'KeyL') tryLand();
-  if (!e.repeat && e.code === 'KeyF' && state === 'space') {
+  if (!e.repeat && e.code === 'Space' && state === 'space') {
+    e.preventDefault();
     const allowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
     if (!allowed) {
       pulseEngaged = false;
@@ -354,7 +390,9 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.code === 'KeyB') usePost = !usePost;                           // bloom toggle
   if (e.code === 'Escape') {
-    if (state === 'flyto') {
+    if (pendingRoute && state === 'space') {
+      clearPendingRoute();
+    } else if (state === 'flyto') {
       tweens.length = 0;
       setState('space');
     } else if (paused) {
@@ -368,14 +406,18 @@ window.addEventListener('keydown', (e) => {
 // ---- UI ---------------------------------------------------------------------
 const ui = new UI({
   onStart: async () => {
-    await audio.unlock();
+    // Pointer Lock must be requested in the original click gesture. Audio
+    // resume can settle slowly on some browsers and must never hold camera
+    // ownership in a half-enabled state.
+    const lockAttempt = requestGameplayPointerLock();
+    audio.unlock();
     audio.setPaused(false);
+    await lockAttempt;
+    // A denied initial request falls back to the next canvas click; controls
+    // must be enabled so that click can actually reach SpaceControls.
     spaceCtl.enabled = state === 'space';
     if (/Intel/i.test(gpuName)) {
       ui.setPerformanceNotice('当前浏览器正在使用 Intel 核显；在 Windows 图形设置中将浏览器设为“高性能”可启用 RTX 独显。', 12000);
-    }
-    if (!window.NMS_NOLOCK && !IS_TOUCH && (state === 'space' || state === 'walk')) {
-      try { await renderer.domElement.requestPointerLock(); } catch { /* next canvas click retries */ }
     }
   },
   onLand: tryLand,
@@ -388,6 +430,9 @@ const ui = new UI({
     newUniverse();
   },
   onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
+  onRouteWarp: () => beginSelectedWarp(),
+  onRouteRift: () => beginSelectedRift(),
+  onRouteCancel: () => clearPendingRoute(),
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
 });
 starMap = new StarMap({
@@ -399,11 +444,28 @@ starMap = new StarMap({
   onRequestClose: () => closeStarMap(),
   onWarpTarget: (star, bodyId = null) => {
     closeStarMap(false);
-    warpTo(star, bodyId);
+    if (star.id === universe.system.star.id) {
+      const target = universe.system.planets.find((planet) => planet.bodyId === bodyId);
+      if (target) {
+        focusPlanet = target;
+        spaceCtl.focus = target;
+        flyToPlanet(target);
+        ui.setHint(`自动导航 · ${target.name}`, true);
+      }
+      return;
+    }
+    setPendingRoute(star, bodyId);
   },
 });
 const walkDial = document.getElementById('walk-dial');
 const pauseOverlay = document.getElementById('pause-overlay');
+const pausePanel = pauseOverlay.querySelector('.pause-panel');
+const pauseStatus = document.getElementById('pause-status');
+for (const id of ['resume-btn', 'wait-sunrise-btn', 'wait-sunset-btn', 'wait-eclipse-btn']) {
+  document.getElementById(id).addEventListener('pointerdown', (event) => {
+    if (event.button === 0 && paused) requestGameplayPointerLock();
+  });
+}
 document.getElementById('resume-btn').addEventListener('click', resumeGame);
 document.getElementById('pause-map-btn').addEventListener('click', async () => {
   if (paused) {
@@ -488,14 +550,12 @@ function findNextEclipse(body, commit = false) {
 
 function waitForSolarEvent(kind) {
   const body = walkCtl.planet || nearest || focusPlanet;
-  const found = findNextSolarEvent(body, kind, true);
-  ui.setHint(found == null ? '当前目标没有可计算的地表日照事件' : kind === 'sunrise' ? '宇宙时钟已推进至日出' : '宇宙时钟已推进至日落', true);
+  beginTimeWarp(kind, body, () => findNextSolarEvent(body, kind));
 }
 
 function waitForEclipse() {
   const body = walkCtl.planet || nearest || focusPlanet;
-  const found = findNextEclipse(body, true);
-  ui.setHint(found == null ? '近期轨道窗口内没有可见食象' : '宇宙时钟已推进至下一次食象', true);
+  beginTimeWarp('eclipse', body, () => findNextEclipse(body));
 }
 
 document.getElementById('wait-sunrise-btn').addEventListener('click', () => waitForSolarEvent('sunrise'));
@@ -516,7 +576,8 @@ function clearFlightInput() {
 }
 
 function openStarMap() {
-  if (!starMap || starMap.isOpen || paused || ['warp', 'landing', 'takeoff', 'flyto'].includes(state)) return;
+  if (!starMap || starMap.isOpen || paused || riftRoute || ['warp', 'landing', 'takeoff', 'flyto'].includes(state)) return;
+  cancelTimeWarp();
   clearFlightInput();
   spaceCtl.enabled = false;
   audio.setPaused(true);
@@ -532,35 +593,141 @@ async function closeStarMap(restoreInput = true) {
   audio.setPaused(false);
   spaceCtl.enabled = state === 'space';
   ui.setCrosshair(state === 'space' || state === 'walk');
-  if (restoreInput && !window.NMS_NOLOCK && !IS_TOUCH && (state === 'space' || state === 'walk')) {
+  if (restoreInput && !window.NMS_NOLOCK && pointerLockInput && (state === 'space' || state === 'walk')) {
     try { await renderer.domElement.requestPointerLock(); } catch { /* next click can reacquire */ }
   }
 }
 
 function pauseGame() {
   if (paused) return;
+  cancelTimeWarp();
   paused = true;
   spaceCtl.enabled = false;
   pauseOverlay.classList.remove('hidden');
+  pausePanel.classList.remove('is-acquiring');
+  pauseStatus.textContent = '指针已释放 · 点击继续以重新接管视角';
   audio.setPaused(true);
   if (document.pointerLockElement) document.exitPointerLock();
 }
 
+function requestGameplayPointerLock() {
+  if (window.NMS_NOLOCK || !pointerLockInput || !['space', 'walk'].includes(state)) return Promise.resolve(true);
+  if (document.pointerLockElement === renderer.domElement) return Promise.resolve(true);
+  if (pointerLockRequest) return pointerLockRequest;
+  pausePanel.classList.add('is-acquiring');
+  pauseStatus.textContent = '正在接管视角控制…';
+  pointerLockRequest = new Promise((resolve) => {
+    let settled = false;
+    const finish = (locked) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      document.removeEventListener('pointerlockchange', onChange);
+      document.removeEventListener('pointerlockerror', onError);
+      pointerLockRequest = null;
+      resolve(locked);
+    };
+    const onChange = () => {
+      if (document.pointerLockElement === renderer.domElement) finish(true);
+    };
+    const onError = () => finish(false);
+    const timeout = setTimeout(() => finish(document.pointerLockElement === renderer.domElement), 1800);
+    document.addEventListener('pointerlockchange', onChange);
+    document.addEventListener('pointerlockerror', onError, { once: true });
+    try {
+      const request = renderer.domElement.requestPointerLock();
+      request?.catch(onError);
+    } catch { onError(); }
+  });
+  return pointerLockRequest;
+}
+
 async function resumeGame() {
-  if (!paused) return;
-  if (!window.NMS_NOLOCK && !IS_TOUCH && (state === 'space' || state === 'walk')) {
-    try { await renderer.domElement.requestPointerLock(); } catch { return; }
+  if (!paused) return true;
+  let locked = await requestGameplayPointerLock();
+  if (locked && !window.NMS_NOLOCK && pointerLockInput && ['space', 'walk'].includes(state)) {
+    // Some Chromium builds briefly report a successful lock and release it in
+    // the following rendering task. Keep the game paused until ownership is
+    // stable, so cursor-hidden/controller-disabled can never leak to play.
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    locked = document.pointerLockElement === renderer.domElement;
+  }
+  pausePanel.classList.remove('is-acquiring');
+  if (!locked) {
+    pauseStatus.textContent = '未能取得视角控制 · 请再次点击继续';
+    return false;
   }
   paused = false;
-  await audio.unlock();
-  audio.setPaused(false);
+  pauseFrameRendered = false;
   spaceCtl.enabled = state === 'space';
   pauseOverlay.classList.add('hidden');
+  audio.setPaused(false);
+  audio.unlock();
+  return true;
+}
+
+const TIME_WARP_LABELS = {
+  sunrise: '下一次日出',
+  sunset: '下一次日落',
+  eclipse: '下一次食象',
+};
+
+async function beginTimeWarp(kind, body, findTarget) {
+  if (!body) {
+    pauseStatus.textContent = '当前没有可用于星历计算的目标天体';
+    return;
+  }
+  pauseStatus.textContent = '正在解算星历窗口…';
+  const target = findTarget();
+  if (target == null) {
+    pauseStatus.textContent = kind === 'eclipse'
+      ? '近期轨道窗口内没有可见食象'
+      : '当前目标没有可计算的地平日照事件';
+    return;
+  }
+  const resumed = await resumeGame();
+  if (!resumed) return;
+  const start = celestialClock.hours;
+  const delta = Math.max(0.001, target - start);
+  const duration = clamp(delta * 0.4, 1.8, 7);
+  const scale = Math.max(600, delta * 3600 / duration);
+  celestialClock.scale = scale;
+  timeWarp = { kind, start, target, scale, label: TIME_WARP_LABELS[kind] };
+  ui.setTimeWarp(true, { label: timeWarp.label, progress: 0, scale });
+  ui.setHint(`星历快进 · ${timeWarp.label}`, true);
+}
+
+function cancelTimeWarp(message = '') {
+  if (!timeWarp) return;
+  timeWarp = null;
+  celestialClock.scale = TIME_SCALE;
+  ui.setTimeWarp(false);
+  if (message) ui.setHint(message, true);
+}
+
+function updateTimeWarp() {
+  if (!timeWarp) return;
+  const span = Math.max(1e-6, timeWarp.target - timeWarp.start);
+  const progress = clamp((celestialClock.hours - timeWarp.start) / span, 0, 1);
+  if (celestialClock.hours >= timeWarp.target) {
+    const completed = timeWarp;
+    celestialClock.set(completed.target);
+    timeWarp = null;
+    celestialClock.scale = TIME_SCALE;
+    ui.setTimeWarp(false);
+    ui.setHint(`已抵达${completed.label.replace('下一次', '')} · 星历倍率恢复`, true);
+    return;
+  }
+  ui.setTimeWarp(true, { label: timeWarp.label, progress, scale: timeWarp.scale });
 }
 
 document.addEventListener('pointerlockchange', () => {
-  if (!window.NMS_NOLOCK && !IS_TOUCH && !document.pointerLockElement
-      && !paused && !starMap?.isOpen && (state === 'space' || state === 'walk')) {
+  if (document.pointerLockElement === renderer.domElement && !paused && !starMap?.isOpen) {
+    spaceCtl.enabled = state === 'space';
+    return;
+  }
+  if (!window.NMS_NOLOCK && pointerLockInput && !document.pointerLockElement
+      && !paused && !starMap?.isOpen && !pendingRoute && (state === 'space' || state === 'walk')) {
     pauseGame();
   }
 });
@@ -610,7 +777,7 @@ function setState(s) {
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>LMB</b> 射击 · <b>W/S</b> 推进/制动 · <b>RMB/SHIFT</b> 加力 · <b>F</b> 脉冲巡航 · <b>M/TAB</b> 星图',
+    space: '<b>鼠标</b> 船头 · <b>LMB</b> 射击 · <b>W/S</b> 推进/制动 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲巡航 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
@@ -707,7 +874,7 @@ function tryLand() {
   const endLocal = dirLocal.clone().multiplyScalar(ground + 1.7);
   const viewLocal = _v2.set(0, 0, -1).applyQuaternion(startLocalQuat);
   const endLocalQuat = horizonQuat(dirLocal, viewLocal, new THREE.Quaternion());
-  if (!window.NMS_NOLOCK && !IS_TOUCH) renderer.domElement.requestPointerLock();
+  if (!window.NMS_NOLOCK && pointerLockInput) renderer.domElement.requestPointerLock();
   parkShipNear(planet, dirLocal);
   setState('landing');
   ui.showLand(false);
@@ -794,6 +961,190 @@ function takeoff(planet = walkCtl.planet, launchPos = nav.pos.clone(), launchUp 
   return true;
 }
 
+function routeArrival(star, bodyId = null, forwardHint = null) {
+  const systemSpec = generateSystemSpec(SEED, star);
+  const bodies = new Map(systemSpec.bodies.map((body) => [body.bodyId, body]));
+  let body = bodyId ? bodies.get(bodyId) : null;
+  if (body?.isMoon) body = bodies.get(body.parentId) || body;
+  const center = star.pos.clone();
+  if (body) {
+    const resolvePosition = (spec, out = new THREE.Vector3()) => {
+      orbitalPosition(spec.orbit, celestialClock.hours, out);
+      if (spec.parentId) out.add(resolvePosition(bodies.get(spec.parentId)));
+      else out.add(star.pos);
+      return out;
+    };
+    resolvePosition(body, center);
+  }
+  const approach = forwardHint
+    ? forwardHint.clone().normalize().negate()
+    : nav.pos.clone().sub(center).normalize();
+  if (approach.lengthSq() < 0.5) approach.set(0, 0, 1);
+  const clearance = body ? body.radius * 2.15 : Math.max(star.radius * 72, 1.4e9);
+  return {
+    center,
+    entry: center.clone().addScaledVector(approach, clearance),
+    bodyId: body?.bodyId || null,
+    bodyName: body?.name || null,
+  };
+}
+
+function formatRouteDistance(distance) {
+  if (distance >= 1e9) return `${(distance / 1e9).toFixed(2)} Gm`;
+  if (distance >= 1e6) return `${(distance / 1e6).toFixed(1)} Mm`;
+  if (distance >= 1e3) return `${(distance / 1e3).toFixed(1)} km`;
+  return `${Math.round(distance)} m`;
+}
+
+function setPendingRoute(star, bodyId = null) {
+  clearPendingRoute(false);
+  pendingRoute = { star, bodyId };
+  const target = routeArrival(star, bodyId);
+  pendingRoute.target = target;
+  const label = target.bodyName ? `${target.bodyName} · ${generateSystemSpec(SEED, star).name}`
+    : generateSystemSpec(SEED, star).name;
+  pendingRoute.label = label;
+  spaceCtl.enabled = false;
+  ui.setCrosshair(false);
+  ui.showRouteChoice(true, label);
+  ui.setHint('航线已锁定 · 选择恒星跃迁或弦界航道', true);
+}
+
+function disposeRiftPreview() {
+  if (!riftPreviewSystem) return;
+  riftPreviewSystem.dispose();
+  riftPreviewSystem = null;
+}
+
+function setRiftPreviewVisible(visible) {
+  if (!riftPreviewSystem) return;
+  for (const view of riftPreviewSystem.starViews) {
+    view.group.visible = visible;
+    view.light.visible = visible;
+    if (visible) {
+      view.glow.material.opacity = 1;
+      view.light.intensity = 3.2 * Math.min(2.2, Math.sqrt(view.spec.luminositySolar));
+    }
+  }
+  for (const planet of riftPreviewSystem.planets) planet.group.visible = visible;
+}
+
+function clearPendingRoute(restoreInput = true) {
+  const hadRoute = !!pendingRoute;
+  pendingRoute = null;
+  ui.showRouteChoice(false);
+  ui.setDestinationMarker({ show: false });
+  if (hadRoute && restoreInput && state === 'space') {
+    spaceCtl.enabled = true;
+    ui.setCrosshair(true);
+    requestGameplayPointerLock();
+  }
+}
+
+function beginSelectedWarp() {
+  if (!pendingRoute || state !== 'space') return;
+  const route = pendingRoute;
+  clearPendingRoute(false);
+  warpTo(route.star, route.bodyId);
+}
+
+function beginSelectedRift() {
+  if (!pendingRoute || state !== 'space' || riftRoute) return;
+  const route = pendingRoute;
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
+  const arrival = routeArrival(route.star, route.bodyId, forward);
+  clearPendingRoute(false);
+  spaceCtl.enabled = true;
+  ui.setCrosshair(true);
+  requestGameplayPointerLock();
+  riftRoute = { ...route, arrival, arrived: false };
+  riftEntranceUniv.copy(nav.pos).addScaledVector(forward, 1250);
+  riftTargetUniv.copy(arrival.entry);
+  riftOrientation.copy(nav.quat);
+  riftPreviewSystem = new StarSystem(universe, route.star, {
+    deferred: false,
+    timeHours: celestialClock.hours,
+  });
+  setRiftPreviewVisible(false);
+  spatialRift.setTransform(
+    riftEntranceUniv.clone().sub(nav.pos),
+    riftOrientation,
+    riftTargetUniv.clone().sub(nav.pos),
+  );
+  spatialRift.openPassage();
+  riftDistortionPass.enabled = true;
+  riftForcedPost = !usePost;
+  usePost = true;
+  audio.cue('warp');
+  ui.setHint('弦界航道正在展开 · 保持操控，通道稳定后自行驶入', true);
+}
+
+function updateDestinationMarker() {
+  if (!pendingRoute || state !== 'space') {
+    ui.setDestinationMarker({ show: false });
+    return;
+  }
+  const direction = pendingRoute.target.center.clone().sub(nav.pos);
+  const distance = direction.length();
+  if (distance < 1) {
+    ui.setDestinationMarker({ show: false });
+    return;
+  }
+  direction.normalize().multiplyScalar(1000).applyQuaternion(nav.quat.clone().invert());
+  const behind = direction.z > -0.01;
+  const z = behind ? Math.max(0.01, direction.z) : -direction.z;
+  let nx = direction.x / (z * Math.tan(camera.fov * Math.PI / 360) * camera.aspect);
+  let ny = direction.y / (z * Math.tan(camera.fov * Math.PI / 360));
+  if (behind) { nx = -nx; ny = -ny; }
+  nx = clamp(nx, -0.82, 0.82);
+  ny = clamp(ny, -0.72, 0.72);
+  ui.setDestinationMarker({
+    show: true,
+    name: pendingRoute.label,
+    distance: formatRouteDistance(distance),
+    x: (nx * 0.5 + 0.5) * window.innerWidth,
+    y: (-ny * 0.5 + 0.5) * window.innerHeight,
+    behind,
+  });
+}
+
+function updateRiftRoute(dt) {
+  if (!riftRoute) return;
+  const entranceRender = riftEntranceUniv.clone().sub(nav.pos);
+  const targetRender = riftTargetUniv.clone().sub(nav.pos);
+  spatialRift.setTransform(entranceRender, riftOrientation, targetRender);
+  spatialRift.update(dt, clock.elapsedTime);
+  if (!riftRoute.arrived) {
+    const previousRender = prevNavPos.clone().sub(nav.pos);
+    if (spatialRift.crossed(previousRender, _v3.set(0, 0, 0))) {
+      const offset = riftRoute.arrival.entry.clone().sub(nav.pos);
+      nav.pos.copy(riftRoute.arrival.entry);
+      riftEntranceUniv.add(offset);
+      disposeRiftPreview();
+      const destination = universe.setSystem(riftRoute.star, true);
+      destination.updateCelestial(celestialClock.hours);
+      spatialRift.markTraversed();
+      riftRoute.arrived = true;
+      ui.setHint(`已穿越弦界航道 · ${destination.name}`, true);
+    }
+  } else if (!spatialRift.group.visible) {
+    if (riftForcedPost) usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
+    riftForcedPost = false;
+    riftDistortionPass.enabled = false;
+    riftRoute = null;
+  }
+}
+
+function renderRiftPortal() {
+  if (!riftRoute || riftRoute.arrived || !riftPreviewSystem) return;
+  riftPreviewSystem.updateCelestial(celestialClock.hours);
+  universe.relativizeSystem(riftPreviewSystem, nav.pos);
+  spatialRift.renderPortal({
+    beforeRender: () => setRiftPreviewVisible(true),
+    afterRender: () => setRiftPreviewVisible(false),
+  });
+}
+
 // A warp is a flight, not a teleport: align with the target, spool up, then
 // cross real space at ferocious speed — every star in the sky parallaxes past,
 // the destination sun grows from a dot — and decelerate into the new system.
@@ -807,7 +1158,7 @@ function warpTo(star, preferBodyId = null) {
   // Begin with a safe stellar-system arrival point. Once the destination
   // system exists, the trajectory is redirected toward its hero planet.
   const arriveDir = startPos.clone().sub(star.pos).normalize();
-  let endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 100, 2.2e9));
+  let endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 72, 1.4e9));
   const dist = startPos.distanceTo(endPos);
   const dur = clamp(8.5 + dist / 8e8, 10, 18);
   let targetQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
@@ -829,7 +1180,7 @@ function warpTo(star, preferBodyId = null) {
       const s = kf * kf * kf * (kf * (kf * 6 - 15) + 10);
       if (arrivalSpec) {
         const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
-        endPos.copy(heroPos).addScaledVector(revealDirection, arrivalSpec.radius * 2.55);
+        endPos.copy(heroPos).addScaledVector(revealDirection, arrivalSpec.radius * 2.15);
         targetQuat = lookQuatAt(nav.pos, heroPos, targetQuat);
       }
       nav.pos.lerpVectors(startPos, endPos, s);
@@ -849,12 +1200,11 @@ function warpTo(star, preferBodyId = null) {
           if (picked?.isMoon) picked = destination._specs.find((spec) => spec.bodyId === picked.parentId);
           if (picked && !picked.isMoon) hero = picked;
         }
-        if (!hero) hero = destination._specs.find((spec) => !spec.isMoon);
         if (hero) {
           const heroPos = destination.frames.get(hero.bodyId).position;
           revealDirection = startPos.clone().sub(heroPos).normalize();
           arrivalSystem = destination; arrivalSpec = hero;
-          endPos = heroPos.clone().addScaledVector(revealDirection, hero.radius * 2.55);
+          endPos = heroPos.clone().addScaledVector(revealDirection, hero.radius * 2.15);
           targetQuat = lookQuatAt(startPos, heroPos, new THREE.Quaternion());
           arrivalPlanetName = hero.name;
         }
@@ -872,6 +1222,8 @@ function warpTo(star, preferBodyId = null) {
         spaceCtl.focus = arrivalPlanet;
         lookQuatAt(nav.pos, arrivalPlanet.posUniv, nav.quat);
       }
+    } else {
+      ui.setHint(`已抵达 ${universe.system.name} · 星系安全入口`, true);
     }
     setState('space');
   });
@@ -885,6 +1237,13 @@ function newUniverse(seed) {
   if (walkCtl.active) walkCtl.exit();
   if (document.pointerLockElement) document.exitPointerLock();
   tweens.length = 0;
+  clearPendingRoute(false);
+  disposeRiftPreview();
+  riftRoute = null;
+  spatialRift.group.visible = false;
+  spatialRift.open = 0;
+  spatialRift.targetOpen = 0;
+  riftDistortionPass.enabled = false;
   scatter.clear();
   universe.dispose();
   ship.parkedPlanet = null;
@@ -916,7 +1275,7 @@ function spawn() {
   const sunDir = sys.sunDirFrom(planet.posUniv, _v).clone();
   const side = _v2.crossVectors(sunDir, _v3.set(0, 1, 0)).normalize();
   const dir = sunDir.clone().addScaledVector(side, 0.85).normalize();
-  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * 2.45);
+  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * 2.10);
   lookQuatAt(nav.pos, planet.posUniv, nav.quat);
   nav.quat.multiply(_q.setFromAxisAngle(_v3.set(0, 1, 0), 0.18));
   nav.vel.set(0, 0, 0);
@@ -1075,6 +1434,7 @@ function frame() {
   // Advance the persistent universe clock only during active play. The world
   // is updated before controls so a walker remains attached to the moving body.
   celestialClock.update(rawDt, !photoMode);
+  updateTimeWarp();
   const followFrame = state === 'space' && referenceBody
     && nav.pos.distanceTo(referenceBodyPos) < Math.max(referenceBody.R * 10, referenceBody.atmoHeight * 5);
   universe.update(nav.pos, state === 'space' || state === 'flyto', celestialClock.hours);
@@ -1151,7 +1511,7 @@ function frame() {
     spaceCtl.pulseDrive = pulseActive;
     if (pulseActive) {
       pulseFuel = Math.max(0, pulseFuel - dt * 6.5);
-      pulseRechargeDelay = 1.4;
+      pulseRechargeDelay = 1.1;
     }
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
@@ -1207,14 +1567,16 @@ function frame() {
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
   }
   stepTweens(dt);
+  updateRiftRoute(dt);
+  updateDestinationMarker();
 
   // The ship reactor recharges pulse energy after a short thermal cooldown.
   // Recharge continues while landed so pulse fuel can never become a dead-end
   // resource that requires restarting the session.
   if (!pulseActive) {
     pulseRechargeDelay = Math.max(0, pulseRechargeDelay - dt);
-    if (pulseRechargeDelay <= 0 && pulseFuel < 100) {
-      pulseFuel = Math.min(100, pulseFuel + dt * 4.5);
+    if (pulseRechargeDelay <= 0 && pulseFuel < PULSE_FUEL_MAX) {
+      pulseFuel = Math.min(PULSE_FUEL_MAX, pulseFuel + dt * 7.0);
     }
   }
 
@@ -1365,40 +1727,50 @@ function frame() {
     atmosphere: envInAtmo,
     pulse: pulseVisual,
     pulseFuel,
-    pulseRecharging: !pulseActive && pulseRechargeDelay <= 0 && pulseFuel < 99.995,
+    pulseFuelMax: PULSE_FUEL_MAX,
+    pulseRecharging: !pulseActive && pulseRechargeDelay <= 0 && pulseFuel < PULSE_FUEL_MAX - 0.005,
   });
   const localHours = nearest ? localSolarTimeAt(nearest, nav.pos) : null;
-  ui.setCosmicTime(celestialClock.hours, localHours);
+  ui.setCosmicTime(celestialClock.hours, localHours, celestialClock.scale);
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
   const headingDeg = Math.atan2(_v.x, -_v.z) * 180 / Math.PI;
   ui.setHeading(headingDeg);
 
   // the survey watch owns the bottom-left corner while on foot: local solar
-  // time, day/night terminator, suit/cell charge and a bearing home to the ship
+  // time, day/night terminator, local atmospheric pressure / cell charge and
+  // a true spherical bearing home to the parked ship
   if (state === 'walk' && walkCtl.planet) {
     dialAcc += dt;
     if (dialAcc >= 0.15) {
       dialAcc = 0;
       const p = walkCtl.planet;
-      _up.copy(nav.pos).sub(p.posUniv).normalize();
+      _up.copy(walkCtl.posLocal).normalize();
+      // Reproduce WalkControls' local east/north basis, including its polar
+      // fallback. This keeps heading and ship bearing correct anywhere.
+      if (Math.abs(_up.y) < 0.93) _v3.crossVectors(_v.set(0, 1, 0), _up).normalize();
+      else _v3.crossVectors(_v.set(1, 0, 0), _up).normalize();
+      _v.crossVectors(_up, _v3).normalize();
       let bearing = null;
       if (ship.parkedPosUniv) {
-        _v2.copy(ship.parkedPosUniv).sub(nav.pos).projectOnPlane(_up);
-        if (_v2.lengthSq() > 4) bearing = Math.atan2(_v2.x, -_v2.z) * 180 / Math.PI;
+        p.worldPositionToLocal(ship.parkedPosUniv, _v2).sub(walkCtl.posLocal).projectOnPlane(_up);
+        if (_v2.lengthSq() > 4) bearing = Math.atan2(_v2.dot(_v3), _v2.dot(_v)) * 180 / Math.PI;
       }
+      const sunLocal = p.sunDirLocal || _up;
+      const pressure = Math.max(0, Number(p.atmosphere?.pressureBar) || 0);
+      const missionSol = Math.floor(celestialClock.hours / 24);
       walkDial?.setState({
         time: { seconds: (localHours ?? 12) * 3600 },
-        date: { day: 'SOL', month: 'UT', date: Math.floor(celestialClock.hours / 24) },
+        date: { day: 'SOL', month: 'UT', date: missionSol },
         planet: {
           name: p.name,
-          phase: clamp(_up.dot(p.sunDirWorld || _up), -0.98, 0.98),
+          phase: clamp(_up.dot(sunLocal), -0.98, 0.98),
           rotation: p.rotationPeriodHours ? (celestialClock.hours / p.rotationPeriodHours) * Math.PI * 2 : 0,
-          lightTilt: -0.12,
+          lightTilt: Math.atan2(sunLocal.dot(_v), sunLocal.dot(_v3)),
           selected: true,
         },
-        ap: 1,
-        battery: clamp(pulseFuel / 100, 0, 1),
-        heading: headingDeg,
+        ap: pressure / (pressure + 1),
+        battery: clamp(pulseFuel / PULSE_FUEL_MAX, 0, 1),
+        heading: walkCtl.yaw * 180 / Math.PI,
         destinationBearing: bearing,
         weather: WALK_WEATHER[p.type] || 'clear',
       });
@@ -1437,6 +1809,8 @@ function frame() {
   }
 
   if (!FREEZE && !photoMode) tickShaders(dt);
+  renderRiftPortal();
+  spatialRift.updateDistortion(riftDistortionPass);
   renderer.info.reset();
   if (usePost) composer.render();
   else renderer.render(scene, camera);
@@ -1448,7 +1822,7 @@ wireUniverse(universe);
 spawn();
 ui.setLoading(true, 'generating universe…');
 const SHOW_HERO = qs.get('nohero') !== '1' && !window.NMS_NOLOCK;
-ui.showHero(SHOW_HERO, '从轨道俯冲至地表，或打开银河星图选择下一次跃迁。');
+ui.showHero(SHOW_HERO);
 if (SHOW_HERO) spaceCtl.enabled = false;
 frame();
 

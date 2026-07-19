@@ -15,16 +15,26 @@ export class UI {
       speedValue: $('speed-value'), speedUnit: $('speed-unit'),
       headingCardinal: $('heading-cardinal'), headingDegrees: $('heading-degrees'),
       starMapBtn: $('star-map-btn'),
+      destinationMarker: $('destination-marker'), destinationMarkerName: $('destination-marker-name'),
+      destinationMarkerDistance: $('destination-marker-distance'),
+      routeChoice: $('route-choice'), routeChoiceName: $('route-choice-name'),
+      routeWarp: $('route-warp-btn'), routeRift: $('route-rift-btn'), routeCancel: $('route-cancel-btn'),
       brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
+      heroSeed: $('hero-seed'), heroBuild: $('hero-build'),
       driveMode: $('drive-mode'), driveSpeed: $('drive-speed'), driveBoost: $('drive-boost'), driveAtmo: $('drive-atmo'),
       driveSpeedFill: $('drive-speed-fill'), driveBoostFill: $('drive-boost-fill'), driveAtmoFill: $('drive-atmo-fill'),
       pulseFuel: $('pulse-fuel'),
+      timeWarp: $('time-warp-indicator'), timeWarpLabel: $('time-warp-label'),
+      timeWarpProgress: $('time-warp-progress'), timeWarpRate: $('time-warp-rate'),
     };
     this.els.land.addEventListener('click', () => this.cb.onLand && this.cb.onLand());
     this.els.newBtn.addEventListener('click', () => this.cb.onNewUniverse && this.cb.onNewUniverse());
     this.els.starMapBtn.addEventListener('click', () => this.cb.onStarMap && this.cb.onStarMap());
+    this.els.routeWarp.addEventListener('click', () => this.cb.onRouteWarp?.());
+    this.els.routeRift.addEventListener('click', () => this.cb.onRouteRift?.());
+    this.els.routeCancel.addEventListener('click', () => this.cb.onRouteCancel?.());
     this.els.heroStart.addEventListener('click', () => {
       this.els.hero.classList.add('hidden');
       this.cb.onStart?.();
@@ -96,15 +106,16 @@ export class UI {
     this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
   }
 
-  setCosmicTime(hours, localHours = null) {
+  setCosmicTime(hours, localHours = null, scale = 60) {
     const day = Math.floor(hours / 24);
     const hour = ((hours % 24) + 24) % 24;
     const local = localHours == null ? '' : ` · 本地 ${String(Math.floor(localHours) % 24).padStart(2, '0')}:${String(Math.floor((localHours % 1) * 60)).padStart(2, '0')}`;
-    if (this.els.cosmicTime) this.els.cosmicTime.textContent = `UT ${String(day).padStart(4, '0')}:${String(Math.floor(hour)).padStart(2, '0')} · ×60${local}`;
+    const rate = scale >= 1000 ? `${(scale / 1000).toFixed(scale >= 10000 ? 0 : 1)}k` : Math.round(scale);
+    if (this.els.cosmicTime) this.els.cosmicTime.textContent = `UT ${String(day).padStart(4, '0')}:${String(Math.floor(hour)).padStart(2, '0')} · ×${rate}${local}`;
   }
 
   setFlightTelemetry({ speed = 0, speedLimit = 1, boost = 0, atmosphere = 0,
-    pulse = 0, pulseFuel = 100, pulseRecharging = false }) {
+    pulse = 0, pulseFuel = 100, pulseFuelMax = 100, pulseRecharging = false }) {
     const speedK = Math.max(0, Math.min(1, speed / Math.max(1, speedLimit)));
     const boostK = Math.max(0, Math.min(1, boost));
     const atmoK = Math.max(0, Math.min(1, atmosphere));
@@ -118,7 +129,8 @@ export class UI {
     this.els.driveSpeedFill.style.width = `${Math.max(3, speedK * 100).toFixed(1)}%`;
     this.els.driveBoostFill.style.width = `${(Math.max(boostK, pulseK) * 100).toFixed(1)}%`;
     this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
-    this._setText(this.els.pulseFuel, `${Math.ceil(Math.max(0, pulseFuel))}%${pulseRecharging ? ' ↑' : ''}`);
+    this._setText(this.els.pulseFuel,
+      `${Math.ceil(Math.max(0, pulseFuel))}/${Math.ceil(pulseFuelMax)}${pulseRecharging ? ' ↑' : ''}`);
     this.els.pulseFuel.parentElement.classList.toggle('pulse-recharging', pulseRecharging);
   }
 
@@ -163,7 +175,18 @@ export class UI {
     this.els.hero.classList.toggle('hidden', !show);
     const copy = this.els.hero.querySelector('p');
     if (subtitle) copy.textContent = subtitle;
+    if (this.els.heroSeed) this.els.heroSeed.textContent = new URLSearchParams(location.search).get('seed') || 'EUCLID';
+    if (this.els.heroBuild) this.els.heroBuild.textContent = document.getElementById('version')?.textContent || '—';
     if (show) queueMicrotask(() => this.els.heroStart.focus());
+  }
+
+  setTimeWarp(show, { label = '', progress = 0, scale = 60 } = {}) {
+    this.els.timeWarp.classList.toggle('hidden', !show);
+    if (!show) return;
+    this._setText(this.els.timeWarpLabel, label);
+    this.els.timeWarpProgress.style.width = `${Math.max(0, Math.min(100, progress * 100)).toFixed(1)}%`;
+    const rate = scale >= 1000 ? `${(scale / 1000).toFixed(scale >= 10000 ? 0 : 1)}k` : Math.round(scale);
+    this._setText(this.els.timeWarpRate, `×${rate}`);
   }
 
   setPerformanceNotice(text, timeout = 8000) {
@@ -177,6 +200,22 @@ export class UI {
       notice.classList.add('notice-fade');
       setTimeout(() => notice.classList.add('hidden'), 700);
     }, timeout);
+  }
+
+  showRouteChoice(show, name = '') {
+    this.els.routeChoice.classList.toggle('hidden', !show);
+    if (show) this._setText(this.els.routeChoiceName, name || '未命名星系');
+  }
+
+  setDestinationMarker({ show = false, name = '', distance = '', x = 0, y = 0, behind = false } = {}) {
+    const marker = this.els.destinationMarker;
+    marker.classList.toggle('hidden', !show);
+    if (!show) return;
+    marker.style.left = `${x}px`;
+    marker.style.top = `${y}px`;
+    marker.classList.toggle('is-behind', behind);
+    this._setText(this.els.destinationMarkerName, name);
+    this._setText(this.els.destinationMarkerDistance, distance);
   }
 
   setCrosshair(show) { this.els.crosshair.classList.toggle('hidden', !show); }

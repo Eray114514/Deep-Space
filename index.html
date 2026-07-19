@@ -67,21 +67,37 @@
 
   <button id="star-map-btn" title="打开银河星图"><span>银河星图</span><kbd>M</kbd></button>
 
+  <div id="destination-marker" class="hidden" aria-hidden="true">
+    <i></i><span id="destination-marker-name">目的地</span><small id="destination-marker-distance">—</small>
+  </div>
+
+  <section id="route-choice" class="hidden" aria-label="选择星际移动方式">
+    <header>
+      <div><span>航线已锁定</span><strong id="route-choice-name">—</strong></div>
+      <button id="route-cancel-btn" type="button" aria-label="取消当前航线">×</button>
+    </header>
+    <div class="route-choice-actions">
+      <button id="route-warp-btn" type="button">
+        <i class="route-method-glyph warp-glyph" aria-hidden="true"></i>
+        <span><small>自动航行</small><b>恒星跃迁</b><em>快速抵达星系入口</em></span>
+        <kbd>1</kbd>
+      </button>
+      <button id="route-rift-btn" type="button">
+        <i class="route-method-glyph rift-glyph" aria-hidden="true"></i>
+        <span><small>手动穿越</small><b>弦界航道</b><em>展开通道并自行驶入</em></span>
+        <kbd>2</kbd>
+      </button>
+    </div>
+  </section>
+
   <div id="resource-strip">
     <span>FE <b>18</b></span><span>CR <b>0</b></span><span>BIO <b>0</b></span>
-    <strong>脉冲燃料 <b id="pulse-fuel">100%</b></strong>
+    <strong>脉冲燃料 <b id="pulse-fuel">140/140</b> <small>SPACE</small></strong>
     <strong>跃迁电池 <b>READY</b></strong>
   </div>
 
   <section id="walk-hud" aria-label="地表探索状态">
-    <div class="walk-radar">
-      <div class="walk-orbit"></div>
-      <strong id="walk-system">未知星球</strong>
-      <span><b>O₂</b> 100</span>
-    </div>
-    <div class="walk-vitals">
-      <span>生命维持</span><i><b style="--level:100%"></b></i><strong>100</strong>
-    </div>
+    <space-exploration-dial id="walk-dial" aria-label="地表探索仪表盘"></space-exploration-dial>
   </section>
 
   <div id="bottom">
@@ -109,35 +125,55 @@
   </div>
 
   <section id="hero-overlay" class="hidden" aria-label="启动深空">
-    <div class="hero-copy">
-      <span>ASTERION FLIGHT PROGRAM</span>
-      <h1>深空</h1>
-      <p>连续宇宙导航已就绪</p>
-      <button id="hero-start-btn">进入深空</button>
-      <small>建议开启音效 · 佩戴耳机</small>
+    <div class="hero-frame" aria-hidden="true">
+      <span class="hero-corner hero-corner-nw"></span><span class="hero-corner hero-corner-ne"></span>
+      <span class="hero-corner hero-corner-sw"></span><span class="hero-corner hero-corner-se"></span>
     </div>
+    <div class="hero-telemetry hero-telemetry-top"><span>AF/S9 航行系统</span><b>远征序列 01</b></div>
+    <div class="hero-telemetry hero-telemetry-side"><span>姿态同步</span><b>就绪</b><i></i><span>星历数据</span><b>在线</b><i></i><span>生命维持</span><b>稳定</b></div>
+    <div class="hero-copy">
+      <span class="hero-eyebrow">ASTERION FRONTIER / CONTINUOUS UNIVERSE</span>
+      <h1><small>进入</small>深空</h1>
+      <p>航行计算机已完成星域解算。接管 Asterion S-9，穿越一座不会重复的连续宇宙。</p>
+      <button id="hero-start-btn"><span>接管航行控制</span><kbd>ENTER</kbd></button>
+      <small>音频链路将在接管后启动 · 建议佩戴耳机</small>
+    </div>
+    <div class="hero-telemetry hero-telemetry-bottom"><span>SEED <b id="hero-seed">EUCLID</b></span><span>BUILD <b id="hero-build">—</b></span><span>INPUT <b>POINTER LOCK</b></span></div>
   </section>
 
   <div id="pulse-fx"></div>
   <div id="vignette"></div>
   <div id="fade"></div>
-  <div id="pause-overlay" class="hidden">
+  <div id="pause-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="pause-title">
     <div class="pause-panel">
-      <span>FLIGHT CONTROL SUSPENDED</span>
-      <h2>姿态锁定</h2>
-      <p>导航与推进系统已暂停</p>
+      <header class="pause-header">
+        <div><span>AF/S9 · CONTROL HANDOFF</span><h2 id="pause-title">航行暂停</h2></div>
+        <div class="pause-state"><i></i><span>姿态保持</span><b>HOLD</b></div>
+      </header>
+      <div class="pause-rule"><span></span><b>01 / FLIGHT COMPUTER</b></div>
       <div class="pause-actions">
-        <button id="resume-btn">返回游戏</button>
-        <button id="pause-map-btn">银河星图</button>
-        <button id="wait-sunrise-btn">等待至下一次日出</button>
-        <button id="wait-sunset-btn">等待至下一次日落</button>
-        <button id="wait-eclipse-btn">等待至下一次食象</button>
-        <button id="new-universe" title="生成新的宇宙种子">重构星域</button>
+        <section class="pause-primary" aria-label="继续航行">
+          <button id="resume-btn" class="pause-resume"><span><small>返回驾驶位</small>继续航行</span><kbd>ESC</kbd></button>
+          <button id="pause-map-btn"><span><small>导航</small>打开银河星图</span><kbd>M</kbd></button>
+        </section>
+        <section class="pause-time" aria-label="星历快进">
+          <header><span>星历快进</span><small>恢复控制后实时推进</small></header>
+          <button id="wait-sunrise-btn"><i class="event-glyph sunrise"></i><span><small>地平事件</small>下一次日出</span><b>→</b></button>
+          <button id="wait-sunset-btn"><i class="event-glyph sunset"></i><span><small>地平事件</small>下一次日落</span><b>→</b></button>
+          <button id="wait-eclipse-btn"><i class="event-glyph eclipse"></i><span><small>轨道事件</small>下一次食象</span><b>→</b></button>
+        </section>
+        <section class="pause-system" aria-label="星域操作">
+          <button id="new-universe" title="生成新的宇宙种子"><span><small>不可撤销</small>重构星域</span><b>↻</b></button>
+        </section>
       </div>
+      <footer><span id="pause-status" role="status" aria-live="polite">指针已释放 · 点击继续以重新接管视角</span><b>ESC</b></footer>
     </div>
+  </div>
+  <div id="time-warp-indicator" class="hidden" role="status" aria-live="polite">
+    <span>星历快进</span><strong id="time-warp-label">下一次日落</strong><i><b id="time-warp-progress"></b></i><small id="time-warp-rate">×60</small>
   </div>
   <div id="err" class="hidden"></div>
 
-  <script type="module" src="src/main.js?v=0.29.0"></script>
+  <script type="module" src="src/main.js?v=0.33.0"></script>
 </body>
 </html>

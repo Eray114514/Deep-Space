@@ -11,12 +11,8 @@ const _dir = new THREE.Vector3();
 const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
 const _p = new THREE.Vector3();
-const _warpQ = new THREE.Quaternion();
-const _warpM = new THREE.Matrix4();
-const _warpScale = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
-const Z = new THREE.Vector3(0, 0, 1);
 
 const PARALLAX = 0.012;            // fraction of true speed applied to streaks
 
@@ -43,24 +39,6 @@ export class WarpStreaks {
     this.lines.renderOrder = 6;
     this.lines.visible = false;
     scene.add(this.lines);
-
-    this.ringCount = 18;
-    this.ringTravel = 0;
-    const ringGeometry = new THREE.TorusGeometry(1, 0.022, 6, 72);
-    const ringMaterial = new THREE.MeshBasicMaterial({
-      color: 0x8cecff,
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      fog: false,
-    });
-    this.rings = new THREE.InstancedMesh(ringGeometry, ringMaterial, this.ringCount);
-    this.rings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.rings.frustumCulled = false;
-    this.rings.renderOrder = 5;
-    this.rings.visible = false;
-    scene.add(this.rings);
 
     this.foldTunnel = new THREE.Mesh(
       new THREE.CylinderGeometry(1800, 11000, 52000, 72, 16, true),
@@ -94,7 +72,6 @@ export class WarpStreaks {
     _e1.crossVectors(_dir, Math.abs(_dir.y) < 0.9 ? Y : X).normalize();
     _e2.crossVectors(_dir, _e1);
     for (const s of this.streaks) this.scatter(s);
-    this.ringTravel = 0;
   }
 
   // vel: true velocity vector (m/s); intensity = warp, boost = local pulse
@@ -102,7 +79,6 @@ export class WarpStreaks {
     const lineIntensity = Math.max(intensity, boost * 0.34);
     if (lineIntensity <= 0.01) {
       this.lines.visible = false;
-      this.rings.visible = false;
       this.foldTunnel.visible = false;
       this.wasActive = false;
       return;
@@ -113,7 +89,6 @@ export class WarpStreaks {
     this.wasActive = true;
     this.lines.visible = true;
     this.lines.material.opacity = Math.min(1, lineIntensity) * 0.8;
-    this.rings.visible = intensity > 0.01;
     this.foldTunnel.visible = intensity > 0.01;
 
     _dir.copy(vel).multiplyScalar(1 / speed);
@@ -132,37 +107,19 @@ export class WarpStreaks {
     }
     this.lines.geometry.attributes.position.needsUpdate = true;
 
-    _warpQ.setFromUnitVectors(Z, _dir);
     if (intensity <= 0.01) return;
-    this.ringTravel += dt * (2200 + intensity * 12500);
-    const ringRange = 48000;
-    for (let i = 0; i < this.ringCount; i++) {
-      const base = (i / this.ringCount) * ringRange;
-      const distance = 900 + ((base - this.ringTravel) % ringRange + ringRange) % ringRange;
-      const radius = 260 + distance * (0.065 + intensity * 0.045);
-      _p.copy(_dir).multiplyScalar(distance);
-      _warpScale.setScalar(radius);
-      _warpM.compose(_p, _warpQ, _warpScale);
-      this.rings.setMatrixAt(i, _warpM);
-    }
-    this.rings.instanceMatrix.needsUpdate = true;
-    this.rings.material.opacity = intensity * 0.16;
-
     this.foldTunnel.position.copy(_dir).multiplyScalar(24500);
     this.foldTunnel.quaternion.setFromUnitVectors(Y, _dir);
-    this.foldTunnel.scale.setScalar(0.85 + intensity * 0.3);
-    this.foldTunnel.material.opacity = intensity * 0.028;
+    this.foldTunnel.scale.setScalar(0.9 + intensity * 0.22);
+    this.foldTunnel.material.opacity = intensity * 0.018;
   }
 
   dispose() {
     this.lines.geometry.dispose();
     this.lines.material.dispose();
-    this.rings.geometry.dispose();
-    this.rings.material.dispose();
     this.foldTunnel.geometry.dispose();
     this.foldTunnel.material.dispose();
     if (this.lines.parent) this.lines.parent.remove(this.lines);
-    if (this.rings.parent) this.rings.parent.remove(this.rings);
     if (this.foldTunnel.parent) this.foldTunnel.parent.remove(this.foldTunnel);
   }
 }

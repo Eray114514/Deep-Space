@@ -103,6 +103,38 @@ try {
   const recalled = await page.evaluate('NMS.recallShip()');
   check(recalled && await page.evaluate('NMS.shipDistance()') < 180,
     'recall returns the ship to a nearby safe landing candidate');
+
+  // Waiting from pause is a visible in-world fast-forward, not a clock jump
+  // while the menu remains open.
+  await page.keyboard.press('Escape');
+  check(await page.locator('#pause-overlay').isVisible(), 'Escape opens the flight-computer pause surface');
+  await page.locator('#wait-sunset-btn').click();
+  await page.waitForFunction(() => document.getElementById('pause-overlay').classList.contains('hidden')
+    && !document.getElementById('time-warp-indicator').classList.contains('hidden'));
+  check((await page.evaluate('NMS.stats().timeScale')) > 60,
+    'sunset command resumes play and engages accelerated ephemeris time');
+  await page.waitForFunction(() => document.getElementById('time-warp-indicator').classList.contains('hidden'),
+    null, { timeout: 12000 });
+  check(await page.evaluate('NMS.stats().timeScale') === 60,
+    'ephemeris time returns to normal after the sunset crossing');
+
+  // Exercise the real desktop Pointer Lock path. The regression was a half-
+  // locked state: cursor hidden, but the flight controller still disabled.
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1&quality=low&post=0&vclouds=0&farflora=0&buildms=25`);
+  await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
+  await page.locator('#app canvas').click({ position: { x: 550, y: 350 } });
+  await page.waitForFunction(() => document.pointerLockElement === document.querySelector('#app canvas'));
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !document.pointerLockElement && !document.getElementById('pause-overlay').classList.contains('hidden'));
+  await page.locator('#resume-btn').click();
+  await page.waitForFunction(() => document.pointerLockElement === document.querySelector('#app canvas')
+    && document.getElementById('pause-overlay').classList.contains('hidden'));
+  const quatBeforeResumeMove = await page.evaluate('NMS._internals.nav.quat.toArray()');
+  await page.mouse.move(780, 420);
+  await page.waitForTimeout(100);
+  const quatAfterResumeMove = await page.evaluate('NMS._internals.nav.quat.toArray()');
+  check(quatAfterResumeMove.some((value, index) => Math.abs(value - quatBeforeResumeMove[index]) > 1e-5),
+    'resumed Pointer Lock immediately owns camera look input');
 } finally {
   await browser.close();
   server.close();

@@ -41,6 +41,8 @@
 
 .mode-galaxy #sm-sysview { display: none; }
 .mode-system #sm-canvas { display: none; }
+.mode-system .sm-map-label { display: none !important; }
+.mode-galaxy .worldLabel, .mode-galaxy #sm-navArrow, .mode-galaxy #sm-nameTag { display: none !important; }
 
 #sm-ui { position: absolute; inset: 0; z-index: 8; pointer-events: none; text-shadow: 0 1px 2px rgba(0, 0, 0, .75); }
 #starmap-overlay .panel { background: rgba(7, 17, 26, .79); border: 1px solid rgba(182, 198, 201, .19); box-shadow: inset 0 1px rgba(255, 255, 255, .018); }
@@ -215,6 +217,7 @@
 }
 .resourceTile:nth-child(1) { background: rgba(92, 171, 169, .46); }
 .resourceTile:nth-child(4) { background: rgba(48, 112, 151, .46); }
+.resourceTile.unknown { color: rgba(219, 226, 225, .34); border-style: dashed; background: rgba(90, 108, 112, .18); }
 .resourceTile::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: rgba(255, 255, 255, .08); pointer-events: none; }
 .traitText { margin-top: 82px; color: #d2d8d9; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 

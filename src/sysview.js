@@ -303,7 +303,7 @@ function starSurfaceMaterial(color) {
 // ---------------------------------------------------------------------------
 // gravity-well contour backdrop: the survey-chart signature of the reference
 // ---------------------------------------------------------------------------
-function buildContourField(masses) {
+function buildContourField(masses, fieldRadius) {
   function potentialField(x, z) {
     let f = 0;
     for (const m of masses) {
@@ -320,9 +320,9 @@ function buildContourField(masses) {
     return -1.78 - f * 0.62 + shear;
   }
   const group = new THREE.Group();
-  const ringCount = 43;
+  const ringCount = Math.round(THREE.MathUtils.clamp(fieldRadius * 1.08, 43, 68));
   for (let i = 0; i < ringCount; i++) {
-    const base = 4.08 + i * 0.48;
+    const base = THREE.MathUtils.lerp(4.08, fieldRadius, i / Math.max(1, ringCount - 1));
     const phase = i * 0.27;
     const pts = [];
     const samples = 480;
@@ -574,10 +574,10 @@ export class SystemView {
     this._buildBackdrop(rand);
     const primaryRecords = this._buildStars(preview, timeHours);
     this._buildOrbits(preview, timeHours, anisotropy, rand);
-    this._buildContours();
+    const outermost = Math.max(14, ...this.bodies.map((b) => b.orbitRadius));
+    this._buildContours(outermost);
 
     // frame the whole system: outermost orbit decides the default distance
-    const outermost = Math.max(14, ...this.bodies.map((b) => b.orbitRadius));
     this.defaultView.distance = THREE.MathUtils.clamp(outermost * 1.42, 34, 72);
     this.resetView();
     return primaryRecords;
@@ -831,7 +831,7 @@ export class SystemView {
     }
   }
 
-  _buildContours() {
+  _buildContours(outermost) {
     const masses = [{ x: 0, z: 0, a: 8.8, s: 8.0, anisX: 0.76, anisZ: 1.18 }];
     for (const record of this.bodies) {
       masses.push({
@@ -842,7 +842,7 @@ export class SystemView {
         anisX: 1, anisZ: 1,
       });
     }
-    this.world.add(buildContourField(masses));
+    this.world.add(buildContourField(masses, outermost * 1.12));
   }
 
   _addMarker(record) {
@@ -898,11 +898,19 @@ export class SystemView {
     const w = rect.width, h = rect.height;
     if (!w || !h) return;
     const temp = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    const view = new THREE.Vector3();
     for (const marker of this.markers) {
+      center.copy(marker.record.group.position);
+      view.copy(center).applyMatrix4(this.camera.matrixWorldInverse);
+      center.project(this.camera);
       temp.copy(marker.record.group.position).add(marker.offset).project(this.camera);
       const x = (temp.x * 0.5 + 0.5) * w;
       const y = (-temp.y * 0.5 + 0.5) * h;
-      const visible = temp.z < 1 && x > -40 && x < w + 40 && y > -40 && y < h + 40;
+      const centerX = (center.x * 0.5 + 0.5) * w;
+      const centerY = (-center.y * 0.5 + 0.5) * h;
+      const visible = view.z < -this.camera.near && center.z > -1 && center.z < 1
+        && centerX > 0 && centerX < w && centerY > 0 && centerY < h;
       marker.el.style.transform = `translate(${x}px,${y}px) translate(-50%,-50%)`;
       marker.el.style.opacity = visible ? '1' : '0';
     }
