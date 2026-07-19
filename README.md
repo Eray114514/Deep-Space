@@ -28,7 +28,10 @@ npm run test:terrain # heavier procedural terrain/LOD checks
 npm run build        # verified static output → dist/
 ```
 
-Optional URL params: `?seed=ANYTHING` (a different universe), `&nolock=1` (no pointer lock).
+Released builds always use the curated `NAVEMI-382` universe. Seed overrides are a
+development-only world-lab tool: run `npm run dev`, then use
+`?worldlab=1&seed=ANYTHING`. Other useful development params include `&nolock=1`
+(no pointer lock).
 
 ## Controls
 

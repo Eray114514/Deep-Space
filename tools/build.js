@@ -27,6 +27,7 @@ const ADDONS_USED = [
   'postprocessing/Pass.js',
   'shaders/SMAAShader.js',
   'controls/OrbitControls.js',
+  'geometries/RoundedBoxGeometry.js',
   'loaders/GLTFLoader.js',
   'utils/BufferGeometryUtils.js',
   'libs/meshopt_decoder.module.js',

@@ -14,9 +14,15 @@ try {
   await page.waitForFunction(() => document.pointerLockElement === document.querySelector('#app canvas'));
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.pointerLockElement && !document.getElementById('pause-overlay').classList.contains('hidden'));
-  await page.locator('#resume-btn').click();
+  const resumeBox = await page.locator('#resume-btn').boundingBox();
+  if (!resumeBox) throw new Error('Resume button has no clickable bounds.');
+  await page.mouse.move(resumeBox.x + resumeBox.width / 2, resumeBox.y + resumeBox.height / 2);
+  // Reproduce the browser race directly: pointer lock may suppress the click
+  // after this trusted pointerdown, so resuming must not depend on pointerup.
+  await page.mouse.down();
   await page.waitForFunction(() => document.pointerLockElement === document.querySelector('#app canvas')
     && document.getElementById('pause-overlay').classList.contains('hidden'));
+  await page.mouse.up();
   const before = await page.evaluate('NMS._internals.nav.quat.toArray()');
   await page.mouse.move(780, 420);
   await page.waitForTimeout(100);

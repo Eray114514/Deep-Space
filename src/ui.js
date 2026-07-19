@@ -10,7 +10,7 @@ export class UI {
       hint: $('hint'), land: $('land-btn'), crosshair: $('crosshair'),
       fade: $('fade'), stats: $('stats'), devFps: $('dev-fps'),
       loading: $('loading'), loadingText: $('loading-text'),
-      altitude: $('flight-ring'), newBtn: $('new-universe'),
+      altitude: $('flight-ring'),
       altitudeValue: $('altitude-value'), altitudeUnit: $('altitude-unit'),
       speedValue: $('speed-value'), speedUnit: $('speed-unit'),
       headingCardinal: $('heading-cardinal'), headingDegrees: $('heading-degrees'),
@@ -30,7 +30,6 @@ export class UI {
       timeWarpProgress: $('time-warp-progress'), timeWarpRate: $('time-warp-rate'),
     };
     this.els.land.addEventListener('click', () => this.cb.onLand && this.cb.onLand());
-    this.els.newBtn.addEventListener('click', () => this.cb.onNewUniverse && this.cb.onNewUniverse());
     this.els.starMapBtn.addEventListener('click', () => this.cb.onStarMap && this.cb.onStarMap());
     this.els.routeWarp.addEventListener('click', () => this.cb.onRouteWarp?.());
     this.els.routeRift.addEventListener('click', () => this.cb.onRouteRift?.());
@@ -45,6 +44,7 @@ export class UI {
 
   setupTouch() {
     const { joystick, knob } = this.els;
+    if (!joystick || !knob) return;
     let pid = null;
     const R = 36;                      // knob travel radius (px)
     const emit = (x, y) => this.cb.onJoystick && this.cb.onJoystick(x, y);
@@ -76,18 +76,19 @@ export class UI {
   }
 
   showTouchUI(show) {
+    if (!this.els.touchUI) return;
     this.els.touchUI.classList.toggle('hidden', !show);
     if (!show) {
-      this.els.knob.style.transform = '';
+      if (this.els.knob) this.els.knob.style.transform = '';
       if (this.cb.onJoystick) this.cb.onJoystick(0, 0);
       if (this.cb.onJump) this.cb.onJump(false);
     }
   }
 
-  setSystem(name, planetCount, seed, catalogId = '') {
+  setSystem(name, planetCount, seed, catalogId = '', showSeed = false) {
     this.els.system.textContent = name;
     this.els.planetCount.textContent = `已测绘天体 · ${planetCount}`;
-    this.els.seed.textContent = `星域种子 · ${seed}`;
+    this.els.seed.textContent = showSeed ? `世界实验种子 · ${seed}` : '正式宇宙 · 深空';
     if (this.els.systemCatalog) this.els.systemCatalog.textContent = catalogId;
     if (this.els.brandSystem) this.els.brandSystem.textContent = name;
   }
@@ -175,7 +176,11 @@ export class UI {
     this.els.hero.classList.toggle('hidden', !show);
     const copy = this.els.hero.querySelector('p');
     if (subtitle) copy.textContent = subtitle;
-    if (this.els.heroSeed) this.els.heroSeed.textContent = new URLSearchParams(location.search).get('seed') || 'EUCLID';
+    if (this.els.heroSeed) {
+      this.els.heroSeed.textContent = this.cb.worldLab
+        ? new URLSearchParams(location.search).get('seed') || 'NAVEMI-382'
+        : 'DEEP SPACE';
+    }
     if (this.els.heroBuild) this.els.heroBuild.textContent = document.getElementById('version')?.textContent || '—';
     if (show) queueMicrotask(() => this.els.heroStart.focus());
   }

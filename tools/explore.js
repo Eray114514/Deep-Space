@@ -16,6 +16,7 @@ const SKIP_ORBITS = process.env.SKIP_ORBITS === '1';     // reshoots: orbits rar
 
 const { server, port } = await startServer(0);
 const browser = await chromium.launch({
+  ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}),
   args: [
     '--no-sandbox',
     '--enable-unsafe-swiftshader',
@@ -38,7 +39,7 @@ for (const seed of SEEDS) {
   console.log(`\n=== ${seed} → http://127.0.0.1:${port} ===`);
   // headless doesn't care about frame pacing: let terrain builds eat most of
   // every frame so big systems actually settle inside the shot timeout
-  await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(seed)}&nolock=1&buildms=120`);
+  await page.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=${encodeURIComponent(seed)}&nolock=1&buildms=120`);
   await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 
   async function shot(name, timeout = 240000) {

@@ -123,6 +123,12 @@ export class SpatialRift {
     this.group.name = 'spatial-rift';
     this.group.visible = false;
     scene.add(this.group);
+    // World placement and passage orientation stay on the parent. The rift's
+    // own opening squash, overshoot and roll live on this child so animation
+    // can never corrupt the ship-facing quaternion supplied by the runtime.
+    this.visual = new THREE.Group();
+    this.visual.name = 'spatial-rift-visual';
+    this.group.add(this.visual);
 
     this.open = 0;
     this.targetOpen = 0;
@@ -311,7 +317,7 @@ export class SpatialRift {
       }),
     );
     this.mass.renderOrder = 3;
-    this.group.add(this.mass);
+    this.visual.add(this.mass);
 
     this.tunnelMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
@@ -352,7 +358,7 @@ export class SpatialRift {
     });
     this.tunnel = new THREE.Mesh(this._makeTunnelGeometry(), this.tunnelMat);
     this.tunnel.renderOrder = 2;
-    this.group.add(this.tunnel);
+    this.visual.add(this.tunnel);
 
     this.rimMaterials = [];
     for (const layer of this.profile.rimLayers) {
@@ -360,13 +366,13 @@ export class SpatialRift {
       const mesh = new THREE.Mesh(this._makeRibbonGeometry(layer.scale, layer.band, layer.z, layer.phase), material);
       mesh.renderOrder = 5;
       this.rimMaterials.push(material);
-      this.group.add(mesh);
+      this.visual.add(mesh);
     }
     const exitMaterial = this._rimShader(0.45, 2.4, 0.82);
     const exitRim = new THREE.Mesh(this._makeRibbonGeometry(0.96, 30, -this.depth + 3, 2.4), exitMaterial);
     exitRim.renderOrder = 4;
     this.rimMaterials.push(exitMaterial);
-    this.group.add(exitRim);
+    this.visual.add(exitRim);
 
     this.portalMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -426,8 +432,8 @@ export class SpatialRift {
     this.portalSurface = new THREE.Mesh(new THREE.PlaneGeometry(this.width * 1.22, this.height * 1.22), this.portalMat);
     this.portalSurface.position.z = -this.depth - 0.5;
     this.portalSurface.renderOrder = 1;
-    this.group.add(this.portalSurface);
-    this.group.scale.set(0.34, 0.025, 0.04).multiplyScalar(this.profile.renderScale);
+    this.visual.add(this.portalSurface);
+    this.visual.scale.set(0.34, 0.025, 0.04).multiplyScalar(this.profile.renderScale);
   }
 
   _openCurve(t) {
@@ -485,8 +491,8 @@ export class SpatialRift {
   crossed(previousRenderPosition, currentRenderPosition) {
     if (this.open < 0.96 || this.traversed) return false;
     this.group.updateMatrixWorld(true);
-    this.group.worldToLocal(_localPrev.copy(previousRenderPosition));
-    this.group.worldToLocal(_localCurr.copy(currentRenderPosition));
+    this.visual.worldToLocal(_localPrev.copy(previousRenderPosition));
+    this.visual.worldToLocal(_localCurr.copy(currentRenderPosition));
     const crossed = _localPrev.z > -this.depth && _localCurr.z <= -this.depth;
     if (!crossed) return false;
     const angle = Math.atan2(_localCurr.y / (this.height * 0.5), _localCurr.x / (this.width * 0.5));
@@ -509,7 +515,7 @@ export class SpatialRift {
 
     if (this.handoffActive) {
       this.group.updateMatrixWorld(true);
-      const cameraLocal = this.group.worldToLocal(_origin.clone());
+      const cameraLocal = this.visual.worldToLocal(_origin.clone());
       if (cameraLocal.z < -this.depth - 28) this.handoffFade = clamp(this.handoffFade + dt / 0.72, 0, 1);
       if (this.handoffFade >= 1) {
         this.handoffActive = false;
@@ -533,13 +539,13 @@ export class SpatialRift {
     const preStretch = preVisible * (0.23 + 0.14 * this.tension);
     const settle = this.targetOpen > 0.5 ? Math.sin(Math.min(1, visualOpen) * Math.PI) * 0.016 : 0;
     const scale = this.profile.renderScale;
-    this.group.scale.set(
-      0.34 + (0.66 + settle) * eased + preStretch + micro * 0.055 + this.burst * 0.085,
-      0.025 + 0.975 * Math.pow(Math.max(eased, 0), 0.78) + preVisible * 0.012 + micro * 0.010 + this.burst * 0.070,
-      0.04 + 0.96 * Math.pow(Math.max(eased, 0), 1.42) + preVisible * (0.085 + 0.075 * this.tension) + micro * 0.035 + this.burst * 0.115,
+    this.visual.scale.set(
+      0.34 + (0.66 + settle) * eased + preStretch * 1.18 + micro * 0.07 + this.burst * 0.22,
+      0.025 + 0.975 * Math.pow(Math.max(eased, 0), 0.78) + preVisible * 0.018 + micro * 0.014 + this.burst * 0.18,
+      0.04 + 0.96 * Math.pow(Math.max(eased, 0), 1.42) + preVisible * (0.11 + 0.09 * this.tension) + micro * 0.05 + this.burst * 0.32,
     ).multiplyScalar(scale);
-    this.group.rotation.z = 0.035 + Math.sin(time * 0.31) * 0.008 * eased
-      + Math.sin(time * 13) * this.tension * 0.004 + Math.sin(time * 27) * this.burst * 0.018;
+    this.visual.rotation.z = 0.035 + Math.sin(time * 0.31) * 0.008 * eased
+      + Math.sin(time * 13) * this.tension * 0.006 + Math.sin(time * 27) * this.burst * 0.042;
     this.stability = smoothstep(0.84, 0.995, this.open);
     for (const material of [this.portalMat, this.tunnelMat, ...this.rimMaterials]) {
       material.uniforms.uOpen.value = visualOpen;
@@ -553,7 +559,7 @@ export class SpatialRift {
     if (this.open < 0.025 || this.traversed) return;
     this.mainCamera.updateMatrixWorld(true);
     this.group.updateMatrixWorld(true);
-    const sourceSurface = this.group.localToWorld(_center.set(0, 0, -this.depth));
+    const sourceSurface = this.visual.localToWorld(_center.set(0, 0, -this.depth));
     const offset = _edgeX.copy(this.targetAnchor).sub(sourceSurface);
     this.offsetMatrix.makeTranslation(offset.x, offset.y, offset.z);
     this.portalCamera.position.copy(this.mainCamera.position).add(offset);
@@ -593,9 +599,9 @@ export class SpatialRift {
       pass.uniforms.uBurst.value = 0;
       return;
     }
-    const center = this.group.localToWorld(_center.set(0, 0, 0)).project(this.mainCamera);
-    const edgeX = this.group.localToWorld(_edgeX.set(this.width * 0.5, 0, 0)).project(this.mainCamera);
-    const edgeY = this.group.localToWorld(_edgeY.set(0, this.height * 0.5, 0)).project(this.mainCamera);
+    const center = this.visual.localToWorld(_center.set(0, 0, 0)).project(this.mainCamera);
+    const edgeX = this.visual.localToWorld(_edgeX.set(this.width * 0.5, 0, 0)).project(this.mainCamera);
+    const edgeY = this.visual.localToWorld(_edgeY.set(0, this.height * 0.5, 0)).project(this.mainCamera);
     const behind = center.z > 1;
     pass.uniforms.uCenter.value.set(center.x * 0.5 + 0.5, center.y * 0.5 + 0.5);
     pass.uniforms.uRadius.value.set(

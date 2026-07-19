@@ -1,6 +1,6 @@
 {
   "name": "deep-space",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "description": "A fully procedural explorable universe in the browser. Stars, planets with consistent terrain from orbit to on-foot, all generated from a seed.",
   "type": "module",
   "scripts": {

@@ -306,8 +306,10 @@ export class SpaceControls {
 // ============================================================================
 
 export class WalkControls {
-  constructor(dom) {
+  constructor(dom, { lookScale = () => 1, onLook = null } = {}) {
     this.dom = dom;
+    this.lookScale = lookScale;
+    this.onLook = onLook;
     this.active = false;
     this.planet = null;
     this.posLocal = new THREE.Vector3();   // eye position, planet-local
@@ -332,8 +334,10 @@ export class WalkControls {
         mx = e.clientX - this._drag.x; my = e.clientY - this._drag.y;
         this._drag.x = e.clientX; this._drag.y = e.clientY;
       } else return;
-      this.yaw += mx * 0.0024;
-      this.pitch = clamp(this.pitch - my * 0.0024, -1.45, 1.45);
+      const scale = this.lookScale();
+      this.yaw += mx * 0.0024 * scale;
+      this.pitch = clamp(this.pitch - my * 0.0024 * scale, -1.45, 1.45);
+      this.onLook?.(mx, my);
     };
     this._onDown = (e) => {
       if (this.active && !document.pointerLockElement && !this._drag) {

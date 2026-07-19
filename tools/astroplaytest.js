@@ -25,7 +25,7 @@ const proofDir = join(process.cwd(), 'test-results', 'astronomy');
 await mkdir(proofDir, { recursive: true });
 
 try {
-  await page.goto(`http://127.0.0.1:${port}/?seed=ASTRO-0&time=0&nolock=1&nohero=1&quality=low&post=0&vclouds=0&farflora=0&buildms=60`);
+  await page.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=ASTRO-0&time=0&nolock=1&nohero=1&quality=low&post=0&vclouds=0&farflora=0&buildms=60`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
 
   const system = await page.evaluate('NMS.system()');

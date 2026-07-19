@@ -30,6 +30,7 @@ import './walkdial.js';
 import { VolumetricPass } from './volumetric-pass.js';
 import { ForegroundPass } from './foreground-pass.js';
 import { RiftDistortionShader, SpatialRift } from './spatial-rift.js';
+import { SurfaceWeapons } from './surface-weapons.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -41,8 +42,15 @@ window.addEventListener('error', (e) => {
 const qs = new URLSearchParams(location.search);
 document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
 const DEV_SERVER = window.__NMS_DEV_SERVER__ === true;
+const WORLD_LAB = DEV_SERVER && qs.get('worldlab') === '1';
+const CANONICAL_WORLD_SEED = 'NAVEMI-382';
 document.body.classList.toggle('dev-runtime', DEV_SERVER);
-let SEED = qs.get('seed') || 'EUCLID';
+let SEED = WORLD_LAB && qs.get('seed') ? qs.get('seed') : CANONICAL_WORLD_SEED;
+if (!WORLD_LAB && qs.has('seed')) {
+  const canonicalUrl = new URL(location.href);
+  canonicalUrl.searchParams.delete('seed');
+  history.replaceState(null, '', canonicalUrl);
+}
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
 // ?freeze=1: stop scenery-in-motion (waves, sway, cloud drift) so the seam
@@ -246,11 +254,29 @@ let pendingRoute = null;
 let riftRoute = null;
 let riftPreviewSystem = null;
 let riftForcedPost = false;
+let riftBloomState = null;
+const RIFT_SPAWN_DISTANCE = 780;
+const RIFT_CAPTURE_DISTANCE = 1900;
 const riftEntranceUniv = new THREE.Vector3();
 const riftTargetUniv = new THREE.Vector3();
 const riftOrientation = new THREE.Quaternion();
+const riftLocalPos = new THREE.Vector3();
+const riftLocalVel = new THREE.Vector3();
+const riftInverse = new THREE.Quaternion();
+const riftAssistQuat = new THREE.Quaternion();
 let dialAcc = 0;
-const WALK_WEATHER = { lush: 'rain', ocean: 'rain', ice: 'snow', toxic: 'storm', lava: 'storm' };
+function walkWeatherFor(planet, localUp, sunLocal) {
+  if (!planet) return 'clear';
+  const terrainHeight = planet.height(localUp, 64);
+  if (planet.type === 'ice' || planet.snowWeightAt?.(localUp, terrainHeight) > 0.32) return 'snow';
+  const coverage = Number(planet.cloudCoverage) || 0;
+  if (coverage < 0.48) return 'clear';
+  if (planet.type === 'toxic' || planet.type === 'lava') return 'storm';
+  // A cloud deck is only precipitation locally when the surface is beneath
+  // the lit, moisture-bearing side; clear skies remain the default elsewhere.
+  const sunAltitude = localUp.dot(sunLocal);
+  return sunAltitude > -0.35 && coverage > 0.62 ? 'rain' : 'clear';
+}
 
 // ---- world ------------------------------------------------------------------
 const fixedTime = qs.has('time') ? Number(qs.get('time')) : null;
@@ -271,10 +297,33 @@ const skyDome = new SkyDome(scene);
 const ship = new Ship(scene, {
   anisotropy: Math.min(16, renderer.capabilities.getMaxAnisotropy()),
 });
-spatialRift = new SpatialRift({ scene, renderer, mainCamera: camera });
+spatialRift = new SpatialRift({
+  scene,
+  renderer,
+  mainCamera: camera,
+  profile: {
+    width: 1025,
+    height: 720,
+    depth: 310,
+    edgeThickness: 1.08,
+    renderScale: 1,
+  },
+});
 spatialRift.resize(window.innerWidth, window.innerHeight, renderDpr);
 const weapons = new ShipWeapons(scene);
 const audio = new FlightAudio();
+const surfaceWeaponHud = document.getElementById('surface-weapon');
+const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
+  canUse: () => state === 'walk' && (document.pointerLockElement === renderer.domElement || window.NMS_NOLOCK),
+  onChange: ({ index, weapon, ammo }) => {
+    if (!surfaceWeaponHud) return;
+    surfaceWeaponHud.querySelector('[data-weapon-name]').textContent = weapon.name;
+    surfaceWeaponHud.querySelector('[data-weapon-ammo]').textContent = weapon.kind === 'laser' ? '∞ / MINING' : `${ammo} / ${weapon.magSize}`;
+    surfaceWeaponHud.classList.toggle('mining-laser', weapon.kind === 'laser');
+    for (const item of surfaceWeaponHud.querySelectorAll('[data-weapon-slot]')) item.classList.toggle('active', Number(item.dataset.weaponSlot) === index);
+  },
+  onShot: () => audio.cue('fire'),
+});
 const pulseFx = document.getElementById('pulse-fx');
 let warpIntensity = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
@@ -339,7 +388,10 @@ const easeInOut = (t) => t * t * (3 - 2 * t);
 
 // ---- controls -----------------------------------------------------------------
 const spaceCtl = new SpaceControls(renderer.domElement, nav);
-const walkCtl = new WalkControls(renderer.domElement);
+const walkCtl = new WalkControls(renderer.domElement, {
+  lookScale: () => surfaceWeapons.lookScale,
+  onLook: (movementX, movementY) => surfaceWeapons.onLookDelta(movementX, movementY),
+});
 
 renderer.domElement.addEventListener('pointerdown', () => {
   audio.unlock();
@@ -405,6 +457,7 @@ window.addEventListener('keydown', (e) => {
 
 // ---- UI ---------------------------------------------------------------------
 const ui = new UI({
+  worldLab: WORLD_LAB,
   onStart: async () => {
     // Pointer Lock must be requested in the original click gesture. Audio
     // resume can settle slowly on some browsers and must never hold camera
@@ -421,14 +474,6 @@ const ui = new UI({
     }
   },
   onLand: tryLand,
-  onNewUniverse: () => {
-    if (paused) {
-      paused = false;
-      document.getElementById('pause-overlay').classList.add('hidden');
-      audio.setPaused(false);
-    }
-    newUniverse();
-  },
   onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
   onRouteWarp: () => beginSelectedWarp(),
   onRouteRift: () => beginSelectedRift(),
@@ -461,12 +506,35 @@ const walkDial = document.getElementById('walk-dial');
 const pauseOverlay = document.getElementById('pause-overlay');
 const pausePanel = pauseOverlay.querySelector('.pause-panel');
 const pauseStatus = document.getElementById('pause-status');
-for (const id of ['resume-btn', 'wait-sunrise-btn', 'wait-sunset-btn', 'wait-eclipse-btn']) {
-  document.getElementById(id).addEventListener('pointerdown', (event) => {
-    if (event.button === 0 && paused) requestGameplayPointerLock();
-  });
+const resumeButton = document.getElementById('resume-btn');
+resumeButton.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || !paused) return;
+  // Pointer Lock can cancel the click that follows pointerdown. Complete the
+  // whole resume transaction from the trusted pointer gesture so the cursor
+  // can never be captured while the pause surface remains open.
+  resumeGame();
+});
+
+// Camera-relative mining ray against the deterministic procedural surface.
+// It intentionally reports only the contact distance for now; a future mining
+// system can use the same value to select deposits and apply extraction work.
+function surfaceBeamDistance(maxDistance = 72) {
+  const planet = walkCtl.planet;
+  if (state !== 'walk' || !planet) return maxDistance;
+  _v.set(0, 0, -1).applyQuaternion(nav.quat);
+  planet.worldOffsetToLocal(_v, _v2).normalize();
+  for (let distance = 1.5; distance <= maxDistance; distance += 1.5) {
+    _v3.copy(walkCtl.posLocal).addScaledVector(_v2, distance);
+    const radius = _v3.length();
+    _up.copy(_v3).multiplyScalar(1 / Math.max(radius, 1));
+    if (radius <= planet.surfaceRadius(_up)) return distance;
+  }
+  return maxDistance;
 }
-document.getElementById('resume-btn').addEventListener('click', resumeGame);
+resumeButton.addEventListener('click', (event) => {
+  // Keyboard activation has no pointerdown and reports detail === 0.
+  if (event.detail === 0) resumeGame();
+});
 document.getElementById('pause-map-btn').addEventListener('click', async () => {
   if (paused) {
     paused = false;
@@ -740,7 +808,7 @@ document.addEventListener('visibilitychange', () => {
 
 // universe → app notifications (system handoffs during warp / manual flight)
 function wireUniverse(u) {
-  u.onSystemChange = (sys) => ui.setSystem(sys.name, sys._specs.length, SEED, sys.catalogId);
+  u.onSystemChange = (sys) => ui.setSystem(sys.name, sys._specs.length, SEED, sys.catalogId, WORLD_LAB);
   u.onBeforeSystemDispose = (sys) => {
     if (walkCtl.planet && sys.planets.includes(walkCtl.planet)) return false; // not under our feet
     if (focusPlanet && sys.planets.includes(focusPlanet)) {
@@ -1048,6 +1116,37 @@ function beginSelectedWarp() {
   warpTo(route.star, route.bodyId);
 }
 
+function enableRiftEffects() {
+  if (!riftBloomState) {
+    riftBloomState = {
+      enabled: bloomPass.enabled,
+      strength: bloomPass.strength,
+      radius: bloomPass.radius,
+      threshold: bloomPass.threshold,
+    };
+  }
+  bloomPass.enabled = true;
+  bloomPass.strength = 1.08;
+  bloomPass.radius = 0.76;
+  bloomPass.threshold = 0.16;
+  riftDistortionPass.enabled = true;
+  riftForcedPost = !usePost;
+  usePost = true;
+}
+
+function restoreRiftEffects() {
+  if (riftBloomState) {
+    bloomPass.enabled = riftBloomState.enabled;
+    bloomPass.strength = riftBloomState.strength;
+    bloomPass.radius = riftBloomState.radius;
+    bloomPass.threshold = riftBloomState.threshold;
+    riftBloomState = null;
+  }
+  if (riftForcedPost) usePost = false;
+  riftForcedPost = false;
+  riftDistortionPass.enabled = false;
+}
+
 function beginSelectedRift() {
   if (!pendingRoute || state !== 'space' || riftRoute) return;
   const route = pendingRoute;
@@ -1057,14 +1156,25 @@ function beginSelectedRift() {
   spaceCtl.enabled = true;
   ui.setCrosshair(true);
   requestGameplayPointerLock();
-  riftRoute = { ...route, arrival, arrived: false };
-  riftEntranceUniv.copy(nav.pos).addScaledVector(forward, 1250);
+  riftRoute = { ...route, arrival, arrived: false, anchorLocked: false, lastHintBand: -1 };
+  riftEntranceUniv.copy(nav.pos).addScaledVector(forward, RIFT_SPAWN_DISTANCE);
   riftTargetUniv.copy(arrival.entry);
   riftOrientation.copy(nav.quat);
+  pulseEngaged = false;
+  pulseActive = false;
+  spaceCtl.pulseDrive = false;
+  spaceCtl.boosting = false;
+  if (nav.vel.length() > 18) nav.vel.setLength(18);
   riftPreviewSystem = new StarSystem(universe, route.star, {
-    deferred: false,
+    deferred: true,
     timeHours: celestialClock.hours,
   });
+  // Stellar routes only need the destination suns. Planet routes build just
+  // far enough to include the selected body instead of constructing a second
+  // full procedural system before the opening animation can move.
+  if (route.bodyId) {
+    while (!riftPreviewSystem.bodyById.has(route.bodyId) && riftPreviewSystem.buildNext());
+  }
   setRiftPreviewVisible(false);
   spatialRift.setTransform(
     riftEntranceUniv.clone().sub(nav.pos),
@@ -1072,11 +1182,9 @@ function beginSelectedRift() {
     riftTargetUniv.clone().sub(nav.pos),
   );
   spatialRift.openPassage();
-  riftDistortionPass.enabled = true;
-  riftForcedPost = !usePost;
-  usePost = true;
+  enableRiftEffects();
   audio.cue('warp');
-  ui.setHint('弦界航道正在展开 · 保持操控，通道稳定后自行驶入', true);
+  ui.setHint('弦界坐标钉定 · 航道正在船头展开', true);
 }
 
 function updateDestinationMarker() {
@@ -1110,10 +1218,71 @@ function updateDestinationMarker() {
 
 function updateRiftRoute(dt) {
   if (!riftRoute) return;
+  spatialRift.update(dt, clock.elapsedTime);
+  if (!riftRoute.arrived) {
+    if (!riftRoute.anchorLocked) {
+      pulseEngaged = false;
+      pulseActive = false;
+      spaceCtl.pulseDrive = false;
+      spaceCtl.boosting = false;
+      nav.vel.multiplyScalar(Math.exp(-dt * 6.5));
+      if (nav.vel.length() > 24) nav.vel.setLength(24);
+      riftOrientation.copy(nav.quat);
+      _v2.set(0, 0, -1).applyQuaternion(riftOrientation).normalize();
+      riftEntranceUniv.copy(nav.pos).addScaledVector(_v2, RIFT_SPAWN_DISTANCE);
+      if (spatialRift.open >= 0.995 && !spatialRift.animating) {
+        riftRoute.anchorLocked = true;
+        riftRoute.lastHintBand = -1;
+      } else {
+        const band = Math.min(9, Math.floor(spatialRift.open * 10));
+        if (band !== riftRoute.lastHintBand) {
+          riftRoute.lastHintBand = band;
+          ui.setHint(`弦界张力 ${Math.round(spatialRift.open * 100)}% · 航道坐标锁定中`, true);
+        }
+      }
+    } else {
+      riftInverse.copy(riftOrientation).invert();
+      riftLocalPos.copy(nav.pos).sub(riftEntranceUniv).applyQuaternion(riftInverse);
+      const normalizedRadial = Math.hypot(
+        riftLocalPos.x / (spatialRift.width * 0.56),
+        riftLocalPos.y / (spatialRift.height * 0.56),
+      );
+      const inCapture = riftLocalPos.z < RIFT_CAPTURE_DISTANCE
+        && riftLocalPos.z > -spatialRift.depth - 260
+        && normalizedRadial < 1;
+      const speedCap = inCapture
+        ? riftLocalPos.z > 560 ? 145 : riftLocalPos.z > 110 ? 105 : 76
+        : 145;
+      if (nav.vel.length() > speedCap) nav.vel.setLength(speedCap);
+      if (inCapture) {
+        pulseEngaged = false;
+        pulseActive = false;
+        spaceCtl.pulseDrive = false;
+        spaceCtl.boosting = false;
+        riftLocalVel.copy(nav.vel).applyQuaternion(riftInverse);
+        if (riftLocalVel.length() > speedCap) riftLocalVel.setLength(speedCap);
+        const centerStrength = 1 - Math.exp(-dt * (riftLocalPos.z > 110 ? 1.35 : 2.6));
+        riftLocalVel.x = lerp(riftLocalVel.x, clamp(-riftLocalPos.x * 0.24, -42, 42), centerStrength);
+        riftLocalVel.y = lerp(riftLocalVel.y, clamp(-riftLocalPos.y * 0.24, -42, 42), centerStrength);
+        nav.vel.copy(riftLocalVel.applyQuaternion(riftOrientation));
+        if (nav.quat.angleTo(riftOrientation) < 1.05) {
+          riftAssistQuat.copy(riftOrientation);
+          nav.quat.slerp(riftAssistQuat, 1 - Math.exp(-dt * 1.15));
+        }
+        const band = riftLocalPos.z > 560 ? 10 : riftLocalPos.z > 110 ? 11 : 12;
+        if (band !== riftRoute.lastHintBand) {
+          riftRoute.lastHintBand = band;
+          ui.setHint(`航道已稳定 · 接近限速 ${speedCap} m/s · W 推进 / S 制动`, true);
+        }
+      } else if (riftRoute.lastHintBand !== 13) {
+        riftRoute.lastHintBand = 13;
+        ui.setHint('航道航速锁定 145 m/s · 将船头对准发光入口', true);
+      }
+    }
+  }
   const entranceRender = riftEntranceUniv.clone().sub(nav.pos);
   const targetRender = riftTargetUniv.clone().sub(nav.pos);
   spatialRift.setTransform(entranceRender, riftOrientation, targetRender);
-  spatialRift.update(dt, clock.elapsedTime);
   if (!riftRoute.arrived) {
     const previousRender = prevNavPos.clone().sub(nav.pos);
     if (spatialRift.crossed(previousRender, _v3.set(0, 0, 0))) {
@@ -1128,9 +1297,7 @@ function updateRiftRoute(dt) {
       ui.setHint(`已穿越弦界航道 · ${destination.name}`, true);
     }
   } else if (!spatialRift.group.visible) {
-    if (riftForcedPost) usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
-    riftForcedPost = false;
-    riftDistortionPass.enabled = false;
+    restoreRiftEffects();
     riftRoute = null;
   }
 }
@@ -1230,7 +1397,9 @@ function warpTo(star, preferBodyId = null) {
 }
 
 function newUniverse(seed) {
-  SEED = seed || (makeWord(Math.random, 2, 3).toUpperCase() + '-' + ((Math.random() * 999) | 0));
+  if (!WORLD_LAB) return false;
+  const requestedSeed = String(seed || '').trim();
+  SEED = requestedSeed || (makeWord(Math.random, 2, 3).toUpperCase() + '-' + ((Math.random() * 999) | 0));
   const url = new URL(location.href);
   url.searchParams.set('seed', SEED);
   history.replaceState(null, '', url);
@@ -1243,7 +1412,7 @@ function newUniverse(seed) {
   spatialRift.group.visible = false;
   spatialRift.open = 0;
   spatialRift.targetOpen = 0;
-  riftDistortionPass.enabled = false;
+  restoreRiftEffects();
   scatter.clear();
   universe.dispose();
   ship.parkedPlanet = null;
@@ -1266,6 +1435,7 @@ function newUniverse(seed) {
   camera.updateProjectionMatrix();
   setState('space');
   spawn();
+  return SEED;
 }
 
 // ---- spawn --------------------------------------------------------------------
@@ -1281,7 +1451,7 @@ function spawn() {
   nav.vel.set(0, 0, 0);
   focusPlanet = planet;
   spaceCtl.focus = planet;
-  ui.setSystem(sys.name, sys.planets.length, SEED, sys.catalogId);
+  ui.setSystem(sys.name, sys.planets.length, SEED, sys.catalogId, WORLD_LAB);
   setState('space');
 }
 
@@ -1439,7 +1609,9 @@ function frame() {
     && nav.pos.distanceTo(referenceBodyPos) < Math.max(referenceBody.R * 10, referenceBody.atmoHeight * 5);
   universe.update(nav.pos, state === 'space' || state === 'flyto', celestialClock.hours);
   if (followFrame && universe.planets().includes(referenceBody)) {
-    nav.pos.add(_v.copy(referenceBody.posUniv).sub(referenceBodyPos));
+    _v.copy(referenceBody.posUniv).sub(referenceBodyPos);
+    nav.pos.add(_v);
+    if (riftRoute && !riftRoute.arrived && riftRoute.anchorLocked) riftEntranceUniv.add(_v);
     // 低空范围内让飞船挂靠行星自转：每帧把 nav.pos / nav.quat 同步应用
     // frameOrientation 的本帧增量，否则悬停找落点时地面疯狂转动、落点
     // 追不上。仅当连续跟踪同一颗 referenceBody 时启用，避免切换目标时
@@ -1451,6 +1623,10 @@ function frame() {
         const dq = _q.copy(referenceBody.frameOrientation).multiply(referenceBodyFramePrev.invert());
         nav.pos.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
         nav.quat.premultiply(dq);
+        if (riftRoute && !riftRoute.arrived && riftRoute.anchorLocked) {
+          riftEntranceUniv.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
+          riftOrientation.premultiply(dq);
+        }
       }
     }
   }
@@ -1596,7 +1772,8 @@ function frame() {
   pulseVisual += ((pulseActive ? 1 : 0) - pulseVisual) * (1 - Math.exp(-dt * (pulseActive ? 4.5 : 7)));
   weaponVisual += ((weaponTrigger ? 1 : 0) - weaponVisual) * (1 - Math.exp(-dt * 16));
   if (state === 'space' && warpIntensity < 0.01) {
-    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 14.0) - camera.fov)
+    const riftFov = riftRoute && !riftRoute.arrived ? spatialRift.burst * 9.5 : 0;
+    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 14.0 + riftFov) - camera.fov)
       * (1 - Math.exp(-dt * 6.2));
     camera.updateProjectionMatrix();
   }
@@ -1670,6 +1847,12 @@ function frame() {
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
   activeBolts = weapons.update(dt, nav, nearest);
+  const surfaceShotDistance = state === 'walk' ? surfaceBeamDistance(120) : 120;
+  surfaceWeapons.update(dt, state === 'walk', surfaceShotDistance, {
+    speed: walkCtl.hSpeed.length(),
+    grounded: walkCtl.grounded,
+  });
+  document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
   // sun → shadow-light crossfade (after updateRelative, which sets intensities)
   sunShadow.visible = shadowBlend > 0.02;
@@ -1701,6 +1884,12 @@ function frame() {
     const t = clock.elapsedTime;
     camera.position.x += Math.sin(t * 29.0) * 0.045 * pulseVisual;
     camera.position.y += Math.sin(t * 37.0 + 0.8) * 0.028 * pulseVisual;
+  }
+  if (riftRoute && !riftRoute.arrived && spatialRift.burst > 0.01) {
+    const t = clock.elapsedTime;
+    const impact = spatialRift.burst * 0.72;
+    camera.position.x += Math.sin(t * 43.0) * impact;
+    camera.position.y += Math.sin(t * 37.0 + 1.1) * impact * 0.72;
   }
 
   // the ship flies just ahead of the camera whenever we're in flight
@@ -1772,7 +1961,7 @@ function frame() {
         battery: clamp(pulseFuel / PULSE_FUEL_MAX, 0, 1),
         heading: walkCtl.yaw * 180 / Math.PI,
         destinationBearing: bearing,
-        weather: WALK_WEATHER[p.type] || 'clear',
+        weather: walkWeatherFor(p, _up, sunLocal),
       });
     }
   }
@@ -1780,7 +1969,8 @@ function frame() {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     volumePass.setActivePlanet(nearest?.isGasGiant ? null : nearest, nav.pos, motion);
   }
-  foregroundPass.enabled = VOLUME_ENABLED && ['space', 'flyto', 'landing', 'takeoff', 'boarding'].includes(state);
+  foregroundPass.enabled = (VOLUME_ENABLED || state === 'walk')
+    && ['space', 'flyto', 'landing', 'takeoff', 'boarding', 'walk'].includes(state);
   ambient.layers.enable(SHIP_FOREGROUND_LAYER);
   hemi.layers.enable(SHIP_FOREGROUND_LAYER);
   headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
@@ -1811,6 +2001,7 @@ function frame() {
   if (!FREEZE && !photoMode) tickShaders(dt);
   renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
+  surfaceWeapons.renderScopeView(renderer);
   renderer.info.reset();
   if (usePost) composer.render();
   else renderer.render(scene, camera);
@@ -2281,7 +2472,10 @@ window.NMS = {
     starMap.setMode(mode);
     return true;
   },
-  setSeed: (s) => newUniverse(s),
+  ...(WORLD_LAB ? {
+    setSeed: (seed) => newUniverse(seed),
+    randomizeWorld: () => newUniverse(),
+  } : {}),
   pos: () => nav.pos.toArray(),
   quat: () => nav.quat.toArray(),
   alt: () => nearestAlt,

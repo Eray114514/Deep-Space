@@ -32,7 +32,7 @@ const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 const errors = [];
 page.on('pageerror', (e) => { errors.push(String(e)); console.error('PAGEERROR:', String(e).split('\n')[0]); });
 
-await page.goto(`http://127.0.0.1:${port}/?seed=${encodeURIComponent(SEED)}&nolock=1&freeze=1&buildms=120`);
+await page.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=${encodeURIComponent(SEED)}&nolock=1&freeze=1&buildms=120`);
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 // the frame must contain nothing but the world: no HUD, no labels, no ship
 await page.addStyleTag({ content: 'body *:not(canvas){visibility:hidden!important} canvas{visibility:visible!important}' });

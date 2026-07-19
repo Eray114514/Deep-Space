@@ -118,6 +118,7 @@ body.weapon-firing #crosshair { box-shadow: 0 0 0 4px rgba(10, 20, 24, .2), 0 0 
   position: fixed; z-index: 11; left: 50%; top: 50%; width: 52px; height: 52px;
   transform: translate(-50%, -50%); border: 1px solid rgba(238, 243, 243, .75); border-radius: 50%;
   pointer-events: none; box-shadow: 0 0 0 4px rgba(10, 20, 24, .2);
+  transition: transform .14s ease-out, border-color .14s ease-out, box-shadow .14s ease-out;
 }
 #crosshair::before {
   content: ""; position: absolute; inset: 18px; border: 1px solid rgba(238, 243, 243, .8); border-radius: 50%;
@@ -247,6 +248,7 @@ body.weapon-firing #crosshair { box-shadow: 0 0 0 4px rgba(10, 20, 24, .2), 0 0 
 /* ---- walk mode: the survey watch replaces the flight instruments ------------------ */
 #walk-hud { display: none; }
 .ui-walk #walk-hud { display: block; }
+.ui-walk #surface-weapon { display: block; }
 .ui-walk #flight-ring, .ui-walk #hud, .ui-walk #ship-integrity, .ui-walk #resource-strip,
 .ui-walk #destination-marker, .ui-walk #route-choice,
 .ui-walk #compass { display: none; }
@@ -254,9 +256,17 @@ body.weapon-firing #crosshair { box-shadow: 0 0 0 4px rgba(10, 20, 24, .2), 0 0 
 #walk-hud {
   position: fixed; z-index: 10;
   left: max(14px, env(safe-area-inset-left)); bottom: max(14px, env(safe-area-inset-bottom));
-  width: min(340px, 34vw, 44vh); aspect-ratio: 1; pointer-events: none;
+  width: min(220px, 20vw, 25vh); aspect-ratio: 1; pointer-events: none;
 }
 #walk-dial { display: block; width: 100%; height: 100%; filter: drop-shadow(0 7px 25px rgba(0, 4, 10, .62)); }
+#surface-weapon { display: none; position: fixed; z-index: 10; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); min-width: 272px; padding: 12px 14px 10px; border: 1px solid rgba(139, 225, 235, .42); background: linear-gradient(120deg, rgba(3, 15, 22, .78), rgba(8, 22, 30, .42)); color: rgba(222, 248, 250, .94); font-family: var(--ui-font, monospace); text-align: right; pointer-events: none; clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px); box-shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 22px rgba(52, 206, 225, .06); }
+.surface-weapon-label { color: rgba(115, 229, 238, .8); font-size: 10px; letter-spacing: .19em; }
+.surface-weapon-ammo { margin-top: 2px; font-size: 26px; font-weight: 600; letter-spacing: .08em; }
+.surface-weapon-slots { display: flex; justify-content: flex-end; gap: 8px; margin-top: 7px; color: rgba(188, 220, 222, .46); font-size: 9px; letter-spacing: .1em; }
+.surface-weapon-slots .active { color: #d4ff83; text-shadow: 0 0 10px rgba(198, 255, 56, .7); }
+#surface-weapon.mining-laser { border-color: rgba(99, 239, 255, .68); box-shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 28px rgba(35, 207, 226, .12); }
+#surface-weapon.mining-laser .surface-weapon-label, #surface-weapon.mining-laser .surface-weapon-ammo, #surface-weapon.mining-laser .surface-weapon-slots .active { color: #bdfbff; text-shadow: 0 0 12px rgba(69, 234, 255, .72); }
+body.surface-ads #crosshair { transform: translate(-50%, -50%) scale(.52); border-color: rgba(212, 255, 131, .9); box-shadow: 0 0 20px rgba(198, 255, 56, .34); }
 
 /* ---- centre-bottom prompts --------------------------------------------------------- */
 #bottom {
@@ -415,24 +425,27 @@ body.weapon-firing #crosshair { box-shadow: 0 0 0 4px rgba(10, 20, 24, .2), 0 0 
 #err { position: fixed; z-index: 100; inset: 18px; padding: 18px; overflow: auto; color: #ffd8d8; background: rgba(40, 0, 0, .94); font: 12px/1.5 var(--ui-mono); white-space: pre-wrap; }
 
 #touch-ui { position: fixed; z-index: 20; inset: 0; pointer-events: none; }
-/* the stick floats just above the survey watch, which owns the corner */
-#joystick { position: absolute; left: 28px; bottom: calc(min(302px, 32vw, 38vh) + 40px); width: 116px; height: 116px; border: 1px solid rgba(235, 240, 236, .38); border-radius: 50%; background: rgba(3, 12, 17, .25); pointer-events: auto; touch-action: none; }
+/* Touch devices keep the stick; mouse/desktop play should leave this corner clean. */
+#joystick { position: absolute; left: 28px; bottom: calc(min(250px, 24vw, 30vh) + 24px); width: 116px; height: 116px; border: 1px solid rgba(235, 240, 236, .38); border-radius: 50%; background: rgba(3, 12, 17, .25); pointer-events: auto; touch-action: none; }
 #joystick-knob { position: absolute; left: 34px; top: 34px; width: 48px; height: 48px; border: 1px solid var(--ui-cyan); border-radius: 50%; background: rgba(62, 160, 176, .22); }
+@media (pointer: fine) {
+  #touch-ui { display: none !important; }
+}
 
 /* walking owns the mouse as a look input even before pointer lock is granted */
 body.walking #app, body.walking #app * { cursor: none !important; }
 
 .hide-hud #brand, .hide-hud #compass, .hide-hud #flight-ring, .hide-hud #hud, .hide-hud #ship-integrity,
 .hide-hud #resource-strip, .hide-hud #bottom,
-.hide-hud #stats, .hide-hud #crosshair, .hide-hud #walk-hud, .hide-hud #star-map-btn { display: none !important; }
+.hide-hud #stats, .hide-hud #crosshair, .hide-hud #walk-hud, .hide-hud #surface-weapon, .hide-hud #star-map-btn { display: none !important; }
 
 @media (max-width: 900px) {
   #flight-ring { width: min(72vw, 560px); }
   #hud { width: 250px; left: 14px; bottom: 14px; }
   #ship-integrity { right: 14px; bottom: 14px; width: 210px; }
   #resource-strip { right: 14px; bottom: 110px; }
-  #walk-hud { left: max(10px, env(safe-area-inset-left)); bottom: max(10px, env(safe-area-inset-bottom)); width: min(270px, 44vw, 42vh); }
-  #joystick { bottom: calc(min(240px, 42vw) + 30px); }
+  #walk-hud { left: max(10px, env(safe-area-inset-left)); bottom: max(10px, env(safe-area-inset-bottom)); width: min(190px, 32vw, 25vh); }
+  #joystick { bottom: calc(min(210px, 38vw, 30vh) + 20px); }
 }
 
 @media (max-width: 640px) {
@@ -458,8 +471,8 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #destination-marker span { max-width: 116px; }
   #bottom { bottom: 88px; }
   #hint { max-width: 84vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #walk-hud { left: max(6px, env(safe-area-inset-left)); bottom: max(6px, env(safe-area-inset-bottom)); width: min(220px, 52vw, 36vh); }
-  #joystick { bottom: calc(min(196px, 46vw) + 22px); }
+  #walk-hud { left: max(6px, env(safe-area-inset-left)); bottom: max(6px, env(safe-area-inset-bottom)); width: min(160px, 38vw, 24vh); }
+  #joystick { bottom: calc(min(174px, 42vw, 27vh) + 16px); }
   .hero-frame { inset: 10px; }
   .hero-telemetry-side { display: none; }
   .hero-telemetry-top { left: 22px; top: 25px; }
