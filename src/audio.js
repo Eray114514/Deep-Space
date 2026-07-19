@@ -2,7 +2,13 @@
 // no downloaded samples, no copyright/licensing dependency, and engine tone can
 // follow actual simulation state continuously.
 
+import { makeRng } from './rng.js';
+
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+// Deterministic brown-noise source: same seed yields the same buffer on every
+// load, keeping audio reproducible alongside the rest of the universe.
+const _noiseRng = makeRng('audio:noise:v1');
 
 export class FlightAudio {
   constructor() {
@@ -15,9 +21,11 @@ export class FlightAudio {
     this.lastAtmosphere = 0;
     this.started = false;
     this.pendingCues = [];
+    this.disposed = false;
   }
 
   async unlock() {
+    if (this.disposed) return;
     if (!this.ctx) this.build();
     if (!this.ctx) return;
     if (this.ctx.state !== 'running') {
@@ -80,7 +88,7 @@ export class FlightAudio {
     const data = this.noiseBuffer.getChannelData(0);
     let brown = 0;
     for (let i = 0; i < data.length; i++) {
-      brown = brown * 0.985 + (Math.random() * 2 - 1) * 0.15;
+      brown = brown * 0.985 + (_noiseRng() * 2 - 1) * 0.15;
       data[i] = Math.max(-1, Math.min(1, brown * 1.8));
     }
 
@@ -119,6 +127,7 @@ export class FlightAudio {
 
   tone({ from = 80, to = from, duration = 0.5, gain = 0.12,
     type = 'triangle', lowpass = 1800, delay = 0 }) {
+    if (this.disposed) return;
     if (!this.ready || !this.ctx) return;
     const ctx = this.ctx;
     const now = ctx.currentTime + delay;
@@ -139,6 +148,7 @@ export class FlightAudio {
   }
 
   noiseBurst({ duration = 0.5, gain = 0.1, from = 500, to = 1600, q = 0.7, delay = 0 }) {
+    if (this.disposed) return;
     if (!this.ready || !this.ctx || !this.noiseBuffer) return;
     const ctx = this.ctx;
     const now = ctx.currentTime + delay;
@@ -159,6 +169,7 @@ export class FlightAudio {
   }
 
   cue(kind) {
+    if (this.disposed) return;
     if (!this.ready || !this.ctx) {
       if (kind !== 'start' && this.pendingCues.length < 4) this.pendingCues.push(kind);
       return;
@@ -199,6 +210,7 @@ export class FlightAudio {
   }
 
   update({ state, speed, atmosphere, boosting, warp, paused }) {
+    if (this.disposed) return;
     if (!this.ready || !this.ctx) return;
     const now = this.ctx.currentTime;
     const set = (param, value, tau = 0.08) => param.setTargetAtTime(value, now, tau);
@@ -236,8 +248,31 @@ export class FlightAudio {
   }
 
   setPaused(paused) {
+    if (this.disposed) return;
     this.paused = paused;
     if (!this.ready || !this.ctx) return;
     this.master.gain.setTargetAtTime(paused ? 0 : 0.34, this.ctx.currentTime, 0.04);
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.ready = false;
+    this.started = false;
+    this.pendingCues.length = 0;
+    const stop = (node) => {
+      if (!node) return;
+      try { node.stop(); } catch { /* already stopped or never started */ }
+    };
+    stop(this.engine);
+    stop(this.sub);
+    stop(this.warpTone);
+    stop(this.airNoise);
+    stop(this.warpNoise);
+    const ctx = this.ctx;
+    this.ctx = null;
+    if (ctx && ctx.state !== 'closed') {
+      try { ctx.close(); } catch { /* context already closing */ }
+    }
   }
 }
