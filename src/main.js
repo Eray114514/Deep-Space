@@ -25,6 +25,7 @@ import { CelestialClock, eclipseFraction } from './astronomy.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
 import { StarMap } from './starmap.js';
+import './walkdial.js';
 import { VolumetricPass } from './volumetric-pass.js';
 import { ForegroundPass } from './foreground-pass.js';
 
@@ -225,6 +226,8 @@ let weaponCooldown = 0;
 let weaponVisual = 0;
 let activeBolts = 0;
 let starMap = null;
+let dialAcc = 0;
+const WALK_WEATHER = { lush: 'rain', ocean: 'rain', ice: 'snow', toxic: 'storm', lava: 'storm' };
 
 // ---- world ------------------------------------------------------------------
 const fixedTime = qs.has('time') ? Number(qs.get('time')) : null;
@@ -329,7 +332,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (starMap?.isOpen) {
-    if (e.code === 'Escape') closeStarMap();
+    starMap.handleKey(e);
     e.preventDefault();
     return;
   }
@@ -394,11 +397,12 @@ starMap = new StarMap({
   getState: () => state,
   getTime: () => celestialClock.hours,
   onRequestClose: () => closeStarMap(),
-  onWarpTarget: (star) => {
+  onWarpTarget: (star, bodyId = null) => {
     closeStarMap(false);
-    warpTo(star);
+    warpTo(star, bodyId);
   },
 });
+const walkDial = document.getElementById('walk-dial');
 const pauseOverlay = document.getElementById('pause-overlay');
 document.getElementById('resume-btn').addEventListener('click', resumeGame);
 document.getElementById('pause-map-btn').addEventListener('click', async () => {
@@ -595,6 +599,8 @@ function setState(s) {
   spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
   ui.setCrosshair(s === 'walk' || s === 'space');
   ui.showTouchUI(IS_TOUCH && s === 'walk');
+  walkDial?.setActive(s === 'walk');
+  if (s === 'walk') dialAcc = 1;
   const hints = IS_TOUCH ? {
     space: '<b>单指</b> 转向 · <b>双指缩放</b> 推进 · <b>M</b> 星图',
     flyto: '自动接近中…',
@@ -791,7 +797,7 @@ function takeoff(planet = walkCtl.planet, launchPos = nav.pos.clone(), launchUp 
 // A warp is a flight, not a teleport: align with the target, spool up, then
 // cross real space at ferocious speed — every star in the sky parallaxes past,
 // the destination sun grows from a dot — and decelerate into the new system.
-function warpTo(star) {
+function warpTo(star, preferBodyId = null) {
   if (state !== 'space') return;
   setState('warp');
   focusPlanet = null;
@@ -836,7 +842,14 @@ function warpTo(star) {
         // the tunnel, then converge on a large planet for the exit reveal.
         swapped = true;
         const destination = universe.setSystem(star, true);
-        const hero = destination._specs.find((spec) => !spec.isMoon);
+        // a planet chosen in the system preview becomes the arrival reveal
+        let hero = null;
+        if (preferBodyId) {
+          let picked = destination._specs.find((spec) => spec.bodyId === preferBodyId);
+          if (picked?.isMoon) picked = destination._specs.find((spec) => spec.bodyId === picked.parentId);
+          if (picked && !picked.isMoon) hero = picked;
+        }
+        if (!hero) hero = destination._specs.find((spec) => !spec.isMoon);
         if (hero) {
           const heroPos = destination.frames.get(hero.bodyId).position;
           revealDirection = startPos.clone().sub(heroPos).normalize();
@@ -1357,7 +1370,40 @@ function frame() {
   const localHours = nearest ? localSolarTimeAt(nearest, nav.pos) : null;
   ui.setCosmicTime(celestialClock.hours, localHours);
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
-  ui.setHeading(Math.atan2(_v.x, -_v.z) * 180 / Math.PI);
+  const headingDeg = Math.atan2(_v.x, -_v.z) * 180 / Math.PI;
+  ui.setHeading(headingDeg);
+
+  // the survey watch owns the bottom-left corner while on foot: local solar
+  // time, day/night terminator, suit/cell charge and a bearing home to the ship
+  if (state === 'walk' && walkCtl.planet) {
+    dialAcc += dt;
+    if (dialAcc >= 0.15) {
+      dialAcc = 0;
+      const p = walkCtl.planet;
+      _up.copy(nav.pos).sub(p.posUniv).normalize();
+      let bearing = null;
+      if (ship.parkedPosUniv) {
+        _v2.copy(ship.parkedPosUniv).sub(nav.pos).projectOnPlane(_up);
+        if (_v2.lengthSq() > 4) bearing = Math.atan2(_v2.x, -_v2.z) * 180 / Math.PI;
+      }
+      walkDial?.setState({
+        time: { seconds: (localHours ?? 12) * 3600 },
+        date: { day: 'SOL', month: 'UT', date: Math.floor(celestialClock.hours / 24) },
+        planet: {
+          name: p.name,
+          phase: clamp(_up.dot(p.sunDirWorld || _up), -0.98, 0.98),
+          rotation: p.rotationPeriodHours ? (celestialClock.hours / p.rotationPeriodHours) * Math.PI * 2 : 0,
+          lightTilt: -0.12,
+          selected: true,
+        },
+        ap: 1,
+        battery: clamp(pulseFuel / 100, 0, 1),
+        heading: headingDeg,
+        destinationBearing: bearing,
+        weather: WALK_WEATHER[p.type] || 'clear',
+      });
+    }
+  }
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     volumePass.setActivePlanet(nearest?.isGasGiant ? null : nearest, nav.pos, motion);

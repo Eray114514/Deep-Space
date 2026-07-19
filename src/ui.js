@@ -15,7 +15,7 @@ export class UI {
       speedValue: $('speed-value'), speedUnit: $('speed-unit'),
       headingCardinal: $('heading-cardinal'), headingDegrees: $('heading-degrees'),
       starMapBtn: $('star-map-btn'),
-      brandSystem: $('brand-system'), walkSystem: $('walk-system'),
+      brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
       driveMode: $('drive-mode'), driveSpeed: $('drive-speed'), driveBoost: $('drive-boost'), driveAtmo: $('drive-atmo'),
@@ -80,7 +80,6 @@ export class UI {
     this.els.seed.textContent = `星域种子 · ${seed}`;
     if (this.els.systemCatalog) this.els.systemCatalog.textContent = catalogId;
     if (this.els.brandSystem) this.els.brandSystem.textContent = name;
-    if (this.els.walkSystem) this.els.walkSystem.textContent = name;
   }
 
   setAltitude(alt, speed) {
