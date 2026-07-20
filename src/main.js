@@ -2286,7 +2286,7 @@ function frame() {
     speed: spd,
     speedLimit: spaceCtl.speedScale * (pulseActive
       ? 13.92 + (1 - spaceCtl.atmosphereFactor) * 8.12
-      : 6.96 + (1 - spaceCtl.atmosphereFactor) * 4.06),
+      : 8.4 + (1 - spaceCtl.atmosphereFactor) * 2.62),
     boost: boostVisual,
     atmosphere: envInAtmo,
     pulse: pulseVisual,
