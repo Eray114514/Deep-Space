@@ -169,7 +169,11 @@ const sunDirCam = new THREE.Vector3(0, 1, 0);
 // ---- post-processing: HDR bloom (sun, lava, engines, stars) -----------------
 // MSAA render target keeps antialiasing; OutputPass applies tone mapping/sRGB
 const sceneTarget = new THREE.WebGLRenderTarget(1, 1, {
-  samples: IS_TOUCH ? 1 : 4,
+  // UnrealBloomPass adds back into the composer read buffer. Multisampling
+  // this half-float target makes ANGLE/D3D11 intermittently resolve only a
+  // rectangular part of the frame on Intel GPUs. Final-image SMAA below keeps
+  // edge smoothing without putting bloom through that unstable MSAA path.
+  samples: 0,
   type: THREE.HalfFloatType,
   depthBuffer: true,
   depthTexture: new THREE.DepthTexture(1, 1, THREE.UnsignedIntType),
