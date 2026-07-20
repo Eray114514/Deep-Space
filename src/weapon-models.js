@@ -278,11 +278,12 @@ function buildScope(parent, z, y, mats) {
         float shift = length(cross(toCenter, lensForward));
         
         // Base optical vignette plus dynamic eye-relief shadow
-        float baseVignette = smoothstep(1.0, 0.65, length(centeredUv));
-        float geometricShadow = smoothstep(0.1, 0.0, shift * vignetteIntensity);
-        // CPU eye-box state uses the same lens axis, but remains stable when
-        // sub-pixel viewmodel sway makes the fragment-space test overreact.
-        float dynamicShadow = max(geometricShadow, eyeBox);
+        float baseVignette = 1.0 - smoothstep(0.65, 1.0, length(centeredUv));
+        float geometricShadow = 1.0 - smoothstep(0.0, 0.1, shift * vignetteIntensity);
+        // The CPU eye-box state is authoritative while aiming. Keep a small
+        // optical floor off-axis so the glass darkens instead of becoming a
+        // featureless black disc.
+        float dynamicShadow = max(0.12, max(geometricShadow, eyeBox));
         float shadow = baseVignette * dynamicShadow;
         
         // Add subtle glare near the edge

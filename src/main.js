@@ -30,7 +30,7 @@ import './walkdial.js';
 import { VolumetricPass } from './volumetric-pass.js';
 import { ForegroundPass } from './foreground-pass.js';
 import { RiftDistortionShader, SpatialRift } from './spatial-rift.js';
-import { SurfaceWeapons } from './surface-weapons.js';
+import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
@@ -364,10 +364,12 @@ const audio = new FlightAudio();
 const surfaceWeaponHud = document.getElementById('surface-weapon');
 const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   canUse: () => state === 'walk' && (document.pointerLockElement === renderer.domElement || window.NMS_NOLOCK),
-  onChange: ({ index, weapon, ammo }) => {
+  onChange: ({ index, weapon, ammo, reloading }) => {
     if (!surfaceWeaponHud) return;
     surfaceWeaponHud.querySelector('[data-weapon-name]').textContent = weapon.name;
-    surfaceWeaponHud.querySelector('[data-weapon-ammo]').textContent = weapon.kind === 'laser' ? '∞ / MINING' : `${ammo} / ${weapon.magSize}`;
+    surfaceWeaponHud.querySelector('[data-weapon-ammo]').textContent = weapon.kind === 'laser'
+      ? '∞ / MINING'
+      : reloading ? `RELOADING · ${ammo} / ${weapon.magSize}` : `${ammo} / ${weapon.magSize}`;
     surfaceWeaponHud.classList.toggle('mining-laser', weapon.kind === 'laser');
     for (const item of surfaceWeaponHud.querySelectorAll('[data-weapon-slot]')) item.classList.toggle('active', Number(item.dataset.weaponSlot) === index);
   },
@@ -492,8 +494,8 @@ window.addEventListener('keydown', (e) => {
       pulseEngaged = !pulseEngaged;
     }
   }
-  if (!e.repeat && (e.code === 'KeyE' || e.code === 'KeyT') && state === 'walk') boardShip();
-  if (!e.repeat && e.code === 'KeyR' && state === 'walk') recallShip();
+  if (!e.repeat && e.code === 'KeyE' && state === 'walk') boardShip();
+  if (!e.repeat && e.code === 'KeyT' && state === 'walk') recallShip();
   if (e.code === 'KeyH') {
     photoMode = !photoMode;
     document.body.classList.toggle('hide-hud', photoMode);
@@ -1006,7 +1008,7 @@ function setState(s) {
     space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>A/D</b> 侧推 · <b>LMB</b> 射击 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲巡航 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
-    walk: '<b>WASD</b> 移动 · <b>SHIFT</b> 奔跑 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
+    walk: '<b>WASD</b> 移动 · <b>R</b> 换弹 · <b>RMB</b> 瞄准 · <b>T</b> 召回飞船 · 靠近飞船按 <b>E</b>',
     boarding: '正在登船…',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
@@ -2902,6 +2904,42 @@ window.NMS = {
     weapons.fire(nav, spaceCtl.speedScale, ship);
     audio.cue('fire');
     return true;
+  },
+  surfaceWeapon(index) {
+    surfaceWeapons.select(Number(index));
+    return true;
+  },
+  surfaceReload: () => surfaceWeapons.reload(),
+  surfaceWeaponState: () => ({
+    index: surfaceWeapons.index,
+    ammo: surfaceWeapons.models[surfaceWeapons.index].ammo,
+    reloading: surfaceWeapons.reloadT > 0,
+    reloadProgress: surfaceWeapons.reloadDuration > 0
+      ? 1 - surfaceWeapons.reloadT / surfaceWeapons.reloadDuration : 0,
+    magazine: surfaceWeapons.models[surfaceWeapons.index].magazine?.position.toArray() || null,
+    ads: surfaceWeapons.ads,
+    scopeEyeBox: surfaceWeapons.models[surfaceWeapons.index].opticGlass?.material?.uniforms?.eyeBox?.value ?? null,
+  }),
+  surfaceScopeSample() {
+    if (!SURFACE_WEAPONS[surfaceWeapons.index].hasScope) return null;
+    const size = 16;
+    const pixels = new Uint8Array(size * size * 4);
+    renderer.readRenderTargetPixels(
+      surfaceWeapons.scopeTarget,
+      (surfaceWeapons.scopeTarget.width - size) / 2,
+      (surfaceWeapons.scopeTarget.height - size) / 2,
+      size,
+      size,
+      pixels,
+    );
+    let luminance = 0;
+    let litPixels = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const value = pixels[i] * 0.2126 + pixels[i + 1] * 0.7152 + pixels[i + 2] * 0.0722;
+      luminance += value;
+      if (value > 4) litPixels++;
+    }
+    return { luminance: luminance / (size * size), litPixels, totalPixels: size * size };
   },
   // seam accounting: unmorphed LOD level changes with their apparent size
   lod: () => ({ ...lodStats }),

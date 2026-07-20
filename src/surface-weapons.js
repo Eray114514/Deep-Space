@@ -10,9 +10,9 @@ import { createWeaponModel } from './weapon-models.js';
 //   longCasing       — uses long-casing geometry for eject animation
 //   hasScope         — weapon renders a scope view when ADS
 export const SURFACE_WEAPONS = [
-  { id: 'KX9', name: 'KX-9 CERBERUS', short: 'KX-9', magSize: 30, fireInterval: 60 / 720, auto: true, kick: 0.95, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.292, -0.556], adsFov: 57, recoilP: 0.018, recoilY: 0.012, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.018, tracerLife: 0.075, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
-  { id: 'CX5', name: 'CX-5 MARAUDER', short: 'CX-5', magSize: 35, fireInterval: 60 / 860, auto: true, kick: 0.68, hipPos: [0.31, -0.3, -0.64], adsPos: [0, -0.2745, -0.526], adsFov: 57, recoilP: 0.011, recoilY: 0.011, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.011, tracerLife: 0.05, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
-  { id: 'M77', name: 'M77 SENTINEL', short: 'M77', magSize: 12, fireInterval: 60 / 310, auto: false, kick: 1.5, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.315, -0.537], adsFov: 42, recoilP: 0.055, recoilY: 0.018, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.026, tracerLife: 0.12, flashDuration: 0.1, muzzleIntensity: 42, shotFovKickMul: 1.35, longCasing: true, hasScope: true },
+  { id: 'KX9', name: 'KX-9 CERBERUS', short: 'KX-9', magSize: 30, reloadTime: 1.55, fireInterval: 60 / 720, auto: true, kick: 0.95, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.292, -0.556], adsFov: 57, recoilP: 0.018, recoilY: 0.012, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.018, tracerLife: 0.075, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
+  { id: 'CX5', name: 'CX-5 MARAUDER', short: 'CX-5', magSize: 35, reloadTime: 1.35, fireInterval: 60 / 860, auto: true, kick: 0.68, hipPos: [0.31, -0.3, -0.64], adsPos: [0, -0.2745, -0.526], adsFov: 57, recoilP: 0.011, recoilY: 0.011, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.011, tracerLife: 0.05, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
+  { id: 'M77', name: 'M77 SENTINEL', short: 'M77', magSize: 12, reloadTime: 2.05, fireInterval: 60 / 310, auto: false, kick: 1.5, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.315, -0.537], adsFov: 42, recoilP: 0.055, recoilY: 0.018, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.026, tracerLife: 0.12, flashDuration: 0.1, muzzleIntensity: 42, shotFovKickMul: 1.35, longCasing: true, hasScope: true },
   { id: 'HLX3', name: 'HLX-3 PROSPECTOR', short: 'HLX-3', magSize: Infinity, fireInterval: 0, auto: true, kick: 0.08, hipPos: [0.38, -0.44, -0.92], adsPos: [0, -0.4, -0.86], adsFov: 54, color: 0x63efff, kind: 'laser', flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
 ];
 
@@ -47,6 +47,8 @@ export class SurfaceWeapons {
     this.laserWasFiring = false;
     this.boltT = 0;
     this.boltAnim = null;
+    this.reloadT = 0;
+    this.reloadDuration = 0;
     this.tracers = [];
     this.flashes = [];
     this.sparks = [];
@@ -90,6 +92,8 @@ export class SurfaceWeapons {
         eject: group.userData.eject?.clone(),
         bolt: group.userData.bolt,
         opticGlass: group.userData.opticGlass,
+        magazine: group.userData.magazine,
+        magazineHome: group.userData.magazineHome?.clone(),
       };
     });
     this.models[0].group.visible = true;
@@ -126,6 +130,10 @@ export class SurfaceWeapons {
         event.preventDefault();
         this.select(slot);
       }
+      if (event.code === 'KeyR') {
+        event.preventDefault();
+        this.reload();
+      }
     };
     window.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp, true);
@@ -152,6 +160,7 @@ export class SurfaceWeapons {
 
   select(index) {
     if (index === this.index || index === this.pendingIndex) return;
+    this.cancelReload();
     this.pendingIndex = index;
     this.switchT = SWITCH_TIME;
     this.ads = false;
@@ -160,13 +169,14 @@ export class SurfaceWeapons {
 
   syncHud() {
     const def = SURFACE_WEAPONS[this.index];
-    this.onChange?.({ index: this.index, weapon: def, ammo: this.models[this.index].ammo });
+    this.onChange?.({ index: this.index, weapon: def, ammo: this.models[this.index].ammo, reloading: this.reloadT > 0 });
   }
 
   fire() {
     const def = SURFACE_WEAPONS[this.index];
     const current = this.models[this.index];
-    if (current.ammo <= 0) { current.ammo = def.magSize; }
+    if (this.reloadT > 0) return false;
+    if (current.ammo <= 0) return this.reload();
     current.ammo--;
     this.cooldown = def.fireInterval;
     this.flashT = def.flashDuration;
@@ -182,6 +192,58 @@ export class SurfaceWeapons {
     this.syncHud();
     // Semi-auto: consume the pending press so the next click is required.
     if (!def.auto) this.justPressed = false;
+    return true;
+  }
+
+  reload() {
+    const def = SURFACE_WEAPONS[this.index];
+    const current = this.models[this.index];
+    if (def.kind === 'laser' || current.ammo >= def.magSize || this.reloadT > 0 || this.switchT > 0) return false;
+    this.reloadDuration = def.reloadTime;
+    this.reloadT = def.reloadTime;
+    this.trigger = false;
+    this.justPressed = false;
+    this.ads = false;
+    this.syncHud();
+    return true;
+  }
+
+  cancelReload() {
+    const current = this.models[this.index];
+    if (current?.magazine && current.magazineHome) {
+      current.magazine.position.copy(current.magazineHome);
+      current.magazine.rotation.set(0, 0, 0);
+    }
+    this.reloadT = 0;
+    this.reloadDuration = 0;
+  }
+
+  updateReload(dt, current) {
+    if (this.reloadT <= 0) return 0;
+    this.reloadT = Math.max(0, this.reloadT - dt);
+    const progress = 1 - this.reloadT / this.reloadDuration;
+    const magazine = current.magazine;
+    if (magazine && current.magazineHome) {
+      const remove = THREE.MathUtils.smoothstep(progress, 0.12, 0.38);
+      const insert = THREE.MathUtils.smoothstep(progress, 0.58, 0.86);
+      const displacement = Math.max(0, remove - insert);
+      magazine.position.copy(current.magazineHome);
+      magazine.position.x += displacement * 0.075;
+      magazine.position.y -= displacement * 0.42;
+      magazine.position.z += displacement * 0.08;
+      magazine.rotation.z = displacement * -0.18;
+    }
+    if (this.reloadT === 0) {
+      current.ammo = SURFACE_WEAPONS[this.index].magSize;
+      this.reloadDuration = 0;
+      if (magazine && current.magazineHome) {
+        magazine.position.copy(current.magazineHome);
+        magazine.rotation.set(0, 0, 0);
+      }
+      this.syncHud();
+      return 0;
+    }
+    return Math.sin(progress * Math.PI);
   }
 
   get lookScale() {
@@ -441,8 +503,10 @@ export class SurfaceWeapons {
       if (this.switchT <= 0) this.switchT = 0;
     }
     const currentDef = SURFACE_WEAPONS[this.index];
+    const current = this.models[this.index];
+    const reloadWeight = this.updateReload(dt, current);
     const laserFiring = currentDef.kind === 'laser' && this.trigger;
-    if (this.switchT <= 0 && currentDef.kind !== 'laser' && this.cooldown <= 0 && (currentDef.auto ? this.trigger : this.justPressed)) this.fire();
+    if (this.switchT <= 0 && this.reloadT <= 0 && currentDef.kind !== 'laser' && this.cooldown <= 0 && (currentDef.auto ? this.trigger : this.justPressed)) this.fire();
     if (laserFiring && !this.laserWasFiring) this.onShot?.(currentDef);
     this.laserWasFiring = laserFiring;
     // justPressed is consumed inside fire() for semi-auto weapons; auto
@@ -499,10 +563,13 @@ export class SurfaceWeapons {
     targetPosition.x += Math.cos(this.bobPhase) * 0.006 * this.bobAmt * (this.ads ? 0.25 : 1);
     targetPosition.x += this.weaponSwayX * (this.ads ? 0.35 : 1);
     targetPosition.y += this.weaponSwayY * (this.ads ? 0.35 : 1);
+    targetPosition.x += reloadWeight * 0.11;
+    targetPosition.y -= reloadWeight * 0.2;
+    targetPosition.z += reloadWeight * 0.08;
     this.rig.position.lerp(targetPosition, Math.min(1, dt * 14));
-    this.rig.rotation.x = THREE.MathUtils.lerp(this.rig.rotation.x, this.kick * 0.14 * currentDef.kick + dipRotation, Math.min(1, dt * 12));
+    this.rig.rotation.x = THREE.MathUtils.lerp(this.rig.rotation.x, this.kick * 0.14 * currentDef.kick + dipRotation + reloadWeight * 0.28, Math.min(1, dt * 12));
     this.rig.rotation.y = THREE.MathUtils.lerp(this.rig.rotation.y, 0, Math.min(1, dt * 12));
-    this.rig.rotation.z = THREE.MathUtils.lerp(this.rig.rotation.z, -this.weaponSwayX * 0.7, Math.min(1, dt * 14));
+    this.rig.rotation.z = THREE.MathUtils.lerp(this.rig.rotation.z, -this.weaponSwayX * 0.7 + reloadWeight * 0.2, Math.min(1, dt * 14));
 
     const cameraRecoil = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.recoilP, this.recoilY, 0, 'XYZ'));
     this.camera.quaternion.multiply(cameraRecoil);
@@ -609,7 +676,7 @@ export class SurfaceWeapons {
     const lateralDistance = Math.sqrt(Math.max(0, lensToEye.lengthSq() - axialDistance * axialDistance));
     const eyeOffset = lateralDistance / Math.max(axialDistance, 0.001);
     const geometricEyeBox = 1 - THREE.MathUtils.smoothstep(eyeOffset, 0.035, 0.36);
-    const eyeBoxTarget = this.ads ? Math.max(0.82, geometricEyeBox) : geometricEyeBox;
+    const eyeBoxTarget = this.ads ? Math.max(0.94, geometricEyeBox) : Math.max(0.14, geometricEyeBox);
     lens.material.uniforms.eyeBox.value = THREE.MathUtils.lerp(
       lens.material.uniforms.eyeBox.value,
       eyeBoxTarget,
