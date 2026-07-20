@@ -185,7 +185,8 @@
   background: rgba(183, 194, 196, .055); border-top: 1px solid rgba(222, 231, 231, .055); border-bottom: 1px solid rgba(0, 0, 0, .20);
   font-size: 15px; font-weight: 850; color: #b9c1c2;
 }
-.detailRow span:last-child { color: #d1d7d8; text-align: right; margin-left: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.detailRow span:first-child { flex-shrink: 0; }
+.detailRow span:last-child { color: #d1d7d8; text-align: right; margin-left: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
 
 .routeActionWrap { flex: 0 0 58px; padding: 7px 14px 9px; border-top: 1px solid rgba(210, 222, 223, .10); background: rgba(5, 12, 18, .12); }
 #sm-routeAction {

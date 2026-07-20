@@ -979,7 +979,9 @@ export class StarMap {
     this.els.detailGravity.textContent = profile.gravity;
     this.els.detailTemperature.textContent = profile.temperature;
     this.els.detailAtmosphere.textContent = profile.atmosphere;
+    this.els.detailAtmosphere.title = profile.atmosphere;
     this.els.detailMagnetosphere.textContent = profile.magnetosphere;
+    this.els.detailMagnetosphere.title = profile.magnetosphere;
     this.els.detailFauna.textContent = profile.fauna;
     this.els.detailFlora.textContent = profile.flora;
     this.els.detailWater.textContent = profile.water;
