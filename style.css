@@ -374,27 +374,46 @@ body.hero-active #version, body.hero-active #dev-fps { display: none !important;
 .hero-wordmark-cn { margin-top: 12px; color: var(--ui-dim); font: 400 15px/1 var(--ui-font); letter-spacing: .9em; }
 .hero-wordmark-rule { width: 72px; height: 2px; margin-top: 20px; background: var(--ui-cyan); box-shadow: 0 0 10px rgba(62, 212, 232, .4); }
 
-/* menu: star-map panel language — flat panel, no accent bars */
-.hero-menu { position: absolute; z-index: 2; left: 50px; top: 47%; transform: translateY(-50%); display: grid; gap: 6px; width: min(320px, 40vw); }
+/* menu: clean vertical command list with a single left accent line */
+.hero-menu { position: absolute; z-index: 2; left: 50px; top: 54%; transform: translateY(-50%); display: grid; gap: 10px; width: min(320px, 40vw); }
 .hero-menu-item {
-  display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; align-items: center; column-gap: 10px;
-  padding: 10px 13px 9px 14px; text-align: left; cursor: pointer;
+  position: relative;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 13px 15px 13px 20px; text-align: left; cursor: pointer;
   color: var(--ui-white); background: var(--ui-panel);
   border: 1px solid var(--ui-panel-border);
   box-shadow: inset 0 1px rgba(255, 255, 255, .018);
-  transition: background .14s ease, border-color .14s ease, transform .14s ease;
+  transition: background .16s ease, border-color .16s ease, transform .16s ease, opacity .16s ease;
 }
-.hero-menu-eyebrow { grid-column: 1; color: var(--ui-dim); font: 600 9px/1 var(--ui-font); letter-spacing: .18em; text-transform: uppercase; }
-.hero-menu-label { grid-column: 1; margin-top: 4px; font-size: 15px; font-weight: 700; letter-spacing: .1em; }
-.hero-menu-item kbd { grid-column: 2; grid-row: 1 / span 2; }
+.hero-menu-item::before {
+  content: ""; position: absolute; left: -1px; top: 10px; bottom: 10px; width: 3px;
+  background: rgba(62, 212, 232, .35); box-shadow: 0 0 10px rgba(62, 212, 232, .15);
+  transition: background .16s ease, box-shadow .16s ease, top .16s ease, bottom .16s ease;
+}
+.hero-menu-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.hero-menu-eyebrow { color: rgba(170, 179, 180, .72); font: 600 8px/1 var(--ui-font); letter-spacing: .22em; text-transform: uppercase; }
+.hero-menu-label { font-size: 15px; font-weight: 650; letter-spacing: .08em; color: var(--ui-white); }
+.hero-menu-item kbd { flex: 0 0 auto; color: rgba(238, 243, 243, .55); background: rgba(7, 17, 26, .45); border-color: rgba(203, 214, 214, .14); }
 .hero-menu-item:hover:not(:disabled), .hero-menu-item:focus-visible {
-  background: rgba(62, 212, 232, .1); border-color: rgba(62, 212, 232, .34);
-  outline: 0; transform: translateX(2px);
+  background: rgba(62, 212, 232, .1); border-color: rgba(62, 212, 232, .38);
+  outline: 0; transform: translateX(4px);
 }
-.hero-menu-item:disabled { opacity: .38; cursor: not-allowed; }
-#hero-start-btn { background: rgba(62, 212, 232, .12); border-color: rgba(62, 212, 232, .3); }
-#hero-start-btn .hero-menu-label { font-size: 17px; }
-.hero-note { position: absolute; z-index: 2; left: 50px; top: calc(47% + 132px); color: rgba(238, 243, 243, .38); font: 9px/1 var(--ui-mono); letter-spacing: .1em; }
+.hero-menu-item:hover:not(:disabled)::before, .hero-menu-item:focus-visible::before {
+  top: 6px; bottom: 6px; background: var(--ui-cyan); box-shadow: 0 0 14px rgba(62, 212, 232, .55);
+}
+.hero-menu-item:disabled {
+  opacity: .72; cursor: not-allowed;
+  background: rgba(7, 17, 26, .55); border-color: rgba(182, 198, 201, .1);
+}
+.hero-menu-item:disabled::before { background: rgba(170, 179, 180, .22); box-shadow: none; }
+.hero-menu-item:disabled .hero-menu-eyebrow { color: rgba(170, 179, 180, .55); }
+.hero-menu-item:disabled .hero-menu-label { color: rgba(238, 243, 243, .62); }
+.hero-menu-item:disabled kbd { color: rgba(238, 243, 243, .38); border-color: rgba(203, 214, 214, .1); }
+#hero-start-btn { background: rgba(62, 212, 232, .1); border-color: rgba(62, 212, 232, .32); }
+#hero-start-btn::before { background: var(--ui-cyan); box-shadow: 0 0 14px rgba(62, 212, 232, .45); }
+#hero-start-btn .hero-menu-label { font-size: 16px; font-weight: 700; letter-spacing: .1em; }
+#hero-start-btn kbd { color: var(--ui-cyan); border-color: rgba(62, 212, 232, .35); background: rgba(62, 212, 232, .08); }
+.hero-note { position: absolute; z-index: 2; left: 50px; top: calc(54% + 152px); color: rgba(238, 243, 243, .38); font: 9px/1 var(--ui-mono); letter-spacing: .1em; }
 
 
 #pulse-fx {
