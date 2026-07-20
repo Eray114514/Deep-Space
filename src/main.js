@@ -141,11 +141,12 @@ scene.add(camera);
 
 const ambient = new THREE.AmbientLight(0x506080, 0.09);
 const hemi = new THREE.HemisphereLight(0x88aaff, 0x223311, 0);
-const RIFT_FILL_INTENSITY = 0.22;
-const RIFT_ARRIVAL_ADAPTATION = 2.4;
-const riftFill = new THREE.AmbientLight(0xa8bcff, RIFT_FILL_INTENSITY);
-riftFill.visible = false;
-scene.add(riftFill);
+// Portal renders temporarily hide the live environment lights. This neutral
+// space fill exactly matches ambience() outside an atmosphere, so the same
+// destination mesh keeps the same light response on both sides of the seam.
+const riftPortalAmbient = new THREE.AmbientLight(0x506080, 0.025);
+riftPortalAmbient.visible = false;
+scene.add(riftPortalAmbient);
 const headlamp = new THREE.PointLight(0xffeed0, 0, 110, 1.4);
 scene.add(ambient, hemi, headlamp);
 
@@ -301,7 +302,6 @@ let riftRoute = null;
 let riftPreviewSystem = null;
 let riftForcedPost = false;
 let riftBloomState = null;
-let riftArrivalFill = 0;
 const RIFT_SPAWN_DISTANCE = 780;
 const RIFT_CAPTURE_DISTANCE = 1900;
 const PLANET_ARRIVAL_FACTOR = 1.68;
@@ -414,6 +414,9 @@ const _v2 = new THREE.Vector3();
 const _ex4 = new THREE.Vector4();
 const _v3 = new THREE.Vector3();
 const _up = new THREE.Vector3();
+const flightStepStart = new THREE.Vector3();
+const flightProbeWorld = new THREE.Vector3();
+const flightProbeLocal = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _sky = new THREE.Color();
@@ -1337,19 +1340,9 @@ function disposeRiftPreview() {
 
 function setRiftPreviewVisible(visible) {
   if (!riftPreviewSystem) return;
-  if (visible) {
-    riftFill.intensity = RIFT_FILL_INTENSITY;
-    riftFill.visible = true;
-  } else if (riftArrivalFill <= 0) {
-    riftFill.visible = false;
-  }
   for (const view of riftPreviewSystem.starViews) {
     view.group.visible = visible;
     view.light.visible = visible;
-    if (visible) {
-      view.glow.material.opacity = 1;
-      view.light.intensity = 3.2 * Math.min(2.2, Math.sqrt(view.spec.luminositySolar));
-    }
   }
   for (const body of [...riftPreviewSystem.planets, ...riftPreviewSystem.compactObjects]) body.group.visible = visible;
 }
@@ -1390,11 +1383,13 @@ function beginRiftPortalScene() {
   renderer.getClearColor(riftPortalClearColor);
   riftPortalClearAlpha = renderer.getClearAlpha();
   renderer.setClearColor(0x000006, 1);
+  riftPortalAmbient.visible = true;
   setRiftPreviewVisible(true);
 }
 
 function endRiftPortalScene() {
   setRiftPreviewVisible(false);
+  riftPortalAmbient.visible = false;
   for (let i = 0; i < riftPortalVisibility.length; i += 2) {
     riftPortalVisibility[i].visible = riftPortalVisibility[i + 1];
   }
@@ -1434,9 +1429,12 @@ function enableRiftEffects() {
     };
   }
   bloomPass.enabled = true;
-  bloomPass.strength = 1.08;
-  bloomPass.radius = 0.76;
-  bloomPass.threshold = 0.16;
+  // Keep the energy concentrated on the rim. A broad low-threshold bloom
+  // spread white light across the portal texture and made the destination
+  // planet appear washed out until the instant the rim moved behind us.
+  bloomPass.strength = 0.72;
+  bloomPass.radius = 0.42;
+  bloomPass.threshold = 0.72;
   riftDistortionPass.enabled = true;
   riftForcedPost = !usePost;
   usePost = true;
@@ -1457,6 +1455,10 @@ function restoreRiftEffects() {
 
 function beginSelectedRift() {
   if (!pendingRoute || state !== 'space' || riftRoute) return;
+  // The route can be chosen entirely through DOM buttons, without ever
+  // touching the flight canvas or keyboard. Unlock inside this trusted click
+  // path so both the opening tear and post-crossing seal are always audible.
+  unlockAudio();
   const route = pendingRoute;
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
   const arrival = routeArrival(route.star, route.bodyId, forward);
@@ -1468,7 +1470,6 @@ function beginSelectedRift() {
   spaceCtl.enabled = true;
   ui.setCrosshair(true);
   riftRoute = { ...route, arrival, arrived: false, anchorLocked: false, lastHintBand: -1 };
-  riftArrivalFill = 0;
   riftEntranceUniv.copy(nav.pos).addScaledVector(forward, RIFT_SPAWN_DISTANCE);
   riftTargetUniv.copy(arrival.entry);
   riftPreviewOriginUniv.copy(arrival.entry);
@@ -1498,7 +1499,7 @@ function beginSelectedRift() {
   );
   spatialRift.openPassage();
   enableRiftEffects();
-  audio.cue('warp');
+  audio.cue('rift-open');
   ui.setHint('弦界坐标钉定 · 航道正在船头展开', true);
 }
 
@@ -1627,12 +1628,6 @@ function updateRiftRoute(dt) {
         view.light.visible = true;
       }
       for (const body of [...destination.planets, ...destination.compactObjects]) body.group.visible = true;
-      // Preserve the exact portal lighting across the threshold, then let the
-      // pilot's view adapt to the destination's natural light. An immediate
-      // cut made an unchanged planet read as if it vanished and reappeared.
-      riftArrivalFill = RIFT_ARRIVAL_ADAPTATION;
-      riftFill.intensity = RIFT_FILL_INTENSITY;
-      riftFill.visible = true;
       universe.relativizeSystem(destination, nav.pos);
       const arrivalBody = destination.bodyById.get(riftRoute.arrival.bodyId) || null;
       if (arrivalBody) {
@@ -1648,6 +1643,7 @@ function updateRiftRoute(dt) {
         riftRoute.arrival.quat,
       );
       spatialRift.markTraversed();
+      audio.cue('rift-close');
       riftRoute.arrived = true;
       setState('space');
       ui.showArrival(arrivalBody?.name || destination.name, destination.name, '弦界抵达');
@@ -1656,15 +1652,6 @@ function updateRiftRoute(dt) {
     restoreRiftEffects();
     riftRoute = null;
   }
-}
-
-function updateRiftArrivalFill(dt) {
-  if (riftArrivalFill <= 0) return;
-  riftArrivalFill = Math.max(0, riftArrivalFill - dt);
-  const remaining = riftArrivalFill / RIFT_ARRIVAL_ADAPTATION;
-  const adapted = remaining * remaining * (3 - 2 * remaining);
-  riftFill.intensity = RIFT_FILL_INTENSITY * adapted;
-  if (riftArrivalFill <= 0) riftFill.visible = false;
 }
 
 function renderRiftPortal() {
@@ -1678,13 +1665,9 @@ function renderRiftPortal() {
     planet.update(_v, 1 / 60, planet.bodyId === riftRoute.arrival.bodyId, 0);
   }
   for (const object of riftPreviewSystem.compactObjects) object.updateVisual?.(performance.now() * 0.001);
-  for (const view of riftPreviewSystem.starViews) {
-    view.group.position.copy(view.positionUniv).sub(riftPreviewOriginUniv);
-    view.light.position.copy(view.group.position);
-  }
-  for (const body of [...riftPreviewSystem.planets, ...riftPreviewSystem.compactObjects]) {
-    body.group.position.copy(body.posUniv).sub(riftPreviewOriginUniv);
-  }
+  // Use the exact camera-relative placement, stellar attenuation and sun glow
+  // that the adopted destination will use on the first post-crossing frame.
+  universe.relativizeSystem(riftPreviewSystem, riftPreviewOriginUniv);
   spatialRift.renderPortal({
     beforeRender: beginRiftPortalScene,
     afterRender: endRiftPortalScene,
@@ -1799,9 +1782,7 @@ function newUniverse(seed) {
   tweens.length = 0;
   clearPendingRoute(false);
   ui.endTravel();
-  riftArrivalFill = 0;
-  riftFill.visible = false;
-  riftFill.intensity = RIFT_FILL_INTENSITY;
+  riftPortalAmbient.visible = false;
   disposeRiftPreview();
   riftRoute = null;
   spatialRift.group.visible = false;
@@ -2140,6 +2121,7 @@ function frame() {
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, 0);
     }
+    flightStepStart.copy(nav.pos);
     spaceCtl.update(dt);
     if (nearest) {
       _v.copy(nav.pos).sub(nearest.posUniv);
@@ -2151,14 +2133,29 @@ function frame() {
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, dt);
     }
-    // never fly into the ground
-    if (nearest && !nearest.isGasGiant && nearestAlt < 3) {
-      _v.copy(nav.pos).sub(nearest.posUniv).normalize();
-      const localDir = nearest.worldOffsetToLocal(_v, _v2).normalize();
-      const localGround = localDir.multiplyScalar(nearest.surfaceRadius(localDir) + 3);
-      nearest.localPositionToWorld(localGround, nav.pos);
-      const inward = Math.min(0, nav.vel.dot(_v));
-      nav.vel.addScaledVector(_v, -inward);
+    // Sweep the camera's whole frame step against procedural terrain. Checking
+    // only last frame's altitude allowed a low-FPS step to enter or cross a
+    // narrow ridge before the next correction.
+    if (nearest && !nearest.isGasGiant) {
+      const travel = flightStepStart.distanceTo(nav.pos);
+      const steps = Math.min(12, Math.max(1, Math.ceil(travel / 3)));
+      for (let i = 1; i <= steps; i++) {
+        flightProbeWorld.lerpVectors(flightStepStart, nav.pos, i / steps);
+        nearest.worldPositionToLocal(flightProbeWorld, flightProbeLocal);
+        const radius = flightProbeLocal.length();
+        _up.copy(flightProbeLocal).multiplyScalar(1 / Math.max(radius, 1));
+        const groundRadius = nearest.surfaceRadius(_up);
+        const clearance = radius - groundRadius;
+        if (i === steps) nearestAlt = clearance;
+        if (clearance >= 3) continue;
+        const safeRadius = groundRadius + 3;
+        nearest.localPositionToWorld(_up.multiplyScalar(safeRadius), nav.pos);
+        nearest.localOffsetToWorld(_up.normalize(), _v);
+        const inward = Math.min(0, nav.vel.dot(_v));
+        nav.vel.addScaledVector(_v, -inward);
+        nearestAlt = 3;
+        break;
+      }
     }
     if (nearest?.isGasGiant && nearestAlt < -nearest.R * 0.1) {
       // Pressure-protection autopilot: no death loop, but the cloud dive has a
@@ -2179,7 +2176,6 @@ function frame() {
   // While paused, stepTweens(dt=0) is a no-op and the camera/world stay put.
   stepTweens(dt);
   updateRiftRoute(dt);
-  updateRiftArrivalFill(dt);
   updateDestinationMarker();
 
   // The ship reactor recharges pulse energy after a short thermal cooldown.
@@ -2347,6 +2343,7 @@ function frame() {
     atmosphere: envInAtmo,
     boosting: boostVisual > 0.12 || pulseVisual > 0.12,
     warp: warpIntensity,
+    rift: riftRoute ? spatialRift.open * (spatialRift.handoffActive ? 0.35 : 1) : 0,
     paused,
   });
   // Background music director: pickTrack decides what should be playing based
@@ -2432,8 +2429,8 @@ function frame() {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     volumePass.setActivePlanet(nearest?.isGasGiant ? null : nearest, nav.pos, motion);
   }
-  foregroundPass.enabled = (VOLUME_ENABLED || state === 'walk')
-    && ['space', 'flyto', 'landing', 'takeoff', 'boarding', 'walk'].includes(state);
+  foregroundPass.enabled = VOLUME_ENABLED
+    && ['space', 'flyto', 'landing', 'takeoff', 'boarding'].includes(state);
   ambient.layers.enable(SHIP_FOREGROUND_LAYER);
   hemi.layers.enable(SHIP_FOREGROUND_LAYER);
   headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
@@ -2982,6 +2979,29 @@ window.NMS = {
   walkSpeed: () => walkCtl.hSpeed.length(),
   warp: () => warpIntensity,
   pulseFuel: () => pulseFuel,
+  riftState: () => ({
+    active: !!riftRoute,
+    arrived: !!riftRoute?.arrived,
+    open: spatialRift.open,
+    tension: spatialRift.tension,
+    burst: spatialRift.burst,
+    handoff: spatialRift.handoffFade,
+    visible: spatialRift.group.visible,
+    audioCue: audio.lastCue,
+    distanceToThreshold: riftRoute && !riftRoute.arrived
+      ? new THREE.Vector3().copy(nav.pos).sub(riftEntranceUniv)
+        .applyQuaternion(new THREE.Quaternion().copy(riftOrientation).invert()).z + spatialRift.depth
+      : null,
+    destinationLight: riftPreviewSystem?.starViews.map((view) => view.light.intensity)
+      || universe.system?.starViews.map((view) => view.light.intensity) || [],
+  }),
+  approachRift(distance = 38) {
+    if (!riftRoute || riftRoute.arrived || !riftRoute.anchorLocked) return false;
+    nav.pos.set(0, 0, -spatialRift.depth + Number(distance))
+      .applyQuaternion(riftOrientation).add(riftEntranceUniv);
+    nav.vel.set(0, 0, 0);
+    return true;
+  },
   setPulse(active) {
     pulseEngaged = !!active && pulseFuel > 0.01
       && (!nearest || nearestAlt > nearest.atmoHeight * 1.08);

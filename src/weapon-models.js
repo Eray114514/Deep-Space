@@ -225,75 +225,13 @@ function buildScope(parent, z, y, mats) {
   frontLens.position.z = -0.277;
   scope.add(frontLens);
 
-  // Rear lens is a custom ShaderMaterial that simulates thick optical glass:
-  // It applies barrel distortion, chromatic aberration, and dynamic scope shadow (vignette).
-  const rearLensMaterial = new THREE.ShaderMaterial({
-    uniforms: {
-      tDiffuse: { value: null },
-      cameraPos: { value: new THREE.Vector3() },
-      lensPos: { value: new THREE.Vector3() },
-      lensForward: { value: new THREE.Vector3() },
-      vignetteIntensity: { value: 0.0 },
-      eyeBox: { value: 0.0 },
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      varying vec3 vWorldPosition;
-      void main() {
-        vUv = uv;
-        vec4 worldPos = modelMatrix * vec4(position, 1.0);
-        vWorldPosition = worldPos.xyz;
-        gl_Position = projectionMatrix * viewMatrix * worldPos;
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D tDiffuse;
-      uniform vec3 cameraPos;
-      uniform vec3 lensPos;
-      uniform vec3 lensForward;
-      uniform float vignetteIntensity;
-      uniform float eyeBox;
-      varying vec2 vUv;
-      varying vec3 vWorldPosition;
-      void main() {
-        vec2 centeredUv = vUv * 2.0 - 1.0;
-        float radiusSq = dot(centeredUv, centeredUv);
-        
-        // Barrel distortion
-        float distortion = 1.0 + radiusSq * 0.12;
-        vec2 distortedUv = centeredUv * distortion;
-        distortedUv = distortedUv * 0.5 + 0.5;
-        
-        // Chromatic aberration at edges
-        float caOffset = radiusSq * 0.006;
-        float r = texture2D(tDiffuse, distortedUv + vec2(caOffset, 0.0)).r;
-        float g = texture2D(tDiffuse, distortedUv).g;
-        float b = texture2D(tDiffuse, distortedUv - vec2(caOffset, 0.0)).b;
-        vec3 color = vec3(r, g, b);
-
-        // Parallax / Scope Shadow (Eye box constraint)
-        // Calculate lateral shift relative to lens center based on view angle
-        vec3 viewDir = normalize(cameraPos - vWorldPosition);
-        vec3 toCenter = normalize(cameraPos - lensPos);
-        float shift = length(cross(toCenter, lensForward));
-        
-        // Base optical vignette plus dynamic eye-relief shadow
-        float baseVignette = 1.0 - smoothstep(0.65, 1.0, length(centeredUv));
-        float geometricShadow = 1.0 - smoothstep(0.0, 0.1, shift * vignetteIntensity);
-        // The CPU eye-box state is authoritative while aiming. Keep a small
-        // optical floor off-axis so the glass darkens instead of becoming a
-        // featureless black disc.
-        float dynamicShadow = max(0.12, max(geometricShadow, eyeBox));
-        float shadow = baseVignette * dynamicShadow;
-        
-        // Add subtle glare near the edge
-        float glare = smoothstep(0.85, 0.98, length(centeredUv)) * 0.08;
-        
-        gl_FragColor = vec4(color * shadow + vec3(glare), 1.0);
-      }
-    `,
+  // Use Three's built-in colour-managed map path for the live scope image.
+  // A custom sampling shader bypassed the renderer/composer output contract
+  // and turned otherwise valid render-target pixels into a black lens.
+  const rearLensMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
     side: THREE.DoubleSide,
-    toneMapped: false,
+    toneMapped: true,
     depthWrite: true,
   });
   const rearLens = new THREE.Mesh(new THREE.CircleGeometry(0.052, 64), rearLensMaterial);

@@ -12,6 +12,13 @@ const _edgeY = new THREE.Vector3();
 const _localPrev = new THREE.Vector3();
 const _localCurr = new THREE.Vector3();
 
+function edgeMotion(angle, time) {
+  return 0.030 * Math.sin(angle * 4 - time * 0.72 + 0.8)
+    + 0.018 * Math.sin(angle * 9 + time * 1.18 - 1.6)
+    + 0.010 * Math.sin(angle * 23 - time * 2.05)
+    + 0.006 * Math.sin(angle * 47 + time * 3.4);
+}
+
 export const RiftDistortionShader = {
   uniforms: {
     tDiffuse: { value: null },
@@ -43,7 +50,13 @@ export const RiftDistortionShader = {
         + .052 * sin(a * 5.0 - 1.18)
         + .030 * sin(a * 11.0 + 2.16)
         + .020 * sin(a * 17.0 - .45)
-        + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0);
+        + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0)
+        + uOpen * (
+          .030 * sin(a * 4.0 - uTime * .72 + .8)
+          + .018 * sin(a * 9.0 + uTime * 1.18 - 1.6)
+          + .010 * sin(a * 23.0 - uTime * 2.05)
+          + .006 * sin(a * 47.0 + uTime * 3.4)
+        );
     }
     void main() {
       vec2 safeR = max(uRadius, vec2(.0001));
@@ -86,11 +99,11 @@ export const DEFAULT_RIFT_PROFILE = Object.freeze({
   tunnelRings: 28,
   renderScale: 1,
   rimLayers: Object.freeze([
-    { scale: 1.000, band: 34, z: 8, alpha: 0.92, phase: 0, brightness: 1.16 },
-    { scale: 1.025, band: 58, z: 1, alpha: 0.56, phase: 1.7, brightness: 1.00 },
-    { scale: 0.982, band: 22, z: 14, alpha: 0.76, phase: 3.2, brightness: 1.28 },
-    { scale: 1.068, band: 82, z: -9, alpha: 0.28, phase: 5.0, brightness: 0.92 },
-    { scale: 1.120, band: 110, z: -16, alpha: 0.14, phase: 7.1, brightness: 0.78 },
+    { scale: 1.000, band: 34, z: 8, alpha: 0.66, phase: 0, brightness: 1.02 },
+    { scale: 1.025, band: 58, z: 1, alpha: 0.34, phase: 1.7, brightness: 0.88 },
+    { scale: 0.982, band: 22, z: 14, alpha: 0.48, phase: 3.2, brightness: 1.08 },
+    { scale: 1.068, band: 82, z: -9, alpha: 0.16, phase: 5.0, brightness: 0.80 },
+    { scale: 1.120, band: 110, z: -16, alpha: 0.07, phase: 7.1, brightness: 0.68 },
   ]),
 });
 
@@ -282,7 +295,13 @@ export class SpatialRift {
           float alive = smoothstep(.02, .30, uOpen);
           float strain = sin(aAngle * 37.0 - uTime * 8.5 + uPhase) * uTension;
           p.z += sin(aAngle * 19.0 + uTime * 2.5 + uPhase) * 3.5 * alive + strain * 8.0;
-          p.xy *= 1.0 + sin(aAngle * 7.0 - uTime * 1.1 + uPhase) * .006 * alive + strain * .0035;
+          float livingEdge =
+            .030 * sin(aAngle * 4.0 - uTime * .72 + .8)
+            + .018 * sin(aAngle * 9.0 + uTime * 1.18 - 1.6)
+            + .010 * sin(aAngle * 23.0 - uTime * 2.05)
+            + .006 * sin(aAngle * 47.0 + uTime * 3.4);
+          float layerRipple = sin(aAngle * 7.0 - uTime * 1.1 + uPhase) * .007;
+          p.xy *= 1.0 + (livingEdge + layerRipple) * alive + strain * .0035;
           p.xy *= 1.0 + uBurst * .018;
           vAcross = aAcross; vAngle = aAngle; vRand = aRand;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
@@ -322,12 +341,52 @@ export class SpatialRift {
 
   _makeStructure() {
     const curve = new THREE.CatmullRomCurve3(this._curvePoints(0, 1.016), true, 'catmullrom', 0.12);
+    this.massMat = new THREE.ShaderMaterial({
+      side: THREE.DoubleSide,
+      depthWrite: true,
+      uniforms: {
+        uTime: { value: 0 }, uOpen: { value: 0 }, uTension: { value: 0 }, uBurst: { value: 0 },
+        uHalfSize: { value: new THREE.Vector2(this.width * 0.5, this.height * 0.5) },
+      },
+      vertexShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_vertex>
+        uniform float uTime; uniform float uOpen; uniform float uTension; uniform float uBurst;
+        uniform vec2 uHalfSize;
+        varying float vCharge;
+        void main() {
+          vec3 p = position;
+          float a = atan(p.y / uHalfSize.y, p.x / uHalfSize.x);
+          float livingEdge =
+            .030 * sin(a * 4.0 - uTime * .72 + .8)
+            + .018 * sin(a * 9.0 + uTime * 1.18 - 1.6)
+            + .010 * sin(a * 23.0 - uTime * 2.05)
+            + .006 * sin(a * 47.0 + uTime * 3.4);
+          p.xy *= 1.0 + livingEdge * smoothstep(.03, .28, uOpen);
+          p.z += sin(a * 19.0 + uTime * 2.5) * (2.4 + 6.0 * uTension);
+          p.xy *= 1.0 + uBurst * .018;
+          vCharge = .5 + .5 * sin(a * 11.0 - uTime * 1.4);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+          #include <logdepthbuf_vertex>
+        }
+      `,
+      fragmentShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
+        varying float vCharge;
+        uniform float uOpen; uniform float uTension; uniform float uBurst;
+        void main() {
+          #include <logdepthbuf_fragment>
+          vec3 base = vec3(.0025, .0055, .012);
+          vec3 charge = vec3(.015, .055, .13) * (.25 + .75 * vCharge);
+          vec3 color = base + charge * (.35 + uTension * .8) + vec3(.16, .09, .24) * uBurst;
+          gl_FragColor = vec4(color * smoothstep(.015, .12, uOpen), 1.0);
+        }
+      `,
+    });
     this.mass = new THREE.Mesh(
       new THREE.TubeGeometry(curve, 520, 34 * this.profile.edgeThickness, 10, true),
-      new THREE.MeshStandardMaterial({
-        color: 0x020409, metalness: 0.36, roughness: 0.44,
-        emissive: 0x061426, emissiveIntensity: 0.55,
-      }),
+      this.massMat,
     );
     this.mass.renderOrder = 3;
     this.visual.add(this.mass);
@@ -346,6 +405,12 @@ export class SpatialRift {
         uniform float uTime; uniform float uOpen; uniform float uTension; uniform float uBurst;
         void main() {
           vec3 p = position;
+          float livingEdge =
+            .030 * sin(aAngle * 4.0 - uTime * .72 + .8)
+            + .018 * sin(aAngle * 9.0 + uTime * 1.18 - 1.6)
+            + .010 * sin(aAngle * 23.0 - uTime * 2.05)
+            + .006 * sin(aAngle * 47.0 + uTime * 3.4);
+          p.xy *= 1.0 + livingEdge * uOpen * (1.0 - aDepth * .48);
           p.xy *= 1.0 + sin(aAngle * 8.0 + aDepth * 18.0 - uTime * 1.15) * .010 * uOpen;
           p.xy *= 1.0 + sin(aAngle * 29.0 - aDepth * 12.0 - uTime * 7.0) * .006 * uTension;
           p.xy *= 1.0 + uBurst * .016 * (1.0 - aDepth);
@@ -387,7 +452,7 @@ export class SpatialRift {
       this.rimMaterials.push(material);
       this.visual.add(mesh);
     }
-    const exitMaterial = this._rimShader(0.45, 2.4, 0.82);
+    const exitMaterial = this._rimShader(0.30, 2.4, 0.76);
     const exitRim = new THREE.Mesh(this._makeRibbonGeometry(0.96, 30, -this.depth + 3, 2.4), exitMaterial);
     exitRim.renderOrder = 4;
     this.rimMaterials.push(exitMaterial);
@@ -431,7 +496,13 @@ export class SpatialRift {
         float boundary(float a) {
           return 1.0 + .100 * sin(a * 3.0 + .72) + .052 * sin(a * 5.0 - 1.18)
             + .030 * sin(a * 11.0 + 2.16) + .020 * sin(a * 17.0 - .45)
-            + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0);
+            + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0)
+            + uOpen * (
+              .030 * sin(a * 4.0 - uTime * .72 + .8)
+              + .018 * sin(a * 9.0 + uTime * 1.18 - 1.6)
+              + .010 * sin(a * 23.0 - uTime * 2.05)
+              + .006 * sin(a * 47.0 + uTime * 3.4)
+            );
         }
         void main() {
           #include <logdepthbuf_fragment>
@@ -464,12 +535,12 @@ export class SpatialRift {
     this.portalSurface.position.z = -this.depth - 0.5;
     this.portalSurface.renderOrder = 1;
     this.visual.add(this.portalSurface);
-    this.visual.scale.set(0.34, 0.025, 0.04).multiplyScalar(this.profile.renderScale);
+    this.visual.scale.set(0.055, 0.045, 0.10).multiplyScalar(this.profile.renderScale);
   }
 
   _openCurve(t) {
-    const times = [0, 0.055, 0.12, 0.19, 0.56, 0.625, 0.73, 0.86, 1];
-    const values = [0, 0.018, 0.105, 0.135, 0.165, 0.205, 0.855, 0.985, 1];
+    const times = [0, 0.08, 0.18, 0.36, 0.58, 0.74, 0.88, 1];
+    const values = [0, 0.018, 0.07, 0.24, 0.58, 0.92, 1.035, 1];
     t = clamp(t, 0, 1);
     let i = 0;
     while (i < times.length - 2 && t > times[i + 1]) i++;
@@ -540,7 +611,7 @@ export class SpatialRift {
     const hitY = lerp(_localPrev.y, _localCurr.y, t);
     const angle = Math.atan2(hitY / (this.height * 0.5), hitX / (this.width * 0.5));
     const radius = Math.hypot(hitX / (this.width * 0.5), hitY / (this.height * 0.5));
-    return radius <= this.contour(angle) * 0.96;
+    return radius <= (this.contour(angle) + edgeMotion(angle, this.time) * this.open) * 0.96;
   }
 
   update(dt, time) {
@@ -568,28 +639,33 @@ export class SpatialRift {
       }
     }
 
-    const visualOpen = this.open * (1 - smoothstep(0, 1, this.handoffFade));
+    const collapse = smoothstep(0, 1, this.handoffFade);
+    const visualOpen = this.open * (1 - collapse);
     const eased = visualOpen < 0.5 ? 2 * visualOpen * visualOpen : 1 - Math.pow(-2 * visualOpen + 2, 3) / 2;
     const progress = this.animDirection > 0 && this.animating ? timeline : 1;
     this.openTimeline = progress;
-    const micro = this.animDirection > 0 && this.animating ? this._tearImpulse(progress, 0.105, 0.020) : 0;
+    const micro = this.animDirection > 0 && this.animating ? this._tearImpulse(progress, 0.12, 0.045) : 0;
     const preVisible = this.animDirection > 0 && this.animating
-      ? smoothstep(0.075, 0.18, progress) * (1 - smoothstep(0.61, 0.76, progress)) : 0;
+      ? smoothstep(0.035, 0.12, progress) * (1 - smoothstep(0.44, 0.72, progress)) : 0;
     this.tension = this.animDirection > 0 && this.animating
-      ? smoothstep(0.14, 0.585, progress) * (1 - smoothstep(0.61, 0.72, progress)) : 0;
-    this.burst = this.animDirection > 0 && this.animating ? this._tearImpulse(progress, 0.655, 0.046) : 0;
-    const preStretch = preVisible * (0.23 + 0.14 * this.tension);
-    const settle = this.targetOpen > 0.5 ? Math.sin(Math.min(1, visualOpen) * Math.PI) * 0.016 : 0;
+      ? smoothstep(0.08, 0.58, progress) * (1 - smoothstep(0.72, 0.90, progress)) : 0;
+    this.burst = this.animDirection > 0 && this.animating ? this._tearImpulse(progress, 0.77, 0.072) : 0;
+    if (this.handoffActive) {
+      this.tension = Math.max(this.tension, Math.sin(collapse * Math.PI) * 0.72);
+      this.burst = Math.max(this.burst, this._tearImpulse(collapse, 0.58, 0.14) * 0.7);
+    }
+    const preStretch = preVisible * (0.035 + 0.035 * this.tension);
+    const settle = this.targetOpen > 0.5 ? Math.sin(Math.min(1, visualOpen) * Math.PI) * 0.012 : 0;
     const scale = this.profile.renderScale;
     this.visual.scale.set(
-      0.34 + (0.66 + settle) * eased + preStretch * 1.18 + micro * 0.07 + this.burst * 0.22,
-      0.025 + 0.975 * Math.pow(Math.max(eased, 0), 0.78) + preVisible * 0.018 + micro * 0.014 + this.burst * 0.18,
-      0.04 + 0.96 * Math.pow(Math.max(eased, 0), 1.42) + preVisible * (0.11 + 0.09 * this.tension) + micro * 0.05 + this.burst * 0.32,
+      0.055 + (0.945 + settle) * eased + preStretch + micro * 0.025 + this.burst * 0.10,
+      0.045 + 0.955 * Math.pow(Math.max(eased, 0), 0.92) - preStretch * 0.35 + micro * 0.018 + this.burst * 0.13,
+      0.10 + 0.90 * Math.pow(Math.max(eased, 0), 0.68) + preVisible * 0.05 + micro * 0.04 + this.burst * 0.18,
     ).multiplyScalar(scale);
     this.visual.rotation.z = 0.035 + Math.sin(time * 0.31) * 0.008 * eased
       + Math.sin(time * 13) * this.tension * 0.006 + Math.sin(time * 27) * this.burst * 0.042;
     this.stability = smoothstep(0.84, 0.995, this.open);
-    for (const material of [this.portalMat, this.tunnelMat, ...this.rimMaterials]) {
+    for (const material of [this.portalMat, this.tunnelMat, this.massMat, ...this.rimMaterials]) {
       material.uniforms.uOpen.value = visualOpen;
       material.uniforms.uTension.value = this.tension;
       material.uniforms.uBurst.value = this.burst;

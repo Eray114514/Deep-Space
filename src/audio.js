@@ -17,6 +17,7 @@ export class FlightAudio {
     this.paused = false;
     this.wasBoosting = false;
     this.wasWarping = false;
+    this.lastCue = null;
     this.lastState = null;
     this.lastAtmosphere = 0;
     this.started = false;
@@ -123,6 +124,45 @@ export class FlightAudio {
     this.warpToneGain.gain.value = 0;
     this.warpTone.connect(this.warpToneGain).connect(this.master);
     this.warpTone.start();
+
+    // A spatial rift has its own resonant bed rather than borrowing the warp
+    // whoosh. Three restrained layers make it feel like a large energized
+    // volume; cue transients below provide the tear and the final seal.
+    this.riftBus = ctx.createGain();
+    this.riftBus.gain.value = 0;
+    this.riftFilter = ctx.createBiquadFilter();
+    this.riftFilter.type = 'lowpass';
+    this.riftFilter.frequency.value = 680;
+    this.riftFilter.Q.value = 1.4;
+    this.riftFilter.connect(this.riftBus).connect(this.master);
+
+    this.riftLow = ctx.createOscillator();
+    this.riftLow.type = 'sine';
+    this.riftLow.frequency.value = 34;
+    this.riftLowGain = ctx.createGain();
+    this.riftLowGain.gain.value = 0.58;
+    this.riftLow.connect(this.riftLowGain).connect(this.riftFilter);
+    this.riftLow.start();
+
+    this.riftHarmonic = ctx.createOscillator();
+    this.riftHarmonic.type = 'triangle';
+    this.riftHarmonic.frequency.value = 69;
+    this.riftHarmonicGain = ctx.createGain();
+    this.riftHarmonicGain.gain.value = 0.12;
+    this.riftHarmonic.connect(this.riftHarmonicGain).connect(this.riftFilter);
+    this.riftHarmonic.start();
+
+    this.riftNoise = ctx.createBufferSource();
+    this.riftNoise.buffer = this.noiseBuffer;
+    this.riftNoise.loop = true;
+    this.riftNoiseFilter = ctx.createBiquadFilter();
+    this.riftNoiseFilter.type = 'bandpass';
+    this.riftNoiseFilter.frequency.value = 740;
+    this.riftNoiseFilter.Q.value = 1.8;
+    this.riftNoiseGain = ctx.createGain();
+    this.riftNoiseGain.gain.value = 0.14;
+    this.riftNoise.connect(this.riftNoiseFilter).connect(this.riftNoiseGain).connect(this.riftFilter);
+    this.riftNoise.start();
   }
 
   tone({ from = 80, to = from, duration = 0.5, gain = 0.12,
@@ -170,6 +210,7 @@ export class FlightAudio {
 
   cue(kind) {
     if (this.disposed) return;
+    this.lastCue = kind;
     if (!this.ready || !this.ctx) {
       if (kind !== 'start' && this.pendingCues.length < 4) this.pendingCues.push(kind);
       return;
@@ -184,6 +225,18 @@ export class FlightAudio {
     } else if (kind === 'warp') {
       this.noiseBurst({ duration: 1.8, gain: 0.2, from: 620, to: 5200, q: 0.42 });
       this.tone({ from: 54, to: 420, duration: 1.85, gain: 0.2, type: 'sawtooth', lowpass: 3800 });
+    } else if (kind === 'rift-open') {
+      this.noiseBurst({ duration: 2.45, gain: 0.13, from: 150, to: 3600, q: 0.34 });
+      this.tone({ from: 29, to: 47, duration: 2.35, gain: 0.20, type: 'sine', lowpass: 170 });
+      this.tone({ from: 71, to: 178, duration: 2.15, gain: 0.075, type: 'triangle', lowpass: 760, delay: 0.08 });
+      this.tone({ from: 390, to: 980, duration: 1.52, gain: 0.032, type: 'sine', lowpass: 2400, delay: 0.38 });
+      this.noiseBurst({ duration: 0.46, gain: 0.17, from: 4800, to: 820, q: 1.15, delay: 1.88 });
+      this.tone({ from: 82, to: 39, duration: 0.52, gain: 0.18, type: 'triangle', lowpass: 260, delay: 1.91 });
+    } else if (kind === 'rift-close') {
+      this.noiseBurst({ duration: 0.72, gain: 0.15, from: 3100, to: 145, q: 0.62 });
+      this.tone({ from: 176, to: 43, duration: 0.74, gain: 0.14, type: 'triangle', lowpass: 820 });
+      this.tone({ from: 55, to: 27, duration: 0.36, gain: 0.23, type: 'sine', lowpass: 150, delay: 0.40 });
+      this.noiseBurst({ duration: 0.13, gain: 0.19, from: 920, to: 105, q: 1.7, delay: 0.54 });
     } else if (kind === 'atmosphere') {
       this.noiseBurst({ duration: 1.25, gain: 0.17, from: 3600, to: 720, q: 0.58 });
       this.tone({ from: 118, to: 64, duration: 0.9, gain: 0.08, lowpass: 900 });
@@ -209,7 +262,7 @@ export class FlightAudio {
     }
   }
 
-  update({ state, speed, atmosphere, boosting, warp, paused }) {
+  update({ state, speed, atmosphere, boosting, warp, rift = 0, paused }) {
     if (this.disposed) return;
     if (!this.ready || !this.ctx) return;
     const now = this.ctx.currentTime;
@@ -219,6 +272,7 @@ export class FlightAudio {
     const speedK = clamp01(Math.log10(1 + Math.max(0, speed)) / 6.2);
     const boostK = boosting && state === 'space' ? 1 : 0;
     const warpK = clamp01(warp);
+    const riftK = clamp01(rift);
     const active = paused ? 0 : 1;
 
     set(this.master.gain, active * 0.34, 0.05);
@@ -232,6 +286,11 @@ export class FlightAudio {
     set(this.warpFilter.frequency, 900 + warpK * 4800, 0.05);
     set(this.warpToneGain.gain, active * warpK * 0.12, 0.07);
     set(this.warpTone.frequency, 50 + warpK * 155, 0.05);
+    set(this.riftBus.gain, active * riftK * 0.15, riftK > 0 ? 0.16 : 0.055);
+    set(this.riftFilter.frequency, 430 + riftK * 760, 0.12);
+    set(this.riftLow.frequency, 31 + riftK * 8, 0.16);
+    set(this.riftHarmonic.frequency, 65 + riftK * 15, 0.13);
+    set(this.riftNoiseFilter.frequency, 520 + riftK * 1250, 0.11);
 
     if (this.lastState !== null && state !== this.lastState) {
       if (state === 'landing') this.cue('landing');
@@ -267,8 +326,11 @@ export class FlightAudio {
     stop(this.engine);
     stop(this.sub);
     stop(this.warpTone);
+    stop(this.riftLow);
+    stop(this.riftHarmonic);
     stop(this.airNoise);
     stop(this.warpNoise);
+    stop(this.riftNoise);
     const ctx = this.ctx;
     this.ctx = null;
     if (ctx && ctx.state !== 'closed') {

@@ -46,8 +46,11 @@ const _s = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const Y = new THREE.Vector3(0, 1, 0);
 
-// shader hooks: proxies dissolve inside the detailed bubble, at the far rim,
-// and when the camera climbs out — all on the GPU, no per-instance updates
+// shader hooks: proxies dissolve at the far rim and when the camera climbs
+// out — all on the GPU, no per-instance updates. Keep the sparse proxy trees
+// at close range as stable landmarks: scaling them to zero at the detailed
+// bubble boundary made every tree the pilot approached appear to sink into
+// the terrain before the ship could reach it.
 function applyFarFade(mat, uniforms) {
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
@@ -59,7 +62,7 @@ function applyFarFade(mat, uniforms) {
         #ifdef USE_INSTANCING
         {
           float d = distance(instanceMatrix[3].xyz, uCamL);
-          float g = smoothstep(150.0, 205.0, d) * (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
+          float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
           // proxies stand for clumps: slightly large at the handoff, and
           // inflating further with distance so far canopies OVERLAP — a
           // forest must stay a forest on a hillside 3 km away

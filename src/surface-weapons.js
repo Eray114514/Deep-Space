@@ -67,6 +67,10 @@ export class SurfaceWeapons {
       magFilter: THREE.LinearFilter,
       depthBuffer: true,
     });
+    // This is an intermediate scene buffer, not a display image. Keeping it
+    // linear lets either the direct renderer or OutputPass apply the single
+    // final tone-map/colour-space conversion when the optic is composited.
+    this.scopeTarget.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     this.rig = new THREE.Group();
     this.rig.layers.set(3);
@@ -82,6 +86,10 @@ export class SurfaceWeapons {
       group.add(flash);
       const laser = def.kind === 'laser' ? this.makeLaserEffect(group.userData.muzzle) : null;
       if (laser) group.add(laser.root);
+      if (group.userData.opticGlass?.material?.isMeshBasicMaterial) {
+        group.userData.opticGlass.material.map = this.scopeTarget.texture;
+        group.userData.opticGlass.material.needsUpdate = true;
+      }
       this.rig.add(group);
       return {
         group,
@@ -641,7 +649,8 @@ export class SurfaceWeapons {
   renderScopeView(renderer) {
     const model = this.models[this.index];
     const lens = model.opticGlass;
-    if (!this.rig.visible || !SURFACE_WEAPONS[this.index].hasScope || !lens?.isMesh || !lens.material?.isShaderMaterial) return;
+    if (!this.rig.visible || !SURFACE_WEAPONS[this.index].hasScope || !lens?.isMesh
+      || lens.material?.map !== this.scopeTarget.texture) return;
 
     const objectivePosition = model.group.localToWorld(new THREE.Vector3(0, 0.315, -0.517));
     this.scopeCamera.position.copy(objectivePosition);
@@ -654,7 +663,6 @@ export class SurfaceWeapons {
 
     const rigWasVisible = this.rig.visible;
     const previousTarget = renderer.getRenderTarget();
-    this.scopeTarget.texture.colorSpace = renderer.outputColorSpace;
     lens.visible = false;
     this.rig.visible = false;
     renderer.setRenderTarget(this.scopeTarget);
@@ -664,29 +672,6 @@ export class SurfaceWeapons {
     this.rig.visible = rigWasVisible;
     lens.visible = true;
 
-    lens.material.uniforms.tDiffuse.value = this.scopeTarget.texture;
-    const eyePosition = this.camera.getWorldPosition(new THREE.Vector3());
-    lens.material.uniforms.cameraPos.value.copy(eyePosition);
-    const lensPosition = lens.getWorldPosition(new THREE.Vector3());
-    lens.material.uniforms.lensPos.value.copy(lensPosition);
-    const lensForward = new THREE.Vector3(0, 0, 1).applyQuaternion(lens.getWorldQuaternion(new THREE.Quaternion()));
-    lens.material.uniforms.lensForward.value.copy(lensForward);
-    const lensToEye = eyePosition.clone().sub(lensPosition);
-    const axialDistance = Math.abs(lensToEye.dot(lensForward));
-    const lateralDistance = Math.sqrt(Math.max(0, lensToEye.lengthSq() - axialDistance * axialDistance));
-    const eyeOffset = lateralDistance / Math.max(axialDistance, 0.001);
-    const geometricEyeBox = 1 - THREE.MathUtils.smoothstep(eyeOffset, 0.035, 0.36);
-    const eyeBoxTarget = this.ads ? Math.max(0.94, geometricEyeBox) : Math.max(0.14, geometricEyeBox);
-    lens.material.uniforms.eyeBox.value = THREE.MathUtils.lerp(
-      lens.material.uniforms.eyeBox.value,
-      eyeBoxTarget,
-      0.16,
-    );
-    lens.material.uniforms.vignetteIntensity.value = THREE.MathUtils.lerp(
-      lens.material.uniforms.vignetteIntensity.value || 18,
-      this.ads ? 2 : 18,
-      0.16,
-    );
   }
 
   dispose() {
