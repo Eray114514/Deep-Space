@@ -341,6 +341,7 @@ export class StarMap {
         <div id="sm-crosshair"></div>
         <div id="sm-navArrow"></div>
         <div id="sm-nameTag"></div>
+        <div id="sm-hoverMark" hidden></div>
       </div>
       <div id="sm-loading"><div class="loadBox"><div class="loadTitle">系统星图</div><div class="loadBar"><i></i></div></div></div>`;
     document.body.appendChild(root);
@@ -369,6 +370,7 @@ export class StarMap {
       controls: $('#sm-controls'),
       leftHud: $('#sm-leftHud'), rightHud: $('#sm-rightHud'), bottomHud: $('#sm-bottomHud'),
       navArrow: $('#sm-navArrow'), nameTag: $('#sm-nameTag'),
+      hoverMark: $('#sm-hoverMark'),
       loading: $('#sm-loading'),
     };
   }
@@ -443,6 +445,22 @@ export class StarMap {
       this.pointerStart = null;
       if (moved < 7) this.pick(event);
     });
+    canvas.addEventListener('pointermove', (event) => {
+      if (this.mode !== 'galaxy' || this.pointerStart) {
+        this.els.hoverMark.hidden = true;
+        return;
+      }
+      const hit = this.pickStarAt(event);
+      if (!hit) {
+        this.els.hoverMark.hidden = true;
+        return;
+      }
+      // 预热 preview 缓存，减少点击时的生成延迟
+      this.systemPreview(hit.star);
+      this.els.hoverMark.hidden = false;
+      this.els.hoverMark.style.transform = `translate3d(${hit.sx.toFixed(1)}px,${hit.sy.toFixed(1)}px,0)`;
+    });
+    canvas.addEventListener('pointerleave', () => { this.els.hoverMark.hidden = true; });
   }
 
   handleKey(event) {
@@ -490,6 +508,7 @@ export class StarMap {
     this.isOpen = false;
     this.root.classList.add('hidden');
     document.body.classList.remove('starmap-open');
+    this.els.hoverMark.hidden = true;
     cancelAnimationFrame(this.raf);
   }
 
@@ -536,10 +555,16 @@ export class StarMap {
   async enterSystem() {
     if (this.mode === 'system' || !this.selectedStar) return;
     this.mode = 'system';
+    this.els.hoverMark.hidden = true;
     this.root.classList.remove('mode-galaxy');
     this.root.classList.add('mode-system');
     this.updateRail();
     this.updateHints();
+    this.resize();
+    // 让浏览器先渲染一帧"已切换到星系模式"的 UI，再同步构建 3D 场景，
+    // 避免 buildSystem 阻塞导致点击后整体卡顿无响应。
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    if (this.mode !== 'system') return; // 期间用户可能已返回银河图
     const preview = this.systemPreview(this.selectedStar);
     this.sysview.buildSystem(preview, this.getTime());
     this.updateSystemPanel(preview);
@@ -991,7 +1016,7 @@ export class StarMap {
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
     const projected = new THREE.Vector3();
-    let bestStar = null;
+    let best = null;
     let bestDist = Infinity;
     const maxPixelDist = 28;
     for (let i = 0; i < this.visibleStars.length; i++) {
@@ -1002,16 +1027,16 @@ export class StarMap {
       const d = Math.hypot(sx - px, sy - py);
       if (d < bestDist && d <= maxPixelDist) {
         bestDist = d;
-        bestStar = this.visibleStars[i];
+        best = { star: this.visibleStars[i], sx, sy };
       }
     }
-    return bestStar;
+    return best;
   }
 
   pick(event) {
-    const star = this.pickStarAt(event);
-    if (!star) return;
-    this.selectStar(star, false);
+    const hit = this.pickStarAt(event);
+    if (!hit) return;
+    this.selectStar(hit.star, false);
     this.enterSystem();
   }
 

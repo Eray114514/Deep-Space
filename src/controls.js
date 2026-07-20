@@ -300,10 +300,13 @@ export class SpaceControls {
     nav.vel.multiplyScalar(Math.exp(-dt * drag));
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);
-      const wheelGain = 0.012 * (1 - this.atmosphereFactor * 0.68);
+      const wheelGain = 0.012 * (1 - this.atmosphereFactor * 0.55);
       nav.vel.addScaledVector(_f, this.wheelImpulse * wheelGain * this.speedScale);
       this.wheelImpulse = 0;
-      const maxV = this.speedScale * (18 - this.atmosphereFactor * 13);
+      // Loosen the atmospheric cruise cap a touch: the old 18→5 drop (−72%)
+      // felt like hitting a wall. 18→8 keeps space top speed intact while
+      // letting dense-air flight breathe.
+      const maxV = this.speedScale * (18 - this.atmosphereFactor * 10);
       if (nav.vel.length() > maxV) nav.vel.setLength(maxV);
     } else {
       this.wheelImpulse = 0;
@@ -329,7 +332,9 @@ export class SpaceControls {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
         const boostAcceleration = this.speedScale * (10.0 + (1 - this.atmosphereFactor) * 7.1);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);
-        const boostLimit = this.speedScale * (6.96 + (1 - this.atmosphereFactor) * 4.06);
+        // Raise the atmospheric floor (6.96 → 8.4) and trim the space bonus
+        // (4.06 → 2.62) so vacuum top speed is unchanged at 11.02.
+        const boostLimit = this.speedScale * (8.4 + (1 - this.atmosphereFactor) * 2.62);
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
       }
     } else {
