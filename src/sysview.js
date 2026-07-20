@@ -809,209 +809,223 @@ export class SystemView {
     const primaries = preview.bodies.filter((body) => !body.isMoon);
     const maxOrbit = Math.max(...primaries.map((body) => body.orbit), 1);
     const bodyMeshes = new Map();
-
-    primaries.forEach((body, i) => {
-      const isBlackHole = body.type === 'blackHole';
-      const orbitRadius = isBlackHole ? 0 : 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
-      const k = isBlackHole ? 0 : orbitRadius / body.orbitSpec.renderRadius;
-      // true elliptical track, sampled from the same ephemeris the game uses
-      if (!isBlackHole) {
-        const pts = [];
-        const samples = 200;
-        for (let sIdx = 0; sIdx < samples; sIdx++) {
-          const t = timeHours + body.orbitSpec.periodHours * sIdx / samples;
-          const p = orbitalPosition(body.orbitSpec, t, new THREE.Vector3());
-          pts.push(new THREE.Vector3(p.x * k, p.y * k + ORBIT_PLANE_Y, p.z * k));
-        }
-        const line = new THREE.LineLoop(
-          new THREE.BufferGeometry().setFromPoints(pts),
-          new THREE.LineBasicMaterial({ color: 0xe1e6e5, transparent: true, opacity: 0.12 + (i % 4) * 0.02, depthWrite: false, depthTest: true }),
-        );
-        line.renderOrder = 1;
-        this.world.add(line);
-      }
-
-      const visualRadius = isBlackHole ? 2.7 : 0.55 + Math.min(1.05, body.radius / 310_000) * 1.05;
-      const group = new THREE.Group();
-      const pos = orbitalPosition(body.orbitSpec, timeHours, new THREE.Vector3());
-      group.position.set(pos.x * k, pos.y * k + ORBIT_PLANE_Y, pos.z * k);
-      this.world.add(group);
-
-      if (isBlackHole) {
-        const mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(visualRadius, 72, 48),
-          new THREE.MeshBasicMaterial({ color: 0x000000, fog: false }),
-        );
-        mesh.userData.record = { kind: 'planet', body };
-        mesh.renderOrder = 8;
-        group.add(mesh);
-        this.pickMeshes.push(mesh);
-
-        // A real spatial accretion structure replaces the old camera-facing
-        // sprite.  Dragging the system view now reveals its inclination,
-        // thickness and fixed orbital plane instead of rotating a flat image
-        // to face the viewer.
-        const discInner = visualRadius * 1.78;
-        const discOuter = visualRadius * 5.35;
-        const discMaterial = makeAccretionMaterial(discInner, discOuter, body.blackHole?.discTemperatureK || 4300);
-        discMaterial.uniforms.uIntensity.value = 0.46;
-        const disc = new THREE.Mesh(
-          new THREE.RingGeometry(discInner, discOuter, 256, 28),
-          discMaterial,
-        );
-        disc.rotation.x = -Math.PI / 2;
-        disc.rotation.z = (body.axialTilt || 0) + 0.08;
-        disc.renderOrder = 6;
-        group.add(disc);
-
-        const photonShell = new THREE.Mesh(
-          new THREE.SphereGeometry(visualRadius * 1.72, 80, 56),
-          makePhotonMaterial(),
-        );
-        photonShell.renderOrder = 10;
-        group.add(photonShell);
-
-        const photonRing = new THREE.Mesh(
-          new THREE.TorusGeometry(visualRadius * 1.58, visualRadius * 0.032, 10, 192),
-          new THREE.MeshBasicMaterial({
-            color: 0xffd39b, transparent: true, opacity: 0.38,
-            blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-          }),
-        );
-        photonRing.rotation.x = Math.PI / 2;
-        photonRing.renderOrder = 11;
-        group.add(photonRing);
-
-        // Two lifted far-side traces show the same disc light bending around
-        // the compact object. They stay in world space, so the distortion has
-        // parallax when the player rotates the preview.
-        for (const side of [-1, 1]) {
-          for (let lane = 0; lane < 4; lane++) {
-            const points = [];
-            for (let sample = 0; sample <= 96; sample++) {
-              const a = THREE.MathUtils.lerp(-1.22, 1.22, sample / 96);
-              const spread = 1 + lane * 0.085;
-              const x = Math.sin(a) * visualRadius * 2.12 * spread;
-              const y = side * (visualRadius * (1.10 + lane * 0.10) + Math.cos(a) * visualRadius * 0.55);
-              const z = -Math.cos(a) * visualRadius * (0.28 + lane * 0.035);
-              points.push(new THREE.Vector3(x, y, z));
-            }
-            const trace = new THREE.Line(
-              new THREE.BufferGeometry().setFromPoints(points),
-              new THREE.LineBasicMaterial({
-                color: side > 0 ? 0xffd6a0 : 0xff7a28,
-                transparent: true, opacity: (side > 0 ? 0.28 : 0.17) * (1 - lane * 0.14),
-                blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-              }),
-            );
-            trace.rotation.y = 0.08;
-            trace.renderOrder = 9;
-            group.add(trace);
-          }
-        }
-        const record = { kind: 'planet', body, group, mesh, cloud: null, radius: visualRadius, orbitRadius, spin: 0.00018, moonPivots: [] };
-        this.bodies.push(record);
-        this.blackHoleRecord = record;
-        this.lensPass.enabled = true;
-        bodyMeshes.set(body.index, record);
-        this._addMarker(record);
-        return;
-      }
-
-      const { map, emissiveMap } = bodyTextures(body, anisotropy);
-      map.userData.cached = true;
-      const material = new THREE.MeshStandardMaterial({
-        map,
-        roughness: body.type === 'ice' ? 0.72 : 0.9,
-        metalness: 0,
-      });
-      if (emissiveMap) {
-        emissiveMap.userData.cached = true;
-        material.emissiveMap = emissiveMap;
-        material.emissive = new THREE.Color(body.type === 'lava' ? 0xff7a26 : 0xa04fd8);
-        material.emissiveIntensity = body.type === 'lava' ? 1.9 : 0.6;
-      }
-      const mesh = new THREE.Mesh(new THREE.SphereGeometry(visualRadius, 64, 44), material);
-      mesh.rotation.y = rand() * Math.PI * 2;
-      mesh.rotation.z = (body.axialTilt || 0) * 0.5;
-      mesh.userData.record = { kind: 'planet', body };
-      group.add(mesh);
-      this.pickMeshes.push(mesh);
-
-      let cloud = null;
-      if (CLOUD_TYPES.has(body.type)) {
-        const cloudTex = makeCloudTexture(body);
-        cloudTex.userData.cached = true;
-        cloud = new THREE.Mesh(
-          new THREE.SphereGeometry(visualRadius * 1.018, 56, 38),
-          new THREE.MeshStandardMaterial({ map: cloudTex, transparent: true, opacity: 0.62, depthWrite: false, roughness: 1 }),
-        );
-        group.add(cloud);
-      }
-      const atmo = ATMO_STYLES[body.type];
-      if (atmo) {
-        const shell = new THREE.Mesh(
-          new THREE.SphereGeometry(visualRadius * 1.115, 48, 32),
-          atmosphereMaterial(atmo[0], atmo[1]),
-        );
-        group.add(shell);
-      }
-      const giant = body.type === 'gasGiant' || body.type === 'iceGiant';
-      const ringChance = body.type === 'gasGiant' ? 0.55 : body.type === 'iceGiant' ? 0.22 : 0;
-      if (rand() < ringChance) {
-        const ring = new THREE.Mesh(
-          new THREE.RingGeometry(visualRadius * 1.45, visualRadius * (2.3 + rand() * 0.8), 160, 2),
-          ringMaterial(body.seed, 0xc28a68),
-        );
-        ring.rotation.x = Math.PI / (2.35 + rand() * 0.5);
-        ring.rotation.z = (rand() - 0.5) * 0.4;
-        group.add(ring);
-      }
-
-      const record = {
-        kind: 'planet', body, group, mesh, cloud, radius: visualRadius,
-        orbitRadius,
-        spin: 0.00055 + (strHash32(body.seed) % 1000) / 1000 * 0.00025,
-        moonPivots: [],
-      };
-      this.bodies.push(record);
-      bodyMeshes.set(body.index, record);
-      this._addMarker(record);
-    });
-
+    primaries.forEach((body, i) => this._buildPrimaryBody(body, i, {
+      maxOrbit, timeHours, anisotropy, rand, bodyMeshes,
+    }));
     // moons ride their parent's group so the whole system stays coherent
     for (const moon of preview.bodies.filter((b) => b.isMoon)) {
       const parent = bodyMeshes.get(moon.parentSpec);
       if (!parent) continue;
-      const moonOrbit = parent.radius + 0.85 + Math.min(1.9, moon.orbit / 1.3e6);
-      const km = moonOrbit / moon.orbitSpec.renderRadius;
-      const moonSize = 0.1 + Math.min(0.2, moon.radius / 300_000 * 0.2);
-      const pivot = new THREE.Group();
-      parent.group.add(pivot);
-      const { map } = bodyTextures(moon, anisotropy);
-      map.userData.cached = true;
-      const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(moonSize, 32, 22),
-        new THREE.MeshStandardMaterial({ map, roughness: 1, metalness: 0 }),
-      );
-      const pos = orbitalPosition(moon.orbitSpec, timeHours, new THREE.Vector3());
-      mesh.position.set(pos.x * km, pos.y * km * 0.6, pos.z * km);
-      pivot.add(mesh);
-      // faint moon track
-      const ringPts = [];
-      for (let sIdx = 0; sIdx <= 72; sIdx++) {
-        const t = timeHours + moon.orbitSpec.periodHours * sIdx / 72;
-        const p = orbitalPosition(moon.orbitSpec, t, new THREE.Vector3());
-        ringPts.push(new THREE.Vector3(p.x * km, p.y * km * 0.6, p.z * km));
-      }
-      const ring = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(ringPts),
-        new THREE.LineBasicMaterial({ color: 0x9db8bc, transparent: true, opacity: 0.1, depthWrite: false }),
-      );
-      pivot.add(ring);
-      parent.moonPivots.push({ pivot, speed: 0.05 + (strHash32(moon.seed) % 100) * 0.001 });
-      this.moons.push({ body: moon, mesh, parent });
+      this._buildMoon(moon, parent, { timeHours, anisotropy });
     }
+  }
+
+  // One primary body (star, planet, or black hole) with its orbit track,
+  // mesh, clouds, atmosphere shell, ring and accretion structure. Black-hole
+  // bodies short-circuit with `return` after assembling the compact-object
+  // visual — the planet branch below only runs for non-black-hole primaries.
+  _buildPrimaryBody(body, i, ctx) {
+    const { maxOrbit, timeHours, anisotropy, rand, bodyMeshes } = ctx;
+    const isBlackHole = body.type === 'blackHole';
+    const orbitRadius = isBlackHole ? 0 : 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
+    const k = isBlackHole ? 0 : orbitRadius / body.orbitSpec.renderRadius;
+    // true elliptical track, sampled from the same ephemeris the game uses
+    if (!isBlackHole) {
+      const pts = [];
+      const samples = 200;
+      for (let sIdx = 0; sIdx < samples; sIdx++) {
+        const t = timeHours + body.orbitSpec.periodHours * sIdx / samples;
+        const p = orbitalPosition(body.orbitSpec, t, new THREE.Vector3());
+        pts.push(new THREE.Vector3(p.x * k, p.y * k + ORBIT_PLANE_Y, p.z * k));
+      }
+      const line = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color: 0xe1e6e5, transparent: true, opacity: 0.12 + (i % 4) * 0.02, depthWrite: false, depthTest: true }),
+      );
+      line.renderOrder = 1;
+      this.world.add(line);
+    }
+
+    const visualRadius = isBlackHole ? 2.7 : 0.55 + Math.min(1.05, body.radius / 310_000) * 1.05;
+    const group = new THREE.Group();
+    const pos = orbitalPosition(body.orbitSpec, timeHours, new THREE.Vector3());
+    group.position.set(pos.x * k, pos.y * k + ORBIT_PLANE_Y, pos.z * k);
+    this.world.add(group);
+
+    if (isBlackHole) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(visualRadius, 72, 48),
+        new THREE.MeshBasicMaterial({ color: 0x000000, fog: false }),
+      );
+      mesh.userData.record = { kind: 'planet', body };
+      mesh.renderOrder = 8;
+      group.add(mesh);
+      this.pickMeshes.push(mesh);
+
+      // A real spatial accretion structure replaces the old camera-facing
+      // sprite.  Dragging the system view now reveals its inclination,
+      // thickness and fixed orbital plane instead of rotating a flat image
+      // to face the viewer.
+      const discInner = visualRadius * 1.78;
+      const discOuter = visualRadius * 5.35;
+      const discMaterial = makeAccretionMaterial(discInner, discOuter, body.blackHole?.discTemperatureK || 4300);
+      discMaterial.uniforms.uIntensity.value = 0.46;
+      const disc = new THREE.Mesh(
+        new THREE.RingGeometry(discInner, discOuter, 256, 28),
+        discMaterial,
+      );
+      disc.rotation.x = -Math.PI / 2;
+      disc.rotation.z = (body.axialTilt || 0) + 0.08;
+      disc.renderOrder = 6;
+      group.add(disc);
+
+      const photonShell = new THREE.Mesh(
+        new THREE.SphereGeometry(visualRadius * 1.72, 80, 56),
+        makePhotonMaterial(),
+      );
+      photonShell.renderOrder = 10;
+      group.add(photonShell);
+
+      const photonRing = new THREE.Mesh(
+        new THREE.TorusGeometry(visualRadius * 1.58, visualRadius * 0.032, 10, 192),
+        new THREE.MeshBasicMaterial({
+          color: 0xffd39b, transparent: true, opacity: 0.38,
+          blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+        }),
+      );
+      photonRing.rotation.x = Math.PI / 2;
+      photonRing.renderOrder = 11;
+      group.add(photonRing);
+
+      // Two lifted far-side traces show the same disc light bending around
+      // the compact object. They stay in world space, so the distortion has
+      // parallax when the player rotates the preview.
+      for (const side of [-1, 1]) {
+        for (let lane = 0; lane < 4; lane++) {
+          const points = [];
+          for (let sample = 0; sample <= 96; sample++) {
+            const a = THREE.MathUtils.lerp(-1.22, 1.22, sample / 96);
+            const spread = 1 + lane * 0.085;
+            const x = Math.sin(a) * visualRadius * 2.12 * spread;
+            const y = side * (visualRadius * (1.10 + lane * 0.10) + Math.cos(a) * visualRadius * 0.55);
+            const z = -Math.cos(a) * visualRadius * (0.28 + lane * 0.035);
+            points.push(new THREE.Vector3(x, y, z));
+          }
+          const trace = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(points),
+            new THREE.LineBasicMaterial({
+              color: side > 0 ? 0xffd6a0 : 0xff7a28,
+              transparent: true, opacity: (side > 0 ? 0.28 : 0.17) * (1 - lane * 0.14),
+              blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+            }),
+          );
+          trace.rotation.y = 0.08;
+          trace.renderOrder = 9;
+          group.add(trace);
+        }
+      }
+      const record = { kind: 'planet', body, group, mesh, cloud: null, radius: visualRadius, orbitRadius, spin: 0.00018, moonPivots: [] };
+      this.bodies.push(record);
+      this.blackHoleRecord = record;
+      this.lensPass.enabled = true;
+      bodyMeshes.set(body.index, record);
+      this._addMarker(record);
+      return;
+    }
+
+    const { map, emissiveMap } = bodyTextures(body, anisotropy);
+    map.userData.cached = true;
+    const material = new THREE.MeshStandardMaterial({
+      map,
+      roughness: body.type === 'ice' ? 0.72 : 0.9,
+      metalness: 0,
+    });
+    if (emissiveMap) {
+      emissiveMap.userData.cached = true;
+      material.emissiveMap = emissiveMap;
+      material.emissive = new THREE.Color(body.type === 'lava' ? 0xff7a26 : 0xa04fd8);
+      material.emissiveIntensity = body.type === 'lava' ? 1.9 : 0.6;
+    }
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(visualRadius, 64, 44), material);
+    mesh.rotation.y = rand() * Math.PI * 2;
+    mesh.rotation.z = (body.axialTilt || 0) * 0.5;
+    mesh.userData.record = { kind: 'planet', body };
+    group.add(mesh);
+    this.pickMeshes.push(mesh);
+
+    let cloud = null;
+    if (CLOUD_TYPES.has(body.type)) {
+      const cloudTex = makeCloudTexture(body);
+      cloudTex.userData.cached = true;
+      cloud = new THREE.Mesh(
+        new THREE.SphereGeometry(visualRadius * 1.018, 56, 38),
+        new THREE.MeshStandardMaterial({ map: cloudTex, transparent: true, opacity: 0.62, depthWrite: false, roughness: 1 }),
+      );
+      group.add(cloud);
+    }
+    const atmo = ATMO_STYLES[body.type];
+    if (atmo) {
+      const shell = new THREE.Mesh(
+        new THREE.SphereGeometry(visualRadius * 1.115, 48, 32),
+        atmosphereMaterial(atmo[0], atmo[1]),
+      );
+      group.add(shell);
+    }
+    const giant = body.type === 'gasGiant' || body.type === 'iceGiant';
+    const ringChance = body.type === 'gasGiant' ? 0.55 : body.type === 'iceGiant' ? 0.22 : 0;
+    if (rand() < ringChance) {
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(visualRadius * 1.45, visualRadius * (2.3 + rand() * 0.8), 160, 2),
+        ringMaterial(body.seed, 0xc28a68),
+      );
+      ring.rotation.x = Math.PI / (2.35 + rand() * 0.5);
+      ring.rotation.z = (rand() - 0.5) * 0.4;
+      group.add(ring);
+    }
+
+    const record = {
+      kind: 'planet', body, group, mesh, cloud, radius: visualRadius,
+      orbitRadius,
+      spin: 0.00055 + (strHash32(body.seed) % 1000) / 1000 * 0.00025,
+      moonPivots: [],
+    };
+    this.bodies.push(record);
+    bodyMeshes.set(body.index, record);
+    this._addMarker(record);
+  }
+
+  // One moon: pivot + mesh + faint orbit track. Rides the parent's group so
+  // the whole system stays coherent as the primary moves along its ephemeris.
+  _buildMoon(moon, parent, ctx) {
+    const { timeHours, anisotropy } = ctx;
+    const moonOrbit = parent.radius + 0.85 + Math.min(1.9, moon.orbit / 1.3e6);
+    const km = moonOrbit / moon.orbitSpec.renderRadius;
+    const moonSize = 0.1 + Math.min(0.2, moon.radius / 300_000 * 0.2);
+    const pivot = new THREE.Group();
+    parent.group.add(pivot);
+    const { map } = bodyTextures(moon, anisotropy);
+    map.userData.cached = true;
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(moonSize, 32, 22),
+      new THREE.MeshStandardMaterial({ map, roughness: 1, metalness: 0 }),
+    );
+    const pos = orbitalPosition(moon.orbitSpec, timeHours, new THREE.Vector3());
+    mesh.position.set(pos.x * km, pos.y * km * 0.6, pos.z * km);
+    pivot.add(mesh);
+    // faint moon track
+    const ringPts = [];
+    for (let sIdx = 0; sIdx <= 72; sIdx++) {
+      const t = timeHours + moon.orbitSpec.periodHours * sIdx / 72;
+      const p = orbitalPosition(moon.orbitSpec, t, new THREE.Vector3());
+      ringPts.push(new THREE.Vector3(p.x * km, p.y * km * 0.6, p.z * km));
+    }
+    const ring = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(ringPts),
+      new THREE.LineBasicMaterial({ color: 0x9db8bc, transparent: true, opacity: 0.1, depthWrite: false }),
+    );
+    pivot.add(ring);
+    parent.moonPivots.push({ pivot, speed: 0.05 + (strHash32(moon.seed) % 100) * 0.001 });
+    this.moons.push({ body: moon, mesh, parent });
   }
 
   _buildContours(outermost, compactObject = false) {

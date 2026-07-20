@@ -3,11 +3,17 @@ import { createWeaponModel } from './weapon-models.js';
 
 // Directly ported ballistic profiles from futuristic-space-station. The two
 // excluded entries are the VX-4 sidearm and GV-1 gravity projector.
+// Per-weapon tuning fields replace hardcoded `def.id === 'M77'` branches:
+//   flashDuration    — how long the muzzle flash material stays visible (s)
+//   muzzleIntensity  — scales muzzle flash size and spark count
+//   shotFovKickMul   — camera FOV kick multiplier on each shot
+//   longCasing       — uses long-casing geometry for eject animation
+//   hasScope         — weapon renders a scope view when ADS
 export const SURFACE_WEAPONS = [
-  { id: 'KX9', name: 'KX-9 CERBERUS', short: 'KX-9', magSize: 30, fireInterval: 60 / 720, auto: true, kick: 0.95, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.292, -0.556], adsFov: 57, recoilP: 0.018, recoilY: 0.012, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.018, tracerLife: 0.075 },
-  { id: 'CX5', name: 'CX-5 MARAUDER', short: 'CX-5', magSize: 35, fireInterval: 60 / 860, auto: true, kick: 0.68, hipPos: [0.31, -0.3, -0.64], adsPos: [0, -0.2745, -0.526], adsFov: 57, recoilP: 0.011, recoilY: 0.011, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.011, tracerLife: 0.05 },
-  { id: 'M77', name: 'M77 SENTINEL', short: 'M77', magSize: 12, fireInterval: 60 / 310, auto: false, kick: 1.5, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.315, -0.537], adsFov: 42, recoilP: 0.055, recoilY: 0.018, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.026, tracerLife: 0.12 },
-  { id: 'HLX3', name: 'HLX-3 PROSPECTOR', short: 'HLX-3', magSize: Infinity, fireInterval: 0, auto: true, kick: 0.08, hipPos: [0.38, -0.44, -0.92], adsPos: [0, -0.4, -0.86], adsFov: 54, color: 0x63efff, kind: 'laser' },
+  { id: 'KX9', name: 'KX-9 CERBERUS', short: 'KX-9', magSize: 30, fireInterval: 60 / 720, auto: true, kick: 0.95, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.292, -0.556], adsFov: 57, recoilP: 0.018, recoilY: 0.012, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.018, tracerLife: 0.075, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
+  { id: 'CX5', name: 'CX-5 MARAUDER', short: 'CX-5', magSize: 35, fireInterval: 60 / 860, auto: true, kick: 0.68, hipPos: [0.31, -0.3, -0.64], adsPos: [0, -0.2745, -0.526], adsFov: 57, recoilP: 0.011, recoilY: 0.011, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.011, tracerLife: 0.05, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
+  { id: 'M77', name: 'M77 SENTINEL', short: 'M77', magSize: 12, fireInterval: 60 / 310, auto: false, kick: 1.5, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.315, -0.537], adsFov: 42, recoilP: 0.055, recoilY: 0.018, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.026, tracerLife: 0.12, flashDuration: 0.1, muzzleIntensity: 42, shotFovKickMul: 1.35, longCasing: true, hasScope: true },
+  { id: 'HLX3', name: 'HLX-3 PROSPECTOR', short: 'HLX-3', magSize: Infinity, fireInterval: 0, auto: true, kick: 0.08, hipPos: [0.38, -0.44, -0.92], adsPos: [0, -0.4, -0.86], adsFov: 54, color: 0x63efff, kind: 'laser', flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
 ];
 
 const axis = new THREE.Vector3(0, 1, 0);
@@ -39,6 +45,8 @@ export class SurfaceWeapons {
     this.bobAmt = 0;
     this.beamDistance = 120;
     this.laserWasFiring = false;
+    this.boltT = 0;
+    this.boltAnim = null;
     this.tracers = [];
     this.flashes = [];
     this.sparks = [];
@@ -124,7 +132,8 @@ export class SurfaceWeapons {
     window.addEventListener('keydown', this.onKey);
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     window.addEventListener('blur', this.onBlur);
-    window.addEventListener('contextmenu', (event) => { if (this.canUse()) event.preventDefault(); });
+    this.onContextMenu = (event) => { if (this.canUse()) event.preventDefault(); };
+    window.addEventListener('contextmenu', this.onContextMenu);
     this.syncHud();
   }
 
@@ -160,17 +169,19 @@ export class SurfaceWeapons {
     if (current.ammo <= 0) { current.ammo = def.magSize; }
     current.ammo--;
     this.cooldown = def.fireInterval;
-    this.flashT = def.id === 'M77' ? 0.1 : 0.06;
+    this.flashT = def.flashDuration;
     this.recoilP = Math.min(0.13, this.recoilP + def.recoilP + Math.random() * 0.006);
     this.recoilY = THREE.MathUtils.clamp(this.recoilY + (Math.random() - 0.5) * def.recoilY, -0.045, 0.045);
     this.kick = def.kick;
-    this.shotFovKick = def.id === 'M77' ? 1.35 : 1;
+    this.shotFovKick = def.shotFovKickMul;
     this.addTracer(def, this.beamDistance);
     this.addMuzzleBlast(def);
     this.ejectCasing();
     this.cycleBolt();
     this.onShot?.(def);
     this.syncHud();
+    // Semi-auto: consume the pending press so the next click is required.
+    if (!def.auto) this.justPressed = false;
   }
 
   get lookScale() {
@@ -186,9 +197,11 @@ export class SurfaceWeapons {
   cycleBolt() {
     const bolt = this.models[this.index].bolt;
     if (!bolt) return;
-    const homeZ = bolt.position.z;
-    bolt.position.z += 0.08;
-    window.setTimeout(() => { bolt.position.z = homeZ; }, 58);
+    // Use a dt-driven animation instead of setTimeout: paused state, page
+    // visibility throttling and SurfaceWeapons disposal all stay consistent.
+    this.boltAnim = { homeZ: bolt.position.z, travel: 0.08, duration: 0.058 };
+    this.boltT = this.boltAnim.duration;
+    bolt.position.z = this.boltAnim.homeZ + this.boltAnim.travel;
   }
 
   ejectCasing() {
@@ -197,7 +210,7 @@ export class SurfaceWeapons {
     const worldPosition = model.group.localToWorld(model.eject.clone());
     const position = this.camera.worldToLocal(worldPosition.clone());
     const casing = new THREE.Mesh(
-      SURFACE_WEAPONS[this.index].id === 'M77' ? this.longCasingGeometry : this.casingGeometry,
+      SURFACE_WEAPONS[this.index].longCasing ? this.longCasingGeometry : this.casingGeometry,
       this.casingMaterial,
     );
     casing.layers.set(3);
@@ -214,8 +227,8 @@ export class SurfaceWeapons {
 
   addMuzzleBlast(def) {
     const muzzle = this.models[this.index].group.localToWorld(this.models[this.index].muzzle.clone());
-    const duration = def.id === 'M77' ? 0.1 : 0.06;
-    const intensity = def.id === 'M77' ? 42 : 26;
+    const duration = def.flashDuration;
+    const intensity = def.muzzleIntensity;
     const material = new THREE.MeshBasicMaterial({
       color: def.color,
       transparent: true,
@@ -432,7 +445,9 @@ export class SurfaceWeapons {
     if (this.switchT <= 0 && currentDef.kind !== 'laser' && this.cooldown <= 0 && (currentDef.auto ? this.trigger : this.justPressed)) this.fire();
     if (laserFiring && !this.laserWasFiring) this.onShot?.(currentDef);
     this.laserWasFiring = laserFiring;
-    this.justPressed = false;
+    // justPressed is consumed inside fire() for semi-auto weapons; auto
+    // weapons never read it. We must NOT clear it here unconditionally or a
+    // click landed during a weapon switch would be silently dropped.
     this.flashT = Math.max(0, this.flashT - dt);
     const flash = this.models[this.index].flash;
     flash.visible = currentDef.kind !== 'laser' && this.flashT > 0;
@@ -441,8 +456,22 @@ export class SurfaceWeapons {
       const pulse = 0.75 + Math.random() * 0.5;
       flash.scale.setScalar(pulse);
       flash.traverse((child) => {
-        if (child.isMesh) child.material.opacity = this.flashT / (currentDef.id === 'M77' ? 0.1 : 0.06);
+        if (child.isMesh) child.material.opacity = this.flashT / currentDef.flashDuration;
       });
+    }
+
+    // Bolt return animation: dt-driven replacement for the old setTimeout(58).
+    if (this.boltT > 0) {
+      this.boltT -= dt;
+      const bolt = this.models[this.index].bolt;
+      if (bolt && this.boltAnim) {
+        const k = Math.max(0, this.boltT / this.boltAnim.duration);
+        bolt.position.z = this.boltAnim.homeZ + this.boltAnim.travel * k;
+      }
+      if (this.boltT <= 0) {
+        this.boltT = 0;
+        this.boltAnim = null;
+      }
     }
 
     const speed = Number.isFinite(motion.speed) ? motion.speed : 0;
@@ -545,7 +574,7 @@ export class SurfaceWeapons {
   renderScopeView(renderer) {
     const model = this.models[this.index];
     const lens = model.opticGlass;
-    if (!this.rig.visible || SURFACE_WEAPONS[this.index].id !== 'M77' || !lens?.isMesh || !lens.material?.isShaderMaterial) return;
+    if (!this.rig.visible || !SURFACE_WEAPONS[this.index].hasScope || !lens?.isMesh || !lens.material?.isShaderMaterial) return;
 
     const objectivePosition = model.group.localToWorld(new THREE.Vector3(0, 0.315, -0.517));
     this.scopeCamera.position.copy(objectivePosition);
@@ -591,5 +620,30 @@ export class SurfaceWeapons {
       this.ads ? 2 : 18,
       0.16,
     );
+  }
+
+  dispose() {
+    window.removeEventListener('mousedown', this.onMouseDown);
+    window.removeEventListener('mouseup', this.onMouseUp, true);
+    window.removeEventListener('keydown', this.onKey);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    window.removeEventListener('blur', this.onBlur);
+    window.removeEventListener('contextmenu', this.onContextMenu);
+    this.tracerGlowGeometry.dispose();
+    this.tracerCoreGeometry.dispose();
+    this.worldFlashGeometry.dispose();
+    this.casingGeometry.dispose();
+    this.longCasingGeometry.dispose();
+    this.casingMaterial.dispose();
+    this.scopeTarget.dispose();
+    // Clear any in-flight transient effects so updateTransientEffects does
+    // not keep touching GPU resources after dispose.
+    for (const tracer of this.tracers) { this.scene.remove(tracer.mesh); tracer.mesh.material.dispose(); }
+    for (const flash of this.flashes) { this.scene.remove(flash.mesh); flash.mesh.material.dispose(); }
+    for (const spark of this.sparks) { this.scene.remove(spark.points); spark.points.geometry.dispose(); spark.points.material.dispose(); }
+    this.tracers.length = 0;
+    this.flashes.length = 0;
+    this.sparks.length = 0;
+    this.casings.length = 0;
   }
 }

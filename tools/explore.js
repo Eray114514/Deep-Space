@@ -7,7 +7,7 @@
 
 import { mkdir } from 'node:fs/promises';
 import { startServer } from './server.js';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser.js';
 
 const SEEDS = (process.env.SEEDS || 'EUCLID,ATLAS-7,VOYAGER-3').split(',');
 const OUT = process.env.OUT || 'screenshots/explore';
@@ -15,15 +15,7 @@ const LANDS_PER_SEED = Number(process.env.LANDS || 3);   // full landings are th
 const SKIP_ORBITS = process.env.SKIP_ORBITS === '1';     // reshoots: orbits rarely change
 
 const { server, port } = await startServer(0);
-const browser = await chromium.launch({
-  ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}),
-  args: [
-    '--no-sandbox',
-    '--enable-unsafe-swiftshader',
-    '--use-angle=swiftshader-webgl',
-    '--disable-gpu-sandbox',
-  ],
-});
+const browser = await launchBrowser();
 
 const errors = [];
 const landedTypes = new Set();   // across all seeds: walk each type only once

@@ -4,17 +4,15 @@
 
 import { mkdir } from 'node:fs/promises';
 import { startServer } from './server.js';
-import { chromium, devices } from 'playwright';
+import { devices } from 'playwright';
+import { launchBrowser } from './browser.js';
 
 const OUT = 'screenshots/phone';
 await mkdir(OUT, { recursive: true });
 const { server, port } = await startServer(0);
 
 const phone = devices['Pixel 7'];
-const browser = await chromium.launch({
-  executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || chromium.executablePath(),
-  args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl'],
-});
+const browser = await launchBrowser();
 // deviceScaleFactor 1: SwiftShader can't push a real phone's pixel count;
 // CSS layout (what we test) is identical
 const ctx = await browser.newContext({ ...phone, deviceScaleFactor: 1 });

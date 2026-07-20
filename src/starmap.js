@@ -493,6 +493,30 @@ export class StarMap {
     cancelAnimationFrame(this.raf);
   }
 
+  // Full teardown for hot-reload / context-loss recovery. close() is the
+  // in-game "hide and pause" path; dispose() actually releases GPU memory
+  // so a stale map renderer does not linger across a session rebuild.
+  dispose() {
+    cancelAnimationFrame(this.raf);
+    window.removeEventListener('resize', this._resize);
+    // Tear down the embedded system viewer first — it owns its own WebGL
+    // renderer, composer, and a large texture cache.
+    this.sysview?.dispose();
+    // Free the galaxy-level renderer + its textures + controls. OrbitControls
+    // attaches listeners to renderer.domElement, so dispose order matters:
+    // controls.dispose() must run before renderer.dispose() releases the
+    // canvas those listeners target.
+    this.controls?.dispose();
+    this.starTexture?.dispose();
+    this.selectionTexture?.dispose();
+    this.softTexture?.dispose();
+    disposeObject(this.world);
+    this.renderer?.dispose();
+    this.renderer?.forceContextLoss?.();
+    this.previewCache.clear();
+    this.visitedSystems.clear();
+  }
+
   setMode(mode) {
     if (mode === 'system') { this.enterSystem(); return; }
     if (this.mode === 'galaxy') return;

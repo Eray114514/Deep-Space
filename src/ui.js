@@ -201,6 +201,7 @@ export class UI {
 
   setPerformanceNotice(text, timeout = 8000) {
     clearTimeout(this._performanceNoticeTimer);
+    clearTimeout(this._performanceNoticeFadeTimer);
     const notice = this.els.performanceNotice;
     notice.textContent = text || '';
     notice.classList.toggle('hidden', !text);
@@ -208,7 +209,7 @@ export class UI {
     if (!text || timeout <= 0) return;
     this._performanceNoticeTimer = setTimeout(() => {
       notice.classList.add('notice-fade');
-      setTimeout(() => notice.classList.add('hidden'), 700);
+      this._performanceNoticeFadeTimer = setTimeout(() => notice.classList.add('hidden'), 700);
     }, timeout);
   }
 
@@ -228,13 +229,14 @@ export class UI {
   showArrival(name, systemName = '', kicker = '抵达') {
     clearTimeout(this._arrivalTimer);
     clearTimeout(this._arrivalHideTimer);
+    cancelAnimationFrame(this._arrivalRaf);
     document.body.classList.add('travel-cinematic');
     this._setText(this.els.arrivalKicker, kicker);
     this._setText(this.els.arrivalName, name || systemName || '未知星域');
     this._setText(this.els.arrivalSystem, systemName && systemName !== name ? systemName : '航行坐标已确认');
     this.els.arrivalTitle.classList.remove('hidden');
     this.els.arrivalTitle.classList.remove('arrival-visible');
-    requestAnimationFrame(() => this.els.arrivalTitle.classList.add('arrival-visible'));
+    this._arrivalRaf = requestAnimationFrame(() => this.els.arrivalTitle.classList.add('arrival-visible'));
     this._arrivalTimer = setTimeout(() => {
       this.els.arrivalTitle.classList.remove('arrival-visible');
       this._arrivalHideTimer = setTimeout(() => {
@@ -247,6 +249,7 @@ export class UI {
   endTravel() {
     clearTimeout(this._arrivalTimer);
     clearTimeout(this._arrivalHideTimer);
+    cancelAnimationFrame(this._arrivalRaf);
     this.els.arrivalTitle.classList.add('hidden');
     this.els.arrivalTitle.classList.remove('arrival-visible');
     document.body.classList.remove('travel-cinematic');
@@ -280,5 +283,21 @@ export class UI {
   setStats(text) { this.els.stats.textContent = text; }
 
   setDevFps(fps) { this.els.devFps.textContent = `${Math.max(0, Math.round(fps))} FPS`; }
+
+  // Release every pending timer / rAF the HUD scheduled. The HUD itself is
+  // a singleton for the page lifetime; dispose() is for hot-reload and
+  // context-loss recovery where the universe is rebuilt but the DOM nodes
+  // stick around. DOM listeners attached in the constructor are on those
+  // persistent nodes and intentionally left intact — a future UI instance
+  // would rebind to the same elements.
+  dispose() {
+    clearTimeout(this._hintTimer);
+    clearTimeout(this._performanceNoticeTimer);
+    clearTimeout(this._performanceNoticeFadeTimer);
+    clearTimeout(this._arrivalTimer);
+    clearTimeout(this._arrivalHideTimer);
+    cancelAnimationFrame(this._arrivalRaf);
+    this._hint = null;
+  }
 
 }

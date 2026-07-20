@@ -24,10 +24,12 @@ const versionSource = await readFile(join(SRC, 'version.js'), 'utf8');
 const html = await readFile(join(ROOT, 'index.html'), 'utf8');
 const runtimeVersion = versionSource.match(/VERSION\s*=\s*['"]([^'"]+)/)?.[1];
 const cacheVersion = html.match(/main\.js\?v=([0-9.]+)/)?.[1];
+const cssCacheVersions = [...html.matchAll(/\.css\?v=([0-9.]+)/g)].map((m) => m[1]);
 
 if (!runtimeVersion || pkg.version !== runtimeVersion || lock.version !== runtimeVersion
-    || lock.packages?.['']?.version !== runtimeVersion || cacheVersion !== runtimeVersion) {
-  throw new Error(`Version mismatch: package=${pkg.version}, lock=${lock.version}, runtime=${runtimeVersion}, html=${cacheVersion}`);
+    || lock.packages?.['']?.version !== runtimeVersion || cacheVersion !== runtimeVersion
+    || cssCacheVersions.length === 0 || cssCacheVersions.some((v) => v !== runtimeVersion)) {
+  throw new Error(`Version mismatch: package=${pkg.version}, lock=${lock.version}, runtime=${runtimeVersion}, html=${cacheVersion}, css=${cssCacheVersions.join(',')}`);
 }
 
 const THREE = await import('three');

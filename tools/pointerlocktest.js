@@ -1,10 +1,8 @@
-import { chromium } from 'playwright';
 import { startServer } from './server.js';
+import { launchBrowser } from './browser.js';
 
 const { server, port } = await startServer(0);
-const chrome = process.env.PLAYWRIGHT_EXECUTABLE_PATH
-  || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const browser = await chromium.launch({ executablePath: chrome, headless: true });
+const browser = await launchBrowser({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1100, height: 700 } });
 
 try {

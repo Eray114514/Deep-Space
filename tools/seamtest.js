@@ -15,7 +15,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
 import { startServer } from './server.js';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser.js';
 
 const SEED = process.env.SEED || 'EUCLID';
 const OUT = process.env.OUT || 'screenshots/seam';
@@ -24,10 +24,7 @@ const PX_LIMIT = 4.5;          // biggest allowed hard-swap apparent size
 
 await mkdir(OUT, { recursive: true });
 const { server, port } = await startServer(0);
-const browser = await chromium.launch({
-  executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || chromium.executablePath(),
-  args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader-webgl', '--disable-gpu-sandbox'],
-});
+const browser = await launchBrowser();
 const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 const errors = [];
 page.on('pageerror', (e) => { errors.push(String(e)); console.error('PAGEERROR:', String(e).split('\n')[0]); });
