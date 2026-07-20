@@ -4,21 +4,19 @@
 // generated, identically every time, from its lattice coordinates.
 
 import * as THREE from 'three';
-import { makeRng, strHash32, hash3i, hashFloat } from './rng.js';
+import { makeRng } from './rng.js';
 import { clamp } from './noise.js';
 import { Planet } from './planet.js';
 import { GasGiant } from './gas-giant.js';
 import { BlackHole } from './black-hole.js';
 import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, orbitalVelocity, orientationAt as bodyOrientationAt } from './astronomy.js';
+import { CELL, galaxyCellAt } from './galaxy-layout.js';
 
-export const CELL = 4e9;               // metres between star lattice cells
-const STAR_PROB = 0.42;
+export { CELL } from './galaxy-layout.js';
 // the visible star field: a galactic disc (dense) with a sparse halo above
 // and below — every rendered dot is a real, warpable system
 const FIELD_XZ = 22;                   // cells of radius in the disc plane
-const DISC_Y = 6;                      // dense disc half-thickness (cells)
 const HALO_Y = 30;                     // sparse halo half-thickness (cells)
-const HALO_PROB = 0.10;                // halo keeps this fraction of stars
 
 // seamless interstellar flight: approaching a star instantiates its system
 // while its planets are still sub-pixel; the system you leave lingers until
@@ -152,7 +150,6 @@ export class Universe {
     this.bodyTuning = bodyTuning;
     this.blackHoleSystem = blackHoleSystem;
     this.scene = scene;
-    this.galaxySeed = strHash32(seedStr + ':galaxy');
     this.group = new THREE.Group();           // current system lives here
     this.group.name = 'universe';
     scene.add(this.group);
@@ -195,14 +192,12 @@ export class Universe {
 
   // Deterministic star lookup for a lattice cell. force=true for the home cell.
   starAt(ix, iy, iz, force = false) {
-    const h = hash3i(ix, iy, iz, this.galaxySeed);
-    // above/below the galactic disc only a sparse halo of stars survives
-    const prob = STAR_PROB * (Math.abs(iy) > DISC_Y ? HALO_PROB : 1);
-    if (!force && hashFloat(h, 0) > prob) return null;
+    const cell = galaxyCellAt(this.seed, ix, iy, iz, force);
+    if (!cell) return null;
     const pos = new THREE.Vector3(
-      (ix + 0.12 + hashFloat(h, 0) * 0.76) * CELL,
-      (iy + 0.12 + hashFloat(h, 1) * 0.76) * CELL * 0.5,   // flattened disc feel
-      (iz + 0.12 + hashFloat(h, 2) * 0.76) * CELL,
+      cell.positionCells[0] * CELL,
+      cell.positionCells[1] * CELL,
+      cell.positionCells[2] * CELL,
     );
     const stellar = generateStellarSpec(this.seed, `${ix},${iy},${iz}`);
     const primary = stellar.stars[0];

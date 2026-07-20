@@ -5,11 +5,11 @@
 // through the browser capture and traversal pass in tools/explore.js.
 
 import { generateSystemSpec } from '../src/astronomy.js';
-import { hash3i, hashFloat, makeRng, strHash32 } from '../src/rng.js';
+import { makeRng } from '../src/rng.js';
 import { makeWord } from '../src/names.js';
+import { nearbyGalaxyCells } from '../src/galaxy-layout.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig } from '../src/world-config.js';
 
-const STAR_PROBABILITY = 0.42;
 const galaxyArg = process.argv.find((arg) => arg.startsWith('--galaxy='));
 const galaxy = getGalaxyConfig(galaxyArg?.split('=')[1] || ACTIVE_GALAXY_ID);
 const CANDIDATE_STREAM = `DEEP-SPACE-CURATION-V1:${galaxy.id}`;
@@ -17,25 +17,6 @@ const countArg = process.argv.find((arg) => arg.startsWith('--count='));
 const topArg = process.argv.find((arg) => arg.startsWith('--top='));
 const candidateCount = Math.max(1, Number(countArg?.split('=')[1]) || 512);
 const topCount = Math.max(1, Number(topArg?.split('=')[1]) || 12);
-
-function nearbySystemIds(seed, limit = 18) {
-  const galaxySeed = strHash32(`${seed}:galaxy`);
-  const cells = [];
-  for (let y = -2; y <= 2; y++) {
-    for (let z = -5; z <= 5; z++) {
-      for (let x = -5; x <= 5; x++) {
-        if (x === 0 && y === 0 && z === 0) continue;
-        const h = hash3i(x, y, z, galaxySeed);
-        if (hashFloat(h, 0) > STAR_PROBABILITY) continue;
-        const px = x + 0.12 + hashFloat(h, 0) * 0.76;
-        const py = (y + 0.12 + hashFloat(h, 1) * 0.76) * 0.5;
-        const pz = z + 0.12 + hashFloat(h, 2) * 0.76;
-        cells.push({ id: `${x},${y},${z}`, distance: Math.hypot(px, py, pz) });
-      }
-    }
-  }
-  return cells.sort((a, b) => a.distance - b.distance).slice(0, limit);
-}
 
 function scoreSeed(seed) {
   const home = generateSystemSpec(seed, '0,0,0');
@@ -67,7 +48,7 @@ function scoreSeed(seed) {
   if ((homeTypes.has('gasGiant') || homeTypes.has('iceGiant')) && moons.length > 0) score += 5;
   for (const count of typeCounts.values()) score -= Math.max(0, count - 2) * 3;
 
-  const nearby = nearbySystemIds(seed);
+  const nearby = nearbyGalaxyCells(seed);
   const nearbyTypes = new Set();
   let nearbyBinaries = 0;
   let nearbySpecials = 0;

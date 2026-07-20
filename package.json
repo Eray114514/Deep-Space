@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/astronomytest.js",
+    "test": "node tools/test.js && node tools/astronomytest.js && node tools/worldlocktest.js",
     "test:terrain": "node tools/sanity.js",
     "test:gameplay": "node tools/gameplaytest.js",
     "test:pointerlock": "node tools/pointerlocktest.js",
     "test:astronomy:browser": "node tools/astroplaytest.js",
     "build": "npm test && node tools/build.js",
     "shots": "node tools/screenshot.js",
+    "world:lock": "node tools/export-canonical-world.js",
     "explore": "node tools/explore.js",
     "seamtest": "node tools/seamtest.js",
     "touchtest": "node tools/touchtest.js"

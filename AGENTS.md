@@ -4,6 +4,16 @@
 
 This is a browser-based, procedural Three.js game using native ES modules. Runtime code lives in `src/`: `main.js` owns the game state and render loop; world generation is split among `galaxy.js`, `planet.js`, `quadtree.js`, `noise.js`, and `rng.js`; interaction and HUD code live in `controls.js`, `ui.js`, `starmap.js`, `sysview.js`, and `walkdial.js`. `starmap.js` is the two-level navigation chart (galaxy level lists star systems only; picking one enters the system level rendered by `sysview.js`, which draws the real deterministic system — shader sun, per-type procedural planet textures, true ephemeris orbits); `walkdial.js` is the walk-mode survey watch (custom element, driven via `setState`). Keep deterministic generation changes close to their source module. `vendor/` contains browser-ready Three.js files; do not edit it unless intentionally updating vendored dependencies. Static models and other shipped assets belong in `assets/` (served at the URL root as `/assets/...`, which works identically in `npm run dev`, `dist/`, and Vercel — avoid `public/`, which Vercel treats specially and serves from the URL root). Development, validation, and capture scripts are in `tools/`; documentation images are in `docs/`.
 
+## Canonical Universe Contract
+
+The release universe is the curated `milky-way` galaxy with seed `NAVEMI-382`. `src/world-config.js` is the authored source for its identity, special destinations, and stable `galaxy ID / system ID / body ID` tuning. The deterministic generators remain the runtime source for the infinite galaxy; do not replace them with a finite baked universe or treat a save file as world content.
+
+`worlds/milky-way.lock.json` is the human-readable compatibility snapshot. It records the complete home-system dossier, the authored black-hole destination, the 18 nearest systems, a 64-system neighborhood profile, home-planet terrain/sea/cloud/ring sentinels, generator versions, and a SHA-256 fingerprint. It intentionally does not serialize the entire infinite lattice, renderer objects, textures, or player state. Regenerate it only with `npm run world:lock` after intentional re-curation, never merely to make a failing test pass.
+
+Treat seeded outputs and RNG namespaces as content APIs. In particular, changing `rng.js`, `noise.js`, `names.js`, `astronomy.js`, `planet.js`, `galaxy-layout.js`, seed suffixes, probability constants, or the number/order of existing RNG draws can rewrite the selected universe. Add optional content through a new independent namespace where possible. Keep planet adjustments in `world-config.js`; for example, moving a liquid surface must not reshape the underlying terrain stream.
+
+`npm test` rebuilds and compares the canonical lock. If it drifts unintentionally, preserve the old output by fixing the generator change. If a rewrite is intentional, rerun static curation, fixed-camera captures, relevant browser playtests, and multiplayer/save migration review; then update the lock and document the compatibility break. Save games should persist canonical IDs plus player-owned state, not generated render data, so all peers can reconstruct the same world from the release contract.
+
 ## Build, Test, and Development Commands
 
 - `npm install` installs the Node tooling and Playwright.
@@ -13,6 +23,7 @@ This is a browser-based, procedural Three.js game using native ES modules. Runti
 - `npm run test:gameplay` runs gameplay checks; `npm run test:astronomy:browser` exercises astronomy in Chromium.
 - `npm run build` runs `npm test`, then recreates the deployable `dist/` directory. Do not hand-edit `dist/`.
 - `npm run shots` captures headless visual scenarios; first run `npx playwright install chromium`.
+- `npm run world:lock` rewrites the canonical-universe snapshot after an approved re-curation.
 
 ## Coding Style & Naming Conventions
 
