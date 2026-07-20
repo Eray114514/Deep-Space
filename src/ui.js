@@ -10,7 +10,7 @@ export class UI {
       hint: $('hint'), land: $('land-btn'), crosshair: $('crosshair'),
       fade: $('fade'), stats: $('stats'), devFps: $('dev-fps'),
       loading: $('loading'), loadingText: $('loading-text'),
-      altitude: $('flight-ring'),
+      altitude: $('flight-telemetry'),
       altitudeValue: $('altitude-value'), altitudeUnit: $('altitude-unit'),
       speedValue: $('speed-value'), speedUnit: $('speed-unit'),
       headingCardinal: $('heading-cardinal'), headingDegrees: $('heading-degrees'),
@@ -37,7 +37,8 @@ export class UI {
     this.els.routeRift.addEventListener('click', () => this.cb.onRouteRift?.());
     this.els.routeCancel.addEventListener('click', () => this.cb.onRouteCancel?.());
     this.els.heroStart.addEventListener('click', () => {
-      this.els.hero.classList.add('hidden');
+      // The overlay fades while main.js runs the pull-back camera cinematic.
+      this.hideHero();
       this.cb.onStart?.();
       window.dispatchEvent(new CustomEvent('game-user-start'));
     });
@@ -102,14 +103,16 @@ export class UI {
     if (alt == null) {
       this._setText(this.els.altitudeValue, '—');
       this._setText(this.els.altitudeUnit, '');
-      this._setText(this.els.speedValue, Number.isFinite(speed) ? (speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0)) : '0');
-      this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
+      const s = Number.isFinite(speed) ? speed : 0;
+      this._setText(this.els.speedValue, s > 1000 ? (s / 1000).toFixed(1) : s.toFixed(0));
+      this._setText(this.els.speedUnit, s > 1000 ? 'km/s' : 'm/s');
       return;
     }
     this._setText(this.els.altitudeValue, alt > 9999 ? (alt / 1000).toFixed(1) : alt.toFixed(0));
     this._setText(this.els.altitudeUnit, alt > 9999 ? 'km' : 'm');
-    this._setText(this.els.speedValue, speed > 1000 ? (speed / 1000).toFixed(1) : speed.toFixed(0));
-    this._setText(this.els.speedUnit, speed > 1000 ? 'km/s' : 'm/s');
+    const s = Number.isFinite(speed) ? speed : 0;
+    this._setText(this.els.speedValue, s > 1000 ? (s / 1000).toFixed(1) : s.toFixed(0));
+    this._setText(this.els.speedUnit, s > 1000 ? 'km/s' : 'm/s');
   }
 
   setCosmicTime(hours, localHours = null, scale = 60) {
@@ -177,10 +180,11 @@ export class UI {
     this.els.land.classList.toggle('hidden', !show);
   }
 
-  showHero(show = true, subtitle = '') {
+  showHero(show = true) {
     this.els.hero.classList.toggle('hidden', !show);
-    const copy = this.els.hero.querySelector('p');
-    if (subtitle) copy.textContent = subtitle;
+    this.els.hero.classList.remove('hero-leaving');
+    // Hides every piece of flight chrome while the start page owns the screen.
+    document.body.classList.toggle('hero-active', show);
     if (this.els.heroSeed) {
       this.els.heroSeed.textContent = this.cb.worldLab
         ? new URLSearchParams(location.search).get('seed') || 'NAVEMI-382'
@@ -188,6 +192,16 @@ export class UI {
     }
     if (this.els.heroBuild) this.els.heroBuild.textContent = document.getElementById('version')?.textContent || '—';
     if (show) queueMicrotask(() => this.els.heroStart.focus());
+  }
+
+  // Start button: fade the overlay out, then hand off to the cinematic start.
+  hideHero() {
+    this.els.hero.classList.add('hero-leaving');
+    setTimeout(() => {
+      this.els.hero.classList.add('hidden');
+      // Flight chrome returns once the pull-back cinematic owns the frame.
+      document.body.classList.remove('hero-active');
+    }, 580);
   }
 
   setTimeWarp(show, { label = '', progress = 0, scale = 60 } = {}) {

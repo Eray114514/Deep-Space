@@ -230,6 +230,9 @@ export class Ship {
     this.parkedPosUniv = null;
     this.parkedQuat = new THREE.Quaternion();
     this.parkAmt = 0;
+    // Hero start cinematic: a camera-relative offset that fades to zero as the
+    // pull-back runs, so the ship slides into formation from off-screen.
+    this.introOffset = new THREE.Vector3();
   }
 
   loadHeroShip() {
@@ -324,6 +327,12 @@ export class Ship {
     _sr.set(1, 0, 0).applyQuaternion(nav.quat);
     _sv.addScaledVector(_sr, -this.lookYaw * 8.5)
       .addScaledVector(_su, this.lookPitch * 5.5);
+    // Start cinematic: slide in from off-screen until the offset decays to 0.
+    if (this.introOffset) {
+      _sv.addScaledVector(_sr, this.introOffset.x)
+        .addScaledVector(_su, this.introOffset.y)
+        .addScaledVector(_sf, this.introOffset.z);
+    }
     const formQuat = _sq2.copy(nav.quat)
       .multiply(_sq.setFromAxisAngle(Y, this.lookYaw))
       .multiply(_sq.setFromAxisAngle(X, this.lookPitch))

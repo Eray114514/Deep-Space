@@ -302,6 +302,15 @@ const RIFT_SPAWN_DISTANCE = 780;
 const RIFT_CAPTURE_DISTANCE = 1900;
 const PLANET_ARRIVAL_FACTOR = 1.68;
 const INITIAL_ORBIT_FACTOR = 1.72;
+// Full-page hero: the camera opens on the home planet's limb so its arc
+// and terminator fill the right half of the screen, then pulls back to the
+// standard orbit when the player commits. Tuned alongside setHeroCamera().
+const HERO_CLOSE_FACTOR = 1.3;
+const HERO_PULLBACK_SECONDS = 2.8;
+// Start-page framing: yaw the camera right until the planet's arc owns the
+// right third of the screen (0.95 pushed it too far; ~0.72 keeps the limb and
+// terminator clearly visible without leaving the frame).
+const HERO_YAW = 0.72;
 const riftEntranceUniv = new THREE.Vector3();
 const riftTargetUniv = new THREE.Vector3();
 const riftPreviewOriginUniv = new THREE.Vector3();
@@ -539,13 +548,17 @@ const ui = new UI({
     unlockAudio();
     audio.setPaused(false);
     music.setPaused(false);
+    // One-shot cinematic: pull the camera back from the home planet's limb to
+    // the full-orbit spawn frame while the ship slides into formation.
+    startHeroPullBack(() => {
+      // A denied initial request falls back to the next canvas click; controls
+      // must be enabled so that click can actually reach SpaceControls.
+      spaceCtl.enabled = state === 'space';
+      if (/Intel/i.test(gpuName)) {
+        ui.setPerformanceNotice('当前浏览器正在使用 Intel 核显；在 Windows 图形设置中将浏览器设为“高性能”可启用 RTX 独显。', 12000);
+      }
+    });
     await lockAttempt;
-    // A denied initial request falls back to the next canvas click; controls
-    // must be enabled so that click can actually reach SpaceControls.
-    spaceCtl.enabled = state === 'space';
-    if (/Intel/i.test(gpuName)) {
-      ui.setPerformanceNotice('当前浏览器正在使用 Intel 核显；在 Windows 图形设置中将浏览器设为“高性能”可启用 RTX 独显。', 12000);
-    }
   },
   onLand: tryLand,
   onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
@@ -892,7 +905,6 @@ async function resumeGame() {
     return false;
   }
   paused = false;
-  pauseFrameRendered = false;
   spaceCtl.enabled = state === 'space';
   pauseOverlay.classList.add('hidden');
   audio.setPaused(false);
@@ -1818,20 +1830,59 @@ function newUniverse(seed) {
 }
 
 // ---- spawn --------------------------------------------------------------------
-function spawn() {
+// hero=true parks the camera tight on the home planet's limb: the planet fills
+// the right half of the frame behind the start page, its arc and terminator
+// visible. startHeroPullBack() then eases the camera out to the standard orbit.
+function spawn(hero = false) {
   const sys = universe.system;
   const planet = sys.planets[0];
   const sunDir = sys.sunDirFrom(planet.posUniv, _v).clone();
   const side = _v2.crossVectors(sunDir, _v3.set(0, 1, 0)).normalize();
   const dir = sunDir.clone().addScaledVector(side, 0.85).normalize();
-  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * INITIAL_ORBIT_FACTOR);
+  const factor = hero ? HERO_CLOSE_FACTOR : INITIAL_ORBIT_FACTOR;
+  nav.pos.copy(planet.posUniv).addScaledVector(dir, planet.R * factor);
   lookQuatAt(nav.pos, planet.posUniv, nav.quat);
-  nav.quat.multiply(_q.setFromAxisAngle(_v3.set(0, 1, 0), 0.18));
+  // Hero framing: yaw right so the planet's arc owns the right half of the
+  // screen and the menu owns the left. Too small a yaw parks the planet dead
+  // centre behind the buttons; too large pushes it out of frame.
+  nav.quat.multiply(_q.setFromAxisAngle(_v3.set(0, 1, 0), hero ? HERO_YAW : 0.18));
   nav.vel.set(0, 0, 0);
   focusPlanet = planet;
   spaceCtl.focus = planet;
+  // The ship waits off-screen during the start page; startHeroPullBack slides
+  // it into formation as the camera pulls back.
+  if (hero) ship.introOffset?.set(160, -110, 60);
   ui.setSystem(sys.name, sys.planets.length, SEED, sys.catalogId, WORLD_LAB);
   setState('space');
+}
+
+// Seamless one-shot: from the limb close-up back out to the full planet while
+// the ship slides into formation. Runs inside the click gesture's call chain
+// so pointer lock requested in onDone still counts as user-activated.
+function startHeroPullBack(onDone) {
+  const planet = universe.system.planets[0];
+  const startPos = nav.pos.clone();
+  const startQuat = nav.quat.clone();
+  const dir = _v.copy(startPos).sub(planet.posUniv).normalize().clone();
+  const endPos = planet.posUniv.clone().addScaledVector(dir, planet.R * INITIAL_ORBIT_FACTOR);
+  const endQuat = lookQuatAt(endPos, planet.posUniv, new THREE.Quaternion())
+    .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.18));
+  const lastCenter = planet.posUniv.clone();
+  // The ship was parked off-screen by spawn(hero); the pull-back slides it in.
+  addTween(HERO_PULLBACK_SECONDS, (k) => {
+    // Keep the shot anchored on the live planet (it drifts on its ephemeris).
+    const shift = planet.posUniv.clone().sub(lastCenter);
+    startPos.add(shift); endPos.add(shift); lastCenter.copy(planet.posUniv);
+    const e = easeInOut(k);
+    nav.pos.lerpVectors(startPos, endPos, e);
+    nav.quat.copy(startQuat).slerp(endQuat, e);
+    // Ship enters frame during the second half of the pull-back.
+    const sk = smoothstep(0.4, 1, k);
+    ship.introOffset.set(160 * (1 - sk), -110 * (1 - sk), 60 * (1 - sk));
+  }, () => {
+    ship.introOffset.set(0, 0, 0);
+    onDone?.();
+  });
 }
 
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
@@ -1946,13 +1997,17 @@ const clock = new THREE.Clock();
 let statAcc = 0;
 let devFpsElapsed = 0;
 let devFpsFrames = 0;
-let pauseFrameRendered = false;
 let perfEmaMs = 16.7;
 let dprAcc = 0;
 
 function frame() {
   requestAnimationFrame(frame);
-  const rawDt = clock.getDelta();
+  const realDt = clock.getDelta();
+  // Paused: the full-page pause surface floats over a LIVE world. Simulation
+  // time freezes (dt=0) but the render pipeline runs exactly as in play, so
+  // clouds/bloom/engine glow stay alive behind the blur and nothing diverges
+  // (the hand-rolled paused branch drifted lighting state = the black flicker).
+  const rawDt = paused ? 0 : realDt;
   // Keep slow-frame input responsive without allowing a tab-resume spike to
   // tunnel through terrain. A 100 ms ceiling still gives stable collision at
   // the browser game's supported low-quality floor.
@@ -1970,17 +2025,6 @@ function frame() {
   // The map owns an opaque full-screen WebGL surface and its own RAF. Rendering
   // the universe underneath doubled GPU work for pixels nobody could see.
   if (starMap?.isOpen) return;
-  if (paused) {
-    if (pauseFrameRendered) return;
-    pauseFrameRendered = true;
-    if (!contextLost) {
-      renderer.info.reset();
-      if (usePost) composer.render();
-      else renderer.render(scene, camera);
-    }
-    return;
-  }
-  pauseFrameRendered = false;
 
   // Advance the persistent universe clock only during active play. The world
   // is updated before controls so a walker remains attached to the moving body.
@@ -2042,8 +2086,9 @@ function frame() {
   // 仅在连续跟踪同一颗天体时启用自转跟随，目标切换的本帧跳过增量。
   referenceBodyFrameValid = !!nearest && nearest === prevRef;
 
-  // controls / state integration
-  if (state === 'space') {
+  // controls / state integration — skipped while paused so player input and
+  // any dt-driven drift stay disconnected from the frozen simulation.
+  if (!paused && state === 'space') {
     const atmosphereFactor = nearest
       ? 1 - smoothstep(0.42, 1.12, nearestAlt / Math.max(nearest.atmoHeight, 1))
       : 0;
@@ -2120,13 +2165,14 @@ function frame() {
       ui.setHint('压力临界 · 自动驾驶强制拉升', true);
       pulseEngaged = false;
     }
-  } else if (state === 'walk') {
+  } else if (!paused && state === 'walk') {
     pulseActive = false;
     spaceCtl.pulseDrive = false;
     walkCtl.update(dt);
     walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
   }
+  // While paused, stepTweens(dt=0) is a no-op and the camera/world stay put.
   stepTweens(dt);
   updateRiftRoute(dt);
   updateRiftArrivalFill(dt);
@@ -2232,9 +2278,11 @@ function frame() {
   universe.updateRelative(nav.pos);
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
-  activeBolts = weapons.update(dt, nav, nearest);
+  // Weapons stay cold while paused; surface weapons keep their pose but get no
+  // trigger input because dt=0 and the fire state is disconnected upstream.
+  activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
   const surfaceShotDistance = state === 'walk' ? surfaceBeamDistance(120) : 120;
-  surfaceWeapons.update(dt, state === 'walk', surfaceShotDistance, {
+  surfaceWeapons.update(dt, state === 'walk' && !paused, surfaceShotDistance, {
     speed: walkCtl.hSpeed.length(),
     grounded: walkCtl.grounded,
   });
@@ -2430,9 +2478,11 @@ function frame() {
 }
 
 wireUniverse(universe);
-spawn();
-ui.setLoading(true, 'generating universe…');
 const SHOW_HERO = qs.get('nohero') !== '1' && !window.NMS_NOLOCK;
+// Hero opens tight on the home planet's limb behind the start page; the
+// nohero/test path keeps the classic spawn orbit so captures stay stable.
+spawn(SHOW_HERO);
+ui.setLoading(true, 'generating universe…');
 ui.showHero(SHOW_HERO);
 if (SHOW_HERO) spaceCtl.enabled = false;
 frame();
