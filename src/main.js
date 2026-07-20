@@ -25,6 +25,7 @@ import { makeWord } from './names.js';
 import { CelestialClock, TIME_SCALE, eclipseFraction, generateSystemSpec, orbitalPosition } from './astronomy.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
+import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
 import { VolumetricPass } from './volumetric-pass.js';
@@ -314,6 +315,10 @@ const riftPortalVisibility = [];
 let riftPortalClearAlpha = 1;
 let riftPortalFog = null;
 let dialAcc = 0;
+// Snow coverage at the player's current foot position, refreshed by the walk
+// dial pass (~7 Hz). Consumed by the music director to switch to the alpine
+// theme on habitable snowfields.
+let currentWalkSnowWeight = 0;
 function walkWeatherFor(planet, localUp, sunLocal) {
   if (!planet) return 'clear';
   const terrainHeight = planet.height(localUp, 64);
@@ -361,6 +366,13 @@ spatialRift = new SpatialRift({
 spatialRift.resize(window.innerWidth, window.innerHeight, renderDpr);
 const weapons = new ShipWeapons(scene);
 const audio = new FlightAudio();
+const music = new BackgroundMusic();
+// Unlock the shared AudioContext on first user gesture, then bind the music
+// bus to the same context (avoids opening a second AudioContext per tab).
+function unlockAudio() {
+  audio.unlock();
+  if (audio.ctx && !music.ready) music.attach(audio.ctx);
+}
 const surfaceWeaponHud = document.getElementById('surface-weapon');
 const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   canUse: () => state === 'walk' && (document.pointerLockElement === renderer.domElement || window.NMS_NOLOCK),
@@ -445,14 +457,14 @@ const walkCtl = new WalkControls(renderer.domElement, {
 });
 
 renderer.domElement.addEventListener('pointerdown', () => {
-  audio.unlock();
+  unlockAudio();
   if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && pointerLockInput) {
     renderer.domElement.requestPointerLock();
   }
 });
 
 window.addEventListener('keydown', (e) => {
-  audio.unlock();
+  unlockAudio();
   if (blackHoleObservatoryOpen) {
     if (e.code === 'Escape' || e.code === 'KeyO') closeBlackHoleObservatory();
     e.preventDefault();
@@ -524,8 +536,9 @@ const ui = new UI({
     // resume can settle slowly on some browsers and must never hold camera
     // ownership in a half-enabled state.
     const lockAttempt = requestGameplayPointerLock();
-    audio.unlock();
+    unlockAudio();
     audio.setPaused(false);
+    music.setPaused(false);
     await lockAttempt;
     // A denied initial request falls back to the next canvas click; controls
     // must be enabled so that click can actually reach SpaceControls.
@@ -688,6 +701,7 @@ document.getElementById('pause-map-btn').addEventListener('click', async () => {
     paused = false;
     pauseOverlay.classList.add('hidden');
     audio.setPaused(true);
+    music.setPaused(true);
   }
   openStarMap();
 });
@@ -798,6 +812,7 @@ function openStarMap() {
   clearFlightInput();
   spaceCtl.enabled = false;
   audio.setPaused(true);
+  music.setPaused(true);
   ui.setCrosshair(false);
   starMap.open();
   if (document.pointerLockElement) document.exitPointerLock();
@@ -808,6 +823,7 @@ async function closeStarMap(restoreInput = true) {
   starMap.close();
   clearFlightInput();
   audio.setPaused(false);
+  music.setPaused(false);
   spaceCtl.enabled = state === 'space';
   ui.setCrosshair(state === 'space' || state === 'walk');
   if (restoreInput && !window.NMS_NOLOCK && pointerLockInput && (state === 'space' || state === 'walk')) {
@@ -824,6 +840,7 @@ function pauseGame() {
   pausePanel.classList.remove('is-acquiring');
   pauseStatus.textContent = '指针已释放 · 点击继续以重新接管视角';
   audio.setPaused(true);
+  music.setPaused(true);
   if (document.pointerLockElement) document.exitPointerLock();
 }
 
@@ -879,7 +896,8 @@ async function resumeGame() {
   spaceCtl.enabled = state === 'space';
   pauseOverlay.classList.add('hidden');
   audio.setPaused(false);
-  audio.unlock();
+  music.setPaused(false);
+  unlockAudio();
   return true;
 }
 
@@ -2279,6 +2297,16 @@ function frame() {
     warp: warpIntensity,
     paused,
   });
+  // Background music director: pickTrack decides what should be playing based
+  // on state, planet biome, snow coverage, black-hole vicinity and star-map
+  // open state. Only switches when the target changes.
+  music.update({
+    state,
+    planetType: (state === 'walk' && walkCtl.planet?.type) || null,
+    snowWeight: state === 'walk' ? currentWalkSnowWeight : 0,
+    nearBlackHole: !!nearbyBlackHole(),
+    starmapOpen: !!starMap?.isOpen,
+  });
 
   // HUD
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
@@ -2340,6 +2368,12 @@ function frame() {
         destinationBearing: bearing,
         weather: walkWeatherFor(p, _up, sunLocal),
       });
+      // Refresh snow coverage for the music director. Alpine theme is only
+      // eligible on habitable worlds (handled in pickTrack); on other types we
+      // keep the value at 0 so their own ambience takes precedence.
+      currentWalkSnowWeight = (p.type === 'lush' || p.type === 'ocean')
+        ? Math.max(0, p.snowWeightAt?.(_up, p.height(_up, 64)) || 0)
+        : 0;
     }
   }
   if (volumePass) {
