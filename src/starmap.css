@@ -282,6 +282,14 @@
   border: 5px solid transparent; border-bottom: 0; border-top-color: var(--cyan);
 }
 
+#sm-hoverMark {
+  position: absolute; left: 0; top: 0; width: 22px; height: 22px;
+  margin: -11px 0 0 -11px; border: 1.5px solid rgba(180, 220, 230, .85);
+  border-radius: 50%; pointer-events: none; z-index: 5; will-change: transform;
+  box-shadow: 0 0 10px rgba(180, 220, 230, .45), inset 0 0 6px rgba(180, 220, 230, .25);
+}
+#sm-hoverMark[hidden] { display: none; }
+
 /* ---- loading --------------------------------------------------------------------- */
 #sm-loading { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; background: #0a1011; transition: opacity .7s; }
 #sm-loading.done { opacity: 0; pointer-events: none; }
