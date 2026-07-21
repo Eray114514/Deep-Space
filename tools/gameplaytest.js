@@ -14,12 +14,28 @@ const check = (ok, label) => {
 };
 
 try {
-  await page.goto(`http://127.0.0.1:${port}/?nolock=1&quality=low&post=0&vclouds=0&farflora=0&buildms=25`);
+  // SwiftShader is identified by the runtime auto-tier. Do not force a URL
+  // quality here: this catches the adapter-detected cloud/profile handoff.
+  await page.goto(`http://127.0.0.1:${port}/?nolock=1&post=0&farflora=0&buildms=25`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
 
   // A trusted keyboard gesture both unlocks WebAudio and invokes boarding.
   await page.evaluate('NMS.land(0)');
   await page.waitForTimeout(100);
+  const cloudFallback = await page.evaluate(() => {
+    const planet = NMS._internals.universe.system.planets[0];
+    return {
+      quality: NMS.stats().quality,
+      ok: planet.cloudCoverage <= 0.05 || (
+        !planet.volCloudMesh
+        && planet.cloudMesh?.visible
+        && planet.cloudMesh.material.side === 2
+        && (!planet.cloudMesh2 || planet.cloudMesh2.visible)
+      ),
+    };
+  });
+  check(cloudFallback.quality === 'auto-low' && cloudFallback.ok,
+    'auto-low keeps the analytic cloud decks visible from the surface');
   const initialShipDistance = await page.evaluate('NMS.shipDistance()');
   check(initialShipDistance < 46, `parked ship is in boarding range (${initialShipDistance.toFixed(1)} m)`);
   await page.keyboard.press('KeyE');

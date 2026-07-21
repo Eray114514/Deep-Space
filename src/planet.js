@@ -16,9 +16,18 @@ import { floraPalette } from './flora.js';
 // volumetric clouds are the default in the browser; ?vclouds=0 and
 // ?quality=low fall back to the flat decks (node/sanity has no location
 // and falls back too — the volume is render-only, never simulation)
-const VCLOUDS = typeof location !== 'undefined'
+let volumetricCloudsEnabled = typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('vclouds') !== '0'
   && new URLSearchParams(location.search).get('quality') !== 'low';
+
+// GPU auto-tiering happens after the WebGL renderer identifies the adapter,
+// but before the first Universe is constructed. Keeping this as a runtime
+// capability (rather than a URL-only constant) guarantees that an auto-low
+// iGPU gets the analytic cloud deck instead of creating a volume that the
+// low-quality renderer deliberately has no pass to composite.
+export function setVolumetricCloudsEnabled(enabled) {
+  volumetricCloudsEnabled = !!enabled;
+}
 
 export const TYPES = {
   lush:   { label: '繁茂', weight: 3.0, relief: 0.034, liquid: 'water', seaQ: -0.05, atmo: 0x69b4ff, sky: 0x7fc3ff, atmoDensity: 1.0, clouds: 0.62 },
@@ -709,7 +718,7 @@ export class Planet {
       // Atmosphere is the first participating-medium layer; clouds composite
       // over it in the shared half-resolution volume pass.
       this.atmoMesh.renderOrder = 1;
-      if (VCLOUDS) this.atmoMesh.layers.set(VOLUME_LAYER);
+      if (volumetricCloudsEnabled) this.atmoMesh.layers.set(VOLUME_LAYER);
       this.atmoMesh.frustumCulled = false;
       this.group.add(this.atmoMesh);
       this.atmoHeight = atmoR - R;
@@ -751,10 +760,15 @@ export class Planet {
         Math.max(this.hAmp * 0.86, R * this.cloudThicknessFraction * 0.72, 4200),
         this.atmoHeight * 0.38,
       );
-      const cmat = new THREE.MeshLambertMaterial({
+      const cmat = new THREE.MeshBasicMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.88,
+        // The analytic deck is the low-GPU fallback both from orbit and from
+        // beneath the cloud base. FrontSide alone disappears for a surface
+        // camera because it is looking at the inside of the sphere.
+        side: THREE.DoubleSide,
       });
+      cmat.forceSinglePass = true;
       const o1 = [rand() * 7, rand() * 7, rand() * 7];
       applyCloudField(cmat, coverage, o1[0], o1[1], o1[2], thick * 0.72);
       this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cmat);
@@ -770,7 +784,7 @@ export class Planet {
       // depend on render flags), but with volumetrics on we spend it there
       const o2 = coverage > 0.45
         ? [rand() * 7, rand() * 7, rand() * 7, rand() * Math.PI * 2] : null;
-      if (VCLOUDS) {
+      if (volumetricCloudsEnabled) {
         // The far deck supplies global weather; deterministic spatial cloud
         // clusters supply close parallax and real separation through the
         // atmosphere without a screen-space raymarch curtain.
@@ -795,10 +809,12 @@ export class Planet {
         // A physically separate upper deck remains visible from space. Its
         // offset pattern and altitude make cloud edges parallax against the
         // lower weather layer instead of reading as one painted film.
-        const cmat2 = new THREE.MeshLambertMaterial({
+        const cmat2 = new THREE.MeshBasicMaterial({
           color: this.type === 'toxic' ? 0xd4efaa : 0xf4f8ff,
           transparent: true, depthWrite: false, opacity: 0.28,
+          side: THREE.DoubleSide,
         });
+        cmat2.forceSinglePass = true;
         applyCloudField(cmat2, coverage * 0.42, o2[0], o2[1], o2[2], thick * 0.24);
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
@@ -923,12 +939,14 @@ export class Planet {
     // each deck also gets the sun direction in its own rotating frame
     if (this.cloudBands.length) {
       const camR = camLocal.length();
+      const surfaceView = smoothstep(1.8, 1.08, camR / this.R);
       for (const b of this.cloudBands) {
         const sh = b.mesh.material.userData.shader;
         if (sh) {
           const fadeWidth = Math.max(1800, (b.halfThickness || 1800) * 1.35);
           const x = Math.min(1, Math.max(0, (Math.abs(camR - b.r) - 250) / fadeWidth));
           sh.uniforms.uCamProx.value = x * x * (3 - 2 * x);
+          if (sh.uniforms.uSurfaceView) sh.uniforms.uSurfaceView.value = surfaceView;
           if (this.sunDirLocal) {
             sh.uniforms.uCSun.value.copy(this.sunDirLocal)
               .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
@@ -974,10 +992,17 @@ export class Planet {
       this.cloudSpin2 += animDt * 0.0028;
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
-      const camR = camLocal.length();
-      const e = smoothstep(4.5, 2.2, camR / this.R);
-      this.cloudMesh2.material.opacity = 0.28 * (1 - e);
-      this.cloudMesh2.visible = (1 - e) > 0.012;
+      if (this.volCloudMesh) {
+        const camR = camLocal.length();
+        const e = smoothstep(4.5, 2.2, camR / this.R);
+        this.cloudMesh2.material.opacity = 0.28 * (1 - e);
+        this.cloudMesh2.visible = (1 - e) > 0.012;
+      } else {
+        // Low quality has no volumetric replacement, so both inexpensive
+        // analytic decks must remain present all the way to the ground.
+        this.cloudMesh2.material.opacity = 0.28;
+        this.cloudMesh2.visible = true;
+      }
     }
   }
 

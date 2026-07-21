@@ -35,6 +35,7 @@ import { ForegroundPass } from './foreground-pass.js';
 import { RiftDistortionShader, SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
+import { setVolumetricCloudsEnabled } from './planet.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -193,10 +194,64 @@ let surfacePipelinesReady = true;
 const pipelineWarmScenes = [];
 const surfaceBootstrapMeshes = [];
 let surfaceBootstrapPending = false;
-let surfaceBootstrapActive = false;
-let surfaceBootstrapLight = null;
+const surfaceBootstrapTarget = new THREE.WebGLRenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
 const startupWarmStartedAt = performance.now();
+
+function finishSurfaceBootstrap() {
+  if (!surfaceBootstrapPending || contextLost) return;
+  surfaceBootstrapPending = false;
+  const savedTarget = renderer.getRenderTarget();
+  const savedAutoClear = renderer.autoClear;
+  const savedLight = {
+    visible: sunShadow.visible,
+    intensity: sunShadow.intensity,
+    position: sunShadow.position.clone(),
+    target: sunShadow.target.position.clone(),
+  };
+  try {
+    // Seed the actual shadow-map programs in a private 2×2 target. The old
+    // bootstrap temporarily replaced the live sun with a near-zero test light
+    // and then presented that frame, which could expose a completely black
+    // surface on the high-quality path.
+    sunShadow.visible = true;
+    sunShadow.intensity = 1;
+    sunShadow.position.set(0, 4000, 0);
+    sunShadow.target.position.set(0, 0, 0);
+    sunShadow.updateMatrixWorld(true);
+    sunShadow.target.updateMatrixWorld(true);
+    for (const mesh of surfaceBootstrapMeshes) mesh.visible = true;
+    renderer.autoClear = true;
+    renderer.setRenderTarget(surfaceBootstrapTarget);
+    renderer.clear(true, true, false);
+    renderer.render(scene, camera);
+  } catch (error) {
+    console.warn('surface bootstrap render failed', error);
+  } finally {
+    for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
+    sunShadow.visible = savedLight.visible;
+    sunShadow.intensity = savedLight.intensity;
+    sunShadow.position.copy(savedLight.position);
+    sunShadow.target.position.copy(savedLight.target);
+    sunShadow.updateMatrixWorld(true);
+    sunShadow.target.updateMatrixWorld(true);
+    renderer.setRenderTarget(savedTarget);
+    renderer.autoClear = savedAutoClear;
+  }
+  if (shipPipelinesWarmed) {
+    for (const mesh of surfaceBootstrapMeshes.splice(0)) {
+      scene.remove(mesh);
+      if (mesh.isInstancedMesh) mesh.dispose();
+      else mesh.geometry.dispose();
+    }
+    surfaceBootstrapTarget.dispose();
+  }
+  // All startup shaders were checked while the loading mask was active.
+  // Querying program logs for every later LOD/GLB variant forces ANGLE to
+  // synchronously finish compilation on the flight frame.
+  renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
+  surfacePipelinesReady = true;
+}
 
 function prewarmSurfacePipelines(planet) {
   if (!planet || warmedSurfacePlanet === planet || typeof renderer.compileAsync !== 'function') return;
@@ -309,6 +364,7 @@ sceneTarget.depthTexture.name = 'scene.depth';
 const composer = new EffectComposer(renderer, sceneTarget);
 composer.addPass(new RenderPass(scene, camera));
 const VOLUME_ENABLED = !QUALITY_LOW && qs.get('vclouds') !== '0';
+setVolumetricCloudsEnabled(VOLUME_ENABLED);
 const volumePass = VOLUME_ENABLED ? new VolumetricPass(scene, camera, { scale: 0.67 }) : null;
 if (volumePass) composer.addPass(volumePass);
 // EXPERIMENTAL ?gtao=1: ground-truth ambient occlusion for contact shadows
@@ -2630,22 +2686,7 @@ function frame() {
   renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
   surfaceWeapons.renderScopeView(renderer);
-  if (surfaceBootstrapPending && !contextLost) {
-    surfaceBootstrapPending = false;
-    surfaceBootstrapActive = true;
-    surfaceBootstrapLight = {
-      visible: sunShadow.visible,
-      intensity: sunShadow.intensity,
-      position: sunShadow.position.clone(),
-    };
-    sunShadow.visible = true;
-    sunShadow.intensity = 1e-7;
-    sunShadow.position.set(0, 4000, 0);
-    sunShadow.target.position.set(0, 0, 0);
-    sunShadow.updateMatrixWorld(true);
-    sunShadow.target.updateMatrixWorld(true);
-    for (const mesh of surfaceBootstrapMeshes) mesh.visible = true;
-  }
+  finishSurfaceBootstrap();
   renderer.info.reset();
   // Skip the actual GPU work while the WebGL context is lost — Three.js
   // no-ops render() anyway, but skipping avoids noise from the post chain
@@ -2657,28 +2698,6 @@ function frame() {
       renderer.render(scene, camera);
       if (ship.foregroundOnly) foregroundPass.renderDirect(renderer);
     }
-  }
-  if (surfaceBootstrapActive) {
-    surfaceBootstrapActive = false;
-    sunShadow.visible = surfaceBootstrapLight.visible;
-    sunShadow.intensity = surfaceBootstrapLight.intensity;
-    sunShadow.position.copy(surfaceBootstrapLight.position);
-    surfaceBootstrapLight = null;
-    if (shipPipelinesWarmed) {
-      for (const mesh of surfaceBootstrapMeshes.splice(0)) {
-        scene.remove(mesh);
-        if (mesh.isInstancedMesh) mesh.dispose();
-        else mesh.geometry.dispose();
-      }
-    } else {
-      for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
-    }
-    // All startup shaders were checked while the loading mask was active.
-    // Querying program logs for every later LOD/GLB variant forces ANGLE to
-    // synchronously finish compilation on the flight frame. Keep an explicit
-    // diagnostics opt-in without imposing that driver fence on normal play.
-    renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
-    surfacePipelinesReady = true;
   }
   prevNavPos.copy(nav.pos);
   const startupAssetsReady = shipPipelinesWarmed || performance.now() - startupWarmStartedAt > 6000;

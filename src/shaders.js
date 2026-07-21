@@ -487,6 +487,10 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
     // the shell fades away as the camera nears its own altitude — the
     // transit white-out fog takes over, so you fly THROUGH, never POP through
     shader.uniforms.uCamProx = { value: 1 };
+    // The same angular pattern that reads as weather systems from orbit would
+    // become continent-wide streaks when viewed from inside the shell. Blend
+    // toward a denser inexpensive field for the low-tier surface sky.
+    shader.uniforms.uSurfaceView = { value: 0 };
     // sun direction in the deck's own (rotating) frame, for self-shadowing
     shader.uniforms.uCSun = { value: new THREE.Vector3(0, 1, 0) };
     material.userData.shader = shader;
@@ -529,13 +533,15 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
         uniform float uCov1;
         uniform vec3 uCOff;
         uniform float uCamProx;
+        uniform float uSurfaceView;
         uniform vec3 uCSun;
         varying vec3 vCDir;
         float cloudFbm(vec3 d) {
-          float f = texture2D(uCloudNoise, d.xy * 0.55 + uCOff.xy).g * 0.5;
-          f += texture2D(uCloudNoise, d.yz * 1.15 + uCOff.yz).r * 0.25;
-          f += texture2D(uCloudNoise, d.zx * 2.35 + uCOff.zx).g * 0.125;
-          f += texture2D(uCloudNoise, d.xy * 4.8 - uCOff.xz).r * 0.0625;
+          float s = mix(1.0, 5.4, uSurfaceView);
+          float f = texture2D(uCloudNoise, d.xy * (0.55 * s) + uCOff.xy).g * 0.5;
+          f += texture2D(uCloudNoise, d.yz * (1.15 * s) + uCOff.yz).r * 0.25;
+          f += texture2D(uCloudNoise, d.zx * (2.35 * s) + uCOff.zx).g * 0.125;
+          f += texture2D(uCloudNoise, d.xy * (4.8 * s) - uCOff.xz).r * 0.0625;
           return f / 0.9375;
         }
         float weatherSystem(vec3 d) {
@@ -546,7 +552,10 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
         }
         float cloudAmount(vec3 d) {
           float fine = cloudFbm(d);
-          float base = smoothstep(uCov0, uCov1, fine);
+          float base = smoothstep(
+            uCov0 - 0.02 * uSurfaceView,
+            uCov1 - 0.10 * uSurfaceView,
+            fine);
           float system = weatherSystem(d) * smoothstep(0.24, 0.68, fine) * 0.86;
           return max(base, system);
         }`)
@@ -557,7 +566,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           // Dense orbital cores must read as kilometres of suspended water,
           // not translucent paint on the planet. A sub-linear response keeps
           // broad opaque bodies while retaining soft procedural edges.
-          diffuseColor.a *= pow(a, 0.95) * uCamProx;
+          diffuseColor.a *= pow(a, mix(0.95, 0.72, uSurfaceView)) * uCamProx;
           // volumetric look from one extra tap: density INCREASING toward
           // the sun means we're in a cloud's shadowed core; decreasing
           // means a sunlit edge. Thick cores also darken (their own bulk).
@@ -566,7 +575,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           diffuseColor.rgb *= self * (1.0 - a * 0.3);
         }`);
   };
-  material.customProgramCacheKey = () => 'cloud-field-v3-weather-systems';
+  material.customProgramCacheKey = () => 'cloud-field-v4-surface-fallback';
 }
 
 // Wind: vegetation bends with a per-instance phase, stronger toward the tip.
