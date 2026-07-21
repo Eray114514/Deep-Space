@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, glob, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,7 +16,35 @@ for (const folder of ['src', 'vendor', 'assets', 'worlds']) {
   await cp(join(ROOT, folder), join(OUT, folder), { recursive: true });
 }
 
-// The import map resolves `three/addons/*` to `./vendor/three-addons/`.
+const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
+const BUILD_VERSION = pkg.version;
+
+// Cloudflare Pages / browsers cache JS modules by URL. When we fix a file
+// such as sysview.js, unchanged parent importers keep serving the cached
+// module unless the request URL changes. Append the release version to every
+// relative ES module import so each deployment invalidates the module graph.
+const staticImportRe = /((?:import|export)(?:\s+[^'"]+?from\s+)?)['"](\.{1,2}\/[^'"]+?)['"]/g;
+const dynamicImportRe = /(import\s*\(\s*)['"](\.{1,2}\/[^'"]+?)['"]\s*\)/g;
+
+function rewriteRelativeImports(text) {
+  const appendVersion = (match, prefix, path) => {
+    if (path.includes('?')) return match;
+    return `${prefix}'${path}?v=${BUILD_VERSION}'`;
+  };
+  return text
+    .replace(staticImportRe, appendVersion)
+    .replace(dynamicImportRe, appendVersion);
+}
+
+async function versionModuleImports(dir) {
+  for await (const file of glob(join(dir, '**/*.js'))) {
+    const original = await readFile(file, 'utf8');
+    const updated = rewriteRelativeImports(original);
+    if (updated !== original) await writeFile(file, updated, 'utf8');
+  }
+}
+
+
 // Copying the entire jsm tree drags in ~14 MB of unused decoders (rhino3dm, draco,
 // ammo, basis, lottie, ...). Instead, expand the explicit entry list into the full
 // transitive closure of relative-path imports so runtime-only dependencies such
@@ -66,6 +94,11 @@ for (const rel of addonsNeeded) {
   await cp(join(JSM_SRC, rel), join(JSM_DST, rel));
 }
 
-const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
-await writeFile(join(OUT, 'build.json'), `${JSON.stringify({ version: pkg.version }, null, 2)}\n`);
-console.log(`Built static game ${pkg.version} → ${OUT} (${addonsNeeded.size} addon files)`);
+// Append version query strings to every relative ES module import so each
+// deployment invalidates the browser's cached module graph (Cloudflare Pages
+// and browsers cache modules by URL, not by content hash).
+await versionModuleImports(join(OUT, 'src'));
+await versionModuleImports(join(OUT, 'vendor'));
+
+await writeFile(join(OUT, 'build.json'), `${JSON.stringify({ version: BUILD_VERSION }, null, 2)}\n`);
+console.log(`Built static game ${BUILD_VERSION} → ${OUT} (${addonsNeeded.size} addon files)`);

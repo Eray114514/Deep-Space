@@ -80,7 +80,7 @@ function applyFarFade(mat, uniforms) {
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
         #ifdef USE_COLOR
-          totalEmissiveRadiance *= vColor;
+          totalEmissiveRadiance *= vColor.rgb;
         #endif`);
     };
     mat.customProgramCacheKey = () => 'far-flora';
