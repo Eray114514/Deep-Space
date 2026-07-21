@@ -77,8 +77,9 @@ for (let i = 0; i <= 100; i++) {
   }
   lastWarpProgress = progress;
 }
-if (Math.abs(warpTravelProgress(0.88) - 0.985) > 1e-8
-    || warpTravelProgress(0.72) < 0.819) {
+if (warpTravelProgress(0.08) < 0.044
+    || warpTravelProgress(0.72) < 0.89
+    || warpTravelProgress(0.88) < 0.985) {
   throw new Error('Warp arrival brake no longer lands in the authored timing window');
 }
 

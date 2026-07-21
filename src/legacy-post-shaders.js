@@ -34,23 +34,6 @@ export const WarpDriveShader = {
       return fract(p);
     }
 
-    float hash21(vec2 p) {
-      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-    }
-
-    float noise21(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      f = f * f * (3.0 - 2.0 * f);
-      return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
-        mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0)), f.x), f.y);
-    }
-
-    float flowNoise(vec2 p) {
-      return noise21(p) * .57 + noise21(p * 2.07 + 7.3) * .29
-        + noise21(p * 4.13 - 3.7) * .14;
-    }
-
     vec3 spectrum(float h) {
       vec3 rainbow = .56 + .44 * cos(TAU * (h + vec3(0.00, .69, .37)));
       vec3 ion = mix(vec3(.18, .80, 1.35), vec3(1.25, .26, 1.10), step(.56, h));
@@ -60,26 +43,26 @@ export const WarpDriveShader = {
     vec3 rayLayer(vec2 p, float bins, float radialScale, float speed, float seed) {
       float radius = length(p);
       float angle = atan(p.y, p.x);
-      float bend = sin(radius * mix(5.0, 9.0, seed) - uTime * .22 + seed * 17.0)
-        * mix(.0012, .0042, smoothstep(.08, .8, radius));
-      float wedge = (angle / TAU + .5 + bend) * bins;
+      float wedge = (angle / TAU + .5) * bins;
       float id = floor(wedge);
       float rnd = hash11(id + seed * 71.7);
       float fine = hash11(id * 5.31 + seed * 19.1);
-      float width = mix(.012, .044, rnd * rnd) * mix(.68, 1.1, smoothstep(.04, .76, radius));
       float across = abs(fract(wedge) - .5);
-      float core = exp(-pow(across / max(width, .001), 2.0) * 2.4);
-      float glow = exp(-pow(across / max(width * 3.2, .001), 2.0) * 1.35);
+      float acrossDistance = across * TAU / bins * radius;
+      float width = mix(.00062, .0019, rnd * rnd) * mix(.82, 1.18, fine);
+      float core = exp(-pow(acrossDistance / max(width, .00035), 2.0) * 2.65);
+      float glow = exp(-pow(acrossDistance / max(width * 4.2, .001), 2.0) * 1.25);
       float phase = fract(radius * radialScale - uTime * speed * mix(.72, 1.4, rnd) + fine);
-      float segment = smoothstep(.025, .13, phase) * (1.0 - smoothstep(.58, .96, phase));
-      float taper = mix(.42, 1.0, smoothstep(.04, .42, phase));
-      float gate = step(.43, fine) * smoothstep(.018, .105, radius);
-      float flare = mix(.32, 1.34, smoothstep(.055, .92, radius));
+      float segment = smoothstep(.018, .085, phase) * (1.0 - smoothstep(.68, .965, phase));
+      float head = exp(-pow(abs(phase - .16) / .085, 2.0) * 2.2);
+      float taper = mix(.46, 1.0, smoothstep(.035, .34, phase)) + head * .72;
+      float gate = step(.52, fine) * smoothstep(.022, .115, radius);
+      float flare = mix(.38, 1.28, smoothstep(.06, .94, radius));
       vec3 cool = mix(vec3(.24, .72, 1.12), vec3(.74, .94, 1.08), rnd);
       float accentAmount = smoothstep(.58, .92, hash11(id * 2.73 + seed * 31.0));
-      vec3 tint = mix(cool, spectrum(fract(rnd * .74 + seed * .29)), accentAmount * .72);
-      vec3 hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .46);
-      return (tint * glow * .19 + hotCore * core * taper) * segment * gate * flare;
+      vec3 tint = mix(cool, spectrum(fract(rnd * .74 + seed * .29)), accentAmount * .62 + .18);
+      vec3 hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .30);
+      return (tint * glow * .15 + hotCore * core * taper * .78) * segment * gate * flare;
     }
 
     void main() {
@@ -102,16 +85,17 @@ export const WarpDriveShader = {
       );
       vec3 scene = mix(original, dispersed, strength * (.14 + uWarp * .12));
 
-      float rayStrength = strength * mix(.62, 1.0, strength) * smoothstep(.025, .14, radius);
-      vec3 rays = rayLayer(p, 61.0, 1.38, .86 + uPulse * 1.18, .13);
-      rays += rayLayer(p * 1.07, 97.0, 2.17, 1.33 + uPulse * 1.42, .47) * .68;
-      rays += rayLayer(p * .94, 139.0, 3.28, 1.82 + uPulse * 1.68, .81) * .34;
+      float rayStrength = strength * mix(.54, .88, strength) * smoothstep(.025, .14, radius);
+      vec3 rays = rayLayer(p, 31.0, 1.05, 2.15 + uPulse * 2.35, .13);
+      rays += rayLayer(p * 1.03, 53.0, 1.82, 2.85 + uPulse * 3.1, .47) * .68;
+      rays += rayLayer(p * .97, 89.0, 3.12, 3.65 + uPulse * 3.9, .81) * .38;
+      rays += rayLayer(p * 1.08, 137.0, 5.25, 4.8 + uPulse * 4.7, .29) * .18;
       float coreFade = smoothstep(.012, .082, radius);
-      float edgeFade = 1.0 - smoothstep(.78, 1.02, radius);
-      rays *= rayStrength * coreFade * edgeFade * (1.0 + uWarp * .22);
+      float edgeFade = 1.0 - smoothstep(.98, 1.2, radius);
+      rays *= rayStrength * coreFade * edgeFade * (1.0 + uWarp * .18);
 
       float tunnel = smoothstep(.08, .92, radius) * (1.0 - smoothstep(.88, 1.14, radius));
-      float turbulence = flowNoise(p * 3.7 + direction * (uTime * .075));
+      float turbulence = .5 + .5 * sin(dot(p, vec2(18.7, 31.9)) + uTime * .17);
       vec3 haze = mix(vec3(.012, .036, .075), vec3(.025, .115, .21), turbulence)
         * (.12 + tunnel * .88) * strength * (uWarp * .64 + uPulse * .22);
       vec3 arrival = vec3(.06, .19, .42) * exp(-radius * radius * 14.0) * uArrival * .52;
@@ -197,5 +181,3 @@ export const RiftDistortionShader = {
     }
   `,
 };
-
-

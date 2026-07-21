@@ -68,18 +68,6 @@ export function createWarpDriveNode(inputNode) {
     const p1 = p0.mul(p0.add(33.33));
     return fract(p1.mul(p1.add(p1)));
   });
-  const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123)));
-  const noise21 = Fn(([p]) => {
-    const cell = floor(p);
-    const local0 = fract(p);
-    const local = local0.mul(local0).mul(float(3).sub(local0.mul(2)));
-    const lower = mix(hash21(cell), hash21(cell.add(vec2(1, 0))), local.x);
-    const upper = mix(hash21(cell.add(vec2(0, 1))), hash21(cell.add(vec2(1))), local.x);
-    return mix(lower, upper, local.y);
-  });
-  const flowNoise = Fn(([p]) => noise21(p).mul(.57)
-    .add(noise21(p.mul(2.07).add(7.3)).mul(.29))
-    .add(noise21(p.mul(4.13).sub(3.7)).mul(.14)));
   const spectrum = Fn(([h]) => {
     const rainbow = vec3(.56).add(cos(h.add(vec3(0, .69, .37)).mul(tau)).mul(.44));
     const ion = mix(vec3(.18, .80, 1.35), vec3(1.25, .26, 1.10), step(.56, h));
@@ -88,29 +76,33 @@ export function createWarpDriveNode(inputNode) {
   const rayLayer = Fn(([p, bins, radialScale, speed, seed]) => {
     const radius = length(p);
     const angle = atan(p.y, p.x);
-    const bend = sin(radius.mul(mix(5, 9, seed)).sub(controls.time.mul(.22))
-      .add(seed.mul(17))).mul(mix(.0012, .0042, smoothstep(.08, .8, radius)));
-    const wedge = angle.div(tau).add(.5).add(bend).mul(bins);
+    // Lock every streak to the vanishing point. Radius-driven angular wobble
+    // reads as a warped overlay rather than straight-line velocity.
+    const wedge = angle.div(tau).add(.5).mul(bins);
     const id = floor(wedge);
     const random = hash11(id.add(seed.mul(71.7)));
     const fine = hash11(id.mul(5.31).add(seed.mul(19.1)));
-    const width = mix(.012, .044, random.mul(random))
-      .mul(mix(.68, 1.1, smoothstep(.04, .76, radius)));
     const across = abs(fract(wedge).sub(.5));
-    const core = exp(pow(across.div(max(width, .001)), 2).mul(-2.4));
-    const glow = exp(pow(across.div(max(width.mul(3.2), .001)), 2).mul(-1.35));
+    // Angular separation becomes screen-space distance so lines keep a near
+    // constant width instead of opening into fat wedges at the screen edge.
+    const acrossDistance = across.mul(tau).div(bins).mul(radius);
+    const width = mix(.00062, .0019, random.mul(random)).mul(mix(.82, 1.18, fine));
+    const core = exp(pow(acrossDistance.div(max(width, .00035)), 2).mul(-2.65));
+    const glow = exp(pow(acrossDistance.div(max(width.mul(4.2), .001)), 2).mul(-1.25));
     const phase = fract(radius.mul(radialScale).sub(controls.time.mul(speed)
       .mul(mix(.72, 1.4, random))).add(fine));
-    const segment = smoothstep(.025, .13, phase)
-      .mul(float(1).sub(smoothstep(.58, .96, phase)));
-    const taper = mix(.42, 1, smoothstep(.04, .42, phase));
-    const gate = step(.43, fine).mul(smoothstep(.018, .105, radius));
-    const flare = mix(.32, 1.34, smoothstep(.055, .92, radius));
+    const segment = smoothstep(.018, .085, phase)
+      .mul(float(1).sub(smoothstep(.68, .965, phase)));
+    const head = exp(pow(abs(phase.sub(.16)).div(.085), 2).mul(-2.2));
+    const taper = mix(.46, 1, smoothstep(.035, .34, phase)).add(head.mul(.72));
+    const gate = step(.52, fine).mul(smoothstep(.022, .115, radius));
+    const flare = mix(.38, 1.28, smoothstep(.06, .94, radius));
     const cool = mix(vec3(.24, .72, 1.12), vec3(.74, .94, 1.08), random);
     const accent = smoothstep(.58, .92, hash11(id.mul(2.73).add(seed.mul(31))));
-    const tint = mix(cool, spectrum(fract(random.mul(.74).add(seed.mul(.29)))), accent.mul(.72));
-    const hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .46);
-    return tint.mul(glow).mul(.19).add(hotCore.mul(core).mul(taper))
+    const tint = mix(cool, spectrum(fract(random.mul(.74).add(seed.mul(.29)))),
+      accent.mul(.62).add(.18));
+    const hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .30);
+    return tint.mul(glow).mul(.15).add(hotCore.mul(core).mul(taper).mul(.78))
       .mul(segment).mul(gate).mul(flare);
   });
   const outputNode = Fn(() => {
@@ -135,17 +127,21 @@ export function createWarpDriveNode(inputNode) {
       const dispersed = vec3(red.r, green.g, blue.b);
       const scene = mix(base.rgb, dispersed,
         strength.mul(float(.14).add(controls.warp.mul(.12))));
-      const rayStrength = strength.mul(mix(.62, 1, strength))
+      const rayStrength = strength.mul(mix(.54, .88, strength))
         .mul(smoothstep(.025, .14, radius));
-      const layeredRays = rayLayer(p, float(61), float(1.38),
-        float(.86).add(controls.pulse.mul(1.18)), float(.13))
-        .add(rayLayer(p.mul(1.07), float(97), float(2.17),
-          float(1.33).add(controls.pulse.mul(1.42)), float(.47)).mul(.68))
-        .add(rayLayer(p.mul(.94), float(139), float(3.28),
-          float(1.82).add(controls.pulse.mul(1.68)), float(.81)).mul(.34));
+      // Sparse long foreground streaks establish speed; denser, shorter
+      // layers behind them supply depth without bending the silhouette.
+      const layeredRays = rayLayer(p, float(31), float(1.05),
+        float(2.15).add(controls.pulse.mul(2.35)), float(.13))
+        .add(rayLayer(p.mul(1.03), float(53), float(1.82),
+          float(2.85).add(controls.pulse.mul(3.1)), float(.47)).mul(.68))
+        .add(rayLayer(p.mul(.97), float(89), float(3.12),
+          float(3.65).add(controls.pulse.mul(3.9)), float(.81)).mul(.38))
+        .add(rayLayer(p.mul(1.08), float(137), float(5.25),
+          float(4.8).add(controls.pulse.mul(4.7)), float(.29)).mul(.18));
       const rays = layeredRays.mul(rayStrength).mul(smoothstep(.012, .082, radius))
-        .mul(float(1).sub(smoothstep(.78, 1.02, radius)))
-        .mul(float(1).add(controls.warp.mul(.22)));
+        .mul(float(1).sub(smoothstep(.98, 1.2, radius)))
+        .mul(float(1).add(controls.warp.mul(.18)));
       const tunnel = smoothstep(.08, .92, radius)
         .mul(float(1).sub(smoothstep(.88, 1.14, radius)));
       // Preserve the flowing haze without the old twelve sine hashes per
@@ -183,9 +179,9 @@ export function warpTravelProgress(t) {
   const k = THREE.MathUtils.clamp(t, 0, 1);
   const stops = [
     [0.00, 0.000, 0.00],
-    [0.16, 0.040, 0.65],
-    [0.72, 0.820, 1.80],
-    [0.88, 0.985, 0.35],
+    [0.08, 0.045, 1.20],
+    [0.62, 0.790, 1.55],
+    [0.86, 0.982, 0.38],
     [1.00, 1.000, 0.00],
   ];
   for (let i = 1; i < stops.length; i++) {
@@ -444,7 +440,8 @@ export class Ship {
     _sf.set(0, 0, -1).applyQuaternion(nav.quat);   // forward
     _su.set(0, 1, 0).applyQuaternion(nav.quat);
     this.thrustPose = this.thrustPose ?? 0;
-    this.thrustPose += (boost - this.thrustPose) * (1 - Math.exp(-dt * 4.2));
+    const driveThrust = Math.max(boost, warp * 1.12);
+    this.thrustPose += (driveThrust - this.thrustPose) * (1 - Math.exp(-dt * 5.8));
     // During acceleration the ship visibly lunges away from the camera. This
     // gives thrust a foreground reference instead of making only the universe
     // appear to slide toward a stationary model.

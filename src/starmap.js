@@ -166,7 +166,10 @@ function previewSystem(seed, star, currentSystem) {
 
 function disposeObject(root) {
   root.traverse((object) => {
-    if (object.geometry) object.geometry.dispose();
+    // THREE.Sprite uses one module-level shared geometry. Disposing it from a
+    // scene teardown destroys the vertex buffer for every sprite created
+    // afterwards, including SystemView's stellar halos.
+    if (object.geometry && !object.isSprite) object.geometry.dispose();
     if (object.material) {
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       for (const material of materials) material.dispose();
@@ -529,6 +532,7 @@ export class StarMap {
     this.root.classList.remove('mode-system');
     this.selectedStar = this.getUniverse().system.star;
     this.selectedPlanet = null;
+    this.sysview.suspend();
     this.sysview.setLabelsVisible(true);
     this.updateRail();
     this.updateHints();
@@ -547,6 +551,7 @@ export class StarMap {
     document.body.classList.remove('starmap-open');
     this.els.hoverMark.hidden = true;
     cancelAnimationFrame(this.raf);
+    if (this.mode === 'system') this.sysview.suspend();
   }
 
   // Full teardown for hot-reload / context-loss recovery. close() is the
@@ -581,6 +586,7 @@ export class StarMap {
     this.root.classList.remove('mode-system');
     this.selectedStar = this.getUniverse().system.star;
     this.sysview.selectBody(null);
+    this.sysview.suspend();
     this.selectedPlanet = null;
     this.updateRail();
     this.updateHints();
@@ -602,7 +608,10 @@ export class StarMap {
     // 避免 buildSystem 阻塞导致点击后整体卡顿无响应。
     await new Promise((resolve) => requestAnimationFrame(() => resolve()));
     if (this.mode !== 'system') return; // 期间用户可能已返回银河图
-    const preview = this.systemPreview(this.selectedStar);
+    const selectedStar = this.selectedStar;
+    await this.sysview.suspend();
+    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
+    const preview = this.systemPreview(selectedStar);
     this.sysview.buildSystem(preview, this.getTime());
     this.updateSystemPanel(preview);
     this.onBodySelect(null);
@@ -733,28 +742,35 @@ export class StarMap {
     this.visibleStars = this.overviewActive ? globalStars : stars;
     this.mapPositions = this.overviewActive ? this.globalMapPositions : this.localMapPositions;
 
-    const makeStarLayer = (layerStars, positions, size, opacity) => {
-      const pointGeometry = new THREE.BufferGeometry();
-      pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
-        positions.flatMap((position) => position.toArray()), 3,
-      ));
-      pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(
-        layerStars.flatMap((star) => {
-        const color = star.color.clone().lerp(new THREE.Color(0xffffff), 0.28);
-        return color.toArray();
-        }), 3,
-      ));
-      const material = new THREE.PointsMaterial({
-        size, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
+    const makeStarLayer = (layerStars, positions, worldSize, opacity) => {
+      // Textured PointsMaterial relies on gl_PointCoord. Three r185 cannot
+      // provide that path reliably to WGSL, so WebGPU could keep the CPU-side
+      // hit target while drawing no star at all. Instanced UV-bearing quads
+      // preserve a single draw call and render identically on both backends.
+      const geometry = new THREE.PlaneGeometry(1, 1);
+      geometry.rotateX(-Math.PI / 2);
+      const material = new THREE.MeshBasicMaterial({
+        map: this.starTexture, vertexColors: true,
         transparent: true, opacity, blending: THREE.AdditiveBlending,
         depthWrite: false, fog: false, toneMapped: false,
       });
-      const points = new THREE.Points(pointGeometry, material);
-      this.world.add(points);
-      return points;
+      const discs = new THREE.InstancedMesh(geometry, material, layerStars.length);
+      const matrix = new THREE.Matrix4();
+      const scale = new THREE.Vector3(worldSize, worldSize, worldSize);
+      const rotation = new THREE.Quaternion();
+      for (let i = 0; i < layerStars.length; i++) {
+        matrix.compose(positions[i], rotation, scale);
+        discs.setMatrixAt(i, matrix);
+        discs.setColorAt(i, layerStars[i].color.clone().lerp(new THREE.Color(0xffffff), 0.32));
+      }
+      discs.instanceMatrix.needsUpdate = true;
+      if (discs.instanceColor) discs.instanceColor.needsUpdate = true;
+      discs.frustumCulled = false;
+      this.world.add(discs);
+      return discs;
     };
-    this.localStarLight = makeStarLayer(stars, this.localMapPositions, 7.2, 0.96);
-    this.globalStarLight = makeStarLayer(globalStars, this.globalMapPositions, 4.2, 0);
+    this.localStarLight = makeStarLayer(stars, this.localMapPositions, 0.18, 0.98);
+    this.globalStarLight = makeStarLayer(globalStars, this.globalMapPositions, 0.64, 0);
 
     const backdropCells = buildGalaxyBackdrop(
       this.getSeed(), GALAXY_BACKDROP_COUNT, this.getUniverse().catalog.allSystems());
@@ -767,8 +783,21 @@ export class StarMap {
     }
     const backdropGeometry = new THREE.BufferGeometry();
     backdropGeometry.setAttribute('position', new THREE.BufferAttribute(backdropPositions, 3));
+    const backdropColors = new Float32Array(backdropCells.length);
+    const coolArm = new THREE.Color(0x9fc9da);
+    const warmCore = new THREE.Color(0xf1cf9d);
+    const backdropColor = new THREE.Color();
+    for (let i = 0; i < backdropCells.length; i += 3) {
+      const radius = Math.hypot(backdropCells[i], backdropCells[i + 2]) / GALAXY_RADIUS_CELLS;
+      const coreMix = 1 - THREE.MathUtils.smoothstep(radius, 0.08, 0.46);
+      backdropColor.copy(coolArm).lerp(warmCore, coreMix * 0.78);
+      backdropColors[i] = backdropColor.r;
+      backdropColors[i + 1] = backdropColor.g;
+      backdropColors[i + 2] = backdropColor.b;
+    }
+    backdropGeometry.setAttribute('color', new THREE.BufferAttribute(backdropColors, 3));
     this.galaxyBackdrop = new THREE.Points(backdropGeometry, new THREE.PointsMaterial({
-      color: 0x91afbf, size: 0.86, sizeAttenuation: false, transparent: true, opacity: 0,
+      size: 1.16, sizeAttenuation: false, vertexColors: true, transparent: true, opacity: 0,
       depthWrite: false, blending: THREE.AdditiveBlending, fog: false, toneMapped: false,
     }));
     this.world.add(this.galaxyBackdrop);
@@ -837,9 +866,9 @@ export class StarMap {
     const distance = this.camera.position.distanceTo(this.controls.target);
     const amount = overviewMix(distance);
     this.overviewAmount = amount;
-    this.localStarLight.material.opacity = 0.96 * (1 - amount);
-    this.globalStarLight.material.opacity = 0.9 * amount;
-    this.galaxyBackdrop.material.opacity = 0.2 * amount;
+    this.localStarLight.material.opacity = 0.98 * (1 - amount);
+    this.globalStarLight.material.opacity = 0.98 * amount;
+    this.galaxyBackdrop.material.opacity = 0.46 * amount;
     if (this.centralMarker) {
       this.centralMarker.position.copy(this.centralMarker.userData.globalPosition);
       this.centralMarker.scale.setScalar(THREE.MathUtils.lerp(1, 0.72, amount));
@@ -963,22 +992,23 @@ export class StarMap {
     const old = this.world.getObjectByName('selection-marker');
     if (old) {
       this.world.remove(old);
-      old.geometry.dispose();
+      if (old.geometry && !old.isSprite) old.geometry.dispose();
       old.material.dispose();
     }
     if (this.mode !== 'galaxy' || !this.selectedStar || !this.visibleStars) return;
     const index = this.visibleStars.findIndex((star) => star.id === this.selectedStar.id);
     if (index < 0) return;
-    const marker = new THREE.Points(
-      new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)),
-      new THREE.PointsMaterial({
-        color: 0xffffff, size: 16, sizeAttenuation: false, map: this.selectionTexture,
-        transparent: true, opacity: 0.84, blending: THREE.AdditiveBlending,
-        depthWrite: false, fog: false, toneMapped: false,
-      }),
-    );
+    const marker = new THREE.Sprite(new THREE.SpriteMaterial({
+      color: 0xffffff, map: this.selectionTexture,
+      transparent: true, opacity: 0.84, blending: THREE.AdditiveBlending,
+      depthWrite: false, fog: false, toneMapped: false,
+    }));
     marker.name = 'selection-marker';
     marker.position.copy(this.mapPositions[index]);
+    const distance = this.camera.position.distanceTo(this.controls.target);
+    const worldPerPixel = 2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5))
+      / Math.max(1, this.renderer.domElement.clientHeight);
+    marker.scale.setScalar(worldPerPixel * 16);
     this.world.add(marker);
   }
 

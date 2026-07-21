@@ -2086,11 +2086,11 @@ function warpTo(star, preferBodyId = null) {
       // Keep the tunnel at full authority until the destination is close,
       // then make the braking phase legible: streaks collapse, FOV compresses
       // briefly below neutral, and rebounds as the real system is revealed.
-      const ramp = smoothstep(0, 0.18, kf) * (1 - smoothstep(0.82, 0.94, kf));
+      const ramp = smoothstep(0, 0.075, kf) * (1 - smoothstep(0.86, 0.95, kf));
       const brakeIn = smoothstep(0.78, 0.9, kf);
       const brakeOut = 1 - smoothstep(0.9, 1, kf);
       warpArrival = brakeIn * brakeOut;
-      camera.fov = BASE_FOV - 4 + 30 * ramp - 7.5 * warpArrival;
+      camera.fov = BASE_FOV - 4 + 34 * ramp - 7.5 * warpArrival;
       warpIntensity = ramp;
       if (kf >= 0.04 && !swapped) {
         // Swap early enough that the real destination can materialise during
@@ -2593,8 +2593,9 @@ function frame() {
   weaponVisual += ((weaponTrigger ? 1 : 0) - weaponVisual) * (1 - Math.exp(-dt * 16));
   if (state === 'space' && warpIntensity < 0.01) {
     const riftFov = riftRoute && !riftRoute.arrived ? spatialRift.burst * 9.5 : 0;
-    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 14.0 + riftFov) - camera.fov)
-      * (1 - Math.exp(-dt * 6.2));
+    const fovResponse = pulseTarget > pulseVisual ? 14 : 6.2;
+    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 19.0 + riftFov) - camera.fov)
+      * (1 - Math.exp(-dt * fovResponse));
     camera.updateProjectionMatrix();
   }
   document.body.classList.toggle('weapon-firing', weaponVisual > 0.12);

@@ -27,11 +27,16 @@
 
   const params = new URLSearchParams(location.search);
   const seed = 'MILKY-038';
-  const star = buildGalaxyCatalog(seed)[84];
-  const blackHole = params.get('scene') === 'black-hole';
+  const catalog = buildGalaxyCatalog(seed);
+  const star = catalog[84];
+  const nextStar = catalog[167];
+  const scene = params.get('scene') || 'planetary';
+  const blackHole = scene === 'black-hole';
+  const switching = scene === 'switch';
   const spec = blackHole
     ? generateBlackHoleSystemSpec(seed, { id: 'milky-way-black-hole', name: '人马座 A*', systemName: '银河中心引力观测区' })
     : generateSystemSpec(seed, star);
+  const nextSpec = generateSystemSpec(seed, nextStar);
   const view = new SystemView({
     host: document.getElementById('host'), labelHost: document.getElementById('labels'),
     navArrow: null, nameTag: null,
@@ -39,13 +44,21 @@
   await view.readyPromise;
   view.buildSystem(toPreview(star, spec), 1200);
   let frames = 0;
-  const draw = () => {
+  const draw = async () => {
     view.frame(1 / 60);
-    if (++frames < 12) requestAnimationFrame(draw);
+    frames++;
+    if (switching && frames === 8) {
+      await view.suspend();
+      view.buildSystem(toPreview(nextStar, nextSpec), 1200);
+    }
+    if (frames < (switching ? 28 : 12)) requestAnimationFrame(draw);
     else window.SYSVIEW_RESULT = {
       ready: true,
       backend: view.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2',
-      scene: blackHole ? 'black-hole' : 'planetary',
+      scene,
+      previewId: view.preview?.star?.id,
+      expectedPreviewId: switching ? nextStar.id : star.id,
+      bodyCount: view.bodies.length,
       nodeMaterials: view.scene.children.flatMap((root) => {
         const materials = [];
         root.traverse((object) => { if (object.material?.isNodeMaterial) materials.push(object.material.type); });

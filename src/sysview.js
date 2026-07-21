@@ -213,7 +213,10 @@ function paintBodyTexture(body, w, h) {
 
 function bodyTextures(body, anisotropy) {
   const small = body.isMoon;
-  const w = small ? 288 : 448, h = small ? 144 : 224;
+  // Preview worlds never occupy enough screen pixels to justify the old
+  // 448px maps. Keeping the same seeded painter at a display-matched size
+  // roughly halves the synchronous work performed when a system opens.
+  const w = small ? 224 : 352, h = small ? 112 : 176;
   const key = `${body.seed}:${body.type}:${w}`;
   const tex = cachedTexture(key, () => paintBodyTexture(body, w, h));
   tex.map.anisotropy = anisotropy;
@@ -224,7 +227,7 @@ function makeCloudTexture(body) {
   const seedNum = 71 + (strHash32(body.seed) % 331);
   const key = `${body.seed}:cloud`;
   return cachedTexture(key, () => {
-    const w = 448, h = 224;
+    const w = 352, h = 176;
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     const ctx = c.getContext('2d');
@@ -369,13 +372,13 @@ function buildContourField(masses, fieldRadius, compactObject = false) {
   }
   const group = new THREE.Group();
   const ringCount = compactObject
-    ? Math.round(THREE.MathUtils.clamp(fieldRadius * 0.74, 34, 46))
-    : Math.round(THREE.MathUtils.clamp(fieldRadius * 1.08, 43, 68));
+    ? Math.round(THREE.MathUtils.clamp(fieldRadius * 0.68, 30, 42))
+    : Math.round(THREE.MathUtils.clamp(fieldRadius * 0.88, 36, 54));
   for (let i = 0; i < ringCount; i++) {
     const base = THREE.MathUtils.lerp(4.08, fieldRadius, i / Math.max(1, ringCount - 1));
     const phase = i * 0.27;
     const pts = [];
-    const samples = 480;
+    const samples = 300;
     for (let j = 0; j < samples; j++) {
       const a = j / samples * Math.PI * 2;
       const ripple = 1.0 + 0.030 * Math.sin(a * 3.0 + phase) + 0.015 * Math.sin(a * 7.0 - phase * 0.6);
@@ -542,6 +545,8 @@ export class SystemView {
     this.preview = null;
     this.blackHoleRecord = null;
     this.timeHours = 0;
+    this.retiredSystems = new Set();
+    this.cleanupPromise = null;
 
     this._elapsed = 0;
     this.raycaster = new THREE.Raycaster();
@@ -638,9 +643,11 @@ export class SystemView {
   }
 
   // -- system construction ---------------------------------------------------
-  clearSystem() {
-    this.world.traverse((object) => {
-      if (object.geometry) object.geometry.dispose();
+  _disposeSystemObjects(objects) {
+    for (const root of objects) root.traverse((object) => {
+      // Sprite geometry is a shared Three.js singleton, not an owned buffer.
+      // Destroying one halo's geometry invalidates every later Sprite draw.
+      if (object.geometry && !object.isSprite) object.geometry.dispose();
       if (object.material) {
         const materials = Array.isArray(object.material) ? object.material : [object.material];
         for (const material of materials) {
@@ -652,7 +659,18 @@ export class SystemView {
         }
       }
     });
+  }
+
+  _retireSystemObjects(objects) {
+    if (!objects.length) return;
+    this.retiredSystems.add({ objects });
+  }
+
+  clearSystem({ immediate = false } = {}) {
+    const retiredObjects = [...this.world.children];
     this.world.clear();
+    if (immediate) this._disposeSystemObjects(retiredObjects);
+    else this._retireSystemObjects(retiredObjects);
     for (const marker of this.markers) marker.el.remove();
     this.markers = [];
     this.bodies = [];
@@ -665,6 +683,24 @@ export class SystemView {
     this.reticle.visible = false;
     if (this.navArrow) this.navArrow.style.display = 'none';
     if (this.nameTag) this.nameTag.style.display = 'none';
+  }
+
+  suspend() {
+    // StarMap switches its frame loop away from SystemView before calling this.
+    // That gives resource destruction a real ownership boundary: detach the
+    // old scene, fence all submissions that could reference it, then release.
+    if (this.world.children.length || this.markers.length) this.clearSystem();
+    if (this.cleanupPromise) return this.cleanupPromise;
+    if (!this.retiredSystems.size) return Promise.resolve();
+    this.renderer._renderLists?.dispose?.();
+    this.renderer._renderContexts?.dispose?.();
+    const queue = this.renderer.backend?.device?.queue;
+    const fence = queue?.onSubmittedWorkDone ? queue.onSubmittedWorkDone() : Promise.resolve();
+    this.cleanupPromise = fence.catch(() => {}).then(() => {
+      for (const retired of this.retiredSystems) this._disposeSystemObjects(retired.objects);
+      this.retiredSystems.clear();
+    }).finally(() => { this.cleanupPromise = null; });
+    return this.cleanupPromise;
   }
 
   buildSystem(preview, timeHours) {
@@ -797,14 +833,14 @@ export class SystemView {
       // prominences
       const prominences = new THREE.Group();
       const prand = makeRng(preview.star.id + ':prom:' + index);
-      for (let j = 0; j < 9; j++) {
+      for (let j = 0; j < 7; j++) {
         const a = prand() * Math.PI * 2, span = 0.34 + prand() * 0.5;
         const rad = radius * 0.96, lift = 0.6 + prand() * 1.05;
         const axis = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
         const tangent = new THREE.Vector3(-Math.sin(a), 0, Math.cos(a));
         const pts = [];
-        for (let i = 0; i < 24; i++) {
-          const t = i / 23;
+        for (let i = 0; i < 18; i++) {
+          const t = i / 17;
           const theta = (t - 0.5) * span;
           const surf = axis.clone().multiplyScalar(Math.cos(theta) * rad)
             .add(tangent.clone().multiplyScalar(Math.sin(theta) * rad));
@@ -814,7 +850,7 @@ export class SystemView {
         const curve = new THREE.CatmullRomCurve3(pts);
         const tubeColor = color.clone().lerp(new THREE.Color(0xffe2a0), j % 3 ? 0.35 : 0.72);
         const tube = new THREE.Mesh(
-          new THREE.TubeGeometry(curve, 72, 0.026 + prand() * 0.038, 5, false),
+          new THREE.TubeGeometry(curve, 48, 0.026 + prand() * 0.038, 4, false),
           new THREE.MeshBasicMaterial({ color: tubeColor, transparent: true, opacity: 0.56, blending: THREE.AdditiveBlending, depthWrite: false }),
         );
         prominences.add(tube);
@@ -1187,6 +1223,8 @@ export class SystemView {
     this.clearSystem();
     this.renderPipeline.dispose?.();
     this.renderer.dispose();
+    for (const retired of this.retiredSystems) this._disposeSystemObjects(retired.objects);
+    this.retiredSystems.clear();
     this.renderer.domElement.remove();
   }
 }

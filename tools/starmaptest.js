@@ -150,15 +150,48 @@ try {
         return {
           gameBackend: window.NMS.stats().rendererBackend,
           mapBackend: map.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'other',
+          starLayerType: map.globalStarLight.type,
+          starLayerHasUv: !!map.globalStarLight.geometry.getAttribute('uv'),
+          backdropOpacity: map.galaxyBackdrop.material.opacity,
           hit: hit?.star.id || null,
           target: bh.id,
         };
       });
       assert.equal(webgpuAudit.gameBackend, 'webgpu', 'production scene did not use real WebGPU');
       assert.equal(webgpuAudit.mapBackend, 'webgpu', 'star map did not use real WebGPU');
+      assert.equal(webgpuAudit.starLayerType, 'Mesh', 'star map did not use the backend-neutral instanced star discs');
+      assert.equal(webgpuAudit.starLayerHasUv, true, 'star-map star discs have no UVs for their alpha texture');
+      assert(webgpuAudit.backdropOpacity >= 0.4, 'spiral-arm backdrop is too faint at full-galaxy zoom');
       assert.equal(webgpuAudit.hit, webgpuAudit.target, 'real-WebGPU visible black-hole point was not pickable');
+
+      const switchAudit = await webgpuPage.evaluate(async () => {
+        const map = document.querySelector('#starmap-overlay').__starMapController;
+        const waitFrames = (count) => new Promise((resolve) => {
+          const next = () => count-- > 0 ? requestAnimationFrame(next) : resolve();
+          next();
+        });
+        const systems = map.globalStars.filter((star) => star.kind !== 'blackHole'
+          && star.id !== map.getUniverse().system.star.id).slice(0, 2);
+        map.selectStar(systems[0], false);
+        await map.enterSystem();
+        await waitFrames(6);
+        map.setMode('galaxy');
+        map.selectStar(systems[1], false);
+        await map.enterSystem();
+        await waitFrames(8);
+        return {
+          selected: map.selectedStar.id,
+          preview: map.sysview.preview.star.id,
+          expected: systems[1].id,
+          bodies: map.sysview.bodies.length,
+          picks: map.sysview.pickMeshes.length,
+        };
+      });
+      assert.equal(switchAudit.selected, switchAudit.expected, 'second system was not selected');
+      assert.equal(switchAudit.preview, switchAudit.expected, 'second preview reused the first system');
+      assert(switchAudit.bodies > 0 && switchAudit.picks > 0, 'second preview lost render or interaction records');
       assert.equal(webgpuErrors.length, 0, `real-WebGPU star map emitted errors: ${webgpuErrors.join('\n')}`);
-      console.log('PASS: real WebGPU star-map rendering and picking');
+      console.log('PASS: real WebGPU star-map rendering, picking, and sequential system previews');
     } finally {
       await webgpuBrowser.close();
     }
