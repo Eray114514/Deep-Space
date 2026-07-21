@@ -22,6 +22,7 @@
     "test:pointerlock": "node tools/pointerlocktest.js",
     "test:astronomy:browser": "node tools/astroplaytest.js",
     "build": "npm test && node tools/build.js",
+    "build:pages": "node tools/build.js",
     "shots": "node tools/screenshot.js",
     "world:lock": "node tools/export-galaxy-catalog.js && node tools/export-canonical-world.js",
     "world:curate": "node tools/curate-finite-galaxies.js 256",
