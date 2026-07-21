@@ -996,6 +996,10 @@ async function closeStarMap(restoreInput = true) {
 
 function pauseGame() {
   if (paused) return;
+  // The start page owns the screen; opening the pause surface while it is
+  // fading out (or still up) creates the two overlays stacked on top of each
+  // other.  Wait until the hand-off to flight is complete.
+  if (document.body.classList.contains('hero-active')) return;
   cancelTimeWarp();
   paused = true;
   spaceCtl.enabled = false;
