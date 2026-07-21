@@ -737,12 +737,16 @@ export class StarMap {
       // formation data, not a second screen-space offset.
       return new THREE.Vector3(delta.x, 0, delta.z);
     });
-    const globalPositionById = new Map(globalStars.map((star, index) => [star.id, this.globalMapPositions[index]]));
-    this.localMapPositions = stars.map((star) => globalPositionById.get(star.id).clone());
-    this.visibleStars = this.overviewActive ? globalStars : stars;
-    this.mapPositions = this.overviewActive ? this.globalMapPositions : this.localMapPositions;
+    this.globalPositionById = new Map(
+      globalStars.map((star, index) => [star.id, this.globalMapPositions[index]]));
+    this.localMapPositions = stars.map((star) => this.globalPositionById.get(star.id).clone());
+    // Every real system remains visible and pickable at every zoom level. The
+    // local catalogue is only a visual emphasis layer; it must never take over
+    // interaction ownership from the complete galaxy catalogue.
+    this.visibleStars = globalStars;
+    this.mapPositions = this.globalMapPositions;
 
-    const makeStarLayer = (layerStars, positions, worldSize, opacity) => {
+    const makeStarLayer = (layerStars, positions, pixelSize, opacity) => {
       // Textured PointsMaterial relies on gl_PointCoord. Three r185 cannot
       // provide that path reliably to WGSL, so WebGPU could keep the CPU-side
       // hit target while drawing no star at all. Instanced UV-bearing quads
@@ -756,7 +760,7 @@ export class StarMap {
       });
       const discs = new THREE.InstancedMesh(geometry, material, layerStars.length);
       const matrix = new THREE.Matrix4();
-      const scale = new THREE.Vector3(worldSize, worldSize, worldSize);
+      const scale = new THREE.Vector3(1, 1, 1);
       const rotation = new THREE.Quaternion();
       for (let i = 0; i < layerStars.length; i++) {
         matrix.compose(positions[i], rotation, scale);
@@ -766,11 +770,14 @@ export class StarMap {
       discs.instanceMatrix.needsUpdate = true;
       if (discs.instanceColor) discs.instanceColor.needsUpdate = true;
       discs.frustumCulled = false;
+      discs.userData.starPositions = positions;
+      discs.userData.pixelSize = pixelSize;
+      discs.userData.worldSize = 0;
       this.world.add(discs);
       return discs;
     };
-    this.localStarLight = makeStarLayer(stars, this.localMapPositions, 0.18, 0.98);
-    this.globalStarLight = makeStarLayer(globalStars, this.globalMapPositions, 0.64, 0);
+    this.globalStarLight = makeStarLayer(globalStars, this.globalMapPositions, 5.6, 0.92);
+    this.localStarLight = makeStarLayer(stars, this.localMapPositions, 7.4, 0.28);
 
     const backdropCells = buildGalaxyBackdrop(
       this.getSeed(), GALAXY_BACKDROP_COUNT, this.getUniverse().catalog.allSystems());
@@ -849,12 +856,13 @@ export class StarMap {
     this.world.add(well);
 
     if (resetView) {
-      const focusedResult = stars.length <= 3 && this.mapPositions.length
-        ? this.mapPositions.reduce((sum, point) => sum.add(point), new THREE.Vector3()).multiplyScalar(1 / this.mapPositions.length)
+      const focusedResult = stars.length <= 3 && this.localMapPositions.length
+        ? this.localMapPositions.reduce((sum, point) => sum.add(point), new THREE.Vector3())
+          .multiplyScalar(1 / this.localMapPositions.length)
         : null;
       this.resetGalaxyView(focusedResult);
     }
-    this.els.count.textContent = `${stars.length} / ${STAR_LIMIT}`;
+    this.els.count.textContent = `${globalStars.filter((star) => star.kind !== 'blackHole').length} / 1024`;
     this.els.sector.textContent = current.id;
     this.buildGalaxyLabels(stars, current);
     this.updateSelectionMarker();
@@ -866,26 +874,50 @@ export class StarMap {
     const distance = this.camera.position.distanceTo(this.controls.target);
     const amount = overviewMix(distance);
     this.overviewAmount = amount;
-    this.localStarLight.material.opacity = 0.98 * (1 - amount);
-    this.globalStarLight.material.opacity = 0.98 * amount;
+    this.globalStarLight.material.opacity = THREE.MathUtils.lerp(0.92, 0.98, amount);
+    this.localStarLight.material.opacity = 0.28 * (1 - amount);
     this.galaxyBackdrop.material.opacity = 0.46 * amount;
+    this.updateStarLayerScale(this.globalStarLight, distance);
+    this.updateStarLayerScale(this.localStarLight, distance);
+    this.updateSelectionMarkerScale(distance);
     if (this.centralMarker) {
       this.centralMarker.position.copy(this.centralMarker.userData.globalPosition);
       this.centralMarker.scale.setScalar(THREE.MathUtils.lerp(1, 0.72, amount));
     }
     const active = amount >= 0.55;
-    if (!force && active === this.overviewActive) return;
+    const activeChanged = active !== this.overviewActive;
     this.overviewActive = active;
-    this.visibleStars = active ? this.globalStars : this.localStars;
-    this.mapPositions = active ? this.globalMapPositions : this.localMapPositions;
-    for (const item of this.labelData || []) {
-      const index = this.visibleStars.findIndex((star) => star.id === item.star.id);
-      item.position = index >= 0 ? this.mapPositions[index] : item.position;
+    this.visibleStars = this.globalStars;
+    this.mapPositions = this.globalMapPositions;
+    if (force || activeChanged) {
+      this.els.count.textContent = `${this.globalStars.filter((star) => star.kind !== 'blackHole').length} / 1024`;
     }
-    this.els.count.textContent = active
-      ? `${this.globalStars.filter((star) => star.kind !== 'blackHole').length} / 1024`
-      : `${this.localStars.length} / ${STAR_LIMIT}`;
-    this.updateSelectionMarker();
+  }
+
+  updateStarLayerScale(layer, distance) {
+    if (!layer?.userData.starPositions?.length) return;
+    const worldPerPixel = 2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5))
+      / Math.max(1, this.renderer.domElement.clientHeight);
+    const worldSize = worldPerPixel * layer.userData.pixelSize;
+    const oldSize = layer.userData.worldSize;
+    if (oldSize && Math.abs(worldSize - oldSize) / oldSize < 0.006) return;
+    layer.userData.worldSize = worldSize;
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion();
+    const scale = new THREE.Vector3(worldSize, worldSize, worldSize);
+    for (let i = 0; i < layer.userData.starPositions.length; i++) {
+      matrix.compose(layer.userData.starPositions[i], rotation, scale);
+      layer.setMatrixAt(i, matrix);
+    }
+    layer.instanceMatrix.needsUpdate = true;
+  }
+
+  updateSelectionMarkerScale(distance) {
+    const marker = this.world?.getObjectByName('selection-marker');
+    if (!marker) return;
+    const worldPerPixel = 2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5))
+      / Math.max(1, this.renderer.domElement.clientHeight);
+    marker.scale.setScalar(worldPerPixel * 16);
   }
 
   buildGalaxyLabels(stars, current) {
@@ -899,10 +931,11 @@ export class StarMap {
           : star.civilizationTag ? 140
           : this.visitedSystems.has(star.id) ? 80
           : 10;
-        return { star, index, preview, priority, distance: this.mapPositions[index].lengthSq() };
+        const position = this.globalPositionById.get(star.id);
+        return { star, index, preview, priority, position, distance: position.lengthSq() };
       })
       .sort((a, b) => b.priority - a.priority || a.distance - b.distance);
-    this.labelData = candidates.map(({ star, index, preview, priority }) => {
+    this.labelData = candidates.map(({ star, preview, priority, position }) => {
       const button = document.createElement('div');
       button.className = 'sm-map-label';
       button.innerHTML = '<i></i><strong></strong><small></small>';
@@ -926,7 +959,7 @@ export class StarMap {
       });
       this.els.labelLayer.appendChild(button);
       return {
-        button, position: this.mapPositions[index], star,
+        button, position, star,
         width: preview.isBlackHoleSystem ? 154 : Math.min(132, 20 + preview.properName.length * 10),
         height: star.id === current.id ? 31 : 25,
         priority,

@@ -23,6 +23,8 @@ try {
   const audit = await page.evaluate(() => {
     const map = document.querySelector('#starmap-overlay').__starMapController;
     const bh = map.getUniverse().specialDestinations[0];
+    const localIds = new Set(map.localStars.map((star) => star.id));
+    const regular = map.globalStars.find((star) => star.kind !== 'blackHole' && !localIds.has(star.id));
     map.selectStar(bh, false);
     const globalIndex = map.globalStars.findIndex((star) => star.id === bh.id);
     const localIndex = map.localStars.findIndex((star) => star.id === bh.id);
@@ -71,7 +73,34 @@ try {
         hit: hit?.star.id || null,
       });
     }
-    return { id: bh.id, samples };
+    const regularIndex = map.globalStars.findIndex((star) => star.id === regular.id);
+    const regularPosition = map.globalMapPositions[regularIndex].clone();
+    map.controls.target.copy(regularPosition);
+    const regularSamples = [];
+    for (const distance of [22, 60, 82, 96, 150]) {
+      map.camera.position.set(regularPosition.x, regularPosition.y + distance, regularPosition.z + 0.01);
+      map.controls.update();
+      map.updateGalaxyOverview(true);
+      map.scene.updateMatrixWorld(true);
+      map.camera.updateMatrixWorld(true);
+      const projected = project(regularPosition);
+      const hit = map.pickStarAt({ clientX: rect.left + projected.x, clientY: rect.top + projected.y });
+      const matrixOffset = regularIndex * 16;
+      const matrixArray = map.globalStarLight.instanceMatrix.array;
+      const instanceScale = Math.hypot(
+        matrixArray[matrixOffset], matrixArray[matrixOffset + 1], matrixArray[matrixOffset + 2]);
+      const worldPerPixel = 2 * distance * Math.tan(map.camera.fov * Math.PI / 360)
+        / Math.max(1, map.renderer.domElement.clientHeight);
+      regularSamples.push({
+        distance,
+        hit: hit?.star.id || null,
+        inVisibleCatalogue: map.visibleStars.some((star) => star.id === regular.id),
+        globalOpacity: map.globalStarLight.material.opacity,
+        screenSize: instanceScale / worldPerPixel,
+        count: map.els.count.textContent,
+      });
+    }
+    return { id: bh.id, regularId: regular.id, samples, regularSamples };
   });
 
   for (const sample of audit.samples) {
@@ -82,6 +111,18 @@ try {
     assert(sample.labelDelta < 1.5,
       `label added a second displaced star point at zoom ${sample.distance} (${JSON.stringify(sample.labelOffset)})`);
     assert.equal(sample.hit, audit.id, `visible black-hole point was not pickable at zoom ${sample.distance}`);
+  }
+  for (const sample of audit.regularSamples) {
+    assert.equal(sample.hit, audit.regularId,
+      `ordinary non-local system was not pickable at zoom ${sample.distance}`);
+    assert.equal(sample.inVisibleCatalogue, true,
+      `ordinary non-local system left the visible catalogue at zoom ${sample.distance}`);
+    assert(sample.globalOpacity >= 0.9,
+      `ordinary systems faded below readable opacity at zoom ${sample.distance}`);
+    assert(Math.abs(sample.screenSize - 5.6) < 0.08,
+      `ordinary system changed screen size at zoom ${sample.distance}: ${sample.screenSize}`);
+    assert.equal(sample.count, '1024 / 1024',
+      `galaxy catalogue count switched at zoom ${sample.distance}`);
   }
   assert.equal(errors.length, 0, `star map emitted page errors: ${errors.join('\n')}`);
 
@@ -133,19 +174,23 @@ try {
       await webgpuPage.waitForTimeout(1000);
       const webgpuAudit = await webgpuPage.evaluate(() => {
         const map = document.querySelector('#starmap-overlay').__starMapController;
-        const bh = map.getUniverse().specialDestinations[0];
-        const index = map.globalStars.findIndex((star) => star.id === bh.id);
+        const localIds = new Set(map.localStars.map((star) => star.id));
+        const target = map.globalStars.find((star) => star.kind !== 'blackHole' && !localIds.has(star.id));
+        const index = map.globalStars.findIndex((star) => star.id === target.id);
         const position = map.globalMapPositions[index].clone();
         map.controls.target.copy(position);
-        map.camera.position.set(position.x, position.y + 150, position.z + 0.01);
-        map.controls.update();
-        map.updateGalaxyOverview(true);
-        map.updateMapLabels();
         const rect = map.renderer.domElement.getBoundingClientRect();
-        const projected = position.clone().project(map.camera);
-        const hit = map.pickStarAt({
-          clientX: rect.left + (projected.x * 0.5 + 0.5) * rect.width,
-          clientY: rect.top + (-projected.y * 0.5 + 0.5) * rect.height,
+        const hits = [22, 60, 82, 96, 150].map((distance) => {
+          map.camera.position.set(position.x, position.y + distance, position.z + 0.01);
+          map.controls.update();
+          map.updateGalaxyOverview(true);
+          map.scene.updateMatrixWorld(true);
+          map.camera.updateMatrixWorld(true);
+          const projected = position.clone().project(map.camera);
+          return map.pickStarAt({
+            clientX: rect.left + (projected.x * 0.5 + 0.5) * rect.width,
+            clientY: rect.top + (-projected.y * 0.5 + 0.5) * rect.height,
+          })?.star.id || null;
         });
         return {
           gameBackend: window.NMS.stats().rendererBackend,
@@ -153,8 +198,8 @@ try {
           starLayerType: map.globalStarLight.type,
           starLayerHasUv: !!map.globalStarLight.geometry.getAttribute('uv'),
           backdropOpacity: map.galaxyBackdrop.material.opacity,
-          hit: hit?.star.id || null,
-          target: bh.id,
+          hits,
+          target: target.id,
         };
       });
       assert.equal(webgpuAudit.gameBackend, 'webgpu', 'production scene did not use real WebGPU');
@@ -162,7 +207,8 @@ try {
       assert.equal(webgpuAudit.starLayerType, 'Mesh', 'star map did not use the backend-neutral instanced star discs');
       assert.equal(webgpuAudit.starLayerHasUv, true, 'star-map star discs have no UVs for their alpha texture');
       assert(webgpuAudit.backdropOpacity >= 0.4, 'spiral-arm backdrop is too faint at full-galaxy zoom');
-      assert.equal(webgpuAudit.hit, webgpuAudit.target, 'real-WebGPU visible black-hole point was not pickable');
+      assert(webgpuAudit.hits.every((hit) => hit === webgpuAudit.target),
+        'real-WebGPU ordinary system was not visible and pickable at every zoom level');
 
       const switchAudit = await webgpuPage.evaluate(async () => {
         const map = document.querySelector('#starmap-overlay').__starMapController;
