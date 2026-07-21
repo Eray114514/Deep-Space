@@ -16,13 +16,15 @@ for (const folder of ['src', 'vendor', 'assets', 'worlds']) {
   await cp(join(ROOT, folder), join(OUT, folder), { recursive: true });
 }
 
-// The import map resolves `three/addons/*` to `./node_modules/three/examples/jsm/`.
+// The import map resolves `three/addons/*` to `./vendor/three-addons/`.
 // Copying the entire jsm tree drags in ~14 MB of unused decoders (rhino3dm, draco,
 // ammo, basis, lottie, ...). Instead, expand the explicit entry list into the full
 // transitive closure of relative-path imports so runtime-only dependencies such
-// as GLTFLoader -> SkeletonUtils are never left behind on Vercel.
+// as GLTFLoader -> SkeletonUtils are never left behind. We place the addons under
+// `vendor/` instead of `node_modules/` so static hosts that honour .gitignore
+// (Cloudflare Pages, etc.) still upload the files.
 const JSM_SRC = join(ROOT, 'node_modules', 'three', 'examples', 'jsm');
-const JSM_DST = join(OUT, 'node_modules', 'three', 'examples', 'jsm');
+const JSM_DST = join(OUT, 'vendor', 'three-addons');
 const ADDON_ENTRIES = [
   'postprocessing/SMAAPass.js',
   'tsl/display/BloomNode.js',
