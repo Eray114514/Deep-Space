@@ -19,6 +19,23 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
 
+// Eager preload: start fetching the hero ship GLB the moment this module is
+// imported, so the network/decode overlap with main.js's heavy universe,
+// renderer, and scene setup. The ship itself stays off-screen (via
+// ship.introOffset) during the hero interface — this only front-loads the
+// asset fetch so the pull-back cinematic can begin the instant the user
+// clicks start, instead of stalling on the GLB the constructor used to kick
+// off late. Skipped under Node (test harness) where the URL has no origin.
+const HERO_SHIP_URL = '/assets/asterion-s9-rebuilt-20260716.glb';
+const heroShipLoader = new GLTFLoader();
+heroShipLoader.setMeshoptDecoder(MeshoptDecoder);
+const heroShipPromise = typeof location !== 'undefined'
+  ? heroShipLoader.loadAsync(HERO_SHIP_URL).catch((error) => {
+    console.error('ASTERION S-9 GLB failed to preload', error);
+    return null;
+  })
+  : Promise.resolve(null);
+
 // One authored size contract drives landing clearance and walk collision. The
 // source GLB bounds are [-14, -4.40003, -12.70865] to
 // [14, 3.17674, 11.87912]; the hero is rotated 180 degrees around Y and shown
@@ -331,9 +348,12 @@ export class Ship {
   }
 
   loadHeroShip() {
-    const loader = new GLTFLoader();
-    loader.setMeshoptDecoder(MeshoptDecoder);
-    loader.load('/assets/asterion-s9-rebuilt-20260716.glb', (gltf) => {
+    // Consumes the module-level heroShipPromise (started at import time) so
+    // the GLB fetch overlaps with main.js init. If the preload failed, the
+    // promise resolves to null and the ship stays invisible — the error was
+    // already logged by the preload's catch handler.
+    heroShipPromise.then((gltf) => {
+      if (!gltf) return;
       const hero = gltf.scene;
       this.loadedEmissives = [];
       this.loadedGear = [];
@@ -372,8 +392,6 @@ export class Ship {
       for (const part of this.loadedGear) part.visible = false;
       for (const part of this.loadedRamp) part.visible = false;
       this.heroLoaded = true;
-    }, undefined, (error) => {
-      console.error('ASTERION S-9 GLB failed to load; ship will be invisible until it loads', error);
     });
   }
 
