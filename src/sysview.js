@@ -10,7 +10,7 @@ import {
   positionWorld, pow, screenUV, sin, smoothstep, texture, uniform, uv, vec2,
   vec3, vec4,
 } from '../vendor/three.tsl.js';
-import { bloom } from '../node_modules/three/examples/jsm/tsl/display/BloomNode.js';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { makeRng, strHash32 } from './rng.js';
 import { orbitalPosition } from './astronomy.js';
 
