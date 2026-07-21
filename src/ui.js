@@ -1,9 +1,12 @@
 // HUD: system info, target card, contextual hints, land prompt,
 // HUD, transitions and input affordances. Pure DOM, no dependencies.
 
+import { ShipHUD } from './ship-hud.js';
+
 export class UI {
   constructor(callbacks = {}) {
     this.cb = callbacks;
+    this.shipHud = new ShipHUD();
     const $ = (id) => document.getElementById(id);
     this.els = {
       system: $('sys-name'), systemCatalog: $('sys-catalog'), cosmicTime: $('cosmic-time'), seed: $('sys-seed'), planetCount: $('sys-planets'),
@@ -103,16 +106,10 @@ export class UI {
     if (alt == null) {
       this._setText(this.els.altitudeValue, '—');
       this._setText(this.els.altitudeUnit, '');
-      const s = Number.isFinite(speed) ? speed : 0;
-      this._setText(this.els.speedValue, s > 1000 ? (s / 1000).toFixed(1) : s.toFixed(0));
-      this._setText(this.els.speedUnit, s > 1000 ? 'km/s' : 'm/s');
       return;
     }
     this._setText(this.els.altitudeValue, alt > 9999 ? (alt / 1000).toFixed(1) : alt.toFixed(0));
     this._setText(this.els.altitudeUnit, alt > 9999 ? 'km' : 'm');
-    const s = Number.isFinite(speed) ? speed : 0;
-    this._setText(this.els.speedValue, s > 1000 ? (s / 1000).toFixed(1) : s.toFixed(0));
-    this._setText(this.els.speedUnit, s > 1000 ? 'km/s' : 'm/s');
   }
 
   setCosmicTime(hours, localHours = null, scale = 60) {
@@ -135,15 +132,24 @@ export class UI {
       ? `脉冲 ${Math.round(pulseK * 100)}%`
       : boostK > 0.12 ? `加力 ${Math.round(boostK * 100)}%` : '待命');
     this._setText(this.els.driveAtmo, `${Math.round(atmoK * 100)}%`);
-    this.els.driveSpeedFill.style.width = `${Math.max(3, speedK * 100).toFixed(1)}%`;
-    this.els.driveBoostFill.style.width = `${(Math.max(boostK, pulseK) * 100).toFixed(1)}%`;
-    this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
+    if (this.els.driveSpeedFill) this.els.driveSpeedFill.style.width = `${Math.max(3, speedK * 100).toFixed(1)}%`;
+    if (this.els.driveBoostFill) this.els.driveBoostFill.style.width = `${(Math.max(boostK, pulseK) * 100).toFixed(1)}%`;
+    if (this.els.driveAtmoFill) this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
     this._setText(this.els.pulseFuel,
       `${Math.ceil(Math.max(0, pulseFuel))}/${Math.ceil(pulseFuelMax)}${pulseRecharging ? ' ↑' : ''}`);
-    this.els.pulseFuel.parentElement.classList.toggle('pulse-recharging', pulseRecharging);
+    this.els.pulseFuel?.parentElement?.classList.toggle('pulse-recharging', pulseRecharging);
+    this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax });
   }
 
-  _setText(el, value) { if (el.textContent !== value) el.textContent = value; }
+  beginWarpPower() { this.shipHud.beginWarpPower(); }
+
+  endWarpPower(immediate = false) { this.shipHud.endWarpPower(immediate); }
+
+  getPowerState() { return this.shipHud.getPowerState(); }
+
+  getPowerEffects() { return this.shipHud.getPowerEffects(); }
+
+  _setText(el, value) { if (el && el.textContent !== value) el.textContent = value; }
 
   setHeading(degrees) {
     const d = ((degrees % 360) + 360) % 360;
@@ -229,6 +235,7 @@ export class UI {
 
   showRouteChoice(show, name = '') {
     this.els.routeChoice.classList.toggle('hidden', !show);
+    document.body.classList.toggle('route-choice-active', show);
     if (show) this._setText(this.els.routeChoiceName, name || '未命名星系');
   }
 

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { createWeaponModel } from './weapon-models.js';
 
 // Directly ported ballistic profiles from futuristic-space-station. The two
@@ -62,7 +63,7 @@ export class SurfaceWeapons {
     // Keep the source optic's 4.2-degree magnification, but use this game's
     // astronomical far plane so the 400 km sky dome is not clipped to black.
     this.scopeCamera = new THREE.PerspectiveCamera(4.2, 1, 0.01, camera.far);
-    this.scopeTarget = new THREE.WebGLRenderTarget(512, 512, {
+    this.scopeTarget = new THREE.RenderTarget(512, 512, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: true,
@@ -86,9 +87,22 @@ export class SurfaceWeapons {
       group.add(flash);
       const laser = def.kind === 'laser' ? this.makeLaserEffect(group.userData.muzzle) : null;
       if (laser) group.add(laser.root);
-      if (group.userData.opticGlass?.material?.isMeshBasicMaterial) {
+      if (group.userData.opticGlass?.material?.isMeshBasicMaterial
+        && new URLSearchParams(location.search).get('renderer') !== 'webgpu') {
         group.userData.opticGlass.material.map = this.scopeTarget.texture;
         group.userData.opticGlass.material.needsUpdate = true;
+      } else if (group.userData.opticGlass?.material?.isMeshBasicMaterial) {
+        const oldMaterial = group.userData.opticGlass.material;
+        group.userData.opticGlass.material = new MeshBasicNodeMaterial({
+          color: oldMaterial.color,
+          map: this.scopeTarget.texture,
+          transparent: oldMaterial.transparent,
+          opacity: oldMaterial.opacity,
+          side: oldMaterial.side,
+          depthWrite: oldMaterial.depthWrite,
+          toneMapped: oldMaterial.toneMapped,
+        });
+        oldMaterial.dispose();
       }
       this.rig.add(group);
       return {

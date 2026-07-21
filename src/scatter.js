@@ -109,23 +109,6 @@ function propColors(planet) {
   return base;
 }
 
-// flora carries its colour per-vertex, so a flat material.emissive can't
-// follow it — patch the emissive term to inherit the vertex/instance tint.
-// Pods then glow in their own accent colour at night for free.
-function floraEmissive(mat) {
-  const prev = mat.onBeforeCompile;
-  mat.onBeforeCompile = (shader, renderer) => {
-    if (prev) prev(shader, renderer);
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <emissivemap_fragment>',
-      `#include <emissivemap_fragment>
-      #ifdef USE_COLOR
-        totalEmissiveRadiance *= vColor;
-      #endif`);
-  };
-  const key = mat.customProgramCacheKey;
-  mat.customProgramCacheKey = () => (key ? key.call(mat) : '') + '-flora';
-}
 // self-light per flora kind (keeps vegetation readable in shadow; pods glow)
 const FLORA_GLOW = { tree0: 0.16, tree1: 0.16, shrub: 0.14, pod: 0.55, grass: 0.09 };
 
@@ -151,11 +134,11 @@ export class Scatter {
       // a touch of self-light keeps the stylized props readable in shadow
       const glow = kind === 'crystal' ? 0.35
         : (kind === 'rock' || kind === 'boulder') ? 0.08 : 0.3;
-      const mat = new THREE.MeshStandardMaterial({
+      let mat = new THREE.MeshStandardMaterial({
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
       });
-      applyWindSway(mat, SWAY[kind] || 0);   // 0 sway still wires the grow scale
+      mat = applyWindSway(mat, SWAY[kind] || 0);   // 0 sway still wires the grow scale
       this.addMesh(planet, kind, GEO[kind], mat);
     }
     // this world's own species: geometry seeded by the planet, colours baked
@@ -163,15 +146,14 @@ export class Scatter {
     // The planet owns the geometries — the far tier shares them.
     this.flora = planet.flora || (planet.flora = buildFlora(planet));
     for (const kind of FLORA_KINDS) {
-      const mat = new THREE.MeshStandardMaterial({
+      let mat = new THREE.MeshStandardMaterial({
         color: 0xffffff, vertexColors: true, roughness: 0.9,
         // grass carries hand-authored up-normals (field-soft lighting) that
         // flat shading would discard
         flatShading: kind !== 'grass', side: THREE.DoubleSide,
       });
       mat.emissive.setScalar(FLORA_GLOW[kind]);
-      applyWindSway(mat, SWAY[kind] || 0);
-      floraEmissive(mat);
+      mat = applyWindSway(mat, SWAY[kind] || 0);
       const im = this.addMesh(planet, kind, this.flora[kind], mat);
       if (kind === 'grass') im.castShadow = false;   // invisible; halves its cost
     }

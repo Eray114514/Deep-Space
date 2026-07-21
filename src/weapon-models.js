@@ -177,7 +177,9 @@ function buildHoloSight(parent, z, y, mats, compact = false) {
   sight.add(glass);
   const reticleMaterial = new THREE.LineBasicMaterial({ color: 0xcaff4a, transparent: true, opacity: 0.72 });
   const curve = new THREE.EllipseCurve(0, 0, 0.015, 0.015, 0, Math.PI * 2);
-  const ring = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(curve.getPoints(30)), reticleMaterial);
+  const ringPoints = curve.getPoints(30);
+  const ringSegments = ringPoints.slice(0, -1).flatMap((point, index) => [point, ringPoints[index + 1]]);
+  const ring = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(ringSegments), reticleMaterial);
   ring.position.set(0, height / 2 + 0.012, -0.024);
   sight.add(ring);
   screw(sight, [width / 2 + 0.002, 0.012, 0.018], mats.edgeMetal);
@@ -253,10 +255,11 @@ function buildScope(parent, z, y, mats) {
   ];
   const reticleLines = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(reticlePoints), reticleMat);
   reticleOverlay.add(reticleLines);
-  const reticleRing = new THREE.LineLoop(
-    new THREE.BufferGeometry().setFromPoints(new THREE.EllipseCurve(0, 0, 0.016, 0.016, 0, Math.PI * 2).getPoints(48)),
-    reticleMat,
-  );
+  const reticleCircle = new THREE.EllipseCurve(0, 0, 0.016, 0.016, 0, Math.PI * 2).getPoints(48);
+  const reticleSegments = reticleCircle.slice(0, -1)
+    .flatMap((point, index) => [point, reticleCircle[index + 1]]);
+  const reticleRing = new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints(reticleSegments), reticleMat);
   reticleOverlay.add(reticleRing);
   const reticleDot = new THREE.Mesh(
     new THREE.CircleGeometry(0.0025, 16),

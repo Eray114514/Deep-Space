@@ -41,10 +41,14 @@ try {
   await page.waitForTimeout(200);
   await page.screenshot({ path: join(proofDir, 'binary-stars.png') });
 
-  const t0 = (await page.evaluate('NMS.time()')).hours;
+  const clockStart = await page.evaluate(() => ({ hours: NMS.time().hours, now: performance.now() }));
   await page.waitForTimeout(1200);
-  const t1 = (await page.evaluate('NMS.time()')).hours;
-  check(Math.abs((t1 - t0) - 0.02) < 0.012, `clock advances at 60× (${(t1 - t0).toFixed(4)} h / 1.2 s)`);
+  const clockEnd = await page.evaluate(() => ({ hours: NMS.time().hours, now: performance.now() }));
+  const clockElapsed = (clockEnd.now - clockStart.now) / 1000;
+  const clockDelta = clockEnd.hours - clockStart.hours;
+  const expectedClockDelta = clockElapsed / 60;
+  check(Math.abs(clockDelta - expectedClockDelta) < 0.012,
+    `clock advances at 60× (${clockDelta.toFixed(4)} h / ${clockElapsed.toFixed(2)} s)`);
   await page.evaluate('NMS.openStarMap()');
   await page.waitForTimeout(300);
   const mapT0 = (await page.evaluate('NMS.time()')).hours;

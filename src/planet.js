@@ -5,6 +5,11 @@
 // a dot across the system or the ground under your feet.
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import {
+  dot, exp, float, Fn, Loop, mix, positionLocal, pow, sqrt,
+  smoothstep as nodeSmoothstep, uniform, vec3, vec4,
+} from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
@@ -12,21 +17,26 @@ import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudBaseDensityC
 import { makeCloudVolumeMaterial } from './clouds.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { floraPalette } from './flora.js';
+import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
 
-// volumetric clouds are the default in the browser; ?vclouds=0 and
-// ?quality=low fall back to the flat decks (node/sanity has no location
-// and falls back too — the volume is render-only, never simulation)
+const USE_NODE_MATERIALS = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+
+// Volumetric clouds are the primary cloud representation in every runtime
+// quality tier. Low quality changes only the ray budget and volume-buffer
+// resolution; it never swaps to a different flat weather rendering.
 let volumetricCloudsEnabled = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('vclouds') !== '0'
-  && new URLSearchParams(location.search).get('quality') !== 'low';
+  && new URLSearchParams(location.search).get('vclouds') !== '0';
+let volumetricCloudQuality = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('quality') === 'low' ? 'low' : 'high';
 
 // GPU auto-tiering happens after the WebGL renderer identifies the adapter,
 // but before the first Universe is constructed. Keeping this as a runtime
-// capability (rather than a URL-only constant) guarantees that an auto-low
-// iGPU gets the analytic cloud deck instead of creating a volume that the
-// low-quality renderer deliberately has no pass to composite.
-export function setVolumetricCloudsEnabled(enabled) {
+// capability (rather than URL-only constants) also covers the auto-low iGPU
+// path selected after renderer creation.
+export function setVolumetricCloudsEnabled(enabled, quality = volumetricCloudQuality) {
   volumetricCloudsEnabled = !!enabled;
+  volumetricCloudQuality = quality === 'low' ? 'low' : 'high';
 }
 
 export const TYPES = {
@@ -72,7 +82,7 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, fadeIn = false, sunDir = null, tuning = null }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, fadeIn = false, sunDir = null, tuning = null, formation = null, ringSystem = null }) {
     this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
     // known at construction so even the root chunks bake sun shadows
     this.sunDirWorld = sunDir ? sunDir.clone() : new THREE.Vector3(0, 1, 0);
@@ -91,6 +101,8 @@ export class Planet {
     this.cfg = TYPES[type];
     this.atmosphere = atmosphere;
     this.cloudProfile = clouds;
+    this.formation = formation;
+    this.ringSystem = ringSystem;
     this.tuning = tuning ? { ...tuning } : {};
 
     // ---- dimensions: compressed planetary worlds, not gameplay marbles ----
@@ -172,6 +184,20 @@ export class Planet {
       this.stripeFreq = 14 + rand() * 22;
       this.stripeAxis = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
     }
+    // Formation history now modulates the existing world function instead of
+    // layering a disconnected orbit texture over it.  The same tectonic,
+    // impact, volcanic and erosion profile therefore survives orbital LOD,
+    // low flight, walking collision and the compatibility sentinels.
+    if (formation) {
+      this.mountAmp *= 0.72 + formation.tectonicActivity * 0.7;
+      this.plateauAmt = clamp(this.plateauAmt + formation.volcanicActivity * 0.24, 0, 1);
+      if (formation.impactRate > 0.18) {
+        this.craterAmp = Math.max(this.craterAmp, this.hAmp * formation.impactRate * 0.34);
+        this.craterFreq ||= 4.4 + rand() * 4.6;
+      }
+      if (this.canyonAmp > 0) this.canyonAmp *= 0.58 + formation.erosion * 0.88;
+      if (this.duneAmp > 0) this.duneAmp *= 0.72 + (1 - formation.waterInventory) * 0.58;
+    }
 
     // Wide chunks preserve the exact finest sampling density while replacing
     // each former 2×2 child set with one submission. Collision and gameplay
@@ -194,6 +220,8 @@ export class Planet {
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
     this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 1));
+    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 1 : 2);
+    this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
     const lodScreenScale = lowTierGrouping ? 0.25 : 1;
@@ -225,7 +253,7 @@ export class Planet {
     // living worlds get stronger continental tint drift (dry-brown swathes)
     const detailK = { desert: 0.3, barren: 0.34, lava: 0.3, exotic: 0.26, ice: 0.18 }[type] ?? 0.22;
     const macroK = { lush: 0.5, ocean: 0.45, ice: 0.2, toxic: 0.35 }[type] ?? 0.3;
-    applyTerrainDetail(this.terrainMaterial, this, detailK, macroK);
+    this.terrainMaterial = applyTerrainDetail(this.terrainMaterial, this, detailK, macroK);
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;
@@ -244,6 +272,7 @@ export class Planet {
     const a = this.appear;
     for (const f of this._fades) {
       f.mat.opacity = f.base * a;
+      if (f.mat.userData.opacityNodeUniform) f.mat.userData.opacityNodeUniform.value = f.base * a;
       f.mat.transparent = a < 1 || f.base < 1;
     }
     if (this.atmoMesh) this.atmoMesh.material.uniforms.density.value = this._atmoBaseDensity * a;
@@ -672,7 +701,7 @@ export class Planet {
         });
       }
       this.liquidMat = mat;
-      if (this.liquid === 'water' || this.liquid === 'toxic') applyWaterWaves(mat, this);
+      if (this.liquid === 'water' || this.liquid === 'toxic') mat = applyWaterWaves(mat, this);
       // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
       // mesh would sag metres between vertices at 100 km radius
       const waterCanonicalGrid = 12;
@@ -686,6 +715,8 @@ export class Planet {
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
         maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 1)),
+        orbitLevelCap: lowTierGrouping ? 1 : 2,
+        orbitPrewarmRadiusRatio: 1.75,
         lodDistanceScale: (waterCanonicalGrid / waterGridCells) * (lowTierGrouping ? 0.25 : 1),
         lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))
           * (lowTierGrouping ? 0.25 : 1),
@@ -745,9 +776,10 @@ export class Planet {
     const coverage = tunedCloudCoverage ?? naturalCloudCoverage;
     if (coverage > 0.05) {
       this.cloudCoverage = coverage;
-      // the visible clouds are shader-procedural (resolution-independent);
-      // this small texture only serves the terrain's cast cloud shadows
-      this.cloudShadowTex = makeCloudTexture(this.nD, coverage);
+      const o1 = [rand() * 7, rand() * 7, rand() * 7];
+      // This atlas is the single weather field for orbit, cloud shadows and
+      // the local volume. It is planet-local and cannot change with the camera.
+      this.cloudShadowTex = makeCloudTexture(this.nD, coverage, o1);
       // Keep the weather visibly inside the atmosphere. The old mountain×2
       // base put cloud tops on (or beyond) the atmospheric boundary, producing
       // a white crust around the limb instead of separated ground/cloud/air.
@@ -769,9 +801,9 @@ export class Planet {
         side: THREE.DoubleSide,
       });
       cmat.forceSinglePass = true;
-      const o1 = [rand() * 7, rand() * 7, rand() * 7];
-      applyCloudField(cmat, coverage, o1[0], o1[1], o1[2], thick * 0.72);
-      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cmat);
+      const cloudMat = applyCloudField(cmat, coverage, o1[0], o1[1], o1[2],
+        thick * 0.72, this.cloudShadowTex);
+      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cloudMat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
       this.cloudBands.push({
@@ -794,7 +826,9 @@ export class Planet {
           ox: o1[0], oy: o1[1], oz: o1[2],
           tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         };
-        this.volCloudMat = makeCloudVolumeMaterial(this, band, detailTexture());
+        this.volCloudMat = makeCloudVolumeMaterial(
+          this, band, detailTexture(), this.cloudShadowTex,
+          { quality: volumetricCloudQuality });
         this.volCloudMat.uniforms.uAmbC.value
           .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.58);
         this.volCloudMesh = new THREE.Mesh(
@@ -815,10 +849,13 @@ export class Planet {
           side: THREE.DoubleSide,
         });
         cmat2.forceSinglePass = true;
-        applyCloudField(cmat2, coverage * 0.42, o2[0], o2[1], o2[2], thick * 0.24);
+        this.cloudShadowTex2 = makeCloudTexture(
+          new Simplex(makeRng(`${this.seed}:cloud-upper:v1`)), coverage * 0.42, o2);
+        const upperCloudMat = applyCloudField(cmat2, coverage * 0.42,
+          o2[0], o2[1], o2[2], thick * 0.24, this.cloudShadowTex2);
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
-          new THREE.SphereGeometry(upperR, 192, 128), cmat2);
+          new THREE.SphereGeometry(upperR, 192, 128), upperCloudMat);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
         this.cloudSpin2 = o2[3];
@@ -831,8 +868,11 @@ export class Planet {
       }
     }
 
-    if (!this.isMoon && rand() < 0.24) {
-      const inner = R * (1.55 + rand() * 0.4), outer = inner + R * (0.5 + rand() * 0.7);
+    const ringSystem = this.ringSystem;
+    const ringPresent = ringSystem ? ringSystem.present : (!this.isMoon && rand() < 0.24);
+    if (!this.isMoon && ringPresent) {
+      const inner = R * (ringSystem?.innerRadiusRatio || (1.55 + rand() * 0.4));
+      const outer = R * (ringSystem?.outerRadiusRatio || (inner / R + 0.5 + rand() * 0.7));
       const geo = new THREE.RingGeometry(inner, outer, 160, 1);
       // map UV.x to radius for the band texture
       const pos = geo.attributes.position, uv = geo.attributes.uv;
@@ -843,7 +883,8 @@ export class Planet {
       const ringTint = this.pal.land[Math.min(2, this.pal.land.length - 1)].c;
       this.ringMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
         map: makeRingTexture(makeRng(this.seed + ':ring'), ringTint),
-        transparent: true, side: THREE.DoubleSide, depthWrite: false, opacity: 0.85,
+        transparent: true, side: THREE.DoubleSide, depthWrite: false,
+        opacity: ringSystem?.opticalDepth ? Math.min(0.92, 0.28 + ringSystem.opticalDepth * 0.68) : 0.85,
       }));
       this.ringMesh.quaternion.copy(this.axisQuat);
       this.ringMesh.rotateX(Math.PI / 2);
@@ -967,14 +1008,17 @@ export class Planet {
       const sh = this.terrainMaterial.userData.shader;
       if (sh) sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
       if (this.volCloudMesh) {
-        // The analytic shell is a distant LOD only. A real density field takes
-        // over from orbit through cloud transit and supplies parallax,
-        // extinction, self-shadowing and volumetric fog.
-        const camR = camLocal.length();
-        // The analytic weather deck is only an extreme-distance silhouette.
-        // Once a planet is a meaningful screen presence, the actual volume
-        // owns the cloud image even from orbit.
-        const e = smoothstep(4.5, 2.2, camR / this.R);
+        // High quality uses the raymarched shell as the primary cloud image at
+        // every viewing distance. The analytic sphere is strictly a distant-
+        // body LOD; leaving it over the active volume made high quality look
+        // exactly like the low-quality texture deck.
+        const target = focused ? 1 : 0;
+        // Initialize directly in the correct ownership state. Fading from the
+        // analytic deck after the first controllable frame exposed a visible
+        // flat-to-volume cloud replacement during startup.
+        if (this.volumeBlend === undefined) this.volumeBlend = target;
+        else this.volumeBlend += (target - this.volumeBlend) * (1 - Math.exp(-dt * 5));
+        const e = clamp(this.volumeBlend, 0, 1);
         const u = this.volCloudMat.uniforms;
         u.uEngage.value = e;
         u.uCameraLocal.value.copy(camLocal);
@@ -983,9 +1027,7 @@ export class Planet {
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
-        // Opacity zero still submits and shades a transparent full-screen
-        // sphere. Stop drawing the distant analytic deck once volume owns it.
-        this.cloudMesh.visible = (1 - e) > 0.012;
+        this.cloudMesh.visible = this.cloudMesh.material.opacity > 0.005;
       }
     }
     if (this.cloudMesh2) {
@@ -993,13 +1035,12 @@ export class Planet {
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
       if (this.volCloudMesh) {
-        const camR = camLocal.length();
-        const e = smoothstep(4.5, 2.2, camR / this.R);
+        const e = clamp(this.volumeBlend || 0, 0, 1);
         this.cloudMesh2.material.opacity = 0.28 * (1 - e);
-        this.cloudMesh2.visible = (1 - e) > 0.012;
+        this.cloudMesh2.visible = this.cloudMesh2.material.opacity > 0.005;
       } else {
-        // Low quality has no volumetric replacement, so both inexpensive
-        // analytic decks must remain present all the way to the ground.
+        // Headless generation and explicit ?vclouds=0 retain the analytic
+        // deck; runtime high/low quality both construct the shared volume.
         this.cloudMesh2.material.opacity = 0.28;
         this.cloudMesh2.visible = true;
       }
@@ -1076,6 +1117,7 @@ export class Planet {
     this.lod.dispose();
     if (this.waterLod) this.waterLod.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
+    if (this.cloudShadowTex2) this.cloudShadowTex2.dispose();
     if (this.flora) {
       for (const k in this.flora) if (this.flora[k] && this.flora[k].dispose) this.flora[k].dispose();
       this.flora = null;
@@ -1103,115 +1145,89 @@ const _msd = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function makeAtmosphereMaterial(color, density, groundR, atmoR) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      atmoColor: { value: color },
-      density: { value: density },
-      sunDir: { value: new THREE.Vector3(0, 1, 0) },   // planet-local, set by the system
-      uCameraLocal: { value: new THREE.Vector3() },
-      uGroundR: { value: groundR },
-      uAtmoR: { value: atmoR },
-      tSceneDepth: { value: null },
-      uDepthReady: { value: 0 },
-      uCameraFar: { value: 1.2e11 },
-      uVolumeSize: { value: new THREE.Vector2(1, 1) },
-    },
-    vertexShader: /* glsl */`
-      uniform vec3 uCameraLocal;
-      varying vec3 vDirection;
-      varying vec3 vViewDirection;
-      void main() {
-        vDirection = position - uCameraLocal;
-        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-        vViewDirection = viewPosition.xyz;
-        gl_Position = projectionMatrix * viewPosition;
-      }`,
-    fragmentShader: /* glsl */`
-      precision highp float;
-      uniform vec3 atmoColor;
-      uniform float density, uGroundR, uAtmoR;
-      uniform sampler2D tSceneDepth;
-      uniform float uDepthReady, uCameraFar;
-      uniform vec2 uVolumeSize;
-      uniform vec3 sunDir, uCameraLocal;
-      varying vec3 vDirection;
-      varying vec3 vViewDirection;
+  if (!USE_NODE_MATERIALS) {
+    return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
+  }
+  const nodes = {
+    atmoColor: uniform(color), density: uniform(density),
+    sunDir: uniform(new THREE.Vector3(0, 1, 0)),
+    uCameraLocal: uniform(new THREE.Vector3()),
+    uGroundR: uniform(groundR), uAtmoR: uniform(atmoR),
+    tSceneDepth: uniform(null, 'texture'), uDepthReady: uniform(0),
+    uCameraFar: uniform(1.2e11), uVolumeSize: uniform(new THREE.Vector2(1, 1)),
+  };
+  // Faithful TSL port of the former 14-step GLSL shell integration. The first
+  // migration replaced this participating medium with a Fresnel outline; that
+  // made the limb opaque neon-blue and removed the soft daylight haze.
+  const atmosphere = Fn(() => {
+    const origin = nodes.uCameraLocal;
+    const ray = positionLocal.sub(origin).normalize();
+    const bOuter = dot(origin, ray);
+    const discOuter = bOuter.mul(bOuter).sub(dot(origin, origin)).add(nodes.uAtmoR.mul(nodes.uAtmoR));
+    const outerRoot = sqrt(discOuter.max(0));
+    const t0 = bOuter.negate().sub(outerRoot).max(0).toVar();
+    const t1 = bOuter.negate().add(outerRoot).toVar();
 
-      vec2 sphereHits(vec3 origin, float r, vec3 dir) {
-        float b = dot(origin, dir);
-        float disc = b * b - dot(origin, origin) + r * r;
-        if (disc < 0.0) return vec2(-1.0);
-        float s = sqrt(disc);
-        return vec2(-b - s, -b + s);
-      }
+    const bGround = dot(origin, ray);
+    const discGround = bGround.mul(bGround).sub(dot(origin, origin)).add(nodes.uGroundR.mul(nodes.uGroundR));
+    const groundNear = bGround.negate().sub(sqrt(discGround.max(0)));
+    const clipsGround = discGround.greaterThan(0).and(groundNear.greaterThan(t0));
+    t1.assign(clipsGround.select(groundNear.min(t1), t1));
+    const span = t1.sub(t0).max(0);
+    const stepLength = span.div(14);
+    const t = t0.add(stepLength.mul(0.5)).toVar();
 
-      float sceneRayLimit() {
-        if (uDepthReady < 0.5) return 1e20;
-        vec2 uv = gl_FragCoord.xy / max(uVolumeSize, vec2(1.0));
-        float depth = texture2D(tSceneDepth, clamp(uv, 0.0, 1.0)).x;
-        if (depth >= 0.999999) return 1e20;
-        float forwardDistance = pow(uCameraFar + 1.0, depth) - 1.0;
-        float forwardCos = max(-normalize(vViewDirection).z, 0.035);
-        return forwardDistance / forwardCos;
-      }
-
-      void main() {
-        vec3 dir = normalize(vDirection);
-        vec2 outer = sphereHits(uCameraLocal, uAtmoR, dir);
-        if (outer.y <= 0.0) discard;
-        vec2 ground = sphereHits(uCameraLocal, uGroundR, dir);
-        float t0 = max(outer.x, 0.0);
-        float t1 = outer.y;
-        if (ground.x > t0) t1 = min(t1, ground.x);
-        t1 = min(t1, sceneRayLimit() + 1.5);
-        if (t1 <= t0) discard;
-
-        const int STEPS = 14;
-        float dt = (t1 - t0) / float(STEPS);
-        float t = t0 + dt * 0.5;
-        float mu = dot(dir, normalize(sunDir));
-        float rayleighPhase = 0.05968 * (1.0 + mu * mu);
-        float g = 0.76;
-        float miePhase = 0.07958 * (1.0 - g * g)
-          / pow(max(0.04, 1.0 + g * g - 2.0 * g * mu), 1.5);
-        vec3 rayleighColor = mix(vec3(0.48, 0.68, 1.0),
-          max(atmoColor, vec3(0.015)), 0.58);
-        vec3 col = vec3(0.0);
-        float trans = 1.0;
-        for (int i = 0; i < STEPS; i++) {
-          vec3 p = uCameraLocal + dir * t;
-          float r = length(p);
-          float h = clamp((r - uGroundR) / max(uAtmoR - uGroundR, 1.0), 0.0, 1.0);
-          float rhoR = exp(-h * 6.2) * density;
-          float rhoM = exp(-h * 15.0) * density * 0.22;
-          vec3 radial = p / max(r, 1.0);
-          float sunMu = dot(radial, normalize(sunDir));
-          float horizon = smoothstep(-0.13, 0.055, sunMu);
-          float slant = 1.0 / max(0.16, sunMu + 0.32);
-          float sunTrans = exp(-(rhoR * 0.32 + rhoM * 1.4) * slant) * horizon;
-          // Soft multi-scatter approximation keeps the terminator and cloud
-          // shadows from turning unnaturally black while preserving sunset.
-          vec3 scatter = rayleighColor * rhoR * rayleighPhase
-            + vec3(1.0, 0.93, 0.82) * rhoM * miePhase;
-          scatter *= sunTrans + 0.075 * density * (1.0 - h);
-          float extinction = (rhoR * 0.58 + rhoM * 1.8) * dt / max(uAtmoR - uGroundR, 1.0);
-          float a = 1.0 - exp(-extinction * 0.62);
-          col += trans * a * scatter * 11.0;
-          trans *= 1.0 - a;
-          t += dt;
-        }
-        float alpha = clamp(1.0 - trans, 0.0, 0.985);
-        if (alpha < 0.001) discard;
-        gl_FragColor = vec4(col, alpha);
-      }`,
+    const mu = dot(ray, nodes.sunDir.normalize());
+    const rayleighPhase = float(0.05968).mul(float(1).add(mu.mul(mu)));
+    const g = float(0.76);
+    const miePhase = float(0.07958).mul(float(1).sub(g.mul(g)))
+      .div(float(1).add(g.mul(g)).sub(g.mul(mu).mul(2)).max(0.04).pow(1.5));
+    const rayleighColor = mix(vec3(0.48, 0.68, 1), nodes.atmoColor.max(vec3(0.015)), 0.58);
+    const integrated = vec3(0).toVar();
+    const transmission = float(1).toVar();
+    Loop(14, () => {
+      const samplePosition = origin.add(ray.mul(t));
+      const radius = samplePosition.length();
+      const height = radius.sub(nodes.uGroundR)
+        .div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
+      const rhoR = exp(height.mul(-6.2)).mul(nodes.density);
+      const rhoM = exp(height.mul(-15)).mul(nodes.density).mul(0.22);
+      const radial = samplePosition.div(radius.max(1));
+      const sunMu = dot(radial, nodes.sunDir.normalize());
+      const horizon = nodeSmoothstep(-0.13, 0.055, sunMu);
+      const slant = float(1).div(sunMu.add(0.32).max(0.16));
+      const sunTransmission = exp(rhoR.mul(0.32).add(rhoM.mul(1.4)).mul(slant).negate())
+        .mul(horizon);
+      const scatter = rayleighColor.mul(rhoR).mul(rayleighPhase)
+        .add(vec3(1, 0.93, 0.82).mul(rhoM).mul(miePhase))
+        .mul(sunTransmission.add(nodes.density.mul(float(1).sub(height)).mul(0.075)));
+      const extinction = rhoR.mul(0.58).add(rhoM.mul(1.8)).mul(stepLength)
+        .div(nodes.uAtmoR.sub(nodes.uGroundR).max(1));
+      const alphaStep = float(1).sub(exp(extinction.mul(-0.62)));
+      integrated.addAssign(scatter.mul(transmission).mul(alphaStep).mul(11));
+      transmission.mulAssign(float(1).sub(alphaStep));
+      t.addAssign(stepLength);
+    });
+    const valid = discOuter.greaterThan(0).and(t1.greaterThan(t0));
+    const alpha = valid.select(float(1).sub(transmission).clamp(0, 0.985), float(0));
+    return vec4(integrated, alpha);
+  })();
+  const material = new MeshBasicNodeMaterial({
     side: THREE.BackSide,
     transparent: true,
     premultipliedAlpha: true,
     depthWrite: false,
   });
+  // The integration accumulator is premultiplied.  NodeMaterial's
+  // premultiplied-alpha output stage performs the actual multiplication, so
+  // feed it straight RGB to avoid the WebGPU-only alpha-squared haze loss.
+  material.colorNode = atmosphere.rgb.div(atmosphere.a.max(0.0001));
+  material.opacityNode = atmosphere.a;
+  material.uniforms = nodes;
+  return material;
 }
 
-function makeCloudTexture(simplex, coverage) {
+function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0]) {
   const W = 1024, H = 512;
   const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
   if (!canvas) return null;
@@ -1225,13 +1241,17 @@ function makeCloudTexture(simplex, coverage) {
     for (let i = 0; i < W; i++) {
       const th = (i / W) * Math.PI * 2;
       const cx = Math.cos(th) * cr, cz = Math.sin(th) * cr;
-      // cap octaves at the texture's own resolution: finer noise would
-      // alias into hard per-texel blocks once thresholded
-      let v = simplex.fbm(cx + 5, cy + 5, cz - 5, 4.2, 6, 0.55, 2.3, 45);
-      v = smoothstep(0.62 - coverage * 0.22, 0.88 - coverage * 0.15, v * 0.5 + 0.5);
-      v = Math.pow(v, 1.35);              // cauliflower edges, puffy cores
+      // The exact same deterministic weather function drives CPU transit fog
+      // and GPU rendering. Fine seeded noise only erodes the shared density;
+      // it never creates an independent camera-facing cloud pattern.
+      const dir = { x: cx, y: cy, z: cz };
+      let v = cloudDensityCPU(dir,
+        0.55 - coverage * 0.24, 0.86 - coverage * 0.14,
+        offsets[0], offsets[1], offsets[2]);
+      const erosion = simplex.fbm(cx + 5, cy + 5, cz - 5, 7.5, 4, 0.54, 2.2, 38) * 0.5 + 0.5;
+      v = clamp(v * (0.78 + erosion * 0.32), 0, 1);
       const k = (j * W + i) * 4;
-      d[k] = d[k + 1] = d[k + 2] = 255;
+      d[k] = d[k + 1] = d[k + 2] = (v * 255) | 0;
       d[k + 3] = (v * 255) | 0;
     }
   }
@@ -1243,6 +1263,8 @@ function makeCloudTexture(simplex, coverage) {
   ctx.filter = 'none';
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.colorSpace = THREE.NoColorSpace;
   return tex;
 }
 

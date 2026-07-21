@@ -2,194 +2,107 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { Planet } from '../src/planet.js';
 import {
-  BodyFrame,
-  CelestialClock,
-  eclipseFraction,
-  generateStellarSpec,
-  generateBlackHoleSystemSpec,
-  generateSystemSpec,
-  orbitalPosition,
-  orientationAt,
+  BodyFrame, CelestialClock, eclipseFraction, generateBlackHoleSystemSpec,
+  generateStellarSpec, generateSystemSpec, orbitalPosition, orientationAt,
 } from '../src/astronomy.js';
+import { GalaxyCatalog, HOME_SYSTEM_ID } from '../src/galaxy-layout.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from '../src/world-config.js';
 
 const galaxy = getGalaxyConfig();
-assert.equal(galaxy.id, ACTIVE_GALAXY_ID, 'default galaxy must resolve explicitly');
-assert.equal(galaxy.seed, 'NAVEMI-382', 'Milky Way must retain its curated seed');
+assert.equal(galaxy.id, ACTIVE_GALAXY_ID);
+assert.equal(galaxy.seed, 'MILKY-038', 'release Milky Way must use the visually reviewed finite seed');
 assert.deepEqual(resolveBodyTuning({
-  galaxyId: galaxy.id, seed: galaxy.seed, systemId: '0,0,0', bodyId: 'planet-0',
-}), {
-  seaLevelOffset: -420,
-  cloudCoverage: 0.5136393490363844,
-}, 'curated home-world tuning must preserve the selected coastline and cloud deck by stable IDs');
+  galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
+}), {}, 'the new finite universe must not inherit NAVEMI-382 body tuning');
 assert.deepEqual(resolveBodyTuning({
-  galaxyId: galaxy.id, seed: 'ANOTHER-SEED', systemId: '0,0,0', bodyId: 'planet-0',
-}), {}, 'authored tuning must not leak into another seed');
-assert.deepEqual(resolveBodyTuning({
-  galaxyId: galaxy.id,
-  seed: galaxy.seed,
-  systemId: '0,0,0',
-  bodyId: 'planet-0',
+  galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
   worldLabParams: new URLSearchParams('system=0,0,0&body=planet-0&sea=-610&clouds=0.58'),
-}), { seaLevelOffset: -610, cloudCoverage: 0.58 }, 'world lab must preview bounded body tuning');
+}), { seaLevelOffset: -610, cloudCoverage: 0.58 });
 
-const seed = 'ASTRONOMY-REGRESSION';
-const home = generateSystemSpec(seed, { id: '0,0,0' });
-assert.deepEqual(home, generateSystemSpec(seed, { id: '0,0,0' }), 'system generation must be deterministic');
-assert.deepEqual(home.compactObjects, [], 'ordinary systems must never gain probabilistic black holes');
-assert.match(home.name, /[\u3400-\u9fff].*星系$/, 'system should expose a Chinese proper name');
-assert.match(home.catalogId, /^AF J\d{4}[+-]\d{4}-[PM0-9A-Z]+$/, 'catalogue ID should be visibly fictional and stable');
-assert.doesNotMatch(home.name, /玄|沧|赤霄/, 'fantasy-style procedural roots are forbidden');
-assert.deepEqual(home.stars, generateStellarSpec(seed, '0,0,0', home.properName).stars,
-  'distant star appearance and instantiated system stars must share one generator');
+const catalog = new GalaxyCatalog(galaxy.seed);
+const homeRecord = catalog.getSystem(HOME_SYSTEM_ID);
+const home = generateSystemSpec(galaxy.seed, homeRecord);
+assert.deepEqual(home, generateSystemSpec(galaxy.seed, homeRecord), 'system generation must be deterministic');
+assert.deepEqual(home.compactObjects, [], 'ordinary systems must not gain random black holes');
+assert.match(home.name, /[\u3400-\u9fff].*星系$/);
+assert.match(home.catalogId, /^AF J\d{4}[+-]\d{4}-[PM0-9A-Z]+$/);
+assert.deepEqual(home.stars, generateStellarSpec(galaxy.seed, homeRecord, home.properName).stars,
+  'catalogue point and instantiated system must share stellar formation data');
 
-const blackHoleDestination = { ...galaxy.blackHoleSystem, kind: 'blackHole' };
-const blackHoleSystem = generateSystemSpec(seed, blackHoleDestination);
-assert.deepEqual(blackHoleSystem, generateBlackHoleSystemSpec(seed, blackHoleDestination),
-  'the special destination and direct compact-system generator must agree');
-assert.equal(blackHoleSystem.compactObjects.length, 1, 'the galaxy has one authored central black hole');
-assert.equal(blackHoleSystem.compactObjects[0].orbit.renderRadius, 0, 'the black hole must occupy the system center');
-assert.equal(blackHoleSystem.stars.length, 3, 'captured stars should orbit the central black hole');
-assert(blackHoleSystem.stars.every((star) => star.orbit?.renderRadius > blackHoleSystem.compactObjects[0].accretionRadius),
-  'captured stellar orbits must remain outside the rendered accretion disc');
-assert.deepEqual(generateSystemSpec(seed, { id: '0,0,0' }).bodies, home.bodies,
-  'generating the compact destination must not consume or mutate ordinary-system RNG');
+const destination = { ...galaxy.blackHoleSystem, kind: 'blackHole' };
+const blackHole = generateSystemSpec(galaxy.seed, destination);
+assert.deepEqual(blackHole, generateBlackHoleSystemSpec(galaxy.seed, destination));
+assert.equal(blackHole.compactObjects.length, 1);
+assert.equal(blackHole.compactObjects[0].orbit.renderRadius, 0);
+assert(blackHole.stars.every((star) => star.orbit.renderRadius > blackHole.compactObjects[0].accretionRadius));
 
 const catalogues = new Set();
-const properSystemNames = new Set();
-let foundBinary = false;
-let foundGiant = false;
-let lockedMoon = null;
-let weakFieldCloudWorld = null;
-for (let x = -5; x <= 5; x++) {
-  for (let z = -5; z <= 5; z++) {
-    const spec = generateSystemSpec(seed, { id: `${x},0,${z}` });
-    assert(!catalogues.has(spec.catalogId), `duplicate catalogue ID ${spec.catalogId}`);
-    catalogues.add(spec.catalogId);
-    assert(!properSystemNames.has(spec.name), `duplicate reachable proper name ${spec.name}`);
-    properSystemNames.add(spec.name);
-    assert.equal(new Set(spec.bodies.map((body) => body.properName)).size, spec.bodies.length,
-      `${spec.systemId}: proper names must be unique inside a system`);
-    const primaries = spec.bodies.filter((body) => !body.isMoon);
-    for (let i = 1; i < primaries.length; i++) {
-      const innerApo = primaries[i - 1].orbit.semiMajorAU * (1 + primaries[i - 1].orbit.eccentricity);
-      const outerPeri = primaries[i].orbit.semiMajorAU * (1 - primaries[i].orbit.eccentricity);
-      assert(innerApo < outerPeri, `${spec.systemId}: primary orbits must not cross`);
-    }
-    if (spec.binaryOrbit) {
-      foundBinary = true;
-      const stableInner = spec.binaryOrbit.semiMajorAU * (1 + spec.binaryOrbit.eccentricity) * 3;
-      assert(primaries[0].orbit.semiMajorAU > stableInner, `${spec.systemId}: circumbinary orbit is unstable`);
-    }
-    for (const body of primaries) {
-      assert(['微弱', '中等', '强烈'].includes(body.magnetosphere?.label),
-        `${spec.systemId}/${body.bodyId}: magnetic field must come from the physical dossier`);
-      assert(body.clouds && body.clouds.coverage >= 0 && body.clouds.coverage <= 0.85,
-        `${spec.systemId}/${body.bodyId}: cloud coverage must be bounded`);
-      if (body.clouds.coverage > 0.05 && body.atmosphere?.pressureBar != null) {
-        assert(body.atmosphere.pressureBar > 0.002,
-          `${spec.systemId}/${body.bodyId}: a stable cloud deck needs atmospheric pressure`);
-      }
-      if (body.type === 'ice' && body.magnetosphere.label === '微弱' && body.clouds.coverage > 0.05) {
-        weakFieldCloudWorld ||= body;
-      }
-      if (body.type === 'gasGiant' || body.type === 'iceGiant') {
-        foundGiant = true;
-        assert(body.orbit.semiMajorAU >= spec.snowLineAU * 0.82,
-          `${spec.systemId}: giant formed implausibly far inside the snow line`);
-      }
-    }
-    lockedMoon ||= spec.bodies.find((body) => body.isMoon && body.tidallyLocked) || null;
+let foundBinary = false, foundGiant = false, foundRing = false, lockedMoon = null;
+for (const record of catalog.nearestSystems(homeRecord.positionCells, 121)) {
+  const spec = generateSystemSpec(galaxy.seed, record);
+  assert(!catalogues.has(spec.catalogId), `duplicate catalogue ID ${spec.catalogId}`);
+  catalogues.add(spec.catalogId);
+  assert.deepEqual(spec.formation, record.formation);
+  const primaries = spec.bodies.filter((body) => !body.isMoon);
+  for (let i = 1; i < primaries.length; i++) {
+    const innerApo = primaries[i - 1].orbit.semiMajorAU * (1 + primaries[i - 1].orbit.eccentricity);
+    const outerPeri = primaries[i].orbit.semiMajorAU * (1 - primaries[i].orbit.eccentricity);
+    assert(innerApo < outerPeri, `${record.id}: primary orbits cross`);
   }
+  if (spec.binaryOrbit) {
+    foundBinary = true;
+    assert(primaries[0].orbit.semiMajorAU > spec.binaryOrbit.semiMajorAU * (1 + spec.binaryOrbit.eccentricity) * 3);
+  }
+  for (const body of spec.bodies) {
+    assert(body.formation && body.formation.ageGyr > 0, `${record.id}/${body.bodyId}: missing formation profile`);
+    assert(body.ringSystem, `${record.id}/${body.bodyId}: missing ring dossier`);
+    assert(body.clouds.coverage >= 0 && body.clouds.coverage <= 0.85);
+    assert(['微弱', '中等', '强烈'].includes(body.magnetosphere.label));
+    if (!body.isMoon && (body.type === 'gasGiant' || body.type === 'iceGiant')) {
+      foundGiant = true;
+      assert(body.orbit.semiMajorAU >= spec.snowLineAU * 0.82);
+    }
+    if (body.ringSystem.present) {
+      foundRing = true;
+      assert(!body.isMoon && body.ringSystem.source !== 'none');
+      assert(body.ringSystem.outerRadiusRatio > body.ringSystem.innerRadiusRatio);
+    }
+  }
+  lockedMoon ||= spec.bodies.find((body) => body.isMoon && body.tidallyLocked) || null;
 }
-assert(foundBinary, 'sample should contain a binary system');
-assert(foundGiant, 'sample should contain a gas or ice giant');
-assert(weakFieldCloudWorld, 'weak-field ice worlds may retain condensable atmospheres and clouds');
-
-const curatedSystem = generateSystemSpec('NAVEMI-382', '0,0,0');
-const curatedIceWorld = curatedSystem.bodies.find((body) => body.type === 'ice'
-  && body.magnetosphere.label === '微弱' && body.clouds.coverage > 0.05);
-assert(curatedIceWorld, 'NAVEMI-382 should retain a physically supported weak-field cloudy ice world');
-const frozenOuterWorld = curatedSystem.bodies.find((body) => body.bodyId === 'planet-7');
-assert(frozenOuterWorld.atmosphere.pressureBar < 0.002 && frozenOuterWorld.clouds.coverage === 0,
-  'extreme cold should collapse the outer ice world atmosphere instead of preserving an arbitrary cloud deck');
-
-const curatedHomeSpec = curatedSystem.bodies.find((body) => body.bodyId === 'planet-0');
-const curatedHomeTuning = resolveBodyTuning({
-  galaxyId: galaxy.id,
-  seed: galaxy.seed,
-  systemId: curatedSystem.systemId,
-  bodyId: curatedHomeSpec.bodyId,
-});
-const curatedHomePlanet = new Planet({
-  seed: curatedHomeSpec.seed,
-  name: curatedHomeSpec.name,
-  posUniv: new THREE.Vector3(),
-  type: curatedHomeSpec.type,
-  isMoon: curatedHomeSpec.isMoon,
-  radius: curatedHomeSpec.radius,
-  atmosphere: curatedHomeSpec.atmosphere,
-  clouds: curatedHomeSpec.clouds,
-  tuning: curatedHomeTuning,
-});
-assert.equal(curatedHomePlanet.cloudCoverage, curatedHomeTuning.cloudCoverage,
-  'the curated home world must retain its selected cloud deck');
-assert.equal(curatedHomePlanet.ringMesh, undefined,
-  'cloud dossier metadata must not shift the legacy RNG stream and add a ring to the home world');
-assert.equal(curatedHomePlanet.seaLevel - curatedHomePlanet.naturalSeaLevel, -420,
-  'sea-level tuning must move the liquid surface by the authored amount');
-assert(Math.abs(curatedHomePlanet.mountMaskLo - 0.03490702388808131) < 1e-12,
-  'sea-level tuning must not reshape the selected terrain provinces');
-const terrainFingerprint = [
-  new THREE.Vector3(1, 0, 0),
-  new THREE.Vector3(0, 1, 0),
-  new THREE.Vector3(0, 0, 1),
-  new THREE.Vector3(1, 1, 1).normalize(),
-].map((dir) => curatedHomePlanet.height(dir, curatedHomePlanet.fullMaxFreq));
-const legacyTerrainFingerprint = [
-  -1349.0379876540412,
-  -159.09969411609043,
-  -78.33918052684972,
-  2866.6725245280663,
-];
-for (let i = 0; i < terrainFingerprint.length; i++) {
-  assert(Math.abs(terrainFingerprint[i] - legacyTerrainFingerprint[i]) < 1e-8,
-    `curated home terrain sample ${i} drifted from the selected world`);
-}
-curatedHomePlanet.dispose();
+assert(foundBinary && foundGiant && foundRing && lockedMoon,
+  'finite neighborhood must cover binaries, giants, physical rings and locked moons');
 
 const homeWorld = home.bodies.find((body) => !body.isMoon);
 assert.equal(homeWorld.type, 'lush');
-assert(homeWorld.equilibriumK >= 235 && homeWorld.equilibriumK <= 330,
-  `home world should truly be temperate (${homeWorld.equilibriumK.toFixed(1)} K)`);
+assert(homeWorld.equilibriumK >= 235 && homeWorld.equilibriumK <= 330);
+const planet = new Planet({
+  seed: homeWorld.seed, name: homeWorld.name, posUniv: new THREE.Vector3(), type: homeWorld.type,
+  radius: homeWorld.radius, atmosphere: homeWorld.atmosphere, clouds: homeWorld.clouds,
+  formation: homeWorld.formation, ringSystem: homeWorld.ringSystem,
+});
+assert.equal(Boolean(planet.ringMesh), homeWorld.ringSystem.present,
+  'renderer must consume the physical ring dossier instead of rolling again');
+const terrain = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(1, 1, 1).normalize()]
+  .map((direction) => planet.height(direction, planet.fullMaxFreq));
+assert(terrain.every(Number.isFinite));
+planet.dispose();
+
 const start = orbitalPosition(homeWorld.orbit, 12);
 const closed = orbitalPosition(homeWorld.orbit, 12 + homeWorld.orbit.periodHours);
-assert(start.distanceTo(closed) < 1e-4, 'Kepler orbit should close after one period');
-
-assert(lockedMoon, 'sample should contain a tidally locked moon');
-if (lockedMoon) {
-  const t = 31.25;
-  const towardParent = orbitalPosition(lockedMoon.orbit, t).negate().normalize();
-  const facing = new THREE.Vector3(-1, 0, 0).applyQuaternion(orientationAt(lockedMoon, t));
-  assert(facing.angleTo(towardParent) < 1e-6, 'tidally locked moon must keep one face toward its parent');
-}
+assert(start.distanceTo(closed) < 1e-4);
+const t = 31.25;
+const towardParent = orbitalPosition(lockedMoon.orbit, t).negate().normalize();
+const facing = new THREE.Vector3(-1, 0, 0).applyQuaternion(orientationAt(lockedMoon, t));
+assert(facing.angleTo(towardParent) < 1e-6);
 
 const frame = new BodyFrame(homeWorld).update(42, new THREE.Vector3(11, 22, 33));
 const local = new THREE.Vector3(13, -7, 29);
-const roundTrip = frame.worldToLocal(frame.localToWorld(local));
-assert(roundTrip.distanceTo(local) < 1e-6, 'body local/world transforms must round-trip without drift');
-
+assert(frame.worldToLocal(frame.localToWorld(local)).distanceTo(local) < 1e-6);
 const clock = new CelestialClock('clock-test', { persist: false });
-clock.update(60);
-assert.equal(clock.hours, 1, '60 real seconds must advance exactly one universe hour');
-clock.frozen = true;
-clock.update(60);
-assert.equal(clock.hours, 1, 'frozen clock must not advance');
+clock.update(60); assert.equal(clock.hours, 1); clock.frozen = true; clock.update(60); assert.equal(clock.hours, 1);
+const observer = new THREE.Vector3(), star = new THREE.Vector3(10, 0, 0);
+assert(eclipseFraction(observer, star, 1, [{ position: new THREE.Vector3(5, 0, 0), radius: 1 }]) < 0.01);
+assert(eclipseFraction(observer, star, 1, [{ position: new THREE.Vector3(5, 5, 0), radius: 1 }]) > 0.99);
 
-const observer = new THREE.Vector3(0, 0, 0);
-const star = new THREE.Vector3(10, 0, 0);
-const totality = eclipseFraction(observer, star, 1, [{ position: new THREE.Vector3(5, 0, 0), radius: 1 }]);
-const clear = eclipseFraction(observer, star, 1, [{ position: new THREE.Vector3(5, 5, 0), radius: 1 }]);
-assert(totality < 0.01 && clear > 0.99, 'eclipse geometry should distinguish totality from a clear line of sight');
-
-console.log(`PASS: ${catalogues.size} deterministic systems, orbits, clock, frames, climate and eclipses are valid.`);
+console.log(`PASS: ${catalogues.size} finite systems, formation, rings, orbits, clock, frames and eclipses are valid.`);

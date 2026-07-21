@@ -40,6 +40,15 @@ export function pulseBurstDistance(speedScale, altitude = Infinity, hasBody = fa
   return distance;
 }
 
+// The RMB boost governor is also the HUD's full-scale mark. Keep this as one
+// pure contract so flight physics and the cockpit pointer cannot drift apart.
+export function flightBoostSpeedLimit(speedScale, atmosphereFactor = 0, gravityPower = 1) {
+  const atmosphere = clamp(atmosphereFactor, 0, 1);
+  return Math.max(0, speedScale)
+    * (8.4 + (1 - atmosphere) * 2.62)
+    * Math.max(0, gravityPower);
+}
+
 // Remove only roll around the current viewing direction. Forward/pitch remain
 // untouched, so planetary horizon assist never steals aiming from the player.
 export function stabilizeHorizon(quat, surfaceUp, amount = 1) {
@@ -90,14 +99,15 @@ export function guidePlanetApproach(velocity, forward, radialOut,
   return intersects;
 }
 
-export function applyFlightThrusters(velocity, quat, throttle, strafe, speedScale, dt) {
+export function applyFlightThrusters(velocity, quat, throttle, strafe, speedScale, dt,
+  gravityPower = 1, navigationPower = 1) {
   if (throttle) {
     _f.set(0, 0, -1).applyQuaternion(quat);
-    velocity.addScaledVector(_f, throttle * speedScale * 3.0 * dt);
+    velocity.addScaledVector(_f, throttle * speedScale * 3.0 * gravityPower * dt);
   }
   if (strafe) {
     _r.set(1, 0, 0).applyQuaternion(quat);
-    velocity.addScaledVector(_r, strafe * speedScale * 4.2 * dt);
+    velocity.addScaledVector(_r, strafe * speedScale * 4.2 * navigationPower * dt);
   }
   return velocity;
 }
@@ -109,6 +119,8 @@ export class SpaceControls {
     this.onClick = onClick;
     this.enabled = true;
     this.speedScale = 1000;          // set per-frame by main from altitude
+    this.gravityPower = 1;
+    this.navigationPower = 1;
     this.atmosphereFactor = 0;
     this.surfaceUp = new THREE.Vector3(0, 1, 0);
     this.horizonAssist = 0;
@@ -219,19 +231,19 @@ export class SpaceControls {
     if (this._drag && this._drag.id === e.pointerId) {
       this._drag.moved += Math.abs(dx) + Math.abs(dy);
       // drag-look fallback for nolock mode and touch.
-      this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -dx * 0.0026));
-      this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -dy * 0.0026));
+      this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -dx * 0.0026 * this.navigationPower));
+      this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -dy * 0.0026 * this.navigationPower));
       this.nav.quat.normalize();
-      this.captureLookInput(dx, dy);
+      this.captureLookInput(dx * this.navigationPower, dy * this.navigationPower);
     }
   }
 
   lockedMove(e) {
     if (!this.enabled || document.pointerLockElement !== this.dom) return;
-    this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -e.movementX * 0.0019));
-    this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -e.movementY * 0.0019));
+    this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -e.movementX * 0.0019 * this.navigationPower));
+    this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -e.movementY * 0.0019 * this.navigationPower));
     this.nav.quat.normalize();
-    this.captureLookInput(e.movementX, e.movementY);
+    this.captureLookInput(e.movementX * this.navigationPower, e.movementY * this.navigationPower);
   }
 
   captureLookInput(dx, dy) {
@@ -314,12 +326,12 @@ export class SpaceControls {
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);
       const wheelGain = 0.012 * (1 - this.atmosphereFactor * 0.55);
-      nav.vel.addScaledVector(_f, this.wheelImpulse * wheelGain * this.speedScale);
+      nav.vel.addScaledVector(_f, this.wheelImpulse * wheelGain * this.speedScale * this.gravityPower);
       this.wheelImpulse = 0;
       // Loosen the atmospheric cruise cap a touch: the old 18→5 drop (−72%)
       // felt like hitting a wall. 18→8 keeps space top speed intact while
       // letting dense-air flight breathe.
-      const maxV = this.speedScale * (18 - this.atmosphereFactor * 10);
+      const maxV = this.speedScale * (18 - this.atmosphereFactor * 10) * this.gravityPower;
       if (nav.vel.length() > maxV) nav.vel.setLength(maxV);
     } else {
       this.wheelImpulse = 0;
@@ -333,14 +345,20 @@ export class SpaceControls {
       const r = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
       this.throttleInput = f;
       this.strafeInput = r;
-      applyFlightThrusters(nav.vel, nav.quat, f, r, this.speedScale, dt);
+      applyFlightThrusters(nav.vel, nav.quat, f, r, this.speedScale, dt,
+        this.gravityPower, this.navigationPower);
       if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        const boostAcceleration = this.speedScale * (10.0 + (1 - this.atmosphereFactor) * 7.1);
+        const boostAcceleration = this.speedScale * (10.0 + (1 - this.atmosphereFactor) * 7.1)
+          * this.gravityPower;
         nav.vel.addScaledVector(_f, boostAcceleration * dt);
         // Raise the atmospheric floor (6.96 → 8.4) and trim the space bonus
         // (4.06 → 2.62) so vacuum top speed is unchanged at 11.02.
-        const boostLimit = this.speedScale * (8.4 + (1 - this.atmosphereFactor) * 2.62);
+        const boostLimit = flightBoostSpeedLimit(
+          this.speedScale,
+          this.atmosphereFactor,
+          this.gravityPower,
+        );
         if (nav.vel.length() > boostLimit) nav.vel.setLength(boostLimit);
       }
     } else {
@@ -366,10 +384,11 @@ export class SpaceControls {
 // ============================================================================
 
 export class WalkControls {
-  constructor(dom, { lookScale = () => 1, onLook = null } = {}) {
+  constructor(dom, { lookScale = () => 1, onLook = null, resolveCollision = null } = {}) {
     this.dom = dom;
     this.lookScale = lookScale;
     this.onLook = onLook;
+    this.resolveCollision = resolveCollision;
     this.active = false;
     this.planet = null;
     this.posLocal = new THREE.Vector3();   // eye position, planet-local
@@ -380,6 +399,7 @@ export class WalkControls {
     this.eyeHeight = 1.7;
     this.hSpeed = new THREE.Vector3();
     this.quat = new THREE.Quaternion();
+    this.previousPosLocal = new THREE.Vector3();
 
     // analog input (virtual joystick): x strafe, y forward, set by the UI
     this.touchMove = { x: 0, y: 0 };
@@ -457,6 +477,7 @@ export class WalkControls {
   update(dt) {
     if (!this.active || !this.planet) return;
     const p = this.planet;
+    this.previousPosLocal.copy(this.posLocal);
     _u.copy(this.posLocal).normalize();
     this.frame(_u, _r, _f);
 
@@ -489,6 +510,11 @@ export class WalkControls {
     if (r <= groundR) { r = groundR; this.vR = 0; this.grounded = true; }
     else if (r > groundR + 0.01) this.grounded = false;
     this.posLocal.copy(_u).multiplyScalar(r);
+
+    // Optional authored props share the same planet-local frame as terrain.
+    // The resolver may push the capsule out of a volume or replace the terrain
+    // floor with a walkable top face.
+    this.resolveCollision?.(this, this.previousPosLocal);
 
     this.updateQuat();
   }

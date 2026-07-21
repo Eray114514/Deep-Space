@@ -3,15 +3,16 @@
 // deterministic system spec — the preview is the same sky the player flies
 // through, only framed like a survey chart.
 
-import * as THREE from 'three';
-import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
-import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
-import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
+import * as THREE from '../vendor/three.webgpu.js';
+import {
+  Fn, cameraPosition, color, cos, exp, float, floor, fract, length, luminance,
+  max, mix, mx_atan2, mx_fractal_noise_float, normalWorld, pass, positionLocal,
+  positionWorld, pow, screenUV, sin, smoothstep, texture, uniform, uv, vec2,
+  vec3, vec4,
+} from '../vendor/three.tsl.js';
+import { bloom } from '../node_modules/three/examples/jsm/tsl/display/BloomNode.js';
 import { makeRng, strHash32 } from './rng.js';
 import { orbitalPosition } from './astronomy.js';
-import { makeAccretionMaterial, makePhotonMaterial } from './black-hole.js';
 
 const ORBIT_PLANE_Y = 0.18;
 const STAR_CENTER_Y = 1.12;
@@ -253,76 +254,97 @@ const ATMO_STYLES = {
 };
 
 function atmosphereMaterial(color, opacity = 0.45) {
-  return new THREE.ShaderMaterial({
+  const material = new THREE.MeshBasicNodeMaterial({
     transparent: true, depthWrite: false, side: THREE.BackSide, blending: THREE.AdditiveBlending,
-    uniforms: { uColor: { value: new THREE.Color(color) }, uOpacity: { value: opacity } },
-    vertexShader: `varying vec3 vN;varying vec3 vW;void main(){vN=normalize(mat3(modelMatrix)*normal);vec4 w=modelMatrix*vec4(position,1.);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}`,
-    fragmentShader: `uniform vec3 uColor;uniform float uOpacity;varying vec3 vN;varying vec3 vW;void main(){vec3 V=normalize(cameraPosition-vW);float f=pow(1.0-clamp(dot(V,normalize(vN)),0.0,1.0),2.8);gl_FragColor=vec4(uColor,f*uOpacity);}`,
   });
+  const viewDirection = cameraPosition.sub(positionWorld).normalize();
+  const fresnel = pow(viewDirection.dot(normalWorld).clamp(0, 1).oneMinus(), 2.8);
+  material.colorNode = colorNode(color);
+  material.opacityNode = fresnel.mul(opacity);
+  return material;
 }
 
-function blackHoleDiscMaterial() {
-  return new THREE.ShaderMaterial({
+function colorNode(value) {
+  return color(new THREE.Color(value));
+}
+
+function makePreviewAccretionMaterial(innerRadius, outerRadius, temperatureK = 4300) {
+  const uniforms = { uTime: uniform(0), uIntensity: uniform(1) };
+  const material = new THREE.MeshBasicNodeMaterial({
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
-    uniforms: { uTime: { value: 0 } },
-    vertexShader: `varying vec2 vPos;void main(){vPos=position.xy;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-    fragmentShader: `
-      uniform float uTime; varying vec2 vPos;
-      float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
-      void main(){
-        float r=length(vPos); float a=atan(vPos.y,vPos.x);
-        float edge=smoothstep(4.7,5.2,r)*(1.0-smoothstep(13.0,14.0,r));
-        float lanes=0.45+0.55*sin(r*7.6-a*5.0+uTime*0.9);
-        float noise=hash(vec2(floor(a*32.0),floor(r*4.0+uTime*0.2)));
-        float density=edge*(0.2+0.32*lanes+0.18*noise);
-        float doppler=0.72+0.48*cos(a-0.6);
-        vec3 color=mix(vec3(1.7,0.18,0.025),vec3(1.5,0.78,0.26),clamp((14.0-r)/9.0,0.0,1.0));
-        gl_FragColor=vec4(color*density*doppler,density*0.78);
-      }`,
   });
+  material.uniforms = uniforms;
+  const radius = length(positionLocal.xy);
+  const angle = mx_atan2(positionLocal.y, positionLocal.x);
+  const edge = smoothstep(innerRadius, innerRadius * 1.12, radius)
+    .mul(smoothstep(outerRadius, outerRadius * 0.92, radius));
+  const lanes = sin(radius.mul(7.6).sub(angle.mul(5)).add(uniforms.uTime.mul(0.9))).mul(0.55).add(0.45);
+  const cells = fract(sin(floor(angle.mul(32)).mul(127.1).add(floor(radius.mul(4).add(uniforms.uTime.mul(0.2))).mul(311.7))).mul(43758.5453));
+  const density = edge.mul(lanes.mul(0.32).add(cells.mul(0.18)).add(0.20));
+  const heat = float(outerRadius).sub(radius).div(Math.max(0.001, outerRadius - innerRadius)).clamp(0, 1);
+  const temperatureShift = THREE.MathUtils.clamp((temperatureK - 3000) / 5000, 0, 1);
+  const discColor = mix(vec3(1.7, 0.18, 0.025), vec3(1.5, 0.78, 0.26), heat.mul(0.8).add(temperatureShift * 0.2));
+  material.colorNode = discColor.mul(density).mul(cos(angle.sub(0.6)).mul(0.48).add(0.72)).mul(uniforms.uIntensity);
+  material.opacityNode = density.mul(0.78);
+  return material;
+}
+
+function makePreviewPhotonMaterial() {
+  const material = new THREE.MeshBasicNodeMaterial({
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+  });
+  const viewDirection = cameraPosition.sub(positionWorld).normalize();
+  const rim = pow(viewDirection.dot(normalWorld).abs().oneMinus(), 5.2);
+  material.colorNode = mix(vec3(1.1, 0.28, 0.025), vec3(2.4, 1.45, 0.72), rim);
+  material.opacityNode = rim.mul(0.28);
+  return material;
 }
 
 function ringMaterial(seedStr, tint) {
   const rand = makeRng(seedStr + ':ring');
   const freq = 26 + rand() * 22, gapAt = 0.5 + rand() * 0.24, warp = 2 + rand() * 3;
   const c = new THREE.Color(tint).multiplyScalar(0.72);
-  return new THREE.ShaderMaterial({
+  const material = new THREE.MeshBasicNodeMaterial({
     transparent: true, side: THREE.DoubleSide, depthWrite: false,
-    uniforms: { uTint: { value: c }, uFreq: { value: freq }, uGap: { value: gapAt }, uWarp: { value: warp } },
-    vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-    fragmentShader: `uniform vec3 uTint;uniform float uFreq;uniform float uGap;uniform float uWarp;varying vec2 vUv;void main(){vec2 p=vUv*2.0-1.0;float r=length(p);float bands=.45+.55*sin(r*uFreq+sin(r*7.0)*uWarp);float edge=smoothstep(0.28,0.38,r)*(1.0-smoothstep(0.9,1.0,r));float gap=1.0-smoothstep(0.0,0.07,abs(r-uGap));float a=edge*(.17+.23*bands)*gap;gl_FragColor=vec4(uTint,a);}`,
   });
+  const p = uv().mul(2).sub(1);
+  const radius = length(p);
+  const bands = sin(radius.mul(freq).add(sin(radius.mul(7)).mul(warp))).mul(0.55).add(0.45);
+  const edge = smoothstep(0.28, 0.38, radius).mul(smoothstep(0.9, 1, radius).oneMinus());
+  const gap = smoothstep(0, 0.07, radius.sub(gapAt).abs()).oneMinus();
+  material.colorNode = colorNode(c);
+  material.opacityNode = edge.mul(bands.mul(0.23).add(0.17)).mul(gap);
+  return material;
 }
 
 // ---------------------------------------------------------------------------
 // star surface shader (animated granulation, parameterized by spectral color)
 // ---------------------------------------------------------------------------
-const starNoiseGLSL = `
-float hash31(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
-float n3(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);float n000=hash31(i+vec3(0,0,0));float n100=hash31(i+vec3(1,0,0));float n010=hash31(i+vec3(0,1,0));float n110=hash31(i+vec3(1,1,0));float n001=hash31(i+vec3(0,0,1));float n101=hash31(i+vec3(1,0,1));float n011=hash31(i+vec3(0,1,1));float n111=hash31(i+vec3(1,1,1));return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y),mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y),f.z);}
-float fbm(vec3 p){float v=0.0,a=.5;for(int i=0;i<5;i++){v+=n3(p)*a;p=p*2.03+17.1;a*=.5;}return v;}`;
-
 function starSurfaceMaterial(color) {
   const base = color.clone();
   const warm = THREE.MathUtils.clamp(base.r - base.b, 0, 1);
   const deep = base.clone().multiplyScalar(0.5)
     .lerp(new THREE.Color().setRGB(1.0, 0.35, 0.09), warm * 0.5)
     .lerp(new THREE.Color().setRGB(0.16, 0.3, 1.0), (1 - warm) * 0.4);
-  const uniforms = {
-    uTime: { value: 0 },
-    uColorA: { value: deep },
-    uColorB: { value: base.clone().multiplyScalar(1.05) },
-    uColorC: { value: base.clone().lerp(new THREE.Color(1, 1, 1), 0.82).multiplyScalar(1.35) },
-  };
-  const material = new THREE.ShaderMaterial({
-    uniforms,
-    vertexShader: `varying vec3 vP;varying vec3 vN;uniform float uTime;${starNoiseGLSL}void main(){vec3 p=position;float q=fbm(normalize(position)*4.3+vec3(uTime*.16,uTime*.09,-uTime*.12));p+=normal*(q-.46)*.28;vP=normalize(p);vN=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);}`,
-    fragmentShader: `precision highp float;varying vec3 vP;varying vec3 vN;uniform float uTime;uniform vec3 uColorA;uniform vec3 uColorB;uniform vec3 uColorC;${starNoiseGLSL}void main(){float n=fbm(vP*5.1+vec3(uTime*.20,-uTime*.12,uTime*.14));float hot=smoothstep(.42,.88,n);vec3 col=mix(uColorA,uColorB,smoothstep(.16,.74,n));col=mix(col,uColorC,pow(hot,2.6));float rim=pow(1.0-max(dot(normalize(vN),vec3(0.,0.,1.)),0.0),2.1);col+=uColorA*rim*.34;gl_FragColor=vec4(col,1.0);}`,
+  const uniforms = { uTime: uniform(0) };
+  const material = new THREE.MeshBasicNodeMaterial({
     toneMapped: false,
   });
+  material.uniforms = uniforms;
+  const localNormal = positionLocal.normalize();
+  const displacementNoise = mx_fractal_noise_float(localNormal.mul(4.3)
+    .add(vec3(uniforms.uTime.mul(0.16), uniforms.uTime.mul(0.09), uniforms.uTime.mul(-0.12))), 5);
+  material.positionNode = positionLocal.add(localNormal.mul(displacementNoise.sub(0.46)).mul(0.28));
+  const surfaceNoise = mx_fractal_noise_float(localNormal.mul(5.1)
+    .add(vec3(uniforms.uTime.mul(0.20), uniforms.uTime.mul(-0.12), uniforms.uTime.mul(0.14))), 5);
+  const hot = smoothstep(0.42, 0.88, surfaceNoise);
+  const rim = pow(normalWorld.normalize().dot(cameraPosition.sub(positionWorld).normalize()).clamp(0, 1).oneMinus(), 2.1);
+  material.colorNode = mix(colorNode(deep), colorNode(base.clone().multiplyScalar(1.05)), smoothstep(0.16, 0.74, surfaceNoise))
+    .mix(colorNode(base.clone().lerp(new THREE.Color(1, 1, 1), 0.82).multiplyScalar(1.35)), pow(hot, 2.6))
+    .add(colorNode(deep).mul(rim).mul(0.34));
   return { material, uniforms };
 }
 
@@ -375,6 +397,7 @@ function buildContourField(masses, fieldRadius, compactObject = false) {
       const y = contourElevation(x, z) + 0.10;
       pts.push(new THREE.Vector3(x, y, z));
     }
+    pts.push(pts[0].clone());
     const geo = new THREE.BufferGeometry().setFromPoints(pts);
     const mat = new THREE.LineBasicMaterial({
       color: compactObject ? 0xc78352 : 0xcbd4d2,
@@ -385,7 +408,7 @@ function buildContourField(masses, fieldRadius, compactObject = false) {
       depthWrite: false,
       depthTest: true,
     });
-    const line = new THREE.LineLoop(geo, mat);
+    const line = new THREE.Line(geo, mat);
     line.renderOrder = -1;
     group.add(line);
   }
@@ -426,7 +449,14 @@ export class SystemView {
     this.nameTag = nameTag;
     this.onSelect = onSelect || (() => {});
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const rendererMode = new URLSearchParams(location.search).get('renderer');
+    this.renderer = new THREE.WebGPURenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance',
+      forceWebGL: rendererMode === 'webgl',
+    });
+    this.rendererReady = false;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -443,49 +473,52 @@ export class SystemView {
     this.cameraDistance = this.defaultView.distance;
     this.responsiveFraming = 1;
 
-    this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.26, 0.82);
-    this.composer.addPass(this.bloom);
-    this.lensPass = new ShaderPass({
-      uniforms: {
-        tDiffuse: { value: null },
-        uCenter: { value: new THREE.Vector2(0.5, 0.5) },
-        uRadius: { value: 0.16 },
-        uAspect: { value: 1 },
-        uStrength: { value: 0.12 },
-      },
-      vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
-      fragmentShader: `
-        uniform sampler2D tDiffuse;
-        uniform vec2 uCenter;
-        uniform float uRadius;
-        uniform float uAspect;
-        uniform float uStrength;
-        varying vec2 vUv;
-        void main() {
-          vec2 delta = vUv - uCenter;
-          vec2 metric = vec2(delta.x * uAspect, delta.y);
-          float radius = length(metric);
-          float normalizedRadius = radius / max(uRadius, 0.0001);
-          float shell = 1.0 - smoothstep(0.16, 1.0, normalizedRadius);
-          float coreGuard = smoothstep(0.08, 0.24, normalizedRadius);
-          float deflection = uStrength * shell * coreGuard / (normalizedRadius + 0.32);
-          vec2 warped = uCenter + delta * (1.0 + deflection);
-          vec3 color = texture2D(tDiffuse, warped).rgb;
-          float ca = deflection * 0.006;
-          if (ca > 0.0001) {
-            vec2 tangent = normalize(vec2(-metric.y / uAspect, metric.x) + vec2(0.00001));
-            color.r = texture2D(tDiffuse, warped + tangent * ca).r;
-            color.b = texture2D(tDiffuse, warped - tangent * ca).b;
-          }
-          gl_FragColor = vec4(color, 1.0);
-        }
-      `,
+    const scenePass = pass(this.scene, this.camera);
+    const sceneColor = scenePass.getTextureNode('output');
+    const lensUniforms = {
+      uCenter: uniform(new THREE.Vector2(0.5, 0.5)),
+      uRadius: uniform(0.16),
+      uAspect: uniform(1),
+      uStrength: uniform(0.12),
+      uEnabled: uniform(0),
+    };
+    const lensNode = Fn(() => {
+      const delta = screenUV.sub(lensUniforms.uCenter);
+      const metric = vec2(delta.x.mul(lensUniforms.uAspect), delta.y);
+      const normalizedRadius = length(metric).div(max(lensUniforms.uRadius, 0.0001));
+      const shell = smoothstep(0.16, 1, normalizedRadius).oneMinus();
+      const coreGuard = smoothstep(0.08, 0.24, normalizedRadius);
+      const deflection = lensUniforms.uStrength.mul(shell).mul(coreGuard)
+        .div(normalizedRadius.add(0.32)).mul(lensUniforms.uEnabled);
+      const warped = lensUniforms.uCenter.add(delta.mul(deflection.add(1)));
+      const tangent = vec2(metric.y.negate().div(lensUniforms.uAspect), metric.x).add(vec2(0.00001)).normalize();
+      const ca = deflection.mul(0.006);
+      const base = sceneColor.sample(warped);
+      return vec4(
+        sceneColor.sample(warped.add(tangent.mul(ca))).r,
+        base.g,
+        sceneColor.sample(warped.sub(tangent.mul(ca))).b,
+        1,
+      );
+    })();
+    const lensPass = { uniforms: lensUniforms };
+    Object.defineProperty(lensPass, 'enabled', {
+      get: () => lensUniforms.uEnabled.value > 0.5,
+      set: (value) => { lensUniforms.uEnabled.value = value ? 1 : 0; },
     });
-    this.lensPass.enabled = false;
-    this.composer.addPass(this.lensPass);
-    this.composer.addPass(new OutputPass());
+    lensPass.enabled = false;
+    this.lensPass = lensPass;
+    this.bloom = bloom(sceneColor, 0.3, 0.26, 0.82);
+    this.renderPipeline = new THREE.RenderPipeline(this.renderer);
+    this.renderPipeline.outputNode = lensNode.add(this.bloom);
+    this.readyPromise = this.renderer.init().then(() => {
+      this.rendererReady = true;
+      this.renderer.domElement.dataset.backend = this.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
+      this.resize();
+    }).catch((error) => {
+      this.renderer.domElement.dataset.backend = 'failed';
+      console.error('SystemView renderer initialization failed', error);
+    });
 
     this.scene.add(new THREE.HemisphereLight(0xa8b8bc, 0x0e1517, 0.62));
     this.fillLight = new THREE.DirectionalLight(0xe6edf2, 0.45);
@@ -595,7 +628,6 @@ export class SystemView {
     const w = Math.max(1, this.host.clientWidth || innerWidth);
     const h = Math.max(1, this.host.clientHeight || innerHeight);
     this.renderer.setSize(w, h);
-    this.composer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
     const aspect = w / h;
     this.responsiveFraming = 1 + Math.max(0, 1.55 - aspect) * 0.16;
@@ -640,7 +672,7 @@ export class SystemView {
     this.preview = preview;
     this.timeHours = timeHours;
     const rand = makeRng(preview.star.id + ':sysview');
-    const anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    const anisotropy = Math.min(8, this.renderer.getMaxAnisotropy?.() || 1);
 
     this._buildBackdrop(rand);
     const primaryRecords = this._buildStars(preview, timeHours);
@@ -728,7 +760,8 @@ export class SystemView {
           const p = orbitalPosition(starSpec.orbit, t, new THREE.Vector3());
           points.push(new THREE.Vector3(p.x * capturedScale, p.y * capturedScale + STAR_CENTER_Y, p.z * capturedScale));
         }
-        this.world.add(new THREE.LineLoop(
+        points.push(points[0].clone());
+        this.world.add(new THREE.Line(
           new THREE.BufferGeometry().setFromPoints(points),
           new THREE.LineBasicMaterial({ color: 0xffb071, transparent: true, opacity: 0.18, depthWrite: false }),
         ));
@@ -838,7 +871,8 @@ export class SystemView {
         const p = orbitalPosition(body.orbitSpec, t, new THREE.Vector3());
         pts.push(new THREE.Vector3(p.x * k, p.y * k + ORBIT_PLANE_Y, p.z * k));
       }
-      const line = new THREE.LineLoop(
+      pts.push(pts[0].clone());
+      const line = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints(pts),
         new THREE.LineBasicMaterial({ color: 0xe1e6e5, transparent: true, opacity: 0.12 + (i % 4) * 0.02, depthWrite: false, depthTest: true }),
       );
@@ -868,7 +902,7 @@ export class SystemView {
       // to face the viewer.
       const discInner = visualRadius * 1.78;
       const discOuter = visualRadius * 5.35;
-      const discMaterial = makeAccretionMaterial(discInner, discOuter, body.blackHole?.discTemperatureK || 4300);
+      const discMaterial = makePreviewAccretionMaterial(discInner, discOuter, body.blackHole?.discTemperatureK || 4300);
       discMaterial.uniforms.uIntensity.value = 0.46;
       const disc = new THREE.Mesh(
         new THREE.RingGeometry(discInner, discOuter, 256, 28),
@@ -881,7 +915,7 @@ export class SystemView {
 
       const photonShell = new THREE.Mesh(
         new THREE.SphereGeometry(visualRadius * 1.72, 80, 56),
-        makePhotonMaterial(),
+        makePreviewPhotonMaterial(),
       );
       photonShell.renderOrder = 10;
       group.add(photonShell);
@@ -1105,7 +1139,7 @@ export class SystemView {
       this.lensPass.uniforms.uAspect.value = this.camera.aspect;
     }
     this._updateMarkers(t);
-    this.composer.render();
+    if (this.rendererReady) this.renderPipeline.render();
   }
 
   _updateMarkers(t) {
@@ -1151,7 +1185,7 @@ export class SystemView {
 
   dispose() {
     this.clearSystem();
-    this.composer.dispose?.();
+    this.renderPipeline.dispose?.();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }

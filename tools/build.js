@@ -9,10 +9,10 @@ if (relative(ROOT, OUT) !== 'dist') throw new Error(`Refusing to replace unexpec
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 
-for (const file of ['index.html', 'style.css']) {
+for (const file of ['index.html', 'renderlab.html', 'style.css']) {
   await cp(join(ROOT, file), join(OUT, file));
 }
-for (const folder of ['src', 'vendor', 'assets']) {
+for (const folder of ['src', 'vendor', 'assets', 'worlds']) {
   await cp(join(ROOT, folder), join(OUT, folder), { recursive: true });
 }
 
@@ -25,6 +25,7 @@ const JSM_DST = join(OUT, 'node_modules', 'three', 'examples', 'jsm');
 const ADDONS_USED = [
   'postprocessing/SMAAPass.js',
   'postprocessing/Pass.js',
+  'tsl/display/BloomNode.js',
   'shaders/SMAAShader.js',
   'controls/OrbitControls.js',
   'geometries/RoundedBoxGeometry.js',

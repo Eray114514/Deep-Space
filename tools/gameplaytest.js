@@ -26,16 +26,22 @@ try {
     const planet = NMS._internals.universe.system.planets[0];
     return {
       quality: NMS.stats().quality,
+      coverage: planet.cloudCoverage,
+      volumeExists: !!planet.volCloudMesh,
+      volumeVisible: planet.volCloudMesh?.visible,
+      rayQuality: planet.volCloudMat?.uniforms?.uQuality?.value,
+      analyticVisible: planet.cloudMesh?.visible,
+      upperVisible: planet.cloudMesh2?.visible,
       ok: planet.cloudCoverage <= 0.05 || (
-        !planet.volCloudMesh
-        && planet.cloudMesh?.visible
-        && planet.cloudMesh.material.side === 2
-        && (!planet.cloudMesh2 || planet.cloudMesh2.visible)
+        planet.volCloudMesh?.visible
+        && planet.volCloudMat?.uniforms?.uQuality?.value === 0
+        && !planet.cloudMesh?.visible
+        && (!planet.cloudMesh2 || !planet.cloudMesh2.visible)
       ),
     };
   });
   check(cloudFallback.quality === 'auto-low' && cloudFallback.ok,
-    'auto-low keeps the analytic cloud decks visible from the surface');
+    `auto-low keeps the shared volumetric cloud field visible from the surface ${JSON.stringify(cloudFallback)}`);
   const initialShipDistance = await page.evaluate('NMS.shipDistance()');
   check(initialShipDistance < 46, `parked ship is in boarding range (${initialShipDistance.toFixed(1)} m)`);
   await page.keyboard.press('KeyE');
@@ -57,15 +63,20 @@ try {
   const speedBefore = await page.evaluate('NMS._internals.nav.vel.length()');
   await page.mouse.move(cx, cy);
   await page.mouse.down({ button: 'right' });
-  await page.waitForTimeout(1200);
+  await page.waitForFunction(() => window.shipHUD?.getTelemetry().speedRatio > 0.995,
+    null, { timeout: 5000 });
   const duringBoost = await page.evaluate('NMS.stats().boost');
   const speedBoost = await page.evaluate('NMS._internals.nav.vel.length()');
+  const boostGauge = await page.evaluate('shipHUD.getTelemetry()');
   await page.mouse.up({ button: 'right' });
   await page.waitForTimeout(300);
   const afterRelease = await page.evaluate('NMS.stats().boost');
   check(duringBoost > 0.65, `RMB drives boost state (${duringBoost.toFixed(2)})`);
   check(speedBoost > Math.max(speedBefore * 1.5, speedBefore + 100),
     `RMB materially accelerates ship (${speedBefore.toFixed(0)} -> ${speedBoost.toFixed(0)} m/s)`);
+  check(boostGauge.speedRatio > 0.995
+      && Math.abs(boostGauge.speedPointerY - boostGauge.speedTopY) < 0.5,
+  `RMB reaches the physical governor and full gauge deflection (${boostGauge.speed.toFixed(0)} / ${boostGauge.speedLimit.toFixed(0)} m/s)`);
   check(afterRelease < duringBoost, 'RMB release clears boost cleanly');
 
   // Space is a discrete pulse even below the atmospheric boundary. It spends
@@ -86,7 +97,15 @@ try {
   await page.keyboard.press('Space');
   await page.waitForFunction('NMS.stats().pulseVisual > 0.25', null, { timeout: 5000 });
   const pulseDuring = await page.evaluate('NMS.stats().pulse');
-  await page.waitForTimeout(620);
+  const pulseGauge = await page.evaluate('shipHUD.getTelemetry()');
+  check(pulseGauge.speed > pulseGauge.speedLimit
+      && pulseGauge.speedRatio === 1
+      && Math.abs(pulseGauge.speedPointerY - pulseGauge.speedTopY) < 0.5,
+  `pulse raises the numeric speed above the governor without over-driving the pointer (${pulseGauge.speed.toFixed(0)} > ${pulseGauge.speedLimit.toFixed(0)} m/s)`);
+  // WebGPU may spend part of the first use compiling a pipeline. Wait for the
+  // simulation-owned burst state instead of assuming 620 ms of wall time also
+  // contained the full 560 ms of rendered simulation time.
+  await page.waitForFunction(() => !window.NMS.stats().pulse, null, { timeout: 5000 });
   const pulseAfter = await page.evaluate(() => ({
     alt: NMS.alt(), fuel: NMS.pulseFuel(), active: NMS.stats().pulse,
   }));
@@ -122,7 +141,18 @@ try {
       nav.vel.copy(radial).multiplyScalar(-2200).addScaledVector(tangent, 9000);
       return position.distanceTo(center) - p.R;
     }, axis);
-    await page.waitForTimeout(2600);
+    // Shader compilation and GPU scheduling can reduce the number of simulation
+    // frames inside a fixed wall-time sleep. Observe the actual approach state.
+    await page.waitForFunction(({ initialAltitude }) => {
+      const { universe, nav } = window.NMS._internals;
+      const p = universe.planets()[0];
+      const THREE = window.NMS._THREE;
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
+      const toCenter = p.posUniv.clone().sub(nav.pos).normalize();
+      const pathError = nav.vel.lengthSq() > 1 ? nav.vel.angleTo(forward) * 180 / Math.PI : 0;
+      return nav.pos.distanceTo(p.posUniv) - p.R < initialAltitude
+        && pathError < 28 && forward.angleTo(toCenter) * 180 / Math.PI < 2;
+    }, { initialAltitude: startAlt }, { timeout: 6000 });
     const result = await page.evaluate(() => {
       const { universe, nav } = NMS._internals;
       const p = universe.planets()[0];

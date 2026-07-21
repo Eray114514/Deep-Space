@@ -7,8 +7,11 @@ import {
 } from '../src/astronomy.js';
 import {
   GALAXY_LAYOUT_VERSION,
-  nearbyGalaxyCells,
+  GalaxyCatalog,
+  HOME_SYSTEM_ID,
 } from '../src/galaxy-layout.js';
+import { buildCivilizationSites, CIVILIZATION_VERSION } from '../src/civilization.js';
+import { buildGalaxyCatalogDocument } from './galaxy-catalog.js';
 import { Planet } from '../src/planet.js';
 import {
   ACTIVE_GALAXY_ID,
@@ -17,7 +20,7 @@ import {
   resolveBodyTuning,
 } from '../src/world-config.js';
 
-export const CANONICAL_WORLD_SCHEMA_VERSION = 1;
+export const CANONICAL_WORLD_SCHEMA_VERSION = 2;
 export const CANONICAL_WORLD_LOCK = 'worlds/milky-way.lock.json';
 
 function jsonClone(value) {
@@ -55,6 +58,8 @@ function summarizeBody(body) {
     atmosphere: body.atmosphere,
     magnetosphere: body.magnetosphere,
     clouds: body.clouds,
+    formation: body.formation,
+    ringSystem: body.ringSystem,
   };
 }
 
@@ -112,8 +117,9 @@ function summarizeBlackHoleSystem(system, destination) {
   };
 }
 
-function buildNeighborhoodProfile(seed) {
-  const cells = nearbyGalaxyCells(seed, { limit: 64, xzRadius: 8, yRadius: 3 });
+function buildNeighborhoodProfile(seed, catalog) {
+  const home = catalog.getSystem(HOME_SYSTEM_ID);
+  const cells = catalog.nearestSystems(home.positionCells, 64);
   const spectralClasses = {};
   const primaryBodyTypes = {};
   let binaries = 0;
@@ -121,7 +127,7 @@ function buildNeighborhoodProfile(seed) {
   let landableBodies = 0;
 
   for (const cell of cells) {
-    const system = generateSystemSpec(seed, cell.id);
+    const system = generateSystemSpec(seed, cell);
     if (system.stars.length > 1) binaries++;
     for (const star of system.stars) {
       spectralClasses[star.spectralClass] = (spectralClasses[star.spectralClass] || 0) + 1;
@@ -134,7 +140,7 @@ function buildNeighborhoodProfile(seed) {
   }
 
   return {
-    sampleRule: '64 nearest generated cells inside xzRadius=8, yRadius=3',
+    sampleRule: '64 nearest records in the finite 1,024-system catalogue',
     sampledSystems: cells.length,
     binaries,
     moons,
@@ -162,6 +168,8 @@ function buildHomeSurfaceSentinels(galaxy, homeSystem) {
     radius: body.radius,
     atmosphere: body.atmosphere,
     clouds: body.clouds,
+    formation: body.formation,
+    ringSystem: body.ringSystem,
     tuning,
   });
   const directions = [
@@ -190,12 +198,22 @@ function buildHomeSurfaceSentinels(galaxy, homeSystem) {
 
 export function buildCanonicalWorldLock(galaxyId = ACTIVE_GALAXY_ID) {
   const galaxy = getGalaxyConfig(galaxyId);
-  const homeSystem = generateSystemSpec(galaxy.seed, '0,0,0');
+  const catalog = new GalaxyCatalog(galaxy.seed);
+  const homeRecord = catalog.getSystem(HOME_SYSTEM_ID);
+  const homeSystem = generateSystemSpec(galaxy.seed, homeRecord);
   const blackHoleDestination = { ...galaxy.blackHoleSystem, kind: 'blackHole' };
   const blackHoleSystem = generateSystemSpec(galaxy.seed, blackHoleDestination);
-  const nearbySystems = nearbyGalaxyCells(galaxy.seed).map((cell) => (
-    summarizeNearbySystem(cell, generateSystemSpec(galaxy.seed, cell.id))
+  const nearbyRecords = catalog.nearestSystems(homeRecord.positionCells, 19)
+    .filter((record) => record.id !== HOME_SYSTEM_ID).slice(0, 18);
+  const nearbySystems = nearbyRecords.map((cell) => (
+    summarizeNearbySystem({ ...cell, distanceCells: Math.hypot(
+      cell.positionCells[0] - homeRecord.positionCells[0],
+      cell.positionCells[1] - homeRecord.positionCells[1],
+      cell.positionCells[2] - homeRecord.positionCells[2],
+    ) }, generateSystemSpec(galaxy.seed, cell))
   ));
+  const catalogDocument = buildGalaxyCatalogDocument(galaxyId);
+  const civilizationSites = buildCivilizationSites(galaxy.seed, catalog);
 
   const content = {
     schemaVersion: CANONICAL_WORLD_SCHEMA_VERSION,
@@ -203,8 +221,9 @@ export function buildCanonicalWorldLock(galaxyId = ACTIVE_GALAXY_ID) {
     contract: {
       purpose: 'Human-readable compatibility snapshot for the curated release universe.',
       runtimeAuthority: 'src/world-config.js plus deterministic generators',
-      scope: 'Home system, authored destinations, 18 nearest systems, a 64-system profile, and home-surface sentinels.',
-      infiniteUniverse: true,
+      scope: 'Complete finite catalogue summary, home system, authored destinations, 18 nearest systems, 64-system profile, civilization sites, and surface sentinels.',
+      infiniteUniverse: false,
+      finiteSystemCount: 1024,
       saveGame: false,
       regenerationPolicy: 'Do not refresh after drift unless the universe was intentionally re-curated and reviewed.',
     },
@@ -218,15 +237,26 @@ export function buildCanonicalWorldLock(galaxyId = ACTIVE_GALAXY_ID) {
       galaxyLayout: GALAXY_LAYOUT_VERSION,
       astronomy: GENERATION_VERSION,
       compactObjects: COMPACT_OBJECTS_VERSION,
+      civilization: CIVILIZATION_VERSION,
     },
     authoredConfig: {
       blackHoleSystem: jsonClone(galaxy.blackHoleSystem),
       bodyTuning: jsonClone(galaxy.bodyTuning),
     },
+    finiteCatalog: {
+      fingerprintSha256: catalogDocument.fingerprintSha256,
+      morphology: jsonClone(galaxy.morphology),
+      systems: catalogDocument.systems.map((record) => ({
+        id: record.id, positionCells: record.positionCells, region: record.region,
+        stellarSeed: record.stellarSeed, formation: record.formation,
+        civilizationTag: record.civilizationTag,
+      })),
+    },
     homeSystem: summarizeHomeSystem(homeSystem),
     specialDestinations: [summarizeBlackHoleSystem(blackHoleSystem, galaxy.blackHoleSystem)],
+    civilizationSites,
     nearbySystems,
-    neighborhoodProfile: buildNeighborhoodProfile(galaxy.seed),
+    neighborhoodProfile: buildNeighborhoodProfile(galaxy.seed, catalog),
     homeSurfaceSentinels: buildHomeSurfaceSentinels(galaxy, homeSystem),
   };
   const fingerprintSha256 = createHash('sha256').update(JSON.stringify(content)).digest('hex');

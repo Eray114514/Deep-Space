@@ -1,0 +1,1903 @@
+{
+  "schemaVersion": 1,
+  "kind": "deep-space-archived-infinite-universe-lock",
+  "contract": {
+    "purpose": "Human-readable compatibility snapshot for the curated release universe.",
+    "runtimeAuthority": "src/world-config.js plus deterministic generators",
+    "scope": "Home system, authored destinations, 18 nearest systems, a 64-system profile, and home-surface sentinels.",
+    "infiniteUniverse": true,
+    "saveGame": false,
+    "regenerationPolicy": "Do not refresh after drift unless the universe was intentionally re-curated and reviewed."
+  },
+  "identity": {
+    "worldId": "deep-space",
+    "galaxyId": "milky-way",
+    "galaxyName": "银河系",
+    "seed": "NAVEMI-382"
+  },
+  "generatorVersions": {
+    "galaxyLayout": 1,
+    "astronomy": 2,
+    "compactObjects": 1
+  },
+  "authoredConfig": {
+    "blackHoleSystem": {
+      "id": "black-hole:erebus",
+      "name": "厄瑞玻斯",
+      "systemName": "厄瑞玻斯引力观测区",
+      "catalogId": "AF BH-001",
+      "positionCells": [
+        17.4,
+        -1.6,
+        -16.2
+      ]
+    },
+    "bodyTuning": {
+      "0,0,0": {
+        "planet-0": {
+          "seaLevelOffset": -420,
+          "cloudCoverage": 0.5136393490363844
+        }
+      }
+    }
+  },
+  "homeSystem": {
+    "systemId": "0,0,0",
+    "properName": "天狼",
+    "latinName": "Sirius",
+    "catalogId": "AF J0344+7331-P0P0P0",
+    "stars": [
+      {
+        "starId": "star-0",
+        "displayName": "天狼 A",
+        "spectralClass": "G6V",
+        "massSolar": 0.9392264572577551,
+        "radiusSolar": 0.9558607501064965,
+        "temperatureK": 5502.030850201845,
+        "luminositySolar": 0.7781821616696644,
+        "color": 16773583,
+        "orbit": null
+      },
+      {
+        "starId": "star-1",
+        "displayName": "天狼 B",
+        "spectralClass": "K8V",
+        "massSolar": 0.764850638313219,
+        "radiusSolar": 0.8244706046586424,
+        "temperatureK": 4414.410503953695,
+        "luminositySolar": 0.34222090375817954,
+        "color": 16763018,
+        "orbit": null
+      }
+    ],
+    "binaryOrbit": {
+      "semiMajorAU": 0.0549443058075849,
+      "renderRadius": 28674435.4267139,
+      "periodHours": 86.4850185194436,
+      "eccentricity": 0.006630838643759489,
+      "inclination": -0.06704412551596761,
+      "ascendingNode": 1.9276703207149162,
+      "phase": 0.5265503977425396
+    },
+    "habitableZoneAU": [
+      1.0055663909203751,
+      1.7676798661442386
+    ],
+    "snowLineAU": 2.857925532089488,
+    "bodies": [
+      {
+        "bodyId": "planet-0",
+        "parentId": null,
+        "properName": "阿玛尔忒亚",
+        "catalogName": "天狼 (AB) b",
+        "type": "lush",
+        "radius": 274732.13601857424,
+        "massEarth": 4.350392051879316,
+        "equilibriumK": 280.8224073855146,
+        "landable": true,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 50.92644091928378,
+        "orbit": {
+          "semiMajorAU": 1.037321119054703,
+          "renderRadius": 58253777.146339424,
+          "periodHours": 7094.579776203227,
+          "eccentricity": 0.011975945280864835,
+          "inclination": 0.06305745861493052,
+          "ascendingNode": 2.984327456188788,
+          "phase": 0.23849516967311502
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "O₂",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 1.2493852454309426,
+          "greenhouseK": 35.2778863562271,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 1.0008132677063926,
+          "label": "强烈",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.74,
+          "condensates": [
+            "H₂O液滴",
+            "H₂O冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-0-moon-0",
+        "parentId": "planet-0",
+        "properName": "富兰克林",
+        "catalogName": "阿玛尔忒亚 I",
+        "type": "barren",
+        "radius": 79738.8944644481,
+        "massEarth": 0.08229803760536014,
+        "equilibriumK": 280.8224073855146,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 108.54385618246592,
+        "orbit": {
+          "renderRadius": 1124662.8765285746,
+          "periodHours": 108.54385618246592,
+          "eccentricity": 0.02783439628779888,
+          "inclination": -0.08916353057138622,
+          "ascendingNode": 5.697106303002311,
+          "phase": 0.8499504122883081,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "Ar",
+            "CO₂"
+          ],
+          "pressureBar": 0.018628160173522083,
+          "greenhouseK": 1.3835932046640664,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.02491956063823308,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.009723141723037168,
+          "condensates": [
+            "H₂O冰晶",
+            "尘埃"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-1",
+        "parentId": null,
+        "properName": "欧几里得",
+        "catalogName": "天狼 (AB) c",
+        "type": "toxic",
+        "radius": 253176.527954638,
+        "massEarth": 3.52977239144966,
+        "equilibriumK": 235.5455105153072,
+        "landable": true,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 39.74530857265927,
+        "orbit": {
+          "semiMajorAU": 1.474439896993319,
+          "renderRadius": 97540066.1572069,
+          "periodHours": 12022.57396782852,
+          "eccentricity": 0.06239182135090232,
+          "inclination": -0.019226017533801498,
+          "ascendingNode": 2.4184220747695897,
+          "phase": 0.12794730463065207
+        },
+        "atmosphere": {
+          "composition": [
+            "CO₂",
+            "Cl₂",
+            "SO₂"
+          ],
+          "pressureBar": 1.8823165859766522,
+          "greenhouseK": 68.40786966728047,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.8178315020921552,
+          "label": "中等",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.72,
+          "condensates": [
+            "硫酸气溶胶",
+            "硫化物"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-2",
+        "parentId": null,
+        "properName": "塞浦路斯",
+        "catalogName": "天狼 (AB) d",
+        "type": "barren",
+        "radius": 241123.68440255523,
+        "massEarth": 3.9746497151441873,
+        "equilibriumK": 190.67053238849547,
+        "landable": true,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 67.52919065672904,
+        "orbit": {
+          "semiMajorAU": 2.2501401947327335,
+          "renderRadius": 183320877.66525146,
+          "periodHours": 22665.808396548142,
+          "eccentricity": 0.04567579384893179,
+          "inclination": -0.004553927523083985,
+          "ascendingNode": 1.8955122170408185,
+          "phase": 0.4935692469589412
+        },
+        "atmosphere": {
+          "composition": [
+            "Ar",
+            "CO₂"
+          ],
+          "pressureBar": 0.10957065085462543,
+          "greenhouseK": 1.2132438027765602,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.1260249368193687,
+          "label": "微弱",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.022837381318637877,
+          "condensates": [
+            "H₂O冰晶",
+            "尘埃"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-3",
+        "parentId": null,
+        "properName": "塞德娜",
+        "catalogName": "天狼 (AB) e",
+        "type": "iceGiant",
+        "radius": 982389.5961418748,
+        "massEarth": 51.80226618144661,
+        "equilibriumK": 159.16570905153552,
+        "landable": false,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 8.130558747332543,
+        "orbit": {
+          "semiMajorAU": 3.229071930658414,
+          "renderRadius": 285810392.68931144,
+          "periodHours": 38964.88743172299,
+          "eccentricity": 0.07687250468879939,
+          "inclination": -0.0573615136789158,
+          "ascendingNode": 5.164916130391174,
+          "phase": 0.2862975711468607
+        },
+        "atmosphere": {
+          "composition": [
+            "H₂",
+            "He",
+            "CH₄"
+          ],
+          "pressureBar": null,
+          "greenhouseK": null
+        },
+        "magnetosphere": {
+          "strengthEarth": 6.1485643412331425,
+          "label": "强烈",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0.8129121140437201,
+          "probability": 1,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂S冰晶"
+          ],
+          "regime": "全球云幕"
+        }
+      },
+      {
+        "bodyId": "planet-3-moon-0",
+        "parentId": "planet-3",
+        "properName": "领航员",
+        "catalogName": "塞德娜 I",
+        "type": "ice",
+        "radius": 49679.366246797144,
+        "massEarth": 0.12174637735821306,
+        "equilibriumK": 159.16570905153552,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 103.15906785225643,
+        "orbit": {
+          "renderRadius": 3825499.6707054186,
+          "periodHours": 103.15906785225643,
+          "eccentricity": 0.036275001280009746,
+          "inclination": -0.07237756557762623,
+          "ascendingNode": 1.6292991493179938,
+          "phase": 0.9821039806120098,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.1903886663495428,
+          "greenhouseK": 6.812156591564417,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.0726634035024483,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0.5636589721684688,
+          "probability": 0.4361473361442276,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂O冰晶"
+          ],
+          "regime": "多云"
+        }
+      },
+      {
+        "bodyId": "planet-3-moon-1",
+        "parentId": "planet-3",
+        "properName": "撒哈拉",
+        "catalogName": "塞德娜 II",
+        "type": "ice",
+        "radius": 120789.80181738734,
+        "massEarth": 0.035882545746862886,
+        "equilibriumK": 159.16570905153552,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 141.01038101831858,
+        "orbit": {
+          "renderRadius": 5117674.835942307,
+          "periodHours": 141.01038101831858,
+          "eccentricity": 0.01892196878325194,
+          "inclination": -0.04372625074815005,
+          "ascendingNode": 5.869488852570284,
+          "phase": 0.37795810331590474,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.09257340115189139,
+          "greenhouseK": 7.835040062665939,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.04578378255379536,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.36152450321237134,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂O冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-3-moon-2",
+        "parentId": "planet-3",
+        "properName": "薛定谔",
+        "catalogName": "塞德娜 III",
+        "type": "ice",
+        "radius": 131266.21594792232,
+        "massEarth": 0.08978228759020566,
+        "equilibriumK": 159.16570905153552,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 188.9936829954882,
+        "orbit": {
+          "renderRadius": 6551359.229227707,
+          "periodHours": 188.9936829954882,
+          "eccentricity": 0.05891478546895087,
+          "inclination": 0.024294568318873642,
+          "ascendingNode": 3.859338107506054,
+          "phase": 0.6111590873915702,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.06083374877198922,
+          "greenhouseK": 13.43357078358531,
+          "state": "稳定气态层"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.043216397747716274,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.3109613910113263,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂O冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-4",
+        "parentId": null,
+        "properName": "阿卡迪亚",
+        "catalogName": "天狼 (AB) f",
+        "type": "ice",
+        "radius": 276674.832906574,
+        "massEarth": 3.2351442962419243,
+        "equilibriumK": 122.59676455318267,
+        "landable": true,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 43.375506944721565,
+        "orbit": {
+          "semiMajorAU": 5.44275415810303,
+          "renderRadius": 499272942.4516076,
+          "periodHours": 85267.7737430571,
+          "eccentricity": 0.028630079440772532,
+          "inclination": -0.06260421414393932,
+          "ascendingNode": 2.7802877060970577,
+          "phase": 0.6889754247386009
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.2854964132340823,
+          "greenhouseK": 6.8335364274680614,
+          "state": "季节性挥发物循环"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.34945149852675733,
+          "label": "中等",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0.2293510215970383,
+          "probability": 0.4678173359381361,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂O冰晶"
+          ],
+          "regime": "稀疏云层"
+        }
+      },
+      {
+        "bodyId": "planet-5",
+        "parentId": null,
+        "properName": "特斯拉",
+        "catalogName": "天狼 (AB) g",
+        "type": "ice",
+        "radius": 233635.99697127938,
+        "massEarth": 5.145003809221088,
+        "equilibriumK": 97.10981985970363,
+        "landable": true,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 39.311948518967256,
+        "orbit": {
+          "semiMajorAU": 8.674619597193852,
+          "renderRadius": 782865941.3974622,
+          "periodHours": 171566.50539067818,
+          "eccentricity": 0.057917566616088156,
+          "inclination": 0.04942815189249814,
+          "ascendingNode": 2.030739552750712,
+          "phase": 0.03657977213151753
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.10996098724517295,
+          "greenhouseK": 6.0150630213320255,
+          "state": "季节性挥发物循环"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.34922303460454057,
+          "label": "中等",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.3810167151223196,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂O冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-6",
+        "parentId": null,
+        "properName": "巴贝奇",
+        "catalogName": "天狼 (AB) h",
+        "type": "gasGiant",
+        "radius": 1427412.3731534928,
+        "massEarth": 182.7261874517426,
+        "equilibriumK": 74.85005114795446,
+        "landable": false,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 8.64753258600831,
+        "orbit": {
+          "semiMajorAU": 14.601333923698688,
+          "renderRadius": 1424966819.3939962,
+          "periodHours": 374667.1755939672,
+          "eccentricity": 0.03230967283248901,
+          "inclination": -0.06740590121131391,
+          "ascendingNode": 4.125819459775435,
+          "phase": 0.633284651208669
+        },
+        "atmosphere": {
+          "composition": [
+            "H₂",
+            "He",
+            "NH₃"
+          ],
+          "pressureBar": null,
+          "greenhouseK": null
+        },
+        "magnetosphere": {
+          "strengthEarth": 8.800867230474292,
+          "label": "强烈",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0.8006775931734592,
+          "probability": 1,
+          "condensates": [
+            "NH₃冰晶",
+            "H₂O冰晶"
+          ],
+          "regime": "全球云幕"
+        }
+      },
+      {
+        "bodyId": "planet-6-moon-0",
+        "parentId": "planet-6",
+        "properName": "塔尔西斯",
+        "catalogName": "巴贝奇 I",
+        "type": "ice",
+        "radius": 53397.07500441,
+        "massEarth": 0.048043964980170134,
+        "equilibriumK": 74.85005114795446,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 90.34430916246491,
+        "orbit": {
+          "renderRadius": 4848653.5794758,
+          "periodHours": 90.34430916246491,
+          "eccentricity": 0.05741300169378519,
+          "inclination": 0.015167903630062938,
+          "ascendingNode": 4.210487542060913,
+          "phase": 0.7357235173694789,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.006568956133841929,
+          "greenhouseK": 11.093240525573492,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.047416589771918684,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.0534188323680369,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-6-moon-1",
+        "parentId": "planet-6",
+        "properName": "埃律西昂",
+        "catalogName": "巴贝奇 II",
+        "type": "ice",
+        "radius": 130532.84902032465,
+        "massEarth": 0.04350298461504281,
+        "equilibriumK": 74.85005114795446,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 144.12114824149856,
+        "orbit": {
+          "renderRadius": 7579401.9329703655,
+          "periodHours": 144.12114824149856,
+          "eccentricity": 0.011220087306573987,
+          "inclination": 0.022441840446554125,
+          "ascendingNode": 1.242838364315081,
+          "phase": 0.26132259517908096,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.012641581562566416,
+          "greenhouseK": 5.755729906260967,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.039810987829535835,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0.3072036914177355,
+          "probability": 0.11721407571959701,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "稀疏云层"
+        }
+      },
+      {
+        "bodyId": "planet-6-moon-2",
+        "parentId": "planet-6",
+        "properName": "巴塔哥尼亚",
+        "catalogName": "巴贝奇 III",
+        "type": "ice",
+        "radius": 43826.07789617032,
+        "massEarth": 0.060987860523164274,
+        "equilibriumK": 74.85005114795446,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 206.07055644052738,
+        "orbit": {
+          "renderRadius": 10206076.661046386,
+          "periodHours": 206.07055644052738,
+          "eccentricity": 0.030376041806302965,
+          "inclination": -0.06249256873503327,
+          "ascendingNode": 3.5366868803587805,
+          "phase": 0.06953878444619477,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.016011432321168913,
+          "greenhouseK": 4.564036902040243,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.04004083377679953,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0.14407782602409427,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-6-moon-3",
+        "parentId": "planet-6",
+        "properName": "罗德斯",
+        "catalogName": "巴贝奇 IV",
+        "type": "ice",
+        "radius": 110831.6713469103,
+        "massEarth": 0.08025315011851489,
+        "equilibriumK": 74.85005114795446,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 268.6610318890056,
+        "orbit": {
+          "renderRadius": 12551099.373023104,
+          "periodHours": 268.6610318890056,
+          "eccentricity": 0.05693358262069523,
+          "inclination": 0.010250192089006304,
+          "ascendingNode": 2.6015511547165464,
+          "phase": 0.7272487594746053,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0009796812570221085,
+          "greenhouseK": 16.30082381144166,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.03755721471415936,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-7",
+        "parentId": null,
+        "properName": "香农",
+        "catalogName": "天狼 (AB) i",
+        "type": "ice",
+        "radius": 395099.52176362276,
+        "massEarth": 0.6783120873384177,
+        "equilibriumK": 59.56050254159866,
+        "landable": true,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 67.00939408107661,
+        "orbit": {
+          "semiMajorAU": 23.060038557467003,
+          "renderRadius": 1600000000,
+          "periodHours": 743612.8575883685,
+          "eccentricity": 0.04445446733385325,
+          "inclination": 0.06612851241603494,
+          "ascendingNode": 0.2169483987830483,
+          "phase": 0.20842351741157472
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0009439839574907045,
+          "greenhouseK": 15.728024929761887,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.20024137599543082,
+          "label": "微弱",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-7-moon-0",
+        "parentId": "planet-7",
+        "properName": "诺特",
+        "catalogName": "香农 I",
+        "type": "ice",
+        "radius": 43621.83196656406,
+        "massEarth": 0.015323060378432275,
+        "equilibriumK": 59.56050254159866,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 112.1226777590899,
+        "orbit": {
+          "renderRadius": 1668769.082676018,
+          "periodHours": 112.1226777590899,
+          "eccentricity": 0.006138501204550266,
+          "inclination": -0.07722147446125746,
+          "ascendingNode": 3.230227259771197,
+          "phase": 0.9922110196202993,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0005823259920744298,
+          "greenhouseK": 3.153555568307638,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.04299579403612153,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-8",
+        "parentId": null,
+        "properName": "杰米森",
+        "catalogName": "天狼 (AB) j",
+        "type": "iceGiant",
+        "radius": 691036.6975143552,
+        "massEarth": 189.63019171450287,
+        "equilibriumK": 48.9672656483733,
+        "landable": false,
+        "tidallyLocked": false,
+        "rotationPeriodHours": 17.563044644892216,
+        "orbit": {
+          "semiMajorAU": 34.116543860487035,
+          "renderRadius": 1600000000,
+          "periodHours": 1338148.7422650463,
+          "eccentricity": 0.051014301404356956,
+          "inclination": -0.03626685041468591,
+          "ascendingNode": 3.788219247702936,
+          "phase": 0.31330846063792706
+        },
+        "atmosphere": {
+          "composition": [
+            "H₂",
+            "He",
+            "CH₄"
+          ],
+          "pressureBar": null,
+          "greenhouseK": null
+        },
+        "magnetosphere": {
+          "strengthEarth": 4.240562589441434,
+          "label": "强烈",
+          "origin": "内禀磁场"
+        },
+        "clouds": {
+          "coverage": 0.6938657508557663,
+          "probability": 1,
+          "condensates": [
+            "CH₄冰晶",
+            "H₂S冰晶"
+          ],
+          "regime": "全球云幕"
+        }
+      },
+      {
+        "bodyId": "planet-8-moon-0",
+        "parentId": "planet-8",
+        "properName": "麦哲伦",
+        "catalogName": "杰米森 I",
+        "type": "ice",
+        "radius": 87011.32252952084,
+        "massEarth": 0.0489393537119031,
+        "equilibriumK": 48.9672656483733,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 96.67884137097332,
+        "orbit": {
+          "renderRadius": 2520113.36841909,
+          "periodHours": 96.67884137097332,
+          "eccentricity": 0.041274010464549066,
+          "inclination": -0.038629057011567054,
+          "ascendingNode": 1.6476121202181668,
+          "phase": 0.4113056901842356,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0007258337664378721,
+          "greenhouseK": 4.165821921080351,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.04352210931528383,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-8-moon-1",
+        "parentId": "planet-8",
+        "properName": "伊萨卡",
+        "catalogName": "杰米森 II",
+        "type": "ice",
+        "radius": 83845.55376973003,
+        "massEarth": 0.06416502594947815,
+        "equilibriumK": 48.9672656483733,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 138.65093346467984,
+        "orbit": {
+          "renderRadius": 3546784.832543015,
+          "periodHours": 138.65093346467984,
+          "eccentricity": 0.018345749345608054,
+          "inclination": 0.018459128444083036,
+          "ascendingNode": 4.790615647113639,
+          "phase": 0.31749184895306826,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0014140616035599241,
+          "greenhouseK": 15.543289188295603,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.04364429897336304,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-8-moon-2",
+        "parentId": "planet-8",
+        "properName": "夸欧尔",
+        "catalogName": "杰米森 III",
+        "type": "ice",
+        "radius": 78875.7362626493,
+        "massEarth": 0.03279484037309885,
+        "equilibriumK": 48.9672656483733,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 176.84520687726783,
+        "orbit": {
+          "renderRadius": 4364319.666272987,
+          "periodHours": 176.84520687726783,
+          "eccentricity": 0.048529669563286006,
+          "inclination": 0.053132466911338265,
+          "ascendingNode": 3.264451888838658,
+          "phase": 0.607637386303395,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0002164493567058409,
+          "greenhouseK": 11.902407169342041,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.029164095695931553,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      },
+      {
+        "bodyId": "planet-8-moon-3",
+        "parentId": "planet-8",
+        "properName": "乌托邦",
+        "catalogName": "杰米森 IV",
+        "type": "ice",
+        "radius": 46215.46228090301,
+        "massEarth": 0.08976321596652269,
+        "equilibriumK": 48.9672656483733,
+        "landable": true,
+        "tidallyLocked": true,
+        "rotationPeriodHours": 262.07228508537173,
+        "orbit": {
+          "renderRadius": 5961942.467583159,
+          "periodHours": 262.07228508537173,
+          "eccentricity": 0.05407146361190825,
+          "inclination": 0.001984335402958095,
+          "ascendingNode": 5.836680275538503,
+          "phase": 0.6031327603850514,
+          "semiMajorAU": 0
+        },
+        "atmosphere": {
+          "composition": [
+            "N₂",
+            "CH₄",
+            "Ar",
+            "H₂O"
+          ],
+          "pressureBar": 0.0012545005725782448,
+          "greenhouseK": 7.429509975016117,
+          "state": "挥发物大部冻结沉降"
+        },
+        "magnetosphere": {
+          "strengthEarth": 0.03753249045010882,
+          "label": "微弱",
+          "origin": "感应磁层"
+        },
+        "clouds": {
+          "coverage": 0,
+          "probability": 0,
+          "condensates": [
+            "N₂冰晶",
+            "CH₄冰晶"
+          ],
+          "regime": "晴空或无稳定云层"
+        }
+      }
+    ]
+  },
+  "specialDestinations": [
+    {
+      "destination": {
+        "id": "black-hole:erebus",
+        "name": "厄瑞玻斯",
+        "systemName": "厄瑞玻斯引力观测区",
+        "catalogId": "AF BH-001",
+        "positionCells": [
+          17.4,
+          -1.6,
+          -16.2
+        ]
+      },
+      "systemId": "black-hole:erebus",
+      "properName": "厄瑞玻斯引力观测区",
+      "catalogId": "AF BH-001",
+      "centralObject": {
+        "bodyId": "black-hole-0",
+        "properName": "厄瑞玻斯",
+        "massEarth": 712603864.6078609,
+        "radius": 3177636.079490185,
+        "accretionRadius": 34497664.310935564,
+        "axialTilt": 0.7338573343664677,
+        "blackHole": {
+          "massSolar": 2140.298620820977,
+          "eventHorizonKm": 6320.83690193955,
+          "spin": 0.7974584049172699,
+          "accretionDisc": true,
+          "discTemperatureK": 4353.791743214242
+        }
+      },
+      "capturedStars": [
+        {
+          "starId": "star-0",
+          "displayName": "厄瑞玻斯引力观测区 A",
+          "spectralClass": "G9V",
+          "massSolar": 0.9686815335135908,
+          "radiusSolar": 0.9773504895926187,
+          "temperatureK": 5939.380022790283,
+          "luminositySolar": 0.8804892997589799,
+          "color": 16773583,
+          "orbit": {
+            "semiMajorAU": 47.52385355113074,
+            "renderRadius": 54000000,
+            "periodHours": 62077.14769331991,
+            "eccentricity": 0.2973694955557585,
+            "inclination": 0.10690360387321562,
+            "ascendingNode": 3.068820320387157,
+            "phase": 0.31376247527077794
+          }
+        },
+        {
+          "starId": "star-1",
+          "displayName": "厄瑞玻斯引力观测区 B",
+          "spectralClass": "M9V",
+          "massSolar": 0.2709824333153665,
+          "radiusSolar": 0.39058685167170093,
+          "temperatureK": 3292.1218550065532,
+          "luminositySolar": 0.049632324771860366,
+          "color": 16751472,
+          "orbit": {
+            "semiMajorAU": 69.37638300471008,
+            "renderRadius": 100000000,
+            "periodHours": 109491.8417859163,
+            "eccentricity": 0.2359215120598674,
+            "inclination": -0.0866798438737169,
+            "ascendingNode": 1.6382957926814443,
+            "phase": 0.44416050240397453
+          }
+        },
+        {
+          "starId": "star-2",
+          "displayName": "厄瑞玻斯引力观测区 C",
+          "spectralClass": "F6V",
+          "massSolar": 1.3990307294973172,
+          "radiusSolar": 1.273490245433449,
+          "temperatureK": 6419.250580156222,
+          "luminositySolar": 3.8309723302112046,
+          "color": 15988479,
+          "orbit": {
+            "semiMajorAU": 111.32004464417696,
+            "renderRadius": 146000000,
+            "periodHours": 222548.3292625276,
+            "eccentricity": 0.21166818896308542,
+            "inclination": -0.01284767184406519,
+            "ascendingNode": 0.0795229072368553,
+            "phase": 0.9904955034144223
+          }
+        }
+      ]
+    }
+  ],
+  "nearbySystems": [
+    {
+      "systemId": "-1,0,0",
+      "positionCells": [
+        -0.62208984375,
+        0.139599609375,
+        0.40388671875
+      ],
+      "distanceCells": 0.7547239934023521,
+      "properName": "惠更斯 西塔-2052",
+      "catalogId": "AF J0141+3607-M1P0P0",
+      "spectralClasses": [
+        "K4V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 5,
+      "moonCount": 1,
+      "primaryBodyTypes": [
+        "desert",
+        "barren",
+        "desert",
+        "barren",
+        "ice"
+      ],
+      "notableBodies": []
+    },
+    {
+      "systemId": "-1,-1,0",
+      "positionCells": [
+        -0.72970703125,
+        -0.26057617187500004,
+        0.14189453125
+      ],
+      "distanceCells": 0.787722254861049,
+      "properName": "欧拉 伽马-6357",
+      "catalogId": "AF J1509-7048-M1M1P0",
+      "spectralClasses": [
+        "M6V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 4,
+      "moonCount": 3,
+      "primaryBodyTypes": [
+        "desert",
+        "ice",
+        "ice",
+        "iceGiant"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-3",
+          "properName": "埃尔斯米尔",
+          "type": "iceGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "0,1,-1",
+      "positionCells": [
+        0.23095703125,
+        0.8919433593750001,
+        -0.23763671875000003
+      ],
+      "distanceCells": 0.9515121211604405,
+      "properName": "塔斯曼 贝塔-1422",
+      "catalogId": "AF J2347+7818-P0P1M1",
+      "spectralClasses": [
+        "M8V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 4,
+      "moonCount": 2,
+      "primaryBodyTypes": [
+        "desert",
+        "lush",
+        "ocean",
+        "barren"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-2",
+          "properName": "夸欧尔",
+          "type": "ocean"
+        }
+      ]
+    },
+    {
+      "systemId": "-1,1,0",
+      "positionCells": [
+        -0.60427734375,
+        0.7086230468750001,
+        0.27994140624999997
+      ],
+      "distanceCells": 0.9724530434243043,
+      "properName": "阿尔泰尔 贝塔-1630",
+      "catalogId": "AF J1419+1327-M1P1P0",
+      "spectralClasses": [
+        "M7V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 5,
+      "moonCount": 2,
+      "primaryBodyTypes": [
+        "lush",
+        "lush",
+        "barren",
+        "ice",
+        "ice"
+      ],
+      "notableBodies": []
+    },
+    {
+      "systemId": "-1,0,-2",
+      "positionCells": [
+        -0.56345703125,
+        0.350380859375,
+        -1.2131445312499998
+      ],
+      "distanceCells": 1.3827401152722838,
+      "properName": "第谷 阿尔法-7577",
+      "catalogId": "AF J0447+3531-M1P0M2",
+      "spectralClasses": [
+        "M4V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 4,
+      "moonCount": 3,
+      "primaryBodyTypes": [
+        "barren",
+        "desert",
+        "barren",
+        "gasGiant"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-3",
+          "properName": "塞德娜",
+          "type": "gasGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "1,0,0",
+      "positionCells": [
+        1.2940429687500001,
+        0.250927734375,
+        0.59908203125
+      ],
+      "distanceCells": 1.4478988959925725,
+      "properName": "哈雷 贝塔-6162",
+      "catalogId": "AF J0055+6336-P1P0P0",
+      "spectralClasses": [
+        "K7V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 7,
+      "moonCount": 4,
+      "primaryBodyTypes": [
+        "barren",
+        "desert",
+        "lush",
+        "lush",
+        "barren",
+        "gasGiant",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-5",
+          "properName": "乌托邦",
+          "type": "gasGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "1,-1,-1",
+      "positionCells": [
+        1.4328320312500002,
+        -0.347041015625,
+        -0.37568359375000004
+      ],
+      "distanceCells": 1.5213754496885206,
+      "properName": "猎户 泽塔-5145",
+      "catalogId": "AF J1219-8216-P1M1M1",
+      "spectralClasses": [
+        "A0V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 8,
+      "moonCount": 3,
+      "primaryBodyTypes": [
+        "lava",
+        "lava",
+        "lava",
+        "desert",
+        "barren",
+        "barren",
+        "ocean",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-0",
+          "properName": "焦耳",
+          "type": "lava"
+        },
+        {
+          "bodyId": "planet-1",
+          "properName": "领航员",
+          "type": "lava"
+        },
+        {
+          "bodyId": "planet-2",
+          "properName": "黎曼",
+          "type": "lava"
+        },
+        {
+          "bodyId": "planet-6",
+          "properName": "薛定谔",
+          "type": "ocean"
+        }
+      ]
+    },
+    {
+      "systemId": "1,0,-1",
+      "positionCells": [
+        1.1953320312500002,
+        0.419404296875,
+        -0.86404296875
+      ],
+      "distanceCells": 1.5333913006847855,
+      "properName": "轩辕 伽马-7561",
+      "catalogId": "AF J1447+7035-P1P0M1",
+      "spectralClasses": [
+        "M2V",
+        "K3V"
+      ],
+      "binary": true,
+      "primaryBodyCount": 8,
+      "moonCount": 8,
+      "primaryBodyTypes": [
+        "lush",
+        "ocean",
+        "iceGiant",
+        "iceGiant",
+        "ice",
+        "ice",
+        "ice",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-1",
+          "properName": "伽拉忒亚",
+          "type": "ocean"
+        },
+        {
+          "bodyId": "planet-2",
+          "properName": "德尔斐",
+          "type": "iceGiant"
+        },
+        {
+          "bodyId": "planet-3",
+          "properName": "拉里萨",
+          "type": "iceGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "1,-2,-1",
+      "positionCells": [
+        1.3482226562500002,
+        -0.7802441406249999,
+        -0.33263671875
+      ],
+      "distanceCells": 1.5928378563012047,
+      "properName": "麦哲伦 泽塔-8452",
+      "catalogId": "AF J0945-6418-P1M2M1",
+      "spectralClasses": [
+        "F0V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 6,
+      "moonCount": 1,
+      "primaryBodyTypes": [
+        "lava",
+        "barren",
+        "desert",
+        "desert",
+        "desert",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-0",
+          "properName": "黎曼",
+          "type": "lava"
+        }
+      ]
+    },
+    {
+      "systemId": "0,0,-2",
+      "positionCells": [
+        0.17603515625,
+        0.225322265625,
+        -1.57087890625
+      ],
+      "distanceCells": 1.5966900255602343,
+      "properName": "洪堡 伽马-5104",
+      "catalogId": "AF J2056+2441-P0P0M2",
+      "spectralClasses": [
+        "M1V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 5,
+      "moonCount": 6,
+      "primaryBodyTypes": [
+        "ice",
+        "desert",
+        "barren",
+        "gasGiant",
+        "iceGiant"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-3",
+          "properName": "恩克拉多斯",
+          "type": "gasGiant"
+        },
+        {
+          "bodyId": "planet-4",
+          "properName": "伽拉忒亚",
+          "type": "iceGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "1,1,0",
+      "positionCells": [
+        1.35267578125,
+        0.6180761718750001,
+        0.5901757812499999
+      ],
+      "distanceCells": 1.6000179299601616,
+      "properName": "拉格朗日 阿尔法-8188",
+      "catalogId": "AF J1744+3846-P1P1P0",
+      "spectralClasses": [
+        "M1V",
+        "K9V"
+      ],
+      "binary": true,
+      "primaryBodyCount": 7,
+      "moonCount": 6,
+      "primaryBodyTypes": [
+        "barren",
+        "ice",
+        "ocean",
+        "barren",
+        "ice",
+        "gasGiant",
+        "gasGiant"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-2",
+          "properName": "洛夫莱斯",
+          "type": "ocean"
+        },
+        {
+          "bodyId": "planet-5",
+          "properName": "塞德娜",
+          "type": "gasGiant"
+        },
+        {
+          "bodyId": "planet-6",
+          "properName": "薛定谔",
+          "type": "gasGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "0,2,0",
+      "positionCells": [
+        0.43728515625,
+        1.4197753906250001,
+        0.63470703125
+      ],
+      "distanceCells": 1.6154979056684498,
+      "properName": "轩辕 艾普西隆-8964",
+      "catalogId": "AF J0512+6020-P0P2P0",
+      "spectralClasses": [
+        "M0V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 7,
+      "moonCount": 0,
+      "primaryBodyTypes": [
+        "toxic",
+        "ice",
+        "ice",
+        "ice",
+        "ice",
+        "ice",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-0",
+          "properName": "薛定谔",
+          "type": "toxic"
+        }
+      ]
+    },
+    {
+      "systemId": "1,1,-1",
+      "positionCells": [
+        1.3667773437500002,
+        0.8570605468750001,
+        -0.38162109375
+      ],
+      "distanceCells": 1.65779001914987,
+      "properName": "拉格朗日 艾普西隆-8692",
+      "catalogId": "AF J0107+4235-P1P1M1",
+      "spectralClasses": [
+        "K9V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 5,
+      "moonCount": 4,
+      "primaryBodyTypes": [
+        "barren",
+        "lush",
+        "barren",
+        "iceGiant",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-3",
+          "properName": "焦耳",
+          "type": "iceGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "0,2,1",
+      "positionCells": [
+        0.40314453125,
+        1.2078808593750001,
+        1.17232421875
+      ],
+      "distanceCells": 1.7308511655798338,
+      "properName": "冒纳凯阿 德尔塔-9716",
+      "catalogId": "AF J2155+2813-P0P2P1",
+      "spectralClasses": [
+        "K3V",
+        "M1V"
+      ],
+      "binary": true,
+      "primaryBodyCount": 7,
+      "moonCount": 3,
+      "primaryBodyTypes": [
+        "barren",
+        "barren",
+        "desert",
+        "barren",
+        "ice",
+        "iceGiant",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-5",
+          "properName": "希玛利亚",
+          "type": "iceGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "-2,-2,0",
+      "positionCells": [
+        -1.58869140625,
+        -0.6681738281249999,
+        0.35341796875
+      ],
+      "distanceCells": 1.7593467280553867,
+      "properName": "卡西尼 阿尔法-5512",
+      "catalogId": "AF J1859-0429-M2M2P0",
+      "spectralClasses": [
+        "M3V"
+      ],
+      "binary": false,
+      "primaryBodyCount": 8,
+      "moonCount": 7,
+      "primaryBodyTypes": [
+        "desert",
+        "ice",
+        "ice",
+        "ice",
+        "ice",
+        "gasGiant",
+        "gasGiant",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-5",
+          "properName": "阿基拉",
+          "type": "gasGiant"
+        },
+        {
+          "bodyId": "planet-6",
+          "properName": "夸欧尔",
+          "type": "gasGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "1,2,0",
+      "positionCells": [
+        1.1248242187500002,
+        1.398623046875,
+        0.34599609375
+      ],
+      "distanceCells": 1.8278646687396516,
+      "properName": "钱德拉 伽马-1206",
+      "catalogId": "AF J0656+3530-P1P2P0",
+      "spectralClasses": [
+        "M4V",
+        "M4V"
+      ],
+      "binary": true,
+      "primaryBodyCount": 5,
+      "moonCount": 5,
+      "primaryBodyTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "ice",
+        "gasGiant"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-4",
+          "properName": "阿蒙森",
+          "type": "gasGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "-2,-2,-1",
+      "positionCells": [
+        -1.6725585937499998,
+        -0.7279199218749999,
+        -0.16341796875000003
+      ],
+      "distanceCells": 1.8313997637599113,
+      "properName": "欧拉 德尔塔-8746",
+      "catalogId": "AF J0147-8141-M2M2M1",
+      "spectralClasses": [
+        "K7V",
+        "M9V"
+      ],
+      "binary": true,
+      "primaryBodyCount": 8,
+      "moonCount": 7,
+      "primaryBodyTypes": [
+        "barren",
+        "toxic",
+        "barren",
+        "ice",
+        "ice",
+        "iceGiant",
+        "ice",
+        "gasGiant"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-1",
+          "properName": "焦耳",
+          "type": "toxic"
+        },
+        {
+          "bodyId": "planet-5",
+          "properName": "费米",
+          "type": "iceGiant"
+        },
+        {
+          "bodyId": "planet-7",
+          "properName": "黎曼",
+          "type": "gasGiant"
+        }
+      ]
+    },
+    {
+      "systemId": "1,2,-1",
+      "positionCells": [
+        1.26583984375,
+        1.339248046875,
+        -0.17009765624999995
+      ],
+      "distanceCells": 1.850640174033102,
+      "properName": "阿尔戈斯 西塔-1504",
+      "catalogId": "AF J2028+0841-P1P2M1",
+      "spectralClasses": [
+        "G5V",
+        "K2V"
+      ],
+      "binary": true,
+      "primaryBodyCount": 7,
+      "moonCount": 3,
+      "primaryBodyTypes": [
+        "barren",
+        "desert",
+        "ocean",
+        "barren",
+        "ice",
+        "ice",
+        "ice"
+      ],
+      "notableBodies": [
+        {
+          "bodyId": "planet-2",
+          "properName": "新亚特兰蒂斯",
+          "type": "ocean"
+        }
+      ]
+    }
+  ],
+  "neighborhoodProfile": {
+    "sampleRule": "64 nearest generated cells inside xzRadius=8, yRadius=3",
+    "sampledSystems": 64,
+    "binaries": 21,
+    "moons": 263,
+    "landableBodies": 582,
+    "spectralClasses": {
+      "K4V": 4,
+      "M6V": 4,
+      "M8V": 3,
+      "M7V": 6,
+      "M4V": 7,
+      "K7V": 6,
+      "A0V": 1,
+      "M2V": 6,
+      "K3V": 2,
+      "F0V": 1,
+      "M1V": 8,
+      "K9V": 5,
+      "M0V": 4,
+      "M3V": 4,
+      "M9V": 3,
+      "G5V": 3,
+      "K2V": 1,
+      "F1V": 1,
+      "K0V": 4,
+      "G2V": 2,
+      "M5V": 2,
+      "G8V": 1,
+      "G0V": 1,
+      "K5V": 1,
+      "A9V": 1,
+      "G4V": 1,
+      "G3V": 1,
+      "G9V": 1,
+      "F7V": 1
+    },
+    "primaryBodyTypes": {
+      "desert": 57,
+      "barren": 77,
+      "ice": 115,
+      "iceGiant": 25,
+      "lush": 25,
+      "ocean": 14,
+      "gasGiant": 36,
+      "lava": 10,
+      "toxic": 21
+    }
+  },
+  "homeSurfaceSentinels": {
+    "systemId": "0,0,0",
+    "bodyId": "planet-0",
+    "tuning": {
+      "seaLevelOffset": -420,
+      "cloudCoverage": 0.5136393490363844
+    },
+    "naturalSeaLevel": -85.85555721291365,
+    "tunedSeaLevel": -505.85555721291365,
+    "cloudCoverage": 0.5136393490363844,
+    "hasRing": false,
+    "mountMaskLo": 0.03490702388808131,
+    "heightSamples": {
+      "positiveX": -1349.0379876540412,
+      "positiveY": -159.09969411609043,
+      "positiveZ": -78.33918052684972,
+      "diagonalXYZ": 2866.6725245280663
+    }
+  },
+  "fingerprintSha256": "c33ef57528d518b9e5741639a28da9276373f4eed9c57951e2fd3164b8099288"
+}

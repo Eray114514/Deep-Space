@@ -12,6 +12,8 @@
 // forest.
 
 import * as THREE from 'three';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
+import { positionLocal, uniform, vertexColor } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
 
@@ -56,32 +58,45 @@ const Y = new THREE.Vector3(0, 1, 0);
 // bubble boundary made every tree the pilot approached appear to sink into
 // the terrain before the ship could reach it.
 function applyFarFade(mat, uniforms) {
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>
-        uniform vec3 uCamL;
-        uniform float uAltK;`)
-      .replace('#include <begin_vertex>', `#include <begin_vertex>
-        #ifdef USE_INSTANCING
-        {
-          float d = distance(instanceMatrix[3].xyz, uCamL);
-          float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
-          // proxies stand for clumps: slightly large at the handoff, and
-          // inflating further with distance so far canopies OVERLAP — a
-          // forest must stay a forest on a hillside 3 km away
-          g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
-          transformed *= g;
-        }
+  const useNodeMaterials = typeof location !== 'undefined'
+    && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+  if (!useNodeMaterials) {
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+          uniform vec3 uCamL;
+          uniform float uAltK;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          #ifdef USE_INSTANCING
+          {
+            float d = distance(instanceMatrix[3].xyz, uCamL);
+            float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
+            g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
+            transformed *= g;
+          }
+          #endif`);
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        #ifdef USE_COLOR
+          totalEmissiveRadiance *= vColor;
         #endif`);
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <emissivemap_fragment>',
-      `#include <emissivemap_fragment>
-      #ifdef USE_COLOR
-        totalEmissiveRadiance *= vColor;
-      #endif`);
-  };
-  mat.customProgramCacheKey = () => 'far-flora';
+    };
+    mat.customProgramCacheKey = () => 'far-flora';
+    return mat;
+  }
+  const alt = uniform(uniforms.uAltK.value).onFrameUpdate(() => uniforms.uAltK.value);
+  const nodeMaterial = new MeshStandardNodeMaterial({
+    color: 0xffffff, vertexColors: true, roughness: mat.roughness,
+    flatShading: mat.flatShading,
+  });
+  nodeMaterial.positionNode = positionLocal.mul(alt.mul(1.15));
+  nodeMaterial.colorNode = vertexColor();
+  nodeMaterial.emissiveNode = vertexColor().mul(0.12);
+  nodeMaterial.userData.nodeMaterial = 'far-flora-v1';
+  mat.dispose();
+  return nodeMaterial;
 }
 
 export class FarFlora {
@@ -115,11 +130,11 @@ export class FarFlora {
     if (!planet) return;
     const flora = planet.flora || (planet.flora = buildFlora(planet));
     this.meshes = [flora.far0, flora.far1].map((geo) => {
-      const mat = new THREE.MeshStandardMaterial({
+      let mat = new THREE.MeshStandardMaterial({
         color: 0xffffff, vertexColors: true, roughness: 0.95, flatShading: true,
       });
       mat.emissive.setScalar(0.22);
-      applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
+      mat = applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
       const im = new THREE.InstancedMesh(geo, mat, CAP);
       im.count = 0;
       im.visible = false;

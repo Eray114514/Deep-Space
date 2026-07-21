@@ -1,22 +1,25 @@
-// The universe: an infinite lattice of procedurally placed star systems.
-// Only the current system is fully instantiated (sun + planets + moons);
-// every other star is a clickable point of light whose system will be
-// generated, identically every time, from its lattice coordinates.
+// The universe: a finite catalogue of 1,024 reachable star systems. Only the
+// current system is fully instantiated (sun + planets + moons); the catalogue
+// keeps every destination stable without manufacturing new stars beyond the
+// authored galactic boundary.
 
 import * as THREE from 'three';
+import { PointsNodeMaterial } from 'three/webgpu';
+import {
+  attribute, clamp as nodeClamp, float, length as nodeLength, mix,
+  positionView, smoothstep as nodeSmoothstep, uniform, vertexColor,
+} from 'three/tsl';
 import { makeRng } from './rng.js';
 import { clamp } from './noise.js';
 import { Planet } from './planet.js';
 import { GasGiant } from './gas-giant.js';
 import { BlackHole } from './black-hole.js';
 import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, orbitalVelocity, orientationAt as bodyOrientationAt } from './astronomy.js';
-import { CELL, galaxyCellAt } from './galaxy-layout.js';
+import { buildGalaxyBackdrop, CELL, GalaxyCatalog, HOME_SYSTEM_ID } from './galaxy-layout.js';
+import { buildCivilizationSites, civilizationSitesForSystem } from './civilization.js';
+import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
 
 export { CELL } from './galaxy-layout.js';
-// the visible star field: a galactic disc (dense) with a sparse halo above
-// and below — every rendered dot is a real, warpable system
-const FIELD_XZ = 22;                   // cells of radius in the disc plane
-const HALO_Y = 30;                     // sparse halo half-thickness (cells)
 
 // seamless interstellar flight: approaching a star instantiates its system
 // while its planets are still sub-pixel; the system you leave lingers until
@@ -27,52 +30,122 @@ const FADE_DIST = 9e9;
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
+const USE_NODE_MATERIALS = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
 // fall off with true distance (computed in view space, where the f64 group
 // offset has already been applied).
 function makeStarPointsMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      uDim: { value: 0 },               // 1 inside a bright daytime atmosphere
-      uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
-      uProj: { value: 600 },            // height / (2·tan(fov/2)) — set by main
-    },
-    vertexShader: /* glsl */`
-      uniform float uPixelRatio;
-      uniform float uProj;
-      attribute float aSize;
-      varying vec3 vColor;
-      varying float vBright;
-      void main() {
-        vColor = color;
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        float dist = length(mv.xyz);
-        // a star's sprite tracks the TRUE angular size of its sun
-        // (radius = aSize * 6e6 m), so flying close resolves the dot into
-        // the same disc the real sun mesh has when the system instantiates
-        float discPx = 2.0 * 6.0e6 * aSize * uProj / dist;
-        gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
-        // apparent magnitude falls with distance; only the very edge fades out
-        vBright = clamp(2.2e10 / dist, 0.42, 1.0)
-                * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
-        gl_Position = projectionMatrix * mv;
-      }`,
-    fragmentShader: /* glsl */`
-      uniform float uDim;
-      varying vec3 vColor;
-      varying float vBright;
-      void main() {
-        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-        float a = smoothstep(1.0, 0.15, r);
-        gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
-                     * a * vBright * (1.0 - uDim * 0.97);
-      }`,
-    vertexColors: true,
+  if (!USE_NODE_MATERIALS) {
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uDim: { value: 0 },
+        uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
+        uProj: { value: 600 },
+      },
+      vertexShader: /* glsl */`
+        uniform float uPixelRatio;
+        uniform float uProj;
+        attribute float aSize;
+        varying vec3 vColor;
+        varying float vBright;
+        void main() {
+          vColor = color;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float dist = length(mv.xyz);
+          float discPx = 1.2e7 * aSize * uProj / max(dist, 1.0);
+          gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
+          vBright = clamp(2.2e10 / max(dist, 1.0), 0.42, 1.0)
+            * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */`
+        uniform float uDim;
+        varying vec3 vColor;
+        varying float vBright;
+        void main() {
+          float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+          float a = smoothstep(1.0, 0.15, r);
+          gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
+            * a * vBright * (1.0 - uDim * 0.97);
+        }`,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+  }
+  const nodes = {
+    uDim: uniform(0),
+    uPixelRatio: uniform(Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2)),
+    uProj: uniform(600),
+  };
+  const starSize = attribute('aSize', 'float');
+  const distance = nodeLength(positionView);
+  const discPx = starSize.mul(1.2e7).mul(nodes.uProj).div(distance.max(1));
+  const pointSize = nodeClamp(discPx.max(float(1.8).add(starSize.mul(0.55))), 1.8, 28)
+    .mul(nodes.uPixelRatio);
+  const brightness = nodeClamp(float(2.2e10).div(distance.max(1)), 0.42, 1)
+    .mul(nodeSmoothstep(9.2e10, 7.5e10, distance))
+    .mul(float(1).sub(nodes.uDim.mul(0.97)));
+  const material = new PointsNodeMaterial({
+    sizeAttenuation: false,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
+  material.sizeNode = pointSize;
+  // pointUV/gl_PointCoord currently has no portable WGSL path in r185.1.
+  // Keep the finite star field backend-neutral; bloom supplies the soft halo.
+  material.colorNode = vertexColor().mul(1.2);
+  material.opacityNode = brightness;
+  material.uniforms = nodes;
+  return material;
+}
+
+function makeBackdropPointsMaterial() {
+  if (!USE_NODE_MATERIALS) {
+    return new THREE.ShaderMaterial({
+      uniforms: { uDim: { value: 0 } },
+      vertexShader: /* glsl */`
+        attribute float aSize;
+        attribute float aAlpha;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+          vColor = color;
+          vAlpha = aAlpha;
+          gl_PointSize = aSize;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: /* glsl */`
+        uniform float uDim;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+          float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+          float a = smoothstep(1.0, 0.1, r);
+          gl_FragColor = vec4(vColor * 0.78, a * vAlpha * (1.0 - uDim * 0.985));
+        }`,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+  }
+  const nodes = { uDim: uniform(0) };
+  const material = new PointsNodeMaterial({
+    sizeAttenuation: false,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  material.sizeNode = attribute('aSize', 'float');
+  material.colorNode = vertexColor().mul(0.78);
+  material.opacityNode = attribute('aAlpha', 'float').mul(float(1).sub(nodes.uDim.mul(0.985)));
+  material.uniforms = nodes;
+  return material;
 }
 
 function glowTexture(size = 128, inner = 0.0, tight = false) {
@@ -164,20 +237,29 @@ export class Universe {
     this.lastStarRebuild = new THREE.Vector3(Infinity, 0, 0);
     this.camPos = new THREE.Vector3();
     this.timeHours = 0;
+    this.catalog = new GalaxyCatalog(seedStr);
+    this.civilizationSites = buildCivilizationSites(seedStr, this.catalog);
+    const civilizationBySystem = new Map(this.civilizationSites.map((site) => [site.systemId, site]));
+    for (const record of this.catalog.allSystems()) {
+      record.civilizationTag = civilizationBySystem.get(record.id)?.type || null;
+    }
+    this.catalogStars = this.catalog.allSystems().map((record) => this.starFromRecord(record));
+    this.catalogStarById = new Map(this.catalogStars.map((star) => [star.id, star]));
+    this.buildFiniteBackdrop();
 
     this.specialDestinations = blackHoleSystem ? [{
       ...blackHoleSystem,
       kind: 'blackHole',
       pos: new THREE.Vector3(
         blackHoleSystem.positionCells[0] * CELL,
-        blackHoleSystem.positionCells[1] * CELL * 0.5,
+        blackHoleSystem.positionCells[1] * CELL,
         blackHoleSystem.positionCells[2] * CELL,
       ),
       color: new THREE.Color(0xffa45f),
       radius: 1.45e7,
     }] : [];
 
-    this.homeStar = this.starAt(0, 0, 0, true);
+    this.homeStar = this.catalogStarById.get(HOME_SYSTEM_ID);
     this.system = null;
     this.fadingSystem = null;          // the system being left behind
     this.setSystem(this.homeStar);
@@ -190,23 +272,56 @@ export class Universe {
       : this.system.planets;
   }
 
-  // Deterministic star lookup for a lattice cell. force=true for the home cell.
-  starAt(ix, iy, iz, force = false) {
-    const cell = galaxyCellAt(this.seed, ix, iy, iz, force);
-    if (!cell) return null;
+  starFromRecord(record) {
     const pos = new THREE.Vector3(
-      cell.positionCells[0] * CELL,
-      cell.positionCells[1] * CELL,
-      cell.positionCells[2] * CELL,
+      record.positionCells[0] * CELL,
+      record.positionCells[1] * CELL,
+      record.positionCells[2] * CELL,
     );
-    const stellar = generateStellarSpec(this.seed, `${ix},${iy},${iz}`);
+    const stellar = generateStellarSpec(this.seed, record);
     const primary = stellar.stars[0];
     return {
-      id: `${ix},${iy},${iz}`,
-      ix, iy, iz, pos,
+      ...record,
+      pos,
       color: new THREE.Color(primary.color),
       radius: primary.radiusRender,
     };
+  }
+
+  starById(id) { return this.catalogStarById.get(id) || null; }
+  allStars() { return this.catalogStars; }
+
+  buildFiniteBackdrop() {
+    const cellPositions = buildGalaxyBackdrop(this.seed, 20000, this.catalog.allSystems());
+    const positions = new Float32Array(cellPositions.length);
+    const colors = new Float32Array(cellPositions.length);
+    const sizes = new Float32Array(cellPositions.length / 3);
+    const alphas = new Float32Array(cellPositions.length / 3);
+    const rand = makeRng(`${this.seed}:space-backdrop:v1`);
+    const tint = new THREE.Color();
+    for (let i = 0; i < sizes.length; i++) {
+      positions[i * 3] = cellPositions[i * 3] * CELL;
+      positions[i * 3 + 1] = cellPositions[i * 3 + 1] * CELL;
+      positions[i * 3 + 2] = cellPositions[i * 3 + 2] * CELL;
+      const warm = rand();
+      tint.setHSL(warm < 0.72 ? 0.58 + rand() * 0.08 : 0.04 + rand() * 0.08,
+        0.18 + rand() * 0.38, 0.62 + rand() * 0.32);
+      colors[i * 3] = tint.r;
+      colors[i * 3 + 1] = tint.g;
+      colors[i * 3 + 2] = tint.b;
+      sizes[i] = rand() < 0.94 ? 1 : 1.45 + rand() * 0.8;
+      alphas[i] = 0.26 + Math.pow(rand(), 2.4) * 0.68;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    geometry.setAttribute('aAlpha', new THREE.BufferAttribute(alphas, 1));
+    this.backdropMaterial = makeBackdropPointsMaterial();
+    this.backdropMesh = new THREE.Points(geometry, this.backdropMaterial);
+    this.backdropMesh.frustumCulled = false;
+    this.backdropMesh.renderOrder = -10;
+    this.scene.add(this.backdropMesh);
   }
 
   buildSkybox() {
@@ -307,22 +422,11 @@ export class Universe {
     this.fadingSystem = null;
   }
 
-  // Gather every real star around the camera — the entire night sky.
-  // Dense galactic disc + sparse halo, ~15–18k stars, all warpable.
+  // Gather the finite catalogue. At 1,024 points it is cheaper and more stable
+  // to keep the whole barred spiral visible than to rebuild a moving lattice.
   rebuildNearStars(camPos) {
     this.lastStarRebuild.copy(camPos);
-    const cx = Math.round(camPos.x / CELL);
-    const cy = Math.round(camPos.y / (CELL * 0.5));
-    const cz = Math.round(camPos.z / CELL);
-    const list = [];
-    for (let dz = -FIELD_XZ; dz <= FIELD_XZ; dz++) {
-      for (let dy = -HALO_Y; dy <= HALO_Y; dy++) {
-        for (let dx = -FIELD_XZ; dx <= FIELD_XZ; dx++) {
-          const s = this.starAt(cx + dx, cy + dy, cz + dz);
-          if (s && s.id !== this.system.star.id) list.push(s);
-        }
-      }
-    }
+    const list = this.catalogStars.filter((star) => star.id !== this.system.star.id);
     for (const destination of this.specialDestinations) {
       if (destination.id !== this.system.star.id && !list.some((star) => star.id === destination.id)) {
         list.push(destination);
@@ -411,12 +515,16 @@ export class Universe {
       p.group.position.copy(p.posUniv).sub(camPos);
       p.updateVisual?.(performance.now() * 0.001);
     }
+    for (const site of sys.artificialSites || []) {
+      if (!site.parentBody) site.group.position.copy(site.posUniv).sub(camPos);
+    }
   }
 
   updateRelative(camPos) {
     this.relativizeSystem(this.system, camPos);
     if (this.fadingSystem) this.relativizeSystem(this.fadingSystem, camPos);
     if (this.nearStarsMesh) this.nearStarsMesh.position.copy(camPos).negate();
+    if (this.backdropMesh) this.backdropMesh.position.copy(camPos).negate();
     // nebula/band opacity = star dimming × (for the band PLANES) an edge-on
     // fade — an additive plane viewed edge-on concentrates into a hard
     // bright line slicing the sky
@@ -446,6 +554,7 @@ export class Universe {
     // f: 0 in deep space -> 1 inside a bright daytime atmosphere
     // (nebula/band opacity is applied per-frame in updateRelative)
     if (this.starMaterial) this.starMaterial.uniforms.uDim.value = f;
+    if (this.backdropMaterial) this.backdropMaterial.uniforms.uDim.value = f;
     this._starDim = f;
   }
 
@@ -453,12 +562,14 @@ export class Universe {
     if (this.fadingSystem) this.fadingSystem.dispose();
     this.fadingSystem = null;
     if (this.system) this.system.dispose();
-    this.scene.remove(this.group, this.nebulas);
+    this.scene.remove(this.group, this.nebulas, this.backdropMesh);
     if (this.nearStarsMesh) {
       this.scene.remove(this.nearStarsMesh);
       this.nearStarsMesh.geometry.dispose();
     }
     if (this.starMaterial) this.starMaterial.dispose();
+    if (this.backdropMesh) this.backdropMesh.geometry.dispose();
+    if (this.backdropMaterial) this.backdropMaterial.dispose();
     const seenTex = new Set();
     for (const n of this.nebulas.children) {
       const tex = n.material.map;
@@ -505,6 +616,8 @@ export class StarSystem {
     this._specs = [...this.spec.bodies, ...(this.spec.compactObjects || [])];
     this.frames = new Map(this._specs.map((body) => [body.bodyId, new BodyFrame(body)]));
     this.bodyById = new Map();
+    this.artificialSites = [];
+    this._civilizationBuilt = false;
     this._buildIdx = 0;
     this._deferred = deferred;
     this._fadeInPlanets = fadeInPlanets;
@@ -528,6 +641,7 @@ export class StarSystem {
       this.compactObjects.push(blackHole);
       this.bodyById.set(s.bodyId, blackHole);
       this.universe.group.add(blackHole.group);
+      if (this.built) this.buildCivilization();
       return !this.built;
     }
     const Ctor = s.type === 'gasGiant' || s.type === 'iceGiant' ? GasGiant : Planet;
@@ -537,6 +651,7 @@ export class StarSystem {
       atmosphere: s.atmosphere, clouds: s.clouds,
       fadeIn: this._fadeInPlanets, sunDir: this.sunDirFrom(frame.position, _v).clone(),
       tuning: this.universe.bodyTuning?.(this.star.id, s.bodyId) || null,
+      formation: s.formation, ringSystem: s.ringSystem,
     });
     planet.bodyId = s.bodyId; planet.catalogName = s.catalogName; planet.properName = s.properName;
     planet.orbit = s.orbit; planet.rotationPeriodHours = s.rotationPeriodHours;
@@ -553,7 +668,45 @@ export class StarSystem {
     this.planets.push(planet);
     this.bodyById.set(s.bodyId, planet);
     this.universe.group.add(planet.group);
+    if (this.built) this.buildCivilization();
     return !this.built;
+  }
+
+  buildCivilization() {
+    if (this._civilizationBuilt) return;
+    this._civilizationBuilt = true;
+    const records = civilizationSitesForSystem(this.universe.civilizationSites, this.star.id);
+    for (const site of records) {
+      let body = site.bodyId ? this.bodyById.get(site.bodyId) || null : null;
+      if (site.type === 'hero-floating-city' && body?.isGasGiant) {
+        const normal = new THREE.Vector3(...site.landingZone.normal).normalize();
+        const offset = normal.multiplyScalar(body.R + body.atmoHeight * 0.52);
+        const position = body.localPositionToWorld(offset, new THREE.Vector3());
+        const habitat = new ArtificialHabitat(site, body, position, body.frameOrientation);
+        habitat.parentOffset = offset;
+        habitat.frameVelocity.copy(body.frameVelocity);
+        this.planets.push(habitat);
+        this.bodyById.set(habitat.bodyId, habitat);
+        this.universe.group.add(habitat.group);
+        body = habitat;
+      }
+      const visual = createCivilizationVisual(site, body);
+      const entry = { site, group: visual, parentBody: body, posUniv: this.star.pos.clone() };
+      if (body) {
+        body.group.add(visual);
+        body.civilizationSite = site;
+        body.civilizationVisual = visual;
+      } else {
+        const angle = (site.id.charCodeAt(site.id.length - 1) % 13) / 13 * Math.PI * 2;
+        entry.posUniv.add(new THREE.Vector3(
+          Math.cos(angle) * 2.4e8,
+          Math.sin(angle * 1.7) * 4e7,
+          Math.sin(angle) * 2.4e8,
+        ));
+        this.universe.group.add(visual);
+      }
+      this.artificialSites.push(entry);
+    }
   }
 
   positionAt(bodyId, timeHours, out = new THREE.Vector3()) {
@@ -596,6 +749,9 @@ export class StarSystem {
       body.posUniv.copy(frame.position); body.frameVelocity.copy(frame.velocity);
       body.setFrame(frame.orientation); body.setSunDir(this.sunDirFrom(body.posUniv, _v));
     }
+    for (const habitat of this.planets.filter((body) => body instanceof ArtificialHabitat)) {
+      habitat.followParent();
+    }
   }
 
   setSunExtinction(x) {
@@ -624,6 +780,12 @@ export class StarSystem {
   }
 
   dispose() {
+    for (const site of this.artificialSites) {
+      if (!site.parentBody) {
+        this.universe.group.remove(site.group);
+        disposeCivilizationVisual(site.group);
+      }
+    }
     for (const p of this.planets) {
       this.universe.group.remove(p.group);
       p.dispose();

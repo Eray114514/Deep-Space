@@ -35,8 +35,17 @@ if (!runtimeVersion || pkg.version !== runtimeVersion || lock.version !== runtim
 const THREE = await import('three');
 const { startDevServer, startServer } = await import('./server.js');
 const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon,
-  pulseBurstDistance, pulseBurstProgress } = await import('../src/controls.js');
-const { Ship, warpTravelProgress } = await import('../src/effects.js');
+  flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } = await import('../src/controls.js');
+const { Ship, landingDescentProgress, SHIP_LANDING_PROFILE,
+  warpTravelProgress } = await import('../src/effects.js');
+const { DEFAULT_POWER, powerEffectsFor } = await import('../src/ship-hud.js');
+
+const defaultPowerEffects = powerEffectsFor(DEFAULT_POWER);
+for (const system of ['weapon', 'navigation', 'thermal', 'gravity', 'shield']) {
+  if (defaultPowerEffects[system] !== 1) {
+    throw new Error(`Default HUD power changed established ${system} feel`);
+  }
+}
 
 // Pulse begins with immediate authority, remains a bounded displacement near
 // terrain, and is never disabled merely because the player is in atmosphere.
@@ -48,6 +57,14 @@ const openPulseDistance = pulseBurstDistance(620, Infinity, false);
 const atmosphericPulseDistance = pulseBurstDistance(620, 1000, true);
 if (openPulseDistance !== 6200 || atmosphericPulseDistance !== 400) {
   throw new Error('Pulse distance scaling or terrain clearance cap drifted');
+}
+
+// Full gauge deflection is the real RMB governor in every atmosphere and at
+// every gravity allocation; pulse speed may exceed it only in the readout.
+if (Math.abs(flightBoostSpeedLimit(620, 0, 1) - 6832.4) > 1e-8
+    || Math.abs(flightBoostSpeedLimit(620, 1, 1) - 5208) > 1e-8
+    || Math.abs(flightBoostSpeedLimit(620, 0.5, 1.2) - 7224.24) > 1e-8) {
+  throw new Error('RMB boost governor no longer owns the HUD full-scale speed');
 }
 
 // Warp travel is monotonic but allocates the final phase to a decisive brake:
@@ -63,6 +80,23 @@ for (let i = 0; i <= 100; i++) {
 if (Math.abs(warpTravelProgress(0.88) - 0.985) > 1e-8
     || warpTravelProgress(0.72) < 0.819) {
   throw new Error('Warp arrival brake no longer lands in the authored timing window');
+}
+
+// Landing is a world-space third-person shot, with enough authored clearance
+// to keep the lowest GLB vertex above every sampled point under the footprint.
+let lastDescent = -1;
+for (let i = 0; i <= 100; i++) {
+  const progress = landingDescentProgress(i / 100);
+  if (progress + 1e-9 < lastDescent || progress < 0 || progress > 1.000001) {
+    throw new Error(`Landing descent curve is invalid at ${i}%`);
+  }
+  lastDescent = progress;
+}
+if (landingDescentProgress(0) !== 0 || landingDescentProgress(1) !== 1
+    || SHIP_LANDING_PROFILE.bounds.minY > -2
+    || SHIP_LANDING_PROFILE.footprint.length < 9
+    || SHIP_LANDING_PROFILE.colliders.length < 2) {
+  throw new Error('Ship landing clearance or compound walk collider contract drifted');
 }
 const rolled = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 1.2);
 const forwardBefore = new THREE.Vector3(0, 0, -1).applyQuaternion(rolled);
@@ -148,12 +182,30 @@ for (let i = 0; i < 120; i++) {
     throw new Error('Stationary surface hover leaves residual ship roll or orientation lag');
   }
 }
+const lowNavVelocity = applyFlightThrusters(
+  new THREE.Vector3(), thrustQuat, 0, 1, 100, 0.1, 1, .5,
+);
+if (Math.abs(lowNavVelocity.dot(localRight) - dVelocity.dot(localRight) * .5) > 1e-6) {
+  throw new Error('Navigation power does not scale lateral thruster authority');
+}
 if (hoverShip.group.layers.isEnabled(0)
     || !hoverShip.group.layers.isEnabled(3)) {
   throw new Error('Flying ship still leaks into the base scene layer before warp compositing');
 }
 const neutralHullPosition = hoverShip.group.position.clone()
   .applyQuaternion(hoverNav.quat.clone().invert());
+
+const landingPose = new THREE.Vector3(42, 18, -11);
+const landingQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.1, -0.4, 0.03));
+hoverShip.setLandingPose(landingPose, landingQuat, 0.64);
+hoverShip.update(1 / 60, hoverNav, 'landing', 0, 0, 0, null);
+if (hoverShip.group.position.distanceTo(landingPose.clone().sub(hoverNav.pos)) > 1e-8
+    || hoverShip.group.quaternion.angleTo(landingQuat) > 1e-8
+    || hoverShip.foregroundOnly !== false
+    || Math.abs(hoverShip.parkAmt - 0.64) > 1e-8) {
+  throw new Error('Third-person landing pose is still coupled to flight-camera formation');
+}
+hoverShip.finishLanding();
 
 for (let i = 0; i < 12; i++) {
   hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, {

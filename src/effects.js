@@ -4,134 +4,168 @@
 // ship pass, so warp and local pulse share one coherent camera-space tunnel.
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import {
+  Fn, If, abs, atan, clamp, color, cos, dot, exp, float, floor, fract, length,
+  max, mix, normalLocal, normalize, positionLocal, pow, screenUV, sin,
+  smoothstep, step, uniform, vec2, vec3, vec4,
+} from 'three/tsl';
+
+const USE_NODE_MATERIALS = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
 
-export const WarpDriveShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uWarp: { value: 0 },
-    uPulse: { value: 0 },
-    uArrival: { value: 0 },
-    uAspect: { value: 1 },
-  },
-  vertexShader: /* glsl */`
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */`
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    uniform float uWarp;
-    uniform float uPulse;
-    uniform float uArrival;
-    uniform float uAspect;
-    varying vec2 vUv;
+// One authored size contract drives landing clearance and walk collision. The
+// source GLB bounds are [-14, -4.40003, -12.70865] to
+// [14, 3.17674, 11.87912]; the hero is rotated 180 degrees around Y and shown
+// at this scale. Keep collision deliberately simpler than the render mesh, but
+// never let it disagree about the ship's overall footprint or belly height.
+export const SHIP_LANDING_PROFILE = Object.freeze({
+  scale: 0.48,
+  bounds: Object.freeze({
+    minY: -4.40003 * 0.48,
+    maxY: 3.17674 * 0.48,
+    halfX: 12.70865 * 0.48,
+    halfZ: 14 * 0.48,
+  }),
+  groundClearance: 0.22,
+  footprint: Object.freeze([
+    Object.freeze([0, 0]),
+    Object.freeze([-5.7, -5.9]), Object.freeze([0, -6.5]), Object.freeze([5.7, -5.9]),
+    Object.freeze([-5.9, 0]), Object.freeze([5.9, 0]),
+    Object.freeze([-5.7, 5.9]), Object.freeze([0, 6.5]), Object.freeze([5.7, 5.9]),
+  ]),
+  colliders: Object.freeze([
+    // Raised central fuselage plus a lower wing/tail volume. Their upper faces
+    // are real walking surfaces, while the volumes stop the player ghosting
+    // through the parked ship.
+    Object.freeze({ center: Object.freeze([0, -0.27, 0]), half: Object.freeze([2.45, 1.78, 5.85]) }),
+    Object.freeze({ center: Object.freeze([0, -0.62, 0.35]), half: Object.freeze([5.95, 0.76, 3.35]) }),
+    Object.freeze({ center: Object.freeze([0, -0.68, 5.05]), half: Object.freeze([4.6, 0.66, 1.45]) }),
+  ]),
+});
 
-    const float TAU = 6.28318530718;
+// Fast initial descent with a long, readable touchdown settle.
+export function landingDescentProgress(t) {
+  const k = THREE.MathUtils.clamp(t, 0, 1);
+  return 1 - Math.pow(1 - k, 2.35);
+}
 
-    float hash11(float p) {
-      p = fract(p * .1031);
-      p *= p + 33.33;
-      p *= p + p;
-      return fract(p);
-    }
-
-    float hash21(vec2 p) {
-      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-    }
-
-    float noise21(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      f = f * f * (3.0 - 2.0 * f);
-      return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
-        mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0)), f.x), f.y);
-    }
-
-    float flowNoise(vec2 p) {
-      return noise21(p) * .57 + noise21(p * 2.07 + 7.3) * .29
-        + noise21(p * 4.13 - 3.7) * .14;
-    }
-
-    vec3 spectrum(float h) {
-      vec3 rainbow = .56 + .44 * cos(TAU * (h + vec3(0.00, .69, .37)));
-      vec3 ion = mix(vec3(.18, .80, 1.35), vec3(1.25, .26, 1.10), step(.56, h));
-      return mix(ion, rainbow * 1.25, .68);
-    }
-
-    vec3 rayLayer(vec2 p, float bins, float radialScale, float speed, float seed) {
-      float radius = length(p);
-      float angle = atan(p.y, p.x);
-      float bend = sin(radius * mix(5.0, 9.0, seed) - uTime * .22 + seed * 17.0)
-        * mix(.0012, .0042, smoothstep(.08, .8, radius));
-      float wedge = (angle / TAU + .5 + bend) * bins;
-      float id = floor(wedge);
-      float rnd = hash11(id + seed * 71.7);
-      float fine = hash11(id * 5.31 + seed * 19.1);
-      float width = mix(.012, .044, rnd * rnd) * mix(.68, 1.1, smoothstep(.04, .76, radius));
-      float across = abs(fract(wedge) - .5);
-      float core = exp(-pow(across / max(width, .001), 2.0) * 2.4);
-      float glow = exp(-pow(across / max(width * 3.2, .001), 2.0) * 1.35);
-      float phase = fract(radius * radialScale - uTime * speed * mix(.72, 1.4, rnd) + fine);
-      float segment = smoothstep(.025, .13, phase) * (1.0 - smoothstep(.58, .96, phase));
-      float taper = mix(.42, 1.0, smoothstep(.04, .42, phase));
-      float gate = step(.43, fine) * smoothstep(.018, .105, radius);
-      float flare = mix(.32, 1.34, smoothstep(.055, .92, radius));
-      vec3 cool = mix(vec3(.24, .72, 1.12), vec3(.74, .94, 1.08), rnd);
-      float accentAmount = smoothstep(.58, .92, hash11(id * 2.73 + seed * 31.0));
-      vec3 tint = mix(cool, spectrum(fract(rnd * .74 + seed * .29)), accentAmount * .72);
-      vec3 hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .46);
-      return (tint * glow * .19 + hotCore * core * taper) * segment * gate * flare;
-    }
-
-    void main() {
-      float strength = clamp(max(uWarp, uPulse), 0.0, 1.0);
-      vec2 p = vUv - .5;
-      p.x *= uAspect;
-      float radius = length(p);
-      vec2 direction = p / max(radius, .0001);
-      float stretch = strength * (.0015 + uWarp * .0065 + uPulse * .0035)
-        * smoothstep(.035, .82, radius);
-      vec2 shift = vec2(direction.x / uAspect, direction.y) * stretch;
-      vec2 uvR = clamp(vUv - shift * .72, vec2(.001), vec2(.999));
-      vec2 uvG = clamp(vUv - shift * .24, vec2(.001), vec2(.999));
-      vec2 uvB = clamp(vUv + shift * .2, vec2(.001), vec2(.999));
-      vec3 original = texture2D(tDiffuse, vUv).rgb;
-      vec3 dispersed = vec3(
-        texture2D(tDiffuse, uvR).r,
-        texture2D(tDiffuse, uvG).g,
-        texture2D(tDiffuse, uvB).b
-      );
-      vec3 scene = mix(original, dispersed, strength * (.14 + uWarp * .12));
-
-      float rayStrength = strength * mix(.62, 1.0, strength) * smoothstep(.025, .14, radius);
-      vec3 rays = rayLayer(p, 61.0, 1.38, .86 + uPulse * 1.18, .13);
-      rays += rayLayer(p * 1.07, 97.0, 2.17, 1.33 + uPulse * 1.42, .47) * .68;
-      rays += rayLayer(p * .94, 139.0, 3.28, 1.82 + uPulse * 1.68, .81) * .34;
-      float coreFade = smoothstep(.012, .082, radius);
-      float edgeFade = 1.0 - smoothstep(.78, 1.02, radius);
-      rays *= rayStrength * coreFade * edgeFade * (1.0 + uWarp * .22);
-
-      float tunnel = smoothstep(.08, .92, radius) * (1.0 - smoothstep(.88, 1.14, radius));
-      float turbulence = flowNoise(p * 3.7 + direction * (uTime * .075));
-      vec3 haze = mix(vec3(.012, .036, .075), vec3(.025, .115, .21), turbulence)
-        * (.12 + tunnel * .88) * strength * (uWarp * .64 + uPulse * .22);
-      vec3 arrival = vec3(.06, .19, .42) * exp(-radius * radius * 14.0) * uArrival * .52;
-      float centerFlash = exp(-radius * radius * 110.0) * uArrival;
-      arrival += vec3(.68, .84, 1.04) * centerFlash * .68;
-
-      gl_FragColor = vec4(scene * (1.0 - strength * .028) + haze + rays + arrival, 1.0);
-    }
-  `,
-};
+// WebGPURenderer post-processing node. The input is a pass texture node and
+// the returned uniforms deliberately mirror the old pass controls.
+export function createWarpDriveNode(inputNode) {
+  const controls = {
+    time: uniform(0), warp: uniform(0), pulse: uniform(0),
+    arrival: uniform(0), aspect: uniform(1),
+  };
+  const tau = 6.28318530718;
+  const hash11 = Fn(([source]) => {
+    const p0 = fract(source.mul(.1031));
+    const p1 = p0.mul(p0.add(33.33));
+    return fract(p1.mul(p1.add(p1)));
+  });
+  const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123)));
+  const noise21 = Fn(([p]) => {
+    const cell = floor(p);
+    const local0 = fract(p);
+    const local = local0.mul(local0).mul(float(3).sub(local0.mul(2)));
+    const lower = mix(hash21(cell), hash21(cell.add(vec2(1, 0))), local.x);
+    const upper = mix(hash21(cell.add(vec2(0, 1))), hash21(cell.add(vec2(1))), local.x);
+    return mix(lower, upper, local.y);
+  });
+  const flowNoise = Fn(([p]) => noise21(p).mul(.57)
+    .add(noise21(p.mul(2.07).add(7.3)).mul(.29))
+    .add(noise21(p.mul(4.13).sub(3.7)).mul(.14)));
+  const spectrum = Fn(([h]) => {
+    const rainbow = vec3(.56).add(cos(h.add(vec3(0, .69, .37)).mul(tau)).mul(.44));
+    const ion = mix(vec3(.18, .80, 1.35), vec3(1.25, .26, 1.10), step(.56, h));
+    return mix(ion, rainbow.mul(1.25), .68);
+  });
+  const rayLayer = Fn(([p, bins, radialScale, speed, seed]) => {
+    const radius = length(p);
+    const angle = atan(p.y, p.x);
+    const bend = sin(radius.mul(mix(5, 9, seed)).sub(controls.time.mul(.22))
+      .add(seed.mul(17))).mul(mix(.0012, .0042, smoothstep(.08, .8, radius)));
+    const wedge = angle.div(tau).add(.5).add(bend).mul(bins);
+    const id = floor(wedge);
+    const random = hash11(id.add(seed.mul(71.7)));
+    const fine = hash11(id.mul(5.31).add(seed.mul(19.1)));
+    const width = mix(.012, .044, random.mul(random))
+      .mul(mix(.68, 1.1, smoothstep(.04, .76, radius)));
+    const across = abs(fract(wedge).sub(.5));
+    const core = exp(pow(across.div(max(width, .001)), 2).mul(-2.4));
+    const glow = exp(pow(across.div(max(width.mul(3.2), .001)), 2).mul(-1.35));
+    const phase = fract(radius.mul(radialScale).sub(controls.time.mul(speed)
+      .mul(mix(.72, 1.4, random))).add(fine));
+    const segment = smoothstep(.025, .13, phase)
+      .mul(float(1).sub(smoothstep(.58, .96, phase)));
+    const taper = mix(.42, 1, smoothstep(.04, .42, phase));
+    const gate = step(.43, fine).mul(smoothstep(.018, .105, radius));
+    const flare = mix(.32, 1.34, smoothstep(.055, .92, radius));
+    const cool = mix(vec3(.24, .72, 1.12), vec3(.74, .94, 1.08), random);
+    const accent = smoothstep(.58, .92, hash11(id.mul(2.73).add(seed.mul(31))));
+    const tint = mix(cool, spectrum(fract(random.mul(.74).add(seed.mul(.29)))), accent.mul(.72));
+    const hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .46);
+    return tint.mul(glow).mul(.19).add(hotCore.mul(core).mul(taper))
+      .mul(segment).mul(gate).mul(flare);
+  });
+  const outputNode = Fn(() => {
+    const strength = clamp(controls.warp.max(controls.pulse), 0, 1);
+    const base = inputNode.sample(screenUV);
+    const result = vec4(base.rgb, 1).toVar();
+    const activity = max(strength, controls.arrival);
+    // The render graph is always resident. A real shader branch keeps the
+    // expensive authored tunnel dormant during ordinary flight; the old GLSL
+    // pass achieved the same thing by disabling the pass altogether.
+    If(activity.greaterThan(.001), () => {
+      const centered = screenUV.sub(0.5);
+      const p = vec2(centered.x.mul(controls.aspect), centered.y);
+      const radius = length(p);
+      const direction = p.div(max(radius, .0001));
+      const stretch = strength.mul(float(.0015).add(controls.warp.mul(.0065))
+        .add(controls.pulse.mul(.0035))).mul(smoothstep(.035, .82, radius));
+      const shift = vec2(direction.x.div(controls.aspect), direction.y).mul(stretch);
+      const red = inputNode.sample(clamp(screenUV.sub(shift.mul(.72)), .001, .999));
+      const green = inputNode.sample(clamp(screenUV.sub(shift.mul(.24)), .001, .999));
+      const blue = inputNode.sample(clamp(screenUV.add(shift.mul(.20)), .001, .999));
+      const dispersed = vec3(red.r, green.g, blue.b);
+      const scene = mix(base.rgb, dispersed,
+        strength.mul(float(.14).add(controls.warp.mul(.12))));
+      const rayStrength = strength.mul(mix(.62, 1, strength))
+        .mul(smoothstep(.025, .14, radius));
+      const layeredRays = rayLayer(p, float(61), float(1.38),
+        float(.86).add(controls.pulse.mul(1.18)), float(.13))
+        .add(rayLayer(p.mul(1.07), float(97), float(2.17),
+          float(1.33).add(controls.pulse.mul(1.42)), float(.47)).mul(.68))
+        .add(rayLayer(p.mul(.94), float(139), float(3.28),
+          float(1.82).add(controls.pulse.mul(1.68)), float(.81)).mul(.34));
+      const rays = layeredRays.mul(rayStrength).mul(smoothstep(.012, .082, radius))
+        .mul(float(1).sub(smoothstep(.78, 1.02, radius)))
+        .mul(float(1).add(controls.warp.mul(.22)));
+      const tunnel = smoothstep(.08, .92, radius)
+        .mul(float(1).sub(smoothstep(.88, 1.14, radius)));
+      // Preserve the flowing haze without the old twelve sine hashes per
+      // pixel; the three authored segmented ray layers remain unchanged.
+      const turbulence = sin(dot(p, vec2(18.7, 31.9)).add(controls.time.mul(.17)))
+        .mul(.5).add(.5);
+      const haze = mix(vec3(.012, .036, .075), vec3(.025, .115, .21), turbulence)
+        .mul(float(.12).add(tunnel.mul(.88))).mul(strength)
+        .mul(controls.warp.mul(.64).add(controls.pulse.mul(.22)));
+      const arrival = vec3(.06, .19, .42).mul(exp(radius.mul(radius).mul(-14)))
+        .mul(controls.arrival).mul(.52)
+        .add(vec3(.68, .84, 1.04).mul(exp(radius.mul(radius).mul(-110)))
+          .mul(controls.arrival).mul(.68));
+      result.assign(vec4(scene.mul(float(1).sub(strength.mul(.028)))
+        .add(haze).add(rays).add(arrival), 1));
+    });
+    return result;
+  })();
+  return { outputNode, uniforms: controls };
+}
 
 function hermite(t, p0, p1, m0, m1, span) {
   const t2 = t * t;
@@ -170,49 +204,75 @@ export function warpTravelProgress(t) {
 
 export class SkyDome {
   constructor(scene) {
-    this.mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uUp: { value: new THREE.Vector3(0, 1, 0) },
-        uSunDir: { value: new THREE.Vector3(0, 1, 0) },
-        uHorizon: { value: new THREE.Color(0x88bbff) },
-        uZenith: { value: new THREE.Color(0x224488) },
-        uSunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
-        uAlpha: { value: 0 },
-      },
-      vertexShader: /* glsl */`
-        #include <common>
-        #include <logdepthbuf_pars_vertex>
-        varying vec3 vDir;
-        void main() {
-          vDir = normalize(position);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          #include <logdepthbuf_vertex>
-        }`,
-      fragmentShader: /* glsl */`
-        #include <common>
-        #include <logdepthbuf_pars_fragment>
-        uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
-        uniform float uAlpha;
-        varying vec3 vDir;
-        void main() {
-          #include <logdepthbuf_fragment>
-          vec3 dir = normalize(vDir);
-          float u = dot(dir, uUp);
-          float t = pow(clamp(1.0 - max(u, 0.0), 0.0, 1.0), 3.2);
-          vec3 col = mix(uZenith, uHorizon * 0.92, t);
-          float sd = max(dot(dir, uSunDir), 0.0);
-          col += uSunTint * (pow(sd, 700.0) * 1.3 + pow(sd, 16.0) * 0.16);
-          float a = uAlpha * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
-          gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
-        }`,
-      side: THREE.BackSide,
-      transparent: true,
-      depthWrite: false,
-      // proper depth test (log-depth aware): terrain must occlude the sky —
-      // transparent materials draw after opaque, so without this the dome
-      // would wash over the whole world
-      depthTest: true,
+    if (!USE_NODE_MATERIALS) {
+      this.mat = new THREE.ShaderMaterial({
+        uniforms: {
+          uUp: { value: new THREE.Vector3(0, 1, 0) },
+          uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+          uHorizon: { value: new THREE.Color(0x88bbff) },
+          uZenith: { value: new THREE.Color(0x224488) },
+          uSunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
+          uAlpha: { value: 0 },
+        },
+        vertexShader: /* glsl */`
+          #include <common>
+          #include <logdepthbuf_pars_vertex>
+          varying vec3 vDir;
+          void main() {
+            vDir = normalize(position);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            #include <logdepthbuf_vertex>
+          }`,
+        fragmentShader: /* glsl */`
+          #include <common>
+          #include <logdepthbuf_pars_fragment>
+          uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
+          uniform float uAlpha;
+          varying vec3 vDir;
+          void main() {
+            #include <logdepthbuf_fragment>
+            vec3 dir = normalize(vDir);
+            float u = dot(dir, uUp);
+            float t = pow(clamp(1.0 - max(u, 0.0), 0.0, 1.0), 3.2);
+            vec3 col = mix(uZenith, uHorizon * 0.92, t);
+            float sd = max(dot(dir, uSunDir), 0.0);
+            col += uSunTint * (pow(sd, 700.0) * 1.3 + pow(sd, 16.0) * 0.16);
+            float a = uAlpha * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
+            gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+          }`,
+        side: THREE.BackSide,
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+      });
+      this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
+      this.mesh.renderOrder = -7;
+      this.mesh.frustumCulled = false;
+      this.mesh.visible = false;
+      scene.add(this.mesh);
+      return;
+    }
+    const nodes = {
+      uUp: uniform(new THREE.Vector3(0, 1, 0)),
+      uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
+      uHorizon: uniform(new THREE.Color(0x88bbff)),
+      uZenith: uniform(new THREE.Color(0x224488)),
+      uSunTint: uniform(new THREE.Color(1.0, 0.92, 0.78)),
+      uAlpha: uniform(0),
+    };
+    const dir = normalize(positionLocal);
+    const upDot = dot(dir, nodes.uUp);
+    const horizonMix = pow(clamp(float(1).sub(upDot.max(0)), 0, 1), 3.2);
+    const sunDot = dot(dir, nodes.uSunDir).max(0);
+    const sky = mix(nodes.uZenith, nodes.uHorizon.mul(0.92), horizonMix)
+      .add(nodes.uSunTint.mul(pow(sunDot, 700).mul(1.3).add(pow(sunDot, 16).mul(0.16))));
+    const belowFade = mix(float(1), clamp(float(1).add(upDot.mul(2.4)), 0, 1), upDot.lessThan(0));
+    this.mat = new MeshBasicNodeMaterial({
+      side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: true,
     });
+    this.mat.colorNode = sky;
+    this.mat.opacityNode = nodes.uAlpha.mul(belowFade);
+    this.mat.uniforms = Object.fromEntries(Object.entries(nodes).map(([key, node]) => [key, node]));
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
     this.mesh.renderOrder = -7;
     this.mesh.frustumCulled = false;
@@ -268,6 +328,7 @@ export class Ship {
     this.parkedPosUniv = null;
     this.parkedQuat = new THREE.Quaternion();
     this.parkAmt = 0;
+    this.landingPose = null;
     // Hero start cinematic: a camera-relative offset that fades to zero as the
     // pull-back runs, so the ship slides into formation from off-screen.
     this.introOffset = new THREE.Vector3();
@@ -309,7 +370,7 @@ export class Ship {
         }
       });
       hero.rotation.y = Math.PI;
-      hero.scale.setScalar(0.48);
+      hero.scale.setScalar(SHIP_LANDING_PROFILE.scale);
       this.group.clear();
       this.group.add(hero);
       for (const part of this.loadedGear) part.visible = false;
@@ -325,6 +386,22 @@ export class Ship {
     this.parkedQuat.copy(quat);
   }
 
+  setLandingPose(posUniv, quat, progress) {
+    this.landingPose ??= {
+      posUniv: new THREE.Vector3(),
+      quat: new THREE.Quaternion(),
+      progress: 0,
+    };
+    this.landingPose.posUniv.copy(posUniv);
+    this.landingPose.quat.copy(quat);
+    this.landingPose.progress = THREE.MathUtils.clamp(progress, 0, 1);
+  }
+
+  finishLanding() {
+    this.landingPose = null;
+    this.parkAmt = 1;
+  }
+
   setForegroundOnly(enabled) {
     if (this.foregroundOnly === enabled) return;
     this.foregroundOnly = enabled;
@@ -332,10 +409,12 @@ export class Ship {
   }
 
   update(dt, nav, state, speed, warp, boost = 0, flightInput = null) {
+    const cinematicLanding = state === 'landing' && !!this.landingPose;
     const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding') && !!this.parkedPosUniv;
-    this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
-    const foregroundOnly = ['space', 'flyto', 'warp', 'takeoff'].includes(state)
-      || (state === 'landing' && this.parkAmt < 0.58);
+    if (cinematicLanding) this.parkAmt = this.landingPose.progress;
+    else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
+    const foregroundOnly = !cinematicLanding && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
+      || (state === 'landing' && this.parkAmt < 0.58));
     this.setForegroundOnly(foregroundOnly);
 
     // The hull's mass response is driven by raw pilot intent, never by speed
@@ -385,7 +464,13 @@ export class Ship {
       .multiply(_sq.setFromAxisAngle(X, this.lookPitch))
       .multiply(_sq.setFromAxisAngle(_sr.set(0, 0, 1), this.roll));
 
-    if (this.parkedPosUniv && this.parkAmt > 0.002) {
+    if (cinematicLanding) {
+      // During landing the camera is an independent third-person observer.
+      // Keep the hull in universe space instead of tying it to flight-camera
+      // formation coordinates.
+      this.group.position.copy(this.landingPose.posUniv).sub(nav.pos);
+      this.group.quaternion.copy(this.landingPose.quat);
+    } else if (this.parkedPosUniv && this.parkAmt > 0.002) {
       // glide between flying formation and the landing pad
       _sp.copy(this.parkedPosUniv).sub(nav.pos);      // camera-relative pad
       const e = this.parkAmt * this.parkAmt * (3 - 2 * this.parkAmt);
@@ -473,7 +558,7 @@ export class ShipWeapons {
     scene.add(this.coreMesh);
   }
 
-  fire(nav, speedScale, ship) {
+  fire(nav, speedScale, ship, weaponPower = 1) {
     // Bind the hardpoints to the rendered ship, including its smoothing, bank
     // and acceleration lunge. Universe position = camera + relative ship pose.
     const shipQuat = ship?.group?.quaternion || nav.quat;
@@ -485,14 +570,14 @@ export class ShipWeapons {
     else _weaponPos.addScaledVector(_weaponForward, 19).addScaledVector(_weaponUp, -4.6);
     // The rebuilt Asterion's paired emitters sit just inboard of the wingtips.
     _weaponPos.addScaledVector(_weaponForward, 1.35).addScaledVector(_weaponUp, -0.15);
-    const muzzleSpeed = Math.max(780, speedScale * 10.5);
+    const muzzleSpeed = Math.max(780, speedScale * 10.5) * weaponPower;
 
     for (const side of [-1, 1]) {
       const bolt = this.bolts[this.cursor];
       this.cursor = (this.cursor + 1) % this.maxBolts;
       bolt.pos.copy(_weaponPos).addScaledVector(_weaponRight, side * 2.5);
       bolt.vel.copy(nav.vel).addScaledVector(_weaponForward, muzzleSpeed);
-      bolt.life = bolt.maxLife = 1.65;
+      bolt.life = bolt.maxLife = 1.65 * Math.max(.65, weaponPower);
       bolt.length = THREE.MathUtils.clamp(muzzleSpeed * 0.0018, 1.0, 2.4);
     }
     this.shotsFired++;

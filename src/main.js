@@ -4,11 +4,10 @@
 // from interstellar space down to boot level), and the ambience pass
 // (atmosphere, fog, day/night, star dimming).
 
-import * as THREE from 'three/webgpu';
 import { StarSystem, Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
 import { SpaceControls, WalkControls, guidePlanetApproach, keys,
-  pulseBurstDistance, pulseBurstProgress } from './controls.js';
+  flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { createWarpDriveNode, landingDescentProgress, SHIP_LANDING_PROFILE,
@@ -31,6 +30,10 @@ import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
 import { GameNodePipeline } from './node-render-pipeline.js';
+import { GameLegacyPipeline } from './legacy-render-pipeline.js';
+
+const BOOT_USE_WEBGPU = new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const THREE = await import(BOOT_USE_WEBGPU ? 'three/webgpu' : 'three');
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -91,6 +94,10 @@ window.addEventListener('pointerdown', (event) => {
 // ---- renderer ---------------------------------------------------------------
 const rendererOptions = {
   antialias: qs.get('quality') !== 'low',
+  // Layer passes share the renderer clear state. A transparent drawing buffer
+  // gives the volume/foreground passes a zero-alpha background so compositing
+  // them cannot replace the main scene with an opaque black rectangle.
+  alpha: true,
   logarithmicDepthBuffer: true,
   powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
 };
@@ -121,7 +128,7 @@ renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
-console.info(`Renderer: WebGPURenderer/${actualRendererBackend}`, gpuName);
+console.info(`Renderer: ${renderer.constructor.name}/${actualRendererBackend}`, gpuName);
 
 // WebGL context-loss safety net. The renderer auto-restores most GPU
 // resources on the next render after restore, but without an explicit
@@ -177,12 +184,41 @@ let shadowBlend = 0;
 const sunDirCam = new THREE.Vector3(0, 1, 0);
 let warmedSurfacePlanet = null;
 let surfacePipelinesReady = true;
-const pipelineWarmScenes = [];
 const surfaceBootstrapMeshes = [];
 let surfaceBootstrapPending = false;
 const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
 const startupWarmStartedAt = performance.now();
+const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
+// Shader compilation may consume most of the general warm-up deadline on a
+// cold browser profile.  Give the visible terrain/water LOD a separate,
+// bounded settling window so control is not handed over during a morph.  The
+// low tier remains tightly capped to avoid trapping integrated GPUs on the
+// loading screen.
+const STARTUP_TERRAIN_GRACE_MS = QUALITY_LOW ? 650 : 3500;
+let startupPrewarmExpired = false;
+
+function startupTerrainReady() {
+  const planet = universe?.system?.planets?.[0];
+  if (!planet || planet.isGasGiant) return true;
+  const terrain = planet.lod?.debugStats?.();
+  const water = planet.waterLod?.debugStats?.() || null;
+  const settled = (stats, targetLevel) => !stats
+    || (stats.visibleMaxLevel >= targetLevel
+      && stats.activeMorphs === 0 && stats.pending === 0);
+  return settled(terrain, planet.lod.planet.orbitLevelCap)
+    && settled(water, planet.waterLod?.planet?.orbitLevelCap ?? 0);
+}
+
+function releaseStartupPrewarm(reason) {
+  if (startupPrewarmExpired) return;
+  startupPrewarmExpired = true;
+  surfaceBootstrapPending = false;
+  surfacePipelinesReady = true;
+  for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
+  renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
+  console.warn(`startup shader prewarm released: ${reason}`);
+}
 
 function finishSurfaceBootstrap() {
   if (!surfaceBootstrapPending || contextLost) return;
@@ -240,7 +276,34 @@ function finishSurfaceBootstrap() {
 }
 
 function prewarmSurfacePipelines(planet) {
-  if (!planet || warmedSurfacePlanet === planet || typeof renderer.compileAsync !== 'function') return;
+  // The low tier intentionally skips the expensive asynchronous surface
+  // warm-up.  Mark the shared topology as accounted for so the regular frame
+  // loop does not start that compile one frame later and recreate the same
+  // renderer/program race on integrated GPUs.
+  if (QUALITY_LOW) {
+    if (planet && !warmedSurfacePlanet) warmedSurfacePlanet = planet;
+    return;
+  }
+  // Terrain/water/prop shader topology is shared between terrestrial bodies;
+  // uniforms and generated textures carry the per-planet variation.  One
+  // representative warm-up is therefore enough.  Recompiling when a nearby
+  // moon briefly becomes the closest body can overlap the live frame and
+  // leave Three.js without a currentProgram while it polls isReady().
+  if (!planet || warmedSurfacePlanet || typeof renderer.compileAsync !== 'function') return;
+  // compileAsync is not re-entrant for a shared renderer/material registry.
+  // A scripted teleport (or a very close moon) can change the nearest body
+  // while the opening planet is still compiling; starting a second compile
+  // then leaves one material without currentProgram and crashes isReady().
+  if (!surfacePipelinesReady) return;
+  // The private target is a startup-only cache warmer. Once the first playable
+  // frame has been released (or its budget expired), later planets compile on
+  // demand; re-entering this path would wait on an already-disposed target and
+  // could hide surface props forever on a slow adapter.
+  if (loadingCleared || startupPrewarmExpired) {
+    warmedSurfacePlanet = planet;
+    surfacePipelinesReady = true;
+    return;
+  }
   warmedSurfacePlanet = planet;
   surfacePipelinesReady = false;
 
@@ -289,28 +352,22 @@ function prewarmSurfacePipelines(planet) {
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
-  // compileAsync does not visit every lazy shadow-map depth variant
-  // material. Seed the two costly variants explicitly: morphed terrain and
-  // instanced surface props. The warm scene stays alive so the shared program
-  // cache retains those programs for the real shadow pass.
-  const morphMesh = planet.group.children.find((object) => object.isMesh
-    && object.geometry?.morphAttributes?.position?.length);
-  const instancedMesh = planet.group.children.find((object) => object.isInstancedMesh);
-  if (morphMesh || instancedMesh) {
-    const warmScene = new THREE.Scene();
-    const depthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-    if (morphMesh) warmScene.add(new THREE.Mesh(morphMesh.geometry, depthMaterial));
-    if (instancedMesh) warmScene.add(new THREE.InstancedMesh(instancedMesh.geometry, depthMaterial, 1));
-    pipelineWarmScenes.push(warmScene);
-    tasks.push(renderer.compileAsync(warmScene, camera));
-  }
-  Promise.all(tasks).then(() => { surfaceBootstrapPending = true; }).catch((error) => {
+  // WebGPURenderer derives backend-specific shadow materials from the node
+  // surface graph. The private 2×2 bootstrap render below warms those real
+  // variants without injecting an incompatible legacy MeshDepthMaterial.
+  Promise.all(tasks).then(() => {
+    if (!startupPrewarmExpired) surfaceBootstrapPending = true;
+  }).catch((error) => {
     surfacePipelinesReady = true;
     console.warn('surface pipeline prewarm failed', error);
   });
 }
 
 function prewarmLoadedShipPipelines() {
+  if (startupPrewarmExpired) {
+    shipPipelinesWarmed = true;
+    return;
+  }
   if (QUALITY_LOW) {
     shipPipelinesWarmed = true;
     return;
@@ -324,7 +381,7 @@ function prewarmLoadedShipPipelines() {
   sunShadow.visible = true;
   sunShadow.intensity = 1e-7;
   renderer.compileAsync(scene, camera).then(() => {
-    surfaceBootstrapPending = true;
+    if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
     surfacePipelinesReady = true;
     console.warn('ship pipeline prewarm failed', error);
@@ -333,12 +390,17 @@ function prewarmLoadedShipPipelines() {
   sunShadow.intensity = lightIntensity;
 }
 
-// ---- node render graph: one TSL path for WebGPU and WebGL 2 -----------------
-const VOLUME_ENABLED = !QUALITY_LOW && qs.get('vclouds') !== '0';
-setVolumetricCloudsEnabled(VOLUME_ENABLED);
-const volumePass = VOLUME_ENABLED ? new VolumetricPass() : null;
-const nodePipeline = new GameNodePipeline(renderer, scene, camera, {
+// ---- renderer-specific post chain -------------------------------------------
+const VOLUME_ENABLED = qs.get('vclouds') !== '0';
+const VOLUME_SCALE = QUALITY_LOW ? 0.46 : 0.67;
+setVolumetricCloudsEnabled(VOLUME_ENABLED, QUALITY_LOW ? 'low' : 'high');
+const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
+  ? new VolumetricPass()
+  : null;
+const Pipeline = BOOT_USE_WEBGPU ? GameNodePipeline : GameLegacyPipeline;
+const nodePipeline = new Pipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
+  volumeScale: VOLUME_SCALE,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
   bloomStrength: IS_TOUCH ? 0.35 : 0.5,
   bloomRadius: 0.4,
@@ -347,6 +409,9 @@ const nodePipeline = new GameNodePipeline(renderer, scene, camera, {
   createWarpDriveNode,
   createRiftDistortionNode,
 });
+const volumePass = BOOT_USE_WEBGPU
+  ? nodeVolumePass
+  : nodePipeline.volumePass;
 const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
 const riftDistortionPass = nodePipeline.rift;
@@ -432,6 +497,9 @@ let pulseActive = false;
 let pulseBurst = null;
 let pulseRechargeDelay = 0;
 let weaponCooldown = 0;
+let flightPower = {
+  weapon: 1, navigation: 1, thermal: 1, gravity: 1, shield: 1, warp: 0,
+};
 let weaponVisual = 0;
 let activeBolts = 0;
 let starMap = null;
@@ -500,7 +568,9 @@ const FARFLORA = qs.get('farflora') !== '0';
 const farFlora = new FarFlora();
 const skyDome = new SkyDome(scene);
 const ship = new Ship(scene, {
-  anisotropy: Math.min(16, renderer.getMaxAnisotropy()),
+  anisotropy: Math.min(16, renderer.getMaxAnisotropy?.()
+    ?? renderer.capabilities?.getMaxAnisotropy?.()
+    ?? 1),
 });
 spatialRift = new SpatialRift({
   scene,
@@ -622,13 +692,13 @@ function cancelPulseBurst() {
 function triggerPulse() {
   if (state !== 'space' || paused || riftRoute || pulseBurst) return false;
   if (pulseFuel + 1e-6 < PULSE_FUEL_COST) {
-    ui.setHint(`脉冲燃料不足 · 需要 ${PULSE_FUEL_COST}`, true);
+    ui.setHint(`脉冲燃料不足 · 需要 ${PULSE_FUEL_COST}`, false);
     return false;
   }
   const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
   const distance = pulseBurstDistance(spaceCtl.speedScale, nearestAlt, !!nearest);
   pulseFuel = Math.max(0, pulseFuel - PULSE_FUEL_COST);
-  pulseRechargeDelay = 1.4;
+  pulseRechargeDelay = 1.4 / Math.max(.1, flightPower.thermal);
   pulseBurst = { elapsed: 0, progress: 0, direction, distance };
   pulseActive = true;
   return true;
@@ -1276,6 +1346,17 @@ function resolveParkedShipCollision(controller, previousPosition) {
 
     const feet = shipCollisionCurrent.y - eyeHeight;
     const previousFeet = shipCollisionPrevious.y - eyeHeight;
+    const mantleReach = top - feet;
+    // A normal jump can mantle the lower wing deck. Without this small ledge
+    // assist the collider would be physically correct but the parked ship's
+    // ~2.5 m deck would be unreachable from the deliberately short jump arc.
+    if (controller.vR > 0 && mantleReach >= 0 && mantleReach <= 1.12) {
+      shipCollisionCurrent.y = top + eyeHeight;
+      controller.vR = 0;
+      controller.grounded = true;
+      resolved = true;
+      break;
+    }
     // Crossing a top face while falling creates a stable walkable deck. A
     // small tolerance avoids losing contact as the curved planet frame moves.
     if (controller.vR <= 0 && previousFeet >= top - 0.18 && feet <= top + 0.28) {
@@ -1963,6 +2044,7 @@ function renderRiftPortal() {
 // the destination sun grows from a dot — and decelerate into the new system.
 function warpTo(star, preferBodyId = null) {
   if (state !== 'space') return;
+  ui.beginWarpPower();
   setState('warp');
   warpArrival = 0;
   focusPlanet = null;
@@ -2056,6 +2138,7 @@ function warpTo(star, preferBodyId = null) {
       ui.setHint(`已抵达 ${universe.system.name} · 星系安全入口`, true);
     }
     setState('space');
+    ui.endWarpPower();
     ui.showArrival(arrivalDisplayName, universe.system.name, '跃迁抵达');
   });
 }
@@ -2072,6 +2155,7 @@ function newUniverse(seed) {
   tweens.length = 0;
   clearPendingRoute(false);
   ui.endTravel();
+  ui.endWarpPower(true);
   riftPortalAmbient.visible = false;
   disposeRiftPreview();
   riftRoute = null;
@@ -2252,6 +2336,7 @@ function ambience() {
   }
   renderer.setClearColor(_sky.multiplyScalar(nearest ? 1 : 0));
   if (!nearest) renderer.setClearColor(0x000000);
+  renderer.setClearAlpha(0);
   universe.setStarDimming(clamp(skyStrength * 1.25, 0, 1));
   // a horizon sun seen through air dims and reddens — otherwise sunsets are
   // a white bloom explosion swallowing a third of the sky
@@ -2363,6 +2448,9 @@ function frame() {
 
   // controls / state integration — skipped while paused so player input and
   // any dt-driven drift stay disconnected from the frozen simulation.
+  flightPower = ui.getPowerEffects();
+  spaceCtl.gravityPower = flightPower.gravity;
+  spaceCtl.navigationPower = flightPower.navigation;
   if (!paused && state === 'space') {
     const atmosphereFactor = nearest
       ? 1 - smoothstep(0.42, 1.12, nearestAlt / Math.max(nearest.atmoHeight, 1))
@@ -2474,16 +2562,16 @@ function frame() {
   if (!pulseActive) {
     pulseRechargeDelay = Math.max(0, pulseRechargeDelay - dt);
     if (pulseRechargeDelay <= 0 && pulseFuel < PULSE_FUEL_MAX) {
-      pulseFuel = Math.min(PULSE_FUEL_MAX, pulseFuel + dt * 7.0);
+      pulseFuel = Math.min(PULSE_FUEL_MAX, pulseFuel + dt * 7.0 * flightPower.thermal);
     }
   }
 
   const weaponTrigger = state === 'space' && (spaceCtl.firing || spaceCtl.firePressed);
   weaponCooldown -= dt;
-  if (weaponTrigger && weaponCooldown <= 0) {
-    weapons.fire(nav, spaceCtl.speedScale, ship);
+  if (weaponTrigger && weaponCooldown <= 0 && flightPower.weapon > 0) {
+    weapons.fire(nav, spaceCtl.speedScale, ship, flightPower.weapon);
     audio.cue('fire');
-    weaponCooldown = 0.13;
+    weaponCooldown = 0.13 / flightPower.weapon;
   } else if (!weaponTrigger) {
     weaponCooldown = Math.min(weaponCooldown, 0);
   }
@@ -2525,6 +2613,8 @@ function frame() {
   // Render adapters consume the already-updated simulation frames.
   for (const p of universe.planets()) {
     _v.copy(nav.pos).sub(p.posUniv);
+    p.lod.startupPriority = !loadingCleared && p === nearest;
+    if (p.waterLod) p.waterLod.startupPriority = !loadingCleared && p === nearest;
     p.update(_v, dt, p === nearest, FREEZE || photoMode ? 0 : dt);
   }
   if (nearest && !nearest.isGasGiant) {
@@ -2580,7 +2670,18 @@ function frame() {
   // chunk builds: a per-frame millisecond budget (overridable for slow
   // software-rendered test environments via ?buildms=)
   const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
-  const built = flushChunkQueue(BUILD_MS || (state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6));
+  // Build the opening planet behind the loading mask. Previously the mask was
+  // released with only the six root faces present, so the player watched the
+  // whole planet change shape for the first seconds of flight. This larger
+  // startup budget is bounded by STARTUP_WARM_BUDGET_MS and never applies to
+  // interactive frames.
+  // High-tier devices can spend a larger slice while the loading mask is up;
+  // this finishes the same final orbit mesh sooner instead of deferring work
+  // into playable frames. Keep the low tier conservative for integrated GPUs.
+  const startupBuildMs = QUALITY_LOW ? 5.5 : 42;
+  const built = flushChunkQueue(BUILD_MS || (!loadingCleared
+    ? startupBuildMs
+    : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6));
   if (built > 0) lastBuildFrame = frameNo;
 
   // camera-relative placement
@@ -2668,18 +2769,32 @@ function frame() {
   });
 
   // HUD
+  const boostSpeedLimit = flightBoostSpeedLimit(
+    spaceCtl.speedScale,
+    spaceCtl.atmosphereFactor,
+    flightPower.gravity,
+  );
+  // Manual cruise uses the RMB-governed velocity. A pulse moves nav.pos
+  // directly and may be terrain-capped, so its cockpit value is expressed as
+  // full boost speed plus the pulse envelope, while still honoring a larger
+  // true frame displacement. The pointer itself remains capped at full boost.
+  const pulseDisplaySpeed = state === 'space' && (pulseActive || pulseVisual > 0.01)
+    ? Math.max(_velActual.length(), boostSpeedLimit * (1 + pulseVisual * 1.8))
+    : 0;
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
-    : state === 'space' ? nav.vel.length() : _velActual.length();
+    : state === 'space' ? Math.max(nav.vel.length(), pulseDisplaySpeed) : _velActual.length();
   ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
   ui.setFlightTelemetry({
     speed: spd,
-    speedLimit: spaceCtl.speedScale * (8.4 + (1 - spaceCtl.atmosphereFactor) * 2.62),
+    speedLimit: boostSpeedLimit,
     boost: boostVisual,
     atmosphere: envInAtmo,
     pulse: pulseVisual,
     pulseFuel,
     pulseFuelMax: PULSE_FUEL_MAX,
     pulseRecharging: !pulseActive && pulseRechargeDelay <= 0 && pulseFuel < PULSE_FUEL_MAX - 0.005,
+    shield: 100 * flightPower.shield,
+    gun: 100 * flightPower.weapon,
   });
   const localHours = nearest ? localSolarTimeAt(nearest, nav.pos) : null;
   ui.setCosmicTime(celestialClock.hours, localHours, celestialClock.scale);
@@ -2772,6 +2887,10 @@ function frame() {
   renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
   surfaceWeapons.renderScopeView(renderer);
+  if (!surfacePipelinesReady
+    && performance.now() - startupWarmStartedAt >= STARTUP_WARM_BUDGET_MS) {
+    releaseStartupPrewarm('deadline exceeded; continuing in background');
+  }
   finishSurfaceBootstrap();
   renderer.info.reset();
   // Skip the actual GPU work while the WebGL context is lost — Three.js
@@ -2785,8 +2904,13 @@ function frame() {
     nodePipeline.render();
   }
   prevNavPos.copy(nav.pos);
-  const startupAssetsReady = shipPipelinesWarmed || performance.now() - startupWarmStartedAt > 6000;
-  if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady && startupAssetsReady) {
+  const startupAssetsReady = shipPipelinesWarmed || startupPrewarmExpired
+    || performance.now() - startupWarmStartedAt > 6000;
+  const startupTerrainTimedOut = performance.now() - startupWarmStartedAt
+    >= STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS;
+  const terrainReady = startupTerrainReady() || startupTerrainTimedOut;
+  if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady
+    && startupAssetsReady && terrainReady) {
     if (!shipPipelinesWarmed) {
       for (const mesh of surfaceBootstrapMeshes.splice(0)) {
         scene.remove(mesh);
@@ -2847,8 +2971,7 @@ window.NMS = {
   _renderer: renderer,
   _THREE: THREE,
   get booted() {
-    return frameNo > 3 && surfacePipelinesReady
-      && (shipPipelinesWarmed || performance.now() - startupWarmStartedAt > 6000);
+    return loadingCleared;
   },
   get state() { return state; },
   get paused() { return paused; },
@@ -2868,6 +2991,7 @@ window.NMS = {
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
+      power: { ...flightPower },
       warpArrival,
       firing: spaceCtl.firing, bolts: activeBolts,
       cosmicHours: celestialClock.hours, timeScale: celestialClock.scale,
@@ -3356,6 +3480,7 @@ window.NMS = {
   walkSpeed: () => walkCtl.hSpeed.length(),
   warp: () => warpIntensity,
   pulseFuel: () => pulseFuel,
+  power: () => ({ state: ui.getPowerState(), effects: ui.getPowerEffects() }),
   riftState: () => ({
     active: !!riftRoute,
     arrived: !!riftRoute?.arrived,
@@ -3384,8 +3509,8 @@ window.NMS = {
     return !!active && triggerPulse();
   },
   fireWeapon() {
-    if (state !== 'space') return false;
-    weapons.fire(nav, spaceCtl.speedScale, ship);
+    if (state !== 'space' || flightPower.weapon <= 0) return false;
+    weapons.fire(nav, spaceCtl.speedScale, ship, flightPower.weapon);
     audio.cue('fire');
     return true;
   },

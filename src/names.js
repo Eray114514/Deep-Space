@@ -57,17 +57,24 @@ export function makeWord(rand, minSyl = 2, maxSyl = 3) {
 
 export function catalogueId(starCell) {
   const id = typeof starCell === 'string' ? starCell : starCell.id;
-  const [x = 0, y = 0, z = 0] = id.split(',').map(Number);
   const h = strHash32(`catalogue:${id}`);
+  const parsed = id.split(',').map(Number);
+  const coordinateId = parsed.length === 3 && parsed.every(Number.isFinite);
+  const [x, y, z] = coordinateId
+    ? parsed
+    : [((h >>> 0) & 255) - 128, ((h >>> 8) & 127) - 63, ((h >>> 15) & 255) - 128];
   const hh = String((Math.abs(x * 7 + z * 13) + (h % 24)) % 24).padStart(2, '0');
   const mm = String((h >>> 5) % 60).padStart(2, '0');
   const sign = y < 0 ? '-' : '+';
   const dd = String((Math.abs(y * 3) + ((h >>> 11) % 90)) % 90).padStart(2, '0');
   const dm = String((h >>> 17) % 60).padStart(2, '0');
-  // The sky-coordinate-looking prefix is for flavour; the signed cell tuple
-  // makes the fictional catalogue key unique across the infinite lattice.
+  // The sky-coordinate-looking prefix is for flavour. Finite catalogue IDs
+  // use their stable record key as the unique suffix; old world-lab cell IDs
+  // retain the compact signed tuple form.
   const enc = (n) => `${n < 0 ? 'M' : 'P'}${Math.abs(n).toString(36).toUpperCase()}`;
-  const suffix = `${enc(x)}${enc(y)}${enc(z)}`;
+  const suffix = coordinateId
+    ? `${enc(x)}${enc(y)}${enc(z)}`
+    : id.replace(/[^a-z0-9]+/gi, '').toUpperCase();
   return `AF J${hh}${mm}${sign}${dd}${dm}-${suffix}`;
 }
 

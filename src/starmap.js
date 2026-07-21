@@ -3,16 +3,20 @@
 // planets are inspected and the route is committed. Rendering for the system
 // level lives in sysview.js; this module owns DOM, state and the galaxy scene.
 
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.webgpu.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { makeRng } from './rng.js';
 import { generateSystemSpec } from './astronomy.js';
 import { SystemView } from './sysview.js';
+import { buildGalaxyBackdrop, CELL, GALAXY_LAYOUT_VERSION, GALAXY_RADIUS_CELLS } from './galaxy-layout.js';
 
 const AU = 149_597_870_700;
 const STAR_LIMIT = 320;
 const GALAXY_DEFAULT_DISTANCE = 22;
 const GALAXY_MIN_DISTANCE = 5;
+const OVERVIEW_FADE_START = 52;
+const OVERVIEW_FADE_END = 112;
+const GALAXY_BACKDROP_COUNT = 20000;
 const TYPE_COLORS = {
   lush: 0x52d7a4, ocean: 0x4ea7ff, desert: 0xe2aa65, ice: 0xb8e7ff,
   lava: 0xff6848, barren: 0x9da7ad, toxic: 0xb5e45d, exotic: 0xe47cff,
@@ -25,6 +29,12 @@ const TYPE_LABELS = {
   gasGiant: '气态巨星', iceGiant: '冰巨星',
   blackHole: '恒星级黑洞',
 };
+
+function overviewMix(distance) {
+  const t = THREE.MathUtils.clamp(
+    (distance - OVERVIEW_FADE_START) / (OVERVIEW_FADE_END - OVERVIEW_FADE_START), 0, 1);
+  return t * t * (3 - 2 * t);
+}
 
 function physicalStarClass(star) {
   const code = star.spectralClass?.[0] || 'G';
@@ -49,6 +59,14 @@ function navigationStatus(preview) {
   if (habitable > 0) return { name: '边境测绘署观测区', coverage: 52, advisory: '生态保护进近' };
   if (giants >= 2) return { name: '自由勘探协定区', coverage: 40, advisory: '强引力井' };
   return { name: '无登记管辖星域', coverage: 30, advisory: '标准星系入口' };
+}
+
+function civilizationLabel(type) {
+  return ({
+    'hero-city-world': '核心城市世界', 'hero-floating-city': '浮空城市',
+    'ring-station': '环形空间站', 'spine-dock': '脊柱船坞', 'cluster-hub': '集群枢纽',
+    'research-outpost': '科研前哨', 'mining-outpost': '矿业前哨', 'relay-outpost': '中继前哨',
+  })[type] || null;
 }
 
 const BIO_PROFILE = {
@@ -239,6 +257,8 @@ export class StarMap {
     this.visitedSystems = new Set();
     this.pointerStart = null;
     this.clock = new THREE.Clock();
+    this.overviewActive = false;
+    this.overviewAmount = 0;
 
     this.buildDOM();
     this.buildRenderer();
@@ -346,6 +366,9 @@ export class StarMap {
       <div id="sm-loading"><div class="loadBox"><div class="loadTitle">系统星图</div><div class="loadBar"><i></i></div></div></div>`;
     document.body.appendChild(root);
     this.root = root;
+    // Browser QA hook. Kept on the owned overlay rather than window so a
+    // disposed/rebuilt universe cannot leave a stale global controller.
+    Object.defineProperty(root, '__starMapController', { value: this, configurable: true });
     const $ = (selector) => root.querySelector(selector);
     this.els = {
       canvas: $('#sm-canvas'), sysviewHost: $('#sm-sysview'), labelLayer: $('#sm-label-layer'),
@@ -382,12 +405,23 @@ export class StarMap {
     this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 500);
     this.camera.position.set(0, 118, 0.01);
     this.camera.up.set(0, 0, -1);
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const forceWebGL = new URLSearchParams(location.search).get('renderer') === 'webgl';
+    this.renderer = new THREE.WebGPURenderer({
+      antialias: true, alpha: true, powerPreference: 'high-performance', forceWebGL,
+    });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.1;
     this.els.canvas.appendChild(this.renderer.domElement);
+    this.rendererReady = false;
+    this.rendererInitError = null;
+    this.rendererInit = this.renderer.init().then(() => {
+      this.rendererReady = true;
+    }).catch((error) => {
+      this.rendererInitError = error;
+      console.error('Star-map WebGPURenderer initialization failed.', error);
+    });
     this.starTexture = makePointTexture();
     this.selectionTexture = makeSelectionTexture();
     this.softTexture = makeSoftDisc();
@@ -405,7 +439,10 @@ export class StarMap {
     this.controls.zoomSpeed = 1.35;
     this.controls.minDistance = GALAXY_MIN_DISTANCE;
     this.controls.maxDistance = 170;
-    this.controls.zoomToCursor = true;
+    // Keep the chart projection anchored while zooming. Cursor-anchored dolly
+    // mutates OrbitControls.target, making a selected system appear to slide
+    // across the galaxy even when its world coordinate is unchanged.
+    this.controls.zoomToCursor = false;
     this.controls.target.set(0, 0, 0);
 
     this.world = new THREE.Group();
@@ -589,10 +626,12 @@ export class StarMap {
   // ---- data -------------------------------------------------------------------
   refreshDiscoveryState() {
     const seed = this.getSeed();
-    if (this.discoverySeed === seed) return;
-    this.discoverySeed = seed;
+    const universe = this.getUniverse();
+    const discoveryKey = `deep-space:${universe.galaxyId}:catalog-v${GALAXY_LAYOUT_VERSION}:${seed}:visited-systems`;
+    if (this.discoverySeed === discoveryKey) return;
+    this.discoverySeed = discoveryKey;
     try {
-      const saved = JSON.parse(localStorage.getItem(`astral-frontier:${seed}:visited-systems`) || '[]');
+      const saved = JSON.parse(localStorage.getItem(discoveryKey) || '[]');
       this.visitedSystems = new Set(Array.isArray(saved) ? saved : []);
     } catch {
       this.visitedSystems = new Set();
@@ -604,7 +643,7 @@ export class StarMap {
     if (this.visitedSystems.has(id)) return;
     this.visitedSystems.add(id);
     try {
-      localStorage.setItem(`astral-frontier:${this.discoverySeed}:visited-systems`, JSON.stringify([...this.visitedSystems]));
+      localStorage.setItem(this.discoverySeed, JSON.stringify([...this.visitedSystems]));
     } catch { /* private browsing can deny persistence */ }
   }
 
@@ -648,6 +687,15 @@ export class StarMap {
     });
   }
 
+  globalCandidates() {
+    const universe = this.getUniverse();
+    const source = [...(universe.allStars?.() || universe.nearStarsList)];
+    for (const destination of universe.specialDestinations) {
+      if (!source.some((star) => star.id === destination.id)) source.push(destination);
+    }
+    return source;
+  }
+
   // ---- galaxy level -------------------------------------------------------------
   resetWorld() {
     disposeObject(this.world);
@@ -668,43 +716,74 @@ export class StarMap {
 
   buildGalaxy(resetView = false) {
     this.resetWorld();
-    const nav = this.getNav();
     const current = this.getUniverse().system.star;
     const stars = this.candidates();
-    const maxDistance = Math.max(...stars.map((star) => star.pos.distanceTo(nav.pos)), 1);
-    const scale = 78 / maxDistance;
-    this.visibleStars = stars;
-    this.mapPositions = stars.map((star) => {
-      const delta = star.pos.clone().sub(current.pos).multiplyScalar(scale);
+    const globalStars = this.globalCandidates();
+    const globalScale = 78 / (GALAXY_RADIUS_CELLS * CELL);
+    this.localStars = stars;
+    this.globalStars = globalStars;
+    this.globalMapPositions = globalStars.map((star) => {
+      const delta = star.pos.clone().sub(current.pos).multiplyScalar(globalScale);
+      // The navigation chart is a top-down projection. Catalogue height is
+      // formation data, not a second screen-space offset.
       return new THREE.Vector3(delta.x, 0, delta.z);
     });
+    const globalPositionById = new Map(globalStars.map((star, index) => [star.id, this.globalMapPositions[index]]));
+    this.localMapPositions = stars.map((star) => globalPositionById.get(star.id).clone());
+    this.visibleStars = this.overviewActive ? globalStars : stars;
+    this.mapPositions = this.overviewActive ? this.globalMapPositions : this.localMapPositions;
 
-    // visible starlight
-    const pointGeometry = new THREE.BufferGeometry();
-    pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
-      this.mapPositions.flatMap((position) => position.toArray()), 3,
-    ));
-    pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(
-      stars.flatMap((star) => {
+    const makeStarLayer = (layerStars, positions, size, opacity) => {
+      const pointGeometry = new THREE.BufferGeometry();
+      pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
+        positions.flatMap((position) => position.toArray()), 3,
+      ));
+      pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(
+        layerStars.flatMap((star) => {
         const color = star.color.clone().lerp(new THREE.Color(0xffffff), 0.28);
         return color.toArray();
-      }), 3,
-    ));
-    const starLight = new THREE.Points(pointGeometry, new THREE.PointsMaterial({
-      size: 7.2, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
-      transparent: true, opacity: 0.96, blending: THREE.AdditiveBlending,
-      depthWrite: false, fog: false, toneMapped: false,
+        }), 3,
+      ));
+      const material = new THREE.PointsMaterial({
+        size, sizeAttenuation: false, map: this.starTexture, vertexColors: true,
+        transparent: true, opacity, blending: THREE.AdditiveBlending,
+        depthWrite: false, fog: false, toneMapped: false,
+      });
+      const points = new THREE.Points(pointGeometry, material);
+      this.world.add(points);
+      return points;
+    };
+    this.localStarLight = makeStarLayer(stars, this.localMapPositions, 7.2, 0.96);
+    this.globalStarLight = makeStarLayer(globalStars, this.globalMapPositions, 4.2, 0);
+
+    const backdropCells = buildGalaxyBackdrop(
+      this.getSeed(), GALAXY_BACKDROP_COUNT, this.getUniverse().catalog.allSystems());
+    const backdropPositions = new Float32Array(backdropCells.length);
+    const currentCells = current.pos.clone().multiplyScalar(1 / CELL);
+    for (let i = 0; i < backdropCells.length; i += 3) {
+      backdropPositions[i] = (backdropCells[i] - currentCells.x) * CELL * globalScale;
+      backdropPositions[i + 1] = 0;
+      backdropPositions[i + 2] = (backdropCells[i + 2] - currentCells.z) * CELL * globalScale;
+    }
+    const backdropGeometry = new THREE.BufferGeometry();
+    backdropGeometry.setAttribute('position', new THREE.BufferAttribute(backdropPositions, 3));
+    this.galaxyBackdrop = new THREE.Points(backdropGeometry, new THREE.PointsMaterial({
+      color: 0x91afbf, size: 0.86, sizeAttenuation: false, transparent: true, opacity: 0,
+      depthWrite: false, blending: THREE.AdditiveBlending, fog: false, toneMapped: false,
     }));
-    this.world.add(starLight);
+    this.world.add(this.galaxyBackdrop);
 
     // Authored destinations must be discoverable without hunting through
     // hundreds of identical point sprites.  Keep the black hole marked at
     // every zoom level with a compact lensing target, not a second star dot.
     for (const destination of this.getUniverse().specialDestinations) {
-      const index = stars.findIndex((star) => star.id === destination.id);
-      if (index < 0) continue;
+      const localIndex = stars.findIndex((star) => star.id === destination.id);
+      const globalIndex = globalStars.findIndex((star) => star.id === destination.id);
+      if (localIndex < 0 || globalIndex < 0) continue;
       const marker = new THREE.Group();
-      marker.position.copy(this.mapPositions[index]);
+      marker.position.copy(this.localMapPositions[localIndex]);
+      marker.userData.localPosition = this.localMapPositions[localIndex];
+      marker.userData.globalPosition = this.globalMapPositions[globalIndex];
       marker.name = `special-destination:${destination.id}`;
       const glow = new THREE.Sprite(new THREE.SpriteMaterial({
         map: this.softTexture, color: 0xff7f32, transparent: true, opacity: 0.38,
@@ -724,6 +803,7 @@ export class StarMap {
         marker.add(ring);
       }
       this.world.add(marker);
+      this.centralMarker = marker;
     }
 
     // faint survey range rings + a soft gravity-well glow — no route spaghetti
@@ -749,6 +829,34 @@ export class StarMap {
     this.els.sector.textContent = current.id;
     this.buildGalaxyLabels(stars, current);
     this.updateSelectionMarker();
+    this.updateGalaxyOverview(true);
+  }
+
+  updateGalaxyOverview(force = false) {
+    if (!this.localStarLight || !this.globalStarLight || !this.galaxyBackdrop) return;
+    const distance = this.camera.position.distanceTo(this.controls.target);
+    const amount = overviewMix(distance);
+    this.overviewAmount = amount;
+    this.localStarLight.material.opacity = 0.96 * (1 - amount);
+    this.globalStarLight.material.opacity = 0.9 * amount;
+    this.galaxyBackdrop.material.opacity = 0.2 * amount;
+    if (this.centralMarker) {
+      this.centralMarker.position.copy(this.centralMarker.userData.globalPosition);
+      this.centralMarker.scale.setScalar(THREE.MathUtils.lerp(1, 0.72, amount));
+    }
+    const active = amount >= 0.55;
+    if (!force && active === this.overviewActive) return;
+    this.overviewActive = active;
+    this.visibleStars = active ? this.globalStars : this.localStars;
+    this.mapPositions = active ? this.globalMapPositions : this.localMapPositions;
+    for (const item of this.labelData || []) {
+      const index = this.visibleStars.findIndex((star) => star.id === item.star.id);
+      item.position = index >= 0 ? this.mapPositions[index] : item.position;
+    }
+    this.els.count.textContent = active
+      ? `${this.globalStars.filter((star) => star.kind !== 'blackHole').length} / 1024`
+      : `${this.localStars.length} / ${STAR_LIMIT}`;
+    this.updateSelectionMarker();
   }
 
   buildGalaxyLabels(stars, current) {
@@ -759,6 +867,7 @@ export class StarMap {
         const priority = special ? 1000
           : star.id === this.selectedStar?.id ? 900
           : star.id === current.id ? 800
+          : star.civilizationTag ? 140
           : this.visitedSystems.has(star.id) ? 80
           : 10;
         return { star, index, preview, priority, distance: this.mapPositions[index].lengthSq() };
@@ -774,6 +883,8 @@ export class StarMap {
         ? '当前位置'
         : preview.isBlackHoleSystem
           ? 'BH · 唯一引力观测禁区'
+          : star.civilizationTag
+            ? `文明 · ${civilizationLabel(star.civilizationTag)}`
           : `${physicalStarClass(preview.stars[0]).code} · ${preview.bodies.filter((b) => !b.isMoon).length} 行星`;
       button.classList.toggle('current', star.id === current.id);
       button.classList.toggle('selected', star.id === this.selectedStar?.id);
@@ -830,7 +941,8 @@ export class StarMap {
     let placedLabels = 0;
     for (const entry of projected) {
       const { item, x, y } = entry;
-      const box = { left: x - 6, top: y - 7, right: x + item.width, bottom: y + item.height };
+      const halfHeight = item.height * 0.5;
+      const box = { left: x - 6, top: y - halfHeight - 3, right: x + item.width, bottom: y + halfHeight + 3 };
       const overlaps = (other) => !(box.right < other.left || box.left > other.right
         || box.bottom < other.top || box.top > other.bottom);
       const blockedByPanel = occupied.slice(0, blockerCount).some(overlaps);
@@ -843,7 +955,7 @@ export class StarMap {
       item.button.hidden = false;
       placedLabels++;
       occupied.push(box);
-      item.button.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) scale(var(--galaxy-label-scale))`;
+      item.button.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) translateY(-50%) scale(var(--galaxy-label-scale))`;
     }
   }
 
@@ -900,7 +1012,8 @@ export class StarMap {
 
     this.els.targetCode.textContent = `${preview.catalogId} // ${cls.code}-CLASS`;
     this.els.catalog.textContent = `代号 · ${preview.catalogId}`;
-    this.els.targetName.textContent = preview.properName;
+    const siteLabel = civilizationLabel(star.civilizationTag);
+    this.els.targetName.textContent = siteLabel ? `${preview.properName} · ${siteLabel}` : preview.properName;
     this.els.classBox.textContent = cls.code;
     this.els.classBox.style.background = preview.isBlackHoleSystem
       ? 'radial-gradient(circle, #000 34%, #ffae67 38%, #4a1608 62%, #050709 68%)'
@@ -908,8 +1021,8 @@ export class StarMap {
     this.els.surveyValue.textContent = `${survey}%`;
     this.els.surveyBar.style.setProperty('--survey-progress', this.els.surveyValue.textContent);
     this.els.surveyBar.title = survey === 100 ? '已到访：完整星系数据' : `远程传感器覆盖 · ${status.advisory}`;
-    this.els.factionName.textContent = status.name;
-    this.els.faction.title = status.advisory;
+    this.els.factionName.textContent = siteLabel ? '人类边疆共同体' : status.name;
+    this.els.faction.title = siteLabel ? `${siteLabel} · 已登记文明航标` : status.advisory;
     this.buildGlyph(preview);
     this.els.distance.textContent = isCurrent ? '当前位置' : distanceText(distance);
     this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount - compactCount} 卫星${compactCount ? ` / ${compactCount} 致密天体` : ''}`;
@@ -1096,8 +1209,9 @@ export class StarMap {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     if (this.mode === 'galaxy') {
       this.controls.update();
+      this.updateGalaxyOverview();
       this.updateMapLabels();
-      this.renderer.render(this.scene, this.camera);
+      if (this.rendererReady) this.renderer.render(this.scene, this.camera);
     } else {
       this.sysview.frame(dt);
     }

@@ -104,7 +104,11 @@ export function flushChunkQueue(budgetMs = 7) {
         const e = buildQueue[i];
         if (e.dead || e.mesh) continue;
         const focusK = e.lod.focused ? 0.18 : 1.0;
-        const prio = (e.lod.nodeDistance(e) / e.size) * focusK;
+        // During the covered startup pass complete the whole coarse shell
+        // before drilling into a few central patches. The old depth-first-ish
+        // ordering left half the globe coarse while isolated areas sharpened.
+        const startupLevel = e.lod.startupPriority ? e.level * 1000 : 0;
+        const prio = startupLevel + (e.lod.nodeDistance(e) / e.size) * focusK;
         if (prio < bestPriority) {
           bestPriority = prio;
           bestIndex = i;
@@ -178,29 +182,46 @@ export class ChunkedLOD {
 
   beyondHorizon(node) {
     const p = this.planet;
-    const camR = this.camLocal.length();
+    const liveCamR = this.camLocal.length();
+    const camR = this._orbitCapped && this.planet.orbitPrewarmRadiusRatio
+      ? Math.max(liveCamR, p.R * this.planet.orbitPrewarmRadiusRatio)
+      : liveCamR;
     const R0 = p.R * 0.94;
     if (camR <= R0 + 1) return false;
     const horizon = Math.acos(Math.min(1, R0 / camR))
       + Math.sqrt(2 * Math.max(p.hAmp, 1) / R0)
       + (node.size / p.R) * 0.9 + 0.08;
-    const ang = Math.acos(Math.max(-1, Math.min(1, _camDir.copy(this.camLocal).normalize().dot(node.centerDir))));
+    const ang = Math.acos(Math.max(-1, Math.min(1,
+      _camDir.copy(this.camLocal).normalize().dot(node.centerDir))));
     return ang > horizon;
   }
 
   update(camLocal, dt = 0.016) {
     this.camLocal.copy(camLocal);
     this._dt = dt;
+    const radiusRatio = camLocal.length() / Math.max(this.planet.R, 1);
+    // A 64×64 terrain chunk already resolves sub-pixel geometry at orbit.
+    // Refining beyond the authored orbit cap only rebuilt imperceptible
+    // frequencies while the player watched the whole globe change shape.
+    // Hysteresis prevents cap churn at the atmosphere/space boundary.
+    if (this._orbitCapped == null) this._orbitCapped = radiusRatio > 1.12;
+    else if (this._orbitCapped && radiusRatio < 1.08) this._orbitCapped = false;
+    else if (!this._orbitCapped && radiusRatio > 1.16) this._orbitCapped = true;
+    this._levelCap = this._orbitCapped && Number.isFinite(this.planet.orbitLevelCap)
+      ? Math.min(this.planet.maxLevel, this.planet.orbitLevelCap)
+      : this.planet.maxLevel;
     // a planet that fills the screen must never show a polygonal limb:
     // force a minimum subdivision depth from its apparent size
     const d = Math.max(camLocal.length() - this.planet.R, 1);
     const ang = this.planet.R / d;
     const baseForceLevel = ang > 1.2 ? 3 : ang > 0.45 ? 2 : ang > 0.15 ? 1 : 0;
     if (this.planet.lodLevelForCanonical) {
-      this._forceLevel = this.planet.lodLevelForCanonical(baseForceLevel);
+      this._forceLevel = Math.min(this._levelCap,
+        this.planet.lodLevelForCanonical(baseForceLevel));
     } else {
       const detailOffset = Math.max(0, Math.round(Math.log2(1 / (this.planet.lodDistanceScale || 1))));
-      this._forceLevel = Math.max(0, baseForceLevel - detailOffset);
+      this._forceLevel = Math.min(this._levelCap,
+        Math.max(0, baseForceLevel - detailOffset));
     }
     for (const root of this.roots) this.process(root);
   }
@@ -232,12 +253,13 @@ export class ChunkedLOD {
     const splitDistance = SPLIT * distanceScale;
     const mergeDistance = MERGE * distanceScale;
     const prefetchDistance = PREFETCH * distanceScale;
-    const wantSplit = node.level < this.planet.maxLevel
+    const wantSplit = node.level < this._levelCap
       && (d < node.size * splitDistance || node.level < this._forceLevel)
       && !beyond;
-    const wantMerge = d > node.size * mergeDistance || beyond;
+    const wantMerge = node.level >= this._levelCap
+      || d > node.size * mergeDistance || beyond;
 
-    if (!node.children && !beyond && node.level < this.planet.maxLevel) {
+    if (!node.children && !beyond && node.level < this._levelCap) {
       // prefetch exists to feed morphs; water (noMorph) swaps sub-pixel and
       // creates at the display threshold like before
       // Focused terrain gets a modest lead for fast descents. Going much

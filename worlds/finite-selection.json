@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "selectedSeed": "MILKY-038",
+  "candidateCount": 256,
+  "shortlistCount": 12,
+  "flightFinalistCount": 4,
+  "selectionRule": "Static scoring nominated the shortlist; fixed-camera galaxy maps and home low-flight/surface/boarding captures decided the release seed.",
+  "reasons": [
+    "The central bar, bulge, primary arms and secondary branches remain readable at full-galaxy zoom.",
+    "The home world has 0.825 plate coherence, 0.420 cloud coverage and the strongest mountain profile among the visually acceptable finalists.",
+    "Final high-quality orbit, low-flight and surface captures beat MILKY-234, MILKY-104 and MILKY-166 on the combined balance of coherent landmasses, relief and broken-cloud weather.",
+    "The 64-system sample retains all nine natural primary-world types while keeping the distant floating-city and central-black-hole routes."
+  ],
+  "evidence": {
+    "staticReport": "worlds/finite-candidates.json",
+    "galaxyCaptures": "docs/curation/finite-galaxy/",
+    "flightCaptures": "docs/curation/finite-worlds-v2/"
+  }
+}

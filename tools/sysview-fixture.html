@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<style>html,body,#host{width:100%;height:100%;margin:0;background:#020607}#labels{position:fixed;inset:0;pointer-events:none}</style>
+<script type="importmap">
+{"imports":{"three":"../vendor/three.module.js","three/webgpu":"../vendor/three.webgpu.js","three/tsl":"../vendor/three.tsl.js","three/addons/":"../node_modules/three/examples/jsm/"}}
+</script>
+<div id="host"></div><div id="labels"></div>
+<script type="module">
+  import { SystemView } from '../src/sysview.js';
+  import { generateBlackHoleSystemSpec, generateSystemSpec } from '../src/astronomy.js';
+  import { buildGalaxyCatalog } from '../src/galaxy-layout.js';
+
+  const toPreview = (star, spec) => {
+    const allBodies = [...spec.bodies, ...(spec.compactObjects || [])];
+    const indexById = new Map(allBodies.map((body, index) => [body.bodyId, index]));
+    return {
+      name: spec.name, properName: spec.properName, catalogId: spec.catalogId,
+      systemId: spec.systemId, isHome: spec.isHome, isBlackHoleSystem: !!spec.isBlackHoleSystem,
+      star, stars: spec.stars, binaryOrbit: spec.binaryOrbit,
+      bodies: allBodies.map((body, index) => ({
+        ...body, index, parentSpec: body.parentId ? indexById.get(body.parentId) : -1,
+        orbitSpec: body.orbit, orbit: body.orbit.renderRadius,
+      })),
+    };
+  };
+
+  const params = new URLSearchParams(location.search);
+  const seed = 'MILKY-038';
+  const star = buildGalaxyCatalog(seed)[84];
+  const blackHole = params.get('scene') === 'black-hole';
+  const spec = blackHole
+    ? generateBlackHoleSystemSpec(seed, { id: 'milky-way-black-hole', name: '人马座 A*', systemName: '银河中心引力观测区' })
+    : generateSystemSpec(seed, star);
+  const view = new SystemView({
+    host: document.getElementById('host'), labelHost: document.getElementById('labels'),
+    navArrow: null, nameTag: null,
+  });
+  await view.readyPromise;
+  view.buildSystem(toPreview(star, spec), 1200);
+  let frames = 0;
+  const draw = () => {
+    view.frame(1 / 60);
+    if (++frames < 12) requestAnimationFrame(draw);
+    else window.SYSVIEW_RESULT = {
+      ready: true,
+      backend: view.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2',
+      scene: blackHole ? 'black-hole' : 'planetary',
+      nodeMaterials: view.scene.children.flatMap((root) => {
+        const materials = [];
+        root.traverse((object) => { if (object.material?.isNodeMaterial) materials.push(object.material.type); });
+        return materials;
+      }).length,
+    };
+  };
+  draw();
+</script>

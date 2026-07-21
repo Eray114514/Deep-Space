@@ -1,0 +1,650 @@
+{
+  "generatedAt": "2026-07-21T08:59:53.920Z",
+  "candidateCount": 256,
+  "rule": "Static score nominates candidates only; final selection requires fixed-camera and flight review.",
+  "top12": [
+    {
+      "seed": "MILKY-169",
+      "score": 186.7868,
+      "minSeparation": 0.9,
+      "localSpread": 3.8697,
+      "verticalRms": 2.0902,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "gasGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 73,
+      "giants": 77,
+      "landable": 387,
+      "homeTerrain": {
+        "plateCoherence": 0.6498,
+        "continentFrequency": 1.2588,
+        "warpAmplitude": 0.5944,
+        "reliefMeters": 11447.6,
+        "mountainStrength": 0.9798,
+        "plainsCalm": 0.8154,
+        "cloudCoverage": 0.1915,
+        "visualScore": 40.685
+      },
+      "citySystemId": "MW-0840",
+      "floatingSystemId": "MW-1013",
+      "floatingRadius": 55.9059
+    },
+    {
+      "seed": "MILKY-038",
+      "score": 182.5405,
+      "minSeparation": 0.7375,
+      "localSpread": 6.0373,
+      "verticalRms": 2.1266,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 100,
+      "giants": 102,
+      "landable": 370,
+      "homeTerrain": {
+        "plateCoherence": 0.8348,
+        "continentFrequency": 1.4314,
+        "warpAmplitude": 0.2572,
+        "reliefMeters": 8607.3,
+        "mountainStrength": 1.3434,
+        "plainsCalm": 0.4577,
+        "cloudCoverage": 0.4202,
+        "visualScore": 56.1416
+      },
+      "citySystemId": "MW-0903",
+      "floatingSystemId": "MW-0456",
+      "floatingRadius": 50.9195
+    },
+    {
+      "seed": "MILKY-234",
+      "score": 182.2595,
+      "minSeparation": 0.4487,
+      "localSpread": 3.2997,
+      "verticalRms": 1.6736,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "gasGiant",
+        "ice"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 78,
+      "giants": 74,
+      "landable": 400,
+      "homeTerrain": {
+        "plateCoherence": 0.7663,
+        "continentFrequency": 1.4024,
+        "warpAmplitude": 0.3631,
+        "reliefMeters": 8520,
+        "mountainStrength": 1.0891,
+        "plainsCalm": 0.66,
+        "cloudCoverage": 0.4287,
+        "visualScore": 52.2736
+      },
+      "citySystemId": "MW-0914",
+      "floatingSystemId": "MW-0989",
+      "floatingRadius": 51.7931
+    },
+    {
+      "seed": "MILKY-104",
+      "score": 174.0418,
+      "minSeparation": 0.7314,
+      "localSpread": 4.1928,
+      "verticalRms": 1.7127,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "gasGiant",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 87,
+      "giants": 83,
+      "landable": 385,
+      "homeTerrain": {
+        "plateCoherence": 0.8246,
+        "continentFrequency": 1.3558,
+        "warpAmplitude": 0.3117,
+        "reliefMeters": 10209.4,
+        "mountainStrength": 1.1978,
+        "plainsCalm": 0.6194,
+        "cloudCoverage": 0.3307,
+        "visualScore": 51.6501
+      },
+      "citySystemId": "MW-0955",
+      "floatingSystemId": "MW-0423",
+      "floatingRadius": 50.7125
+    },
+    {
+      "seed": "MILKY-230",
+      "score": 173.7622,
+      "minSeparation": 0.2156,
+      "localSpread": 4.2167,
+      "verticalRms": 1.5704,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 77,
+      "giants": 78,
+      "landable": 386,
+      "homeTerrain": {
+        "plateCoherence": 0.1616,
+        "continentFrequency": 2.5868,
+        "warpAmplitude": 0.5146,
+        "reliefMeters": 8826,
+        "mountainStrength": 0.7739,
+        "plainsCalm": 0.6661,
+        "cloudCoverage": 0.5375,
+        "visualScore": 35.5247
+      },
+      "citySystemId": "MW-0905",
+      "floatingSystemId": "MW-1021",
+      "floatingRadius": 55.7827
+    },
+    {
+      "seed": "MILKY-035",
+      "score": 172.8276,
+      "minSeparation": 0.3825,
+      "localSpread": 2.91,
+      "verticalRms": 1.6511,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "gasGiant",
+        "ice"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 84,
+      "giants": 80,
+      "landable": 382,
+      "homeTerrain": {
+        "plateCoherence": 0.8295,
+        "continentFrequency": 1.1278,
+        "warpAmplitude": 0.4292,
+        "reliefMeters": 6645.9,
+        "mountainStrength": 0.8721,
+        "plainsCalm": 0.682,
+        "cloudCoverage": 0.462,
+        "visualScore": 48.135
+      },
+      "citySystemId": "MW-0844",
+      "floatingSystemId": "MW-1022",
+      "floatingRadius": 53.3719
+    },
+    {
+      "seed": "MILKY-003",
+      "score": 171.8435,
+      "minSeparation": 0.7672,
+      "localSpread": 2.4367,
+      "verticalRms": 1.894,
+      "homePrimaryTypes": [
+        "lush",
+        "ice",
+        "gasGiant",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 77,
+      "giants": 78,
+      "landable": 398,
+      "homeTerrain": {
+        "plateCoherence": 0.863,
+        "continentFrequency": 1.1448,
+        "warpAmplitude": 0.3758,
+        "reliefMeters": 5929.7,
+        "mountainStrength": 1.1692,
+        "plainsCalm": 0.6942,
+        "cloudCoverage": 0.2105,
+        "visualScore": 39.439
+      },
+      "citySystemId": "MW-0915",
+      "floatingSystemId": "MW-0980",
+      "floatingRadius": 51.9777
+    },
+    {
+      "seed": "MILKY-248",
+      "score": 170.2794,
+      "minSeparation": 0.2178,
+      "localSpread": 4.0819,
+      "verticalRms": 1.7135,
+      "homePrimaryTypes": [
+        "lush",
+        "ice",
+        "gasGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 83,
+      "giants": 85,
+      "landable": 408,
+      "homeTerrain": {
+        "plateCoherence": 0.6188,
+        "continentFrequency": 1.7085,
+        "warpAmplitude": 0.3907,
+        "reliefMeters": 9111.3,
+        "mountainStrength": 0.7933,
+        "plainsCalm": 0.5425,
+        "cloudCoverage": 0.3932,
+        "visualScore": 42.61
+      },
+      "citySystemId": "MW-0928",
+      "floatingSystemId": "MW-1004",
+      "floatingRadius": 51.2654
+    },
+    {
+      "seed": "MILKY-143",
+      "score": 169.3201,
+      "minSeparation": 0.9972,
+      "localSpread": 2.7428,
+      "verticalRms": 1.8428,
+      "homePrimaryTypes": [
+        "lush",
+        "ice",
+        "gasGiant",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 87,
+      "giants": 85,
+      "landable": 385,
+      "homeTerrain": {
+        "plateCoherence": 0.5161,
+        "continentFrequency": 1.6268,
+        "warpAmplitude": 0.5702,
+        "reliefMeters": 7555.7,
+        "mountainStrength": 1.1238,
+        "plainsCalm": 0.8812,
+        "cloudCoverage": 0,
+        "visualScore": 30.6919
+      },
+      "citySystemId": "MW-0864",
+      "floatingSystemId": "MW-1009",
+      "floatingRadius": 55.16
+    },
+    {
+      "seed": "MILKY-166",
+      "score": 167.7279,
+      "minSeparation": 0.3569,
+      "localSpread": 4.5003,
+      "verticalRms": 1.7752,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 87,
+      "giants": 87,
+      "landable": 391,
+      "homeTerrain": {
+        "plateCoherence": 0.6771,
+        "continentFrequency": 1.5003,
+        "warpAmplitude": 0.4271,
+        "reliefMeters": 11468.7,
+        "mountainStrength": 0.9149,
+        "plainsCalm": 0.5428,
+        "cloudCoverage": 0.5315,
+        "visualScore": 56.3676
+      },
+      "citySystemId": "MW-0956",
+      "floatingSystemId": "MW-0990",
+      "floatingRadius": 52.0174
+    },
+    {
+      "seed": "MILKY-097",
+      "score": 166.6968,
+      "minSeparation": 0.3772,
+      "localSpread": 3.3192,
+      "verticalRms": 1.8719,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "gasGiant",
+        "ice",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 78,
+      "giants": 86,
+      "landable": 388,
+      "homeTerrain": {
+        "plateCoherence": 0.2083,
+        "continentFrequency": 2.5251,
+        "warpAmplitude": 0.4867,
+        "reliefMeters": 7737.8,
+        "mountainStrength": 1.1174,
+        "plainsCalm": 0.767,
+        "cloudCoverage": 0.6361,
+        "visualScore": 35.8227
+      },
+      "citySystemId": "MW-0846",
+      "floatingSystemId": "MW-0465",
+      "floatingRadius": 50.8904
+    },
+    {
+      "seed": "MILKY-085",
+      "score": 166.6527,
+      "minSeparation": 0.612,
+      "localSpread": 3.7087,
+      "verticalRms": 2.0691,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "iceGiant",
+        "gasGiant",
+        "ice"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 84,
+      "giants": 82,
+      "landable": 381,
+      "homeTerrain": {
+        "plateCoherence": 0.6653,
+        "continentFrequency": 1.3763,
+        "warpAmplitude": 0.5101,
+        "reliefMeters": 11377.8,
+        "mountainStrength": 0.8831,
+        "plainsCalm": 0.5038,
+        "cloudCoverage": 0.5404,
+        "visualScore": 54.7179
+      },
+      "citySystemId": "MW-0953",
+      "floatingSystemId": "MW-1013",
+      "floatingRadius": 52.3764
+    }
+  ],
+  "top4": [
+    {
+      "seed": "MILKY-169",
+      "score": 186.7868,
+      "minSeparation": 0.9,
+      "localSpread": 3.8697,
+      "verticalRms": 2.0902,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "gasGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 73,
+      "giants": 77,
+      "landable": 387,
+      "homeTerrain": {
+        "plateCoherence": 0.6498,
+        "continentFrequency": 1.2588,
+        "warpAmplitude": 0.5944,
+        "reliefMeters": 11447.6,
+        "mountainStrength": 0.9798,
+        "plainsCalm": 0.8154,
+        "cloudCoverage": 0.1915,
+        "visualScore": 40.685
+      },
+      "citySystemId": "MW-0840",
+      "floatingSystemId": "MW-1013",
+      "floatingRadius": 55.9059
+    },
+    {
+      "seed": "MILKY-038",
+      "score": 182.5405,
+      "minSeparation": 0.7375,
+      "localSpread": 6.0373,
+      "verticalRms": 2.1266,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 100,
+      "giants": 102,
+      "landable": 370,
+      "homeTerrain": {
+        "plateCoherence": 0.8348,
+        "continentFrequency": 1.4314,
+        "warpAmplitude": 0.2572,
+        "reliefMeters": 8607.3,
+        "mountainStrength": 1.3434,
+        "plainsCalm": 0.4577,
+        "cloudCoverage": 0.4202,
+        "visualScore": 56.1416
+      },
+      "citySystemId": "MW-0903",
+      "floatingSystemId": "MW-0456",
+      "floatingRadius": 50.9195
+    },
+    {
+      "seed": "MILKY-234",
+      "score": 182.2595,
+      "minSeparation": 0.4487,
+      "localSpread": 3.2997,
+      "verticalRms": 1.6736,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "gasGiant",
+        "ice"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 78,
+      "giants": 74,
+      "landable": 400,
+      "homeTerrain": {
+        "plateCoherence": 0.7663,
+        "continentFrequency": 1.4024,
+        "warpAmplitude": 0.3631,
+        "reliefMeters": 8520,
+        "mountainStrength": 1.0891,
+        "plainsCalm": 0.66,
+        "cloudCoverage": 0.4287,
+        "visualScore": 52.2736
+      },
+      "citySystemId": "MW-0914",
+      "floatingSystemId": "MW-0989",
+      "floatingRadius": 51.7931
+    },
+    {
+      "seed": "MILKY-104",
+      "score": 174.0418,
+      "minSeparation": 0.7314,
+      "localSpread": 4.1928,
+      "verticalRms": 1.7127,
+      "homePrimaryTypes": [
+        "lush",
+        "barren",
+        "ice",
+        "gasGiant",
+        "iceGiant"
+      ],
+      "sampleTypes": [
+        "barren",
+        "desert",
+        "gasGiant",
+        "ice",
+        "iceGiant",
+        "lava",
+        "lush",
+        "ocean",
+        "toxic"
+      ],
+      "rings": 87,
+      "giants": 83,
+      "landable": 385,
+      "homeTerrain": {
+        "plateCoherence": 0.8246,
+        "continentFrequency": 1.3558,
+        "warpAmplitude": 0.3117,
+        "reliefMeters": 10209.4,
+        "mountainStrength": 1.1978,
+        "plainsCalm": 0.6194,
+        "cloudCoverage": 0.3307,
+        "visualScore": 51.6501
+      },
+      "citySystemId": "MW-0955",
+      "floatingSystemId": "MW-0423",
+      "floatingRadius": 50.7125
+    }
+  ]
+}

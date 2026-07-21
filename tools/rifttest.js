@@ -29,6 +29,8 @@ const frameB = path.join(os.tmpdir(), 'deep-space-rift-open-b.png');
 const openingFrame = path.join(os.tmpdir(), 'deep-space-rift-opening.png');
 const thresholdFrame = path.join(os.tmpdir(), 'deep-space-rift-threshold.png');
 const arrivalFrame = path.join(os.tmpdir(), 'deep-space-rift-arrival.png');
+const routeFrame = path.join(os.tmpdir(), 'deep-space-route-choice.png');
+const routeMobileFrame = path.join(os.tmpdir(), 'deep-space-route-choice-mobile.png');
 
 try {
   await page.goto(`http://127.0.0.1:${port}/?nolock=1&nohero=1&quality=low&vclouds=0&farflora=0&freeze=1&buildms=25`);
@@ -44,7 +46,40 @@ try {
   await page.waitForFunction(() => document.querySelector('#sm-planetLeft')?.classList.contains('active'));
   await page.locator('#sm-routeAction').click({ force: true });
   await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
+  const routeFocusState = await page.evaluate(() => ({
+    active: document.body.classList.contains('route-choice-active'),
+    hudVisibility: getComputedStyle(document.getElementById('ship-hud-stage')).visibility,
+    hudOpacity: getComputedStyle(document.getElementById('ship-hud-stage')).opacity,
+  }));
+  check(routeFocusState.active && routeFocusState.hudVisibility === 'hidden'
+      && Number(routeFocusState.hudOpacity) === 0,
+  'route protocol takes visual focus and retires the flight HUD');
+  await page.locator('#route-rift-btn').hover();
+  await page.waitForTimeout(220);
+  const routeHoverState = await page.locator('#route-rift-btn').evaluate((button) => ({
+    filter: getComputedStyle(button).filter,
+    transform: getComputedStyle(button).transform,
+  }));
+  check(routeHoverState.filter !== 'none' && routeHoverState.transform !== 'none',
+    'hovering a route gives the chosen protocol a distinct active state');
+  await page.screenshot({ path: routeFrame });
+  await page.setViewportSize({ width: 640, height: 720 });
+  const mobileRouteBounds = await page.locator('#route-choice').boundingBox();
+  check(mobileRouteBounds && mobileRouteBounds.x >= 0
+      && mobileRouteBounds.x + mobileRouteBounds.width <= 640
+      && mobileRouteBounds.y >= 0
+      && mobileRouteBounds.y + mobileRouteBounds.height <= 720,
+  'route choice remains fully inside a 640 px viewport');
+  await page.screenshot({ path: routeMobileFrame });
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.locator('#route-rift-btn').click();
+  await page.waitForFunction(() => document.body.classList.contains('travel-cinematic'));
+  const riftHudHidden = await page.evaluate(() => ({
+    display: getComputedStyle(document.getElementById('ship-hud-stage')).display,
+    routeHidden: getComputedStyle(document.getElementById('route-choice')).display,
+  }));
+  check(riftHudHidden.display === 'none' && riftHudHidden.routeHidden === 'none',
+    'rift passage hides the complete cockpit HUD and route selector');
   await page.waitForFunction(() => {
     const rift = NMS.riftState();
     return rift.tension > 0.45 && rift.open > 0.10 && rift.open < 0.82;
@@ -121,9 +156,31 @@ try {
   const closed = await page.evaluate('NMS.riftState()');
   check(!closed.visible && closed.open === 0, 'exit collapses fully after traversal');
 
+  // Reload and exercise the sibling route through the real star-map choice.
+  // Both travel methods share the cinematic state, but this guards against a
+  // future route handler forgetting to enter it before starting the tween.
+  await page.goto(`http://127.0.0.1:${port}/?nolock=1&nohero=1&quality=low&vclouds=0&farflora=0&freeze=1&buildms=25`);
+  await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
+  const warpTargetId = await page.evaluate(() => NMS._internals.universe.nearStarsList[0]?.id || null);
+  await page.evaluate((id) => {
+    NMS.openStarMap();
+    NMS.selectStarMapTarget(id);
+  }, warpTargetId);
+  await page.locator('#sm-systemGlyph [data-glyph-index]').first().click({ force: true });
+  await page.waitForFunction(() => document.querySelector('#sm-planetLeft')?.classList.contains('active'));
+  await page.locator('#sm-routeAction').click({ force: true });
+  await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
+  await page.locator('#route-warp-btn').click();
+  await page.waitForFunction(() => NMS.state === 'warp'
+    && document.body.classList.contains('travel-cinematic'));
+  const warpHudHidden = await page.evaluate(() => getComputedStyle(
+    document.getElementById('ship-hud-stage'),
+  ).display);
+  check(warpHudHidden === 'none', 'stellar warp hides the complete cockpit HUD');
+
   check(shaderErrors.length === 0, 'rift shaders compile without browser errors');
   check(errors.length === 0, 'rift traversal produces no page errors');
-  console.log(`captures: ${openingFrame}, ${frameA}, ${frameB}, ${thresholdFrame}, ${arrivalFrame}`);
+  console.log(`captures: ${routeFrame}, ${routeMobileFrame}, ${openingFrame}, ${frameA}, ${frameB}, ${thresholdFrame}, ${arrivalFrame}`);
 } finally {
   await browser.close();
   server.close();

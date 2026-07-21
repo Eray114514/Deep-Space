@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
 import { generateCelestialNames, ROMAN } from './names.js';
 
-export const GENERATION_VERSION = 2;
+export const GENERATION_VERSION = 3;
 export const TIME_SCALE = 60; // real seconds -> simulated seconds
 const TAU = Math.PI * 2;
 
@@ -18,6 +18,7 @@ const STELLAR_CLASSES = [
 ];
 
 function range(rand, [a, b]) { return a + (b - a) * rand(); }
+function lerp(a, b, t) { return a + (b - a) * t; }
 function weighted(rand, items) {
   const total = items.reduce((sum, item) => sum + item.weight, 0);
   let n = rand() * total;
@@ -27,8 +28,24 @@ function weighted(rand, items) {
 function smoothstep(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
-function makeStar(rand, index, systemName, home = false) {
-  const cls = home && index === 0 ? STELLAR_CLASSES.find((c) => c.spectral === 'G') : weighted(rand, STELLAR_CLASSES);
+function stellarClassesFor(formation = null) {
+  if (!formation) return STELLAR_CLASSES;
+  const youth = clamp(formation.starFormation || 0, 0, 1);
+  const old = smoothstep(8, 12.5, formation.ageGyr || 6);
+  return STELLAR_CLASSES.map((entry) => {
+    let scale = 1;
+    if (entry.spectral === 'O' || entry.spectral === 'B') scale *= 0.08 + youth * 2.8;
+    else if (entry.spectral === 'A' || entry.spectral === 'F') scale *= 0.45 + youth * 1.25;
+    else if (entry.spectral === 'M' || entry.spectral === 'K') scale *= 0.82 + old * 0.65;
+    else if (entry.spectral === 'D') scale *= 0.35 + old * 2.2;
+    return { ...entry, weight: entry.weight * scale };
+  });
+}
+
+function makeStar(rand, index, systemName, home = false, formation = null) {
+  const cls = home && index === 0
+    ? STELLAR_CLASSES.find((c) => c.spectral === 'G')
+    : weighted(rand, stellarClassesFor(formation));
   const massSolar = range(rand, cls.mass);
   const temperatureK = range(rand, cls.temp);
   const luminositySolar = cls.spectral === 'D'
@@ -94,12 +111,14 @@ function bodyClimate(equilibriumK, rand, isHome, au, snowLine) {
 
 export function generateStellarSpec(seed, starCell, systemName = '') {
   const id = typeof starCell === 'string' ? starCell : starCell.id;
+  const formation = typeof starCell === 'object' ? starCell.formation || null : null;
   const isHome = id === '0,0,0';
   const rand = makeRng(`${seed}:stellar:v${GENERATION_VERSION}:${id}`);
-  const primary = makeStar(rand, 0, systemName, isHome);
-  const binaryChance = isHome ? 0.34 : Math.min(0.62, 0.2 + primary.massSolar * 0.15);
+  const primary = makeStar(rand, 0, systemName, isHome, formation);
+  const metalBonus = clamp((formation?.metallicity || 0) * 0.08, -0.08, 0.08);
+  const binaryChance = isHome ? 0.34 : Math.min(0.68, 0.18 + primary.massSolar * 0.15 + metalBonus);
   const stars = [primary];
-  if (rand() < binaryChance) stars.push(makeStar(rand, 1, systemName, false));
+  if (rand() < binaryChance) stars.push(makeStar(rand, 1, systemName, false, formation));
   if (stars.length === 2) primary.displayName = `${systemName} A`;
   const totalMass = stars.reduce((sum, star) => sum + star.massSolar, 0);
   const totalLuminosity = stars.reduce((sum, star) => sum + star.luminositySolar, 0);
@@ -114,7 +133,66 @@ export function generateStellarSpec(seed, starCell, systemName = '') {
     ascendingNode: rand() * TAU,
     phase: rand(),
   } : null;
-  return { stars, binaryOrbit, totalMass, totalLuminosity, binarySemiMajorAU, binaryEccentricity };
+  return { stars, binaryOrbit, totalMass, totalLuminosity, binarySemiMajorAU, binaryEccentricity, formation };
+}
+
+function deriveFormationProfile({ type, equilibriumK, massEarth, tidallyLocked, isMoon, systemFormation, rand }) {
+  const ageGyr = systemFormation?.ageGyr ?? range(rand, [1.2, 11.8]);
+  const metallicity = systemFormation?.metallicity ?? range(rand, [-0.5, 0.25]);
+  const giant = type === 'gasGiant' || type === 'iceGiant';
+  const heat = clamp((equilibriumK - 120) / 600, 0, 1);
+  const youth = 1 - smoothstep(2, 10.5, ageGyr);
+  const tectonicActivity = giant ? 0 : clamp(0.12 + youth * 0.58 + Math.pow(massEarth, 0.25) * 0.18 + rand() * 0.22, 0, 1);
+  const impactRate = clamp(0.08 + (1 - smoothstep(1, 8, ageGyr)) * 0.55 + rand() * 0.28, 0, 1);
+  const volcanicActivity = giant ? 0 : clamp(tectonicActivity * 0.72 + heat * 0.24 + rand() * 0.12, 0, 1);
+  const waterInventory = ['lush', 'ocean', 'ice'].includes(type)
+    ? clamp(0.35 + rand() * 0.65, 0, 1)
+    : type === 'desert' || type === 'toxic' ? rand() * 0.28 : rand() * 0.12;
+  const erosion = giant ? 0 : clamp(waterInventory * 0.58 + (type === 'desert' ? 0.28 : 0.08) + rand() * 0.2, 0, 1);
+  const climateBands = tidallyLocked ? 'day-night' : equilibriumK < 220 ? 'polar' : equilibriumK > 430 ? 'hot' : 'temperate';
+  const landmarkWeights = giant ? {} : {
+    impactBasin: Number(impactRate.toFixed(4)),
+    shieldVolcano: Number(volcanicActivity.toFixed(4)),
+    riftValley: Number(tectonicActivity.toFixed(4)),
+    canyon: Number(erosion.toFixed(4)),
+    polarCap: Number((climateBands === 'polar' ? 0.85 : 0.18 + waterInventory * 0.28).toFixed(4)),
+    dryBasin: Number(((1 - waterInventory) * erosion).toFixed(4)),
+    archipelago: Number((waterInventory * tectonicActivity).toFixed(4)),
+  };
+  return {
+    ageGyr: Number(ageGyr.toFixed(3)),
+    metallicity: Number(metallicity.toFixed(4)),
+    tectonicActivity: Number(tectonicActivity.toFixed(4)),
+    impactRate: Number(impactRate.toFixed(4)),
+    volcanicActivity: Number(volcanicActivity.toFixed(4)),
+    waterInventory: Number(waterInventory.toFixed(4)),
+    erosion: Number(erosion.toFixed(4)),
+    climateBands,
+    satelliteFormation: isMoon ? 'captured-or-coaccreted' : 'primary',
+    landmarkWeights,
+  };
+}
+
+function deriveRingSystem({ type, radius, moonCount, formation, rand }) {
+  const giant = type === 'gasGiant' || type === 'iceGiant';
+  const disruption = formation.impactRate * 0.46 + moonCount * 0.09 + (1 - smoothstep(1, 9, formation.ageGyr)) * 0.28;
+  const threshold = giant ? 0.42 : 0.82;
+  const present = moonCount > 0 && disruption + rand() * 0.18 > threshold;
+  const inner = 1.34 + rand() * 0.22;
+  const outer = inner + 0.62 + rand() * (giant ? 1.05 : 0.48);
+  return {
+    present,
+    source: present ? (formation.impactRate > 0.55 ? 'impact-debris' : 'tidal-disruption') : 'none',
+    innerRadiusRatio: Number(inner.toFixed(4)),
+    outerRadiusRatio: Number(outer.toFixed(4)),
+    opticalDepth: Number((present ? 0.24 + rand() * 0.68 : 0).toFixed(4)),
+    iceFraction: Number((present ? clamp((260 - (formation.equilibriumK || 180)) / 220, 0.08, 0.96) : 0).toFixed(4)),
+    rocheRadius: Number((radius * (2.05 + rand() * 0.5)).toFixed(2)),
+    gaps: present ? [
+      Number(lerp(0.34, 0.48, rand()).toFixed(4)),
+      Number(lerp(0.62, 0.82, rand()).toFixed(4)),
+    ].sort() : [],
+  };
 }
 
 function atmosphereFor(type, rand) {
@@ -301,15 +379,18 @@ export function generateSystemSpec(seed, starCell) {
     return generateBlackHoleSystemSpec(seed, starCell);
   }
   const id = typeof starCell === 'string' ? starCell : starCell.id;
+  const systemFormation = typeof starCell === 'object' ? starCell.formation || null : null;
   const rand = makeRng(`${seed}:system-spec:v${GENERATION_VERSION}:${id}`);
   const isHome = id === '0,0,0';
-  const bodyCount = (isHome ? 6 : 4) + Math.floor(rand() * 5);
+  const diskMass = clamp(0.62 + (systemFormation?.metallicity || 0) * 0.52
+    + (systemFormation?.starFormation || 0.3) * 0.32 + rand() * 0.52, 0.3, 1.65);
+  const bodyCount = isHome ? 7 : clamp(3 + Math.floor(diskMass * 3.2 + rand() * 3), 3, 9);
   // Reserve the actual upper bound (four moons per giant) so name allocation
   // never wraps and repeats inside moon-rich outer systems.
   const preliminaryMoonCount = bodyCount * 4;
-  const names = generateCelestialNames(seed, id, bodyCount, preliminaryMoonCount);
+  const names = generateCelestialNames(seed, starCell, bodyCount, preliminaryMoonCount);
   const baseName = names.system.zh;
-  const stellar = generateStellarSpec(seed, id, baseName);
+  const stellar = generateStellarSpec(seed, starCell, baseName);
   const { stars, binaryOrbit, totalMass, totalLuminosity, binarySemiMajorAU, binaryEccentricity } = stellar;
   const starCount = stars.length;
 
@@ -346,6 +427,13 @@ export function generateSystemSpec(seed, starCell) {
       inclination: (rand() - 0.5) * 0.14, ascendingNode: rand() * TAU, phase: rand(),
     };
     const n = names.bodies[i];
+    const moonMax = giant ? 2 + Math.floor(rand() * 3) : radius > 230000 && rand() < 0.38 ? 1 : 0;
+    const massEarth = giant ? 18 + bodyRand() * 220 : 0.35 + bodyRand() * 5.8;
+    const formation = deriveFormationProfile({
+      type, equilibriumK, massEarth,
+      tidallyLocked, isMoon: false, systemFormation, rand: bodyRand,
+    });
+    formation.equilibriumK = equilibriumK;
     const spec = {
       bodyId, parentId: null, host: starCount === 2 ? 'AB' : 'A', seed: seedBody,
       name: n.displayName, properName: n.zh, latinName: n.latin, nameSourceCategory: n.sourceCategory,
@@ -354,13 +442,14 @@ export function generateSystemSpec(seed, starCell) {
       equilibriumK, axialTilt: giant ? rand() * 0.18 : rand() * 0.72,
       atmosphere: atmosphereFor(type, bodyRand),
       rotationPeriodHours, rotationPhase: rand(), tidallyLocked,
-      massEarth: giant ? 18 + rand() * 220 : 0.35 + rand() * 5.8,
+      massEarth,
       landable: !giant,
+      formation,
     };
+    spec.ringSystem = deriveRingSystem({ type, radius, moonCount: moonMax, formation, rand: bodyRand });
     attachPlanetaryEnvironment(spec);
     bodies.push(spec);
 
-    const moonMax = giant ? 2 + Math.floor(rand() * 3) : radius > 230000 && rand() < 0.38 ? 1 : 0;
     for (let m = 0; m < moonMax; m++) {
       const moonSeed = `${seed}:m:${id}:${i}:${m}`;
       const moonRng = makeRng(moonSeed);
@@ -369,6 +458,12 @@ export function generateSystemSpec(seed, starCell) {
       const moonPeriod = 34 + Math.pow(moonOrbitRadius / Math.max(radius, 1), 1.5) * 9;
       const mn = names.moons[moonNameIndex++ % names.moons.length];
       const moonType = equilibriumK < 215 ? 'ice' : (rand() < 0.58 ? 'barren' : 'exotic');
+      const moonMassEarth = 0.01 + rand() * 0.12;
+      const moonFormation = deriveFormationProfile({
+        type: moonType, equilibriumK, massEarth: moonMassEarth,
+        tidallyLocked: true, isMoon: true, systemFormation, rand: moonRng,
+      });
+      moonFormation.equilibriumK = equilibriumK;
       const moonSpec = {
         bodyId: `${bodyId}-moon-${m}`, parentId: bodyId, host: bodyId, seed: moonSeed,
         name: mn.displayName, properName: mn.zh, latinName: mn.latin, nameSourceCategory: mn.sourceCategory,
@@ -378,7 +473,10 @@ export function generateSystemSpec(seed, starCell) {
         orbit: { renderRadius: moonOrbitRadius, periodHours: moonPeriod, eccentricity: rand() * 0.06,
           inclination: (rand() - 0.5) * 0.18, ascendingNode: rand() * TAU, phase: rand(), semiMajorAU: 0 },
         equilibriumK, atmosphere: atmosphereFor(moonType, moonRng), axialTilt: rand() * 0.08, rotationPeriodHours: moonPeriod,
-        rotationPhase: rand(), tidallyLocked: true, massEarth: 0.01 + rand() * 0.12, landable: true,
+        rotationPhase: rand(), tidallyLocked: true, massEarth: moonMassEarth, landable: true,
+        formation: moonFormation,
+        ringSystem: { present: false, source: 'none', innerRadiusRatio: 0, outerRadiusRatio: 0,
+          opticalDepth: 0, iceFraction: 0, rocheRadius: 0, gaps: [] },
       };
       attachPlanetaryEnvironment(moonSpec);
       bodies.push(moonSpec);
@@ -389,7 +487,7 @@ export function generateSystemSpec(seed, starCell) {
     name: names.system.displayName, properName: baseName, latinName: names.system.latin,
     nameSourceCategory: names.system.sourceCategory,
     catalogId: names.system.catalogId, isHome, stars, binaryOrbit, bodies,
-    compactObjects: [],
+    compactObjects: [], formation: systemFormation, diskMass,
     habitableZoneAU: [0.95 * Math.sqrt(totalLuminosity), 1.67 * Math.sqrt(totalLuminosity)], snowLineAU: snowLine,
   };
 }

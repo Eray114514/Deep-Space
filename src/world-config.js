@@ -10,24 +10,24 @@ export const WORLD_CONFIG = Object.freeze({
     'milky-way': Object.freeze({
       id: 'milky-way',
       name: '银河系',
-      seed: 'NAVEMI-382',
+      seed: 'MILKY-038',
+      catalogVersion: 3,
+      systemCount: 1024,
+      morphology: Object.freeze({
+        type: 'barred-spiral',
+        majorArms: 2,
+        minorArms: 2,
+        radiusCells: 52,
+        homeRegion: 'spur',
+      }),
       blackHoleSystem: Object.freeze({
-        id: 'black-hole:erebus',
-        name: '厄瑞玻斯',
-        systemName: '厄瑞玻斯引力观测区',
-        catalogId: 'AF BH-001',
-        positionCells: Object.freeze([17.4, -1.6, -16.2]),
+        id: 'black-hole:sagittarius-a',
+        name: '人马座 A*',
+        systemName: '银河中心引力观测区',
+        catalogId: 'MW CORE-001',
+        positionCells: Object.freeze([0, 0, 0]),
       }),
-      bodyTuning: Object.freeze({
-        '0,0,0': Object.freeze({
-          'planet-0': Object.freeze({
-            seaLevelOffset: -420,
-            // Preserve the cloud deck that made this curated seed visually
-            // distinctive before clouds moved into the astronomy dossier.
-            cloudCoverage: 0.5136393490363844,
-          }),
-        }),
-      }),
+      bodyTuning: Object.freeze({}),
     }),
   }),
 });

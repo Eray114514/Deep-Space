@@ -261,7 +261,7 @@
 }
 .sm-map-label[hidden] { display: none; }
 .sm-map-label i {
-  --label-color: #fff; grid-row: 1 / -1; width: 6px; height: 6px; margin-left: 1px;
+  --label-color: #fff; grid-row: 1 / -1; width: 6px; height: 6px; margin-left: -5px;
   border-radius: 50%; background: var(--label-color); box-shadow: 0 0 8px var(--label-color);
 }
 .sm-map-label strong { font-size: 12px; font-weight: 680; line-height: 1.08; white-space: nowrap; }
@@ -275,7 +275,7 @@
   color: #ffc88f; opacity: 1;
 }
 .sm-map-label.black-hole i {
-  width: 10px; height: 10px; margin-left: -1px; background: #010203; border: 1.5px solid #ffbd75;
+  width: 10px; height: 10px; margin-left: -7px; background: #010203; border: 1.5px solid #ffbd75;
   box-shadow: 0 0 0 1px rgba(255, 91, 26, .18), 0 0 12px rgba(255, 116, 42, .72);
 }
 .sm-map-label.current::after {
