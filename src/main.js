@@ -4,23 +4,16 @@
 // from interstellar space down to boot level), and the ambience pass
 // (atmosphere, fog, day/night, star dimming).
 
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { StarSystem, Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
 import { SpaceControls, WalkControls, guidePlanetApproach, keys,
   pulseBurstDistance, pulseBurstProgress } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
-import { WarpDriveShader, warpTravelProgress, SkyDome, Ship, ShipWeapons,
-  SHIP_FOREGROUND_LAYER } from './effects.js';
+import { createWarpDriveNode, landingDescentProgress, SHIP_LANDING_PROFILE,
+  warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
 import { tickShaders } from './shaders.js';
-import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
-import { GTAOPass } from '../vendor/jsm/postprocessing/GTAOPass.js';
-import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord } from './names.js';
@@ -31,11 +24,13 @@ import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
 import { VolumetricPass } from './volumetric-pass.js';
-import { ForegroundPass } from './foreground-pass.js';
-import { RiftDistortionShader, SpatialRift } from './spatial-rift.js';
+import { createRiftDistortionNode, SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
+import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
+import { GameNodePipeline } from './node-render-pipeline.js';
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -45,6 +40,7 @@ window.addEventListener('error', (e) => {
 });
 
 const qs = new URLSearchParams(location.search);
+const rendererPolicy = resolveRendererPolicy(qs);
 document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
 const DEV_SERVER = window.__NMS_DEV_SERVER__ === true;
 const WORLD_LAB = DEV_SERVER && qs.get('worldlab') === '1';
@@ -98,27 +94,17 @@ const rendererOptions = {
   logarithmicDepthBuffer: true,
   powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
 };
-let renderer = new THREE.WebGLRenderer(rendererOptions);
-let glInfo = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
-let gpuName = glInfo
-  ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL)
-  : 'WebGL high-performance adapter';
+const rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
+const renderer = rendererRuntime.renderer;
+const actualRendererBackend = rendererRuntime.backend;
+const webgpuAdapterInfo = rendererRuntime.adapterInfo;
+const gpuName = rendererRuntime.gpuName;
 const AUTO_LOW_GPU = qs.get('quality') !== 'high' && (
   /SwiftShader|llvmpipe|Microsoft Basic Render/i.test(gpuName)
   || /ANGLE \(Intel,|Intel.*(?:UHD|HD Graphics|Iris)/i.test(gpuName)
   || /AMD Radeon\(TM\) Graphics/i.test(gpuName)
 );
 QUALITY_LOW ||= AUTO_LOW_GPU;
-if (AUTO_LOW_GPU && rendererOptions.antialias) {
-  renderer.dispose();
-  renderer.forceContextLoss();
-  rendererOptions.antialias = false;
-  renderer = new THREE.WebGLRenderer(rendererOptions);
-  glInfo = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
-  gpuName = glInfo
-    ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL)
-    : gpuName;
-}
 if (QUALITY_LOW) setGridCells(18);
 renderer.setSize(window.innerWidth, window.innerHeight);
 const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.35 : 2.0;
@@ -135,25 +121,25 @@ renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
-console.info('Renderer:', gpuName);
+console.info(`Renderer: WebGPURenderer/${actualRendererBackend}`, gpuName);
 
 // WebGL context-loss safety net. The renderer auto-restores most GPU
 // resources on the next render after restore, but without an explicit
-// preventDefault the canvas stays black and silent. We surface a HUD hint
-// so the player sees a transient "图形上下文已恢复" instead of an
-// unexplained freeze, and skip our own composer.render() until the
-// context is back so post-processing state stays consistent.
+// preventDefault the canvas stays black and silent. WebGPU loss reconstructs
+// the deterministic scene after one guarded reload; WebGL 2 resumes in-place.
 let contextLost = false;
-renderer.domElement.addEventListener('webglcontextlost', (event) => {
-  event.preventDefault();
-  contextLost = true;
-  console.warn('webglcontextlost — deferring render until restored');
-}, false);
-renderer.domElement.addEventListener('webglcontextrestored', () => {
-  contextLost = false;
-  ui?.setHint('图形上下文已恢复', false);
-  console.info('webglcontextrestored — render resumed');
-}, false);
+installDeviceRecovery(renderer, (state, detail) => {
+  contextLost = state === 'lost';
+  const notice = document.getElementById('performance-notice');
+  if (notice && state === 'lost') {
+    notice.textContent = actualRendererBackend === 'webgpu'
+      ? 'WebGPU 设备已重置，正在恢复图形资源…'
+      : 'WebGL 2 图形上下文已丢失，等待恢复…';
+    notice.classList.remove('hidden');
+  }
+  if (notice && state === 'restored') notice.classList.add('hidden');
+  console.info(`graphics device ${state}`, detail || '');
+});
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.0);
@@ -194,7 +180,7 @@ let surfacePipelinesReady = true;
 const pipelineWarmScenes = [];
 const surfaceBootstrapMeshes = [];
 let surfaceBootstrapPending = false;
-const surfaceBootstrapTarget = new THREE.WebGLRenderTarget(2, 2, { depthBuffer: true });
+const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
 const startupWarmStartedAt = performance.now();
 
@@ -303,7 +289,7 @@ function prewarmSurfacePipelines(planet) {
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
-  // WebGLRenderer.compileAsync does not visit the internal shadow-map depth
+  // compileAsync does not visit every lazy shadow-map depth variant
   // material. Seed the two costly variants explicitly: morphed terrain and
   // instanced surface props. The warm scene stays alive so the shared program
   // cache retains those programs for the real shadow pass.
@@ -347,64 +333,28 @@ function prewarmLoadedShipPipelines() {
   sunShadow.intensity = lightIntensity;
 }
 
-// ---- post-processing: HDR bloom (sun, lava, engines, stars) -----------------
-// MSAA render target keeps antialiasing; OutputPass applies tone mapping/sRGB
-const sceneTarget = new THREE.WebGLRenderTarget(1, 1, {
-  // UnrealBloomPass adds back into the composer read buffer. Multisampling
-  // this half-float target makes ANGLE/D3D11 intermittently resolve only a
-  // rectangular part of the frame on Intel GPUs. Final-image SMAA below keeps
-  // edge smoothing without putting bloom through that unstable MSAA path.
-  samples: 0,
-  type: THREE.HalfFloatType,
-  depthBuffer: true,
-  depthTexture: new THREE.DepthTexture(1, 1, THREE.UnsignedIntType),
-});
-sceneTarget.depthTexture.format = THREE.DepthFormat;
-sceneTarget.depthTexture.name = 'scene.depth';
-const composer = new EffectComposer(renderer, sceneTarget);
-composer.addPass(new RenderPass(scene, camera));
+// ---- node render graph: one TSL path for WebGPU and WebGL 2 -----------------
 const VOLUME_ENABLED = !QUALITY_LOW && qs.get('vclouds') !== '0';
 setVolumetricCloudsEnabled(VOLUME_ENABLED);
-const volumePass = VOLUME_ENABLED ? new VolumetricPass(scene, camera, { scale: 0.67 }) : null;
-if (volumePass) composer.addPass(volumePass);
-// EXPERIMENTAL ?gtao=1: ground-truth ambient occlusion for contact shadows
-// on cliffs and props. Off by default: the logarithmic depth buffer skews
-// its view-space reconstruction at distance — evaluate before trusting.
-if (qs.get('gtao') === '1' && !QUALITY_LOW) {
-  const gtaoPass = new GTAOPass(scene, camera, 1, 1);
-  gtaoPass.output = GTAOPass.OUTPUT.Default;
-  gtaoPass.updateGtaoMaterial({
-    radius: 3.0, distanceExponent: 1.2, thickness: 1.5,
-    scale: 1.15, samples: 12, distanceFallOff: 1,
-  });
-  gtaoPass.blendIntensity = 0.85;
-  composer.addPass(gtaoPass);
-}
-const warpDrivePass = new ShaderPass(WarpDriveShader);
-warpDrivePass.enabled = false;
-composer.addPass(warpDrivePass);
-const foregroundPass = new ForegroundPass(scene, camera, SHIP_FOREGROUND_LAYER);
-composer.addPass(foregroundPass);
-const riftDistortionPass = new ShaderPass(RiftDistortionShader);
-riftDistortionPass.enabled = false;
-composer.addPass(riftDistortionPass);
-// threshold above 1.0: only genuinely HDR pixels bloom (sun, lava, engines,
-// specular glints) — daytime sky must NOT veil the terrain
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), IS_TOUCH ? 0.35 : 0.5, 0.4, 1.05);
-composer.addPass(bloomPass);
-composer.addPass(new OutputPass());
-// Final-image morphological AA catches the thin diagonal silhouette and
-// texture edges that MSAA misses after bloom/volume compositing.
-const smaaPass = !QUALITY_LOW && !IS_TOUCH ? new SMAAPass(1, 1) : null;
-if (smaaPass) composer.addPass(smaaPass);
-// The volume pass needs the composer even when decorative bloom is disabled.
-bloomPass.enabled = qs.get('post') !== '0' && !QUALITY_LOW;
+const volumePass = VOLUME_ENABLED ? new VolumetricPass() : null;
+const nodePipeline = new GameNodePipeline(renderer, scene, camera, {
+  volume: VOLUME_ENABLED,
+  bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
+  bloomStrength: IS_TOUCH ? 0.35 : 0.5,
+  bloomRadius: 0.4,
+  bloomThreshold: 1.05,
+  foregroundLayer: SHIP_FOREGROUND_LAYER,
+  createWarpDriveNode,
+  createRiftDistortionNode,
+});
+const warpDrivePass = nodePipeline.warp;
+const foregroundPass = nodePipeline.foregroundPass;
+const riftDistortionPass = nodePipeline.rift;
+const bloomPass = nodePipeline.bloom;
 let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 let spatialRift = null;
-renderer.info.autoReset = false;   // accumulate across composer passes
 function sizePost() {
-  composer.setPixelRatio(renderDpr);
-  composer.setSize(window.innerWidth, window.innerHeight);
+  nodePipeline.setSize(window.innerWidth, window.innerHeight, renderDpr);
 }
 sizePost();
 
@@ -515,6 +465,7 @@ const riftPortalClearColor = new THREE.Color();
 const riftPortalVisibility = [];
 let riftPortalClearAlpha = 1;
 let riftPortalFog = null;
+let riftPortalToneMapping = THREE.ACESFilmicToneMapping;
 let dialAcc = 0;
 // Snow coverage at the player's current foot position, refreshed by the walk
 // dial pass (~7 Hz). Consumed by the music director to switch to the alpine
@@ -549,7 +500,7 @@ const FARFLORA = qs.get('farflora') !== '0';
 const farFlora = new FarFlora();
 const skyDome = new SkyDome(scene);
 const ship = new Ship(scene, {
-  anisotropy: Math.min(16, renderer.capabilities.getMaxAnisotropy()),
+  anisotropy: Math.min(16, renderer.getMaxAnisotropy()),
 });
 spatialRift = new SpatialRift({
   scene,
@@ -606,6 +557,9 @@ const flightProbeWorld = new THREE.Vector3();
 const flightProbeLocal = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
+const shipCollisionCurrent = new THREE.Vector3();
+const shipCollisionPrevious = new THREE.Vector3();
+const shipCollisionInverse = new THREE.Quaternion();
 const _sky = new THREE.Color();
 const _c2 = new THREE.Color();
 const _zenithMul = new THREE.Color(0.3, 0.42, 0.78);
@@ -657,6 +611,7 @@ const spaceCtl = new SpaceControls(renderer.domElement, nav);
 const walkCtl = new WalkControls(renderer.domElement, {
   lookScale: () => surfaceWeapons.lookScale,
   onLook: (movementX, movementY) => surfaceWeapons.onLookDelta(movementX, movementY),
+  resolveCollision: resolveParkedShipCollision,
 });
 
 function cancelPulseBurst() {
@@ -922,7 +877,9 @@ document.getElementById('pause-map-btn').addEventListener('click', async () => {
     paused = false;
     pauseOverlay.classList.add('hidden');
     audio.setPaused(true);
-    music.setPaused(true);
+    // Opening the star map from the pause menu should restore BGM (which was
+    // paused by pauseGame) and let the director switch to the starmap theme.
+    music.setPaused(false);
   }
   openStarMap();
 });
@@ -1031,7 +988,6 @@ function openStarMap() {
   clearFlightInput();
   spaceCtl.enabled = false;
   audio.setPaused(true);
-  music.setPaused(true);
   ui.setCrosshair(false);
   starMap.open();
   if (document.pointerLockElement) document.exitPointerLock();
@@ -1042,7 +998,6 @@ async function closeStarMap(restoreInput = true) {
   starMap.close();
   clearFlightInput();
   audio.setPaused(false);
-  music.setPaused(false);
   spaceCtl.enabled = state === 'space';
   ui.setCrosshair(state === 'space' || state === 'walk');
   if (restoreInput && !window.NMS_NOLOCK && pointerLockInput && (state === 'space' || state === 'walk')) {
@@ -1277,18 +1232,101 @@ function flyToPlanet(planet) {
   }, () => setState('space'));
 }
 
-// set the ship down on flat, dry ground ~22 m from where the player lands
+function shipFootprintRange(planet, centerDir, localQuat) {
+  const center = centerDir.clone().multiplyScalar(planet.R);
+  const offset = new THREE.Vector3();
+  const sampleDir = new THREE.Vector3();
+  let min = Infinity;
+  let max = -Infinity;
+  for (const [x, z] of SHIP_LANDING_PROFILE.footprint) {
+    offset.set(x, 0, z).applyQuaternion(localQuat);
+    sampleDir.copy(center).add(offset).normalize();
+    const height = planet.height(sampleDir, planet.fullMaxFreq);
+    min = Math.min(min, height);
+    max = Math.max(max, height);
+  }
+  return { min, max };
+}
+
+function resolveParkedShipCollision(controller, previousPosition) {
+  if (controller.planet !== ship.parkedPlanet || !ship.parkedLocal
+      || !ship.parkedLocalQuat || ship.parkAmt < 0.98) return;
+
+  shipCollisionInverse.copy(ship.parkedLocalQuat).invert();
+  shipCollisionCurrent.copy(controller.posLocal).sub(ship.parkedLocal)
+    .applyQuaternion(shipCollisionInverse);
+  shipCollisionPrevious.copy(previousPosition).sub(ship.parkedLocal)
+    .applyQuaternion(shipCollisionInverse);
+
+  const radius = 0.44;
+  const eyeHeight = controller.eyeHeight;
+  let resolved = false;
+  for (const collider of SHIP_LANDING_PROFILE.colliders) {
+    const [cx, cy, cz] = collider.center;
+    const [hx, hy, hz] = collider.half;
+    const minX = cx - hx - radius;
+    const maxX = cx + hx + radius;
+    const minZ = cz - hz - radius;
+    const maxZ = cz + hz + radius;
+    const bottom = cy - hy;
+    const top = cy + hy;
+    const inside = shipCollisionCurrent.x >= minX && shipCollisionCurrent.x <= maxX
+      && shipCollisionCurrent.z >= minZ && shipCollisionCurrent.z <= maxZ;
+    if (!inside) continue;
+
+    const feet = shipCollisionCurrent.y - eyeHeight;
+    const previousFeet = shipCollisionPrevious.y - eyeHeight;
+    // Crossing a top face while falling creates a stable walkable deck. A
+    // small tolerance avoids losing contact as the curved planet frame moves.
+    if (controller.vR <= 0 && previousFeet >= top - 0.18 && feet <= top + 0.28) {
+      shipCollisionCurrent.y = top + eyeHeight;
+      controller.vR = 0;
+      controller.grounded = true;
+      resolved = true;
+      break;
+    }
+
+    const bodyOverlaps = shipCollisionCurrent.y > bottom
+      && feet < top - 0.03;
+    if (!bodyOverlaps) continue;
+
+    // Capsule-vs-OBB side response. Preserve the axis that remains tangent to
+    // the hull so the player slides along a wing instead of stopping dead.
+    const previousInsideX = shipCollisionPrevious.x >= minX && shipCollisionPrevious.x <= maxX;
+    const previousInsideZ = shipCollisionPrevious.z >= minZ && shipCollisionPrevious.z <= maxZ;
+    if (!previousInsideX) shipCollisionCurrent.x = shipCollisionPrevious.x;
+    if (!previousInsideZ) shipCollisionCurrent.z = shipCollisionPrevious.z;
+    if (previousInsideX && previousInsideZ) {
+      const distances = [
+        [Math.abs(shipCollisionCurrent.x - minX), minX, 'x'],
+        [Math.abs(maxX - shipCollisionCurrent.x), maxX, 'x'],
+        [Math.abs(shipCollisionCurrent.z - minZ), minZ, 'z'],
+        [Math.abs(maxZ - shipCollisionCurrent.z), maxZ, 'z'],
+      ].sort((a, b) => a[0] - b[0]);
+      shipCollisionCurrent[distances[0][2]] = distances[0][1];
+    }
+    resolved = true;
+  }
+
+  if (!resolved) return;
+  controller.posLocal.copy(shipCollisionCurrent.applyQuaternion(ship.parkedLocalQuat))
+    .add(ship.parkedLocal);
+}
+
+// Set the ship down on flat, dry ground ~22 m from where the player lands.
+// The complete rendered footprint is sampled, so a ridge beneath the far wing
+// raises the landing origin instead of cutting through the hull.
 function parkShipNear(planet, landDir) {
   const up = _v.copy(landDir);
   const e1 = new THREE.Vector3();
   if (Math.abs(up.y) < 0.93) e1.set(up.z, 0, -up.x).normalize();
   else e1.set(0, -up.z, up.y).normalize();
   const e2 = new THREE.Vector3().crossVectors(up, e1);
-  const cand = new THREE.Vector3(), s = new THREE.Vector3();
+  const cand = new THREE.Vector3();
   // scenic landings favour cliff perches — hunt outward until the ground is
   // genuinely FLAT, or the ship sits level on a slope with its nose in the air
   const landH = planet.height(up, planet.fullMaxFreq);
-  let best = null, bestH = 0, bestScore = Infinity;
+  let best = null, bestH = 0, bestQuat = null, bestScore = Infinity;
   // Boarding is part of the landing contract: stay within a short walk even
   // when a scenic perch has dramatic relief around it.
   for (const rad of [22, 28, 34, 38]) {
@@ -1300,17 +1338,20 @@ function parkShipNear(planet, landDir) {
         .normalize();
       const h = planet.height(cand, planet.fullMaxFreq);
       if (planet.hasLiquid && h < planet.seaLevel + 1) continue;
-      const st = 6 / planet.R;   // slope over the ship's own footprint
-      const ha = planet.height(s.copy(cand).addScaledVector(e1, st).normalize(), planet.fullMaxFreq);
-      const hb = planet.height(s.copy(cand).addScaledVector(e2, st).normalize(), planet.fullMaxFreq);
-      const slope = (Math.abs(ha - h) + Math.abs(hb - h)) / 6;
-      const clearH = Math.max(h, ha, hb);
+      const candidateForward = landDir.clone().sub(cand).normalize();
+      const candidateQuat = horizonQuat(cand, candidateForward, new THREE.Quaternion());
+      const footprint = shipFootprintRange(planet, cand, candidateQuat);
+      const slope = (footprint.max - footprint.min)
+        / (SHIP_LANDING_PROFILE.bounds.halfZ * 2);
+      const clearH = footprint.max;
       const playerDistance = Math.hypot(rad, clearH - landH);
       if (playerDistance > BOARD_DISTANCE - 3) continue;
       const score = slope * 24 + rad * 0.03 + Math.abs(clearH - landH) * 0.08;
       if (score < bestScore) {
         bestScore = score; best = cand.clone();
-        bestH = clearH;                            // clear the whole footprint
+        bestH = clearH - SHIP_LANDING_PROFILE.bounds.minY
+          + SHIP_LANDING_PROFILE.groundClearance;
+        bestQuat = candidateQuat;
       }
     }
     if (best && bestScore < 1.4) break;            // flat enough, stop early
@@ -1318,42 +1359,81 @@ function parkShipNear(planet, landDir) {
   if (!best) {   // everything around is wet/steep — keep the ship reachable
     cand.copy(up).addScaledVector(e1, 22 / planet.R).normalize();
     best = cand.clone();
-    bestH = clamp(planet.height(cand, planet.fullMaxFreq), landH - 28, landH + 28);
+    const candidateForward = landDir.clone().sub(cand).normalize();
+    bestQuat = horizonQuat(cand, candidateForward, new THREE.Quaternion());
+    const footprint = shipFootprintRange(planet, cand, bestQuat);
+    bestH = clamp(footprint.max, landH - 28, landH + 28)
+      - SHIP_LANDING_PROFILE.bounds.minY + SHIP_LANDING_PROFILE.groundClearance;
   }
-  const padLocal = best.clone().multiplyScalar(planet.R + bestH + 1.3);
+  const padLocal = best.clone().multiplyScalar(planet.R + bestH);
   const padUniv = planet.localPositionToWorld(padLocal, new THREE.Vector3());
-  // nose pointed at the player
-  _v2.copy(landDir).sub(best).normalize();
-  const parkedLocalQuat = horizonQuat(best, _v2, new THREE.Quaternion());
+  const parkedLocalQuat = bestQuat;
   const parkedWorldQuat = planet.frameOrientation.clone().multiply(parkedLocalQuat);
   ship.parkedPlanet = planet; ship.parkedLocal = padLocal; ship.parkedLocalQuat = parkedLocalQuat;
   ship.setParked(padUniv, parkedWorldQuat);
+  return { padLocal, padUniv, parkedLocalQuat, parkedWorldQuat };
 }
 
 function tryLand() {
   if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false || nearestAlt > 420) return;
   const planet = nearest;
   const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
-  const startLocalQuat = planet._invFrame.clone().multiply(nav.quat);
   const dirLocal = startLocal.clone().normalize();
   const ground = planet.surfaceRadius(dirLocal);
   const endLocal = dirLocal.clone().multiplyScalar(ground + 1.7);
-  const viewLocal = _v2.set(0, 0, -1).applyQuaternion(startLocalQuat);
-  const endLocalQuat = horizonQuat(dirLocal, viewLocal, new THREE.Quaternion());
   if (!window.NMS_NOLOCK && pointerLockInput) renderer.domElement.requestPointerLock();
-  parkShipNear(planet, dirLocal);
+  const landing = parkShipNear(planet, dirLocal);
+  const upLocal = landing.padLocal.clone().normalize();
+  const forwardLocal = new THREE.Vector3(0, 0, -1)
+    .applyQuaternion(landing.parkedLocalQuat).normalize();
+  const rightLocal = new THREE.Vector3(1, 0, 0)
+    .applyQuaternion(landing.parkedLocalQuat).normalize();
+  const approachLocal = landing.padLocal.clone()
+    .addScaledVector(upLocal, 54)
+    .addScaledVector(forwardLocal, -14);
+  const cameraStartLocal = landing.padLocal.clone()
+    .addScaledVector(rightLocal, 27)
+    .addScaledVector(forwardLocal, 23)
+    .addScaledVector(upLocal, 17);
+  const cameraEndLocal = landing.padLocal.clone()
+    .addScaledVector(rightLocal, 21)
+    .addScaledVector(forwardLocal, 16)
+    .addScaledVector(upLocal, 9);
+  const approachQuat = landing.parkedLocalQuat.clone().multiply(
+    new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.09));
+  const shipLocal = new THREE.Vector3();
+  const shipWorld = new THREE.Vector3();
+  const shipLocalQuat = new THREE.Quaternion();
+  const shipWorldQuat = new THREE.Quaternion();
+  const cameraLocal = new THREE.Vector3();
+  const focusWorld = new THREE.Vector3();
+  const worldUp = new THREE.Vector3();
+  planet.localPositionToWorld(approachLocal, shipWorld);
+  ship.setLandingPose(shipWorld,
+    shipWorldQuat.copy(planet.frameOrientation).multiply(approachQuat), 0);
   setState('landing');
   ui.showLand(false);
   nav.vel.set(0, 0, 0);
-  addTween(1.9, (k) => {
-    const e = easeInOut(k);
-    planet.localPositionToWorld(_v.lerpVectors(startLocal, endLocal, e), nav.pos);
-    nav.quat.copy(planet.frameOrientation)
-      .multiply(_q.copy(startLocalQuat).slerp(endLocalQuat, e));
+  addTween(3.6, (k) => {
+    const descent = landingDescentProgress(k);
+    shipLocal.lerpVectors(approachLocal, landing.padLocal, descent);
+    shipLocalQuat.copy(approachQuat).slerp(landing.parkedLocalQuat, descent);
+    planet.localPositionToWorld(shipLocal, shipWorld);
+    shipWorldQuat.copy(planet.frameOrientation).multiply(shipLocalQuat);
+    ship.setLandingPose(shipWorld, shipWorldQuat, descent);
+
+    cameraLocal.lerpVectors(cameraStartLocal, cameraEndLocal, easeInOut(k));
+    planet.localPositionToWorld(cameraLocal, nav.pos);
+    planet.localPositionToWorld(
+      focusWorld.copy(shipLocal).addScaledVector(upLocal, 0.8), focusWorld);
+    planet.localOffsetToWorld(upLocal, worldUp).normalize();
+    lookQuatAt(nav.pos, focusWorld, nav.quat, worldUp);
   }, () => {
-    planet.worldPositionToLocal(nav.pos, _v);
-    _v2.set(0, 0, -1).applyQuaternion(nav.quat).applyQuaternion(planet._invFrame);
-    walkCtl.enter(planet, _v, _v2);
+    ship.finishLanding();
+    const exitView = landing.padLocal.clone().sub(endLocal).projectOnPlane(dirLocal).normalize();
+    walkCtl.enter(planet, endLocal, exitView);
+    planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(planet.frameOrientation).multiply(walkCtl.quat);
     setState('walk');
   });
 }
@@ -1581,6 +1661,11 @@ function beginRiftPortalScene() {
   scene.fog = null;
   renderer.getClearColor(riftPortalClearColor);
   riftPortalClearAlpha = renderer.getClearAlpha();
+  riftPortalToneMapping = renderer.toneMapping;
+  // Keep the offscreen destination in linear HDR. The visible portal then
+  // flows through the same node output transform exactly once, just like
+  // the adopted destination on the next frame.
+  renderer.toneMapping = THREE.NoToneMapping;
   renderer.setClearColor(0x000006, 1);
   riftPortalAmbient.visible = true;
   setRiftPreviewVisible(true);
@@ -1594,6 +1679,7 @@ function endRiftPortalScene() {
   }
   riftPortalVisibility.length = 0;
   scene.fog = riftPortalFog;
+  renderer.toneMapping = riftPortalToneMapping;
   renderer.setClearColor(riftPortalClearColor, riftPortalClearAlpha);
 }
 
@@ -2425,11 +2511,11 @@ function frame() {
   // pulse. It runs before the foreground ship pass, so rays never float over
   // the hull as a separate screen layer.
   warpDrivePass.enabled = Math.max(warpIntensity, pulseVisual, warpArrival) > 0.005;
-  warpDrivePass.uniforms.uTime.value = clock.elapsedTime;
-  warpDrivePass.uniforms.uWarp.value = warpIntensity;
-  warpDrivePass.uniforms.uPulse.value = pulseVisual;
-  warpDrivePass.uniforms.uArrival.value = warpArrival;
-  warpDrivePass.uniforms.uAspect.value = camera.aspect;
+  warpDrivePass.uniforms.time.value = clock.elapsedTime;
+  warpDrivePass.uniforms.warp.value = warpIntensity;
+  warpDrivePass.uniforms.pulse.value = pulseVisual;
+  warpDrivePass.uniforms.arrival.value = warpArrival;
+  warpDrivePass.uniforms.aspect.value = camera.aspect;
 
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
@@ -2444,14 +2530,14 @@ function frame() {
   if (nearest && !nearest.isGasGiant) {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearest.worldOffsetToLocal(_v, _v);
-    scatter.update(nearest, _v, nearestAlt);
+    scatter.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt);
     if (scatter.planet) {
       prewarmSurfacePipelines(scatter.planet);
       if (!surfacePipelinesReady) {
         for (const mesh of Object.values(scatter.meshes)) mesh.visible = false;
       }
     }
-    if (FARFLORA) farFlora.update(nearest, _v, nearestAlt);
+    if (FARFLORA) farFlora.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt);
   } else {
     if (scatter.planet) scatter.clear();
     if (farFlora.planet) farFlora.clear();
@@ -2649,7 +2735,7 @@ function frame() {
   }
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
-    volumePass.setActivePlanet(nearest?.isGasGiant ? null : nearest, nav.pos, motion);
+    volumePass.setActivePlanet(nearest?.isGasGiant || nearest?.type === 'artificialHabitat' ? null : nearest, nav.pos, motion);
   }
   foregroundPass.enabled = ship.foregroundOnly;
   ambient.layers.enable(SHIP_FOREGROUND_LAYER);
@@ -2693,11 +2779,10 @@ function frame() {
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
   if (!contextLost) {
-    if (usePost || warpDrivePass.enabled) composer.render();
-    else {
-      renderer.render(scene, camera);
-      if (ship.foregroundOnly) foregroundPass.renderDirect(renderer);
-    }
+    // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
+    // only zeros optional effect uniforms; it never swaps renderer families.
+    bloomPass.enabled = usePost && !QUALITY_LOW;
+    nodePipeline.render();
   }
   prevNavPos.copy(nav.pos);
   const startupAssetsReady = shipPipelinesWarmed || performance.now() - startupWarmStartedAt > 6000;
@@ -2788,6 +2873,11 @@ window.NMS = {
       cosmicHours: celestialClock.hours, timeScale: celestialClock.scale,
       dayLight: envDay, eclipse: envEclipse,
       gpu: gpuName, dpr: renderDpr,
+      rendererRequested: rendererPolicy.requested,
+      rendererBackend: actualRendererBackend,
+      rendererReason: rendererRuntime.reason,
+      webgpuAvailable: rendererPolicy.webgpuAvailable,
+      adapterInfo: webgpuAdapterInfo,
       quality: QUALITY_LOW ? (AUTO_LOW_GPU ? 'auto-low' : 'low') : 'high',
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
@@ -2892,6 +2982,21 @@ window.NMS = {
     if (!p || p.isGasGiant || p.landable === false) return false;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
+    if (p.type === 'artificialHabitat') {
+      const dir = p.scenicDir();
+      parkShipNear(p, dir);
+      const local = dir.clone().multiplyScalar(p.surfaceRadius(dir) + 1.7);
+      const forward = new THREE.Vector3().crossVectors(p.sunDirLocal, dir).normalize();
+      if (forward.lengthSq() < 0.1) forward.set(1, 0, 0);
+      walkCtl.enter(p, local, forward);
+      walkCtl.yaw += yawDeg * Math.PI / 180;
+      walkCtl.update(0.001);
+      p.localPositionToWorld(walkCtl.posLocal, nav.pos);
+      nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
+      focusPlanet = p; spaceCtl.focus = p;
+      setState('walk');
+      return true;
+    }
     const sunDir = p.sunDirLocal.clone();
     const meadow = bias === 'meadow';
     const snowy = bias === 'snow';

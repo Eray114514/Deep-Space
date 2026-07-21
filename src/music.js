@@ -139,7 +139,7 @@ export class BackgroundMusic {
     // Non-loop track ended: only the cruise pool is multi-track, advance it.
     if (rec.def.pool === 'cruise') {
       const next = this._nextInPool('cruise', id);
-      if (next) this._play(next, 0);
+      if (next) this.cue(next, { fade: 0 });
     }
   }
 

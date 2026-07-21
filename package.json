@@ -1,11 +1,15 @@
 {
   "name": "deep-space",
-  "version": "0.36.3",
+  "version": "0.37.1",
   "description": "A fully procedural explorable universe in the browser. Stars, planets with consistent terrain from orbit to on-foot, all generated from a seed.",
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/astronomytest.js && node tools/worldlocktest.js",
+    "test": "node tools/test.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js",
+    "test:galaxy": "node tools/galaxycatalogtest.js",
+    "test:starmap": "node tools/starmaptest.js",
+    "test:artificial": "node tools/artificialtest.js && node tools/artificialplaytest.js",
+    "test:renderers": "node tools/renderertest.js",
     "test:terrain": "node tools/sanity.js",
     "test:gameplay": "node tools/gameplaytest.js",
     "test:performance": "node tools/perftest.js",
@@ -14,15 +18,18 @@
     "test:astronomy:browser": "node tools/astroplaytest.js",
     "build": "npm test && node tools/build.js",
     "shots": "node tools/screenshot.js",
-    "world:lock": "node tools/export-canonical-world.js",
+    "world:lock": "node tools/export-galaxy-catalog.js && node tools/export-canonical-world.js",
+    "world:curate": "node tools/curate-finite-galaxies.js 256",
+    "world:curate:shots": "node tools/capture-finite-candidates.js",
     "explore": "node tools/explore.js",
     "seamtest": "node tools/seamtest.js",
     "touchtest": "node tools/touchtest.js"
   },
   "devDependencies": {
+    "@gltf-transform/cli": "^4.3.0",
     "playwright": "1.56.0",
     "pngjs": "^7.0.0",
-    "three": "^0.170.0"
+    "three": "^0.185.1"
   },
   "license": "MIT"
 }
