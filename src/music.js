@@ -91,8 +91,12 @@ export class BackgroundMusic {
     if (this.disposed) return;
     if (this.ctx || !ctx) return;
     this.ctx = ctx;
+    // Master stays at unity: per-track gain nodes own volume, fades and pause
+    // ducks. (An earlier version set this to 0 and never raised it, which is
+    // why no track was ever audible — every per-track gain was multiplied by
+    // a zero master on the way to destination.)
     this.master = ctx.createGain();
-    this.master.gain.value = 0;
+    this.master.gain.value = 1;
     this.master.connect(ctx.destination);
     for (const def of TRACK_DEFS) {
       const el = new Audio();
