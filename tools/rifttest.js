@@ -83,6 +83,18 @@ try {
   check(maxLightDelta < 0.002,
     `destination stellar light is continuous across the threshold (max Δ ${maxLightDelta.toFixed(5)})`);
   check(arrived.audioCue === 'rift-close', 'threshold crossing triggers the dedicated closing cue');
+  const exitDepths = await page.evaluate(() => new Promise((resolve) => {
+    const samples = [];
+    const sample = () => requestAnimationFrame(() => {
+      const rift = NMS.riftState();
+      if (rift.exitDepth) samples.push(rift.exitDepth);
+      if (!rift.visible || samples.length >= 8) resolve(samples);
+      else sample();
+    });
+    sample();
+  }));
+  check(exitDepths.length > 0 && exitDepths.every((range) => range.min > 0),
+    `collapsing exit stays fully behind the camera (${exitDepths.length} sampled frames)`);
   await page.evaluate(() => NMS._internals.nav.vel.set(0, 0, 0));
   await page.waitForTimeout(80);
   await page.screenshot({ path: arrivalFrame });

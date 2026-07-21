@@ -39,6 +39,8 @@ const RANGE = 24;            // cells of radius around the camera
 const CAPS = { grass: 10000, shrub: 2600, tree0: 1500, tree1: 1500, pod: 1200, default: 2000 };
 export function capFor(kind) { return CAPS[kind] ?? CAPS.default; }
 const SHOW_BELOW_ALT = 600;  // metres
+const PREWARM_BELOW_ALT = 8000;
+const STREAM_BUDGET_MS = 1.8;
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -128,11 +130,14 @@ function floraEmissive(mat) {
 const FLORA_GLOW = { tree0: 0.16, tree1: 0.16, shrub: 0.14, pod: 0.55, grass: 0.09 };
 
 export class Scatter {
-  constructor() {
+  constructor({ streamBudgetMs = STREAM_BUDGET_MS } = {}) {
     if (!GEO) GEO = baseGeo();
     this.planet = null;
     this.flora = null;  // per-planet species geometries
     this.meshes = {};   // kind -> InstancedMesh
+    this.staging = {};  // kind -> persistent CPU-side next-ring buffers
+    this.job = null;
+    this.streamBudgetMs = streamBudgetMs;
     this.lastKey = '';
     this.seen = new Set();
   }
@@ -170,6 +175,15 @@ export class Scatter {
       const im = this.addMesh(planet, kind, this.flora[kind], mat);
       if (kind === 'grass') im.castShadow = false;   // invisible; halves its cost
     }
+    for (const kind in this.meshes) {
+      const cap = capFor(kind);
+      const im = this.meshes[kind];
+      im.setColorAt(0, _ic.setRGB(1, 1, 1));
+      this.staging[kind] = {
+        matrix: new Float32Array(cap * 16),
+        color: new Float32Array(cap * 3),
+      };
+    }
     this.lastKey = '';
   }
 
@@ -196,6 +210,8 @@ export class Scatter {
     }
     this.flora = null;   // geometries are planet-owned (planet.dispose frees them)
     this.meshes = {};
+    this.staging = {};
+    this.job = null;
     this.planet = null;
     this.lastKey = '';
   }
@@ -206,13 +222,14 @@ export class Scatter {
 
   // camLocal: camera in planet-local coords; alt: metres above terrain
   update(planet, camLocal, alt) {
-    if (planet !== this.planet) this.setPlanet(alt < SHOW_BELOW_ALT ? planet : null);
+    if (planet !== this.planet) this.setPlanet(alt < PREWARM_BELOW_ALT ? planet : null);
     if (!this.planet) return;
     // climbing away: props shrink to nothing across a 200 m band instead of
     // blinking out (all at once!) the moment an altitude line is crossed
     const g = Math.max(0, Math.min(1, (SHOW_BELOW_ALT - alt) / 200));
     GROW.value = g * g * (3 - 2 * g);
-    if (alt > SHOW_BELOW_ALT) { this.hideAll(); this.lastKey = ''; return; }
+    for (const kind in this.meshes) this.meshes[kind].visible = g > 0.0001;
+    if (alt > PREWARM_BELOW_ALT) { this.hideAll(); this.lastKey = ''; return; }
 
     const p = this.planet;
     _dir.copy(camLocal).normalize();
@@ -222,49 +239,73 @@ export class Scatter {
     // rebuild only when the camera crosses into a new planet-fixed cell
     const kx = Math.round(_dir.x * Q), ky = Math.round(_dir.y * Q), kz = Math.round(_dir.z * Q);
     const key = p.seed + ':' + kx + ':' + ky + ':' + kz;
-    if (key === this.lastKey) return;
-    this.lastKey = key;
+    if (key !== this.lastKey) {
+      this.lastKey = key;
+      this.beginJob(p, kx, ky, kz, Q, cellAng);
+    }
+    if (!this.job) return;
+    if (this.stepJob(performance.now() + this.streamBudgetMs)) {
+      this.commitJob(this.job);
+      this.job = null;
+    }
+  }
 
-    // discovery lattice anchored at the CANONICAL center of the camera's own
-    // cell — planet-fixed, so the grid of sample points never swims
+  beginJob(p, kx, ky, kz, Q, cellAng) {
+    // The discovery lattice is anchored at the canonical center of the
+    // camera's cell. A new target replaces only the unfinished staging job;
+    // the last complete ring remains visible until this one commits.
     _anchor.set(kx, ky, kz).normalize();
     if (Math.abs(_anchor.y) < 0.93) _e1.set(-_anchor.z, 0, _anchor.x).normalize();
     else _e1.set(1, 0, 0).projectOnPlane(_anchor).normalize();
     _e2.crossVectors(_anchor, _e1);
-
     const counts = {};
     for (const kind in this.meshes) counts[kind] = 0;
-    const seedI = p.intSeed ^ 0x5ca7;
     this.seen.clear();
+    this.job = {
+      p, Q, cellAng, seedI: p.intSeed ^ 0x5ca7,
+      anchor: _anchor.clone(), e1: _e1.clone(), e2: _e2.clone(),
+      counts, gx: -RANGE * 2, gy: -RANGE * 2,
+    };
+  }
 
-    // half-step oversampling, and every sample claims all 8 lattice corners
-    // of its cube — so which cells get found cannot depend on how the
-    // discovery grid happens to align with the planet lattice
+  stepJob(deadline) {
+    const job = this.job;
     const STEPS = RANGE * 2;
-    for (let gy = -STEPS; gy <= STEPS; gy++) {
-      for (let gx = -STEPS; gx <= STEPS; gx++) {
-        if (gx * gx + gy * gy > STEPS * STEPS) continue;
-        _v.copy(_anchor)
-          .addScaledVector(_e1, gx * 0.5 * cellAng)
-          .addScaledVector(_e2, gy * 0.5 * cellAng)
+    _anchor.copy(job.anchor);
+    while (job.gy <= STEPS) {
+      const gx = job.gx, gy = job.gy;
+      job.gx++;
+      if (job.gx > STEPS) { job.gx = -STEPS; job.gy++; }
+      if (gx * gx + gy * gy <= STEPS * STEPS) {
+        _v.copy(job.anchor)
+          .addScaledVector(job.e1, gx * 0.5 * job.cellAng)
+          .addScaledVector(job.e2, gy * 0.5 * job.cellAng)
           .normalize();
-        const fx = Math.floor(_v.x * Q), fy = Math.floor(_v.y * Q), fz = Math.floor(_v.z * Q);
+        const fx = Math.floor(_v.x * job.Q), fy = Math.floor(_v.y * job.Q), fz = Math.floor(_v.z * job.Q);
         for (let corner = 0; corner < 8; corner++) {
           const qx = fx + (corner & 1), qy = fy + ((corner >> 1) & 1), qz = fz + (corner >> 2);
-          // pack ±16383 per axis (Q reaches ~13.4k on 120 km worlds)
           const ck = (qx + 16384) + (qy + 16384) * 32768 + (qz + 16384) * 1073741824;
           if (this.seen.has(ck)) continue;
           this.seen.add(ck);
-          // only cells on the planet's surface shell carry a prop
-          if (Math.abs(Math.hypot(qx, qy, qz) - Q) > 0.7) continue;
-          this.placeCell(p, qx, qy, qz, Q, cellAng, seedI, counts);
+          if (Math.abs(Math.hypot(qx, qy, qz) - job.Q) > 0.7) continue;
+          this.placeCell(job.p, qx, qy, qz, job.Q, job.cellAng, job.seedI, job.counts);
         }
       }
+      if ((gx & 3) === 3 && performance.now() >= deadline) return false;
     }
+    return true;
+  }
+
+  commitJob(job) {
     for (const kind in this.meshes) {
-      this.meshes[kind].count = counts[kind];
-      this.meshes[kind].instanceMatrix.needsUpdate = true;
-      if (this.meshes[kind].instanceColor) this.meshes[kind].instanceColor.needsUpdate = true;
+      const count = job.counts[kind];
+      const mesh = this.meshes[kind];
+      const stage = this.staging[kind];
+      mesh.instanceMatrix.array.set(stage.matrix.subarray(0, count * 16), 0);
+      mesh.instanceColor.array.set(stage.color.subarray(0, count * 3), 0);
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.instanceColor.needsUpdate = true;
     }
   }
 
@@ -328,8 +369,12 @@ export class Scatter {
         _ic.setRGB(1, 1, 1).offsetHSL(
           (hashFloat(hc, 0) - 0.5) * 0.05, 0, (hashFloat(hc, 1) - 0.5) * 0.16);
       }
-      im.setColorAt(counts[kind], _ic);
-      im.setMatrixAt(counts[kind]++, _m);
+      const index = counts[kind]++;
+      const stage = this.staging[kind];
+      stage.matrix.set(_m.elements, index * 16);
+      stage.color[index * 3] = _ic.r;
+      stage.color[index * 3 + 1] = _ic.g;
+      stage.color[index * 3 + 2] = _ic.b;
     }
   }
 }

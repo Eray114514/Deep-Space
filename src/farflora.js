@@ -19,7 +19,11 @@ const TILE_M = 1024;         // metres per cache tile
 const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
 const RADIUS = 4.4;          // tiles of reach around the camera (~4.5 km)
 const CAP = 24000;           // per species
-const SHOW_BELOW = 16000;    // m altitude; fade starts at 10 km
+const PREWARM_BELOW = 26000; // build while invisible, well before the tree line appears
+const SHOW_BELOW = 16000;    // retained cache band; visual fade starts at 13 km
+const STREAM_BUDGET_MS = 1.25;
+const REPACK_INTERVAL_MS = 160;
+const CACHE_LIMIT = 384;
 
 // per-biome CLUMP probability per 32 m cell and the tree0 share. One proxy
 // stands for several near-tier trees (they inflate with distance), so these
@@ -81,13 +85,26 @@ function applyFarFade(mat, uniforms) {
 }
 
 export class FarFlora {
-  constructor() {
+  constructor({ streamBudgetMs = STREAM_BUDGET_MS, repackIntervalMs = REPACK_INTERVAL_MS } = {}) {
     this.planet = null;
     this.meshes = null;       // [tree0 proxies, tree1 proxies]
     this.tiles = new Map();   // packed tile key -> {m0: Float32Array, n0, m1, n1}
     this.queue = [];
+    this.queued = new Set();
+    this.activeKeys = new Set();
+    this.targetKeys = new Set();
+    this.stableKeys = new Set();
+    this.job = null;
     this.lastKey = '';
     this.dirty = false;
+    this.streamBudgetMs = streamBudgetMs;
+    this.repackIntervalMs = repackIntervalMs;
+    this.lastRepackAt = -Infinity;
+    this.metrics = {
+      builtTiles: 0, repacks: 0,
+      streamMs: 0, repackMs: 0,
+      worstStreamMs: 0, worstRepackMs: 0,
+    };
     this.uCamL = { value: new THREE.Vector3() };
     this.uAltK = { value: 1 };
   }
@@ -105,6 +122,7 @@ export class FarFlora {
       applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
       const im = new THREE.InstancedMesh(geo, mat, CAP);
       im.count = 0;
+      im.visible = false;
       im.frustumCulled = false;
       im.receiveShadow = true;
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -125,19 +143,40 @@ export class FarFlora {
     this.planet = null;
     this.tiles.clear();
     this.queue.length = 0;
+    this.queued.clear();
+    this.activeKeys.clear();
+    this.targetKeys.clear();
+    this.stableKeys.clear();
+    this.job = null;
     this.lastKey = '';
     this.dirty = false;
+    this.lastRepackAt = -Infinity;
   }
 
-  pending() { return this.queue.length; }
+  pending() { return this.queue.length + (this.job ? 1 : 0); }
+
+  debugStats() {
+    return {
+      ...this.metrics,
+      pending: this.pending(),
+      cachedTiles: this.tiles.size,
+      activeTiles: this.activeKeys.size,
+      instances: this.meshes ? this.meshes[0].count + this.meshes[1].count : 0,
+    };
+  }
 
   update(planet, camLocal, alt) {
-    if (planet !== this.planet) this.setPlanet(alt < SHOW_BELOW ? planet : null);
+    if (planet !== this.planet) this.setPlanet(alt < PREWARM_BELOW ? planet : null);
     if (!this.planet) return;
-    if (alt > SHOW_BELOW) { this.clear(); return; }
+    if (alt > PREWARM_BELOW) {
+      for (const mesh of this.meshes) mesh.visible = false;
+      return;
+    }
     const p = this.planet;
     this.uCamL.value.copy(camLocal);
     this.uAltK.value = smooth01((13000 - alt) / 3000);
+    const visible = alt < SHOW_BELOW && this.uAltK.value > 0.0001;
+    for (const mesh of this.meshes) mesh.visible = visible;
 
     // tile discovery on crossing a tile-sized cell of the coarse lattice
     _dir.copy(camLocal).normalize();
@@ -167,63 +206,146 @@ export class FarFlora {
           }
         }
       }
-      for (const k of this.tiles.keys()) {
-        if (!want.has(k)) { this.tiles.delete(k); this.dirty = true; }
+      this.targetKeys = want;
+      // Keep the completed previous ring live until its replacement is ready.
+      // This prevents a fast flight from punching visible holes into the tree
+      // line and avoids repeatedly uploading a half-populated instance buffer.
+      this.activeKeys = new Set([...this.stableKeys, ...want]);
+      this.dirty = true;
+
+      // Keep completed tiles and in-flight work across tile-boundary changes.
+      // Fast low flight used to delete the previous ring and replace the whole
+      // queue, so the same forest was regenerated indefinitely.
+      this.queue = this.queue.filter((k) => {
+        if (want.has(k)) return true;
+        this.queued.delete(k);
+        return false;
+      });
+      for (const k of want) {
+        if (this.tiles.has(k) || this.queued.has(k) || this.job?.key === k) continue;
+        this.queue.push(k);
+        this.queued.add(k);
       }
-      const missing = [];
-      for (const k of want) if (!this.tiles.has(k)) missing.push(k);
-      missing.sort((a, b) => a - b);          // deterministic build order
-      this.queue = missing;
+      this.sortQueue();
+      this.pruneCache();
     }
 
-    // build a couple of tiles per frame (each is ~600 height/biome samples)
-    let built = 0;
-    while (this.queue.length && built < 2) {
-      const k = this.queue.shift();
-      if (!this.tiles.has(k)) {
-        this.tiles.set(k, this.buildTile(p, k));
-        this.dirty = true;
-        built++;
+    // Generation is resumable and wall-clock-budgeted. Slower CPUs take more
+    // frames to fill the invisible 16→13 km warm-up band, but no individual
+    // frame inherits a full tile's procedural height/biome cost.
+    const streamStart = performance.now();
+    const deadline = streamStart + this.streamBudgetMs;
+    let completed = 0;
+    do {
+      if (!this.job) {
+        const k = this.queue.shift();
+        if (k == null) break;
+        this.queued.delete(k);
+        if (this.tiles.has(k)) continue;
+        this.job = this.createTileJob(p, k);
       }
+      if (!this.stepTileJob(p, this.job, deadline)) break;
+      this.tiles.set(this.job.key, this.finishTileJob(this.job));
+      this.job = null;
+      this.dirty = true;
+      completed++;
+      this.metrics.builtTiles++;
+    } while (performance.now() < deadline);
+    const streamMs = performance.now() - streamStart;
+    this.metrics.streamMs = streamMs;
+    this.metrics.worstStreamMs = Math.max(this.metrics.worstStreamMs, streamMs);
+
+    if (this.pending() === 0 && this.targetKeys.size > 0
+      && !sameKeys(this.stableKeys, this.targetKeys)) {
+      this.stableKeys = new Set(this.targetKeys);
+      this.activeKeys = new Set(this.targetKeys);
+      this.dirty = true;
+      this.pruneCache();
     }
 
-    if (this.dirty) this.repack();
+    if (this.dirty) {
+      const now = performance.now();
+      const firstVisibleBatch = visible
+        && this.meshes[0].count + this.meshes[1].count === 0 && completed > 0;
+      const visibleBatch = visible && now - this.lastRepackAt >= this.repackIntervalMs;
+      if (firstVisibleBatch || visibleBatch || this.pending() === 0) {
+        this.repack();
+        this.lastRepackAt = performance.now();
+      }
+    }
   }
 
-  buildTile(p, key) {
+  sortQueue() {
+    const [ax, ay, az] = this.anchorK || [0, 0, 0];
+    this.queue.sort((a, b) => {
+      const da = tileDistanceSq(a, ax, ay, az);
+      const db = tileDistanceSq(b, ax, ay, az);
+      return (da - db) || (a - b);
+    });
+  }
+
+  pruneCache() {
+    if (this.tiles.size <= CACHE_LIMIT) return;
+    const [ax, ay, az] = this.anchorK || [0, 0, 0];
+    const evict = [...this.tiles.keys()]
+      .filter((k) => !this.activeKeys.has(k))
+      .sort((a, b) => (tileDistanceSq(b, ax, ay, az) - tileDistanceSq(a, ax, ay, az)) || (b - a));
+    while (this.tiles.size > CACHE_LIMIT && evict.length) this.tiles.delete(evict.shift());
+  }
+
+  createTileJob(p, key) {
     const qx = (key % 1024) - 512;
     const qy = (Math.floor(key / 1024) % 1024) - 512;
     const qz = Math.floor(key / 1048576) - 512;
     const Q = p.R / TILE_M;
-    const Q3 = p.R / CELL_M;
-    const cellAng = CELL_M / p.R;
-    const seedI = p.intSeed ^ 0xfa12;
     _anchor.set(qx, qy, qz).normalize();
     frame(_anchor, _e1, _e2);
     const SUB = Math.round(TILE_M / CELL_M) + 1;
-    const m0 = [], m1 = [];
-    const seen = new Set();
-    for (let gy = -SUB; gy <= SUB; gy++) {
-      for (let gx = -SUB; gx <= SUB; gx++) {
-        _v.copy(_anchor)
-          .addScaledVector(_e1, gx * 0.5 * cellAng)
-          .addScaledVector(_e2, gy * 0.5 * cellAng)
-          .normalize();
+    return {
+      key, qx, qy, qz, Q,
+      Q3: p.R / CELL_M,
+      cellAng: CELL_M / p.R,
+      seedI: p.intSeed ^ 0xfa12,
+      anchor: _anchor.clone(),
+      e1: _e1.clone(),
+      e2: _e2.clone(),
+      SUB, gx: -SUB, gy: -SUB,
+      // Write matrices straight into their long-lived typed storage. The old
+      // JS arrays created 16 boxed-number entries per tree and then copied the
+      // whole tile again on completion, producing severe GC pauses in flight.
+      m0: new Float32Array(128 * 16), n0: 0,
+      m1: new Float32Array(128 * 16), n1: 0,
+      seen: new Set(),
+    };
+  }
+
+  stepTileJob(p, job, deadline) {
+    while (job.gy <= job.SUB) {
+      const gx = job.gx, gy = job.gy;
+      job.gx++;
+      if (job.gx > job.SUB) { job.gx = -job.SUB; job.gy++; }
+      _v.copy(job.anchor)
+        .addScaledVector(job.e1, gx * 0.5 * job.cellAng)
+        .addScaledVector(job.e2, gy * 0.5 * job.cellAng)
+        .normalize();
         // the candidate belongs to THIS tile only (no double-planting from
         // the neighbour's overlapping scan)
-        if (Math.round(_v.x * Q) !== qx || Math.round(_v.y * Q) !== qy
-          || Math.round(_v.z * Q) !== qz) continue;
-        const cx = Math.floor(_v.x * Q3), cy = Math.floor(_v.y * Q3), cz = Math.floor(_v.z * Q3);
+      if (Math.round(_v.x * job.Q) === job.qx && Math.round(_v.y * job.Q) === job.qy
+        && Math.round(_v.z * job.Q) === job.qz) {
+        const cx = Math.floor(_v.x * job.Q3), cy = Math.floor(_v.y * job.Q3), cz = Math.floor(_v.z * job.Q3);
         for (let c = 0; c < 8; c++) {
           const ux = cx + (c & 1), uy = cy + ((c >> 1) & 1), uz = cz + (c >> 2);
-          const ck = ux + ':' + uy + ':' + uz;
-          if (seen.has(ck)) continue;
-          seen.add(ck);
-          if (Math.abs(Math.hypot(ux, uy, uz) - Q3) > 0.7) continue;
+          // Exact numeric packing stays below Number.MAX_SAFE_INTEGER for the
+          // supported planet radii and avoids thousands of temporary strings.
+          const ck = (ux + 32768) + (uy + 32768) * 65536
+            + (uz + 32768) * 4294967296;
+          if (job.seen.has(ck)) continue;
+          job.seen.add(ck);
+          if (Math.abs(Math.hypot(ux, uy, uz) - job.Q3) > 0.7) continue;
           _up.set(ux, uy, uz).normalize();
-          if (Math.round(_up.x * Q) !== qx || Math.round(_up.y * Q) !== qy
-            || Math.round(_up.z * Q) !== qz) continue;
-          const h0 = hash3i(ux, uy, uz, seedI);
+          if (Math.round(_up.x * job.Q) !== job.qx || Math.round(_up.y * job.Q) !== job.qy
+            || Math.round(_up.z * job.Q) !== job.qz) continue;
+          const h0 = hash3i(ux, uy, uz, job.seedI);
           const hgt = p.height(_up, 96);
           const dens = FAR_DENSITY[p.biomeAt(_up, hgt)];
           if (!dens) continue;
@@ -232,8 +354,8 @@ export class FarFlora {
           // jitter inside the cell, ground the tree at full terrain detail
           frame(_up, _ce1, _ce2);
           _jd.copy(_up)
-            .addScaledVector(_ce1, (hashFloat(h0, 1) - 0.5) * cellAng)
-            .addScaledVector(_ce2, (hashFloat(h0, 2) - 0.5) * cellAng)
+            .addScaledVector(_ce1, (hashFloat(h0, 1) - 0.5) * job.cellAng)
+            .addScaledVector(_ce2, (hashFloat(h0, 2) - 0.5) * job.cellAng)
             .normalize();
           // full terrain frequency: a coarse height differs from the drawn
           // surface by tens of metres — trees planted with it are BURIED
@@ -246,29 +368,37 @@ export class FarFlora {
           const sc = 0.75 + hashFloat(h0, 2) * 0.65;
           _s.set(sc, sc * (0.85 + hashFloat(h0, 0) * 0.4), sc);
           _m.compose(_p, _q, _s);
-          (hashFloat(h0, 3) < dens[1] ? m0 : m1).push(..._m.elements);
+          appendMatrix(job, hashFloat(h0, 3) < dens[1] ? 0 : 1, _m.elements);
         }
       }
+      if (performance.now() >= deadline) return false;
     }
+    return true;
+  }
+
+  finishTileJob(job) {
     return {
-      m0: new Float32Array(m0), n0: m0.length / 16,
-      m1: new Float32Array(m1), n1: m1.length / 16,
+      m0: job.m0, n0: job.n0,
+      m1: job.m1, n1: job.n1,
     };
   }
 
+  buildTile(p, key) {
+    const job = this.createTileJob(p, key);
+    this.stepTileJob(p, job, Infinity);
+    return this.finishTileJob(job);
+  }
+
   repack() {
+    const started = performance.now();
     this.dirty = false;
     if (!this.meshes) return;
-    // nearest tiles pack first: if a fully-forested world overflows the
-    // instance budget, the holes appear at the far rim, never underfoot
+    // Only the live ring consumes the instance budget. Completed tiles just
+    // outside it remain cached, ready for a quick turn-back.
     const [ax, ay, az] = this.anchorK || [0, 0, 0];
-    const dist2 = (k) => {
-      const qx = (k % 1024) - 512;
-      const qy = (Math.floor(k / 1024) % 1024) - 512;
-      const qz = Math.floor(k / 1048576) - 512;
-      return (qx - ax) * (qx - ax) + (qy - ay) * (qy - ay) + (qz - az) * (qz - az);
-    };
-    const keys = [...this.tiles.keys()].sort((a, b) => (dist2(a) - dist2(b)) || (a - b));
+    const keys = [...this.activeKeys]
+      .filter((k) => this.tiles.has(k))
+      .sort((a, b) => (tileDistanceSq(a, ax, ay, az) - tileDistanceSq(b, ax, ay, az)) || (a - b));
     let n0 = 0, n1 = 0;
     const a0 = this.meshes[0].instanceMatrix.array;
     const a1 = this.meshes[1].instanceMatrix.array;
@@ -280,9 +410,49 @@ export class FarFlora {
     }
     this.meshes[0].count = n0;
     this.meshes[1].count = n1;
-    this.meshes[0].instanceMatrix.needsUpdate = true;
-    this.meshes[1].instanceMatrix.needsUpdate = true;
+    this.markInstanceUpload(this.meshes[0], n0);
+    this.markInstanceUpload(this.meshes[1], n1);
+    const elapsed = performance.now() - started;
+    this.metrics.repackMs = elapsed;
+    this.metrics.worstRepackMs = Math.max(this.metrics.worstRepackMs, elapsed);
+    this.metrics.repacks++;
   }
+
+  markInstanceUpload(mesh, count) {
+    const attribute = mesh.instanceMatrix;
+    if (attribute.clearUpdateRanges && attribute.addUpdateRange) {
+      attribute.clearUpdateRanges();
+      attribute.addUpdateRange(0, count * 16);
+    }
+    attribute.needsUpdate = true;
+  }
+}
+
+function tileDistanceSq(key, ax, ay, az) {
+  const qx = (key % 1024) - 512;
+  const qy = (Math.floor(key / 1024) % 1024) - 512;
+  const qz = Math.floor(key / 1048576) - 512;
+  return (qx - ax) * (qx - ax) + (qy - ay) * (qy - ay) + (qz - az) * (qz - az);
+}
+
+function sameKeys(a, b) {
+  if (a.size !== b.size) return false;
+  for (const key of a) if (!b.has(key)) return false;
+  return true;
+}
+
+function appendMatrix(job, species, elements) {
+  const matrixKey = species === 0 ? 'm0' : 'm1';
+  const countKey = species === 0 ? 'n0' : 'n1';
+  let buffer = job[matrixKey];
+  const offset = job[countKey] * 16;
+  if (offset + 16 > buffer.length) {
+    const grown = new Float32Array(buffer.length * 2);
+    grown.set(buffer);
+    job[matrixKey] = buffer = grown;
+  }
+  buffer.set(elements, offset);
+  job[countKey]++;
 }
 
 function frame(u, a, b) {

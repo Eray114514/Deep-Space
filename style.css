@@ -416,14 +416,6 @@ body.hero-active #version, body.hero-active #dev-fps { display: none !important;
 .hero-note { position: absolute; z-index: 2; left: 50px; top: calc(54% + 152px); color: rgba(238, 243, 243, .38); font: 9px/1 var(--ui-mono); letter-spacing: .1em; }
 
 
-#pulse-fx {
-  position: fixed; z-index: 7; inset: -5%; pointer-events: none; opacity: 0;
-  background:
-    repeating-conic-gradient(from 0deg at 50% 50%, transparent 0 4.8deg, rgba(105, 224, 255, .09) 5deg 5.25deg, transparent 5.5deg 9.5deg),
-    radial-gradient(ellipse at center, transparent 0 54%, rgba(90, 207, 240, .09) 76%, rgba(2, 18, 31, .5) 100%);
-  mask-image: radial-gradient(ellipse at center, transparent 0 34%, #000 66%, #000 100%);
-  transform: scale(1.08); transition: opacity .12s linear; mix-blend-mode: screen;
-}
 #vignette { position: fixed; z-index: 7; inset: 0; pointer-events: none; background: radial-gradient(ellipse, transparent 62%, rgba(0, 4, 7, .32) 100%); }
 #fade { position: fixed; z-index: 30; inset: 0; opacity: 0; background: #000; pointer-events: none; transition: opacity .6s; }
 

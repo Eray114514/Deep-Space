@@ -1,127 +1,164 @@
-// Warp-flight visuals: hyperspace streak lines that rush past the camera.
-// Streaks live in render space (camera at origin) inside a cylinder around
-// the flight path; their parallax is scaled way down so at ~3,000 km/s they
-// read as a light tunnel instead of single-frame noise.
+// Warp-flight visuals. The old world-space LineSegments and a separate DOM
+// pulse overlay never formed one image: lines crossed depth layers while the
+// screen tint sat above the ship. This shader is inserted before the foreground
+// ship pass, so warp and local pulse share one coherent camera-space tunnel.
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
-const _dir = new THREE.Vector3();
-const _e1 = new THREE.Vector3();
-const _e2 = new THREE.Vector3();
-const _p = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
 
-const PARALLAX = 0.012;            // fraction of true speed applied to streaks
-
-export class WarpStreaks {
-  constructor(scene, count = 340) {
-    this.count = count;
-    this.streaks = [];               // camera-relative positions
-    for (let i = 0; i < count; i++) this.streaks.push(new THREE.Vector3());
-    this.positions = new Float32Array(count * 2 * 3);
-    const colors = new Float32Array(count * 2 * 3);
-    for (let i = 0; i < count; i++) {
-      const w = 0.55 + Math.random() * 0.45;
-      colors[i * 6] = 0.72 * w; colors[i * 6 + 1] = 0.84 * w; colors[i * 6 + 2] = 1.0 * w;  // head
-      colors[i * 6 + 3] = 0.02; colors[i * 6 + 4] = 0.03; colors[i * 6 + 5] = 0.05;          // tail
+export const WarpDriveShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uWarp: { value: 0 },
+    uPulse: { value: 0 },
+    uArrival: { value: 0 },
+    uAspect: { value: 1 },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    this.lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0,
-      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-    }));
-    this.lines.frustumCulled = false;
-    this.lines.renderOrder = 6;
-    this.lines.visible = false;
-    scene.add(this.lines);
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uWarp;
+    uniform float uPulse;
+    uniform float uArrival;
+    uniform float uAspect;
+    varying vec2 vUv;
 
-    this.foldTunnel = new THREE.Mesh(
-      new THREE.CylinderGeometry(1800, 11000, 52000, 72, 16, true),
-      new THREE.MeshBasicMaterial({
-        color: 0x276b8a,
-        transparent: true,
-        opacity: 0,
-        side: THREE.BackSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        fog: false,
-      }),
-    );
-    this.foldTunnel.frustumCulled = false;
-    this.foldTunnel.renderOrder = 4;
-    this.foldTunnel.visible = false;
-    scene.add(this.foldTunnel);
-  }
+    const float TAU = 6.28318530718;
 
-  scatter(streak) {
-    const r = 400 + Math.random() * 9000;
-    const a = Math.random() * Math.PI * 2;
-    const z = -8000 + Math.random() * 48000;
-    streak.copy(_dir).multiplyScalar(z)
-      .addScaledVector(_e1, Math.cos(a) * r)
-      .addScaledVector(_e2, Math.sin(a) * r);
-  }
-
-  reset(velDir) {
-    _dir.copy(velDir).normalize();
-    _e1.crossVectors(_dir, Math.abs(_dir.y) < 0.9 ? Y : X).normalize();
-    _e2.crossVectors(_dir, _e1);
-    for (const s of this.streaks) this.scatter(s);
-  }
-
-  // vel: true velocity vector (m/s); intensity = warp, boost = local pulse
-  update(dt, vel, intensity, boost = 0) {
-    const lineIntensity = Math.max(intensity, boost * 0.34);
-    if (lineIntensity <= 0.01) {
-      this.lines.visible = false;
-      this.foldTunnel.visible = false;
-      this.wasActive = false;
-      return;
+    float hash11(float p) {
+      p = fract(p * .1031);
+      p *= p + 33.33;
+      p *= p + p;
+      return fract(p);
     }
-    const speed = vel.length();
-    if (speed < 1) { this.lines.visible = false; return; }
-    if (!this.wasActive) this.reset(_dir.copy(vel).multiplyScalar(1 / speed));
-    this.wasActive = true;
-    this.lines.visible = true;
-    this.lines.material.opacity = Math.min(1, lineIntensity) * 0.8;
-    this.foldTunnel.visible = intensity > 0.01;
 
-    _dir.copy(vel).multiplyScalar(1 / speed);
-    _e1.crossVectors(_dir, Math.abs(_dir.y) < 0.9 ? Y : X).normalize();
-    _e2.crossVectors(_dir, _e1);
-    const step = speed * dt * PARALLAX;
-    const len = Math.min(300 + speed * 0.0022, 14000) * Math.max(0.22, lineIntensity);
-
-    for (let i = 0; i < this.count; i++) {
-      const s = this.streaks[i];
-      s.addScaledVector(_dir, -step);
-      if (s.dot(_dir) < -9000) this.scatter(s);
-      this.positions[i * 6] = s.x; this.positions[i * 6 + 1] = s.y; this.positions[i * 6 + 2] = s.z;
-      _p.copy(s).addScaledVector(_dir, -len);
-      this.positions[i * 6 + 3] = _p.x; this.positions[i * 6 + 4] = _p.y; this.positions[i * 6 + 5] = _p.z;
+    float hash21(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
     }
-    this.lines.geometry.attributes.position.needsUpdate = true;
 
-    if (intensity <= 0.01) return;
-    this.foldTunnel.position.copy(_dir).multiplyScalar(24500);
-    this.foldTunnel.quaternion.setFromUnitVectors(Y, _dir);
-    this.foldTunnel.scale.setScalar(0.9 + intensity * 0.22);
-    this.foldTunnel.material.opacity = intensity * 0.018;
-  }
+    float noise21(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+        mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0)), f.x), f.y);
+    }
 
-  dispose() {
-    this.lines.geometry.dispose();
-    this.lines.material.dispose();
-    this.foldTunnel.geometry.dispose();
-    this.foldTunnel.material.dispose();
-    if (this.lines.parent) this.lines.parent.remove(this.lines);
-    if (this.foldTunnel.parent) this.foldTunnel.parent.remove(this.foldTunnel);
+    float flowNoise(vec2 p) {
+      return noise21(p) * .57 + noise21(p * 2.07 + 7.3) * .29
+        + noise21(p * 4.13 - 3.7) * .14;
+    }
+
+    vec3 spectrum(float h) {
+      vec3 rainbow = .56 + .44 * cos(TAU * (h + vec3(0.00, .69, .37)));
+      vec3 ion = mix(vec3(.18, .80, 1.35), vec3(1.25, .26, 1.10), step(.56, h));
+      return mix(ion, rainbow * 1.25, .68);
+    }
+
+    vec3 rayLayer(vec2 p, float bins, float radialScale, float speed, float seed) {
+      float radius = length(p);
+      float angle = atan(p.y, p.x);
+      float bend = sin(radius * mix(5.0, 9.0, seed) - uTime * .22 + seed * 17.0)
+        * mix(.0012, .0042, smoothstep(.08, .8, radius));
+      float wedge = (angle / TAU + .5 + bend) * bins;
+      float id = floor(wedge);
+      float rnd = hash11(id + seed * 71.7);
+      float fine = hash11(id * 5.31 + seed * 19.1);
+      float width = mix(.012, .044, rnd * rnd) * mix(.68, 1.1, smoothstep(.04, .76, radius));
+      float across = abs(fract(wedge) - .5);
+      float core = exp(-pow(across / max(width, .001), 2.0) * 2.4);
+      float glow = exp(-pow(across / max(width * 3.2, .001), 2.0) * 1.35);
+      float phase = fract(radius * radialScale - uTime * speed * mix(.72, 1.4, rnd) + fine);
+      float segment = smoothstep(.025, .13, phase) * (1.0 - smoothstep(.58, .96, phase));
+      float taper = mix(.42, 1.0, smoothstep(.04, .42, phase));
+      float gate = step(.43, fine) * smoothstep(.018, .105, radius);
+      float flare = mix(.32, 1.34, smoothstep(.055, .92, radius));
+      vec3 cool = mix(vec3(.24, .72, 1.12), vec3(.74, .94, 1.08), rnd);
+      float accentAmount = smoothstep(.58, .92, hash11(id * 2.73 + seed * 31.0));
+      vec3 tint = mix(cool, spectrum(fract(rnd * .74 + seed * .29)), accentAmount * .72);
+      vec3 hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .46);
+      return (tint * glow * .19 + hotCore * core * taper) * segment * gate * flare;
+    }
+
+    void main() {
+      float strength = clamp(max(uWarp, uPulse), 0.0, 1.0);
+      vec2 p = vUv - .5;
+      p.x *= uAspect;
+      float radius = length(p);
+      vec2 direction = p / max(radius, .0001);
+      float stretch = strength * (.0015 + uWarp * .0065 + uPulse * .0035)
+        * smoothstep(.035, .82, radius);
+      vec2 shift = vec2(direction.x / uAspect, direction.y) * stretch;
+      vec2 uvR = clamp(vUv - shift * .72, vec2(.001), vec2(.999));
+      vec2 uvG = clamp(vUv - shift * .24, vec2(.001), vec2(.999));
+      vec2 uvB = clamp(vUv + shift * .2, vec2(.001), vec2(.999));
+      vec3 original = texture2D(tDiffuse, vUv).rgb;
+      vec3 dispersed = vec3(
+        texture2D(tDiffuse, uvR).r,
+        texture2D(tDiffuse, uvG).g,
+        texture2D(tDiffuse, uvB).b
+      );
+      vec3 scene = mix(original, dispersed, strength * (.14 + uWarp * .12));
+
+      float rayStrength = strength * mix(.62, 1.0, strength) * smoothstep(.025, .14, radius);
+      vec3 rays = rayLayer(p, 61.0, 1.38, .86 + uPulse * 1.18, .13);
+      rays += rayLayer(p * 1.07, 97.0, 2.17, 1.33 + uPulse * 1.42, .47) * .68;
+      rays += rayLayer(p * .94, 139.0, 3.28, 1.82 + uPulse * 1.68, .81) * .34;
+      float coreFade = smoothstep(.012, .082, radius);
+      float edgeFade = 1.0 - smoothstep(.78, 1.02, radius);
+      rays *= rayStrength * coreFade * edgeFade * (1.0 + uWarp * .22);
+
+      float tunnel = smoothstep(.08, .92, radius) * (1.0 - smoothstep(.88, 1.14, radius));
+      float turbulence = flowNoise(p * 3.7 + direction * (uTime * .075));
+      vec3 haze = mix(vec3(.012, .036, .075), vec3(.025, .115, .21), turbulence)
+        * (.12 + tunnel * .88) * strength * (uWarp * .64 + uPulse * .22);
+      vec3 arrival = vec3(.06, .19, .42) * exp(-radius * radius * 14.0) * uArrival * .52;
+      float centerFlash = exp(-radius * radius * 110.0) * uArrival;
+      arrival += vec3(.68, .84, 1.04) * centerFlash * .68;
+
+      gl_FragColor = vec4(scene * (1.0 - strength * .028) + haze + rays + arrival, 1.0);
+    }
+  `,
+};
+
+function hermite(t, p0, p1, m0, m1, span) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * p0
+    + (t3 - 2 * t2 + t) * m0 * span
+    + (-2 * t3 + 3 * t2) * p1
+    + (t3 - t2) * m1 * span;
+}
+
+// Staged motion keeps the opening charge, covers most of the route at speed,
+// then brakes hard into a brief final settle instead of spending the last
+// quarter of the jump in an indistinct smootherstep slowdown.
+export function warpTravelProgress(t) {
+  const k = THREE.MathUtils.clamp(t, 0, 1);
+  const stops = [
+    [0.00, 0.000, 0.00],
+    [0.16, 0.040, 0.65],
+    [0.72, 0.820, 1.80],
+    [0.88, 0.985, 0.35],
+    [1.00, 1.000, 0.00],
+  ];
+  for (let i = 1; i < stops.length; i++) {
+    const a = stops[i - 1], b = stops[i];
+    if (k <= b[0]) return hermite((k - a[0]) / (b[0] - a[0]), a[1], b[1], a[2], b[2], b[0] - a[0]);
   }
+  return 1;
 }
 
 // ============================================================================
@@ -212,8 +249,9 @@ export const SHIP_FOREGROUND_LAYER = 3;
 export class Ship {
   constructor(scene, { anisotropy = 1 } = {}) {
     const g = new THREE.Group();
-    g.layers.enable(SHIP_FOREGROUND_LAYER);
+    g.layers.set(SHIP_FOREGROUND_LAYER);
     this.group = g;
+    this.foregroundOnly = true;
     scene.add(g);
 
     this.smQuat = new THREE.Quaternion();
@@ -244,7 +282,7 @@ export class Ship {
       this.loadedGear = [];
       this.loadedRamp = [];
       hero.traverse((object) => {
-        object.layers.enable(SHIP_FOREGROUND_LAYER);
+        object.layers.set(this.foregroundOnly ? SHIP_FOREGROUND_LAYER : 0);
         if (/^(LANDING_GEAR_ROOT|Gear_)/.test(object.name)) this.loadedGear.push(object);
         if (/^(BOARDING_RAMP_ROOT|Ramp_)/.test(object.name)) this.loadedRamp.push(object);
         if (!object.isMesh) return;
@@ -287,9 +325,18 @@ export class Ship {
     this.parkedQuat.copy(quat);
   }
 
+  setForegroundOnly(enabled) {
+    if (this.foregroundOnly === enabled) return;
+    this.foregroundOnly = enabled;
+    this.group.traverse((object) => object.layers.set(enabled ? SHIP_FOREGROUND_LAYER : 0));
+  }
+
   update(dt, nav, state, speed, warp, boost = 0, flightInput = null) {
     const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding') && !!this.parkedPosUniv;
     this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
+    const foregroundOnly = ['space', 'flyto', 'warp', 'takeoff'].includes(state)
+      || (state === 'landing' && this.parkAmt < 0.58);
+    this.setForegroundOnly(foregroundOnly);
 
     // The hull's mass response is driven by raw pilot intent, never by speed
     // or by the final camera quaternion. Therefore a zero-speed mouse turn

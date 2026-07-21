@@ -129,7 +129,7 @@ export class UI {
     const boostK = Math.max(0, Math.min(1, boost));
     const atmoK = Math.max(0, Math.min(1, atmosphere));
     const pulseK = Math.max(0, Math.min(1, pulse));
-    this._setText(this.els.driveMode, pulseK > 0.12 ? '脉冲巡航' : boostK > 0.12 ? '加力' : atmoK > 0.42 ? '大气内' : '巡航');
+    this._setText(this.els.driveMode, pulseK > 0.12 ? '脉冲冲刺' : boostK > 0.12 ? '加力' : atmoK > 0.42 ? '大气内' : '巡航');
     this._setText(this.els.driveSpeed, speed > 1000 ? `${(speed / 1000).toFixed(1)} km/s` : `${speed.toFixed(0)} m/s`);
     this._setText(this.els.driveBoost, pulseK > 0.12
       ? `脉冲 ${Math.round(pulseK * 100)}%`

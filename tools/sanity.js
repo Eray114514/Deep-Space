@@ -131,7 +131,7 @@ for (const type of Object.keys(TYPES)) {
   // across many rebuilds — every prop in the shared interior must persist
   // bit-identically at every single rebuild (this has been broken twice)
   if (type === 'lush') {
-    const scatter = new Scatter();
+    const scatter = new Scatter({ streamBudgetMs: Infinity });
     const m4 = new THREE.Matrix4();
     const grab = () => {
       const map = new Map();
@@ -212,7 +212,7 @@ for (const type of Object.keys(TYPES)) {
     // bit-identical between two independent builds at the same spot
     const farCam = walkDir.clone().multiplyScalar(p.R + p.height(walkDir, p.fullMaxFreq) + 300);
     const buildFar = () => {
-      const ff = new FarFlora();
+      const ff = new FarFlora({ streamBudgetMs: Infinity, repackIntervalMs: 0 });
       for (let i = 0; i < 200 && (i < 2 || ff.pending() > 0); i++) ff.update(p, farCam, 300);
       const counts = [ff.meshes[0].count, ff.meshes[1].count];
       const sig = ff.meshes[0].instanceMatrix.array.slice(0, counts[0] * 16).join(',');

@@ -43,3 +43,23 @@ export async function launchBrowser(opts = {}) {
     ...rest,
   });
 }
+
+// Performance captures must exercise the machine's real graphics adapter.
+// Keep this separate from launchBrowser(): the latter deliberately forces
+// SwiftShader so correctness tests stay portable on GPU-less CI hosts.
+export async function launchHardwareBrowser(opts = {}) {
+  const { args: extraArgs = [], adapterLuid = process.env.PERF_ADAPTER_LUID, ...rest } = opts;
+  const args = [
+    '--no-sandbox',
+    '--enable-webgl',
+    '--ignore-gpu-blocklist',
+    '--disable-gpu-sandbox',
+    ...(adapterLuid ? [`--use-adapter-luid=${adapterLuid}`] : []),
+    ...extraArgs,
+  ];
+  return chromium.launch({
+    executablePath: resolveExecutablePath(),
+    args,
+    ...rest,
+  });
+}

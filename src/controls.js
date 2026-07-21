@@ -23,6 +23,23 @@ const _m = new THREE.Matrix4();
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
+// A pulse is a discrete displacement owned by the flight state, not a second
+// cruise tier. It starts at full authority and brakes through the burst.
+export function pulseBurstProgress(t) {
+  const k = clamp(t, 0, 1);
+  return 1 - Math.pow(1 - k, 3);
+}
+
+export function pulseBurstDistance(speedScale, altitude = Infinity, hasBody = false) {
+  let distance = clamp(Math.max(0, speedScale) * 10, 90, 1.2e6);
+  if (hasBody && Number.isFinite(altitude)) {
+    // Near terrain the pulse stays useful but short enough for the existing
+    // swept clearance probe to catch ridges. Atmosphere itself is not a ban.
+    distance = Math.min(distance, Math.max(80, Math.max(0, altitude) * 0.3 + 100));
+  }
+  return distance;
+}
+
 // Remove only roll around the current viewing direction. Forward/pitch remain
 // untouched, so planetary horizon assist never steals aiming from the player.
 export function stabilizeHorizon(quat, surfaceUp, amount = 1) {
@@ -98,7 +115,6 @@ export class SpaceControls {
     this.boosting = false;
     this.firing = false;
     this.firePressed = false;
-    this.pulseDrive = false;
     this.wheelImpulse = 0;
     this.throttleInput = 0;
     this.strafeInput = 0;
@@ -286,13 +302,10 @@ export class SpaceControls {
       stabilizeHorizon(nav.quat, this.surfaceUp, response * this.horizonAssist);
     }
     const boosting = this.enabled && (this.boosting || keys.ShiftLeft || keys.ShiftRight);
-    const pulsing = this.enabled && this.pulseDrive;
     // Boost has its own lower drag curve. Previously the ordinary 2.4/s
     // damping cancelled most of the boost acceleration, so RMB looked active
     // while the ship barely gained speed.
-    const drag = pulsing
-      ? (0.18 + this.atmosphereFactor * 0.7)
-      : boosting
+    const drag = boosting
       ? (0.42 + this.atmosphereFactor * 0.46)
       // Keep some inertia in open space, while dense air still settles the
       // ship promptly enough for a precise landing approach.
@@ -321,14 +334,7 @@ export class SpaceControls {
       this.throttleInput = f;
       this.strafeInput = r;
       applyFlightThrusters(nav.vel, nav.quat, f, r, this.speedScale, dt);
-      if (pulsing) {
-        _f.set(0, 0, -1).applyQuaternion(nav.quat);
-        // Pulse cruise is an explicit 2× tier above RMB/Shift boost.
-        const pulseAcceleration = this.speedScale * (20.0 + (1 - this.atmosphereFactor) * 14.2);
-        nav.vel.addScaledVector(_f, pulseAcceleration * dt);
-        const pulseLimit = this.speedScale * (13.92 + (1 - this.atmosphereFactor) * 8.12);
-        if (nav.vel.length() > pulseLimit) nav.vel.setLength(pulseLimit);
-      } else if (boosting) {
+      if (boosting) {
         _f.set(0, 0, -1).applyQuaternion(nav.quat);
         const boostAcceleration = this.speedScale * (10.0 + (1 - this.atmosphereFactor) * 7.1);
         nav.vel.addScaledVector(_f, boostAcceleration * dt);

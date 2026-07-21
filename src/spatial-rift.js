@@ -66,6 +66,7 @@ export const RiftDistortionShader = {
       float b = boundary(a);
       float band = exp(-pow((d - b) / .082, 2.0));
       float outer = exp(-pow((d - b) / .21, 2.0));
+      float tear = exp(-pow((d - b) / .030, 2.0));
       vec2 dir = normalize(q + vec2(1e-5));
       float pulse = .72 + .28 * sin(uTime * 2.1 + a * 9.0);
       float strainPulse = .82 + .18 * sin(uTime * 10.5 + a * 17.0);
@@ -75,13 +76,16 @@ export const RiftDistortionShader = {
       vec2 tangent = vec2(-dir.y, dir.x);
       pull += tangent * safeR * (.010 * band * sin(a * 13.0 - uTime * 1.7)) * fold;
       pull += tangent * safeR * (.014 * outer * sin(a * 23.0 + uTime * 6.0)) * uTension;
+      pull += tangent * safeR * .018 * tear * sin(a * 41.0 - uTime * 4.2) * uOpen;
       vec2 uv = vUv + pull;
-      float split = (.0007 + .0032 * band) * fold * uStrength + uBurst * band * .0065;
+      float split = (.0007 + .0032 * band + .0065 * tear) * fold * uStrength
+        + uBurst * band * .0065;
       float r = texture2D(tDiffuse, uv + dir * split).r;
       float g = texture2D(tDiffuse, uv).g;
       float bcol = texture2D(tDiffuse, uv - dir * split).b;
       vec3 col = vec3(r, g, bcol);
       col += vec3(.02, .05, .09) * band * uOpen;
+      col += vec3(.12, .34, .92) * tear * uOpen * (.48 + .32 * sin(a * 29.0 - uTime * 3.1));
       col += vec3(.08, .20, .48) * band * uTension * .55;
       col += vec3(.55, .30, .82) * band * uBurst * .28;
       gl_FragColor = vec4(col, 1.0);
@@ -294,6 +298,8 @@ export class SpatialRift {
           vec3 p = position;
           float alive = smoothstep(.02, .30, uOpen);
           float strain = sin(aAngle * 37.0 - uTime * 8.5 + uPhase) * uTension;
+          float arcTip = pow(max(0.0, sin(aAngle * 17.0 - uTime * 2.7 + uPhase)), 28.0)
+            + pow(max(0.0, sin(aAngle * 31.0 + uTime * 1.9 - uPhase)), 42.0);
           p.z += sin(aAngle * 19.0 + uTime * 2.5 + uPhase) * 3.5 * alive + strain * 8.0;
           float livingEdge =
             .030 * sin(aAngle * 4.0 - uTime * .72 + .8)
@@ -301,7 +307,9 @@ export class SpatialRift {
             + .010 * sin(aAngle * 23.0 - uTime * 2.05)
             + .006 * sin(aAngle * 47.0 + uTime * 3.4);
           float layerRipple = sin(aAngle * 7.0 - uTime * 1.1 + uPhase) * .007;
-          p.xy *= 1.0 + (livingEdge + layerRipple) * alive + strain * .0035;
+          p.xy *= 1.0 + (livingEdge + layerRipple) * alive + strain * .0035
+            + aAcross * arcTip * (.014 + .016 * uTension) * alive;
+          p.z += aAcross * arcTip * (4.0 + 5.0 * uTension);
           p.xy *= 1.0 + uBurst * .018;
           vAcross = aAcross; vAngle = aAngle; vRand = aRand;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
@@ -331,7 +339,15 @@ export class SpatialRift {
           float charge = pow(max(0.0, sin(vAngle * 41.0 - uTime * 9.0 + uPhase)), 18.0);
           c += vec3(.72, 1.05, 1.65) * (charge * .95 + .16) * uTension;
           c += vec3(1.75, 1.25, 1.85) * (1.0 - core * .25) * uBurst * .82;
+          // A white-hot inner filament sells a cut in space without flooding
+          // the destination image. Broken angular gates keep it electrical,
+          // while the broader ribbons remain the cooler displaced membrane.
+          float inner = exp(-vAcross * 22.0);
+          float gate = .34 + .66 * max(f1, charge);
+          float tear = inner * gate;
+          c += vec3(3.8, 4.6, 7.2) * tear;
           float a = (.08 + .92 * core) * (.28 + .72 * flow) * uAlpha * smoothstep(.02, .20, uOpen);
+          a += tear * uAlpha * .82 * smoothstep(.03, .18, uOpen);
           a *= 1.0 + uTension * .95 + uBurst * .75;
           gl_FragColor = vec4(c * uBrightness, a);
         }
@@ -377,8 +393,8 @@ export class SpatialRift {
         uniform float uOpen; uniform float uTension; uniform float uBurst;
         void main() {
           #include <logdepthbuf_fragment>
-          vec3 base = vec3(.0025, .0055, .012);
-          vec3 charge = vec3(.015, .055, .13) * (.25 + .75 * vCharge);
+          vec3 base = vec3(.0004, .0012, .0035);
+          vec3 charge = vec3(.004, .016, .045) * (.25 + .75 * vCharge);
           vec3 color = base + charge * (.35 + uTension * .8) + vec3(.16, .09, .24) * uBurst;
           gl_FragColor = vec4(color * smoothstep(.015, .12, uOpen), 1.0);
         }

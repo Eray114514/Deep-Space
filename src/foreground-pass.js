@@ -15,12 +15,20 @@ export class ForegroundPass extends Pass {
   }
 
   render(renderer, writeBuffer, readBuffer) {
+    this.renderLayer(renderer, this.renderToScreen ? null : readBuffer);
+  }
+
+  renderDirect(renderer) {
+    this.renderLayer(renderer, null);
+  }
+
+  renderLayer(renderer, target) {
     const oldAutoClear = renderer.autoClear;
     const oldMask = this.camera.layers.mask;
     const oldTarget = renderer.getRenderTarget();
     renderer.autoClear = false;
     this.camera.layers.set(this.layer);
-    renderer.setRenderTarget(this.renderToScreen ? null : readBuffer);
+    renderer.setRenderTarget(target);
     renderer.clearDepth();
     renderer.render(this.scene, this.camera);
     this.camera.layers.mask = oldMask;

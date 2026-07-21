@@ -7,10 +7,12 @@
 import * as THREE from 'three';
 import { StarSystem, Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
-import { SpaceControls, WalkControls, guidePlanetApproach, keys } from './controls.js';
+import { SpaceControls, WalkControls, guidePlanetApproach, keys,
+  pulseBurstDistance, pulseBurstProgress } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
-import { WarpStreaks, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
+import { WarpDriveShader, warpTravelProgress, SkyDome, Ship, ShipWeapons,
+  SHIP_FOREGROUND_LAYER } from './effects.js';
 import { tickShaders } from './shaders.js';
 import { EffectComposer } from '../vendor/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from '../vendor/jsm/postprocessing/RenderPass.js';
@@ -74,8 +76,7 @@ const BUILD_MS = Number(qs.get('buildms')) || 0;
 // test can pixel-compare static frames — any residual change is LOD activity
 const FREEZE = qs.get('freeze') === '1';
 // ?quality=low for integrated GPUs: coarser grids, no bloom, lower res
-const QUALITY_LOW = qs.get('quality') === 'low';
-if (QUALITY_LOW) setGridCells(18);
+let QUALITY_LOW = qs.get('quality') === 'low';
 
 document.getElementById('version').textContent = 'v' + VERSION;
 console.info(`深空 v${VERSION}`);
@@ -91,28 +92,48 @@ window.addEventListener('pointerdown', (event) => {
 }, true);
 
 // ---- renderer ---------------------------------------------------------------
-const renderer = new THREE.WebGLRenderer({
-  antialias: true,
+const rendererOptions = {
+  antialias: qs.get('quality') !== 'low',
   logarithmicDepthBuffer: true,
-  powerPreference: 'high-performance',
-});
+  powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
+};
+let renderer = new THREE.WebGLRenderer(rendererOptions);
+let glInfo = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
+let gpuName = glInfo
+  ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL)
+  : 'WebGL high-performance adapter';
+const AUTO_LOW_GPU = qs.get('quality') !== 'high' && (
+  /SwiftShader|llvmpipe|Microsoft Basic Render/i.test(gpuName)
+  || /ANGLE \(Intel,|Intel.*(?:UHD|HD Graphics|Iris)/i.test(gpuName)
+  || /AMD Radeon\(TM\) Graphics/i.test(gpuName)
+);
+QUALITY_LOW ||= AUTO_LOW_GPU;
+if (AUTO_LOW_GPU && rendererOptions.antialias) {
+  renderer.dispose();
+  renderer.forceContextLoss();
+  rendererOptions.antialias = false;
+  renderer = new THREE.WebGLRenderer(rendererOptions);
+  glInfo = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
+  gpuName = glInfo
+    ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL)
+    : gpuName;
+}
+if (QUALITY_LOW) setGridCells(18);
 renderer.setSize(window.innerWidth, window.innerHeight);
 const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.35 : 2.0;
 // Mild supersampling on <=1440p desktop protects the hero ship even when the
 // OS reports DPR 1. Very high-resolution displays stay at native scale.
 const DESKTOP_DPR_FLOOR = !QUALITY_LOW && !IS_TOUCH
   && window.innerWidth * window.innerHeight <= 2560 * 1440 ? 1.25 : 1;
-let renderDpr = Math.min(Math.max(window.devicePixelRatio, DESKTOP_DPR_FLOOR), MAX_DPR);
+let renderDpr = QUALITY_LOW
+  ? Math.min(window.devicePixelRatio, 0.65)
+  : Math.min(Math.max(window.devicePixelRatio, DESKTOP_DPR_FLOOR), MAX_DPR);
 renderer.setPixelRatio(renderDpr);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
-const glInfo = renderer.getContext().getExtension('WEBGL_debug_renderer_info');
-const gpuName = glInfo
-  ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL)
-  : 'WebGL high-performance adapter';
 console.info('Renderer:', gpuName);
 
 // WebGL context-loss safety net. The renderer auto-restores most GPU
@@ -155,7 +176,8 @@ scene.add(ambient, hemi, headlamp);
 const sunShadow = new THREE.DirectionalLight(0xffffff, 0);
 sunShadow.castShadow = true;
 sunShadow.visible = false;
-const SHADOW_MAP = window.matchMedia('(pointer: coarse)').matches ? 1024 : 2048;
+const SHADOW_MAP = QUALITY_LOW ? 512
+  : window.matchMedia('(pointer: coarse)').matches ? 1024 : 2048;
 sunShadow.shadow.mapSize.set(SHADOW_MAP, SHADOW_MAP);
 sunShadow.shadow.camera.near = 100;
 sunShadow.shadow.camera.far = 8500;
@@ -166,6 +188,109 @@ sunShadow.shadow.normalBias = 2.0;
 scene.add(sunShadow, sunShadow.target);
 let shadowBlend = 0;
 const sunDirCam = new THREE.Vector3(0, 1, 0);
+let warmedSurfacePlanet = null;
+let surfacePipelinesReady = true;
+const pipelineWarmScenes = [];
+const surfaceBootstrapMeshes = [];
+let surfaceBootstrapPending = false;
+let surfaceBootstrapActive = false;
+let surfaceBootstrapLight = null;
+let shipPipelinesWarmed = false;
+const startupWarmStartedAt = performance.now();
+
+function prewarmSurfacePipelines(planet) {
+  if (!planet || warmedSurfacePlanet === planet || typeof renderer.compileAsync !== 'function') return;
+  warmedSurfacePlanet = planet;
+  surfacePipelinesReady = false;
+
+  const terrainSource = planet.group.children.find((object) => object.isMesh
+    && object.geometry?.getAttribute?.('aLocal'));
+  if (terrainSource) {
+    const geometry = terrainSource.geometry.clone();
+    if (!geometry.morphAttributes.position?.length) {
+      const count = geometry.getAttribute('position').count;
+      geometry.morphAttributes.position = [new THREE.BufferAttribute(new Float32Array(count * 3), 3)];
+      geometry.morphAttributes.normal = [new THREE.BufferAttribute(new Float32Array(count * 3), 3)];
+      geometry.morphTargetsRelative = true;
+    }
+    const mesh = new THREE.Mesh(geometry, planet.terrainMaterial);
+    mesh.position.set(0, 0, 0);
+    mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    mesh.visible = false;
+    scene.add(mesh);
+    surfaceBootstrapMeshes.push(mesh);
+  }
+  const instancedSources = [
+    ...Object.values(scatter.meshes),
+    ...(farFlora.meshes || []),
+  ];
+  for (const source of instancedSources) {
+    const mesh = new THREE.InstancedMesh(source.geometry, source.material, 1);
+    mesh.setMatrixAt(0, new THREE.Matrix4());
+    mesh.setColorAt(0, new THREE.Color(1, 1, 1));
+    mesh.position.set(0, 0, 0);
+    mesh.frustumCulled = false;
+    mesh.castShadow = source.castShadow;
+    mesh.visible = false;
+    scene.add(mesh);
+    surfaceBootstrapMeshes.push(mesh);
+  }
+
+  // compileAsync gathers programs synchronously, then lets ANGLE finish them
+  // through KHR_parallel_shader_compile. Temporarily exposing the real shadow
+  // light makes the cached surface variants match the eventual ground pass.
+  const lightWasVisible = sunShadow.visible;
+  const lightIntensity = sunShadow.intensity;
+  sunShadow.visible = true;
+  sunShadow.intensity = 1e-7;
+  const tasks = [renderer.compileAsync(scene, camera)];
+  sunShadow.visible = lightWasVisible;
+  sunShadow.intensity = lightIntensity;
+
+  // WebGLRenderer.compileAsync does not visit the internal shadow-map depth
+  // material. Seed the two costly variants explicitly: morphed terrain and
+  // instanced surface props. The warm scene stays alive so the shared program
+  // cache retains those programs for the real shadow pass.
+  const morphMesh = planet.group.children.find((object) => object.isMesh
+    && object.geometry?.morphAttributes?.position?.length);
+  const instancedMesh = planet.group.children.find((object) => object.isInstancedMesh);
+  if (morphMesh || instancedMesh) {
+    const warmScene = new THREE.Scene();
+    const depthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+    if (morphMesh) warmScene.add(new THREE.Mesh(morphMesh.geometry, depthMaterial));
+    if (instancedMesh) warmScene.add(new THREE.InstancedMesh(instancedMesh.geometry, depthMaterial, 1));
+    pipelineWarmScenes.push(warmScene);
+    tasks.push(renderer.compileAsync(warmScene, camera));
+  }
+  Promise.all(tasks).then(() => { surfaceBootstrapPending = true; }).catch((error) => {
+    surfacePipelinesReady = true;
+    console.warn('surface pipeline prewarm failed', error);
+  });
+}
+
+function prewarmLoadedShipPipelines() {
+  if (QUALITY_LOW) {
+    shipPipelinesWarmed = true;
+    return;
+  }
+  if (!ship.heroLoaded || shipPipelinesWarmed || !surfacePipelinesReady
+    || typeof renderer.compileAsync !== 'function') return;
+  shipPipelinesWarmed = true;
+  surfacePipelinesReady = false;
+  const lightWasVisible = sunShadow.visible;
+  const lightIntensity = sunShadow.intensity;
+  sunShadow.visible = true;
+  sunShadow.intensity = 1e-7;
+  renderer.compileAsync(scene, camera).then(() => {
+    surfaceBootstrapPending = true;
+  }).catch((error) => {
+    surfacePipelinesReady = true;
+    console.warn('ship pipeline prewarm failed', error);
+  });
+  sunShadow.visible = lightWasVisible;
+  sunShadow.intensity = lightIntensity;
+}
 
 // ---- post-processing: HDR bloom (sun, lava, engines, stars) -----------------
 // MSAA render target keeps antialiasing; OutputPass applies tone mapping/sRGB
@@ -199,6 +324,9 @@ if (qs.get('gtao') === '1' && !QUALITY_LOW) {
   gtaoPass.blendIntensity = 0.85;
   composer.addPass(gtaoPass);
 }
+const warpDrivePass = new ShaderPass(WarpDriveShader);
+warpDrivePass.enabled = false;
+composer.addPass(warpDrivePass);
 const foregroundPass = new ForegroundPass(scene, camera, SHIP_FOREGROUND_LAYER);
 composer.addPass(foregroundPass);
 const riftDistortionPass = new ShaderPass(RiftDistortionShader);
@@ -237,8 +365,10 @@ function setRenderDpr(next) {
   // The hero ship is a high-frequency foreground asset; dropping below the
   // display's normal desktop scaling makes its wing silhouette visibly stair-
   // stepped even with post AA. Low quality remains an explicit opt-in.
-  const qualityFloor = QUALITY_LOW || IS_TOUCH
-    ? Math.min(1, window.devicePixelRatio)
+  const qualityFloor = QUALITY_LOW
+    ? Math.min(window.devicePixelRatio, 0.5)
+    : IS_TOUCH
+      ? Math.min(1, window.devicePixelRatio)
     : Math.max(DESKTOP_DPR_FLOOR, Math.min(1.35, window.devicePixelRatio));
   const qualityCeiling = Math.max(qualityFloor, Math.min(window.devicePixelRatio, MAX_DPR));
   const dpr = clamp(next, qualityFloor, qualityCeiling);
@@ -289,9 +419,11 @@ let photoMode = false;
 let boostVisual = 0;
 let pulseVisual = 0;
 const PULSE_FUEL_MAX = 140;
+const PULSE_FUEL_COST = 18;
+const PULSE_DURATION = 0.56;
 let pulseFuel = PULSE_FUEL_MAX;
 let pulseActive = false;
-let pulseEngaged = false;
+let pulseBurst = null;
 let pulseRechargeDelay = 0;
 let weaponCooldown = 0;
 let weaponVisual = 0;
@@ -359,7 +491,6 @@ const scatter = new Scatter();
 // far tier: proxy trees to the horizon (?farflora=0 spares SwiftShader tests)
 const FARFLORA = qs.get('farflora') !== '0';
 const farFlora = new FarFlora();
-const warpStreaks = new WarpStreaks(scene);
 const skyDome = new SkyDome(scene);
 const ship = new Ship(scene, {
   anisotropy: Math.min(16, renderer.capabilities.getMaxAnisotropy()),
@@ -400,8 +531,8 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   },
   onShot: () => audio.cue('fire'),
 });
-const pulseFx = document.getElementById('pulse-fx');
 let warpIntensity = 0;
+let warpArrival = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
 let envUnderwater = false;
@@ -472,6 +603,26 @@ const walkCtl = new WalkControls(renderer.domElement, {
   onLook: (movementX, movementY) => surfaceWeapons.onLookDelta(movementX, movementY),
 });
 
+function cancelPulseBurst() {
+  pulseBurst = null;
+  pulseActive = false;
+}
+
+function triggerPulse() {
+  if (state !== 'space' || paused || riftRoute || pulseBurst) return false;
+  if (pulseFuel + 1e-6 < PULSE_FUEL_COST) {
+    ui.setHint(`脉冲燃料不足 · 需要 ${PULSE_FUEL_COST}`, true);
+    return false;
+  }
+  const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
+  const distance = pulseBurstDistance(spaceCtl.speedScale, nearestAlt, !!nearest);
+  pulseFuel = Math.max(0, pulseFuel - PULSE_FUEL_COST);
+  pulseRechargeDelay = 1.4;
+  pulseBurst = { elapsed: 0, progress: 0, direction, distance };
+  pulseActive = true;
+  return true;
+}
+
 renderer.domElement.addEventListener('pointerdown', () => {
   unlockAudio();
   if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && pointerLockInput) {
@@ -514,13 +665,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (!e.repeat && e.code === 'Space' && state === 'space') {
     e.preventDefault();
-    const allowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
-    if (!allowed) {
-      pulseEngaged = false;
-      ui.setHint('脉冲巡航受大气层干扰 · 升至外层大气后重试', true);
-    } else if (pulseFuel > 0.01) {
-      pulseEngaged = !pulseEngaged;
-    }
+    triggerPulse();
   }
   if (!e.repeat && e.code === 'KeyE' && state === 'walk') boardShip();
   if (!e.repeat && e.code === 'KeyT' && state === 'walk') recallShip();
@@ -817,10 +962,8 @@ function clearFlightInput() {
   spaceCtl.boosting = false;
   spaceCtl.firing = false;
   spaceCtl.firePressed = false;
-  spaceCtl.pulseDrive = false;
   spaceCtl.clearTransientInput();
-  pulseActive = false;
-  pulseEngaged = false;
+  cancelPulseBurst();
   spaceCtl.wheelImpulse = 0;
   nav.vel.set(0, 0, 0);
   walkCtl.hSpeed.set(0, 0, 0);
@@ -1021,9 +1164,7 @@ function setState(s) {
   state = s;
   document.body.classList.toggle('walking', s === 'walk');
   if (s !== 'space') {
-    pulseActive = false;
-    pulseEngaged = false;
-    spaceCtl.pulseDrive = false;
+    cancelPulseBurst();
     spaceCtl.firing = false;
     spaceCtl.firePressed = false;
     spaceCtl.clearTransientInput();
@@ -1042,7 +1183,7 @@ function setState(s) {
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>A/D</b> 侧推 · <b>LMB</b> 射击 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲巡航 · <b>M/TAB</b> 星图',
+    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>A/D</b> 侧推 · <b>LMB</b> 射击 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲冲刺 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>R</b> 换弹 · <b>RMB</b> 瞄准 · <b>T</b> 召回飞船 · 靠近飞船按 <b>E</b>',
@@ -1371,8 +1512,6 @@ function beginRiftPortalScene() {
     ship.group,
     weapons.glowMesh,
     weapons.coreMesh,
-    warpStreaks.lines,
-    warpStreaks.foldTunnel,
     sunShadow,
     hemi,
     ambient,
@@ -1432,9 +1571,9 @@ function enableRiftEffects() {
   // Keep the energy concentrated on the rim. A broad low-threshold bloom
   // spread white light across the portal texture and made the destination
   // planet appear washed out until the instant the rim moved behind us.
-  bloomPass.strength = 0.72;
-  bloomPass.radius = 0.42;
-  bloomPass.threshold = 0.72;
+  bloomPass.strength = 0.92;
+  bloomPass.radius = 0.24;
+  bloomPass.threshold = 0.88;
   riftDistortionPass.enabled = true;
   riftForcedPost = !usePost;
   usePost = true;
@@ -1474,9 +1613,7 @@ function beginSelectedRift() {
   riftTargetUniv.copy(arrival.entry);
   riftPreviewOriginUniv.copy(arrival.entry);
   riftOrientation.copy(nav.quat);
-  pulseEngaged = false;
-  pulseActive = false;
-  spaceCtl.pulseDrive = false;
+  cancelPulseBurst();
   spaceCtl.boosting = false;
   if (nav.vel.length() > 18) nav.vel.setLength(18);
   riftPreviewSystem = new StarSystem(universe, route.star, {
@@ -1549,9 +1686,7 @@ function updateRiftRoute(dt) {
   spatialRift.update(dt, clock.elapsedTime);
   if (!riftRoute.arrived) {
     if (!riftRoute.anchorLocked) {
-      pulseEngaged = false;
-      pulseActive = false;
-      spaceCtl.pulseDrive = false;
+      cancelPulseBurst();
       spaceCtl.boosting = false;
       nav.vel.multiplyScalar(Math.exp(-dt * 6.5));
       if (nav.vel.length() > 24) nav.vel.setLength(24);
@@ -1583,9 +1718,7 @@ function updateRiftRoute(dt) {
         : 145;
       if (nav.vel.length() > speedCap) nav.vel.setLength(speedCap);
       if (inCapture) {
-        pulseEngaged = false;
-        pulseActive = false;
-        spaceCtl.pulseDrive = false;
+        cancelPulseBurst();
         spaceCtl.boosting = false;
         riftLocalVel.copy(nav.vel).applyQuaternion(riftInverse);
         if (riftLocalVel.length() > speedCap) riftLocalVel.setLength(speedCap);
@@ -1612,7 +1745,12 @@ function updateRiftRoute(dt) {
   // The portal render owns a destination-local coordinate system whose entry
   // point is the origin. The actual universe position remains in
   // riftTargetUniv and is applied only when the ship crosses the threshold.
-  spatialRift.setTransform(entranceRender, riftOrientation, _v3.set(0, 0, 0), riftRoute.arrival.quat);
+  // Before crossing this is the source aperture; afterwards the remaining
+  // collapse belongs wholly to the destination frame. Reapplying the old
+  // source quaternion on the next frame could rotate a wide rim through the
+  // camera and flash a folded fragment in front of the arrived planet.
+  const passageOrientation = riftRoute.arrived ? riftRoute.arrival.quat : riftOrientation;
+  spatialRift.setTransform(entranceRender, passageOrientation, _v3.set(0, 0, 0), riftRoute.arrival.quat);
   if (!riftRoute.arrived) {
     const previousRender = prevNavPos.clone().sub(nav.pos);
     if (spatialRift.crossed(previousRender, _v3.set(0, 0, 0))) {
@@ -1634,7 +1772,7 @@ function updateRiftRoute(dt) {
         focusPlanet = arrivalBody;
         spaceCtl.focus = arrivalBody;
       }
-      _v2.set(0, 0, -1).applyQuaternion(riftOrientation).normalize();
+      _v2.set(0, 0, -1).applyQuaternion(riftRoute.arrival.quat).normalize();
       riftEntranceUniv.copy(nav.pos).addScaledVector(_v2, -(spatialRift.depth + 90));
       spatialRift.setTransform(
         riftEntranceUniv.clone().sub(nav.pos),
@@ -1680,6 +1818,7 @@ function renderRiftPortal() {
 function warpTo(star, preferBodyId = null) {
   if (state !== 'space') return;
   setState('warp');
+  warpArrival = 0;
   focusPlanet = null;
   spaceCtl.focus = null;
   const startPos = nav.pos.clone();
@@ -1696,7 +1835,6 @@ function warpTo(star, preferBodyId = null) {
   let arrivalPlanetName = null;
   let arrivalSystem = null, arrivalSpec = null, revealDirection = null;
   nav.vel.set(0, 0, 0);
-  warpStreaks.reset(_v.copy(star.pos).sub(startPos).normalize());
 
   addTween(dur, (k) => {
     if (k < SPOOL) {
@@ -1705,8 +1843,7 @@ function warpTo(star, preferBodyId = null) {
       camera.fov = BASE_FOV - 4 * (k / SPOOL);
     } else {
       const kf = (k - SPOOL) / (1 - SPOOL);
-      // quintic smootherstep: gentle ends, ferocious middle
-      const s = kf * kf * kf * (kf * (kf * 6 - 15) + 10);
+      const s = warpTravelProgress(kf);
       if (arrivalSpec) {
         const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
         endPos.copy(heroPos).addScaledVector(revealDirection, blackHoleArrivalDistance(arrivalSpec));
@@ -1714,8 +1851,14 @@ function warpTo(star, preferBodyId = null) {
       }
       nav.pos.lerpVectors(startPos, endPos, s);
       nav.quat.copy(targetQuat);
-      const ramp = smoothstep(0, 0.2, kf) * (1 - smoothstep(0.78, 0.97, kf));
-      camera.fov = BASE_FOV - 4 + 30 * ramp;
+      // Keep the tunnel at full authority until the destination is close,
+      // then make the braking phase legible: streaks collapse, FOV compresses
+      // briefly below neutral, and rebounds as the real system is revealed.
+      const ramp = smoothstep(0, 0.18, kf) * (1 - smoothstep(0.82, 0.94, kf));
+      const brakeIn = smoothstep(0.78, 0.9, kf);
+      const brakeOut = 1 - smoothstep(0.9, 1, kf);
+      warpArrival = brakeIn * brakeOut;
+      camera.fov = BASE_FOV - 4 + 30 * ramp - 7.5 * warpArrival;
       warpIntensity = ramp;
       if (kf >= 0.04 && !swapped) {
         // Swap early enough that the real destination can materialise during
@@ -1747,6 +1890,7 @@ function warpTo(star, preferBodyId = null) {
     camera.fov = BASE_FOV;
     camera.updateProjectionMatrix();
     warpIntensity = 0;
+    warpArrival = 0;
     let arrivalDisplayName = universe.system.name;
     if (arrivalSpec?.type === 'blackHole') {
       const blackHole = universe.system.bodyById.get(arrivalSpec.bodyId);
@@ -2096,14 +2240,7 @@ function frame() {
       spaceCtl.speedScale = 120000;
       spaceCtl.horizonAssist = 0;
     }
-    const pulseAllowed = !nearest || nearestAlt > nearest.atmoHeight * 1.08;
-    if (!pulseAllowed || pulseFuel <= 0.01) pulseEngaged = false;
-    pulseActive = pulseEngaged && pulseFuel > 0.01 && pulseAllowed;
-    spaceCtl.pulseDrive = pulseActive;
-    if (pulseActive) {
-      pulseFuel = Math.max(0, pulseFuel - dt * 6.5);
-      pulseRechargeDelay = 1.1;
-    }
+    pulseActive = !!pulseBurst;
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
       // A distance-shaped radial cap preserves the scale of the world and
@@ -2117,19 +2254,27 @@ function frame() {
       const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
-        * (pulseActive ? 1.35 : 1);
+        * (pulseActive ? 1.18 : 1);
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, 0);
     }
     flightStepStart.copy(nav.pos);
     spaceCtl.update(dt);
+    if (pulseBurst) {
+      pulseBurst.elapsed = Math.min(PULSE_DURATION, pulseBurst.elapsed + dt);
+      const progress = pulseBurstProgress(pulseBurst.elapsed / PULSE_DURATION);
+      nav.pos.addScaledVector(pulseBurst.direction,
+        pulseBurst.distance * Math.max(0, progress - pulseBurst.progress));
+      pulseBurst.progress = progress;
+      if (pulseBurst.elapsed >= PULSE_DURATION) cancelPulseBurst();
+    }
     if (nearest) {
       _v.copy(nav.pos).sub(nearest.posUniv);
       const centerDistance = _v.length();
       const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
-        * (pulseActive ? 1.35 : 1);
+        * (pulseActive ? 1.18 : 1);
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, dt);
     }
@@ -2164,11 +2309,10 @@ function frame() {
       nav.pos.copy(nearest.posUniv).addScaledVector(_v, nearest.R * 0.92);
       nav.vel.addScaledVector(_v, Math.max(900, -nav.vel.dot(_v) + 900));
       ui.setHint('压力临界 · 自动驾驶强制拉升', true);
-      pulseEngaged = false;
+      cancelPulseBurst();
     }
   } else if (!paused && state === 'walk') {
-    pulseActive = false;
-    spaceCtl.pulseDrive = false;
+    cancelPulseBurst();
     walkCtl.update(dt);
     walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
@@ -2201,7 +2345,13 @@ function frame() {
 
   const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
   boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
-  pulseVisual += ((pulseActive ? 1 : 0) - pulseVisual) * (1 - Math.exp(-dt * (pulseActive ? 4.5 : 7)));
+  const pulseK = pulseBurst ? clamp(pulseBurst.elapsed / PULSE_DURATION, 0, 1) : 1;
+  const pulseTarget = pulseBurst
+    ? smoothstep(0, 0.04, pulseK) * (1 - smoothstep(0.55, 1, pulseK))
+    : 0;
+  pulseVisual = pulseTarget > pulseVisual
+    ? pulseTarget
+    : pulseVisual + (pulseTarget - pulseVisual) * (1 - Math.exp(-dt * 14));
   weaponVisual += ((weaponTrigger ? 1 : 0) - weaponVisual) * (1 - Math.exp(-dt * 16));
   if (state === 'space' && warpIntensity < 0.01) {
     const riftFov = riftRoute && !riftRoute.arrived ? spatialRift.burst * 9.5 : 0;
@@ -2209,13 +2359,20 @@ function frame() {
       * (1 - Math.exp(-dt * 6.2));
     camera.updateProjectionMatrix();
   }
-  pulseFx.style.opacity = (pulseVisual * 0.78).toFixed(3);
-  pulseFx.style.transform = `scale(${(1.08 + pulseVisual * 0.06).toFixed(3)})`;
   document.body.classList.toggle('weapon-firing', weaponVisual > 0.12);
+
+  // One WebGL pass now owns both interstellar warp and the discrete local
+  // pulse. It runs before the foreground ship pass, so rays never float over
+  // the hull as a separate screen layer.
+  warpDrivePass.enabled = Math.max(warpIntensity, pulseVisual, warpArrival) > 0.005;
+  warpDrivePass.uniforms.uTime.value = clock.elapsedTime;
+  warpDrivePass.uniforms.uWarp.value = warpIntensity;
+  warpDrivePass.uniforms.uPulse.value = pulseVisual;
+  warpDrivePass.uniforms.uArrival.value = warpArrival;
+  warpDrivePass.uniforms.uAspect.value = camera.aspect;
 
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
-  warpStreaks.update(dt, _velActual, warpIntensity, Math.max(boostVisual, pulseVisual * 1.8));
   // a deferred system (warp or manual approach) materializes one planet/frame
   if (universe.system && !universe.system.built) universe.system.buildNext();
 
@@ -2228,6 +2385,12 @@ function frame() {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearest.worldOffsetToLocal(_v, _v);
     scatter.update(nearest, _v, nearestAlt);
+    if (scatter.planet) {
+      prewarmSurfacePipelines(scatter.planet);
+      if (!surfacePipelinesReady) {
+        for (const mesh of Object.values(scatter.meshes)) mesh.visible = false;
+      }
+    }
     if (FARFLORA) farFlora.update(nearest, _v, nearestAlt);
   } else {
     if (scatter.planet) scatter.clear();
@@ -2337,12 +2500,13 @@ function frame() {
     yaw: spaceCtl.lookInput.yaw,
     pitch: spaceCtl.lookInput.pitch,
   });
+  prewarmLoadedShipPipelines();
   audio.update({
     state,
     speed: flightSpd,
     atmosphere: envInAtmo,
     boosting: boostVisual > 0.12 || pulseVisual > 0.12,
-    warp: warpIntensity,
+    warp: Math.max(warpIntensity, pulseVisual * 0.68),
     rift: riftRoute ? spatialRift.open * (spatialRift.handoffActive ? 0.35 : 1) : 0,
     paused,
   });
@@ -2363,9 +2527,7 @@ function frame() {
   ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
   ui.setFlightTelemetry({
     speed: spd,
-    speedLimit: spaceCtl.speedScale * (pulseActive
-      ? 13.92 + (1 - spaceCtl.atmosphereFactor) * 8.12
-      : 8.4 + (1 - spaceCtl.atmosphereFactor) * 2.62),
+    speedLimit: spaceCtl.speedScale * (8.4 + (1 - spaceCtl.atmosphereFactor) * 2.62),
     boost: boostVisual,
     atmosphere: envInAtmo,
     pulse: pulseVisual,
@@ -2429,8 +2591,7 @@ function frame() {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     volumePass.setActivePlanet(nearest?.isGasGiant ? null : nearest, nav.pos, motion);
   }
-  foregroundPass.enabled = VOLUME_ENABLED
-    && ['space', 'flyto', 'landing', 'takeoff', 'boarding'].includes(state);
+  foregroundPass.enabled = ship.foregroundOnly;
   ambient.layers.enable(SHIP_FOREGROUND_LAYER);
   hemi.layers.enable(SHIP_FOREGROUND_LAYER);
   headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
@@ -2452,27 +2613,79 @@ function frame() {
   // gracefully instead of silently presenting a single-digit frame rate.
   perfEmaMs += (dt * 1000 - perfEmaMs) * 0.025;
   dprAcc += dt;
-  if (dprAcc > 2.5 && !FREEZE) {
+  const adaptInterval = perfEmaMs > 28 ? 0.8 : QUALITY_LOW ? 1.5 : 2.5;
+  if (dprAcc > adaptInterval && !FREEZE) {
     dprAcc = 0;
-    if (perfEmaMs > 20.5) setRenderDpr(renderDpr - 0.1);
-    else if (perfEmaMs < 14.2) setRenderDpr(renderDpr + 0.05);
+    if (perfEmaMs > 28) setRenderDpr(renderDpr - 0.15);
+    else if (QUALITY_LOW && perfEmaMs > 17.2) setRenderDpr(renderDpr - 0.05);
+    else if (perfEmaMs > 20.5) setRenderDpr(renderDpr - 0.1);
+    else if (perfEmaMs < (QUALITY_LOW ? 15.2 : 14.2)) setRenderDpr(renderDpr + 0.05);
   }
 
   if (!FREEZE && !photoMode) tickShaders(dt);
   renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
   surfaceWeapons.renderScopeView(renderer);
+  if (surfaceBootstrapPending && !contextLost) {
+    surfaceBootstrapPending = false;
+    surfaceBootstrapActive = true;
+    surfaceBootstrapLight = {
+      visible: sunShadow.visible,
+      intensity: sunShadow.intensity,
+      position: sunShadow.position.clone(),
+    };
+    sunShadow.visible = true;
+    sunShadow.intensity = 1e-7;
+    sunShadow.position.set(0, 4000, 0);
+    sunShadow.target.position.set(0, 0, 0);
+    sunShadow.updateMatrixWorld(true);
+    sunShadow.target.updateMatrixWorld(true);
+    for (const mesh of surfaceBootstrapMeshes) mesh.visible = true;
+  }
   renderer.info.reset();
   // Skip the actual GPU work while the WebGL context is lost — Three.js
   // no-ops render() anyway, but skipping avoids noise from the post chain
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
   if (!contextLost) {
-    if (usePost) composer.render();
-    else renderer.render(scene, camera);
+    if (usePost || warpDrivePass.enabled) composer.render();
+    else {
+      renderer.render(scene, camera);
+      if (ship.foregroundOnly) foregroundPass.renderDirect(renderer);
+    }
+  }
+  if (surfaceBootstrapActive) {
+    surfaceBootstrapActive = false;
+    sunShadow.visible = surfaceBootstrapLight.visible;
+    sunShadow.intensity = surfaceBootstrapLight.intensity;
+    sunShadow.position.copy(surfaceBootstrapLight.position);
+    surfaceBootstrapLight = null;
+    if (shipPipelinesWarmed) {
+      for (const mesh of surfaceBootstrapMeshes.splice(0)) {
+        scene.remove(mesh);
+        if (mesh.isInstancedMesh) mesh.dispose();
+        else mesh.geometry.dispose();
+      }
+    } else {
+      for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
+    }
+    // All startup shaders were checked while the loading mask was active.
+    // Querying program logs for every later LOD/GLB variant forces ANGLE to
+    // synchronously finish compilation on the flight frame. Keep an explicit
+    // diagnostics opt-in without imposing that driver fence on normal play.
+    renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
+    surfacePipelinesReady = true;
   }
   prevNavPos.copy(nav.pos);
-  if (!loadingCleared && frameNo >= 3) {
+  const startupAssetsReady = shipPipelinesWarmed || performance.now() - startupWarmStartedAt > 6000;
+  if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady && startupAssetsReady) {
+    if (!shipPipelinesWarmed) {
+      for (const mesh of surfaceBootstrapMeshes.splice(0)) {
+        scene.remove(mesh);
+        if (mesh.isInstancedMesh) mesh.dispose();
+        else mesh.geometry.dispose();
+      }
+    }
     loadingCleared = true;
     ui.setLoading(false);
   }
@@ -2486,15 +2699,49 @@ spawn(SHOW_HERO);
 ui.setLoading(true, 'generating universe…');
 ui.showHero(SHOW_HERO);
 if (SHOW_HERO) spaceCtl.enabled = false;
+const bootstrapSurfacePlanet = universe.system.planets[0];
+if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {
+  scatter.setPlanet(bootstrapSurfacePlanet);
+  for (const mesh of Object.values(scatter.meshes)) mesh.visible = false;
+  if (FARFLORA) farFlora.setPlanet(bootstrapSurfacePlanet);
+  if (farFlora.meshes) for (const mesh of farFlora.meshes) mesh.visible = false;
+  if (QUALITY_LOW) {
+    shipPipelinesWarmed = true;
+    renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
+  } else {
+    prewarmSurfacePipelines(bootstrapSurfacePlanet);
+  }
+}
 frame();
 
 // ---- debug / test API (used by tools/screenshot.js) ----------------------------
+function riftExitDepthRange() {
+  if (!riftRoute?.arrived || !spatialRift.group.visible) return null;
+  spatialRift.visual.updateMatrixWorld(true);
+  camera.updateMatrixWorld(true);
+  const depths = [];
+  for (const z of [24, -spatialRift.depth - 24]) {
+    for (const x of [-spatialRift.width * 0.62, spatialRift.width * 0.62]) {
+      for (const y of [-spatialRift.height * 0.62, spatialRift.height * 0.62]) {
+        const point = new THREE.Vector3(x, y, z);
+        spatialRift.visual.localToWorld(point);
+        camera.worldToLocal(point);
+        depths.push(point.z);
+      }
+    }
+  }
+  return { min: Math.min(...depths), max: Math.max(...depths) };
+}
+
 window.NMS = {
   version: VERSION,
   _ff: farFlora,           // debug handle (headless diagnostics)
   _renderer: renderer,
   _THREE: THREE,
-  get booted() { return frameNo > 3; },
+  get booted() {
+    return frameNo > 3 && surfacePipelinesReady
+      && (shipPipelinesWarmed || performance.now() - startupWarmStartedAt > 6000);
+  },
   get state() { return state; },
   get paused() { return paused; },
   seed: () => SEED,
@@ -2512,11 +2759,13 @@ window.NMS = {
       frame: frameNo, calls: info.calls, tris: info.triangles, chunks,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
-      pulse: pulseActive, pulseFuel: Math.round(pulseFuel * 10) / 10,
+      pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
+      warpArrival,
       firing: spaceCtl.firing, bolts: activeBolts,
       cosmicHours: celestialClock.hours, timeScale: celestialClock.scale,
       dayLight: envDay, eclipse: envEclipse,
       gpu: gpuName, dpr: renderDpr,
+      quality: QUALITY_LOW ? (AUTO_LOW_GPU ? 'auto-low' : 'low') : 'high',
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },
@@ -2988,6 +3237,7 @@ window.NMS = {
     handoff: spatialRift.handoffFade,
     visible: spatialRift.group.visible,
     audioCue: audio.lastCue,
+    exitDepth: riftExitDepthRange(),
     distanceToThreshold: riftRoute && !riftRoute.arrived
       ? new THREE.Vector3().copy(nav.pos).sub(riftEntranceUniv)
         .applyQuaternion(new THREE.Quaternion().copy(riftOrientation).invert()).z + spatialRift.depth
@@ -3003,9 +3253,7 @@ window.NMS = {
     return true;
   },
   setPulse(active) {
-    pulseEngaged = !!active && pulseFuel > 0.01
-      && (!nearest || nearestAlt > nearest.atmoHeight * 1.08);
-    return pulseEngaged;
+    return !!active && triggerPulse();
   },
   fireWeapon() {
     if (state !== 'space') return false;

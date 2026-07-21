@@ -52,6 +52,35 @@ try {
     `RMB materially accelerates ship (${speedBefore.toFixed(0)} -> ${speedBoost.toFixed(0)} m/s)`);
   check(afterRelease < duringBoost, 'RMB release clears boost cleanly');
 
+  // Space is a discrete pulse even below the atmospheric boundary. It spends
+  // one fixed fuel charge, moves immediately, then ends without leaving a
+  // hidden cruise mode engaged.
+  await page.evaluate(() => {
+    const { universe, nav } = NMS._internals;
+    const p = universe.system.planets[0];
+    const THREE = NMS._THREE;
+    const radial = p.localOffsetToWorld(new THREE.Vector3(1, 0, 0), new THREE.Vector3()).normalize();
+    const position = p.posUniv.clone().addScaledVector(radial, p.R + p.atmoHeight * 0.5);
+    const look = position.clone().addScaledVector(radial, 1000);
+    NMS.setPosition(position.x, position.y, position.z, look.x, look.y, look.z);
+    nav.vel.set(0, 0, 0);
+  });
+  await page.waitForTimeout(120);
+  const pulseBefore = await page.evaluate(() => ({ alt: NMS.alt(), fuel: NMS.pulseFuel() }));
+  await page.keyboard.press('Space');
+  await page.waitForFunction('NMS.stats().pulseVisual > 0.25', null, { timeout: 5000 });
+  const pulseDuring = await page.evaluate('NMS.stats().pulse');
+  await page.waitForTimeout(620);
+  const pulseAfter = await page.evaluate(() => ({
+    alt: NMS.alt(), fuel: NMS.pulseFuel(), active: NMS.stats().pulse,
+  }));
+  check(pulseBefore.alt > 0 && pulseDuring,
+    `Space pulse engages inside atmosphere (${Math.round(pulseBefore.alt)} m altitude)`);
+  check(pulseAfter.alt > pulseBefore.alt + 70,
+    `Space pulse produces a bounded forward displacement (${Math.round(pulseAfter.alt - pulseBefore.alt)} m)`);
+  check(Math.abs((pulseBefore.fuel - pulseAfter.fuel) - 18) < 0.1 && !pulseAfter.active,
+    `Space pulse spends one fuel charge and ends (${pulseBefore.fuel.toFixed(1)} -> ${pulseAfter.fuel.toFixed(1)})`);
+
   check(await page.evaluate(() => !document.getElementById('labels')
       && !document.getElementById('target-card')
       && document.querySelectorAll('.planet-label').length === 0),

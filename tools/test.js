@@ -34,8 +34,36 @@ if (!runtimeVersion || pkg.version !== runtimeVersion || lock.version !== runtim
 
 const THREE = await import('three');
 const { startDevServer, startServer } = await import('./server.js');
-const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon } = await import('../src/controls.js');
-const { Ship } = await import('../src/effects.js');
+const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon,
+  pulseBurstDistance, pulseBurstProgress } = await import('../src/controls.js');
+const { Ship, warpTravelProgress } = await import('../src/effects.js');
+
+// Pulse begins with immediate authority, remains a bounded displacement near
+// terrain, and is never disabled merely because the player is in atmosphere.
+if (pulseBurstProgress(0) !== 0 || pulseBurstProgress(1) !== 1
+    || pulseBurstProgress(0.05) < 0.14) {
+  throw new Error('Pulse burst still has a slow cruise-style acceleration ramp');
+}
+const openPulseDistance = pulseBurstDistance(620, Infinity, false);
+const atmosphericPulseDistance = pulseBurstDistance(620, 1000, true);
+if (openPulseDistance !== 6200 || atmosphericPulseDistance !== 400) {
+  throw new Error('Pulse distance scaling or terrain clearance cap drifted');
+}
+
+// Warp travel is monotonic but allocates the final phase to a decisive brake:
+// by 88% it is already at 98.5%, leaving only a short arrival settle.
+let lastWarpProgress = -1;
+for (let i = 0; i <= 100; i++) {
+  const progress = warpTravelProgress(i / 100);
+  if (progress + 1e-9 < lastWarpProgress || progress < 0 || progress > 1.000001) {
+    throw new Error(`Warp travel curve is invalid at ${i}%`);
+  }
+  lastWarpProgress = progress;
+}
+if (Math.abs(warpTravelProgress(0.88) - 0.985) > 1e-8
+    || warpTravelProgress(0.72) < 0.819) {
+  throw new Error('Warp arrival brake no longer lands in the authored timing window');
+}
 const rolled = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 1.2);
 const forwardBefore = new THREE.Vector3(0, 0, -1).applyQuaternion(rolled);
 stabilizeHorizon(rolled, new THREE.Vector3(0, 1, 0), 1);
@@ -120,6 +148,10 @@ for (let i = 0; i < 120; i++) {
     throw new Error('Stationary surface hover leaves residual ship roll or orientation lag');
   }
 }
+if (hoverShip.group.layers.isEnabled(0)
+    || !hoverShip.group.layers.isEnabled(3)) {
+  throw new Error('Flying ship still leaks into the base scene layer before warp compositing');
+}
 const neutralHullPosition = hoverShip.group.position.clone()
   .applyQuaternion(hoverNav.quat.clone().invert());
 
@@ -144,6 +176,11 @@ for (let i = 0; i < 120; i++) {
 if (Math.abs(hoverShip.roll) > 1e-5 || Math.abs(hoverShip.lookYaw) > 1e-5
     || Math.abs(hoverShip.lookPitch) > 1e-5) {
   throw new Error('Player steering mass response does not settle after input stops');
+}
+hoverShip.setForegroundOnly(false);
+if (!hoverShip.group.layers.isEnabled(0)
+    || hoverShip.group.layers.isEnabled(3)) {
+  throw new Error('Parked ship does not return to the terrain-occluded base layer');
 }
 
 // Opening another terminal while the dev server is still running must not

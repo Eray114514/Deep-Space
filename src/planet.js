@@ -164,11 +164,39 @@ export class Planet {
       this.stripeAxis = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
     }
 
-    // LOD limits: finest cells ≈ 1.5 m even on 120 km worlds
-    const rootCell = (Math.PI / 2) * this.R / GRID_CELLS;
-    this.maxLevel = clamp(Math.round(Math.log2(rootCell / 1.5)), 4, 13);
-    this.freqAtLevel = (lvl) => 0.4 * GRID_CELLS * Math.pow(2, lvl) / (Math.PI / 2);
-    this.fullMaxFreq = this.freqAtLevel(this.maxLevel);
+    // Wide chunks preserve the exact finest sampling density while replacing
+    // each former 2×2 child set with one submission. Collision and gameplay
+    // keep the canonical frequency cap; only the renderer's grouping changes.
+    const canonicalGridCells = GRID_CELLS;
+    this.canonicalGridCells = canonicalGridCells;
+    const rootCell = (Math.PI / 2) * this.R / canonicalGridCells;
+    this.canonicalMaxLevel = clamp(Math.round(Math.log2(rootCell / 1.5)), 4, 13);
+    this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
+    this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
+    // 8/3× grouping is intentionally wider than the old 2× prototype. The
+    // renderer oversamples the same authored frequency cap, improving curved
+    // silhouettes and reducing chunk-edge overhead without changing terrain
+    // identity, collision height, or the canonical universe lock.
+    const lowTierGrouping = canonicalGridCells <= 18;
+    const wideGroupFactor = lowTierGrouping ? 4 : (8 / 3);
+    this.gridCells = Math.round(canonicalGridCells * wideGroupFactor);
+    this.gridCellsAtLevel = () => this.gridCells;
+    // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
+    // matches that screen-space resolution (≈3 m cells) instead of spending
+    // four times the triangles on sub-pixel relief.
+    this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 1));
+    this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
+      0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
+    const lodScreenScale = lowTierGrouping ? 0.25 : 1;
+    this.lodDistanceScale = (canonicalGridCells / this.gridCells) * lodScreenScale;
+    this.lodDistanceScaleAtLevel = (lvl) => (canonicalGridCells / this.gridCellsAtLevel(lvl)) * lodScreenScale;
+    this.lodLevelForCanonical = (canonicalLevel) => {
+      for (let level = 0; level <= this.maxLevel; level++) {
+        const effective = level + Math.log2(this.gridCellsAtLevel(level) / canonicalGridCells);
+        if (effective >= canonicalLevel) return level;
+      }
+      return this.maxLevel;
+    };
 
     // ---- palette ----------------------------------------------------------
     this.buildPalette(rand);
@@ -638,11 +666,28 @@ export class Planet {
       if (this.liquid === 'water' || this.liquid === 'toxic') applyWaterWaves(mat, this);
       // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
       // mesh would sag metres between vertices at 100 km radius
+      const waterCanonicalGrid = 12;
+      const lowTierGrouping = this.canonicalGridCells <= 18;
+      const waterGroupFactor = lowTierGrouping ? 4 : 2;
+      const waterGridCells = waterCanonicalGrid * waterGroupFactor;
+      const waterGridCellsAtLevel = () => waterGridCells;
+      const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 8);
       this.waterLod = new ChunkedLOD({
         R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: true, noShadow: true,
-        gridCells: 12,
-        maxLevel: Math.min(this.maxLevel - 3, 8),
-        freqAtLevel: this.freqAtLevel,
+        gridCells: waterGridCells,
+        gridCellsAtLevel: waterGridCellsAtLevel,
+        maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 1)),
+        lodDistanceScale: (waterCanonicalGrid / waterGridCells) * (lowTierGrouping ? 0.25 : 1),
+        lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))
+          * (lowTierGrouping ? 0.25 : 1),
+        lodLevelForCanonical: (canonicalLevel) => {
+          for (let level = 0; level <= waterCanonicalMaxLevel; level++) {
+            const effective = level + Math.log2(waterGridCellsAtLevel(level) / waterCanonicalGrid);
+            if (effective >= canonicalLevel) return level;
+          }
+          return waterCanonicalMaxLevel;
+        },
+        freqAtLevel: this.canonicalFreqAtLevel,
         height: () => 0,
         colorAt: (dir, h, slope, f, out) => out.setRGB(1, 1, 1),
         // water knows how deep the terrain lies beneath every vertex —

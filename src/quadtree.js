@@ -73,46 +73,66 @@ function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
 
 // ---- global build scheduler -------------------------------------------------
 const buildQueue = [];
+let activeBuildJob = null;
 
 export function pendingChunks(lod = null) {
   let n = 0;
   for (const e of buildQueue) if (!e.dead && (!lod || e.lod === lod)) n++;
+  if (activeBuildJob && !activeBuildJob.node.dead
+    && (!lod || activeBuildJob.node.lod === lod)) n++;
   return n;
 }
 
 // budget is in MILLISECONDS: build as many chunks as fit, so refinement
 // speed tracks the hardware instead of starving on big worlds
 export function flushChunkQueue(budgetMs = 7) {
-  if (buildQueue.length === 0) return 0;
+  if (buildQueue.length === 0 && !activeBuildJob) return 0;
   const t0 = performance.now();
+  const deadline = t0 + budgetMs;
   let built = 0;
-  while (buildQueue.length && (built === 0 || performance.now() - t0 < budgetMs)) {
+  let attempted = false;
+  while (activeBuildJob || buildQueue.length) {
+    if (activeBuildJob?.node.dead || activeBuildJob?.node.mesh) activeBuildJob = null;
+
     // A full sort of 1–2k moving priorities every frame cost more than the
     // one or two chunks we normally build. Select only the best entry needed
     // this frame; focused terrain wins over background worlds.
-    let bestIndex = -1;
-    let bestPriority = Infinity;
-    for (let i = 0; i < buildQueue.length; i++) {
-      const e = buildQueue[i];
-      if (e.dead || e.mesh) continue;
-      const focusK = e.lod.focused ? 0.18 : 1.0;
-      const prio = (e.lod.nodeDistance(e) / e.size) * focusK;
-      if (prio < bestPriority) {
-        bestPriority = prio;
-        bestIndex = i;
+    if (!activeBuildJob) {
+      let bestIndex = -1;
+      let bestPriority = Infinity;
+      for (let i = 0; i < buildQueue.length; i++) {
+        const e = buildQueue[i];
+        if (e.dead || e.mesh) continue;
+        const focusK = e.lod.focused ? 0.18 : 1.0;
+        const prio = (e.lod.nodeDistance(e) / e.size) * focusK;
+        if (prio < bestPriority) {
+          bestPriority = prio;
+          bestIndex = i;
+        }
       }
+      if (bestIndex < 0) {
+        buildQueue.length = 0;
+        break;
+      }
+      const node = buildQueue[bestIndex];
+      buildQueue[bestIndex] = buildQueue[buildQueue.length - 1];
+      buildQueue.pop();
+      node.queued = false;
+      if (node.dead || node.mesh) continue;
+      activeBuildJob = node.lod.createBuildJob(node);
     }
-    if (bestIndex < 0) {
-      buildQueue.length = 0;
-      break;
+
+    attempted = true;
+    if (activeBuildJob.node.lod.stepBuildJob(activeBuildJob, deadline)) {
+      activeBuildJob.node.lod.finishBuildJob(activeBuildJob);
+      activeBuildJob = null;
+      built++;
     }
-    const node = buildQueue[bestIndex];
-    buildQueue[bestIndex] = buildQueue[buildQueue.length - 1];
-    buildQueue.pop();
-    node.queued = false;
-    if (node.dead || node.mesh) continue;
-    node.lod.buildNodeMesh(node);
-    built++;
+    // A partial chunk consumed this frame's budget. Keeping it active avoids
+    // throwing away sampled vertices, while the next frame resumes exactly
+    // where this one stopped.
+    if (activeBuildJob || performance.now() >= deadline) break;
+    if (attempted && performance.now() - t0 >= budgetMs) break;
   }
   return built;
 }
@@ -175,7 +195,13 @@ export class ChunkedLOD {
     // force a minimum subdivision depth from its apparent size
     const d = Math.max(camLocal.length() - this.planet.R, 1);
     const ang = this.planet.R / d;
-    this._forceLevel = ang > 1.2 ? 3 : ang > 0.45 ? 2 : ang > 0.15 ? 1 : 0;
+    const baseForceLevel = ang > 1.2 ? 3 : ang > 0.45 ? 2 : ang > 0.15 ? 1 : 0;
+    if (this.planet.lodLevelForCanonical) {
+      this._forceLevel = this.planet.lodLevelForCanonical(baseForceLevel);
+    } else {
+      const detailOffset = Math.max(0, Math.round(Math.log2(1 / (this.planet.lodDistanceScale || 1))));
+      this._forceLevel = Math.max(0, baseForceLevel - detailOffset);
+    }
     for (const root of this.roots) this.process(root);
   }
 
@@ -200,10 +226,16 @@ export class ChunkedLOD {
     const px = (node.size / Math.max(d, 1)) * PX_PER_RAD;   // apparent size
     node.pxBoost = Math.min(12, Math.max(1, 24 / Math.max(px, 0.01)));
     const beyond = this.beyondHorizon(node);
+    const distanceScale = this.planet.lodDistanceScaleAtLevel
+      ? this.planet.lodDistanceScaleAtLevel(node.level)
+      : this.planet.lodDistanceScale || 1;
+    const splitDistance = SPLIT * distanceScale;
+    const mergeDistance = MERGE * distanceScale;
+    const prefetchDistance = PREFETCH * distanceScale;
     const wantSplit = node.level < this.planet.maxLevel
-      && (d < node.size * SPLIT || node.level < this._forceLevel)
+      && (d < node.size * splitDistance || node.level < this._forceLevel)
       && !beyond;
-    const wantMerge = d > node.size * MERGE || beyond;
+    const wantMerge = d > node.size * mergeDistance || beyond;
 
     if (!node.children && !beyond && node.level < this.planet.maxLevel) {
       // prefetch exists to feed morphs; water (noMorph) swaps sub-pixel and
@@ -211,7 +243,7 @@ export class ChunkedLOD {
       // Focused terrain gets a modest lead for fast descents. Going much
       // farther than this refines the whole visible cap and destroys frame
       // time before the extra geometry is actually resolvable.
-      const reach = this.planet.noMorph ? SPLIT : (this.focused ? 5.8 : PREFETCH);
+      const reach = (this.planet.noMorph ? SPLIT : (this.focused ? 5.8 : PREFETCH)) * distanceScale;
       if (d < node.size * reach || node.level < this._forceLevel) this.createChildren(node);
     }
 
@@ -277,7 +309,7 @@ export class ChunkedLOD {
           }
         }
       } else if (!node.splitActive && node.children && !wantSplit
-        && d > node.size * (PREFETCH + 0.4)) {
+        && d > node.size * (prefetchDistance + 0.4 * distanceScale)) {
         // children were built for a split that never displayed (fast flyby)
         // and we're beyond the prefetch band: dropping them changes nothing
         // on screen (inside the band they stay warm, ready for the approach)
@@ -339,10 +371,34 @@ export class ChunkedLOD {
     node.mergePending = false;
   }
 
+  createBuildJob(node) {
+    return { node, iterator: this.buildNodeMeshGenerator(node) };
+  }
+
+  stepBuildJob(job, deadline) {
+    do {
+      const step = job.iterator.next();
+      if (step.done) return true;
+    } while (performance.now() < deadline);
+    return false;
+  }
+
+  finishBuildJob(job) {
+    // Geometry is committed by the generator only after every attribute and
+    // index is complete, so partially-built chunks never reach rendering.
+    return job.node.mesh;
+  }
+
   buildNodeMesh(node) {
+    const job = this.createBuildJob(node);
+    while (!this.stepBuildJob(job, Infinity)) { /* synchronous root build */ }
+    return this.finishBuildJob(job);
+  }
+
+  *buildNodeMeshGenerator(node) {
     const p = this.planet;
     // flat liquid surfaces don't need dense grids — p.gridCells overrides
-    const N = p.gridCells || GRID_CELLS;
+    const N = p.gridCellsAtLevel ? p.gridCellsAtLevel(node.level) : p.gridCells || GRID_CELLS;
     const cellAngle = (Math.PI / 2) / (N * (1 << node.level));
     const maxFreq = p.freqAtLevel(node.level);
     const eps = cellAngle * 0.5;
@@ -411,6 +467,10 @@ export class ChunkedLOD {
           dNrm[idx * 3 + 1] = _cN.y - _n.y;
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
         }
+        // Yield in small cache-friendly batches. Yielding every vertex creates
+        // millions of short-lived IteratorResult objects during a descent and
+        // eventually hands the render loop a large garbage-collection pause.
+        if ((i & 15) === 15 || i === N) yield;
       }
     }
 
@@ -428,6 +488,7 @@ export class ChunkedLOD {
           const idx = (sj * 2) * (N + 1) + si * 2;
           const hh = Math.hypot(positions[idx * 3], positions[idx * 3 + 1], positions[idx * 3 + 2]) - p.R;
           sub[sj * (SN + 1) + si] = p.sunVis(_dirV, hh);
+          if ((si & 15) === 15 || si === SN) yield;
         }
       }
       for (let j = 0; j <= N; j++) {
@@ -438,6 +499,7 @@ export class ChunkedLOD {
           const c = sub[(j0 + 1) * (SN + 1) + i0], d = sub[(j0 + 1) * (SN + 1) + i0 + 1];
           aMat[(j * (N + 1) + i) * 3 + 2] = (a * (1 - ti) + b * ti) * (1 - tj) + (c * (1 - ti) + d * ti) * tj;
         }
+        yield;
       }
     }
 
@@ -470,22 +532,34 @@ export class ChunkedLOD {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
         dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
       }
+      yield;
     }
 
-    const indices = [];
+    const gridIndexCount = N * N * 6;
+    const skirtIndexCount = p.noSkirt ? 0 : 4 * N * 12;
+    const indices = new Uint16Array(gridIndexCount + skirtIndexCount);
+    let indexCursor = 0;
     // all six FACE_FN have du×dv pointing outward, so CCW (front) is (a,b,c)
     for (let j = 0; j < N; j++) {
       for (let i = 0; i < N; i++) {
         const a = j * (N + 1) + i, b = a + 1, c = a + (N + 1), d = c + 1;
-        indices.push(a, b, c, b, d, c);
+        indices[indexCursor++] = a; indices[indexCursor++] = b;
+        indices[indexCursor++] = c; indices[indexCursor++] = b;
+        indices[indexCursor++] = d; indices[indexCursor++] = c;
       }
+      yield;
     }
     // skirt quads (both windings; backface culling drops the wrong one)
     const skirtEdge = (offset, count, gridIdx) => {
       for (let s = 0; s < count - 1; s++) {
         const g0 = gridIdx(s), g1 = gridIdx(s + 1);
         const s0 = gridVerts + offset + s, s1 = gridVerts + offset + s + 1;
-        indices.push(g0, g1, s0, s0, g1, s1, g0, s0, g1, g1, s0, s1);
+        indices[indexCursor++] = g0; indices[indexCursor++] = g1;
+        indices[indexCursor++] = s0; indices[indexCursor++] = s0;
+        indices[indexCursor++] = g1; indices[indexCursor++] = s1;
+        indices[indexCursor++] = g0; indices[indexCursor++] = s0;
+        indices[indexCursor++] = g1; indices[indexCursor++] = g1;
+        indices[indexCursor++] = s0; indices[indexCursor++] = s1;
       }
     };
     if (!p.noSkirt) {
@@ -520,7 +594,7 @@ export class ChunkedLOD {
       geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];
       geo.morphTargetsRelative = true;
     }
-    geo.setIndex(indices);
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeBoundingSphere();
     if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
 
