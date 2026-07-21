@@ -569,9 +569,8 @@ body.surface-ads #crosshair::after { opacity: 1; }
 .loading-ring { height: 2px; background: #263436; overflow: hidden; position: relative; }
 .loading-ring::after {
   content: ""; position: absolute; inset: 0; background: #dfe7e7;
-  transform-origin: left; animation: load-sweep 1.4s cubic-bezier(.2, .7, .2, 1) infinite;
+  transform-origin: left; transform: scaleX(var(--loading-progress, 0));
 }
-@keyframes load-sweep { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 #loading-text { margin-top: 14px; font: 700 13px/1 var(--ui-font); letter-spacing: 5px; color: var(--ui-white); }
 
 /* ---- full-page hero / start screen ------------------------------------------- */
@@ -832,7 +831,6 @@ body.walking #app, body.walking #app * { cursor: none !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .loading-ring::after { animation-duration: 2.4s; }
   .pause-panel.is-acquiring .pause-state i { animation: none; }
   .pause-actions button { transition: none; }
 }

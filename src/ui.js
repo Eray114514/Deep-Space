@@ -301,6 +301,17 @@ export class UI {
     if (text) this.els.loadingText.textContent = text;
   }
 
+  // Drives the loading bar from the per-frame startup readiness check in
+  // main.js. `progress` is 0..1; the bar only moves forward (we never lie
+  // about regressing) and snaps to 1 just before setLoading(false) hides the
+  // screen.
+  setLoadingProgress(progress) {
+    const p = Math.max(0, Math.min(1, progress));
+    if (this._loadingProgress === p) return;
+    this._loadingProgress = p;
+    this.els.loading.style.setProperty('--loading-progress', p.toFixed(4));
+  }
+
   setStats(text) { this.els.stats.textContent = text; }
 
   setDevFps(fps) { this.els.devFps.textContent = `${Math.max(0, Math.round(fps))} FPS`; }

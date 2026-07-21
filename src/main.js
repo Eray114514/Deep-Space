@@ -482,6 +482,10 @@ let referenceBodyFrameValid = false;
 let frameNo = 0;
 let lastBuildFrame = 0;
 let loadingCleared = false;
+// Displayed loading bar progress (0..1). Only moves forward — driven by
+// discrete startup milestones in tickLoading so the bar reflects real
+// pipeline readiness instead of an infinite CSS sweep.
+let loadingProgress = 0;
 let paused = false;
 let blackHoleObservatoryOpen = false;
 let pointerLockRequest = null;
@@ -2909,6 +2913,21 @@ function frame() {
   const startupTerrainTimedOut = performance.now() - startupWarmStartedAt
     >= STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS;
   const terrainReady = startupTerrainReady() || startupTerrainTimedOut;
+  if (!loadingCleared) {
+    // Stage-weighted target — only moves forward. Each milestone contributes
+    // a fixed slice so the bar reflects real pipeline readiness instead of an
+    // infinite CSS sweep that resets to zero.
+    let target = 0;
+    if (frameNo >= 3) target += 0.15;
+    if (surfacePipelinesReady) target += 0.35;
+    if (startupAssetsReady) target += 0.25;
+    if (terrainReady) target += 0.25;
+    if (loadingProgress < target) {
+      loadingProgress += (target - loadingProgress) * Math.min(1, dt * 5);
+      if (loadingProgress > target) loadingProgress = target;
+    }
+    ui.setLoadingProgress(loadingProgress);
+  }
   if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady
     && startupAssetsReady && terrainReady) {
     if (!shipPipelinesWarmed) {
@@ -2918,6 +2937,20 @@ function frame() {
         else mesh.geometry.dispose();
       }
     }
+    loadingProgress = 1;
+    ui.setLoadingProgress(1);
+    loadingCleared = true;
+    ui.setLoading(false);
+  } else if (!loadingCleared
+    && performance.now() - startupWarmStartedAt
+      > STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS + 3000) {
+    // Safety net: every individual stage has its own timeout, but if some
+    // unforeseen interaction (driver reset, missed rAF, extension blocking
+    // compileAsync) leaves the mask up past the worst-case budget, force it
+    // down so the player is never stranded on the loading screen.
+    console.warn('loading mask forced clear by safety-net timeout');
+    loadingProgress = 1;
+    ui.setLoadingProgress(1);
     loadingCleared = true;
     ui.setLoading(false);
   }
@@ -2928,7 +2961,7 @@ const SHOW_HERO = qs.get('nohero') !== '1' && !window.NMS_NOLOCK;
 // Hero opens tight on the home planet's limb behind the start page; the
 // nohero/test path keeps the classic spawn orbit so captures stay stable.
 spawn(SHOW_HERO);
-ui.setLoading(true, 'generating universe…');
+ui.setLoading(true, '加载中');
 ui.showHero(SHOW_HERO);
 if (SHOW_HERO) spaceCtl.enabled = false;
 const bootstrapSurfacePlanet = universe.system.planets[0];
