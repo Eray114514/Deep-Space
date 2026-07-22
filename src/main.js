@@ -794,6 +794,9 @@ const ui = new UI({
       // A denied initial request falls back to the next canvas click; controls
       // must be enabled so that click can actually reach SpaceControls.
       spaceCtl.enabled = state === 'space';
+      // The ship has slid into formation — fade cockpit chrome in now instead
+      // of snapping it on at the start of the pull-back.
+      ui.revealChrome();
     });
     await lockAttempt;
   },
@@ -3000,7 +3003,9 @@ const SHOW_HERO = qs.get('nohero') !== '1' && !window.NMS_NOLOCK;
 // nohero/test path keeps the classic spawn orbit so captures stay stable.
 spawn(SHOW_HERO);
 ui.setLoading(true, '加载中');
-ui.showHero(SHOW_HERO);
+// Bootstrap shows the pre-hero splash (clean "Deep Space" title card) behind
+// the loading veil; a click dissolves into the full hero start page.
+ui.showSplash(SHOW_HERO);
 if (SHOW_HERO) spaceCtl.enabled = false;
 const bootstrapSurfacePlanet = universe.system.planets[0];
 if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {

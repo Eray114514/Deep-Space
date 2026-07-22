@@ -25,6 +25,7 @@ export class UI {
       brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
+      heroSplash: $('hero-splash'),
       heroPerfHint: $('hero-perf-hint'), perfTutorial: $('perf-tutorial'), perfTutorialClose: $('perf-tutorial-close'),
       arrivalTitle: $('arrival-title'), arrivalKicker: $('arrival-kicker'),
       arrivalName: $('arrival-name'), arrivalSystem: $('arrival-system'),
@@ -64,6 +65,15 @@ export class UI {
       }
     };
     document.addEventListener('keydown', this._perfTutorialKey);
+    // Pre-hero splash: click / Enter / Space dissolves into the hero. The
+    // loading veil sits above the splash until bootstrap finishes, so this
+    // stays inert until setLoading(false) plays the entrance animation.
+    if (this.els.heroSplash) {
+      this.els.heroSplash.addEventListener('click', () => this.hideSplash());
+      this.els.heroSplash.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.hideSplash(); }
+      });
+    }
     this.setupTouch();
   }
 
@@ -206,8 +216,9 @@ export class UI {
   }
 
   showHero(show = true) {
-    this.els.hero.classList.toggle('hidden', !show);
-    this.els.hero.classList.remove('hero-leaving');
+    const hero = this.els.hero;
+    hero.classList.toggle('hidden', !show);
+    hero.classList.remove('hero-leaving');
     // Hides every piece of flight chrome while the start page owns the screen.
     document.body.classList.toggle('hero-active', show);
     if (this.els.heroSeed) {
@@ -216,16 +227,76 @@ export class UI {
         : 'DEEP SPACE';
     }
     if (this.els.heroBuild) this.els.heroBuild.textContent = document.getElementById('version')?.textContent || '—';
-    if (show) queueMicrotask(() => this.els.heroStart.focus());
+    if (show) {
+      // Fade the overlay in (used when dissolving from the splash). hero-faded
+      // holds opacity 0 for one committed frame before the transition fires.
+      hero.classList.add('hero-faded');
+      requestAnimationFrame(() => requestAnimationFrame(() => hero.classList.remove('hero-faded')));
+      queueMicrotask(() => this.els.heroStart.focus());
+    } else {
+      hero.classList.remove('hero-faded');
+    }
   }
 
+  // Pre-hero title card. Shown behind the loading veil at init; the entrance
+  // animation is triggered by setLoading(false) once bootstrap completes.
+  showSplash(show = true) {
+    const splash = this.els.heroSplash;
+    if (!splash || !show) return;
+    this._splashAnimated = false;
+    document.body.classList.add('hero-active');
+    document.body.classList.remove('hud-cloaked');
+    splash.classList.remove('hidden', 'splash-leaving', 'hero-splash-in');
+  }
+
+  playSplashEntrance() {
+    const splash = this.els.heroSplash;
+    if (!splash || splash.classList.contains('hidden') || this._splashAnimated) return;
+    this._splashAnimated = true;
+    // Restart the keyframes from a clean frame.
+    splash.classList.remove('hero-splash-in');
+    void splash.offsetWidth;
+    splash.classList.add('hero-splash-in');
+  }
+
+  hideSplash() {
+    const splash = this.els.heroSplash;
+    if (!splash || splash.classList.contains('hidden')) return;
+    splash.classList.add('splash-leaving');
+    // Cross-dissolve: hero fades in behind the splash veil as it fades out.
+    this.showHero(true);
+    setTimeout(() => {
+      splash.classList.add('hidden');
+      splash.classList.remove('splash-leaving', 'hero-splash-in');
+      this._splashAnimated = false;
+    }, 620);
+  }
+
+  // Lifts a chrome-hiding state (hero-active / travel-cinematic) with a fade
+  // instead of a snap. Adds a one-frame opacity cloak so the display:none ->
+  // display:block switch happens while opacity is 0, then removes the cloak on
+  // the next frame so the .8s opacity transition fires.
+  _revealChrome(hidingClass) {
+    const body = document.body;
+    body.classList.remove('hud-cloaked');
+    if (!body.classList.contains(hidingClass)) return;
+    body.classList.add('hud-cloaked');
+    body.classList.remove(hidingClass);
+    requestAnimationFrame(() => requestAnimationFrame(() => body.classList.remove('hud-cloaked')));
+  }
+
+  // Called by main.js when the hero pull-back cinematic finishes — the ship is
+  // in formation, so cockpit chrome can fade in.
+  revealChrome() { this._revealChrome('hero-active'); }
+
   // Start button: fade the overlay out, then hand off to the cinematic start.
+  // hero-active stays until revealChrome() lifts it at the end of the pull-back
+  // so cockpit chrome stays hidden while the ship slides into formation.
   hideHero() {
     this.els.hero.classList.add('hero-leaving');
     setTimeout(() => {
       this.els.hero.classList.add('hidden');
-      // Flight chrome returns once the pull-back cinematic owns the frame.
-      document.body.classList.remove('hero-active');
+      this.els.hero.classList.remove('hero-faded');
     }, 580);
   }
 
@@ -290,6 +361,9 @@ export class UI {
     clearTimeout(this._arrivalHideTimer);
     this.els.arrivalTitle.classList.add('hidden');
     this.els.arrivalTitle.classList.remove('arrival-visible');
+    // Cancel any in-flight chrome reveal so the cloak does not linger across
+    // the next travel cycle.
+    document.body.classList.remove('hud-cloaked');
     document.body.classList.add('travel-cinematic');
   }
 
@@ -308,7 +382,9 @@ export class UI {
       this.els.arrivalTitle.classList.remove('arrival-visible');
       this._arrivalHideTimer = setTimeout(() => {
         this.els.arrivalTitle.classList.add('hidden');
-        document.body.classList.remove('travel-cinematic');
+        // Cockpit chrome fades back in as the arrival title clears, instead
+        // of snapping on at the end of the travel cinematic.
+        this._revealChrome('travel-cinematic');
       }, 700);
     }, 2800);
   }
@@ -319,7 +395,7 @@ export class UI {
     cancelAnimationFrame(this._arrivalRaf);
     this.els.arrivalTitle.classList.add('hidden');
     this.els.arrivalTitle.classList.remove('arrival-visible');
-    document.body.classList.remove('travel-cinematic');
+    this._revealChrome('travel-cinematic');
   }
 
   setDestinationMarker({ show = false, name = '', distance = '', x = 0, y = 0, behind = false } = {}) {
@@ -345,6 +421,11 @@ export class UI {
   setLoading(show, text) {
     this.els.loading.classList.toggle('hidden', !show);
     if (text) this.els.loadingText.textContent = text;
+    if (!show) {
+      // The loading veil has just lifted — now play the pre-hero splash
+      // entrance so the title animation isn't wasted behind the veil.
+      this.playSplashEntrance();
+    }
   }
 
   // Drives the loading bar from the per-frame startup readiness check in

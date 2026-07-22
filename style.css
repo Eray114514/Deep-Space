@@ -596,6 +596,24 @@ body.surface-ads #crosshair::after { opacity: 1; }
 .travel-cinematic #version, .travel-cinematic #performance-notice,
 .travel-cinematic #touch-ui, .travel-cinematic #ship-hud-stage { display: none !important; }
 
+/* Flight cockpit chrome fades in after the hero pull-back / warp arrival
+   instead of snapping on. hud-cloaked holds opacity 0 for one frame while a
+   hiding class (hero-active / travel-cinematic) is lifted, then a rAF removes
+   the cloak so the opacity transition fires. Elements that carry their own
+   .hidden stay display:none and are unaffected. */
+#brand, #ship-hud-stage, #star-map-btn, #destination-marker, #route-choice,
+#walk-hud, #surface-weapon, #bottom, #crosshair, #stats, #dev-fps,
+#version, #time-warp-indicator, #touch-ui, #performance-notice {
+  transition: opacity .8s cubic-bezier(.22, .61, .36, 1);
+}
+body.hud-cloaked #brand, body.hud-cloaked #ship-hud-stage, body.hud-cloaked #star-map-btn,
+body.hud-cloaked #destination-marker, body.hud-cloaked #route-choice, body.hud-cloaked #walk-hud,
+body.hud-cloaked #surface-weapon, body.hud-cloaked #bottom, body.hud-cloaked #crosshair,
+body.hud-cloaked #stats, body.hud-cloaked #dev-fps, body.hud-cloaked #version,
+body.hud-cloaked #time-warp-indicator, body.hud-cloaked #touch-ui, body.hud-cloaked #performance-notice {
+  opacity: 0 !important;
+}
+
 #arrival-title {
   position: fixed; z-index: 40; left: 50%; top: clamp(42px, 8vh, 92px);
   width: min(620px, calc(100vw - 48px)); transform: translate(-50%, -10px);
@@ -622,6 +640,48 @@ body.surface-ads #crosshair::after { opacity: 1; }
 }
 #loading-text { margin-top: 14px; font: 700 13px/1 var(--ui-font); letter-spacing: 5px; color: var(--ui-white); }
 
+/* ---- pre-hero splash: clean premium title card, click to enter the hero ------- */
+#hero-splash {
+  position: fixed; z-index: 49; inset: 0; display: grid; place-items: center;
+  cursor: pointer; outline: 0; transition: opacity .6s ease;
+}
+#hero-splash.hidden { display: none; }
+#hero-splash.splash-leaving { opacity: 0; pointer-events: none; }
+.hero-splash-veil { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 42%, rgba(8, 14, 20, .82), rgba(3, 6, 9, .97) 76%); }
+.hero-splash-inner { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 0; text-align: center; }
+.hero-splash-eyebrow { color: var(--ui-cyan); font: 600 10px/1 var(--ui-mono); letter-spacing: .34em; opacity: 0; }
+.hero-splash-title {
+  margin: 22px 0 0; font: 200 clamp(48px, 9vw, 132px)/1 var(--ui-font);
+  color: var(--ui-white); text-shadow: 0 0 48px rgba(62, 212, 232, .16);
+  display: inline-flex; gap: .28em;
+}
+.hero-splash-title span { display: inline-block; opacity: 0; }
+.hero-splash-rule { width: clamp(160px, 22vw, 280px); height: 1px; margin-top: 30px; background: linear-gradient(90deg, transparent, var(--ui-cyan), transparent); transform-origin: center; opacity: 0; box-shadow: 0 0 12px rgba(62, 212, 232, .35); }
+.hero-splash-cta { margin-top: 26px; color: var(--ui-white); font: 500 11px/1 var(--ui-mono); letter-spacing: .42em; text-transform: uppercase; opacity: 0; }
+
+@keyframes splash-eyebrow-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes splash-word-in {
+  from { opacity: 0; transform: translateY(20px); filter: blur(14px); letter-spacing: .42em; }
+  to   { opacity: 1; transform: translateY(0); filter: blur(0); letter-spacing: .14em; }
+}
+@keyframes splash-rule-in { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
+@keyframes splash-cta-in { from { opacity: 0; transform: translateY(8px); } to { opacity: .6; transform: translateY(0); } }
+@keyframes splash-cta-pulse { 0%, 100% { opacity: .6; } 50% { opacity: .95; } }
+
+#hero-splash.hero-splash-in .hero-splash-eyebrow { animation: splash-eyebrow-in 1s cubic-bezier(.2,.7,.2,1) .1s both; }
+#hero-splash.hero-splash-in .hero-splash-title span { animation: splash-word-in 1.5s cubic-bezier(.2,.7,.2,1) .25s both; }
+#hero-splash.hero-splash-in .hero-splash-title span:nth-child(2) { animation-delay: .42s; }
+#hero-splash.hero-splash-in .hero-splash-rule { animation: splash-rule-in 1.1s cubic-bezier(.2,.7,.2,1) .7s both; }
+#hero-splash.hero-splash-in .hero-splash-cta { animation: splash-cta-in .9s ease 1.4s both, splash-cta-pulse 2.6s ease-in-out 2.3s infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  #hero-splash.hero-splash-in .hero-splash-eyebrow,
+  #hero-splash.hero-splash-in .hero-splash-title span,
+  #hero-splash.hero-splash-in .hero-splash-rule,
+  #hero-splash.hero-splash-in .hero-splash-cta { animation: none; opacity: 1; }
+  .hero-splash-cta { opacity: .7; }
+}
+
 /* ---- full-page hero / start screen ------------------------------------------- */
 #hero-overlay {
   position: fixed; z-index: 48; inset: 0; overflow: hidden;
@@ -629,6 +689,7 @@ body.surface-ads #crosshair::after { opacity: 1; }
   transition: opacity .55s ease;
 }
 #hero-overlay.hero-leaving { opacity: 0; pointer-events: none; }
+#hero-overlay.hero-faded { opacity: 0; }
 /* While the start page is up, every piece of flight chrome stays out of the
    frame — the menu owns the screen, the live planet owns the backdrop. */
 body.hero-active #brand, body.hero-active #compass, body.hero-active #flight-telemetry,
