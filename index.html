@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>深空 · 连续宇宙</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="style.css?v=0.37.6" />
-  <link rel="stylesheet" href="src/starmap.css?v=0.37.6" />
+  <link rel="stylesheet" href="style.css?v=0.37.7" />
+  <link rel="stylesheet" href="src/starmap.css?v=0.37.7" />
   <script type="importmap">
     {
       "imports": {
@@ -146,36 +146,48 @@
     <div class="hero-topline" aria-hidden="true">
       <span>AF/S9 航行系统</span><b>远征序列 01</b>
     </div>
-    <div class="hero-wordmark">
-      <span class="hero-wordmark-eyebrow">ASTERION FRONTIER · CONTINUOUS UNIVERSE</span>
-      <h1 class="hero-wordmark-main">DEEP SPACE</h1>
-      <span class="hero-wordmark-cn">深 空</span>
-      <i class="hero-wordmark-rule" aria-hidden="true"></i>
+    <div class="hero-content">
+      <div class="hero-wordmark">
+        <span class="hero-wordmark-eyebrow">ASTERION FRONTIER · CONTINUOUS UNIVERSE</span>
+        <h1 class="hero-wordmark-main">DEEP SPACE</h1>
+        <span class="hero-wordmark-cn">深 空</span>
+        <i class="hero-wordmark-rule" aria-hidden="true"></i>
+      </div>
+      <div class="hero-menu-block">
+        <nav class="hero-menu" aria-label="主菜单">
+          <button id="hero-start-btn" class="hero-menu-item">
+            <span class="hero-menu-copy">
+              <span class="hero-menu-eyebrow">开始</span>
+              <span class="hero-menu-label">开始游戏</span>
+            </span>
+            <kbd>ENTER</kbd>
+          </button>
+          <button class="hero-menu-item" disabled aria-disabled="true">
+            <span class="hero-menu-copy">
+              <span class="hero-menu-eyebrow">继续</span>
+              <span class="hero-menu-label">继续航行</span>
+            </span>
+            <kbd>—</kbd>
+          </button>
+          <button class="hero-menu-item" disabled aria-disabled="true">
+            <span class="hero-menu-copy">
+              <span class="hero-menu-eyebrow">系统</span>
+              <span class="hero-menu-label">设置</span>
+            </span>
+            <kbd>—</kbd>
+          </button>
+        </nav>
+        <p class="hero-note">音频链路将在接管后启动 · 建议佩戴耳机</p>
+        <button id="hero-perf-hint" class="hero-perf-hint hidden" type="button" aria-haspopup="dialog" aria-controls="perf-tutorial">
+          <i class="hero-perf-hint-glyph" aria-hidden="true"></i>
+          <span class="hero-perf-hint-copy">
+            <span class="hero-perf-hint-title">检测到核显 / 低性能设备</span>
+            <span class="hero-perf-hint-sub">画面可能偏卡 · 点击查看启用独显教程</span>
+          </span>
+          <kbd>→</kbd>
+        </button>
+      </div>
     </div>
-    <nav class="hero-menu" aria-label="主菜单">
-      <button id="hero-start-btn" class="hero-menu-item">
-        <span class="hero-menu-copy">
-          <span class="hero-menu-eyebrow">开始</span>
-          <span class="hero-menu-label">开始游戏</span>
-        </span>
-        <kbd>ENTER</kbd>
-      </button>
-      <button class="hero-menu-item" disabled aria-disabled="true">
-        <span class="hero-menu-copy">
-          <span class="hero-menu-eyebrow">继续</span>
-          <span class="hero-menu-label">继续航行</span>
-        </span>
-        <kbd>—</kbd>
-      </button>
-      <button class="hero-menu-item" disabled aria-disabled="true">
-        <span class="hero-menu-copy">
-          <span class="hero-menu-eyebrow">系统</span>
-          <span class="hero-menu-label">设置</span>
-        </span>
-        <kbd>—</kbd>
-      </button>
-    </nav>
-    <p class="hero-note">音频链路将在接管后启动 · 建议佩戴耳机</p>
     <div class="hero-bottomline" aria-hidden="true">
       <span>UNIVERSE <b id="hero-seed">DEEP SPACE</b></span>
       <span>BUILD <b id="hero-build">—</b></span>
@@ -235,6 +247,48 @@
   </section>
   <div id="err" class="hidden"></div>
 
-  <script type="module" src="src/main.js?v=0.37.6"></script>
+  <section id="perf-tutorial" class="hidden" role="dialog" aria-modal="true" aria-labelledby="perf-tutorial-title">
+    <div class="perf-tutorial-panel">
+      <header class="perf-tutorial-header">
+        <div class="perf-tutorial-titleblock">
+          <span class="perf-tutorial-eyebrow">AF/S9 · GRAPHICS SETUP</span>
+          <h2 id="perf-tutorial-title">启用独立显卡</h2>
+          <i class="perf-tutorial-rule" aria-hidden="true"></i>
+        </div>
+        <button id="perf-tutorial-close" type="button" aria-label="关闭教程">×</button>
+      </header>
+      <ol class="perf-tutorial-steps">
+        <li>
+          <span class="perf-step-num">01</span>
+          <div class="perf-step-body">
+            <b>打开 Windows 图形设置</b>
+            <p>按 <kbd>Win</kbd> 键搜索“图形设置”并打开；或进入 <em>设置 → 系统 → 显示 → 图形</em>（Windows 11）/ <em>图形设置</em>（Windows 10）。</p>
+          </div>
+        </li>
+        <li>
+          <span class="perf-step-num">02</span>
+          <div class="perf-step-body">
+            <b>找到浏览器的 exe 文件</b>
+            <p>右键浏览器桌面快捷方式 → “打开文件所在位置”，资源管理器会跳转到 exe 所在目录。常见路径：</p>
+            <ul class="perf-step-paths">
+              <li><span>Edge</span><code>C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</code></li>
+              <li><span>Chrome</span><code>C:\Program Files\Google\Chrome\Application\chrome.exe</code></li>
+              <li><span>Firefox</span><code>C:\Program Files\Mozilla Firefox\firefox.exe</code></li>
+            </ul>
+          </div>
+        </li>
+        <li>
+          <span class="perf-step-num">03</span>
+          <div class="perf-step-body">
+            <b>设为“高性能”并重启浏览器</b>
+            <p>在图形设置中点“浏览”选中浏览器 exe，回到列表点该条目 → 选项 → 选“高性能” → 保存。完全关闭浏览器后重新打开，刷新本页即可启用独显。</p>
+          </div>
+        </li>
+      </ol>
+      <footer><span>若不便调整，可访问 <code>?quality=low</code> 降低渲染负载；独显启用后刷新本页即可。</span></footer>
+    </div>
+  </section>
+
+  <script type="module" src="src/main.js?v=0.37.7"></script>
 </body>
 </html>

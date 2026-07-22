@@ -794,9 +794,6 @@ const ui = new UI({
       // A denied initial request falls back to the next canvas click; controls
       // must be enabled so that click can actually reach SpaceControls.
       spaceCtl.enabled = state === 'space';
-      if (/Intel/i.test(gpuName)) {
-        ui.setPerformanceNotice('当前浏览器正在使用 Intel 核显；在 Windows 图形设置中将浏览器设为“高性能”可启用 RTX 独显。', 12000);
-      }
     });
     await lockAttempt;
   },
@@ -807,6 +804,9 @@ const ui = new UI({
   onRouteCancel: () => clearPendingRoute(),
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
 });
+// Surface a clickable low-power GPU hint on the hero start page before the
+// first frame, so the player can switch the browser to its discrete GPU.
+ui.setHeroPerfHint(AUTO_LOW_GPU, gpuName);
 starMap = new StarMap({
   getUniverse: () => universe,
   getNav: () => nav,

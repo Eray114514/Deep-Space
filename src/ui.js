@@ -25,6 +25,7 @@ export class UI {
       brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
+      heroPerfHint: $('hero-perf-hint'), perfTutorial: $('perf-tutorial'), perfTutorialClose: $('perf-tutorial-close'),
       arrivalTitle: $('arrival-title'), arrivalKicker: $('arrival-kicker'),
       arrivalName: $('arrival-name'), arrivalSystem: $('arrival-system'),
       heroSeed: $('hero-seed'), heroBuild: $('hero-build'),
@@ -45,6 +46,24 @@ export class UI {
       this.cb.onStart?.();
       window.dispatchEvent(new CustomEvent('game-user-start'));
     });
+    if (this.els.heroPerfHint) {
+      this.els.heroPerfHint.addEventListener('click', () => this.showPerfTutorial(true));
+    }
+    if (this.els.perfTutorialClose) {
+      this.els.perfTutorialClose.addEventListener('click', () => this.showPerfTutorial(false));
+    }
+    if (this.els.perfTutorial) {
+      // Click on the backdrop (not the panel) closes the dialog.
+      this.els.perfTutorial.addEventListener('click', (e) => {
+        if (e.target === this.els.perfTutorial) this.showPerfTutorial(false);
+      });
+    }
+    this._perfTutorialKey = (e) => {
+      if (e.key === 'Escape' && this.els.perfTutorial && !this.els.perfTutorial.classList.contains('hidden')) {
+        this.showPerfTutorial(false);
+      }
+    };
+    document.addEventListener('keydown', this._perfTutorialKey);
     this.setupTouch();
   }
 
@@ -231,6 +250,33 @@ export class UI {
       notice.classList.add('notice-fade');
       this._performanceNoticeFadeTimer = setTimeout(() => notice.classList.add('hidden'), 700);
     }, timeout);
+  }
+
+  // Surfaces an inline hint on the hero start page when a low-power GPU is
+  // detected. The hint is clickable and opens a short Windows graphics-setup
+  // tutorial so the player can switch the browser to its discrete GPU before
+  // the first frame. gpuName customises the title for the detected adapter.
+  setHeroPerfHint(visible, gpuName = '') {
+    const hint = this.els.heroPerfHint;
+    if (!hint) return;
+    if (visible && gpuName) {
+      const sub = hint.querySelector('.hero-perf-hint-sub');
+      if (sub && !/Intel|AMD|SwiftShader|llvmpipe|Basic Render/i.test(gpuName)) {
+        sub.textContent = '当前设备图形性能受限 · 点击查看优化教程';
+      }
+    }
+    hint.classList.toggle('hidden', !visible);
+  }
+
+  showPerfTutorial(show = true) {
+    const dialog = this.els.perfTutorial;
+    if (!dialog) return;
+    dialog.classList.toggle('hidden', !show);
+    if (show) {
+      queueMicrotask(() => this.els.perfTutorialClose?.focus());
+    } else if (this.els.heroPerfHint && !this.els.hero?.classList.contains('hidden')) {
+      this.els.heroPerfHint.focus();
+    }
   }
 
   showRouteChoice(show, name = '') {
