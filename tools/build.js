@@ -16,6 +16,17 @@ for (const folder of ['src', 'vendor', 'assets', 'worlds']) {
   await cp(join(ROOT, folder), join(OUT, folder), { recursive: true });
 }
 
+// The source import map points into node_modules for local dev. The built
+// output vendors the needed addons under vendor/three-addons/ so static hosts
+// that honour .gitignore still upload them; rewrite the map accordingly.
+const indexHtmlPath = join(OUT, 'index.html');
+let indexHtml = await readFile(indexHtmlPath, 'utf8');
+indexHtml = indexHtml.replace(
+  '"three/addons/": "./node_modules/three/examples/jsm/"',
+  '"three/addons/": "./vendor/three-addons/"'
+);
+await writeFile(indexHtmlPath, indexHtml, 'utf8');
+
 const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
 const BUILD_VERSION = pkg.version;
 
