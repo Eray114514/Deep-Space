@@ -265,6 +265,8 @@ export class UI {
     splash.classList.add('splash-leaving');
     // Cross-dissolve: hero fades in behind the splash veil as it fades out.
     this.showHero(true);
+    // First user gesture — unlock audio so the hero start page has sound.
+    this.cb.onEnterHero?.();
     setTimeout(() => {
       splash.classList.add('hidden');
       splash.classList.remove('splash-leaving', 'hero-splash-in');

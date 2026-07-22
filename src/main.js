@@ -780,14 +780,18 @@ window.addEventListener('keydown', (e) => {
 const ui = new UI({
   worldLab: WORLD_LAB,
   galaxyName: GALAXY.name,
-  onStart: async () => {
-    // Pointer Lock must be requested in the original click gesture. Audio
-    // resume can settle slowly on some browsers and must never hold camera
-    // ownership in a half-enabled state.
-    const lockAttempt = requestGameplayPointerLock();
+  onEnterHero: () => {
+    // The splash "点击进入" click is the first user gesture — unlock audio
+    // here so the hero start page already has sound, and the later "开始游戏"
+    // click only needs to handle pointer lock + the pull-back cinematic.
     unlockAudio();
     audio.setPaused(false);
     music.setPaused(false);
+  },
+  onStart: async () => {
+    // Pointer Lock must be requested in the original click gesture. Audio
+    // was already unlocked when the player entered the hero start page.
+    const lockAttempt = requestGameplayPointerLock();
     // One-shot cinematic: pull the camera back from the home planet's limb to
     // the full-orbit spawn frame while the ship slides into formation.
     startHeroPullBack(() => {
