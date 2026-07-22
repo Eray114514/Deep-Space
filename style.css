@@ -641,45 +641,53 @@ body.hud-cloaked #time-warp-indicator, body.hud-cloaked #touch-ui, body.hud-cloa
 #loading-text { margin-top: 14px; font: 700 13px/1 var(--ui-font); letter-spacing: 5px; color: var(--ui-white); }
 
 /* ---- pre-hero splash: clean premium title card, click to enter the hero ------- */
+/* Opaque dark plate identical to the loading veil so the splash reads as a
+   continuation of the boot screen, not the live planet. The planet + hero
+   only appear when the player clicks and this layer fades out. */
 #hero-splash {
   position: fixed; z-index: 49; inset: 0; display: grid; place-items: center;
-  cursor: pointer; outline: 0; transition: opacity .6s ease;
+  cursor: pointer; outline: 0; background: #03090c; transition: opacity .6s ease;
 }
 #hero-splash.hidden { display: none; }
 #hero-splash.splash-leaving { opacity: 0; pointer-events: none; }
-.hero-splash-veil { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 42%, rgba(8, 14, 20, .82), rgba(3, 6, 9, .97) 76%); }
+.hero-splash-veil { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 46%, rgba(14, 24, 33, .55), rgba(3, 9, 12, 0) 62%); pointer-events: none; }
 .hero-splash-inner { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 0; text-align: center; }
-.hero-splash-eyebrow { color: var(--ui-cyan); font: 600 10px/1 var(--ui-mono); letter-spacing: .34em; opacity: 0; }
+.hero-splash-eyebrow { color: var(--ui-cyan); font: 600 10px/1 var(--ui-mono); letter-spacing: .42em; text-transform: uppercase; opacity: 0; }
 .hero-splash-title {
-  margin: 22px 0 0; font: 200 clamp(48px, 9vw, 132px)/1 var(--ui-font);
-  color: var(--ui-white); text-shadow: 0 0 48px rgba(62, 212, 232, .16);
-  display: inline-flex; gap: .28em;
+  margin: 26px 0 0; font: 200 clamp(46px, 8.4vw, 120px)/1 var(--ui-font);
+  letter-spacing: .14em; color: var(--ui-white);
+  text-shadow: 0 0 56px rgba(62, 212, 232, .14);
+  display: inline-flex; gap: .22em;
 }
 .hero-splash-title span { display: inline-block; opacity: 0; }
-.hero-splash-rule { width: clamp(160px, 22vw, 280px); height: 1px; margin-top: 30px; background: linear-gradient(90deg, transparent, var(--ui-cyan), transparent); transform-origin: center; opacity: 0; box-shadow: 0 0 12px rgba(62, 212, 232, .35); }
-.hero-splash-cta { margin-top: 26px; color: var(--ui-white); font: 500 11px/1 var(--ui-mono); letter-spacing: .42em; text-transform: uppercase; opacity: 0; }
+.hero-splash-rule { width: 0; height: 1px; margin-top: 32px; background: linear-gradient(90deg, transparent, var(--ui-cyan), transparent); box-shadow: 0 0 12px rgba(62, 212, 232, .35); opacity: 0; }
+.hero-splash-cta { margin-top: 28px; color: var(--ui-white); font: 400 11px/1 var(--ui-mono); letter-spacing: .46em; text-transform: uppercase; opacity: 0; }
 
-@keyframes splash-eyebrow-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+/* Restrained premium reveal: a slow fade with a slight rise and a soft blur
+   that clears gently. Letter-spacing stays fixed (morphing it read as jitter).
+   The two words cascade with a small delay so the title "writes" itself. */
+@keyframes splash-eyebrow-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: .85; transform: translateY(0); } }
 @keyframes splash-word-in {
-  from { opacity: 0; transform: translateY(20px); filter: blur(14px); letter-spacing: .42em; }
-  to   { opacity: 1; transform: translateY(0); filter: blur(0); letter-spacing: .14em; }
+  from { opacity: 0; transform: translateY(14px); filter: blur(8px); }
+  to   { opacity: 1; transform: translateY(0); filter: blur(0); }
 }
-@keyframes splash-rule-in { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
-@keyframes splash-cta-in { from { opacity: 0; transform: translateY(8px); } to { opacity: .6; transform: translateY(0); } }
-@keyframes splash-cta-pulse { 0%, 100% { opacity: .6; } 50% { opacity: .95; } }
+@keyframes splash-rule-in { from { width: 0; opacity: 0; } to { width: clamp(160px, 22vw, 280px); opacity: 1; } }
+@keyframes splash-cta-in { from { opacity: 0; transform: translateY(6px); } to { opacity: .55; transform: translateY(0); } }
+@keyframes splash-cta-pulse { 0%, 100% { opacity: .55; } 50% { opacity: .9; } }
 
-#hero-splash.hero-splash-in .hero-splash-eyebrow { animation: splash-eyebrow-in 1s cubic-bezier(.2,.7,.2,1) .1s both; }
-#hero-splash.hero-splash-in .hero-splash-title span { animation: splash-word-in 1.5s cubic-bezier(.2,.7,.2,1) .25s both; }
-#hero-splash.hero-splash-in .hero-splash-title span:nth-child(2) { animation-delay: .42s; }
-#hero-splash.hero-splash-in .hero-splash-rule { animation: splash-rule-in 1.1s cubic-bezier(.2,.7,.2,1) .7s both; }
-#hero-splash.hero-splash-in .hero-splash-cta { animation: splash-cta-in .9s ease 1.4s both, splash-cta-pulse 2.6s ease-in-out 2.3s infinite; }
+#hero-splash.hero-splash-in .hero-splash-eyebrow { animation: splash-eyebrow-in 1.1s cubic-bezier(.22,.61,.36,1) .15s both; }
+#hero-splash.hero-splash-in .hero-splash-title span { animation: splash-word-in 1.6s cubic-bezier(.22,.61,.36,1) .35s both; }
+#hero-splash.hero-splash-in .hero-splash-title span:nth-child(2) { animation-delay: .5s; }
+#hero-splash.hero-splash-in .hero-splash-rule { animation: splash-rule-in 1.2s cubic-bezier(.22,.61,.36,1) .95s both; }
+#hero-splash.hero-splash-in .hero-splash-cta { animation: splash-cta-in 1s ease 1.6s both, splash-cta-pulse 2.8s ease-in-out 2.6s infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   #hero-splash.hero-splash-in .hero-splash-eyebrow,
   #hero-splash.hero-splash-in .hero-splash-title span,
   #hero-splash.hero-splash-in .hero-splash-rule,
   #hero-splash.hero-splash-in .hero-splash-cta { animation: none; opacity: 1; }
-  .hero-splash-cta { opacity: .7; }
+  .hero-splash-rule { width: clamp(160px, 22vw, 280px); }
+  .hero-splash-cta { opacity: .65; }
 }
 
 /* ---- full-page hero / start screen ------------------------------------------- */
