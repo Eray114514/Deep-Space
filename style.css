@@ -654,9 +654,9 @@ body.hud-cloaked #time-warp-indicator, body.hud-cloaked #touch-ui, body.hud-cloa
 .hero-splash-inner { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 0; text-align: center; }
 .hero-splash-eyebrow { color: var(--ui-cyan); font: 600 10px/1 var(--ui-mono); letter-spacing: .42em; text-transform: uppercase; opacity: 0; }
 .hero-splash-title {
-  margin: 26px 0 0; font: 200 clamp(46px, 8.4vw, 120px)/1 var(--ui-font);
-  letter-spacing: .14em; color: var(--ui-white);
-  text-shadow: 0 0 56px rgba(62, 212, 232, .14);
+  margin: 26px 0 0; font: 200 clamp(56px, 7.4vw, 108px)/.94 var(--ui-font);
+  letter-spacing: .18em; color: var(--ui-white);
+  text-shadow: 0 0 38px rgba(62, 212, 232, .12);
   display: inline-flex; gap: .22em;
 }
 .hero-splash-title span { display: inline-block; opacity: 0; }
