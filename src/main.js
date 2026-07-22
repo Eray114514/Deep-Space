@@ -535,6 +535,7 @@ const riftInverse = new THREE.Quaternion();
 const riftAssistQuat = new THREE.Quaternion();
 const riftPortalClearColor = new THREE.Color();
 const riftPortalVisibility = [];
+const riftPortalDepthState = [];
 let riftPortalClearAlpha = 1;
 let riftPortalFog = null;
 let riftPortalToneMapping = THREE.ACESFilmicToneMapping;
@@ -583,7 +584,7 @@ spatialRift = new SpatialRift({
   profile: {
     width: 1025,
     height: 720,
-    depth: 310,
+    depth: 108,
     edgeThickness: 1.08,
     renderScale: 1,
   },
@@ -604,9 +605,11 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   onChange: ({ index, weapon, ammo, reloading }) => {
     if (!surfaceWeaponHud) return;
     surfaceWeaponHud.querySelector('[data-weapon-name]').textContent = weapon.name;
-    surfaceWeaponHud.querySelector('[data-weapon-ammo]').textContent = weapon.kind === 'laser'
-      ? '∞ / MINING'
-      : reloading ? `RELOADING · ${ammo} / ${weapon.magSize}` : `${ammo} / ${weapon.magSize}`;
+    const ammoReadout = surfaceWeaponHud.querySelector('[data-weapon-ammo]');
+    ammoReadout.textContent = weapon.kind === 'laser' ? '∞' : `${ammo} / ${weapon.magSize}`;
+    ammoReadout.dataset.state = reloading ? 'RELOADING' : weapon.kind === 'laser' ? 'MINING BEAM' : 'READY';
+    surfaceWeaponHud.dataset.activeSlot = String(index + 1).padStart(2, '0');
+    surfaceWeaponHud.classList.toggle('reloading', reloading);
     surfaceWeaponHud.classList.toggle('mining-laser', weapon.kind === 'laser');
     for (const item of surfaceWeaponHud.querySelectorAll('[data-weapon-slot]')) item.classList.toggle('active', Number(item.dataset.weaponSlot) === index);
   },
@@ -1730,6 +1733,7 @@ function hideSystemForRiftPortal(system) {
 
 function beginRiftPortalScene() {
   riftPortalVisibility.length = 0;
+  riftPortalDepthState.length = 0;
   hideSystemForRiftPortal(universe.system);
   hideSystemForRiftPortal(universe.fadingSystem);
   for (const object of [
@@ -1754,11 +1758,28 @@ function beginRiftPortalScene() {
   renderer.setClearColor(0x000006, 1);
   riftPortalAmbient.visible = true;
   setRiftPreviewVisible(true);
+  // The production volume graph renders participating media into a separate
+  // target without the opaque scene depth buffer, then composites it over the
+  // planet. The portal draws both layers directly into one target; leaving
+  // depth testing enabled makes each BackSide volume shell sit behind the
+  // terrain and disappear. Preserve the materials and mirror the graph's
+  // compositing rule only for this offscreen render.
+  for (const planet of riftPreviewSystem?.planets || []) {
+    for (const material of [planet.atmoMesh?.material, planet.volCloudMat]) {
+      if (!material) continue;
+      riftPortalDepthState.push(material, material.depthTest);
+      material.depthTest = false;
+    }
+  }
 }
 
 function endRiftPortalScene() {
   setRiftPreviewVisible(false);
   riftPortalAmbient.visible = false;
+  for (let i = 0; i < riftPortalDepthState.length; i += 2) {
+    riftPortalDepthState[i].depthTest = riftPortalDepthState[i + 1];
+  }
+  riftPortalDepthState.length = 0;
   for (let i = 0; i < riftPortalVisibility.length; i += 2) {
     riftPortalVisibility[i].visible = riftPortalVisibility[i + 1];
   }
@@ -2869,7 +2890,11 @@ function frame() {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     volumePass.setActivePlanet(nearest?.isGasGiant || nearest?.type === 'artificialHabitat' ? null : nearest, nav.pos, motion);
   }
-  foregroundPass.enabled = ship.foregroundOnly;
+  // The cockpit hull and the first-person weapon rig share the depth-cleared
+  // foreground layer. Walking parks the ship back in world space, but the gun
+  // still owns this pass; tying it only to ship.foregroundOnly hid all four
+  // weapon models after landing.
+  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible;
   ambient.layers.enable(SHIP_FOREGROUND_LAYER);
   hemi.layers.enable(SHIP_FOREGROUND_LAYER);
   headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
@@ -3543,6 +3568,17 @@ window.NMS = {
       : null,
     destinationLight: riftPreviewSystem?.starViews.map((view) => view.light.intensity)
       || universe.system?.starViews.map((view) => view.light.intensity) || [],
+    previewVolume: (() => {
+      const target = riftPreviewSystem?.bodyById.get(riftRoute?.arrival?.bodyId);
+      if (!target) return null;
+      return {
+        cloudCoverage: target.cloudCoverage || 0,
+        atmosphereVisible: !!target.atmoMesh?.visible,
+        volumeCloudVisible: !!target.volCloudMesh?.visible,
+        analyticCloudVisible: !!target.cloudMesh?.visible,
+        portalVolumeLayerRendered: spatialRift.portalVolumeLayerRendered,
+      };
+    })(),
   }),
   approachRift(distance = 38) {
     if (!riftRoute || riftRoute.arrived || !riftRoute.anchorLocked) return false;
@@ -3568,6 +3604,11 @@ window.NMS = {
   surfaceWeaponState: () => ({
     index: surfaceWeapons.index,
     ammo: surfaceWeapons.models[surfaceWeapons.index].ammo,
+    rendered: surfaceWeapons.rig.visible
+      && surfaceWeapons.models[surfaceWeapons.index].group.visible
+      && foregroundPass.enabled,
+    assetLoaded: SURFACE_WEAPONS[surfaceWeapons.index].kind !== 'laser'
+      || surfaceWeapons.models[surfaceWeapons.index].group.userData.loaded === true,
     reloading: surfaceWeapons.reloadT > 0,
     reloadProgress: surfaceWeapons.reloadDuration > 0
       ? 1 - surfaceWeapons.reloadT / surfaceWeapons.reloadDuration : 0,
@@ -3601,7 +3642,7 @@ window.NMS = {
   lodReset: () => { lodStatsReset(); return true; },
   shipVisible(v) { ship.group.visible = v; return true; },
   // internals, for the headless diagnosis harness
-  get _internals() { return { universe, scene, renderer, nav, camera }; },
+  get _internals() { return { universe, scene, renderer, nav, camera, starMap }; },
 };
 
 // Reproducible visual-QA poses. These are opt-in URL states and never alter

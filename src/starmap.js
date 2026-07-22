@@ -7,6 +7,7 @@ import * as THREE from '../vendor/three.webgpu.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { makeRng } from './rng.js';
 import { generateSystemSpec } from './astronomy.js';
+import { generateCelestialNames } from './names.js';
 import { SystemView } from './sysview.js';
 import { buildGalaxyBackdrop, CELL, GALAXY_LAYOUT_VERSION, GALAXY_RADIUS_CELLS } from './galaxy-layout.js';
 
@@ -262,6 +263,7 @@ export class StarMap {
     this.clock = new THREE.Clock();
     this.overviewActive = false;
     this.overviewAmount = 0;
+    this.labelIdentityCache = new Map();
 
     this.buildDOM();
     this.buildRenderer();
@@ -271,6 +273,11 @@ export class StarMap {
       navArrow: this.els.navArrow,
       nameTag: this.els.nameTag,
       onSelect: (body) => this.onBodySelect(body),
+      // The flight scene and galaxy chart already own GPU renderers. Keeping
+      // the embedded preview on WebGL2 avoids a third WebGPU device/context,
+      // which could stay pending or lose its high-DPI canvas on real systems.
+      forceWebGL: true,
+      pixelRatioCap: 1.25,
     });
     this.bindUI();
   }
@@ -364,7 +371,7 @@ export class StarMap {
         <div id="sm-crosshair"></div>
         <div id="sm-navArrow"></div>
         <div id="sm-nameTag"></div>
-        <div id="sm-hoverMark" hidden></div>
+        <div id="sm-hoverMark" hidden><span id="sm-hoverName"></span></div>
       </div>
       <div id="sm-loading"><div class="loadBox"><div class="loadTitle">系统星图</div><div class="loadBar"><i></i></div></div></div>`;
     document.body.appendChild(root);
@@ -396,7 +403,7 @@ export class StarMap {
       controls: $('#sm-controls'),
       leftHud: $('#sm-leftHud'), rightHud: $('#sm-rightHud'), bottomHud: $('#sm-bottomHud'),
       navArrow: $('#sm-navArrow'), nameTag: $('#sm-nameTag'),
-      hoverMark: $('#sm-hoverMark'),
+      hoverMark: $('#sm-hoverMark'), hoverName: $('#sm-hoverName'),
       loading: $('#sm-loading'),
     };
   }
@@ -498,6 +505,7 @@ export class StarMap {
       // 预热 preview 缓存，减少点击时的生成延迟
       this.systemPreview(hit.star);
       this.els.hoverMark.hidden = false;
+      this.els.hoverName.textContent = this.systemLabelIdentity(hit.star).properName;
       this.els.hoverMark.style.transform = `translate3d(${hit.sx.toFixed(1)}px,${hit.sy.toFixed(1)}px,0)`;
     });
     canvas.addEventListener('pointerleave', () => { this.els.hoverMark.hidden = true; });
@@ -550,6 +558,7 @@ export class StarMap {
     this.root.classList.add('hidden');
     document.body.classList.remove('starmap-open');
     this.els.hoverMark.hidden = true;
+    this.els.loading.classList.add('done');
     cancelAnimationFrame(this.raf);
     if (this.mode === 'system') this.sysview.suspend();
   }
@@ -584,6 +593,7 @@ export class StarMap {
     this.mode = 'galaxy';
     this.root.classList.add('mode-galaxy');
     this.root.classList.remove('mode-system');
+    this.els.loading.classList.add('done');
     this.selectedStar = this.getUniverse().system.star;
     this.sysview.selectBody(null);
     this.sysview.suspend();
@@ -601,6 +611,7 @@ export class StarMap {
     this.els.hoverMark.hidden = true;
     this.root.classList.remove('mode-galaxy');
     this.root.classList.add('mode-system');
+    this.els.loading.classList.remove('done');
     this.updateRail();
     this.updateHints();
     this.resize();
@@ -611,11 +622,20 @@ export class StarMap {
     const selectedStar = this.selectedStar;
     await this.sysview.suspend();
     if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
+    await this.sysview.readyPromise;
+    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
+    if (!this.sysview.rendererReady) {
+      this.els.loading.classList.add('done');
+      console.error('System preview renderer did not initialize.', this.sysview.rendererInitError);
+      return;
+    }
     const preview = this.systemPreview(selectedStar);
     this.sysview.buildSystem(preview, this.getTime());
     this.updateSystemPanel(preview);
     this.onBodySelect(null);
     this.resize();
+    this.sysview.frame(0);
+    this.els.loading.classList.add('done');
   }
 
   updateRail() {
@@ -703,6 +723,57 @@ export class StarMap {
       if (!source.some((star) => star.id === destination.id)) source.push(destination);
     }
     return source;
+  }
+
+  systemLabelIdentity(star) {
+    const cached = this.labelIdentityCache.get(star.id);
+    if (cached) return cached;
+    const universe = this.getUniverse();
+    let identity;
+    if (universe.system.star.id === star.id) {
+      identity = {
+        properName: universe.system.spec.properName,
+        catalogId: universe.system.spec.catalogId,
+        isBlackHoleSystem: false,
+      };
+    } else {
+      const destination = universe.specialDestinations.find((item) => item.id === star.id);
+      if (destination) {
+        identity = {
+          properName: destination.systemName || destination.name,
+          catalogId: destination.catalogId || star.id,
+          isBlackHoleSystem: true,
+        };
+      } else {
+        const names = generateCelestialNames(this.getSeed(), star, 0, 0).system;
+        identity = {
+          properName: names.zh,
+          catalogId: names.catalogId,
+          isBlackHoleSystem: false,
+        };
+      }
+    }
+    this.labelIdentityCache.set(star.id, identity);
+    return identity;
+  }
+
+  galaxyLabelCandidates(localStars, globalStars) {
+    const selected = new Map(localStars.map((star) => [star.id, star]));
+    const buckets = new Map();
+    for (const star of globalStars) {
+      if (star.kind === 'blackHole' || star.civilizationTag || this.visitedSystems.has(star.id)) {
+        selected.set(star.id, star);
+        continue;
+      }
+      const position = this.globalPositionById.get(star.id);
+      const key = `${Math.floor((position.x + 84) / 9)},${Math.floor((position.z + 84) / 9)}`;
+      const previous = buckets.get(key);
+      if (!previous || position.lengthSq() < previous.position.lengthSq()) {
+        buckets.set(key, { star, position });
+      }
+    }
+    for (const { star } of buckets.values()) selected.set(star.id, star);
+    return [...selected.values()];
   }
 
   // ---- galaxy level -------------------------------------------------------------
@@ -864,7 +935,7 @@ export class StarMap {
     }
     this.els.count.textContent = `${globalStars.filter((star) => star.kind !== 'blackHole').length} / 1024`;
     this.els.sector.textContent = current.id;
-    this.buildGalaxyLabels(stars, current);
+    this.buildGalaxyLabels(this.galaxyLabelCandidates(stars, globalStars), current);
     this.updateSelectionMarker();
     this.updateGalaxyOverview(true);
   }
@@ -921,10 +992,13 @@ export class StarMap {
   }
 
   buildGalaxyLabels(stars, current) {
+    const detailedIds = new Set(this.localStars.map((star) => star.id));
     const candidates = stars
       .map((star, index) => {
-        const preview = this.systemPreview(star);
-        const special = preview.isBlackHoleSystem;
+        const identity = this.systemLabelIdentity(star);
+        const detailed = detailedIds.has(star.id) || identity.isBlackHoleSystem;
+        const preview = detailed ? this.systemPreview(star) : null;
+        const special = identity.isBlackHoleSystem;
         const priority = special ? 1000
           : star.id === this.selectedStar?.id ? 900
           : star.id === current.id ? 800
@@ -932,26 +1006,28 @@ export class StarMap {
           : this.visitedSystems.has(star.id) ? 80
           : 10;
         const position = this.globalPositionById.get(star.id);
-        return { star, index, preview, priority, position, distance: position.lengthSq() };
+        return { star, index, identity, preview, priority, position, distance: position.lengthSq() };
       })
       .sort((a, b) => b.priority - a.priority || a.distance - b.distance);
-    this.labelData = candidates.map(({ star, preview, priority, position }) => {
+    this.labelData = candidates.map(({ star, identity, preview, priority, position }) => {
       const button = document.createElement('div');
       button.className = 'sm-map-label';
       button.innerHTML = '<i></i><strong></strong><small></small>';
       button.children[0].style.setProperty('--label-color', `#${star.color.getHexString()}`);
-      button.children[1].textContent = preview.properName;
+      button.children[1].textContent = identity.properName;
       button.children[2].textContent = star.id === current.id
         ? '当前位置'
-        : preview.isBlackHoleSystem
+        : identity.isBlackHoleSystem
           ? 'BH · 唯一引力观测禁区'
           : star.civilizationTag
             ? `文明 · ${civilizationLabel(star.civilizationTag)}`
-          : `${physicalStarClass(preview.stars[0]).code} · ${preview.bodies.filter((b) => !b.isMoon).length} 行星`;
+          : preview
+            ? `${physicalStarClass(preview.stars[0]).code} · ${preview.bodies.filter((b) => !b.isMoon).length} 行星`
+            : identity.catalogId;
       button.classList.toggle('current', star.id === current.id);
       button.classList.toggle('selected', star.id === this.selectedStar?.id);
-      button.classList.toggle('black-hole', preview.isBlackHoleSystem);
-      button.title = preview.isBlackHoleSystem ? '唯一黑洞系统 · 单击查看' : `${preview.properName} · 单击查看`;
+      button.classList.toggle('black-hole', identity.isBlackHoleSystem);
+      button.title = identity.isBlackHoleSystem ? '唯一黑洞系统 · 单击查看' : `${identity.properName} · 单击查看`;
       button.addEventListener('click', (event) => {
         event.stopPropagation();
         this.selectStar(star, false);
@@ -960,7 +1036,7 @@ export class StarMap {
       this.els.labelLayer.appendChild(button);
       return {
         button, position, star,
-        width: preview.isBlackHoleSystem ? 154 : Math.min(132, 20 + preview.properName.length * 10),
+        width: identity.isBlackHoleSystem ? 154 : Math.min(132, 20 + identity.properName.length * 10),
         height: star.id === current.id ? 31 : 25,
         priority,
       };
@@ -1051,7 +1127,7 @@ export class StarMap {
     if (this.mode === 'galaxy' && this.labelData?.length) {
       const currentId = this.getUniverse().system.star.id;
       for (const item of this.labelData) {
-        const special = this.systemPreview(item.star).isBlackHoleSystem;
+        const special = this.systemLabelIdentity(item.star).isBlackHoleSystem;
         item.priority = special ? 1000
           : item.star.id === star.id ? 900
           : item.star.id === currentId ? 800

@@ -493,12 +493,61 @@ body.route-choice-active #dev-fps {
   width: min(220px, 20vw, 25vh); aspect-ratio: 1; pointer-events: none;
 }
 #walk-dial { display: block; width: 100%; height: 100%; filter: drop-shadow(0 7px 25px rgba(0, 4, 10, .62)); }
-#surface-weapon { display: none; position: fixed; z-index: 10; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); min-width: 232px; padding: 10px 12px 9px; border: 1px solid var(--ui-panel-border); background: var(--ui-panel); color: var(--ui-white); font-family: var(--ui-font, monospace); text-align: right; pointer-events: none; box-shadow: inset 0 1px rgba(255, 255, 255, .018); }
-.surface-weapon-label { color: var(--ui-dim); font-size: 9px; letter-spacing: .18em; }
-.surface-weapon-ammo { margin-top: 2px; font: 650 22px/1 var(--ui-font); font-variant-numeric: tabular-nums; letter-spacing: .04em; }
-.surface-weapon-slots { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; color: var(--ui-dim); font: 9px/1 var(--ui-mono); letter-spacing: .08em; }
-.surface-weapon-slots .active { color: var(--ui-green); }
-#surface-weapon.mining-laser .surface-weapon-label, #surface-weapon.mining-laser .surface-weapon-ammo, #surface-weapon.mining-laser .surface-weapon-slots .active { color: var(--ui-cyan); }
+#surface-weapon {
+  --weapon-ink: #bfefff;
+  --weapon-signal: #39c8ff;
+  display: none; position: fixed; z-index: 10;
+  right: max(22px, env(safe-area-inset-right)); bottom: max(22px, env(safe-area-inset-bottom));
+  width: clamp(224px, 15vw, 276px); min-width: 0; padding: 13px 15px 12px 21px;
+  border: 0; color: var(--weapon-ink); text-align: right; pointer-events: none;
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 14px);
+  background:
+    linear-gradient(90deg, var(--weapon-ink), rgba(191, 239, 255, .08)) 14px 0 / calc(100% - 14px) 1px no-repeat,
+    linear-gradient(180deg, var(--weapon-ink), rgba(57, 200, 255, .18) 54%, transparent) 100% 0 / 1px 100% no-repeat,
+    linear-gradient(270deg, var(--weapon-signal), rgba(57, 200, 255, .06)) 100% 100% / 72% 1px no-repeat,
+    linear-gradient(105deg, rgba(2, 11, 20, .12), rgba(2, 11, 20, .68) 42%, rgba(2, 11, 20, .8));
+  filter: drop-shadow(0 7px 20px rgba(0, 4, 10, .56));
+  font-family: var(--ui-mono);
+  text-shadow: 0 0 7px rgba(57, 200, 255, .24);
+}
+#surface-weapon::before {
+  content: 'SRF / ' attr(data-active-slot); position: absolute; left: 21px; top: 15px;
+  color: rgba(66, 169, 207, .7); font: 700 8px/1 var(--ui-mono); letter-spacing: .14em;
+}
+#surface-weapon::after {
+  content: ''; position: absolute; left: 5px; top: 5px; width: 7px; height: 7px;
+  border-top: 1px solid var(--weapon-signal); border-left: 1px solid var(--weapon-signal);
+  opacity: .82;
+}
+.surface-weapon-label {
+  min-height: 10px; padding-left: 62px; overflow: hidden; color: rgba(191, 239, 255, .7);
+  font: 700 9px/1 var(--ui-mono); letter-spacing: .16em; text-overflow: ellipsis; white-space: nowrap;
+}
+.surface-weapon-ammo {
+  display: flex; align-items: baseline; justify-content: flex-end; gap: 12px; margin-top: 7px;
+  color: var(--weapon-ink); font: 700 25px/.95 var(--ui-mono); font-variant-numeric: tabular-nums;
+  letter-spacing: .045em;
+}
+.surface-weapon-ammo::before {
+  content: attr(data-state); margin-right: auto; color: rgba(66, 169, 207, .68);
+  font: 700 8px/1 var(--ui-mono); letter-spacing: .16em;
+}
+.surface-weapon-slots {
+  display: grid; grid-template-columns: repeat(4, auto); justify-content: end; gap: 9px;
+  margin-top: 9px; padding-top: 7px; border-top: 1px solid rgba(191, 239, 255, .2);
+  color: rgba(66, 169, 207, .52); font: 700 8px/1 var(--ui-mono); letter-spacing: .06em;
+}
+.surface-weapon-slots span { position: relative; opacity: .55; }
+.surface-weapon-slots .active { color: var(--weapon-ink); opacity: 1; }
+.surface-weapon-slots .active::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -8px; height: 2px;
+  background: var(--weapon-signal); box-shadow: 0 0 7px rgba(57, 200, 255, .72);
+}
+#surface-weapon.reloading { --weapon-signal: #e9c885; }
+#surface-weapon.reloading .surface-weapon-ammo::before { color: var(--ui-gold); }
+#surface-weapon.mining-laser { --weapon-ink: #c8fbff; --weapon-signal: #3ed4e8; }
+#surface-weapon.mining-laser .surface-weapon-label,
+#surface-weapon.mining-laser .surface-weapon-ammo { color: #c8fbff; }
 body.surface-ads #crosshair { transform: translate(-50%, -50%) scale(.62); }
 body.surface-ads #crosshair::after { opacity: 1; }
 
@@ -744,6 +793,7 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #ship-integrity { right: 14px; bottom: 14px; width: 210px; }
   #resource-strip { right: 14px; bottom: 110px; }
   #walk-hud { left: max(10px, env(safe-area-inset-left)); bottom: max(10px, env(safe-area-inset-bottom)); width: min(190px, 32vw, 25vh); }
+  #surface-weapon { right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); width: min(224px, 34vw); }
   #joystick { bottom: calc(min(210px, 38vw, 30vh) + 20px); }
 }
 
@@ -792,6 +842,11 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #bottom { bottom: 88px; }
   #hint { max-width: 84vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #walk-hud { left: max(6px, env(safe-area-inset-left)); bottom: max(6px, env(safe-area-inset-bottom)); width: min(160px, 38vw, 24vh); }
+  #surface-weapon { right: max(6px, env(safe-area-inset-right)); bottom: max(6px, env(safe-area-inset-bottom)); width: min(206px, 46vw); padding: 11px 10px 10px 17px; }
+  #surface-weapon::before { left: 17px; top: 13px; }
+  .surface-weapon-label { padding-left: 54px; font-size: 8px; }
+  .surface-weapon-ammo { font-size: 21px; }
+  .surface-weapon-slots { gap: 6px; font-size: 7px; }
   #joystick { bottom: calc(min(174px, 42vw, 27vh) + 16px); }
   .hero-frame { inset: 10px; }
   .hero-topline { left: 22px; top: 22px; }

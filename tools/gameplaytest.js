@@ -42,6 +42,19 @@ try {
   });
   check(cloudFallback.quality === 'auto-low' && cloudFallback.ok,
     `auto-low keeps the shared volumetric cloud field visible from the surface ${JSON.stringify(cloudFallback)}`);
+  const surfaceWeaponVisibility = [];
+  for (let index = 0; index < 4; index++) {
+    await page.evaluate((slot) => NMS.surfaceWeapon(slot), index);
+    await page.waitForFunction((slot) => NMS.surfaceWeaponState().index === slot,
+      index, { timeout: 3000 });
+    if (index === 3) {
+      await page.waitForFunction(() => NMS.surfaceWeaponState().assetLoaded,
+        null, { timeout: 5000 });
+    }
+    surfaceWeaponVisibility.push(await page.evaluate('NMS.surfaceWeaponState()'));
+  }
+  check(surfaceWeaponVisibility.every((weapon) => weapon.rendered && weapon.assetLoaded),
+    `all four first-person weapons own an active foreground pass ${JSON.stringify(surfaceWeaponVisibility)}`);
   const initialShipDistance = await page.evaluate('NMS.shipDistance()');
   check(initialShipDistance < 46, `parked ship is in boarding range (${initialShipDistance.toFixed(1)} m)`);
   await page.keyboard.press('KeyE');

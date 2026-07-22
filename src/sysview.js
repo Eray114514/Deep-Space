@@ -445,22 +445,24 @@ function createSelectionReticle(scene) {
 // SystemView
 // ---------------------------------------------------------------------------
 export class SystemView {
-  constructor({ host, labelHost, navArrow, nameTag, onSelect }) {
+  constructor({ host, labelHost, navArrow, nameTag, onSelect, forceWebGL = false, pixelRatioCap = 1.75 }) {
     this.host = host;
     this.labelHost = labelHost;
     this.navArrow = navArrow;
     this.nameTag = nameTag;
     this.onSelect = onSelect || (() => {});
+    this.pixelRatioCap = pixelRatioCap;
 
     const rendererMode = new URLSearchParams(location.search).get('renderer');
     this.renderer = new THREE.WebGPURenderer({
       antialias: true,
       alpha: true,
       powerPreference: 'high-performance',
-      forceWebGL: rendererMode === 'webgl',
+      forceWebGL: forceWebGL || rendererMode === 'webgl',
     });
     this.rendererReady = false;
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+    this.rendererInitError = null;
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, this.pixelRatioCap));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.82;
@@ -519,6 +521,7 @@ export class SystemView {
       this.renderer.domElement.dataset.backend = this.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
       this.resize();
     }).catch((error) => {
+      this.rendererInitError = error;
       this.renderer.domElement.dataset.backend = 'failed';
       console.error('SystemView renderer initialization failed', error);
     });
@@ -633,7 +636,7 @@ export class SystemView {
     const w = Math.max(1, this.host.clientWidth || innerWidth);
     const h = Math.max(1, this.host.clientHeight || innerHeight);
     this.renderer.setSize(w, h);
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, this.pixelRatioCap));
     const aspect = w / h;
     this.responsiveFraming = 1 + Math.max(0, 1.55 - aspect) * 0.16;
     this.camera.fov = THREE.MathUtils.clamp(37 + Math.max(0, 1.55 - aspect) * 8, 37, 43);

@@ -64,30 +64,30 @@ export const RiftDistortionShader = {
       float a = atan(q.y, q.x);
       float d = length(q);
       float b = boundary(a);
-      float band = exp(-pow((d - b) / .082, 2.0));
-      float outer = exp(-pow((d - b) / .21, 2.0));
-      float tear = exp(-pow((d - b) / .030, 2.0));
+      float band = exp(-pow((d - b) / .030, 2.0));
+      float outer = exp(-pow((d - b) / .075, 2.0));
+      float tear = exp(-pow((d - b) / .010, 2.0));
       vec2 dir = normalize(q + vec2(1e-5));
       float pulse = .72 + .28 * sin(uTime * 2.1 + a * 9.0);
       float strainPulse = .82 + .18 * sin(uTime * 10.5 + a * 17.0);
       float fold = uOpen + uTension * .72 + uBurst * .32;
-      vec2 pull = -dir * safeR * (.050 * band + .012 * outer) * fold * uStrength * pulse;
-      pull += -dir * safeR * (.024 * outer + .018 * band) * uTension * strainPulse;
+      vec2 pull = -dir * safeR * (.012 * band + .002 * outer) * fold * uStrength * pulse;
+      pull += -dir * safeR * (.006 * outer + .004 * band) * uTension * strainPulse;
       vec2 tangent = vec2(-dir.y, dir.x);
-      pull += tangent * safeR * (.010 * band * sin(a * 13.0 - uTime * 1.7)) * fold;
-      pull += tangent * safeR * (.014 * outer * sin(a * 23.0 + uTime * 6.0)) * uTension;
-      pull += tangent * safeR * .018 * tear * sin(a * 41.0 - uTime * 4.2) * uOpen;
+      pull += tangent * safeR * (.003 * band * sin(a * 13.0 - uTime * 1.7)) * fold;
+      pull += tangent * safeR * (.004 * outer * sin(a * 23.0 + uTime * 6.0)) * uTension;
+      pull += tangent * safeR * .006 * tear * sin(a * 41.0 - uTime * 4.2) * uOpen;
       vec2 uv = vUv + pull;
-      float split = (.0007 + .0032 * band + .0065 * tear) * fold * uStrength
-        + uBurst * band * .0065;
+      float split = (.0002 + .0010 * band + .0022 * tear) * fold * uStrength
+        + uBurst * band * .0020;
       float r = texture2D(tDiffuse, uv + dir * split).r;
       float g = texture2D(tDiffuse, uv).g;
       float bcol = texture2D(tDiffuse, uv - dir * split).b;
       vec3 col = vec3(r, g, bcol);
-      col += vec3(.02, .05, .09) * band * uOpen;
-      col += vec3(.12, .34, .92) * tear * uOpen * (.48 + .32 * sin(a * 29.0 - uTime * 3.1));
-      col += vec3(.08, .20, .48) * band * uTension * .55;
-      col += vec3(.55, .30, .82) * band * uBurst * .28;
+      col += vec3(.006, .015, .030) * band * uOpen;
+      col += vec3(.10, .22, .52) * tear * uOpen * (.36 + .24 * sin(a * 29.0 - uTime * 3.1));
+      col += vec3(.025, .07, .18) * band * uTension * .35;
+      col += vec3(.28, .16, .42) * band * uBurst * .18;
       gl_FragColor = vec4(col, 1.0);
     }
   `,
@@ -96,18 +96,17 @@ export const RiftDistortionShader = {
 export const DEFAULT_RIFT_PROFILE = Object.freeze({
   width: 820,
   height: 630,
-  depth: 245,
+  depth: 96,
   edgeThickness: 1,
   ribbonSegments: 520,
   tunnelSegments: 300,
   tunnelRings: 28,
   renderScale: 1,
   rimLayers: Object.freeze([
-    { scale: 1.000, band: 34, z: 8, alpha: 0.66, phase: 0, brightness: 1.02 },
-    { scale: 1.025, band: 58, z: 1, alpha: 0.34, phase: 1.7, brightness: 0.88 },
-    { scale: 0.982, band: 22, z: 14, alpha: 0.48, phase: 3.2, brightness: 1.08 },
-    { scale: 1.068, band: 82, z: -9, alpha: 0.16, phase: 5.0, brightness: 0.80 },
-    { scale: 1.120, band: 110, z: -16, alpha: 0.07, phase: 7.1, brightness: 0.68 },
+    { scale: 1.000, band: 5, z: 8, alpha: 0.74, phase: 0, brightness: 1.22 },
+    { scale: 1.008, band: 9, z: 2, alpha: 0.22, phase: 1.7, brightness: 0.78 },
+    { scale: 0.994, band: 4, z: 14, alpha: 0.66, phase: 3.2, brightness: 1.32 },
+    { scale: 1.018, band: 14, z: -4, alpha: 0.05, phase: 5.0, brightness: 0.58 },
   ]),
 });
 
@@ -163,6 +162,7 @@ export class SpatialRift {
     this.openTimeline = 0;
     this.tension = 0;
     this.burst = 0;
+    this.portalVolumeLayerRendered = false;
 
     this.portalCamera = mainCamera.clone();
     this.portalCamera.matrixAutoUpdate = true;
@@ -277,6 +277,47 @@ export class SpatialRift {
     return geometry;
   }
 
+  _makeLivingFilament(scale, opacity, phase) {
+    const count = 321;
+    const positions = new Float32Array(count * 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({
+      color: phase % 2 ? 0x9bcfff : 0xf1f7ff,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const line = new THREE.Line(geometry, material);
+    line.userData.filament = { scale, phase, count, opacity };
+    line.renderOrder = 7;
+    return line;
+  }
+
+  _updateLivingFilaments(time, open) {
+    for (const line of this.livingFilaments) {
+      const { scale, phase, count, opacity } = line.userData.filament;
+      const positions = line.geometry.attributes.position.array;
+      for (let i = 0; i < count; i++) {
+        const angle = (i % (count - 1)) / (count - 1) * TAU;
+        const motion = edgeMotion(angle + phase * 0.015, time * (1 + phase * 0.04)) * open;
+        const electric = Math.sin(angle * (13 + phase * 2) - time * (2.1 + phase * 0.17)) * 0.006 * open;
+        const radius = (this.contour(angle) + motion + electric) * scale;
+        const fracture = Math.pow(Math.max(0, Math.sin(angle * (19 + phase * 3)
+          - time * (2.4 + phase * 0.21) + phase)), 18);
+        const index = i * 3;
+        positions[index] = Math.cos(angle) * this.width * 0.5 * radius;
+        positions[index + 1] = Math.sin(angle) * this.height * 0.5 * radius;
+        positions[index + 2] = 15 + phase * 1.5
+          + Math.sin(angle * 19 + time * 2.8 + phase) * (3 + fracture * 9) * open;
+      }
+      line.geometry.attributes.position.needsUpdate = true;
+      line.material.opacity = opacity * smoothstep(0.02, 0.20, open);
+    }
+  }
+
   _rimShader(alpha = 1, phase = 0, brightness = 1) {
     return new THREE.ShaderMaterial({
       transparent: true,
@@ -334,8 +375,8 @@ export class SpatialRift {
           float flow = .34 + .66 * (f1 * .72 + f2 * .45);
           float hue = fract(vAngle / 6.28318 + uTime * .018 + vRand * .11 + uPhase * .03);
           vec3 chroma = spectrum(hue);
-          vec3 c = mix(vec3(.10, .52, 1.35), chroma, .67) + vec3(1.35, .42, .08) * f1 * .72;
-          c += vec3(1.45, 1.18, .96) * pow(core, 4.0) * (f1 * .6 + .35);
+          vec3 c = mix(vec3(.08, .30, .82), chroma, .24) + vec3(.72, .26, .10) * f1 * .34;
+          c += vec3(1.65, 1.90, 2.65) * pow(core, 4.0) * (f1 * .7 + .25);
           float charge = pow(max(0.0, sin(vAngle * 41.0 - uTime * 9.0 + uPhase)), 18.0);
           c += vec3(.72, 1.05, 1.65) * (charge * .95 + .16) * uTension;
           c += vec3(1.75, 1.25, 1.85) * (1.0 - core * .25) * uBurst * .82;
@@ -346,7 +387,9 @@ export class SpatialRift {
           float gate = .34 + .66 * max(f1, charge);
           float tear = inner * gate;
           c += vec3(3.8, 4.6, 7.2) * tear;
-          float a = (.08 + .92 * core) * (.28 + .72 * flow) * uAlpha * smoothstep(.02, .20, uOpen);
+          float fracture = .06 + .94 * max(f1, max(f2 * .72, charge));
+          float a = (.04 + .96 * core) * fracture * (.22 + .78 * flow)
+            * uAlpha * smoothstep(.02, .20, uOpen);
           a += tear * uAlpha * .82 * smoothstep(.03, .18, uOpen);
           a *= 1.0 + uTension * .95 + uBurst * .75;
           gl_FragColor = vec4(c * uBrightness, a);
@@ -393,15 +436,17 @@ export class SpatialRift {
         uniform float uOpen; uniform float uTension; uniform float uBurst;
         void main() {
           #include <logdepthbuf_fragment>
+          float broken = smoothstep(.28, .58, vCharge + uTension * .16 + uBurst * .3);
+          if (broken < .08) discard;
           vec3 base = vec3(.0004, .0012, .0035);
-          vec3 charge = vec3(.004, .016, .045) * (.25 + .75 * vCharge);
-          vec3 color = base + charge * (.35 + uTension * .8) + vec3(.16, .09, .24) * uBurst;
+          vec3 charge = vec3(.003, .012, .034) * (.25 + .75 * vCharge);
+          vec3 color = base + charge * (.22 + uTension * .55) + vec3(.08, .035, .12) * uBurst;
           gl_FragColor = vec4(color * smoothstep(.015, .12, uOpen), 1.0);
         }
       `,
     });
     this.mass = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 520, 34 * this.profile.edgeThickness, 10, true),
+      new THREE.TubeGeometry(curve, 520, 5 * this.profile.edgeThickness, 5, true),
       this.massMat,
     );
     this.mass.renderOrder = 3;
@@ -409,8 +454,9 @@ export class SpatialRift {
 
     this.tunnelMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
-      transparent: false,
-      depthWrite: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
       toneMapped: false,
       uniforms: { uTime: { value: 0 }, uOpen: { value: 0 }, uTension: { value: 0 }, uBurst: { value: 0 } },
       vertexShader: /* glsl */`
@@ -446,13 +492,15 @@ export class SpatialRift {
           float l1 = pow(max(0.0, sin(vAngle * 17.0 - vDepth * 29.0 - uTime * 2.1)), 18.0);
           float l2 = pow(max(0.0, sin(vAngle * 31.0 + vDepth * 41.0 + uTime * 1.3)), 28.0);
           float ribs = pow(max(0.0, sin(vDepth * 25.0 - vAngle * 3.0)), 20.0);
-          vec3 base = mix(vec3(.002, .006, .014), vec3(.015, .035, .075), .5 + .5 * sin(vAngle * 5.0));
-          vec3 c = base + spectral(fract(vAngle / 6.28318 + vDepth * .3 + uTime * .015)) * (l1 * .82 + l2 * .48);
-          c += vec3(.10, .42, 1.15) * ribs * .30;
+          float fracture = max(l1, max(l2 * .72, ribs * .42));
+          vec3 c = spectral(fract(vAngle / 6.28318 + vDepth * .3 + uTime * .015)) * (l1 * .58 + l2 * .32);
+          c += vec3(.08, .34, .90) * ribs * .18;
           c += spectral(fract(vAngle / 6.28318 + uTime * .08)) * uTension * (l1 * .55 + .08);
-          c += vec3(.95, .62, 1.35) * uBurst * (.20 + .80 * (1.0 - vDepth));
+          c += vec3(.72, .48, 1.08) * uBurst * (.12 + .88 * fracture) * (1.0 - vDepth);
           c *= smoothstep(.045, .20, uOpen) + uTension * .10;
-          gl_FragColor = vec4(c, 1.0);
+          float alpha = (.002 + fracture * .08) * (1.0 - vDepth * .84)
+            * smoothstep(.045, .20, uOpen);
+          gl_FragColor = vec4(c, min(alpha, .12));
         }
       `,
     });
@@ -468,11 +516,18 @@ export class SpatialRift {
       this.rimMaterials.push(material);
       this.visual.add(mesh);
     }
-    const exitMaterial = this._rimShader(0.30, 2.4, 0.76);
-    const exitRim = new THREE.Mesh(this._makeRibbonGeometry(0.96, 30, -this.depth + 3, 2.4), exitMaterial);
+    const exitMaterial = this._rimShader(0.07, 2.4, 0.58);
+    const exitRim = new THREE.Mesh(this._makeRibbonGeometry(0.982, 6, -this.depth + 3, 2.4), exitMaterial);
     exitRim.renderOrder = 4;
     this.rimMaterials.push(exitMaterial);
     this.visual.add(exitRim);
+
+    this.livingFilaments = [
+      this._makeLivingFilament(0.994, 0.34, 0),
+      this._makeLivingFilament(1.003, 0.48, 1),
+      this._makeLivingFilament(1.014, 0.26, 2),
+    ];
+    for (const filament of this.livingFilaments) this.visual.add(filament);
 
     this.portalMat = new THREE.ShaderMaterial({
       // The destination is a real opaque window. Treating this plane as a
@@ -528,7 +583,7 @@ export class SpatialRift {
           float mask = 1.0 - smoothstep(b - aa, b + aa, r);
           if (mask < .45 || uOpen < .035) discard;
           vec2 uv = vProj.xy / max(vProj.w, 1e-5);
-          float edge = smoothstep(b - .25, b, r);
+          float edge = smoothstep(b - .055, b, r);
           float wave = sin(a * 19.0 - uTime * 1.8) + sin(a * 7.0 + uTime * 1.15);
           vec2 dir = normalize(p + vec2(1e-5));
           vec2 tangent = vec2(-dir.y, dir.x);
@@ -538,9 +593,9 @@ export class SpatialRift {
           float gg = texture2D(tPortal, uv).g;
           float bb = texture2D(tPortal, uv - dir * d).b;
           vec3 col = vec3(rr, gg, bb);
-          col += vec3(.10, .24, .48) * pow(edge, 5.0) * .42;
-          col += vec3(.22, .42, .92) * pow(edge, 3.0) * uTension * .24;
-          col += vec3(.72, .42, 1.05) * pow(edge, 2.0) * uBurst * .34;
+          col += vec3(.035, .08, .18) * pow(edge, 5.0) * .24;
+          col += vec3(.10, .20, .46) * pow(edge, 3.0) * uTension * .16;
+          col += vec3(.42, .24, .62) * pow(edge, 2.0) * uBurst * .22;
           float reveal = smoothstep(.055, .20, uOpen) + uTension * .045;
           if (reveal < .035) discard;
           gl_FragColor = vec4(col, 1.0);
@@ -687,6 +742,7 @@ export class SpatialRift {
       material.uniforms.uBurst.value = this.burst;
       material.uniforms.uTime.value = time;
     }
+    this._updateLivingFilaments(time, visualOpen);
   }
 
   renderPortal({ beforeRender, afterRender } = {}) {
@@ -709,6 +765,12 @@ export class SpatialRift {
     this.portalCamera.far = this.mainCamera.far;
     this.portalCamera.updateProjectionMatrix();
     this.portalCamera.updateMatrixWorld(true);
+    // The destination atmosphere and volumetric cloud shell live on layer 2
+    // in the main render graph. The portal is a direct offscreen render, so it
+    // must opt into that same layer or the planet is shown bare until crossing.
+    const oldLayerMask = this.portalCamera.layers.mask;
+    this.portalCamera.layers.enable(2);
+    this.portalVolumeLayerRendered = this.portalCamera.layers.isEnabled(2);
     this.textureMatrix.copy(this.biasMatrix)
       .multiply(this.portalCamera.projectionMatrix)
       .multiply(this.portalCamera.matrixWorldInverse)
@@ -725,6 +787,7 @@ export class SpatialRift {
     this.renderer.render(this.scene, this.portalCamera);
     this.renderer.setRenderTarget(oldTarget);
     this.renderer.xr.enabled = oldXr;
+    this.portalCamera.layers.mask = oldLayerMask;
     afterRender?.();
     this.group.visible = wasVisible;
   }
@@ -769,4 +832,3 @@ export class SpatialRift {
     this.portalRT.dispose();
   }
 }
-

@@ -71,36 +71,36 @@ export function createRiftDistortionNode(inputNode) {
       const angle = mx_atan2(q.y, q.x);
       const distance = length(q);
       const boundary = riftBoundary(angle, uniforms.uOpen, uniforms.uTime);
-      const band = exp(pow(distance.sub(boundary).div(0.082), 2).negate());
-      const outer = exp(pow(distance.sub(boundary).div(0.21), 2).negate());
-      const tear = exp(pow(distance.sub(boundary).div(0.030), 2).negate());
+      const band = exp(pow(distance.sub(boundary).div(0.030), 2).negate());
+      const outer = exp(pow(distance.sub(boundary).div(0.075), 2).negate());
+      const tear = exp(pow(distance.sub(boundary).div(0.010), 2).negate());
       const direction = normalize(q.add(vec2(0.00001)));
       const tangent = vec2(direction.y.negate(), direction.x);
       const pulse = sin(uniforms.uTime.mul(2.1).add(angle.mul(9))).mul(0.28).add(0.72);
       const strainPulse = sin(uniforms.uTime.mul(10.5).add(angle.mul(17))).mul(0.18).add(0.82);
       const fold = uniforms.uOpen.add(uniforms.uTension.mul(0.72)).add(uniforms.uBurst.mul(0.32));
-      const pull = direction.negate().mul(safeR).mul(band.mul(0.050).add(outer.mul(0.012)))
+      const pull = direction.negate().mul(safeR).mul(band.mul(0.012).add(outer.mul(0.002)))
         .mul(fold).mul(uniforms.uStrength).mul(pulse).toVar();
-      pull.addAssign(direction.negate().mul(safeR).mul(outer.mul(0.024).add(band.mul(0.018)))
+      pull.addAssign(direction.negate().mul(safeR).mul(outer.mul(0.006).add(band.mul(0.004)))
         .mul(uniforms.uTension).mul(strainPulse));
-      pull.addAssign(tangent.mul(safeR).mul(band).mul(0.010)
+      pull.addAssign(tangent.mul(safeR).mul(band).mul(0.003)
         .mul(sin(angle.mul(13).sub(uniforms.uTime.mul(1.7)))).mul(fold));
-      pull.addAssign(tangent.mul(safeR).mul(outer).mul(0.014)
+      pull.addAssign(tangent.mul(safeR).mul(outer).mul(0.004)
         .mul(sin(angle.mul(23).add(uniforms.uTime.mul(6)))).mul(uniforms.uTension));
-      pull.addAssign(tangent.mul(safeR).mul(0.018).mul(tear)
+      pull.addAssign(tangent.mul(safeR).mul(0.006).mul(tear)
         .mul(sin(angle.mul(41).sub(uniforms.uTime.mul(4.2)))).mul(uniforms.uOpen));
       const warpedUv = sampleUv.add(pull);
-      const split = float(0.0007).add(band.mul(0.0032)).add(tear.mul(0.0065))
-        .mul(fold).mul(uniforms.uStrength).add(uniforms.uBurst.mul(band).mul(0.0065));
+      const split = float(0.0002).add(band.mul(0.0010)).add(tear.mul(0.0022))
+        .mul(fold).mul(uniforms.uStrength).add(uniforms.uBurst.mul(band).mul(0.0020));
       const red = inputNode.sample(warpedUv.add(direction.mul(split))).r;
       const green = inputNode.sample(warpedUv).g;
       const blue = inputNode.sample(warpedUv.sub(direction.mul(split))).b;
       const distorted = vec3(red, green, blue).toVar();
-      distorted.addAssign(vec3(0.02, 0.05, 0.09).mul(band).mul(uniforms.uOpen));
-      distorted.addAssign(vec3(0.12, 0.34, 0.92).mul(tear).mul(uniforms.uOpen)
-        .mul(sin(angle.mul(29).sub(uniforms.uTime.mul(3.1))).mul(0.32).add(0.48)));
-      distorted.addAssign(vec3(0.08, 0.20, 0.48).mul(band).mul(uniforms.uTension).mul(0.55));
-      distorted.addAssign(vec3(0.55, 0.30, 0.82).mul(band).mul(uniforms.uBurst).mul(0.28));
+      distorted.addAssign(vec3(0.006, 0.015, 0.030).mul(band).mul(uniforms.uOpen));
+      distorted.addAssign(vec3(0.10, 0.22, 0.52).mul(tear).mul(uniforms.uOpen)
+        .mul(sin(angle.mul(29).sub(uniforms.uTime.mul(3.1))).mul(0.24).add(0.36)));
+      distorted.addAssign(vec3(0.025, 0.07, 0.18).mul(band).mul(uniforms.uTension).mul(0.35));
+      distorted.addAssign(vec3(0.28, 0.16, 0.42).mul(band).mul(uniforms.uBurst).mul(0.18));
       result.assign(vec4(distorted, 1));
     });
     return result;
@@ -111,18 +111,17 @@ export function createRiftDistortionNode(inputNode) {
 export const DEFAULT_RIFT_PROFILE = Object.freeze({
   width: 820,
   height: 630,
-  depth: 245,
+  depth: 96,
   edgeThickness: 1,
   ribbonSegments: 520,
   tunnelSegments: 300,
   tunnelRings: 28,
   renderScale: 1,
   rimLayers: Object.freeze([
-    { scale: 1.000, band: 34, z: 8, alpha: 0.66, phase: 0, brightness: 1.02 },
-    { scale: 1.025, band: 58, z: 1, alpha: 0.34, phase: 1.7, brightness: 0.88 },
-    { scale: 0.982, band: 22, z: 14, alpha: 0.48, phase: 3.2, brightness: 1.08 },
-    { scale: 1.068, band: 82, z: -9, alpha: 0.16, phase: 5.0, brightness: 0.80 },
-    { scale: 1.120, band: 110, z: -16, alpha: 0.07, phase: 7.1, brightness: 0.68 },
+    { scale: 1.000, band: 5, z: 8, alpha: 0.74, phase: 0, brightness: 1.22 },
+    { scale: 1.008, band: 9, z: 2, alpha: 0.22, phase: 1.7, brightness: 0.78 },
+    { scale: 0.994, band: 4, z: 14, alpha: 0.66, phase: 3.2, brightness: 1.32 },
+    { scale: 1.018, band: 14, z: -4, alpha: 0.05, phase: 5.0, brightness: 0.58 },
   ]),
 });
 
@@ -178,6 +177,7 @@ export class SpatialRift {
     this.openTimeline = 0;
     this.tension = 0;
     this.burst = 0;
+    this.portalVolumeLayerRendered = false;
 
     this.portalCamera = mainCamera.clone();
     this.portalCamera.matrixAutoUpdate = true;
@@ -302,7 +302,7 @@ export class SpatialRift {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     const material = new THREE.LineBasicMaterial({
-      color: phase % 2 ? 0x8dcfff : 0xe6f5ff,
+      color: phase % 2 ? 0x9bcfff : 0xf1f7ff,
       transparent: true,
       opacity,
       depthWrite: false,
@@ -310,14 +310,14 @@ export class SpatialRift {
       toneMapped: false,
     });
     const line = new THREE.Line(geometry, material);
-    line.userData.filament = { scale, phase, count };
+    line.userData.filament = { scale, phase, count, opacity };
     line.renderOrder = 7;
     return line;
   }
 
   _updateLivingFilaments(time, open) {
     for (const line of this.livingFilaments) {
-      const { scale, phase, count } = line.userData.filament;
+      const { scale, phase, count, opacity } = line.userData.filament;
       const positions = line.geometry.attributes.position.array;
       for (let i = 0; i < count; i++) {
         const angle = (i % (count - 1)) / (count - 1) * TAU;
@@ -327,10 +327,13 @@ export class SpatialRift {
         const index = i * 3;
         positions[index] = Math.cos(angle) * this.width * 0.5 * radius;
         positions[index + 1] = Math.sin(angle) * this.height * 0.5 * radius;
-        positions[index + 2] = 15 + phase * 1.5 + Math.sin(angle * 19 + time * 2.8 + phase) * 4 * open;
+        const fracture = Math.pow(Math.max(0, Math.sin(angle * (19 + phase * 3)
+          - time * (2.4 + phase * 0.21) + phase)), 18);
+        positions[index + 2] = 15 + phase * 1.5
+          + Math.sin(angle * 19 + time * 2.8 + phase) * (3 + fracture * 9) * open;
       }
       line.geometry.attributes.position.needsUpdate = true;
-      line.material.opacity = (0.22 + phase * 0.08) * smoothstep(0.02, 0.20, open);
+      line.material.opacity = opacity * smoothstep(0.02, 0.20, open);
     }
   }
 
@@ -376,13 +379,15 @@ export class SpatialRift {
     const charge = pow(max(0, sin(angle.mul(41).sub(uniforms.uTime.mul(9)).add(uniforms.uPhase))), 18);
     const tear = exp(across.mul(-22)).mul(max(f1, charge).mul(0.66).add(0.34));
     const stablePulse = sin(uniforms.uTime.mul(3.2).add(angle.mul(3)).add(uniforms.uPhase)).mul(0.18).add(0.92);
-    material.colorNode = mix(vec3(0.10, 0.52, 1.35), spectrum(hue), 0.67)
-      .add(vec3(1.35, 0.42, 0.08).mul(f1).mul(0.72))
-      .add(vec3(1.45, 1.18, 0.96).mul(pow(core, 4)).mul(f1.mul(0.6).add(0.35)))
+    material.colorNode = mix(vec3(0.08, 0.30, 0.82), spectrum(hue), 0.24)
+      .add(vec3(0.72, 0.26, 0.10).mul(f1).mul(0.34))
+      .add(vec3(1.65, 1.90, 2.65).mul(pow(core, 4)).mul(f1.mul(0.7).add(0.25)))
       .add(vec3(0.72, 1.05, 1.65).mul(charge.mul(0.95).add(0.16)).mul(uniforms.uTension))
       .add(vec3(1.75, 1.25, 1.85).mul(core.mul(0.25).oneMinus()).mul(uniforms.uBurst).mul(0.82))
       .add(vec3(3.8, 4.6, 7.2).mul(tear)).mul(uniforms.uBrightness).mul(stablePulse);
-    material.opacityNode = core.mul(0.92).add(0.08).mul(flow.mul(0.72).add(0.28)).mul(uniforms.uAlpha)
+    const fracture = max(f1, max(f2.mul(0.72), charge)).mul(0.94).add(0.06);
+    material.opacityNode = core.mul(0.96).add(0.04).mul(fracture)
+      .mul(flow.mul(0.78).add(0.22)).mul(uniforms.uAlpha)
       .mul(tslSmoothstep(0.02, 0.20, uniforms.uOpen))
       .add(tear.mul(uniforms.uAlpha).mul(0.82).mul(tslSmoothstep(0.03, 0.18, uniforms.uOpen)))
       .mul(uniforms.uTension.mul(0.95).add(uniforms.uBurst.mul(0.75)).add(1))
@@ -413,12 +418,12 @@ export class SpatialRift {
     })();
     const charge = sin(massAngle.mul(11).sub(massUniforms.uTime.mul(1.4))).mul(0.5).add(0.5);
     this.massMat.colorNode = vec3(0.0004, 0.0012, 0.0035)
-      .add(vec3(0.004, 0.016, 0.045).mul(charge.mul(0.75).add(0.25))
-        .mul(massUniforms.uTension.mul(0.8).add(0.35)))
-      .add(vec3(0.16, 0.09, 0.24).mul(massUniforms.uBurst))
+      .add(vec3(0.003, 0.012, 0.034).mul(charge.mul(0.75).add(0.25))
+        .mul(massUniforms.uTension.mul(0.55).add(0.22)))
+      .add(vec3(0.08, 0.035, 0.12).mul(massUniforms.uBurst))
       .mul(tslSmoothstep(0.015, 0.12, massUniforms.uOpen));
     this.mass = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 520, 34 * this.profile.edgeThickness, 10, true),
+      new THREE.TubeGeometry(curve, 520, 5 * this.profile.edgeThickness, 5, true),
       this.massMat,
     );
     this.mass.renderOrder = 3;
@@ -427,8 +432,9 @@ export class SpatialRift {
     const tunnelUniforms = { uTime: uniform(0), uOpen: uniform(0), uTension: uniform(0), uBurst: uniform(0) };
     this.tunnelMat = new MeshBasicNodeMaterial({
       side: THREE.BackSide,
-      transparent: false,
-      depthWrite: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
       toneMapped: false,
     });
     this.tunnelMat.uniforms = tunnelUniforms;
@@ -451,14 +457,18 @@ export class SpatialRift {
     const l1 = pow(max(0, sin(tunnelAngle.mul(17).sub(tunnelDepth.mul(29)).sub(tunnelUniforms.uTime.mul(2.1)))), 18);
     const l2 = pow(max(0, sin(tunnelAngle.mul(31).add(tunnelDepth.mul(41)).add(tunnelUniforms.uTime.mul(1.3)))), 28);
     const ribs = pow(max(0, sin(tunnelDepth.mul(25).sub(tunnelAngle.mul(3)))), 20);
+    const tunnelFracture = max(l1, max(l2.mul(0.72), ribs.mul(0.42)));
     const tunnelHue = fract(tunnelAngle.div(TAU).add(tunnelDepth.mul(0.3)).add(tunnelUniforms.uTime.mul(0.015)));
-    this.tunnelMat.colorNode = mix(vec3(0.002, 0.006, 0.014), vec3(0.015, 0.035, 0.075), sin(tunnelAngle.mul(5)).mul(0.5).add(0.5))
-      .add(spectral(tunnelHue).mul(l1.mul(0.82).add(l2.mul(0.48))))
-      .add(vec3(0.10, 0.42, 1.15).mul(ribs).mul(0.30))
+    this.tunnelMat.colorNode = spectral(tunnelHue).mul(l1.mul(0.58).add(l2.mul(0.32)))
+      .add(vec3(0.08, 0.34, 0.90).mul(ribs).mul(0.18))
       .add(spectral(fract(tunnelAngle.div(TAU).add(tunnelUniforms.uTime.mul(0.08))))
         .mul(tunnelUniforms.uTension).mul(l1.mul(0.55).add(0.08)))
-      .add(vec3(0.95, 0.62, 1.35).mul(tunnelUniforms.uBurst).mul(tunnelDepth.oneMinus().mul(0.80).add(0.20)))
+      .add(vec3(0.72, 0.48, 1.08).mul(tunnelUniforms.uBurst)
+        .mul(tunnelFracture.mul(0.88).add(0.12)).mul(tunnelDepth.oneMinus()))
       .mul(tslSmoothstep(0.045, 0.20, tunnelUniforms.uOpen).add(tunnelUniforms.uTension.mul(0.10)));
+    this.tunnelMat.opacityNode = tunnelFracture.mul(0.08).add(0.002)
+      .mul(tunnelDepth.mul(0.84).oneMinus())
+      .mul(tslSmoothstep(0.045, 0.20, tunnelUniforms.uOpen)).clamp(0, 0.12);
     this.tunnel = new THREE.Mesh(this._makeTunnelGeometry(), this.tunnelMat);
     this.tunnel.renderOrder = 2;
     this.visual.add(this.tunnel);
@@ -471,8 +481,8 @@ export class SpatialRift {
       this.rimMaterials.push(material);
       this.visual.add(mesh);
     }
-    const exitMaterial = this._rimShader(0.30, 2.4, 0.76);
-    const exitRim = new THREE.Mesh(this._makeRibbonGeometry(0.96, 30, -this.depth + 3, 2.4), exitMaterial);
+    const exitMaterial = this._rimShader(0.07, 2.4, 0.58);
+    const exitRim = new THREE.Mesh(this._makeRibbonGeometry(0.982, 6, -this.depth + 3, 2.4), exitMaterial);
     exitRim.renderOrder = 4;
     this.rimMaterials.push(exitMaterial);
     this.visual.add(exitRim);
@@ -482,10 +492,9 @@ export class SpatialRift {
     // It also makes the stable passage visibly alive without a full-screen
     // temporal effect or a backend-specific line shader.
     this.livingFilaments = [
-      this._makeLivingFilament(0.988, 0.22, 0),
-      this._makeLivingFilament(1.000, 0.30, 1),
-      this._makeLivingFilament(1.013, 0.24, 2),
-      this._makeLivingFilament(1.028, 0.16, 3),
+      this._makeLivingFilament(0.994, 0.34, 0),
+      this._makeLivingFilament(1.003, 0.48, 1),
+      this._makeLivingFilament(1.014, 0.26, 2),
     ];
     for (const filament of this.livingFilaments) this.visual.add(filament);
 
@@ -517,7 +526,7 @@ export class SpatialRift {
       const mask = tslSmoothstep(boundary.sub(aa), boundary.add(aa), radius).oneMinus();
       const projected = portalUniforms.uTextureMatrix.mul(modelWorldMatrix.mul(vec4(positionLocal, 1)));
       const baseUv = projected.xy.div(max(projected.w, 0.00001));
-      const edge = tslSmoothstep(boundary.sub(0.25), boundary, radius);
+      const edge = tslSmoothstep(boundary.sub(0.055), boundary, radius);
       const wave = sin(angle.mul(19).sub(portalUniforms.uTime.mul(1.8)))
         .add(sin(angle.mul(7).add(portalUniforms.uTime.mul(1.15))));
       const direction = normalize(p.add(vec2(0.00001)));
@@ -525,7 +534,7 @@ export class SpatialRift {
       // The opened membrane never becomes a frozen screenshot: a restrained
       // whole-window shear plus stronger boundary displacement keeps the live
       // destination spatially connected to the moving tear.
-      const membraneShear = edge.mul(0.0045).add(0.0012);
+      const membraneShear = edge.mul(0.0018).add(0.0002);
       const warpedUv = baseUv.add(tangent.mul(wave).mul(membraneShear).mul(portalUniforms.uOpen));
       const split = edge.mul(0.0045).add(0.00055).mul(portalUniforms.uOpen);
       const red = portalTexture.sample(warpedUv.add(direction.mul(split))).r;
@@ -536,11 +545,11 @@ export class SpatialRift {
       // Preserve the destination's linear color/exposure through the window;
       // spectral energy belongs on the animated boundary, not as a tint over
       // the entire world that visibly disappears at the crossing plane.
-      const col = vec3(red, green, blue).add(vec3(0.006, 0.0075, 0.009))
-        .add(vec3(0.10, 0.24, 0.48).mul(pow(edge, 5)).mul(0.42))
-        .add(vec3(0.22, 0.42, 0.92).mul(pow(edge, 3)).mul(portalUniforms.uTension).mul(0.24))
-        .add(vec3(0.72, 0.42, 1.05).mul(pow(edge, 2)).mul(portalUniforms.uBurst).mul(0.34))
-        .add(vec3(0.04, 0.08, 0.16).mul(membrane).mul(portalUniforms.uOpen).mul(pow(edge, 3)).mul(0.35))
+      const col = vec3(red, green, blue)
+        .add(vec3(0.035, 0.08, 0.18).mul(pow(edge, 5)).mul(0.24))
+        .add(vec3(0.10, 0.20, 0.46).mul(pow(edge, 3)).mul(portalUniforms.uTension).mul(0.16))
+        .add(vec3(0.42, 0.24, 0.62).mul(pow(edge, 2)).mul(portalUniforms.uBurst).mul(0.22))
+        .add(vec3(0.025, 0.05, 0.11).mul(membrane).mul(portalUniforms.uOpen).mul(pow(edge, 3)).mul(0.22))
         .mul(mix(float(1), portalPulse, edge.mul(0.72)));
       const reveal = tslSmoothstep(0.055, 0.20, portalUniforms.uOpen).add(portalUniforms.uTension.mul(0.045));
       return vec4(col, mask.mul(reveal.greaterThan(0.035)));
@@ -714,6 +723,12 @@ export class SpatialRift {
     this.portalCamera.far = this.mainCamera.far;
     this.portalCamera.updateProjectionMatrix();
     this.portalCamera.updateMatrixWorld(true);
+    // The destination atmosphere and volumetric cloud shell live on layer 2
+    // in the main render graph. The portal is a direct offscreen render, so it
+    // must opt into that same layer or the planet is shown bare until crossing.
+    const oldLayerMask = this.portalCamera.layers.mask;
+    this.portalCamera.layers.enable(2);
+    this.portalVolumeLayerRendered = this.portalCamera.layers.isEnabled(2);
     this.textureMatrix.copy(this.biasMatrix)
       .multiply(this.portalCamera.projectionMatrix)
       .multiply(this.portalCamera.matrixWorldInverse)
@@ -730,6 +745,7 @@ export class SpatialRift {
     this.renderer.render(this.scene, this.portalCamera);
     this.renderer.setRenderTarget(oldTarget);
     this.renderer.xr.enabled = oldXr;
+    this.portalCamera.layers.mask = oldLayerMask;
     afterRender?.();
     this.group.visible = wasVisible;
   }
@@ -774,4 +790,3 @@ export class SpatialRift {
     this.portalRT.dispose();
   }
 }
-

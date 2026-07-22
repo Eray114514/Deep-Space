@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
+import { PNG } from 'pngjs';
 import { startServer } from './server.js';
 import { launchBrowser, launchWebGPUHardwareBrowser } from './browser.js';
 
@@ -100,7 +101,24 @@ try {
         count: map.els.count.textContent,
       });
     }
-    return { id: bh.id, regularId: regular.id, samples, regularSamples };
+    const hoverPoint = project(regularPosition);
+    map.renderer.domElement.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: rect.left + hoverPoint.x,
+      clientY: rect.top + hoverPoint.y,
+    }));
+    return {
+      id: bh.id,
+      regularId: regular.id,
+      samples,
+      regularSamples,
+      remoteLabelCount: map.labelData.filter((item) => !localIds.has(item.star.id)).length,
+      labelRecordCount: map.labelData.length,
+      globalCount: map.globalStars.length,
+      previewCacheSize: map.previewCache.size,
+      hoverVisible: !map.els.hoverMark.hidden,
+      hoverName: map.els.hoverName.textContent,
+      expectedHoverName: map.systemLabelIdentity(regular).properName,
+    };
   });
 
   for (const sample of audit.samples) {
@@ -124,6 +142,14 @@ try {
     assert.equal(sample.count, '1024 / 1024',
       `galaxy catalogue count switched at zoom ${sample.distance}`);
   }
+  assert(audit.remoteLabelCount > 40,
+    `far galaxy has too few distributed name labels (${audit.remoteLabelCount})`);
+  assert(audit.labelRecordCount < audit.globalCount,
+    'galaxy eagerly created a DOM label for every system');
+  assert(audit.previewCacheSize < 500,
+    `far labels eagerly generated too many full system previews (${audit.previewCacheSize})`);
+  assert.equal(audit.hoverVisible, true, 'ordinary far-system hover label stayed hidden');
+  assert.equal(audit.hoverName, audit.expectedHoverName, 'ordinary far-system hover name was missing');
   assert.equal(errors.length, 0, `star map emitted page errors: ${errors.join('\n')}`);
 
   await mkdir('test-results/starmap', { recursive: true });
@@ -216,8 +242,10 @@ try {
           const next = () => count-- > 0 ? requestAnimationFrame(next) : resolve();
           next();
         });
-        const systems = map.globalStars.filter((star) => star.kind !== 'blackHole'
-          && star.id !== map.getUniverse().system.star.id).slice(0, 2);
+        const farReportedSystem = map.globalStars.find((star) => star.id === 'MW-0997');
+        const firstSystem = map.globalStars.find((star) => star.kind !== 'blackHole'
+          && star.id !== map.getUniverse().system.star.id && star.id !== farReportedSystem?.id);
+        const systems = [firstSystem, farReportedSystem].filter(Boolean);
         map.selectStar(systems[0], false);
         await map.enterSystem();
         await waitFrames(6);
@@ -231,11 +259,26 @@ try {
           expected: systems[1].id,
           bodies: map.sysview.bodies.length,
           picks: map.sysview.pickMeshes.length,
+          rendererReady: map.sysview.rendererReady,
+          backend: map.sysview.renderer.domElement.dataset.backend,
+          pixelRatio: map.sysview.renderer.getPixelRatio(),
         };
       });
       assert.equal(switchAudit.selected, switchAudit.expected, 'second system was not selected');
       assert.equal(switchAudit.preview, switchAudit.expected, 'second preview reused the first system');
       assert(switchAudit.bodies > 0 && switchAudit.picks > 0, 'second preview lost render or interaction records');
+      assert.equal(switchAudit.rendererReady, true, 'embedded system renderer was not ready before preview reveal');
+      assert.equal(switchAudit.backend, 'webgl2', 'embedded system preview did not use the stable WebGL2 backend');
+      assert(switchAudit.pixelRatio <= 1.25, `embedded preview pixel ratio is too high: ${switchAudit.pixelRatio}`);
+      const previewPng = PNG.sync.read(await webgpuPage.locator('#sm-sysview canvas').screenshot());
+      let brightPixels = 0;
+      for (let i = 0; i < previewPng.data.length; i += 4) {
+        const luminance = previewPng.data[i] * 0.2126
+          + previewPng.data[i + 1] * 0.7152 + previewPng.data[i + 2] * 0.0722;
+        if (luminance > 64) brightPixels++;
+      }
+      assert(brightPixels > 500,
+        `second system preview rendered a blank canvas (${brightPixels} bright pixels)`);
       assert.equal(webgpuErrors.length, 0, `real-WebGPU star map emitted errors: ${webgpuErrors.join('\n')}`);
       console.log('PASS: real WebGPU star-map rendering, picking, and sequential system previews');
     } finally {

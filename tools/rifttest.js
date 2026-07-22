@@ -33,16 +33,26 @@ const routeFrame = path.join(os.tmpdir(), 'deep-space-route-choice.png');
 const routeMobileFrame = path.join(os.tmpdir(), 'deep-space-route-choice-mobile.png');
 
 try {
-  await page.goto(`http://127.0.0.1:${port}/?nolock=1&nohero=1&quality=low&vclouds=0&farflora=0&freeze=1&buildms=25`);
+  await page.goto(`http://127.0.0.1:${port}/?nolock=1&nohero=1&quality=low&vclouds=1&farflora=0&freeze=1&buildms=25`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
 
-  const targetId = await page.evaluate(() => NMS._internals.universe.nearStarsList[0]?.id || null);
-  check(!!targetId, 'a neighboring system is available for the rift route');
+  const target = await page.evaluate(() => {
+    const { universe, starMap } = NMS._internals;
+    for (const star of universe.nearStarsList) {
+      const preview = starMap.systemPreview(star);
+      const body = preview.bodies.find((candidate) => !candidate.isMoon
+        && !['gasGiant', 'iceGiant', 'blackHole'].includes(candidate.type)
+        && (candidate.clouds?.coverage || 0) > 0.12);
+      if (body) return { starId: star.id, bodyIndex: body.index, coverage: body.clouds.coverage };
+    }
+    return null;
+  });
+  check(!!target, 'a cloudy neighboring planet is available for the rift route');
   await page.evaluate((id) => {
     NMS.openStarMap();
     NMS.selectStarMapTarget(id);
-  }, targetId);
-  await page.locator('#sm-systemGlyph [data-glyph-index]').first().click({ force: true });
+  }, target.starId);
+  await page.locator(`#sm-systemGlyph [data-glyph-index="${target.bodyIndex}"]`).click({ force: true });
   await page.waitForFunction(() => document.querySelector('#sm-planetLeft')?.classList.contains('active'));
   await page.locator('#sm-routeAction').click({ force: true });
   await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
@@ -92,6 +102,11 @@ try {
   const stable = await page.evaluate('NMS.riftState()');
   check(stable.visible && stable.destinationLight.length > 0,
     'stable passage renders a live destination system');
+  check(stable.previewVolume?.cloudCoverage > 0.12
+      && stable.previewVolume?.atmosphereVisible
+      && stable.previewVolume?.volumeCloudVisible
+      && stable.previewVolume?.portalVolumeLayerRendered,
+  `portal renders the selected planet's atmosphere and volume clouds (${stable.previewVolume?.cloudCoverage?.toFixed(2) || 'missing'} coverage)`);
 
   await page.screenshot({ path: frameA });
   await page.waitForTimeout(420);
