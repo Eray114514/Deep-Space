@@ -2388,7 +2388,19 @@ function frame() {
   }
   // The map owns an opaque full-screen WebGL surface and its own RAF. Rendering
   // the universe underneath doubled GPU work for pixels nobody could see.
-  if (starMap?.isOpen) return;
+  if (starMap?.isOpen) {
+    // Even though the 3D universe is skipped while the star map covers the
+    // screen, the BGM director must still run so it can switch to the starmap
+    // theme (and back when the map closes).
+    music.update({
+      state,
+      planetType: null,
+      snowWeight: 0,
+      nearBlackHole: false,
+      starmapOpen: true,
+    });
+    return;
+  }
 
   // Advance the persistent universe clock only during active play. The world
   // is updated before controls so a walker remains attached to the moving body.
