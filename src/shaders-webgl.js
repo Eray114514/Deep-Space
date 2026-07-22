@@ -291,6 +291,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         varying vec3 vMat;
         varying vec4 vExtra;
         float gSnowW = 0.0;
+        float gPatch = 0.0;
         float triDetail(vec3 p, vec3 w, float s, int ch) {
           vec2 a = texture2D(uDetailTex, p.yz * s).rg;
           vec2 b = texture2D(uDetailTex, p.zx * s).rg;
@@ -351,6 +352,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           float mw = clamp(macro * 1.5 + 0.5, 0.0, 1.0) * uMacroK;
           diffuseColor.rgb *= mix(vec3(1.0), vec3(1.09, 0.99, 0.84), mw);
 
+          // ---- mid-scale patchiness (~100–500 m): soil and moisture
+          // variation seen from a hilltop — the octave between micro grain
+          // and continental swathes that uniform game terrain lacks
+          float pch = triDetail(vLocalPos, w, 0.0035, 1)
+                    + triDetail(vLocalPos, w, 0.0012, 0) - 1.0;
+          gPatch = pch;
+          diffuseColor.rgb *= 1.0 + pch * (0.30 + 0.20 * vMat.z) * (0.5 + uMacroK);
+          // damp hollows darken and cool slightly
+          diffuseColor.rgb = mix(diffuseColor.rgb,
+            diffuseColor.rgb * vec3(0.88, 0.97, 0.92),
+            clamp(-pch * 1.8, 0.0, 0.5) * uMacroK);
+
           // ---- per-pixel snowline: crisp caps from orbit
           if (uSnowK > 0.5) {
             float lat = abs(nd.y) + (texture2D(uDetailTex, nd.xz * 2.0 + nd.y).r - 0.5) * 0.12;
@@ -369,8 +382,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-        // snow glints; everything else stays matte
-        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.42, 0.05, 1.0);`)
+        // snow glints, damp hollows go faintly glossy, dry rises stay matte —
+        // low-sun specular variation is a big part of ground reading as real
+        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.42 + gPatch * 0.14, 0.05, 1.0);`)
       .replace('#include <fog_fragment>', `
         #ifdef USE_FOG
         {
@@ -395,10 +409,10 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
                    - triDetail(vLocalPos - vec3(0.0, 0.35, 0.0), wN, uDetailS.y, 1);
           vec3 tang = normalize(cross(normal, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
           vec3 bitn = cross(normal, tang);
-          normal = normalize(normal + (tang * gx + bitn * gy) * uDetailK * (1.1 + vMat.x * 1.2));
+          normal = normalize(normal + (tang * gx + bitn * gy) * uDetailK * (1.7 + vMat.x * 1.5));
         }`);
   };
-  material.customProgramCacheKey = () => 'terrain-palette-v3';
+  material.customProgramCacheKey = () => 'terrain-palette-v4';
 }
 
 // Living water: scrolling normal perturbation, plus Beer–Lambert depth

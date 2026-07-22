@@ -221,6 +221,14 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   const macro = triDetail(local, 0.0013, 'r').add(triDetail(local, 0.00028, 'g')).sub(1);
   const macroWeight = macro.mul(1.5).add(0.5).clamp(0, 1).mul(macroK);
   surface = surface.mul(mix(vec3(1), vec3(1.09, 0.99, 0.84), macroWeight));
+
+  // mid-scale patchiness (~100–500 m): soil and moisture variation — the
+  // octave between micro grain and continental swathes that uniform game
+  // terrain lacks. Damp hollows darken and cool slightly.
+  const pch = triDetail(local, 0.0035, 'g').add(triDetail(local, 0.0012, 'r')).sub(1);
+  surface = surface.mul(float(1).add(pch.mul(float(0.30).add(matWeights.z.mul(0.20))).mul(float(0.5).add(macroK))));
+  surface = mix(surface, surface.mul(vec3(0.88, 0.97, 0.92)), pch.mul(-1.8).clamp(0, 0.5).mul(macroK));
+
   surface = surface.mul(mix(0.42, 1, matWeights.z));
 
   let snowWeight = float(0);
@@ -241,9 +249,25 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   const cloudK = uniform(planet.cloudMesh ? 0.42 : 0);
   surface = surface.mul(float(1).sub(texture(cloudMap, vec2(cloudU, cloudV)).a.mul(cloudK)));
   material.colorNode = surface;
-  material.roughnessNode = float(1).sub(snowWeight.mul(0.42)).clamp(0.05, 1);
+  material.roughnessNode = float(1).sub(snowWeight.mul(0.42)).add(pch.mul(0.14)).clamp(0.05, 1);
+
+  // micro-relief: bend the shading normal with the same detail field — this,
+  // more than geometry, is what makes ground read as real. Mirrors the
+  // normal_fragment_begin pass in shaders-webgl.js. Without it WebGPU terrain
+  // only has colour variation and reads flat under oblique light.
+  {
+    const nrm = normalLocal.normalize();
+    const tang = nrm.cross(vec3(0, 1, 0)).add(vec3(1e-4, 1e-4, 1e-4)).normalize();
+    const bitn = nrm.cross(tang);
+    const dx = vec3(0.35, 0, 0), dy = vec3(0, 0.35, 0);
+    const gx = triDetail(local.add(dx), 1 / 3.2, 'g').sub(triDetail(local.sub(dx), 1 / 3.2, 'g'));
+    const gy = triDetail(local.add(dy), 1 / 3.2, 'g').sub(triDetail(local.sub(dy), 1 / 3.2, 'g'));
+    const bend = tang.mul(gx).add(bitn.mul(gy)).mul(strength).mul(float(1.7).add(matWeights.x.mul(1.5)));
+    material.normalNode = nrm.add(bend).normalize();
+  }
+
   material.userData.shader = { uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK } };
-  material.userData.nodeMaterial = 'terrain-v2-faithful';
+  material.userData.nodeMaterial = 'terrain-v3-faithful';
   source.dispose?.();
   return material;
 }
