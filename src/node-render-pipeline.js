@@ -26,7 +26,7 @@ export class GameNodePipeline {
   } = {}) {
     this.renderer = renderer;
     this.pipeline = new THREE.RenderPipeline(renderer);
-    this.scenePass = pass(scene, camera, { samples: 0 });
+    this.scenePass = pass(scene, camera, { samples: 4 });
     this.scenePass.name = 'Main scene';
     this.scenePass.setLayers(new THREE.Layers());
     const sceneColor = this.scenePass.getTextureNode('output');

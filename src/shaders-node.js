@@ -6,7 +6,7 @@ import { MeshBasicNodeMaterial, MeshPhysicalNodeMaterial, MeshStandardNodeMateri
 import {
   abs, acos, atan, attribute, color, dot, float, fract, instanceIndex, length, mix,
   mx_fractal_noise_float, normalLocal, normalView, positionLocal,
-  positionViewDirection, pow, select, sign, sin, smoothstep, texture, time, uniform,
+  positionView, positionViewDirection, pow, select, sign, sin, smoothstep, texture, time, uniform,
   vec2, vec3, vertexColor,
 } from 'three/tsl';
 import { Simplex } from './noise.js';
@@ -250,6 +250,21 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   surface = surface.mul(float(1).sub(texture(cloudMap, vec2(cloudU, cloudV)).a.mul(cloudK)));
   material.colorNode = surface;
   material.roughnessNode = float(1).sub(snowWeight.mul(0.42)).add(pch.mul(0.14)).clamp(0.05, 1);
+
+  // valley mist: haze pools in the low country and thickens with distance —
+  // the depth cue that sells scale from altitude. Mirrors the fog_fragment
+  // injection in shaders-webgl.js.
+  {
+    const mistBase = planet.liquid === 'lava' ? 0.05 : (planet.hasLiquid ? 0.26 : 0.1);
+    const uMistK = uniform(mistBase * Math.min(planet.atmoDensity || 0.4, 1));
+    const uMistH = uniform(planet.hAmp * 0.12);
+    const uMistColor = uniform(planet.skyColor.clone().convertSRGBToLinear());
+    const mistHeight = h.sub(U.t0 || 0);
+    const mistFactor = smoothstep(uMistH, float(0), mistHeight)
+      .mul(float(1).sub(positionView.z.negate().mul(3.2e-4).exp()));
+    const mist = uMistK.mul(mistFactor).clamp(0, 0.6);
+    material.colorNode = mix(material.colorNode, uMistColor, mist);
+  }
 
   // micro-relief: bend the shading normal with the same detail field — this,
   // more than geometry, is what makes ground read as real. Mirrors the
