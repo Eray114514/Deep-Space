@@ -18,6 +18,7 @@ import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, or
 import { buildGalaxyBackdrop, CELL, GalaxyCatalog, HOME_SYSTEM_ID } from './galaxy-layout.js';
 import { buildCivilizationSites, civilizationSitesForSystem } from './civilization.js';
 import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
 
 export { CELL } from './galaxy-layout.js';
 
@@ -30,8 +31,9 @@ const FADE_DIST = 9e9;
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
-const USE_NODE_MATERIALS = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const _rendererParams = typeof location !== 'undefined'
+  ? new URLSearchParams(location.search) : new URLSearchParams();
+const USE_NODE_MATERIALS = resolveRendererPolicy(_rendererParams).backend === 'webgpu';
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
 // fall off with true distance (computed in view space, where the f64 group

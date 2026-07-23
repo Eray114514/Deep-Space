@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  abs, color, dot, float, length, mix, mx_fractal_noise_float, normalWorld,
-  positionLocal, positionWorldDirection, pow, sin, smoothstep, uniform, vec3,
+  abs, color, dot, float, length, mix, modelWorldMatrix, mx_fractal_noise_float, normalWorld,
+  positionLocal, positionWorldDirection, pow, sin, smoothstep, uniform, vec3, vec4,
 } from 'three/tsl';
 
 export function makeBlackHoleImpostorTexture(size = 1024) {
@@ -134,7 +134,11 @@ export function makeAccretionMaterial(innerRadius, outerRadius, temperatureK) {
   density = density.mul(float(0.42).add(lanes.mul(0.48)).add(turbulence.mul(0.22)));
   const hotMix = nodes.uHeat.add(float(1).sub(radial).mul(0.25)).clamp(0, 1);
   let discColor = mix(vec3(1.8, 0.24, 0.045), vec3(1.5, 0.82, 0.34), hotMix);
-  const tangent = vec3(positionLocal.y.negate(), positionLocal.x, 0).normalize();
+  // Doppler beaming needs the disc tangent in world space (the disc mesh has
+  // rotation). The GLSL version uses mat3(modelMatrix); TSL equivalent is
+  // modelWorldMatrix * vec4(localTangent, 0) — w=0 discards translation.
+  const localTangent = vec3(positionLocal.y.negate(), positionLocal.x, 0).normalize();
+  const tangent = modelWorldMatrix.mul(vec4(localTangent, 0)).xyz.normalize();
   const doppler = dot(tangent, positionWorldDirection);
   discColor = discColor.mul(mix(0.52, 1.75, smoothstep(-0.8, 0.8, doppler)));
   const material = new MeshBasicNodeMaterial({

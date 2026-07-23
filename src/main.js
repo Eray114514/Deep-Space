@@ -30,9 +30,14 @@ import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
 import { GameNodePipeline } from './node-render-pipeline.js';
+import { GameNodePipelineV2 } from './render-pipeline-v2.js';
 import { GameLegacyPipeline } from './legacy-render-pipeline.js';
+import { isLowPowerGpu, resolveGraphicsSettings, resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
 
-const BOOT_USE_WEBGPU = new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const qs = new URLSearchParams(location.search);
+const graphicsSettings = resolveGraphicsSettings({ params: qs });
+const rendererPolicy = resolveRendererPolicy(qs);
+const BOOT_USE_WEBGPU = rendererPolicy.backend === 'webgpu';
 const THREE = await import(BOOT_USE_WEBGPU ? 'three/webgpu' : 'three');
 
 // ---- error surface (also read by the headless test harness) ---------------
@@ -42,8 +47,6 @@ window.addEventListener('error', (e) => {
   errBox.textContent += `${e.message} @ ${e.filename}:${e.lineno}\n`;
 });
 
-const qs = new URLSearchParams(location.search);
-const rendererPolicy = resolveRendererPolicy(qs);
 document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
 const DEV_SERVER = window.__NMS_DEV_SERVER__ === true;
 const WORLD_LAB = DEV_SERVER && qs.get('worldlab') === '1';
@@ -75,9 +78,6 @@ const BUILD_MS = Number(qs.get('buildms')) || 0;
 // ?freeze=1: stop scenery-in-motion (waves, sway, cloud drift) so the seam
 // test can pixel-compare static frames — any residual change is LOD activity
 const FREEZE = qs.get('freeze') === '1';
-// ?quality=low for integrated GPUs: coarser grids, no bloom, lower res
-let QUALITY_LOW = qs.get('quality') === 'low';
-
 document.getElementById('version').textContent = 'v' + VERSION;
 console.info(`深空 v${VERSION}`);
 
@@ -93,7 +93,7 @@ window.addEventListener('pointerdown', (event) => {
 
 // ---- renderer ---------------------------------------------------------------
 const rendererOptions = {
-  antialias: qs.get('quality') !== 'low',
+  antialias: graphicsSettings.quality !== 'performance',
   // Layer passes share the renderer clear state. A transparent drawing buffer
   // gives the volume/foreground passes a zero-alpha background so compositing
   // them cannot replace the main scene with an opaque black rectangle.
@@ -102,26 +102,37 @@ const rendererOptions = {
   powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
 };
 const rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
+if (qs.get('renderer-recovery') === 'device-lost') {
+  // Clean the recovery params from the URL so a refresh does not stick on WebGL.
+  const cleanUrl = new URL(location.href);
+  cleanUrl.searchParams.delete('renderer');
+  cleanUrl.searchParams.delete('renderer-recovery');
+  history.replaceState(null, '', cleanUrl);
+}
 const renderer = rendererRuntime.renderer;
 const actualRendererBackend = rendererRuntime.backend;
 const webgpuAdapterInfo = rendererRuntime.adapterInfo;
 const gpuName = rendererRuntime.gpuName;
-const AUTO_LOW_GPU = qs.get('quality') !== 'high' && (
-  /SwiftShader|llvmpipe|Microsoft Basic Render/i.test(gpuName)
-  || /ANGLE \(Intel,|Intel.*(?:UHD|HD Graphics|Iris)/i.test(gpuName)
-  || /AMD Radeon\(TM\) Graphics/i.test(gpuName)
-);
-QUALITY_LOW ||= AUTO_LOW_GPU;
-if (QUALITY_LOW) setGridCells(18);
+const QUALITY_PROFILE = resolveQualityProfile(graphicsSettings, gpuName, {
+  touch: IS_TOUCH, width: window.innerWidth, height: window.innerHeight,
+});
+const QUALITY_LOW = QUALITY_PROFILE.id === 'performance';
+// Near-field terrain density is never a performance-tier casualty.
+setGridCells(QUALITY_PROFILE.gridCells);
 renderer.setSize(window.innerWidth, window.innerHeight);
-const MAX_DPR = QUALITY_LOW ? 1.1 : IS_TOUCH ? 1.35 : 2.0;
-// Mild supersampling on <=1440p desktop protects the hero ship even when the
-// OS reports DPR 1. Very high-resolution displays stay at native scale.
-const DESKTOP_DPR_FLOOR = !QUALITY_LOW && !IS_TOUCH
-  && window.innerWidth * window.innerHeight <= 2560 * 1440 ? 1.25 : 1;
-let renderDpr = QUALITY_LOW
-  ? Math.min(window.devicePixelRatio, 0.65)
-  : Math.min(Math.max(window.devicePixelRatio, DESKTOP_DPR_FLOOR), MAX_DPR);
+// DPR 以 devicePixelRatio 为基准:1.0 = 点对点,>1.0 = 超采样。floor 永不低于点对点,
+// 避免升采样糊与纹理锯齿;省性能靠阴影/体积/网格密度。
+const DPR_BASE = window.devicePixelRatio || 1;
+const DPR_FLOOR = DPR_BASE * QUALITY_PROFILE.dprFloorMult;
+const DPR_CEILING = DPR_BASE * QUALITY_PROFILE.dprCeilingMult;
+let renderDpr = Math.min(Math.max(DPR_BASE * QUALITY_PROFILE.dprTargetMult, DPR_FLOOR), DPR_CEILING);
+// 高 DPR + 高分辨率显示器(如 4K@2x)会让 render target 超过 WebGPU 的
+// maxTextureDimension2D(典型 8192),导致全黑。按能力上限裁剪,保持 floor
+// 不低于 devicePixelRatio 的点对点承诺。
+const maxTexSize = renderer.capabilities?.maxTextureSize || 8192;
+renderDpr = Math.min(renderDpr,
+  maxTexSize / Math.max(1, window.innerWidth),
+  maxTexSize / Math.max(1, window.innerHeight));
 renderer.setPixelRatio(renderDpr);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
@@ -170,13 +181,12 @@ scene.add(ambient, hemi, headlamp);
 const sunShadow = new THREE.DirectionalLight(0xffffff, 0);
 sunShadow.castShadow = true;
 sunShadow.visible = false;
-const SHADOW_MAP = QUALITY_LOW ? 512
-  : window.matchMedia('(pointer: coarse)').matches ? 1024 : 2048;
+const SHADOW_MAP = QUALITY_PROFILE.shadowMap;
 sunShadow.shadow.mapSize.set(SHADOW_MAP, SHADOW_MAP);
 sunShadow.shadow.camera.near = 100;
 sunShadow.shadow.camera.far = 8500;
-sunShadow.shadow.camera.left = sunShadow.shadow.camera.bottom = -300;
-sunShadow.shadow.camera.right = sunShadow.shadow.camera.top = 300;
+sunShadow.shadow.camera.left = sunShadow.shadow.camera.bottom = -QUALITY_PROFILE.shadowDistance;
+sunShadow.shadow.camera.right = sunShadow.shadow.camera.top = QUALITY_PROFILE.shadowDistance;
 sunShadow.shadow.bias = -0.0002;
 sunShadow.shadow.normalBias = 2.0;
 scene.add(sunShadow, sunShadow.target);
@@ -188,6 +198,8 @@ const surfaceBootstrapMeshes = [];
 let surfaceBootstrapPending = false;
 const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
+const warmedVolumePlanets = new Set();
+let volumePrewarmInProgress = false;
 const startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
 // Shader compilation may consume most of the general warm-up deadline on a
@@ -275,6 +287,34 @@ function finishSurfaceBootstrap() {
   surfacePipelinesReady = true;
 }
 
+function prewarmPlanetVolumePipelines(planet) {
+  // Avoid a 3000-4000 m hitch when the player descends through the atmosphere
+  // of a planet other than the one that was warmed during startup.  The shared
+  // topology is the same, but each planet owns its own atmosphere/cloud
+  // material instance, so the first visible frame on a new body can still
+  // trigger an on-demand compile.
+  if (QUALITY_LOW || !planet || planet.isGasGiant || volumePrewarmInProgress
+    || typeof renderer.compileAsync !== 'function') return;
+  if (warmedVolumePlanets.has(planet)) return;
+  const meshes = [planet.atmoMesh, planet.volCloudMesh].filter(Boolean);
+  if (meshes.length === 0) {
+    warmedVolumePlanets.add(planet);
+    return;
+  }
+  const wereVisible = meshes.map((m) => m.visible);
+  for (const mesh of meshes) mesh.visible = true;
+  volumePrewarmInProgress = true;
+  nodePipeline.compileAsync().then(() => {
+    for (let i = 0; i < meshes.length; i++) meshes[i].visible = wereVisible[i];
+    warmedVolumePlanets.add(planet);
+    volumePrewarmInProgress = false;
+  }).catch((error) => {
+    for (let i = 0; i < meshes.length; i++) meshes[i].visible = wereVisible[i];
+    volumePrewarmInProgress = false;
+    console.warn('planet volume prewarm failed', error);
+  });
+}
+
 function prewarmSurfacePipelines(planet) {
   // The low tier intentionally skips the expensive asynchronous surface
   // warm-up.  Mark the shared topology as accounted for so the regular frame
@@ -341,14 +381,25 @@ function prewarmSurfacePipelines(planet) {
     surfaceBootstrapMeshes.push(mesh);
   }
 
-  // compileAsync gathers programs synchronously, then lets ANGLE finish them
-  // through KHR_parallel_shader_compile. Temporarily exposing the real shadow
-  // light makes the cached surface variants match the eventual ground pass.
+  // Prewarm the actual render pipeline (RenderPipeline on WebGPU, EffectComposer
+  // on WebGL). renderer.compileAsync(scene, camera) only compiles materials for
+  // the legacy path; it does not build the volume-pass node that first executes
+  // when the cloud shell becomes visible, which caused a multi-second hitch at
+  // 3000-3400 m. Briefly expose volume shells and the real shadow light so the
+  // compiled variants match the live frame.
+  const volumeMeshesToPrewarm = [];
+  for (const mesh of [planet.atmoMesh, planet.volCloudMesh]) {
+    if (mesh && !mesh.visible) {
+      volumeMeshesToPrewarm.push(mesh);
+      mesh.visible = true;
+    }
+  }
+
   const lightWasVisible = sunShadow.visible;
   const lightIntensity = sunShadow.intensity;
   sunShadow.visible = true;
   sunShadow.intensity = 1e-7;
-  const tasks = [renderer.compileAsync(scene, camera)];
+  const tasks = [nodePipeline.compileAsync()];
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
@@ -356,8 +407,11 @@ function prewarmSurfacePipelines(planet) {
   // surface graph. The private 2×2 bootstrap render below warms those real
   // variants without injecting an incompatible legacy MeshDepthMaterial.
   Promise.all(tasks).then(() => {
+    for (const mesh of volumeMeshesToPrewarm) mesh.visible = false;
+    if (planet) warmedVolumePlanets.add(planet);
     if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
+    for (const mesh of volumeMeshesToPrewarm) mesh.visible = false;
     surfacePipelinesReady = true;
     console.warn('surface pipeline prewarm failed', error);
   });
@@ -392,12 +446,13 @@ function prewarmLoadedShipPipelines() {
 
 // ---- renderer-specific post chain -------------------------------------------
 const VOLUME_ENABLED = qs.get('vclouds') !== '0';
-const VOLUME_SCALE = QUALITY_LOW ? 0.46 : 0.67;
+const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
 setVolumetricCloudsEnabled(VOLUME_ENABLED, QUALITY_LOW ? 'low' : 'high');
 const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
   ? new VolumetricPass()
   : null;
-const Pipeline = BOOT_USE_WEBGPU ? GameNodePipeline : GameLegacyPipeline;
+const Pipeline = BOOT_USE_WEBGPU ? GameNodePipelineV2 : GameLegacyPipeline;
+const _executedComputeNodes = new WeakSet();
 const nodePipeline = new Pipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
   volumeScale: VOLUME_SCALE,
@@ -433,16 +488,12 @@ window.addEventListener('resize', () => {
 });
 
 function setRenderDpr(next) {
-  // The hero ship is a high-frequency foreground asset; dropping below the
-  // display's normal desktop scaling makes its wing silhouette visibly stair-
-  // stepped even with post AA. Low quality remains an explicit opt-in.
-  const qualityFloor = QUALITY_LOW
-    ? Math.min(window.devicePixelRatio, 0.5)
-    : IS_TOUCH
-      ? Math.min(1, window.devicePixelRatio)
-    : Math.max(DESKTOP_DPR_FLOOR, Math.min(1.35, window.devicePixelRatio));
-  const qualityCeiling = Math.max(qualityFloor, Math.min(window.devicePixelRatio, MAX_DPR));
-  const dpr = clamp(next, qualityFloor, qualityCeiling);
+  // 自适应 DPR 在档位 [floor, ceiling] 区间内微调;性能档 floor=ceiling=点对点,
+  // 实际不波动,保证低画质也不糊。同时不能超过 GPU 最大纹理尺寸,否则黑屏。
+  const maxTexSize = renderer.capabilities?.maxTextureSize || 8192;
+  const dpr = Math.min(clamp(next, DPR_FLOOR, DPR_CEILING),
+    maxTexSize / Math.max(1, window.innerWidth),
+    maxTexSize / Math.max(1, window.innerHeight));
   if (Math.abs(dpr - renderDpr) < 0.04) return;
   renderDpr = dpr;
   renderer.setPixelRatio(renderDpr);
@@ -810,10 +861,17 @@ const ui = new UI({
   onRouteRift: () => beginSelectedRift(),
   onRouteCancel: () => clearPendingRoute(),
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
+  onApplyGraphics: (settings) => {
+    writeGraphicsSettings(settings);
+    setTimeout(() => location.reload(), 180);
+  },
 });
 // Surface a clickable low-power GPU hint on the hero start page before the
 // first frame, so the player can switch the browser to its discrete GPU.
-ui.setHeroPerfHint(AUTO_LOW_GPU, gpuName);
+ui.setHeroPerfHint(graphicsSettings.quality === 'auto' && isLowPowerGpu(gpuName), gpuName);
+ui.setGraphicsSettings(graphicsSettings, QUALITY_PROFILE, {
+  gpu: gpuName, actualBackend: actualRendererBackend, reason: rendererRuntime.reason,
+});
 starMap = new StarMap({
   getUniverse: () => universe,
   getNav: () => nav,
@@ -2489,6 +2547,9 @@ function frame() {
   }
   // 仅在连续跟踪同一颗天体时启用自转跟随，目标切换的本帧跳过增量。
   referenceBodyFrameValid = !!nearest && nearest === prevRef;
+  // Start warming the new planet's atmosphere/cloud materials as soon as it
+  // becomes the nearest body, so descent through its cloud layer is smooth.
+  if (nearest && nearest !== prevRef) prewarmPlanetVolumePipelines(nearest);
 
   // controls / state integration — skipped while paused so player input and
   // any dt-driven drift stay disconnected from the frozen simulation.
@@ -2947,6 +3008,16 @@ function frame() {
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
   if (!contextLost) {
+    // V2 compute shader scheduling: cloud noise bakes once on first frame.
+    // (ocean v6 uses noise texture, no compute; atmosphere v2 is pure TSL.)
+    if (BOOT_USE_WEBGPU) {
+      scene.traverse((obj) => {
+        const cn = obj.isMesh && obj.material?.userData?.computeNode;
+        if (!cn || _executedComputeNodes.has(cn)) return;
+        renderer.compute(cn);
+        _executedComputeNodes.add(cn);
+      });
+    }
     // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
     // only zeros optional effect uniforms; it never swaps renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
@@ -3082,7 +3153,7 @@ window.NMS = {
       rendererReason: rendererRuntime.reason,
       webgpuAvailable: rendererPolicy.webgpuAvailable,
       adapterInfo: webgpuAdapterInfo,
-      quality: QUALITY_LOW ? (AUTO_LOW_GPU ? 'auto-low' : 'low') : 'high',
+      quality: (QUALITY_PROFILE.automatic ? 'auto-' : '') + QUALITY_PROFILE.id,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },

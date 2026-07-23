@@ -32,11 +32,12 @@ export async function createGameRenderer(policy, options = {}) {
       effectivePolicy = { ...policy, backend: 'webgl2', reason: 'webgpu-adapter-unavailable-fallback' };
     }
   }
-  // An explicit WebGPU experiment loads NodeMaterials before renderer setup.
-  // If the adapter is unavailable, keep those materials on WebGPURenderer's
-  // WebGL backend; switching renderer families in-place would feed NodeMaterial
-  // objects to WebGLRenderer and fail shader compilation.
-  if (effectivePolicy.backend === 'webgl2' && policy.requested === 'webgpu') {
+  // When auto resolves to WebGPU (the default), the page already loaded
+  // NodeMaterial facades before renderer init. If the adapter is unavailable,
+  // keep those materials on WebGPURenderer's WebGL backend; switching to
+  // classic WebGLRenderer would feed NodeMaterial objects to an incompatible
+  // renderer and fail shader compilation.
+  if (effectivePolicy.backend === 'webgl2' && policy.backend === 'webgpu') {
     const renderer = new THREE_WEBGPU.WebGPURenderer({ ...options, forceWebGL: true });
     await withTimeout(renderer.init(), RENDERER_INIT_TIMEOUT_MS, 'WebGPU experiment fallback initialization');
     return describeRenderer(renderer, effectivePolicy, null, 'webgpu-adapter-unavailable-node-fallback');
@@ -60,12 +61,12 @@ export async function createGameRenderer(policy, options = {}) {
     // the node renderer's WebGL backend without changing the public canvas.
     console.warn('WebGPU initialization failed; retrying with WebGL 2.', error);
     renderer.dispose();
-    const fallback = policy.requested === 'webgpu'
-      ? new THREE_WEBGPU.WebGPURenderer({ ...options, forceWebGL: true })
-      : new THREE.WebGLRenderer(options);
-    if (fallback.isWebGPURenderer) {
-      await withTimeout(fallback.init(), RENDERER_INIT_TIMEOUT_MS, 'WebGPU experiment WebGL fallback');
-    }
+    // The page already loaded the NodeMaterial facade before renderer init.
+    // Stay in that material family and run it on WebGPURenderer's WebGL 2
+    // backend; swapping to classic WebGLRenderer would feed NodeMaterials to
+    // an incompatible renderer after an automatic WebGPU failure.
+    const fallback = new THREE_WEBGPU.WebGPURenderer({ ...options, forceWebGL: true });
+    await withTimeout(fallback.init(), RENDERER_INIT_TIMEOUT_MS, 'Node WebGL fallback initialization');
     return describeRenderer(fallback, policy, null, 'webgpu-init-failed-fallback');
   }
 
@@ -115,7 +116,14 @@ export function installDeviceRecovery(renderer, onState) {
       const key = 'nms-webgpu-recovery';
       if (sessionStorage.getItem(key) !== '1') {
         sessionStorage.setItem(key, '1');
-        setTimeout(() => location.reload(), 350);
+        // Reload with ?renderer=webgl so the device-lost fallback does not
+        // loop back into WebGPU on the same broken adapter.
+        setTimeout(() => {
+          const recoveryUrl = new URL(location.href);
+          recoveryUrl.searchParams.set('renderer', 'webgl');
+          recoveryUrl.searchParams.set('renderer-recovery', 'device-lost');
+          location.replace(recoveryUrl);
+        }, 350);
       }
     });
   } else {

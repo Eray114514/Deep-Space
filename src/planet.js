@@ -7,8 +7,9 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  dot, exp, float, Fn, Loop, mix, positionLocal, pow, sqrt,
-  smoothstep as nodeSmoothstep, uniform, vec3, vec4,
+  dot, exp, float, Fn, logarithmicDepthToViewZ, Loop, mix, positionLocal,
+  positionViewDirection, pow, screenUV, sqrt,
+  smoothstep as nodeSmoothstep, texture, uniform, uv, vec3, vec4,
 } from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
@@ -18,9 +19,12 @@ import { makeCloudVolumeMaterial } from './clouds.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { floraPalette } from './flora.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
+import { makeAtmosphereMaterialV2 } from './atmosphere-system.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
 
-const USE_NODE_MATERIALS = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
+).backend === 'webgpu';
 
 // Volumetric clouds are the primary cloud representation in every runtime
 // quality tier. Low quality changes only the ray budget and volume-buffer
@@ -51,6 +55,18 @@ export const TYPES = {
 };
 
 const _c = new THREE.Color();
+
+// 1x1 placeholder so TSL's texture() node compiles before the pipeline binds
+// the real scene depth texture each frame.
+let _depthTex = null;
+function _depthPlaceholder() {
+  if (_depthTex) return _depthTex;
+  const data = new Uint8Array([255]);
+  _depthTex = new THREE.DataTexture(data, 1, 1, THREE.RedFormat, THREE.UnsignedByteType);
+  _depthTex.name = 'atmo-depth-placeholder';
+  _depthTex.needsUpdate = true;
+  return _depthTex;
+}
 
 function col(hex) { return new THREE.Color(hex); }
 
@@ -700,8 +716,8 @@ export class Planet {
           roughness: 0.13, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
         });
       }
-      this.liquidMat = mat;
       if (this.liquid === 'water' || this.liquid === 'toxic') mat = applyWaterWaves(mat, this);
+      this.liquidMat = mat;
       // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
       // mesh would sag metres between vertices at 100 km radius
       const waterCanonicalGrid = 12;
@@ -829,8 +845,9 @@ export class Planet {
         this.volCloudMat = makeCloudVolumeMaterial(
           this, band, detailTexture(), this.cloudShadowTex,
           { quality: volumetricCloudQuality });
-        this.volCloudMat.uniforms.uAmbC.value
-          .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.58);
+        // Keep cloud ambient neutral (fixed blue-gray) like WebGL. Sky-tinted
+        // ambient makes cloud tops look like the atmosphere colour when viewed
+        // from above, which reads as a blue tint bug near the cloud base.
         this.volCloudMesh = new THREE.Mesh(
           new THREE.SphereGeometry(band.rOut, 192, 128), this.volCloudMat);
         this.volCloudMesh.renderOrder = 2;
@@ -897,6 +914,7 @@ export class Planet {
     this.sunDirWorld.copy(dirLocal);
     this.sunDirLocal.copy(dirLocal).applyQuaternion(this._invFrame);
     if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(this.sunDirLocal);
+    if (this.liquidMat?.userData?.sunDirUniform) this.liquidMat.userData.sunDirUniform.value.copy(this.sunDirLocal);
   }
 
   setFrame(orientation) {
@@ -906,6 +924,7 @@ export class Planet {
     // Re-express the live stellar direction in the rotating body frame.
     this.sunDirLocal.copy(this.sunDirWorld).applyQuaternion(this._invFrame);
     if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(this.sunDirLocal);
+    if (this.liquidMat?.userData?.sunDirUniform) this.liquidMat.userData.sunDirUniform.value.copy(this.sunDirLocal);
   }
 
   worldOffsetToLocal(worldOffset, out = new THREE.Vector3()) {
@@ -1148,83 +1167,11 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   if (!USE_NODE_MATERIALS) {
     return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
   }
-  const nodes = {
-    atmoColor: uniform(color), density: uniform(density),
-    sunDir: uniform(new THREE.Vector3(0, 1, 0)),
-    uCameraLocal: uniform(new THREE.Vector3()),
-    uGroundR: uniform(groundR), uAtmoR: uniform(atmoR),
-    tSceneDepth: uniform(null, 'texture'), uDepthReady: uniform(0),
-    uCameraFar: uniform(1.2e11), uVolumeSize: uniform(new THREE.Vector2(1, 1)),
-  };
-  // Faithful TSL port of the former 14-step GLSL shell integration. The first
-  // migration replaced this participating medium with a Fresnel outline; that
-  // made the limb opaque neon-blue and removed the soft daylight haze.
-  const atmosphere = Fn(() => {
-    const origin = nodes.uCameraLocal;
-    const ray = positionLocal.sub(origin).normalize();
-    const bOuter = dot(origin, ray);
-    const discOuter = bOuter.mul(bOuter).sub(dot(origin, origin)).add(nodes.uAtmoR.mul(nodes.uAtmoR));
-    const outerRoot = sqrt(discOuter.max(0));
-    const t0 = bOuter.negate().sub(outerRoot).max(0).toVar();
-    const t1 = bOuter.negate().add(outerRoot).toVar();
-
-    const bGround = dot(origin, ray);
-    const discGround = bGround.mul(bGround).sub(dot(origin, origin)).add(nodes.uGroundR.mul(nodes.uGroundR));
-    const groundNear = bGround.negate().sub(sqrt(discGround.max(0)));
-    const clipsGround = discGround.greaterThan(0).and(groundNear.greaterThan(t0));
-    t1.assign(clipsGround.select(groundNear.min(t1), t1));
-    const span = t1.sub(t0).max(0);
-    const stepLength = span.div(14);
-    const t = t0.add(stepLength.mul(0.5)).toVar();
-
-    const mu = dot(ray, nodes.sunDir.normalize());
-    const rayleighPhase = float(0.05968).mul(float(1).add(mu.mul(mu)));
-    const g = float(0.76);
-    const miePhase = float(0.07958).mul(float(1).sub(g.mul(g)))
-      .div(float(1).add(g.mul(g)).sub(g.mul(mu).mul(2)).max(0.04).pow(1.5));
-    const rayleighColor = mix(vec3(0.48, 0.68, 1), nodes.atmoColor.max(vec3(0.015)), 0.58);
-    const integrated = vec3(0).toVar();
-    const transmission = float(1).toVar();
-    Loop(14, () => {
-      const samplePosition = origin.add(ray.mul(t));
-      const radius = samplePosition.length();
-      const height = radius.sub(nodes.uGroundR)
-        .div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
-      const rhoR = exp(height.mul(-6.2)).mul(nodes.density);
-      const rhoM = exp(height.mul(-15)).mul(nodes.density).mul(0.22);
-      const radial = samplePosition.div(radius.max(1));
-      const sunMu = dot(radial, nodes.sunDir.normalize());
-      const horizon = nodeSmoothstep(-0.13, 0.055, sunMu);
-      const slant = float(1).div(sunMu.add(0.32).max(0.16));
-      const sunTransmission = exp(rhoR.mul(0.32).add(rhoM.mul(1.4)).mul(slant).negate())
-        .mul(horizon);
-      const scatter = rayleighColor.mul(rhoR).mul(rayleighPhase)
-        .add(vec3(1, 0.93, 0.82).mul(rhoM).mul(miePhase))
-        .mul(sunTransmission.add(nodes.density.mul(float(1).sub(height)).mul(0.075)));
-      const extinction = rhoR.mul(0.58).add(rhoM.mul(1.8)).mul(stepLength)
-        .div(nodes.uAtmoR.sub(nodes.uGroundR).max(1));
-      const alphaStep = float(1).sub(exp(extinction.mul(-0.62)));
-      integrated.addAssign(scatter.mul(transmission).mul(alphaStep).mul(11));
-      transmission.mulAssign(float(1).sub(alphaStep));
-      t.addAssign(stepLength);
-    });
-    const valid = discOuter.greaterThan(0).and(t1.greaterThan(t0));
-    const alpha = valid.select(float(1).sub(transmission).clamp(0, 0.985), float(0));
-    return vec4(integrated, alpha);
-  })();
-  const material = new MeshBasicNodeMaterial({
-    side: THREE.BackSide,
-    transparent: true,
-    premultipliedAlpha: true,
-    depthWrite: false,
-  });
-  // The integration accumulator is premultiplied.  NodeMaterial's
-  // premultiplied-alpha output stage performs the actual multiplication, so
-  // feed it straight RGB to avoid the WebGPU-only alpha-squared haze loss.
-  material.colorNode = atmosphere.rgb.div(atmosphere.a.max(0.0001));
-  material.opacityNode = atmosphere.a;
-  material.uniforms = nodes;
-  return material;
+  // V2: from-scratch WebGPU-native atmosphere (atmosphere-system.js). 14-step
+  // ray-march aligned with WebGL, log-depth occlusion, alpha cap 0.985, no
+  // sunset tint drift. Replaces the in-file TSL port that caused cloud-tint
+  // and limb-darkening issues.
+  return makeAtmosphereMaterialV2(color, density, groundR, atmoR);
 }
 
 function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0]) {

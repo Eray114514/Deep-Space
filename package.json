@@ -21,6 +21,7 @@
     "test:rift": "node tools/rifttest.js",
     "test:pointerlock": "node tools/pointerlocktest.js",
     "test:astronomy:browser": "node tools/astroplaytest.js",
+    "test:parity": "node tools/paritytest.js",
     "build": "npm test && node tools/build.js",
     "build:pages": "node tools/build.js",
     "shots": "node tools/screenshot.js",

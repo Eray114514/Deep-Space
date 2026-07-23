@@ -1,8 +1,10 @@
 // Renderer-specific natural material facade. The authored WebGL shaders stay
-// intact while the WebGPU/TSL port is validated in its explicit experiment.
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
-const useNodeMaterials = params?.get('renderer') === 'webgpu';
-const implementation = await import(useNodeMaterials ? './shaders-node.js' : './shaders-webgl.js');
+// intact; the WebGPU/TSL port runs on WebGPU (the default) or its WebGL 2 fallback.
+import { resolveRendererPolicy } from './renderer-policy.js';
+
+const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+const useNodeMaterials = resolveRendererPolicy(params).backend === 'webgpu';
+const implementation = await import(useNodeMaterials ? './shaders-node-v2.js' : './shaders-webgl.js');
 
 export const TIME = implementation.TIME;
 export const GROW = implementation.GROW;

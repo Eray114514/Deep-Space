@@ -10,9 +10,11 @@ import {
   max, mix, normalLocal, normalize, positionLocal, pow, screenUV, sin,
   smoothstep, step, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
+import { resolveRendererPolicy } from './renderer-policy.js';
 
-const USE_NODE_MATERIALS = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
+).backend === 'webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
@@ -323,9 +325,11 @@ export class Ship {
   constructor(scene, { anisotropy = 1 } = {}) {
     const g = new THREE.Group();
     g.layers.set(SHIP_FOREGROUND_LAYER);
+    g.visible = true;
     this.group = g;
     this.foregroundOnly = true;
     scene.add(g);
+    console.log('Ship group parent', g.parent?.type, g.parent?.uuid, 'visible', g.visible);
 
     this.smQuat = new THREE.Quaternion();
     this.roll = 0;

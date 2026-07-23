@@ -16,6 +16,8 @@ import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { positionLocal, uniform, vertexColor } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
+import { applyFarFadeV2 } from './flora-system.js';
 
 const TILE_M = 1024;         // metres per cache tile
 const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
@@ -58,8 +60,9 @@ const Y = new THREE.Vector3(0, 1, 0);
 // bubble boundary made every tree the pilot approached appear to sink into
 // the terrain before the ship could reach it.
 function applyFarFade(mat, uniforms) {
-  const useNodeMaterials = typeof location !== 'undefined'
-    && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+  const useNodeMaterials = resolveRendererPolicy(
+    typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
+  ).backend === 'webgpu';
   if (!useNodeMaterials) {
     mat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms);
@@ -87,16 +90,10 @@ function applyFarFade(mat, uniforms) {
     return mat;
   }
   const alt = uniform(uniforms.uAltK.value).onFrameUpdate(() => uniforms.uAltK.value);
-  const nodeMaterial = new MeshStandardNodeMaterial({
-    color: 0xffffff, vertexColors: true, roughness: mat.roughness,
-    flatShading: mat.flatShading,
-  });
-  nodeMaterial.positionNode = positionLocal.mul(alt.mul(1.15));
-  nodeMaterial.colorNode = vertexColor();
-  nodeMaterial.emissiveNode = vertexColor().mul(0.12);
-  nodeMaterial.userData.nodeMaterial = 'far-flora-v1';
-  mat.dispose();
-  return nodeMaterial;
+  // V2: restore distance-based scaling fade (flora-system.js) instead of the
+  // emissive soft-fade workaround. This matches the WebGL path's
+  // smoothstep(3900, 4400, d) scaling that hides LOD pop.
+  return applyFarFadeV2(mat, uniforms);
 }
 
 export class FarFlora {

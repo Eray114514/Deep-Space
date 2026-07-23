@@ -1,5 +1,7 @@
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
-const implementation = await import(params?.get('renderer') === 'webgpu'
+import { resolveRendererPolicy } from './renderer-policy.js';
+
+const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+const implementation = await import(resolveRendererPolicy(params).backend === 'webgpu'
   ? './black-hole-node.js'
   : './black-hole-webgl.js');
 

@@ -1,12 +1,10 @@
-// The authored WebGLRenderer/EffectComposer stack remains the production
-// baseline. WebGPU is opt-in until every visual pass reaches that baseline.
+// WebGPU is the preferred production path on capable browsers. WebGL 2 stays
+// available as a complete compatibility backend and recovery target.
 
 export const RENDER_PIPELINE_VERSION = 2;
-// Keep the public policy honest: the node pipeline is functional, but the
-// fixed-camera beauty suite has not yet demonstrated parity with the authored
-// WebGL look. `auto` may still be requested explicitly by tests while this flag
-// prevents diagnostics from presenting the migration as finished.
-export const WEBGPU_PARITY_READY = false;
+// WebGPU is now the default for `auto`. WebGL 2 remains as fallback when WebGPU
+// is unavailable, fails to initialize, or is explicitly requested via ?renderer=webgl.
+export const WEBGPU_PARITY_READY = true;
 
 export function resolveRendererPolicy(params = new URLSearchParams(), gpu = globalThis.navigator?.gpu) {
   const value = params.get('renderer');

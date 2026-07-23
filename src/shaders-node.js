@@ -4,10 +4,10 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial, MeshPhysicalNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu';
 import {
-  abs, acos, atan, attribute, color, dot, float, fract, instanceIndex, length, mix,
-  mx_fractal_noise_float, normalLocal, normalView, positionLocal,
-  positionView, positionViewDirection, pow, select, sign, sin, smoothstep, texture, time, uniform,
-  vec2, vec3, vertexColor,
+  abs, acos, atan, attribute, color, cos, cross, dot, exp, float, fract, instanceIndex, length,
+  max, min, mix, mx_fractal_noise_float, normalize, normalLocal, normalView, positionGeometry,
+  positionLocal, positionView, positionViewDirection, pow, select, sign, sin, smoothstep, texture,
+  time, uniform, vec2, vec3, vertexColor, transformNormalToView,
 } from 'three/tsl';
 import { Simplex } from './noise.js';
 import { makeRng } from './rng.js';
@@ -278,7 +278,10 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     const gx = triDetail(local.add(dx), 1 / 3.2, 'g').sub(triDetail(local.sub(dx), 1 / 3.2, 'g'));
     const gy = triDetail(local.add(dy), 1 / 3.2, 'g').sub(triDetail(local.sub(dy), 1 / 3.2, 'g'));
     const bend = tang.mul(gx).add(bitn.mul(gy)).mul(strength).mul(float(1.7).add(matWeights.x.mul(1.5)));
-    material.normalNode = nrm.add(bend).normalize();
+    // normalNode expects view-space input (setupNormal returns it as-is).
+    // Without transformNormalToView the local-space normal breaks PBR N·L
+    // (view-dependent black ground) and water/terrain Fresnel.
+    material.normalNode = transformNormalToView(nrm.add(bend).normalize());
   }
 
   material.userData.shader = { uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK } };
@@ -287,26 +290,110 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   return material;
 }
 
+// WebGPU-native ocean v5 — non-periodic, stable glint. v4's Gerstner waves
+// are pure sinusoids: on a sphere they imprint a FIXED spatial wavelength,
+// so every wave crest lights up at the same interval — the "periodic white"
+// pattern that survived every Fresnel fix. v5 replaces them with a noise-
+// driven normal (non-periodic, no repeating stripes) and, crucially, moves
+// BOTH Fresnel AND sun specular onto the smooth sphere normal. The glint
+// now stays pinned to the sun-camera-planet geometry and cannot drift with
+// wave phase or time.
 export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
-  const material = copyMaterialFlags(source, new MeshPhysicalNodeMaterial({
-    roughness: source.roughness, metalness: source.metalness,
-  }));
-  const local = attribute('aLocal', 'vec3'), depth = attribute('aDepth', 'float').max(0);
-  const deep = planet?.pal?.sea?.[0]?.c || new THREE.Color(0x061b35);
-  const shallow = planet?.liquidColor?.clone().convertSRGBToLinear()
-    .lerp(new THREE.Color(1, 1, 1), 0.3) || new THREE.Color(0.4, 0.75, 0.8);
-  const absorption = float(1).sub(pow(2.71828, depth.mul(-0.05)));
-  const wave = mx_fractal_noise_float(local.mul(waveScale).add(vec3(time.mul(0.021), 0, time.mul(-0.013))), 4);
-  const fresnel = pow(float(1).sub(abs(dot(normalView.normalize(), positionViewDirection))), 5);
-  const sky = planet?.skyColor?.clone().convertSRGBToLinear().multiplyScalar(0.6)
+  const material = copyMaterialFlags(source, new MeshBasicNodeMaterial());
+  const local = attribute('aLocal', 'vec3');
+  const depth = attribute('aDepth', 'float').max(0);
+
+  // Linear-space palette (buildPalette / convertSRGBToLinear already applied).
+  const deepC = (planet?.pal?.sea?.[0]?.c || new THREE.Color(0x061b35)).clone()
+    .lerp(planet?.liquidColor?.clone().convertSRGBToLinear() || new THREE.Color(0.02, 0.08, 0.15), 0.4);
+  const shallowC = planet?.liquidColor?.clone().convertSRGBToLinear()
+    || new THREE.Color(0.4, 0.75, 0.8);
+  const skyC = planet?.skyColor?.clone().convertSRGBToLinear().multiplyScalar(0.6)
     || new THREE.Color(0.25, 0.4, 0.55);
-  material.colorNode = mix(mix(uniform(shallow), uniform(deep), absorption), uniform(sky), fresnel.mul(0.65))
-    .mul(float(0.88).add(wave.mul(0.16)));
+  const sunC = new THREE.Color(1, 0.98, 0.92); // warm sunlight, linear
+  const deepVec = vec3(deepC.r, deepC.g, deepC.b);
+  const shallowVec = vec3(shallowC.r, shallowC.g, shallowC.b);
+  const skyVec = vec3(skyC.r, skyC.g, skyC.b);
+  const sunVec = vec3(sunC.r, sunC.g, sunC.b);
+
+  const sunDirLocal = uniform(planet?.sunDirLocal?.clone() || new THREE.Vector3(0, 1, 0));
+
+  // --- Smooth sphere normal: drives Fresnel AND specular (stable, no drift) ---
+  const surfN = local.normalize();
+
+  // --- Noise-driven normal perturbation (NON-PERIODIC, replaces Gerstner) ---
+  // Two tri-planar samples of the shared detail texture, scrolled slowly.
+  // Tri-planar avoids a seam at the sphere's UV pole; the noise has no
+  // fixed wavelength so it cannot form the repeating bright stripes that
+  // Gerstner sinusoids imprint on the sphere.
+  const detailMap = detailTexture();
+  const tt = time;
+  const s1 = waveScale, s2 = waveScale * 2.3;
+  const g1 = texture(detailMap, local.xy.mul(s1).add(vec2(tt.mul(0.018), tt.mul(-0.011)))).g
+    .add(texture(detailMap, local.yz.mul(s1).add(vec2(tt.mul(0.013), tt.mul(0.02)))).g)
+    .add(texture(detailMap, local.zx.mul(s1).add(vec2(tt.mul(-0.016), tt.mul(0.014)))).g).div(3);
+  const g2 = texture(detailMap, local.xy.mul(s2).add(vec2(tt.mul(-0.022), tt.mul(0.017)))).r
+    .add(texture(detailMap, local.yz.mul(s2).add(vec2(tt.mul(0.019), tt.mul(-0.013)))).r)
+    .add(texture(detailMap, local.zx.mul(s2).add(vec2(tt.mul(0.015), tt.mul(0.021)))).r).div(3);
+  // Tangent basis on the sphere
+  const upRef = abs(surfN.y).lessThan(0.88).select(vec3(0, 1, 0), vec3(1, 0, 0));
+  const t1 = normalize(cross(upRef, surfN));
+  const t2 = cross(surfN, t1);
+  // Subtle perturbation: enough for diffuse ripple, not enough to stripe.
+  const waveN = normalize(surfN
+    .add(t1.mul(g1.sub(0.5).mul(0.35)))
+    .add(t2.mul(g2.sub(0.5).mul(0.35))));
+
+  // View-space vectors.
+  const Nsmooth = transformNormalToView(surfN);   // stable — Fresnel + spec
+  const Nwave = transformNormalToView(waveN);      // perturbed — diffuse only
+  const V = positionViewDirection.normalize();
+  const L = transformNormalToView(sunDirLocal.normalize());
+
+  // --- Fresnel on SMOOTH normal: stable, no periodic brightening ---
+  const NdotV = abs(dot(Nsmooth, V)).clamp(0, 1);
+  const fres = pow(float(1).sub(NdotV), 5);
+  const fresSchlick = fres.add(float(0.02).mul(float(1).sub(fres)));
+
+  // --- N·L diffuse on WAVE normal: ripple detail, non-periodic ---
+  const NdotL = dot(Nwave, L).clamp(0, 1);
+
+  // --- Sun specular on SMOOTH normal: glint pinned to geometry, no drift ---
+  // The v3/v4 glint used the wave normal, so it surfed the moving wave field
+  // and visibly drifted across the ocean. On the smooth normal it is a single
+  // stable highlight whose position depends only on sun-camera-planet angle.
+  const H = normalize(V.add(L));
+  const NdotH = dot(Nsmooth, H).max(0);
+  const spec = pow(NdotH, 180).mul(1.2);
+
+  // --- Wavelength-dependent Beer–Lambert absorption ---
+  const absR = float(1).sub(exp(depth.mul(-0.06)));
+  const absG = float(1).sub(exp(depth.mul(-0.035)));
+  const absB = float(1).sub(exp(depth.mul(-0.02)));
+  const waterBody = vec3(
+    mix(shallowVec.x, deepVec.x, absR),
+    mix(shallowVec.y, deepVec.y, absG),
+    mix(shallowVec.z, deepVec.z, absB),
+  );
+  const sss = skyVec.mul(0.10).mul(absG);
+
+  // --- Foam: shoreline surf only (no crest foam — that was periodic too) ---
+  const shoreFoam = smoothstep(0, 6, depth).mul(smoothstep(22, 0, depth)).mul(0.25);
+
+  // --- Compose ---
+  const diffuse = waterBody.add(sss).mul(NdotL.mul(0.7).add(0.3));
+  const base = mix(diffuse, skyVec, fresSchlick.mul(0.4));
+  const finalColor = base.add(sunVec.mul(spec)).add(vec3(shoreFoam));
+  material.colorNode = finalColor;
+
   const opacity = uniform(source.opacity ?? 1);
-  material.opacityNode = mix(opacity, opacity.mul(2.2).add(0.25).min(1), fresnel);
-  material.roughnessNode = mix(0.08, 0.2, wave);
-  material.userData.nodeMaterial = 'water-v1';
+  const depthFactor = mix(0.22, 1.0, float(1).sub(exp(depth.mul(-0.12))));
+  const depthOpacity = opacity.mul(depthFactor);
+  material.opacityNode = mix(depthOpacity, depthOpacity.mul(2.0).add(0.2).min(1), fres);
+
+  material.userData.nodeMaterial = 'water-v5-noise';
   material.userData.opacityNodeUniform = opacity;
+  material.userData.sunDirUniform = sunDirLocal;
   source.dispose?.();
   return material;
 }
@@ -367,10 +454,25 @@ export function applyWindSway(source, amount) {
   const grow = uniform(GROW.value).onFrameUpdate(() => GROW.value);
   const clock = uniform(TIME.value).onFrameUpdate(() => TIME.value);
   const phase = fract(float(instanceIndex).mul(0.6180339)).mul(6.28318);
-  const height = positionLocal.y.max(0);
-  const sway = sin(clock.mul(1.6).add(phase)).add(sin(clock.mul(3.7).add(phase.mul(1.7))).mul(0.4))
-    .mul(amount).mul(height);
-  material.positionNode = positionLocal.mul(grow).add(vec3(sway, 0, sway.mul(0.7)));
+  // positionLocal already carries the instance matrix (NodeMaterial applies
+  // instancing before positionNode), so reading its y gives the world-space
+  // coordinate (~90k) and produces enormous sway offsets. positionGeometry is
+  // the raw attribute — untouched by instancing — so it yields the true 0–5 m
+  // local height the sway was tuned against.
+  const height = positionGeometry.y.max(0);
+  // X and Z sway use different frequencies/phases (matching the GLSL deck)
+  // so foliage doesn't oscillate in a single plane.
+  const swayX = sin(clock.mul(1.6).add(phase))
+    .add(sin(clock.mul(3.7).add(phase.mul(1.7))).mul(0.4))
+    .mul(amount).mul(height).mul(grow);
+  const swayZ = cos(clock.mul(1.3).add(phase.mul(1.3)))
+    .add(sin(clock.mul(2.9).add(phase)).mul(0.4))
+    .mul(amount).mul(height).mul(0.7).mul(grow);
+  // Do NOT multiply positionLocal by grow: it includes the instance
+  // translation, so scaling it would drag every plant toward the world
+  // origin (the "plants flying into the sky" bug). Grow only modulates sway
+  // strength; visibility is handled by scatter via mesh.visible.
+  material.positionNode = positionLocal.add(vec3(swayX, 0, swayZ));
   material.colorNode = source.vertexColors ? vertexColor() : uniform(source.color?.clone() || new THREE.Color(1, 1, 1));
   if (source.emissive) material.emissiveNode = uniform(source.emissive.clone())
     .mul(source.vertexColors ? vertexColor() : 1);
