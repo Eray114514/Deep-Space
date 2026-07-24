@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js",
+    "test": "node tools/test.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js && node tools/gputiertest.js",
     "test:galaxy": "node tools/galaxycatalogtest.js",
     "test:starmap": "node tools/starmaptest.js",
     "test:artificial": "node tools/artificialtest.js && node tools/artificialplaytest.js",

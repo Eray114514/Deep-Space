@@ -72,20 +72,111 @@ export function resolveGraphicsSettings({ params = new URLSearchParams(), storag
   };
 }
 
+// GPU 性能档位识别。输入来自 WEBGL_debug_renderer_info 的
+// UNMASKED_RENDERER_WEBGL 字符串(经 renderer-runtime.js 透传),形如:
+//   "ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 Laptop GPU (0x00002C59) D3D11)"
+//   "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0)"
+//   "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0)"
+// 返回 high/mid/low/unknown;chooseAutomaticQuality 把它映射到画质档。
+export function classifyGpuTier(gpuName = '') {
+  if (!gpuName) return 'unknown';
+
+  // 软件渲染 / 软光栅 — 永远 low。
+  if (/SwiftShader|llvmpipe|Microsoft Basic Render|Google SwiftShader/i.test(gpuName)) return 'low';
+
+  // -- NVIDIA -------------------------------------------------------------
+  if (/NVIDIA|GeForce/i.test(gpuName)) {
+    // MX 系列笔记本独显按集显处理。
+    if (/GeForce\s*(?:MX\d{3}|940M|930M|920M)/i.test(gpuName)) return 'low';
+    // GTX 10/16 系低端(1050/1050 Ti/1630/1650)
+    if (/GeForce\s*(?:GTX\s*)?(?:10[45]0|16[35]0)/i.test(gpuName)) return 'low';
+    // GTX 10/16 系中端(1060/1070/1660 等)
+    if (/GeForce\s*(?:GTX\s*)?(?:1060|1070|1660)/i.test(gpuName)) return 'mid';
+    // GTX 1080 仍按 high(实际性能足够)
+    if (/GeForce\s*(?:GTX\s*)?1080/i.test(gpuName)) return 'high';
+
+    // RTX 20 系:2080(含 Ti)高端;2070/2060 中端
+    if (/RTX\s*20\d0/i.test(gpuName)) {
+      if (/RTX\s*20[89]0/i.test(gpuName)) return 'high';
+      return 'mid';
+    }
+    // RTX 30 系:3090/3080 桌面高端;其余(含所有 Laptop)中端
+    if (/RTX\s*30\d0/i.test(gpuName)) {
+      if (/RTX\s*30(?:90|80)/i.test(gpuName) && !/Laptop/i.test(gpuName)) return 'high';
+      return 'mid';
+    }
+    // RTX 40 系:4090/4080/4070 Ti 高端;4070/4060/4050 中端
+    if (/RTX\s*40\d0/i.test(gpuName)) {
+      if (/RTX\s*40(?:90|80)/i.test(gpuName)) return 'high';
+      if (/RTX\s*4070\s*Ti/i.test(gpuName)) return 'high';
+      return 'mid';
+    }
+    // RTX 50 系全部 high(5070/5080/5090 及 Laptop 版本均胜任极致档)
+    if (/RTX\s*50\d0/i.test(gpuName)) return 'high';
+
+    // 未识别的 NVIDIA 默认按中端处理。
+    return 'mid';
+  }
+
+  // -- AMD ----------------------------------------------------------------
+  if (/AMD|Radeon/i.test(gpuName)) {
+    // 集显(Vega Mobile / Radeon TM Graphics 等)
+    if (/Radeon\s*\(TM\)\s*Graphics|Vega\s*\d+|Vega Mobile/i.test(gpuName)) return 'low';
+    // RX 9000 系(9070/9070 XT 等)全部 high
+    if (/RX\s*9\d{3}/i.test(gpuName)) return 'high';
+    // RX 7000 系
+    if (/RX\s*7\d{3}/i.test(gpuName)) {
+      if (/RX\s*79\d0/i.test(gpuName)) return 'high';  // 7900 XTX/XT/GRE
+      return 'mid';                                     // 7800/7700/7600
+    }
+    // RX 6000 系
+    if (/RX\s*6\d{3}/i.test(gpuName)) {
+      if (/RX\s*6[45]\d0/i.test(gpuName)) return 'low';               // 6400/6500
+      if (/RX\s*6(?:[89]\d0|95\d)/i.test(gpuName)) return 'high';     // 6800/6900/6950
+      return 'mid';                                                   // 6700/6600
+    }
+    // RX 5000 系:5700 中端,其余低端
+    if (/RX\s*5\d{3}/i.test(gpuName)) {
+      if (/RX\s*57\d0/i.test(gpuName)) return 'mid';
+      return 'low';
+    }
+    // RX 500/400 老卡 → low
+    if (/Radeon\s*(?:RX\s*)?[45]\d{2,3}/i.test(gpuName)) return 'low';
+    return 'mid';
+  }
+
+  // -- Intel --------------------------------------------------------------
+  if (/Intel/i.test(gpuName)) {
+    // Arc 独显:兼容 "Arc(TM) A770" / "Arc A770" / "Arc B580" 等写法。
+    // A770/A750/A580/B580/B570 归 mid(Battlemage 与 Alchemist 高型号);
+    // A380 等入门型号归 low。
+    if (/Arc[^\d]*[AB]\d{3,4}/i.test(gpuName)) {
+      if (/Arc[^\d]*[AB][5-8]\d{2,3}/i.test(gpuName)) return 'mid';
+      return 'low';
+    }
+    // 集显(Iris Xe / UHD / HD Graphics)一律 low
+    return 'low';
+  }
+
+  // -- Apple Silicon ------------------------------------------------------
+  if (/Apple\s*M/i.test(gpuName)) {
+    if (/Apple\s*M[1-4]\s*(?:Pro|Max|Ultra)/i.test(gpuName)) return 'high';
+    return 'mid';
+  }
+
+  return 'unknown';
+}
+
 export function isLowPowerGpu(gpuName = '') {
-  return /SwiftShader|llvmpipe|Microsoft Basic Render/i.test(gpuName)
-    || /ANGLE \(Intel,|Intel.*(?:UHD|HD Graphics|Iris|Xe|Arc)/i.test(gpuName)
-    || /AMD Radeon\(TM\) Graphics/i.test(gpuName);
+  return classifyGpuTier(gpuName) === 'low';
 }
 
 export function chooseAutomaticQuality(gpuName = '', { touch = false, width = 1920, height = 1080 } = {}) {
-  // 低功耗/软件渲染才降到性能档;带触摸屏的 Windows 笔记本(5080 等高端卡也会
-  // 被报告 touch)不应因此直接锁性能。
-  if (isLowPowerGpu(gpuName)) return 'performance';
-  // 高端 GPU 优先识别:NVIDIA 30/40/50 系、AMD RDNA2/3 直接极致,不受分辨率/触摸压制。
-  if (/RTX\s*(?:30\d0|40[6789]0|50\d0)|RX\s*(?:6[89]\d0|7[89]\d0)|blackwell|lovelace|ampere/i.test(gpuName)) return 'ultra';
-  // 未知/中端 GPU 在高分辨率或触摸设备上取均衡,不再盲目性能档。
-  if (touch || width * height > 2560 * 1440) return 'balanced';
+  const tier = classifyGpuTier(gpuName);
+  if (tier === 'high') return 'ultra';
+  if (tier === 'low') return 'performance';
+  // mid 或 unknown 默认均衡;触摸屏 + 高分辨率不强制降档(中端独显仍能跑均衡)。
+  if (tier === 'unknown' && width * height > 3840 * 2160) return 'performance';
   return 'balanced';
 }
 
