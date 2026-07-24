@@ -5,12 +5,6 @@
 // a dot across the system or the ground under your feet.
 
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
-import {
-  dot, exp, float, Fn, logarithmicDepthToViewZ, Loop, mix, positionLocal,
-  positionViewDirection, pow, screenUV, sqrt,
-  smoothstep as nodeSmoothstep, texture, uniform, uv, vec3, vec4,
-} from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
@@ -19,12 +13,6 @@ import { makeCloudVolumeMaterial } from './clouds.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { floraPalette } from './flora.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
-import { makeAtmosphereMaterialV2 } from './atmosphere-system.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const USE_NODE_MATERIALS = resolveRendererPolicy(
-  typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
-).useNodeMaterials;
 
 // Volumetric clouds are the primary cloud representation in every runtime
 // quality tier. Low quality changes only the ray budget and volume-buffer
@@ -55,18 +43,6 @@ export const TYPES = {
 };
 
 const _c = new THREE.Color();
-
-// 1x1 placeholder so TSL's texture() node compiles before the pipeline binds
-// the real scene depth texture each frame.
-let _depthTex = null;
-function _depthPlaceholder() {
-  if (_depthTex) return _depthTex;
-  const data = new Uint8Array([255]);
-  _depthTex = new THREE.DataTexture(data, 1, 1, THREE.RedFormat, THREE.UnsignedByteType);
-  _depthTex.name = 'atmo-depth-placeholder';
-  _depthTex.needsUpdate = true;
-  return _depthTex;
-}
 
 function col(hex) { return new THREE.Color(hex); }
 
@@ -986,15 +962,6 @@ export class Planet {
   update(camLocal, dt, focused, animDt = dt) {
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
     this.lod.focused = focused;
-    if (this.volCloudMesh) {
-      const d = window.__diag ||= {};
-      d.cloudFocused = focused;
-      d.cloudPlanet = this.bodyId || this.name;
-      if (focused) {
-        d.focusedCloudPlanet = this.bodyId || this.name;
-        d.focusedCloudHasVol = true;
-      }
-    }
     this.lod.update(camLocal, dt);
     if (this.waterLod) {
       this.waterLod.focused = focused;
@@ -1052,10 +1019,6 @@ export class Planet {
         u.uCameraLocal.value.copy(camLocal);
         u.uSpin.value.setFromMatrix4(_m4);
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
-        const d = window.__diag ||= {};
-        d.cloudUpdates = (d.cloudUpdates || 0) + 1;
-        d.cloudFrame = u.uFrame.value;
-        d.cloudEngage = e;
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
@@ -1177,14 +1140,7 @@ const _msd = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function makeAtmosphereMaterial(color, density, groundR, atmoR) {
-  if (!USE_NODE_MATERIALS) {
-    return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
-  }
-  // V2: from-scratch WebGPU-native atmosphere (atmosphere-system.js). 14-step
-  // ray-march aligned with WebGL, log-depth occlusion, alpha cap 0.985, no
-  // sunset tint drift. Replaces the in-file TSL port that caused cloud-tint
-  // and limb-darkening issues.
-  return makeAtmosphereMaterialV2(color, density, groundR, atmoR);
+  return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
 }
 
 function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0]) {

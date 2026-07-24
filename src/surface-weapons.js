@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { createWeaponModel } from './weapon-models.js';
 
 // Directly ported ballistic profiles from futuristic-space-station. The two
@@ -87,22 +86,9 @@ export class SurfaceWeapons {
       group.add(flash);
       const laser = def.kind === 'laser' ? this.makeLaserEffect(group.userData.muzzle) : null;
       if (laser) group.add(laser.root);
-      if (group.userData.opticGlass?.material?.isMeshBasicMaterial
-        && new URLSearchParams(location.search).get('renderer') !== 'webgpu') {
+      if (group.userData.opticGlass?.material?.isMeshBasicMaterial) {
         group.userData.opticGlass.material.map = this.scopeTarget.texture;
         group.userData.opticGlass.material.needsUpdate = true;
-      } else if (group.userData.opticGlass?.material?.isMeshBasicMaterial) {
-        const oldMaterial = group.userData.opticGlass.material;
-        group.userData.opticGlass.material = new MeshBasicNodeMaterial({
-          color: oldMaterial.color,
-          map: this.scopeTarget.texture,
-          transparent: oldMaterial.transparent,
-          opacity: oldMaterial.opacity,
-          side: oldMaterial.side,
-          depthWrite: oldMaterial.depthWrite,
-          toneMapped: oldMaterial.toneMapped,
-        });
-        oldMaterial.dispose();
       }
       this.rig.add(group);
       return {

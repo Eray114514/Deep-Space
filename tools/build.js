@@ -9,7 +9,7 @@ if (relative(ROOT, OUT) !== 'dist') throw new Error(`Refusing to replace unexpec
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 
-for (const file of ['index.html', 'renderlab.html', 'style.css']) {
+for (const file of ['index.html', 'style.css']) {
   await cp(join(ROOT, file), join(OUT, file));
 }
 for (const folder of ['src', 'vendor', 'assets', 'worlds']) {
@@ -25,7 +25,6 @@ const BUILD_VERSION = pkg.version;
 // string because import-map prefix substitution must keep the trailing slash.
 const ADDON_ENTRIES = [
   'postprocessing/SMAAPass.js',
-  'tsl/display/BloomNode.js',
   'controls/OrbitControls.js',
   'geometries/RoundedBoxGeometry.js',
   'loaders/GLTFLoader.js',
@@ -36,8 +35,6 @@ const ADDON_ENTRIES = [
 // output vendors the needed addons under vendor/three-addons/ so static hosts
 // that honour .gitignore still upload them. Version every exact Three entry so
 // direct imports and addon imports resolve to one module identity in production.
-// Loading both `three.webgpu.js` and `three.webgpu.js?v=...` creates separate TSL
-// class graphs and can make RenderPipeline output a transparent frame.
 const indexHtmlPath = join(OUT, 'index.html');
 let indexHtml = await readFile(indexHtmlPath, 'utf8');
 const importMapMatch = indexHtml.match(/<script type="importmap">\s*([\s\S]*?)\s*<\/script>/);
@@ -46,8 +43,6 @@ const importMap = JSON.parse(importMapMatch[1]);
 const imports = importMap.imports || (importMap.imports = {});
 for (const [specifier, target] of [
   ['three', './vendor/three.module.js'],
-  ['three/webgpu', './vendor/three.webgpu.js'],
-  ['three/tsl', './vendor/three.tsl.js'],
 ]) {
   imports[specifier] = `${target}?v=${BUILD_VERSION}`;
 }
@@ -139,12 +134,12 @@ await versionModuleImports(join(OUT, 'src'));
 await versionModuleImports(join(OUT, 'vendor'));
 
 // Fail the deployment build if a runtime addon entry can still pull an
-// unversioned Three/TSL graph. This is intentionally checked in the build
+// unversioned Three graph. This is intentionally checked in the build
 // itself because both Vercel and Pages run this file as their final packager.
 const builtIndexHtml = await readFile(indexHtmlPath, 'utf8');
 const builtImportMapMatch = builtIndexHtml.match(/<script type="importmap">\s*([\s\S]*?)\s*<\/script>/);
 const builtImports = JSON.parse(builtImportMapMatch?.[1] || '{}').imports || {};
-for (const specifier of ['three', 'three/webgpu', 'three/tsl']) {
+for (const specifier of ['three']) {
   if (!builtImports[specifier]?.endsWith(`?v=${BUILD_VERSION}`)) {
     throw new Error(`Build failed: ${specifier} is not versioned in the import map.`);
   }

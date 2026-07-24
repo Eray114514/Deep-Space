@@ -3,7 +3,7 @@
 <link rel="icon" href="data:,">
 <style>html,body,#host{width:100%;height:100%;margin:0;background:#020607}#labels{position:fixed;inset:0;pointer-events:none}</style>
 <script type="importmap">
-{"imports":{"three":"../vendor/three.module.js","three/webgpu":"../vendor/three.webgpu.js","three/tsl":"../vendor/three.tsl.js","three/addons/":"../node_modules/three/examples/jsm/"}}
+{"imports":{"three":"../vendor/three.module.js","three/addons/":"../node_modules/three/examples/jsm/"}}
 </script>
 <div id="host"></div><div id="labels"></div>
 <script type="module">
@@ -54,14 +54,14 @@
     if (frames < (switching ? 28 : 12)) requestAnimationFrame(draw);
     else window.SYSVIEW_RESULT = {
       ready: true,
-      backend: view.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2',
+      backend: 'webgl2',
       scene,
       previewId: view.preview?.star?.id,
       expectedPreviewId: switching ? nextStar.id : star.id,
       bodyCount: view.bodies.length,
-      nodeMaterials: view.scene.children.flatMap((root) => {
+      shaderMaterials: view.scene.children.flatMap((root) => {
         const materials = [];
-        root.traverse((object) => { if (object.material?.isNodeMaterial) materials.push(object.material.type); });
+        root.traverse((object) => { if (object.material?.isShaderMaterial) materials.push(object.material.type); });
         return materials;
       }).length,
     };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { PNG } from 'pngjs';
 import { startServer } from './server.js';
-import { launchBrowser, launchWebGPUHardwareBrowser } from './browser.js';
+import { launchBrowser } from './browser.js';
 
 const { server, port } = await startServer(0);
 const browser = await launchBrowser();
@@ -176,120 +176,5 @@ try {
   console.log(`PASS: canonical star-map projection and picking stay aligned across ${audit.samples.length} zoom levels`);
 } finally {
   await browser.close();
-  try {
-    const webgpuBrowser = process.env.SKIP_WEBGPU_STAR_MAP === '1'
-      ? null
-      : await launchWebGPUHardwareBrowser({ headless: true });
-    if (webgpuBrowser) {
-    const webgpuPage = await webgpuBrowser.newPage({ viewport: { width: 1536, height: 960 } });
-    const webgpuErrors = [];
-    webgpuPage.on('pageerror', (error) => webgpuErrors.push(`page: ${error}`));
-    webgpuPage.on('console', (message) => {
-      if (message.type() === 'error') webgpuErrors.push(`console: ${message.text()}`);
-    });
-    try {
-      await webgpuPage.goto(`http://127.0.0.1:${port}/?quality=low&nolock=1&nohero=1&renderer=webgpu&farflora=0&vclouds=0&freeze=1`, {
-        waitUntil: 'domcontentloaded',
-      });
-      await webgpuPage.waitForFunction(() => window.NMS?.booted === true, null, { timeout: 90000 });
-      await webgpuPage.evaluate(() => window.NMS.openStarMap());
-      await webgpuPage.waitForFunction(() => {
-        const map = document.querySelector('#starmap-overlay')?.__starMapController;
-        return map?.rendererReady && map.mapPositions?.length > 0;
-      }, null, { timeout: 90000 });
-      await webgpuPage.waitForTimeout(1000);
-      const webgpuAudit = await webgpuPage.evaluate(() => {
-        const map = document.querySelector('#starmap-overlay').__starMapController;
-        const localIds = new Set(map.localStars.map((star) => star.id));
-        const target = map.globalStars.find((star) => star.kind !== 'blackHole' && !localIds.has(star.id));
-        const index = map.globalStars.findIndex((star) => star.id === target.id);
-        const position = map.globalMapPositions[index].clone();
-        map.controls.target.copy(position);
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        const hits = [22, 60, 82, 96, 150].map((distance) => {
-          map.camera.position.set(position.x, position.y + distance, position.z + 0.01);
-          map.controls.update();
-          map.updateGalaxyOverview(true);
-          map.scene.updateMatrixWorld(true);
-          map.camera.updateMatrixWorld(true);
-          const projected = position.clone().project(map.camera);
-          return map.pickStarAt({
-            clientX: rect.left + (projected.x * 0.5 + 0.5) * rect.width,
-            clientY: rect.top + (-projected.y * 0.5 + 0.5) * rect.height,
-          })?.star.id || null;
-        });
-        return {
-          gameBackend: window.NMS.stats().rendererBackend,
-          mapBackend: map.renderer.backend?.isWebGPUBackend ? 'webgpu' : 'other',
-          starLayerType: map.globalStarLight.type,
-          starLayerHasUv: !!map.globalStarLight.geometry.getAttribute('uv'),
-          backdropOpacity: map.galaxyBackdrop.material.opacity,
-          hits,
-          target: target.id,
-        };
-      });
-      assert.equal(webgpuAudit.gameBackend, 'webgpu', 'production scene did not use real WebGPU');
-      assert.equal(webgpuAudit.mapBackend, 'webgpu', 'star map did not use real WebGPU');
-      assert.equal(webgpuAudit.starLayerType, 'Mesh', 'star map did not use the backend-neutral instanced star discs');
-      assert.equal(webgpuAudit.starLayerHasUv, true, 'star-map star discs have no UVs for their alpha texture');
-      assert(webgpuAudit.backdropOpacity >= 0.4, 'spiral-arm backdrop is too faint at full-galaxy zoom');
-      assert(webgpuAudit.hits.every((hit) => hit === webgpuAudit.target),
-        'real-WebGPU ordinary system was not visible and pickable at every zoom level');
-
-      const switchAudit = await webgpuPage.evaluate(async () => {
-        const map = document.querySelector('#starmap-overlay').__starMapController;
-        const waitFrames = (count) => new Promise((resolve) => {
-          const next = () => count-- > 0 ? requestAnimationFrame(next) : resolve();
-          next();
-        });
-        const farReportedSystem = map.globalStars.find((star) => star.id === 'MW-0997');
-        const firstSystem = map.globalStars.find((star) => star.kind !== 'blackHole'
-          && star.id !== map.getUniverse().system.star.id && star.id !== farReportedSystem?.id);
-        const systems = [firstSystem, farReportedSystem].filter(Boolean);
-        map.selectStar(systems[0], false);
-        await map.enterSystem();
-        await waitFrames(6);
-        map.setMode('galaxy');
-        map.selectStar(systems[1], false);
-        await map.enterSystem();
-        await waitFrames(8);
-        return {
-          selected: map.selectedStar.id,
-          preview: map.sysview.preview.star.id,
-          expected: systems[1].id,
-          bodies: map.sysview.bodies.length,
-          picks: map.sysview.pickMeshes.length,
-          rendererReady: map.sysview.rendererReady,
-          backend: map.sysview.renderer.domElement.dataset.backend,
-          pixelRatio: map.sysview.renderer.getPixelRatio(),
-        };
-      });
-      assert.equal(switchAudit.selected, switchAudit.expected, 'second system was not selected');
-      assert.equal(switchAudit.preview, switchAudit.expected, 'second preview reused the first system');
-      assert(switchAudit.bodies > 0 && switchAudit.picks > 0, 'second preview lost render or interaction records');
-      assert.equal(switchAudit.rendererReady, true, 'embedded system renderer was not ready before preview reveal');
-      assert.equal(switchAudit.backend, 'webgl2', 'embedded system preview did not use the stable WebGL2 backend');
-      assert(switchAudit.pixelRatio <= 1.25, `embedded preview pixel ratio is too high: ${switchAudit.pixelRatio}`);
-      const previewPng = PNG.sync.read(await webgpuPage.locator('#sm-sysview canvas').screenshot());
-      let brightPixels = 0;
-      for (let i = 0; i < previewPng.data.length; i += 4) {
-        const luminance = previewPng.data[i] * 0.2126
-          + previewPng.data[i + 1] * 0.7152 + previewPng.data[i + 2] * 0.0722;
-        if (luminance > 64) brightPixels++;
-      }
-      assert(brightPixels > 500,
-        `second system preview rendered a blank canvas (${brightPixels} bright pixels)`);
-      assert.equal(webgpuErrors.length, 0, `real-WebGPU star map emitted errors: ${webgpuErrors.join('\n')}`);
-      console.log('PASS: real WebGPU star-map rendering, picking, and sequential system previews');
-    } finally {
-      await webgpuBrowser.close();
-    }
-    } else if (process.env.SKIP_WEBGPU_STAR_MAP === '1') {
-      console.log('SKIP: real WebGPU star-map validation disabled for isolated fallback audit');
-    } else {
-      console.log('SKIP: no installed Chrome/Edge for real WebGPU star-map validation');
-    }
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
+  await new Promise((resolve) => server.close(resolve));
 }

@@ -11,8 +11,6 @@
     {
       "imports": {
         "three": "./vendor/three.module.js",
-        "three/webgpu": "./vendor/three.webgpu.js",
-        "three/tsl": "./vendor/three.tsl.js",
         "three/addons/": "./node_modules/three/examples/jsm/"
       }
     }
@@ -206,7 +204,7 @@
         </header>
         <div class="graphics-device">
           <span>当前图形设备</span><strong id="graphics-gpu">检测中</strong>
-          <small id="graphics-backend">WebGPU 自动 · 实际检测中</small>
+          <small id="graphics-backend">WebGL 2 · 实际检测中</small>
         </div>
         <fieldset>
           <legend>画质档位</legend>
@@ -217,7 +215,7 @@
             <label><input type="radio" name="graphics-quality" value="ultra"><span><b>极致</b><small>最高分辨率与完整效果</small></span></label>
           </div>
         </fieldset>
-        <p id="graphics-settings-note" class="graphics-settings-note">支持设备默认使用 WebGPU；初始化失败时自动回落 WebGL 2。画质调整将在重新启动后生效。</p>
+        <p id="graphics-settings-note" class="graphics-settings-note">渲染后端为 WebGL 2。画质调整将在重新启动后生效。</p>
         <footer><button id="graphics-settings-cancel" type="button">取消</button><button id="graphics-settings-apply" type="button">应用并重新启动</button></footer>
       </div>
     </section>

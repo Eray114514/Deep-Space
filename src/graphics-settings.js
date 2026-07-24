@@ -1,6 +1,6 @@
-// Graphics quality profiles and persistence. The renderer backend is not a
-// player choice — WebGPU is the default, with automatic WebGL 2 fallback.
-// Only quality tier (auto/performance/balanced/ultra) is exposed in the UI.
+// Graphics quality profiles and persistence. The renderer backend is WebGL 2
+// and not a player choice. Only quality tier (auto/performance/balanced/ultra)
+// is exposed in the UI.
 
 export const GRAPHICS_SETTINGS_KEY = 'deep-space.graphics.v1';
 export const GRAPHICS_SETTINGS_VERSION = 1;
@@ -83,7 +83,6 @@ export function chooseAutomaticQuality(gpuName = '', { touch = false, width = 19
   // 被报告 touch)不应因此直接锁性能。
   if (isLowPowerGpu(gpuName)) return 'performance';
   // 高端 GPU 优先识别:NVIDIA 30/40/50 系、AMD RDNA2/3 直接极致,不受分辨率/触摸压制。
-  // WebGPU adapter 常以架构名报告(如 "nvidia · blackwell"),故同时匹配型号与架构。
   if (/RTX\s*(?:30\d0|40[6789]0|50\d0)|RX\s*(?:6[89]\d0|7[89]\d0)|blackwell|lovelace|ampere/i.test(gpuName)) return 'ultra';
   // 未知/中端 GPU 在高分辨率或触摸设备上取均衡,不再盲目性能档。
   if (touch || width * height > 2560 * 1440) return 'balanced';

@@ -115,9 +115,8 @@ try {
       && pulseGauge.speedRatio === 1
       && Math.abs(pulseGauge.speedPointerY - pulseGauge.speedTopY) < 0.5,
   `pulse raises the numeric speed above the governor without over-driving the pointer (${pulseGauge.speed.toFixed(0)} > ${pulseGauge.speedLimit.toFixed(0)} m/s)`);
-  // WebGPU may spend part of the first use compiling a pipeline. Wait for the
-  // simulation-owned burst state instead of assuming 620 ms of wall time also
-  // contained the full 560 ms of rendered simulation time.
+  // Wait for the simulation-owned burst state instead of assuming 620 ms of
+  // wall time also contained the full 560 ms of rendered simulation time.
   await page.waitForFunction(() => !window.NMS.stats().pulse, null, { timeout: 5000 });
   const pulseAfter = await page.evaluate(() => ({
     alt: NMS.alt(), fuel: NMS.pulseFuel(), active: NMS.stats().pulse,

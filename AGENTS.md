@@ -36,3 +36,7 @@ Run `npm test` for every code change. Run the targeted terrain, gameplay, seam, 
 ## Commit & Pull Request Guidelines
 
 Use concise Conventional Commit-style subjects, e.g. `feat: add pulse recharge` or `fix: stabilize planetary flight horizon`. Keep commits focused. Pull requests should state the player-visible impact, identify affected systems, link any issue, and include screenshots or captures for visual/UI changes. Mention verification commands and avoid bundling unrelated working-tree changes.
+
+## 渲染后端
+
+项目使用 WebGL 2 作为唯一渲染后端。WebGPU 迁移曾进行实验但已退役，最后保留 WebGPU 代码的 git 节点为 `b746772`，后续如重启迁移可参考该节点代码。不要在代码或文档中引入 WebGPU/NodeMaterial/TSL 相关描述或实现。

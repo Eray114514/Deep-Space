@@ -1,9 +1,5 @@
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
-const implementation = await import(resolveRendererPolicy(params).useNodeMaterials
-  ? './spatial-rift-node.js'
-  : './spatial-rift-webgl.js');
+// Spatial rift facade — WebGL 2 only.
+import * as implementation from './spatial-rift-webgl.js';
 
 export const createRiftDistortionNode = implementation.createRiftDistortionNode
   || (() => ({ outputNode: null, uniforms: {} }));

@@ -1,10 +1,7 @@
-// Renderer-specific cloud facade. WebGL keeps the authored shader/raymarch;
-// the TSL port runs on WebGPU (the default) or its WebGL 2 fallback.
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
-const useNodeMaterials = resolveRendererPolicy(params).useNodeMaterials;
-const implementation = await import(useNodeMaterials ? './clouds-node-v2.js' : './clouds-webgl.js');
+// Cloud facade — WebGL 2 only. The authored GLSL raymarch in clouds-webgl.js
+// is the sole implementation; the TSL/NodeMaterial port was retired with the
+// WebGPU backend (see git commit b746772 for the last WebGPU code).
+import * as implementation from './clouds-webgl.js';
 
 export const cloudNoiseTexture = implementation.cloudNoiseTexture;
 export const disposeCloudNoiseTexture = implementation.disposeCloudNoiseTexture;

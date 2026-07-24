@@ -10,7 +10,7 @@ import { SpaceControls, WalkControls, guidePlanetApproach, keys,
   flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
-import { createWarpDriveNode, landingDescentProgress, SHIP_LANDING_PROFILE,
+import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
 import { tickShaders } from './shaders.js';
 import { UI } from './ui.js';
@@ -22,24 +22,19 @@ import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
-import { VolumetricPass } from './volumetric-pass.js';
 import { createRiftDistortionNode, SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
-import { GameNodePipeline } from './node-render-pipeline.js';
-import { GameNodePipelineV2 } from './render-pipeline-v2.js';
 import { GameLegacyPipeline } from './legacy-render-pipeline.js';
 import { isLowPowerGpu, resolveGraphicsSettings, resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
+import * as THREE from 'three';
 
 const qs = new URLSearchParams(location.search);
 const graphicsSettings = resolveGraphicsSettings({ params: qs });
 const rendererPolicy = resolveRendererPolicy(qs);
-const BOOT_USE_NODE = rendererPolicy.useNodeMaterials;
-const BOOT_USE_WEBGPU = rendererPolicy.backend === 'webgpu';
-const THREE = await import(BOOT_USE_NODE ? 'three/webgpu' : 'three');
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -112,7 +107,7 @@ if (qs.get('renderer-recovery') === 'device-lost') {
 }
 const renderer = rendererRuntime.renderer;
 const actualRendererBackend = rendererRuntime.backend;
-const webgpuAdapterInfo = rendererRuntime.adapterInfo;
+const adapterInfo = rendererRuntime.adapterInfo;
 const gpuName = rendererRuntime.gpuName;
 const QUALITY_PROFILE = resolveQualityProfile(graphicsSettings, gpuName, {
   touch: IS_TOUCH, width: window.innerWidth, height: window.innerHeight,
@@ -127,8 +122,8 @@ const DPR_BASE = window.devicePixelRatio || 1;
 const DPR_FLOOR = DPR_BASE * QUALITY_PROFILE.dprFloorMult;
 const DPR_CEILING = DPR_BASE * QUALITY_PROFILE.dprCeilingMult;
 let renderDpr = Math.min(Math.max(DPR_BASE * QUALITY_PROFILE.dprTargetMult, DPR_FLOOR), DPR_CEILING);
-// 高 DPR + 高分辨率显示器(如 4K@2x)会让 render target 超过 WebGPU 的
-// maxTextureDimension2D(典型 8192),导致全黑。按能力上限裁剪,保持 floor
+// 高 DPR + 高分辨率显示器(如 4K@2x)会让 render target 超过 GPU 的
+// maxTextureSize(典型 8192),导致全黑。按能力上限裁剪,保持 floor
 // 不低于 devicePixelRatio 的点对点承诺。
 const maxTexSize = renderer.capabilities?.maxTextureSize || 8192;
 renderDpr = Math.min(renderDpr,
@@ -144,16 +139,13 @@ console.info(`Renderer: ${renderer.constructor.name}/${actualRendererBackend}`, 
 
 // WebGL context-loss safety net. The renderer auto-restores most GPU
 // resources on the next render after restore, but without an explicit
-// preventDefault the canvas stays black and silent. WebGPU loss reconstructs
-// the deterministic scene after one guarded reload; WebGL 2 resumes in-place.
+// preventDefault the canvas stays black and silent.
 let contextLost = false;
 installDeviceRecovery(renderer, (state, detail) => {
   contextLost = state === 'lost';
   const notice = document.getElementById('performance-notice');
   if (notice && state === 'lost') {
-    notice.textContent = actualRendererBackend === 'webgpu'
-      ? 'WebGPU 设备已重置，正在恢复图形资源…'
-      : 'WebGL 2 图形上下文已丢失，等待恢复…';
+    notice.textContent = 'WebGL 2 图形上下文已丢失，等待恢复…';
     notice.classList.remove('hidden');
   }
   if (notice && state === 'restored') notice.classList.add('hidden');
@@ -382,12 +374,11 @@ function prewarmSurfacePipelines(planet) {
     surfaceBootstrapMeshes.push(mesh);
   }
 
-  // Prewarm the actual render pipeline (RenderPipeline on WebGPU, EffectComposer
-  // on WebGL). renderer.compileAsync(scene, camera) only compiles materials for
-  // the legacy path; it does not build the volume-pass node that first executes
-  // when the cloud shell becomes visible, which caused a multi-second hitch at
-  // 3000-3400 m. Briefly expose volume shells and the real shadow light so the
-  // compiled variants match the live frame.
+  // Prewarm the EffectComposer render pipeline. renderer.compileAsync(scene,
+  // camera) only compiles materials; it does not build the volume-pass
+  // shaders that first execute when the cloud shell becomes visible, which
+  // caused a multi-second hitch at 3000-3400 m. Briefly expose volume shells
+  // and the real shadow light so the compiled variants match the live frame.
   const volumeMeshesToPrewarm = [];
   for (const mesh of [planet.atmoMesh, planet.volCloudMesh]) {
     if (mesh && !mesh.visible) {
@@ -404,9 +395,8 @@ function prewarmSurfacePipelines(planet) {
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
-  // WebGPURenderer derives backend-specific shadow materials from the node
-  // surface graph. The private 2×2 bootstrap render below warms those real
-  // variants without injecting an incompatible legacy MeshDepthMaterial.
+  // The private 2×2 bootstrap render below warms the real shadow materials
+  // without injecting an incompatible MeshDepthMaterial.
   Promise.all(tasks).then(() => {
     for (const mesh of volumeMeshesToPrewarm) mesh.visible = false;
     if (planet) warmedVolumePlanets.add(planet);
@@ -449,11 +439,7 @@ function prewarmLoadedShipPipelines() {
 const VOLUME_ENABLED = qs.get('vclouds') !== '0';
 const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
 setVolumetricCloudsEnabled(VOLUME_ENABLED, QUALITY_LOW ? 'low' : 'high');
-const nodeVolumePass = BOOT_USE_NODE && VOLUME_ENABLED
-  ? new VolumetricPass()
-  : null;
-const Pipeline = BOOT_USE_NODE ? GameNodePipelineV2 : GameLegacyPipeline;
-const _executedComputeNodes = new WeakSet();
+const Pipeline = GameLegacyPipeline;
 const nodePipeline = new Pipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
   volumeScale: VOLUME_SCALE,
@@ -462,12 +448,9 @@ const nodePipeline = new Pipeline(renderer, scene, camera, {
   bloomRadius: 0.4,
   bloomThreshold: 1.05,
   foregroundLayer: SHIP_FOREGROUND_LAYER,
-  createWarpDriveNode,
   createRiftDistortionNode,
 });
-const volumePass = BOOT_USE_NODE
-  ? nodeVolumePass
-  : nodePipeline.volumePass;
+const volumePass = nodePipeline.volumePass;
 const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
 const riftDistortionPass = nodePipeline.rift;
@@ -722,11 +705,6 @@ function addTween(dur, fn, onDone) {
   tweens.push({ t: 0, dur, fn, onDone });
 }
 function stepTweens(dt) {
-  const d = window.__diag ||= {};
-  d.tweenCalls = (d.tweenCalls || 0) + 1;
-  d.tweenCount = tweens.length;
-  d.lastDt = dt;
-  if (d.tweenCalls % 30 === 0) console.log('[diag] stepTweens', { dt, count: tweens.length, calls: d.tweenCalls });
   for (let i = tweens.length - 1; i >= 0; i--) {
     const tw = tweens[i];
     tw.t += dt;
@@ -848,10 +826,8 @@ const ui = new UI({
   onStart: async () => {
     // Pointer Lock must be requested in the original click gesture. Audio
     // was already unlocked when the player entered the hero start page.
-    console.log('[diag] onStart entered');
     try {
       const lockAttempt = requestGameplayPointerLock();
-      console.log('[diag] requestGameplayPointerLock returned, calling startHeroPullBack');
       // One-shot cinematic: pull the camera back from the home planet's limb to
       // the full-orbit spawn frame while the ship slides into formation.
       startHeroPullBack(() => {
@@ -862,10 +838,9 @@ const ui = new UI({
         // of snapping it on at the start of the pull-back.
         ui.revealChrome();
       });
-      console.log('[diag] startHeroPullBack returned, tweenCount=', window.__diag?.tweenCount, 'heroStarted=', window.__diag?.heroStarted);
       await lockAttempt;
     } catch (e) {
-      console.error('[diag] onStart THREW:', e);
+      console.error('onStart failed:', e);
     }
   },
   onLand: tryLand,
@@ -2322,8 +2297,6 @@ function spawn(hero = false) {
 // the ship slides into formation. Runs inside the click gesture's call chain
 // so pointer lock requested in onDone still counts as user-activated.
 function startHeroPullBack(onDone) {
-  (window.__diag ||= {}).heroStarted = true;
-  console.log('[diag] startHeroPullBack called');
   const planet = universe.system.planets[0];
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
@@ -2469,13 +2442,6 @@ let dprAcc = 0;
 
 function frame() {
   requestAnimationFrame(frame);
-  const d0 = window.__diag ||= {};
-  d0.frameNo = (d0.frameNo || 0) + 1;
-  d0.state = state;
-  d0.paused = paused;
-  d0.nearestName = nearest?.bodyId || nearest?.name || null;
-  d0.navPos = [nav.pos.x, nav.pos.y, nav.pos.z];
-  if (d0.frameNo % 60 === 0) console.log('[diag] frame', d0.frameNo, { paused, state, navPos: nav.pos.toArray().map(v=>v.toFixed(1)) });
   const realDt = clock.getDelta();
   // Paused: the full-page pause surface floats over a LIVE world. Simulation
   // time freezes (dt=0) but the render pipeline runs exactly as in play, so
@@ -3032,27 +2998,13 @@ function frame() {
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
   if (!contextLost) {
-    // V2 compute shader scheduling: cloud noise bakes once on first frame.
-    // (ocean v6 uses noise texture, no compute; atmosphere v2 is pure TSL.)
-    if (BOOT_USE_WEBGPU) {
-      scene.traverse((obj) => {
-        const cn = obj.isMesh && obj.material?.userData?.computeNode;
-        if (!cn || _executedComputeNodes.has(cn)) return;
-        renderer.compute(cn);
-        _executedComputeNodes.add(cn);
-      });
-    }
-    // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
-    // only zeros optional effect uniforms; it never swaps renderer families.
+    // Disabling post only zeros optional effect uniforms; it never swaps
+    // renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
-    const d = window.__diag ||= {};
-    d.renderCalls = (d.renderCalls || 0) + 1;
     try {
       nodePipeline.render();
-      d.renderOk = (d.renderOk || 0) + 1;
     } catch (e) {
-      d.renderErr = (d.renderErr || 0) + 1;
-      if (d.renderErr <= 3) console.error('[diag] nodePipeline.render threw:', e);
+      console.error('nodePipeline.render threw:', e);
     }
   }
   prevNavPos.copy(nav.pos);
@@ -3183,8 +3135,7 @@ window.NMS = {
       rendererRequested: rendererPolicy.requested,
       rendererBackend: actualRendererBackend,
       rendererReason: rendererRuntime.reason,
-      webgpuAvailable: rendererPolicy.webgpuAvailable,
-      adapterInfo: webgpuAdapterInfo,
+      adapterInfo,
       quality: (QUALITY_PROFILE.automatic ? 'auto-' : '') + QUALITY_PROFILE.id,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };

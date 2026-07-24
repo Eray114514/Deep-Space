@@ -1,9 +1,8 @@
-// Atmosphere and local clouds are rendered by GameNodePipeline as a dedicated
-// half-resolution scene pass. This controller retains only simulation-facing
-// state; the old GLSL history resolve/EffectComposer pass is intentionally
-// gone so both WebGPU and WebGL 2 execute the same node render graph.
+// Atmosphere and local clouds volume state controller. The WebGL 2 render
+// pipeline (GameLegacyPipeline) owns the actual scene passes; this object
+// only carries simulation-facing state shared by atmosphere/cloud materials.
 
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 
 export const VOLUME_LAYER = 2;
 

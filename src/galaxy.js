@@ -4,11 +4,6 @@
 // authored galactic boundary.
 
 import * as THREE from 'three';
-import { PointsNodeMaterial } from 'three/webgpu';
-import {
-  attribute, clamp as nodeClamp, float, length as nodeLength, mix,
-  positionView, smoothstep as nodeSmoothstep, uniform, vertexColor,
-} from 'three/tsl';
 import { makeRng } from './rng.js';
 import { clamp } from './noise.js';
 import { Planet } from './planet.js';
@@ -18,7 +13,6 @@ import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, or
 import { buildGalaxyBackdrop, CELL, GalaxyCatalog, HOME_SYSTEM_ID } from './galaxy-layout.js';
 import { buildCivilizationSites, civilizationSitesForSystem } from './civilization.js';
 import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
 
 export { CELL } from './galaxy-layout.js';
 
@@ -31,123 +25,78 @@ const FADE_DIST = 9e9;
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
-const _rendererParams = typeof location !== 'undefined'
-  ? new URLSearchParams(location.search) : new URLSearchParams();
-const USE_NODE_MATERIALS = resolveRendererPolicy(_rendererParams).useNodeMaterials;
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
 // fall off with true distance (computed in view space, where the f64 group
 // offset has already been applied).
 function makeStarPointsMaterial() {
-  if (!USE_NODE_MATERIALS) {
-    return new THREE.ShaderMaterial({
-      uniforms: {
-        uDim: { value: 0 },
-        uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
-        uProj: { value: 600 },
-      },
-      vertexShader: /* glsl */`
-        uniform float uPixelRatio;
-        uniform float uProj;
-        attribute float aSize;
-        varying vec3 vColor;
-        varying float vBright;
-        void main() {
-          vColor = color;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          float dist = length(mv.xyz);
-          float discPx = 1.2e7 * aSize * uProj / max(dist, 1.0);
-          gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
-          vBright = clamp(2.2e10 / max(dist, 1.0), 0.42, 1.0)
-            * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: /* glsl */`
-        uniform float uDim;
-        varying vec3 vColor;
-        varying float vBright;
-        void main() {
-          float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-          float a = smoothstep(1.0, 0.15, r);
-          gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
-            * a * vBright * (1.0 - uDim * 0.97);
-        }`,
-      vertexColors: true,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-  }
-  const nodes = {
-    uDim: uniform(0),
-    uPixelRatio: uniform(Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2)),
-    uProj: uniform(600),
-  };
-  const starSize = attribute('aSize', 'float');
-  const distance = nodeLength(positionView);
-  const discPx = starSize.mul(1.2e7).mul(nodes.uProj).div(distance.max(1));
-  const pointSize = nodeClamp(discPx.max(float(1.8).add(starSize.mul(0.55))), 1.8, 28)
-    .mul(nodes.uPixelRatio);
-  const brightness = nodeClamp(float(2.2e10).div(distance.max(1)), 0.42, 1)
-    .mul(nodeSmoothstep(9.2e10, 7.5e10, distance))
-    .mul(float(1).sub(nodes.uDim.mul(0.97)));
-  const material = new PointsNodeMaterial({
-    sizeAttenuation: false,
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uDim: { value: 0 },
+      uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
+      uProj: { value: 600 },
+    },
+    vertexShader: /* glsl */`
+      uniform float uPixelRatio;
+      uniform float uProj;
+      attribute float aSize;
+      varying vec3 vColor;
+      varying float vBright;
+      void main() {
+        vColor = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float dist = length(mv.xyz);
+        float discPx = 1.2e7 * aSize * uProj / max(dist, 1.0);
+        gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
+        vBright = clamp(2.2e10 / max(dist, 1.0), 0.42, 1.0)
+          * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uDim;
+      varying vec3 vColor;
+      varying float vBright;
+      void main() {
+        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+        float a = smoothstep(1.0, 0.15, r);
+        gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
+          * a * vBright * (1.0 - uDim * 0.97);
+      }`,
+    vertexColors: true,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
-  material.sizeNode = pointSize;
-  // pointUV/gl_PointCoord currently has no portable WGSL path in r185.1.
-  // Keep the finite star field backend-neutral; bloom supplies the soft halo.
-  material.colorNode = vertexColor().mul(1.2);
-  material.opacityNode = brightness;
-  material.uniforms = nodes;
-  return material;
 }
 
 function makeBackdropPointsMaterial() {
-  if (!USE_NODE_MATERIALS) {
-    return new THREE.ShaderMaterial({
-      uniforms: { uDim: { value: 0 } },
-      vertexShader: /* glsl */`
-        attribute float aSize;
-        attribute float aAlpha;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          vColor = color;
-          vAlpha = aAlpha;
-          gl_PointSize = aSize;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }`,
-      fragmentShader: /* glsl */`
-        uniform float uDim;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-          float a = smoothstep(1.0, 0.1, r);
-          gl_FragColor = vec4(vColor * 0.78, a * vAlpha * (1.0 - uDim * 0.985));
-        }`,
-      vertexColors: true,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-  }
-  const nodes = { uDim: uniform(0) };
-  const material = new PointsNodeMaterial({
-    sizeAttenuation: false,
+  return new THREE.ShaderMaterial({
+    uniforms: { uDim: { value: 0 } },
+    vertexShader: /* glsl */`
+      attribute float aSize;
+      attribute float aAlpha;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vColor = color;
+        vAlpha = aAlpha;
+        gl_PointSize = aSize;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uDim;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+        float a = smoothstep(1.0, 0.1, r);
+        gl_FragColor = vec4(vColor * 0.78, a * vAlpha * (1.0 - uDim * 0.985));
+      }`,
+    vertexColors: true,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
-  material.sizeNode = attribute('aSize', 'float');
-  material.colorNode = vertexColor().mul(0.78);
-  material.opacityNode = attribute('aAlpha', 'float').mul(float(1).sub(nodes.uDim.mul(0.985)));
-  material.uniforms = nodes;
-  return material;
 }
 
 function glowTexture(size = 128, inner = 0.0, tight = false) {

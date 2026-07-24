@@ -12,12 +12,8 @@
 // forest.
 
 import * as THREE from 'three';
-import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { positionLocal, uniform, vertexColor } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
-import { applyFarFadeV2 } from './flora-system.js';
 
 const TILE_M = 1024;         // metres per cache tile
 const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
@@ -60,40 +56,30 @@ const Y = new THREE.Vector3(0, 1, 0);
 // bubble boundary made every tree the pilot approached appear to sink into
 // the terrain before the ship could reach it.
 function applyFarFade(mat, uniforms) {
-  const useNodeMaterials = resolveRendererPolicy(
-    typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
-  ).useNodeMaterials;
-  if (!useNodeMaterials) {
-    mat.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, uniforms);
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', `#include <common>
-          uniform vec3 uCamL;
-          uniform float uAltK;`)
-        .replace('#include <begin_vertex>', `#include <begin_vertex>
-          #ifdef USE_INSTANCING
-          {
-            float d = distance(instanceMatrix[3].xyz, uCamL);
-            float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
-            g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
-            transformed *= g;
-          }
-          #endif`);
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <emissivemap_fragment>',
-        `#include <emissivemap_fragment>
-        #ifdef USE_COLOR
-          totalEmissiveRadiance *= vColor.rgb;
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        uniform vec3 uCamL;
+        uniform float uAltK;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        #ifdef USE_INSTANCING
+        {
+          float d = distance(instanceMatrix[3].xyz, uCamL);
+          float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
+          g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
+          transformed *= g;
+        }
         #endif`);
-    };
-    mat.customProgramCacheKey = () => 'far-flora';
-    return mat;
-  }
-  const alt = uniform(uniforms.uAltK.value).onFrameUpdate(() => uniforms.uAltK.value);
-  // V2: restore distance-based scaling fade (flora-system.js) instead of the
-  // emissive soft-fade workaround. This matches the WebGL path's
-  // smoothstep(3900, 4400, d) scaling that hides LOD pop.
-  return applyFarFadeV2(mat, uniforms);
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+      #ifdef USE_COLOR
+        totalEmissiveRadiance *= vColor.rgb;
+      #endif`);
+  };
+  mat.customProgramCacheKey = () => 'far-flora';
+  return mat;
 }
 
 export class FarFlora {

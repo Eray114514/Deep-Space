@@ -4,17 +4,6 @@
 // ship pass, so warp and local pulse share one coherent camera-space tunnel.
 
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
-import {
-  Fn, If, abs, atan, clamp, color, cos, dot, exp, float, floor, fract, length,
-  max, mix, normalLocal, normalize, positionLocal, pow, screenUV, sin,
-  smoothstep, step, uniform, vec2, vec3, vec4,
-} from 'three/tsl';
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const USE_NODE_MATERIALS = resolveRendererPolicy(
-  typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
-).useNodeMaterials;
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
@@ -74,114 +63,6 @@ export function landingDescentProgress(t) {
   return 1 - Math.pow(1 - k, 2.35);
 }
 
-// WebGPURenderer post-processing node. The input is a pass texture node and
-// the returned uniforms deliberately mirror the old pass controls.
-export function createWarpDriveNode(inputNode) {
-  const controls = {
-    time: uniform(0), warp: uniform(0), pulse: uniform(0),
-    arrival: uniform(0), aspect: uniform(1),
-  };
-  const tau = 6.28318530718;
-  const hash11 = Fn(([source]) => {
-    const p0 = fract(source.mul(.1031));
-    const p1 = p0.mul(p0.add(33.33));
-    return fract(p1.mul(p1.add(p1)));
-  });
-  const spectrum = Fn(([h]) => {
-    const rainbow = vec3(.56).add(cos(h.add(vec3(0, .69, .37)).mul(tau)).mul(.44));
-    const ion = mix(vec3(.18, .80, 1.35), vec3(1.25, .26, 1.10), step(.56, h));
-    return mix(ion, rainbow.mul(1.25), .68);
-  });
-  const rayLayer = Fn(([p, bins, radialScale, speed, seed]) => {
-    const radius = length(p);
-    const angle = atan(p.y, p.x);
-    // Lock every streak to the vanishing point. Radius-driven angular wobble
-    // reads as a warped overlay rather than straight-line velocity.
-    const wedge = angle.div(tau).add(.5).mul(bins);
-    const id = floor(wedge);
-    const random = hash11(id.add(seed.mul(71.7)));
-    const fine = hash11(id.mul(5.31).add(seed.mul(19.1)));
-    const across = abs(fract(wedge).sub(.5));
-    // Angular separation becomes screen-space distance so lines keep a near
-    // constant width instead of opening into fat wedges at the screen edge.
-    const acrossDistance = across.mul(tau).div(bins).mul(radius);
-    const width = mix(.00062, .0019, random.mul(random)).mul(mix(.82, 1.18, fine));
-    const core = exp(pow(acrossDistance.div(max(width, .00035)), 2).mul(-2.65));
-    const glow = exp(pow(acrossDistance.div(max(width.mul(4.2), .001)), 2).mul(-1.25));
-    const phase = fract(radius.mul(radialScale).sub(controls.time.mul(speed)
-      .mul(mix(.72, 1.4, random))).add(fine));
-    const segment = smoothstep(.018, .085, phase)
-      .mul(float(1).sub(smoothstep(.68, .965, phase)));
-    const head = exp(pow(abs(phase.sub(.16)).div(.085), 2).mul(-2.2));
-    const taper = mix(.46, 1, smoothstep(.035, .34, phase)).add(head.mul(.72));
-    const gate = step(.52, fine).mul(smoothstep(.022, .115, radius));
-    const flare = mix(.38, 1.28, smoothstep(.06, .94, radius));
-    const cool = mix(vec3(.24, .72, 1.12), vec3(.74, .94, 1.08), random);
-    const accent = smoothstep(.58, .92, hash11(id.mul(2.73).add(seed.mul(31))));
-    const tint = mix(cool, spectrum(fract(random.mul(.74).add(seed.mul(.29)))),
-      accent.mul(.62).add(.18));
-    const hotCore = mix(tint, vec3(1.12, 1.16, 1.18), .30);
-    return tint.mul(glow).mul(.15).add(hotCore.mul(core).mul(taper).mul(.78))
-      .mul(segment).mul(gate).mul(flare);
-  });
-  const outputNode = Fn(() => {
-    const strength = clamp(controls.warp.max(controls.pulse), 0, 1);
-    const base = inputNode.sample(screenUV);
-    const result = vec4(base.rgb, 1).toVar();
-    const activity = max(strength, controls.arrival);
-    // The render graph is always resident. A real shader branch keeps the
-    // expensive authored tunnel dormant during ordinary flight; the old GLSL
-    // pass achieved the same thing by disabling the pass altogether.
-    If(activity.greaterThan(.001), () => {
-      const centered = screenUV.sub(0.5);
-      const p = vec2(centered.x.mul(controls.aspect), centered.y);
-      const radius = length(p);
-      const direction = p.div(max(radius, .0001));
-      const stretch = strength.mul(float(.0015).add(controls.warp.mul(.0065))
-        .add(controls.pulse.mul(.0035))).mul(smoothstep(.035, .82, radius));
-      const shift = vec2(direction.x.div(controls.aspect), direction.y).mul(stretch);
-      const red = inputNode.sample(clamp(screenUV.sub(shift.mul(.72)), .001, .999));
-      const green = inputNode.sample(clamp(screenUV.sub(shift.mul(.24)), .001, .999));
-      const blue = inputNode.sample(clamp(screenUV.add(shift.mul(.20)), .001, .999));
-      const dispersed = vec3(red.r, green.g, blue.b);
-      const scene = mix(base.rgb, dispersed,
-        strength.mul(float(.14).add(controls.warp.mul(.12))));
-      const rayStrength = strength.mul(mix(.54, .88, strength))
-        .mul(smoothstep(.025, .14, radius));
-      // Sparse long foreground streaks establish speed; denser, shorter
-      // layers behind them supply depth without bending the silhouette.
-      const layeredRays = rayLayer(p, float(31), float(1.05),
-        float(2.15).add(controls.pulse.mul(2.35)), float(.13))
-        .add(rayLayer(p.mul(1.03), float(53), float(1.82),
-          float(2.85).add(controls.pulse.mul(3.1)), float(.47)).mul(.68))
-        .add(rayLayer(p.mul(.97), float(89), float(3.12),
-          float(3.65).add(controls.pulse.mul(3.9)), float(.81)).mul(.38))
-        .add(rayLayer(p.mul(1.08), float(137), float(5.25),
-          float(4.8).add(controls.pulse.mul(4.7)), float(.29)).mul(.18));
-      const rays = layeredRays.mul(rayStrength).mul(smoothstep(.012, .082, radius))
-        .mul(float(1).sub(smoothstep(.98, 1.2, radius)))
-        .mul(float(1).add(controls.warp.mul(.18)));
-      const tunnel = smoothstep(.08, .92, radius)
-        .mul(float(1).sub(smoothstep(.88, 1.14, radius)));
-      // Preserve the flowing haze without the old twelve sine hashes per
-      // pixel; the three authored segmented ray layers remain unchanged.
-      const turbulence = sin(dot(p, vec2(18.7, 31.9)).add(controls.time.mul(.17)))
-        .mul(.5).add(.5);
-      const haze = mix(vec3(.012, .036, .075), vec3(.025, .115, .21), turbulence)
-        .mul(float(.12).add(tunnel.mul(.88))).mul(strength)
-        .mul(controls.warp.mul(.64).add(controls.pulse.mul(.22)));
-      const arrival = vec3(.06, .19, .42).mul(exp(radius.mul(radius).mul(-14)))
-        .mul(controls.arrival).mul(.52)
-        .add(vec3(.68, .84, 1.04).mul(exp(radius.mul(radius).mul(-110)))
-          .mul(controls.arrival).mul(.68));
-      result.assign(vec4(scene.mul(float(1).sub(strength.mul(.028)))
-        .add(haze).add(rays).add(arrival), 1));
-    });
-    return result;
-  })();
-  return { outputNode, uniforms: controls };
-}
-
 function hermite(t, p0, p1, m0, m1, span) {
   const t2 = t * t;
   const t3 = t2 * t;
@@ -219,75 +100,46 @@ export function warpTravelProgress(t) {
 
 export class SkyDome {
   constructor(scene) {
-    if (!USE_NODE_MATERIALS) {
-      this.mat = new THREE.ShaderMaterial({
-        uniforms: {
-          uUp: { value: new THREE.Vector3(0, 1, 0) },
-          uSunDir: { value: new THREE.Vector3(0, 1, 0) },
-          uHorizon: { value: new THREE.Color(0x88bbff) },
-          uZenith: { value: new THREE.Color(0x224488) },
-          uSunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
-          uAlpha: { value: 0 },
-        },
-        vertexShader: /* glsl */`
-          #include <common>
-          #include <logdepthbuf_pars_vertex>
-          varying vec3 vDir;
-          void main() {
-            vDir = normalize(position);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            #include <logdepthbuf_vertex>
-          }`,
-        fragmentShader: /* glsl */`
-          #include <common>
-          #include <logdepthbuf_pars_fragment>
-          uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
-          uniform float uAlpha;
-          varying vec3 vDir;
-          void main() {
-            #include <logdepthbuf_fragment>
-            vec3 dir = normalize(vDir);
-            float u = dot(dir, uUp);
-            float t = pow(clamp(1.0 - max(u, 0.0), 0.0, 1.0), 3.2);
-            vec3 col = mix(uZenith, uHorizon * 0.92, t);
-            float sd = max(dot(dir, uSunDir), 0.0);
-            col += uSunTint * (pow(sd, 700.0) * 1.3 + pow(sd, 16.0) * 0.16);
-            float a = uAlpha * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
-            gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
-          }`,
-        side: THREE.BackSide,
-        transparent: true,
-        depthWrite: false,
-        depthTest: true,
-      });
-      this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
-      this.mesh.renderOrder = -7;
-      this.mesh.frustumCulled = false;
-      this.mesh.visible = false;
-      scene.add(this.mesh);
-      return;
-    }
-    const nodes = {
-      uUp: uniform(new THREE.Vector3(0, 1, 0)),
-      uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
-      uHorizon: uniform(new THREE.Color(0x88bbff)),
-      uZenith: uniform(new THREE.Color(0x224488)),
-      uSunTint: uniform(new THREE.Color(1.0, 0.92, 0.78)),
-      uAlpha: uniform(0),
-    };
-    const dir = normalize(positionLocal);
-    const upDot = dot(dir, nodes.uUp);
-    const horizonMix = pow(clamp(float(1).sub(upDot.max(0)), 0, 1), 3.2);
-    const sunDot = dot(dir, nodes.uSunDir).max(0);
-    const sky = mix(nodes.uZenith, nodes.uHorizon.mul(0.92), horizonMix)
-      .add(nodes.uSunTint.mul(pow(sunDot, 700).mul(1.3).add(pow(sunDot, 16).mul(0.16))));
-    const belowFade = mix(float(1), clamp(float(1).add(upDot.mul(2.4)), 0, 1), upDot.lessThan(0));
-    this.mat = new MeshBasicNodeMaterial({
-      side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: true,
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uUp: { value: new THREE.Vector3(0, 1, 0) },
+        uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+        uHorizon: { value: new THREE.Color(0x88bbff) },
+        uZenith: { value: new THREE.Color(0x224488) },
+        uSunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
+        uAlpha: { value: 0 },
+      },
+      vertexShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_vertex>
+        varying vec3 vDir;
+        void main() {
+          vDir = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          #include <logdepthbuf_vertex>
+        }`,
+      fragmentShader: /* glsl */`
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
+        uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
+        uniform float uAlpha;
+        varying vec3 vDir;
+        void main() {
+          #include <logdepthbuf_fragment>
+          vec3 dir = normalize(vDir);
+          float u = dot(dir, uUp);
+          float t = pow(clamp(1.0 - max(u, 0.0), 0.0, 1.0), 3.2);
+          vec3 col = mix(uZenith, uHorizon * 0.92, t);
+          float sd = max(dot(dir, uSunDir), 0.0);
+          col += uSunTint * (pow(sd, 700.0) * 1.3 + pow(sd, 16.0) * 0.16);
+          float a = uAlpha * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
+          gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+        }`,
+      side: THREE.BackSide,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
     });
-    this.mat.colorNode = sky;
-    this.mat.opacityNode = nodes.uAlpha.mul(belowFade);
-    this.mat.uniforms = Object.fromEntries(Object.entries(nodes).map(([key, node]) => [key, node]));
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
     this.mesh.renderOrder = -7;
     this.mesh.frustumCulled = false;

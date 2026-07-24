@@ -3,7 +3,7 @@
 // planets are inspected and the route is committed. Rendering for the system
 // level lives in sysview.js; this module owns DOM, state and the galaxy scene.
 
-import * as THREE from '../vendor/three.webgpu.js';
+import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { makeRng } from './rng.js';
 import { generateSystemSpec } from './astronomy.js';
@@ -273,10 +273,6 @@ export class StarMap {
       navArrow: this.els.navArrow,
       nameTag: this.els.nameTag,
       onSelect: (body) => this.onBodySelect(body),
-      // The flight scene and galaxy chart already own GPU renderers. Keeping
-      // the embedded preview on WebGL2 avoids a third WebGPU device/context,
-      // which could stay pending or lose its high-DPI canvas on real systems.
-      forceWebGL: true,
       pixelRatioCap: 1.25,
     });
     this.bindUI();
@@ -415,23 +411,17 @@ export class StarMap {
     this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 500);
     this.camera.position.set(0, 118, 0.01);
     this.camera.up.set(0, 0, -1);
-    const forceWebGL = new URLSearchParams(location.search).get('renderer') === 'webgl';
-    this.renderer = new THREE.WebGPURenderer({
-      antialias: true, alpha: true, powerPreference: 'high-performance', forceWebGL,
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true, alpha: true, powerPreference: 'high-performance',
     });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.1;
     this.els.canvas.appendChild(this.renderer.domElement);
-    this.rendererReady = false;
+    this.rendererReady = true;
     this.rendererInitError = null;
-    this.rendererInit = this.renderer.init().then(() => {
-      this.rendererReady = true;
-    }).catch((error) => {
-      this.rendererInitError = error;
-      console.error('Star-map WebGPURenderer initialization failed.', error);
-    });
+    this.rendererInit = Promise.resolve();
     this.starTexture = makePointTexture();
     this.selectionTexture = makeSelectionTexture();
     this.softTexture = makeSoftDisc();
@@ -818,10 +808,8 @@ export class StarMap {
     this.mapPositions = this.globalMapPositions;
 
     const makeStarLayer = (layerStars, positions, pixelSize, opacity) => {
-      // Textured PointsMaterial relies on gl_PointCoord. Three r185 cannot
-      // provide that path reliably to WGSL, so WebGPU could keep the CPU-side
-      // hit target while drawing no star at all. Instanced UV-bearing quads
-      // preserve a single draw call and render identically on both backends.
+      // Instanced UV-bearing quads preserve a single draw call and keep the
+      // star sprites crisp at every DPI.
       const geometry = new THREE.PlaneGeometry(1, 1);
       geometry.rotateX(-Math.PI / 2);
       const material = new THREE.MeshBasicMaterial({

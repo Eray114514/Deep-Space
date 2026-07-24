@@ -1,9 +1,5 @@
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
-const implementation = await import(resolveRendererPolicy(params).useNodeMaterials
-  ? './black-hole-node.js'
-  : './black-hole-webgl.js');
+// Black hole facade — WebGL 2 only.
+import * as implementation from './black-hole-webgl.js';
 
 export const makeBlackHoleImpostorTexture = implementation.makeBlackHoleImpostorTexture;
 export const makeAccretionMaterial = implementation.makeAccretionMaterial;

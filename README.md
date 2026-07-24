@@ -2,7 +2,7 @@
 
 一个完全过程化、可在浏览器中无缝探索的宇宙。从恒星际空间滚动到任意行星表面并**踏上任何一颗星球**——海洋、河流、冰盖、陨石坑、沙丘、熔岩海、云层、星环与卫星，全部由种子生成，离开再回来，同一块石头还在原地。
 
-基于原生 ES 模块与 Three.js 构建，开发期直接运行，也能产出自包含的静态部署到 `dist/`。渲染管线同时支持 WebGPU 与 WebGL 2，默认优先 WebGPU，初始化失败时自动回落。
+基于原生 ES 模块与 Three.js 构建，开发期直接运行，也能产出自包含的静态部署到 `dist/`。渲染管线使用 WebGL 2。
 
 ## 特性
 
@@ -125,7 +125,7 @@ colorAt(dir, h, slope, maxFreq) -> 表面颜色
 | `src/ship-hud.js` / `src/surface-weapons.js` | 舰船 HUD 与地表武器 |
 | `src/music.js` / `src/audio.js` | 配乐目录与飞行音频 |
 | `src/world-config.js` | 策展宇宙的身份、特殊目的地与稳定调参来源 |
-| `src/renderer-runtime.js` / `src/renderer-policy.js` | WebGPU / WebGL 双管线运行时与策略 |
+| `src/renderer-runtime.js` / `src/renderer-policy.js` | WebGL 2 渲染运行时与策略 |
 | `vendor/` | 浏览器版 Three.js 文件，除非有意升级依赖否则勿改 |
 | `assets/` | 静态模型与音频，以 `/assets/...` 提供于 URL 根 |
 | `tools/` | 开发、校验与截图脚本；文档图片在 `docs/` |

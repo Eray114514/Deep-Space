@@ -383,11 +383,7 @@ export class UI {
     }
     this._setText(this.els.graphicsGpu, gpu || '未能读取设备名称');
     this._setText(this.els.graphicsBackend,
-      `WebGPU 自动 · 实际 ${(actualBackend || 'unknown').toUpperCase()} · 当前 ${profile.label}`);
-    if (reason?.includes('fallback')) {
-      this._setText(this.els.graphicsNote,
-        `WebGPU 未能启动，已自动回落 WebGL 2（${reason}）。调整画质后将重新启动。`);
-    }
+      `WebGL 2 · ${profile.label}`);
   }
 
   showGraphicsSettings(show = true) {

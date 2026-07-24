@@ -131,8 +131,9 @@ Recreate the *experience* of No Man's Sky in the browser with three.js:
 - **No assets**: geometry, textures, and (future) audio are all generated in
   code at runtime.
 - **three.js**: currently vendored r170 (`vendor/three.module.js`); an upgrade
-  to latest (r18x/WebGPU) is a future task — the owner expects modern renderer
-  capabilities where they help.
+  to latest (r18x) is a future task — the owner expects modern renderer
+  capabilities where they help. WebGL 2 is the sole render backend; WebGPU
+  migration was retired (last WebGPU code at git `b746772`).
 - **Test suites** (all must stay green before a release):
   - `node tools/sanity.js` — node-side: terrain sanity, LOD consistency,
     geomorph settling, scatter/far-flora determinism, instance caps.
@@ -170,7 +171,7 @@ Pending / next (in owner's priority order):
 2. Biome-specific audio (§2.7).
 3. Perceived-seamlessness polish on terrain detail resolve (§2.2).
 4. GTAO tuning for log-depth, then consider default-on (§2.3).
-5. three.js upgrade / WebGPU evaluation (§4).
+5. three.js upgrade (§4).
 
 Known cosmetic issues (logged, not blocking): faint parallel streaks over
 horizon suns; moon landings can spawn in dense forest; ice plains featureless
