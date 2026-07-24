@@ -111,8 +111,10 @@ export function classifyGpuTier(gpuName = '') {
       if (/RTX\s*4070\s*Ti/i.test(gpuName)) return 'high';
       return 'mid';
     }
-    // RTX 50 系全部 high(5070/5080/5090 及 Laptop 版本均胜任极致档)
-    if (/RTX\s*50\d0/i.test(gpuName)) return 'high';
+    // RTX 50 系:5070/5080/5090(含 Laptop)胜任极致档;
+    // 5050/5060(含 Laptop)约等于 4060,归中端跑均衡。
+    if (/RTX\s*50[789]0/i.test(gpuName)) return 'high';
+    if (/RTX\s*50[56]0/i.test(gpuName)) return 'mid';
 
     // 未识别的 NVIDIA 默认按中端处理。
     return 'mid';
