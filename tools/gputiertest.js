@@ -7,11 +7,15 @@ const SAMPLES = {
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 Laptop GPU (0x00002C59) Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 5070 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
-  'ANGLE (NVIDIA, NVIDIA GeForce RTX 5050 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 5050 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 5050 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 3090 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 2080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
@@ -23,8 +27,9 @@ const SAMPLES = {
   'Apple M2 Pro': 'high',
 
   // 中端 → balanced
-  'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
+  'ANGLE (NVIDIA, NVIDIA GeForce RTX 4050 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
   'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'mid',
@@ -69,7 +74,8 @@ for (const [sample, expected] of Object.entries(SAMPLES)) {
 
 // 画质档映射:high→ultra, mid→balanced, low→performance。
 assert.equal(chooseAutomaticQuality('NVIDIA GeForce RTX 5080 Laptop GPU'), 'ultra');
-assert.equal(chooseAutomaticQuality('NVIDIA GeForce RTX 4060'), 'balanced');
+assert.equal(chooseAutomaticQuality('NVIDIA GeForce RTX 4060 Laptop GPU'), 'balanced');
+assert.equal(chooseAutomaticQuality('NVIDIA GeForce RTX 4060'), 'ultra');
 assert.equal(chooseAutomaticQuality('Intel Iris Xe Graphics'), 'performance');
 assert.equal(chooseAutomaticQuality(''), 'balanced');
 

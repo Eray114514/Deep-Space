@@ -105,16 +105,18 @@ export function classifyGpuTier(gpuName = '') {
       if (/RTX\s*30(?:90|80)/i.test(gpuName) && !/Laptop/i.test(gpuName)) return 'high';
       return 'mid';
     }
-    // RTX 40 系:4090/4080/4070 Ti 高端;4070/4060/4050 中端
+    // RTX 40 系:4090/4080/4070 Ti 全平台高端;
+    // 4070/4060 桌面版性能足够极致档, Laptop 版归中端;4050(仅 Laptop)中端。
     if (/RTX\s*40\d0/i.test(gpuName)) {
       if (/RTX\s*40(?:90|80)/i.test(gpuName)) return 'high';
       if (/RTX\s*4070\s*Ti/i.test(gpuName)) return 'high';
+      if (!/Laptop/i.test(gpuName)) return 'high';
       return 'mid';
     }
-    // RTX 50 系:5070/5080/5090(含 Laptop)胜任极致档;
-    // 5050/5060(含 Laptop)约等于 4060,归中端跑均衡。
+    // RTX 50 系:5070/5080/5090 全平台高端;
+    // 5050/5060 桌面版性能足够极致档(桌面 5060 ≈ 4060 Ti), Laptop 版归中端。
     if (/RTX\s*50[789]0/i.test(gpuName)) return 'high';
-    if (/RTX\s*50[56]0/i.test(gpuName)) return 'mid';
+    if (/RTX\s*50[56]0/i.test(gpuName)) return /Laptop/i.test(gpuName) ? 'mid' : 'high';
 
     // 未识别的 NVIDIA 默认按中端处理。
     return 'mid';
