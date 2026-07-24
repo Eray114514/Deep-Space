@@ -24,7 +24,7 @@ import { resolveRendererPolicy } from './renderer-policy.js';
 
 const USE_NODE_MATERIALS = resolveRendererPolicy(
   typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
-).backend === 'webgpu';
+).useNodeMaterials;
 
 // Volumetric clouds are the primary cloud representation in every runtime
 // quality tier. Low quality changes only the ray budget and volume-buffer
@@ -986,6 +986,15 @@ export class Planet {
   update(camLocal, dt, focused, animDt = dt) {
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
     this.lod.focused = focused;
+    if (this.volCloudMesh) {
+      const d = window.__diag ||= {};
+      d.cloudFocused = focused;
+      d.cloudPlanet = this.bodyId || this.name;
+      if (focused) {
+        d.focusedCloudPlanet = this.bodyId || this.name;
+        d.focusedCloudHasVol = true;
+      }
+    }
     this.lod.update(camLocal, dt);
     if (this.waterLod) {
       this.waterLod.focused = focused;
@@ -1043,6 +1052,10 @@ export class Planet {
         u.uCameraLocal.value.copy(camLocal);
         u.uSpin.value.setFromMatrix4(_m4);
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
+        const d = window.__diag ||= {};
+        d.cloudUpdates = (d.cloudUpdates || 0) + 1;
+        d.cloudFrame = u.uFrame.value;
+        d.cloudEngage = e;
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);

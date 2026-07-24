@@ -512,6 +512,16 @@ export function makeCloudVolumeMaterialV2(planet, band, detailTex, _weatherMap,
   const material = new MeshBasicNodeMaterial({
     transparent: true, premultipliedAlpha: true, depthWrite: false,
     depthTest: false, side: THREE.BackSide,
+    // clouds-webgl.js emits already-premultiplied vec4(col, alpha) and relies on
+    // premultipliedAlpha:true for the (ONE, ONE_MINUS_SRC_ALPHA) blend factors.
+    // On WebGPU, NodeMaterial's premultipliedAlpha:true is the supported path
+    // and does NOT double-premultiply (the extra rgb*=alpha step only fires on
+    // the WebGL/TSL backend). CustomBlending on WebGPU NodeMaterial is not
+    // reliably parsed and was the root cause of the WebGPU black screen.
+    // clouds-webgl.js uses a raw ShaderMaterial (fog defaults off). NodeMaterial
+    // defaults fog=true, which composites scene FogExp2 on top of the cloud
+    // shell — disable to match the authored GLSL behaviour.
+    fog: false,
   });
   // integrated accumulates T*a*s*powder*tint — front-to-back integrated
   // premultiplied radiance, exactly like clouds-webgl.js's col. The over()

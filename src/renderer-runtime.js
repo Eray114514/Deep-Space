@@ -43,6 +43,15 @@ export async function createGameRenderer(policy, options = {}) {
     return describeRenderer(renderer, effectivePolicy, null, 'webgpu-adapter-unavailable-node-fallback');
   }
 
+  // tsl-webgl: TSL/NodeMaterial shaders compiled to GLSL on a WebGL 2 backend.
+  // Uses WebGPURenderer({forceWebGL:true}) so the NodeMaterial pipeline works
+  // without a real WebGPU device.
+  if (policy.useNodeMaterials && policy.backend === 'webgl2') {
+    const renderer = new THREE_WEBGPU.WebGPURenderer({ ...options, forceWebGL: true });
+    await withTimeout(renderer.init(), RENDERER_INIT_TIMEOUT_MS, 'tsl-webgl initialization');
+    return describeRenderer(renderer, effectivePolicy, null, 'developer-forced-tsl-webgl');
+  }
+
   if (effectivePolicy.backend === 'webgl2') {
     const renderer = new THREE.WebGLRenderer(options);
     return describeRenderer(renderer, effectivePolicy, null);

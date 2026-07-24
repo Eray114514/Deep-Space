@@ -33,7 +33,7 @@ const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
 const _rendererParams = typeof location !== 'undefined'
   ? new URLSearchParams(location.search) : new URLSearchParams();
-const USE_NODE_MATERIALS = resolveRendererPolicy(_rendererParams).backend === 'webgpu';
+const USE_NODE_MATERIALS = resolveRendererPolicy(_rendererParams).useNodeMaterials;
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
 // fall off with true distance (computed in view space, where the f64 group

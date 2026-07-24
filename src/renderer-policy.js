@@ -8,19 +8,28 @@ export const WEBGPU_PARITY_READY = true;
 
 export function resolveRendererPolicy(params = new URLSearchParams(), gpu = globalThis.navigator?.gpu) {
   const value = params.get('renderer');
-  const requested = value === 'webgl' ? 'webgl' : value === 'webgpu' ? 'webgpu' : 'auto';
+  const requested = value === 'webgl' ? 'webgl'
+    : value === 'webgpu' ? 'webgpu'
+    : value === 'tsl-webgl' ? 'tsl-webgl'
+    : 'auto';
   const webgpuAvailable = Boolean(gpu);
   const useWebGPU = webgpuAvailable
     && (requested === 'webgpu' || (requested === 'auto' && WEBGPU_PARITY_READY));
+  // tsl-webgl: TSL/NodeMaterial shaders compiled to GLSL and run on WebGL 2 via
+  // WebGPURenderer({forceWebGL:true}). Used to compare TSL vs hand-written GLSL
+  // shader equivalence without the WebGPU backend as a variable.
+  const useNodeMaterials = useWebGPU || requested === 'tsl-webgl';
   return {
     requested,
     backend: useWebGPU ? 'webgpu' : 'webgl2',
+    useNodeMaterials,
     webgpuAvailable,
     parityReady: WEBGPU_PARITY_READY,
     reason: requested === 'webgl' ? 'player-forced-webgl2'
       : requested === 'webgpu' ? 'developer-forced-webgpu'
-        : webgpuAvailable && !WEBGPU_PARITY_READY ? 'visual-parity-pending-fallback'
-          : webgpuAvailable ? 'webgpu-preferred' : 'webgpu-unavailable-fallback',
+        : requested === 'tsl-webgl' ? 'developer-forced-tsl-webgl'
+          : webgpuAvailable && !WEBGPU_PARITY_READY ? 'visual-parity-pending-fallback'
+            : webgpuAvailable ? 'webgpu-preferred' : 'webgpu-unavailable-fallback',
   };
 }
 

@@ -3,7 +3,7 @@
 import { resolveRendererPolicy } from './renderer-policy.js';
 
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
-const useNodeMaterials = resolveRendererPolicy(params).backend === 'webgpu';
+const useNodeMaterials = resolveRendererPolicy(params).useNodeMaterials;
 const implementation = await import(useNodeMaterials ? './shaders-node-v2.js' : './shaders-webgl.js');
 
 export const TIME = implementation.TIME;

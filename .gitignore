@@ -9,4 +9,15 @@ tmp/
 
 # 本地调试/过程文档，不应进入远端
 tools/_*.mjs
+tools/_*.js
 design-qa.md
+
+# WebGPU 迁移实验期间产生的临时对比/诊断文件
+exp-*.png
+stash-*.js
+stash-*.patch
+tools/parity-*.js
+tools/color-probe.js
+tools/dump-shaders.js
+tools/capture-one.js
+tools/transpile-glsl.js

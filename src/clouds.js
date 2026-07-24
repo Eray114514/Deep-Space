@@ -3,7 +3,7 @@
 import { resolveRendererPolicy } from './renderer-policy.js';
 
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
-const useNodeMaterials = resolveRendererPolicy(params).backend === 'webgpu';
+const useNodeMaterials = resolveRendererPolicy(params).useNodeMaterials;
 const implementation = await import(useNodeMaterials ? './clouds-node-v2.js' : './clouds-webgl.js');
 
 export const cloudNoiseTexture = implementation.cloudNoiseTexture;

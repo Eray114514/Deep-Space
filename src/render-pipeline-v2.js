@@ -39,11 +39,21 @@ const _scratchSize = new THREE.Vector2();
  * The resulting alpha is the union of both alphas. This matches the legacy
  * WebGL volume composite and avoids double-attenuating soft cloud/atmosphere
  * edges. `float(1)` keeps the literal in node-space.
+ *
+ * Each input is sampled ONCE via toVar() and then swizzled. Without this, the
+ * TSL compiler emits a separate textureSample() call for every .rgb / .a
+ * access; nested over() chains then multiply those calls and the WGSL binding
+ * planner produces incorrect bind-group layouts — the root cause of the
+ * "[Texture output] usage (TextureBinding|RenderAttachment) includes writable
+ * usage and another usage" WebGPU validation error that stalls the render
+ * pipeline and drops frame rate to a few FPS.
  */
 function over(base, overlay) {
+  const b = base.toVar();
+  const o = overlay.toVar();
   return vec4(
-    overlay.rgb.add(base.rgb.mul(float(1).sub(overlay.a))),
-    max(base.a, overlay.a),
+    o.rgb.add(b.rgb.mul(float(1).sub(o.a))),
+    max(b.a, o.a),
   );
 }
 
@@ -92,6 +102,22 @@ export class GameNodePipelineV2 {
     this.rift = { enabled: false, node: rift.node || rift.outputNode, uniforms: rift.uniforms };
     const warpActivity = max(max(warp.uniforms.warp, warp.uniforms.pulse), warp.uniforms.arrival);
     let colorNode = mix(this.rift.node, warp.outputNode || warp.node, warpActivity.clamp(0, 1));
+
+    // DEBUG: ?debug=sceneonly bypasses all compositing to isolate WebGPU
+    // texture-usage conflicts.
+    const debugSceneOnly = typeof location !== 'undefined'
+      && new URLSearchParams(location.search).get('debug') === 'sceneonly';
+    if (debugSceneOnly) {
+      this.volumePass = null;
+      this.foregroundPass = pass(scene, camera, { depthBuffer: true, samples: 1 });
+      this.foregroundPass.name = 'Cockpit foreground';
+      const foregroundLayers = new THREE.Layers();
+      foregroundLayers.set(foregroundLayer);
+      this.foregroundPass.setLayers(foregroundLayers);
+      this.pipeline.outputNode = vec4(sceneColor.rgb, 1);
+      this.bloom = { enabled: false, strength: 0, radius: 0, threshold: 0 };
+      return;
+    }
 
     // --- volume pass (VOLUME_LAYER, half-res, no depth buffer of its own) ---
     this.volumePass = null;

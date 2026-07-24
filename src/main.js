@@ -37,8 +37,9 @@ import { isLowPowerGpu, resolveGraphicsSettings, resolveQualityProfile, writeGra
 const qs = new URLSearchParams(location.search);
 const graphicsSettings = resolveGraphicsSettings({ params: qs });
 const rendererPolicy = resolveRendererPolicy(qs);
+const BOOT_USE_NODE = rendererPolicy.useNodeMaterials;
 const BOOT_USE_WEBGPU = rendererPolicy.backend === 'webgpu';
-const THREE = await import(BOOT_USE_WEBGPU ? 'three/webgpu' : 'three');
+const THREE = await import(BOOT_USE_NODE ? 'three/webgpu' : 'three');
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -448,10 +449,10 @@ function prewarmLoadedShipPipelines() {
 const VOLUME_ENABLED = qs.get('vclouds') !== '0';
 const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
 setVolumetricCloudsEnabled(VOLUME_ENABLED, QUALITY_LOW ? 'low' : 'high');
-const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
+const nodeVolumePass = BOOT_USE_NODE && VOLUME_ENABLED
   ? new VolumetricPass()
   : null;
-const Pipeline = BOOT_USE_WEBGPU ? GameNodePipelineV2 : GameLegacyPipeline;
+const Pipeline = BOOT_USE_NODE ? GameNodePipelineV2 : GameLegacyPipeline;
 const _executedComputeNodes = new WeakSet();
 const nodePipeline = new Pipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
@@ -464,7 +465,7 @@ const nodePipeline = new Pipeline(renderer, scene, camera, {
   createWarpDriveNode,
   createRiftDistortionNode,
 });
-const volumePass = BOOT_USE_WEBGPU
+const volumePass = BOOT_USE_NODE
   ? nodeVolumePass
   : nodePipeline.volumePass;
 const warpDrivePass = nodePipeline.warp;
@@ -721,6 +722,11 @@ function addTween(dur, fn, onDone) {
   tweens.push({ t: 0, dur, fn, onDone });
 }
 function stepTweens(dt) {
+  const d = window.__diag ||= {};
+  d.tweenCalls = (d.tweenCalls || 0) + 1;
+  d.tweenCount = tweens.length;
+  d.lastDt = dt;
+  if (d.tweenCalls % 30 === 0) console.log('[diag] stepTweens', { dt, count: tweens.length, calls: d.tweenCalls });
   for (let i = tweens.length - 1; i >= 0; i--) {
     const tw = tweens[i];
     tw.t += dt;
@@ -842,18 +848,25 @@ const ui = new UI({
   onStart: async () => {
     // Pointer Lock must be requested in the original click gesture. Audio
     // was already unlocked when the player entered the hero start page.
-    const lockAttempt = requestGameplayPointerLock();
-    // One-shot cinematic: pull the camera back from the home planet's limb to
-    // the full-orbit spawn frame while the ship slides into formation.
-    startHeroPullBack(() => {
-      // A denied initial request falls back to the next canvas click; controls
-      // must be enabled so that click can actually reach SpaceControls.
-      spaceCtl.enabled = state === 'space';
-      // The ship has slid into formation — fade cockpit chrome in now instead
-      // of snapping it on at the start of the pull-back.
-      ui.revealChrome();
-    });
-    await lockAttempt;
+    console.log('[diag] onStart entered');
+    try {
+      const lockAttempt = requestGameplayPointerLock();
+      console.log('[diag] requestGameplayPointerLock returned, calling startHeroPullBack');
+      // One-shot cinematic: pull the camera back from the home planet's limb to
+      // the full-orbit spawn frame while the ship slides into formation.
+      startHeroPullBack(() => {
+        // A denied initial request falls back to the next canvas click; controls
+        // must be enabled so that click can actually reach SpaceControls.
+        spaceCtl.enabled = state === 'space';
+        // The ship has slid into formation — fade cockpit chrome in now instead
+        // of snapping it on at the start of the pull-back.
+        ui.revealChrome();
+      });
+      console.log('[diag] startHeroPullBack returned, tweenCount=', window.__diag?.tweenCount, 'heroStarted=', window.__diag?.heroStarted);
+      await lockAttempt;
+    } catch (e) {
+      console.error('[diag] onStart THREW:', e);
+    }
   },
   onLand: tryLand,
   onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
@@ -2309,6 +2322,8 @@ function spawn(hero = false) {
 // the ship slides into formation. Runs inside the click gesture's call chain
 // so pointer lock requested in onDone still counts as user-activated.
 function startHeroPullBack(onDone) {
+  (window.__diag ||= {}).heroStarted = true;
+  console.log('[diag] startHeroPullBack called');
   const planet = universe.system.planets[0];
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
@@ -2325,10 +2340,12 @@ function startHeroPullBack(onDone) {
     const e = easeInOut(k);
     nav.pos.lerpVectors(startPos, endPos, e);
     nav.quat.copy(startQuat).slerp(endQuat, e);
+    if (Math.floor(k * 20) !== Math.floor((k - 0.001) * 20)) console.log(`[diag] heroTween k=${k.toFixed(2)} navPos=${nav.pos.toArray().map(v=>v.toFixed(1)).join(',')}`);
     // Ship enters frame during the second half of the pull-back.
     const sk = smoothstep(0.4, 1, k);
     ship.introOffset.set(160 * (1 - sk), -110 * (1 - sk), 60 * (1 - sk));
   }, () => {
+    console.log('[diag] heroTween DONE onDone fired');
     ship.introOffset.set(0, 0, 0);
     onDone?.();
   });
@@ -2452,6 +2469,13 @@ let dprAcc = 0;
 
 function frame() {
   requestAnimationFrame(frame);
+  const d0 = window.__diag ||= {};
+  d0.frameNo = (d0.frameNo || 0) + 1;
+  d0.state = state;
+  d0.paused = paused;
+  d0.nearestName = nearest?.bodyId || nearest?.name || null;
+  d0.navPos = [nav.pos.x, nav.pos.y, nav.pos.z];
+  if (d0.frameNo % 60 === 0) console.log('[diag] frame', d0.frameNo, { paused, state, navPos: nav.pos.toArray().map(v=>v.toFixed(1)) });
   const realDt = clock.getDelta();
   // Paused: the full-page pause surface floats over a LIVE world. Simulation
   // time freezes (dt=0) but the render pipeline runs exactly as in play, so
@@ -3021,7 +3045,15 @@ function frame() {
     // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
     // only zeros optional effect uniforms; it never swaps renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
-    nodePipeline.render();
+    const d = window.__diag ||= {};
+    d.renderCalls = (d.renderCalls || 0) + 1;
+    try {
+      nodePipeline.render();
+      d.renderOk = (d.renderOk || 0) + 1;
+    } catch (e) {
+      d.renderErr = (d.renderErr || 0) + 1;
+      if (d.renderErr <= 3) console.error('[diag] nodePipeline.render threw:', e);
+    }
   }
   prevNavPos.copy(nav.pos);
   const startupAssetsReady = shipPipelinesWarmed || startupPrewarmExpired

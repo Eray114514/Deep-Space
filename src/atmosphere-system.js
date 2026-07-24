@@ -154,15 +154,26 @@ export function makeAtmosphereMaterialV2(color, density, groundR, atmoR) {
   const material = new MeshBasicNodeMaterial({
     side: THREE.BackSide,
     transparent: true,
+    // atmosphere-webgl.js emits already-premultiplied vec4(col, alpha) and
+    // relies on premultipliedAlpha:true to pick the (ONE, ONE_MINUS_SRC_ALPHA)
+    // blend factors. On WebGPU, NodeMaterial's premultipliedAlpha:true is the
+    // supported path and does NOT double-premultiply (the extra rgb*=alpha step
+    // only fires on the WebGL/TSL backend). CustomBlending on WebGPU NodeMaterial
+    // is not reliably parsed and was the root cause of the WebGPU black screen,
+    // so keep premultipliedAlpha:true and let NodeMaterial own the blend state.
     premultipliedAlpha: true,
     depthWrite: false,
     depthTest: true,
+    // atmosphere-webgl.js uses a raw ShaderMaterial (fog defaults off). The
+    // NodeMaterial family defaults fog=true, which auto-composites the scene's
+    // FogExp2 on top of the ray-marched shell — that extra fog mix is what
+    // makes the TSL path read as over-blue/over-bright in atmosphere. Disable
+    // it so the shell matches the authored GLSL behaviour exactly.
+    fog: false,
   });
   // `integrated` already accumulates scatter*transmission*alphaStep — the
   // layer's transmitted premultiplied radiance — matching atmosphere-webgl.js
-  // which emits vec4(col, alpha) under the same premultipliedAlpha flag. Do
-  // NOT divide by alpha: that un-premultiplies the radiance and the
-  // (ONE, ONE_MINUS_SRC_ALPHA) volume blend would squash it to black.
+  // which emits vec4(col, alpha) under the same premultipliedAlpha flag.
   material.colorNode = atmosphere.rgb;
   material.opacityNode = atmosphere.a;
   material.uniforms = nodes;

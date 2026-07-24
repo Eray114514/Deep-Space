@@ -62,7 +62,7 @@ const Y = new THREE.Vector3(0, 1, 0);
 function applyFarFade(mat, uniforms) {
   const useNodeMaterials = resolveRendererPolicy(
     typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
-  ).backend === 'webgpu';
+  ).useNodeMaterials;
   if (!useNodeMaterials) {
     mat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms);

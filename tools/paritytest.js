@@ -17,6 +17,7 @@ import { startServer } from './server.js';
 import { launchWebGPUHardwareBrowser } from './browser.js';
 
 const SCENE = process.argv[2] || 'orbit';
+const MODE = process.argv[3] || 'webgpu'; // 'webgpu' | 'tsl-webgl'
 const { server, port } = await startServer(0);
 const browser = await launchWebGPUHardwareBrowser({ headless: true });
 if (!browser) throw new Error('System Chrome/Edge is required for the parity test.');
@@ -106,29 +107,31 @@ function compare(a, b) {
 }
 
 try {
-  console.log(`Parity test: scene=${SCENE}, factor=${preset.factor}`);
+  console.log(`Parity test: scene=${SCENE}, mode=${MODE}, factor=${preset.factor}`);
 
   // Capture WebGL baseline first — it is the authored visual reference.
   const webgl = await captureBackend('webgl', `webgl-${SCENE}`);
   console.log('WebGL baseline:', webgl.state);
 
-  // Capture WebGPU test — this is the migration target.
-  const webgpu = await captureBackend('webgpu', `webgpu-${SCENE}`);
-  console.log('WebGPU test:   ', webgpu.state);
+  // Capture test backend — WebGPU or TSL-on-WebGL depending on mode.
+  const testBackend = MODE === 'tsl-webgl' ? 'tsl-webgl' : 'webgpu';
+  const testLabel = MODE === 'tsl-webgl' ? 'tsl-webgl' : 'webgpu';
+  const test = await captureBackend(testBackend, `${testLabel}-${SCENE}`);
+  console.log(`${testLabel} test:   `, test.state);
 
   // Surface backend mismatches as errors.
   if (webgl.state.errors.length) console.error('WebGL errors:', webgl.state.errors);
-  if (webgpu.state.errors.length) console.error('WebGPU errors:', webgpu.state.errors);
+  if (test.state.errors.length) console.error(`${testLabel} errors:`, test.state.errors);
 
-  const result = compare(webgl.buffer, webgpu.buffer);
-  await writeFile(new URL(`diff-${SCENE}.png`, outDir), result.diffBuffer);
+  const result = compare(webgl.buffer, test.buffer);
+  await writeFile(new URL(`diff-${SCENE}-${testLabel}.png`, outDir), result.diffBuffer);
 
-  console.log(`\nDifference (WebGL vs WebGPU):`);
+  console.log(`\nDifference (WebGL vs ${testLabel}):`);
   console.log(`  RMSE:         ${result.rmse.toFixed(2)}`);
   console.log(`  Changed (>12): ${(result.changedRatio * 100).toFixed(1)}%`);
   console.log(`  Max delta:    ${result.maxDelta}`);
 
-  // Tolerance: WebGPU must be visually equivalent to WebGL.
+  // Tolerance: test backend must be visually equivalent to WebGL.
   // RMSE < 18 accounts for MSAA strategy differences (4× MSAA vs SMAA)
   // and float precision. Changed ratio < 40% allows edge AA divergence but
   // catches region-level failures (black atmospheres, missing clouds).
@@ -144,15 +147,15 @@ try {
     console.error(`FAIL: changed ratio ${(result.changedRatio * 100).toFixed(1)}% exceeds limit ${(CHANGED_LIMIT * 100)}%`);
     pass = false;
   }
-  if (webgpu.state.errors.length) {
-    console.error('FAIL: WebGPU backend reported console errors');
+  if (test.state.errors.length) {
+    console.error(`FAIL: ${testLabel} backend reported console errors`);
     pass = false;
   }
 
   if (pass) {
-    console.log(`\nPASS: WebGPU visual parity within tolerance for scene="${SCENE}".`);
+    console.log(`\nPASS: ${testLabel} visual parity within tolerance for scene="${SCENE}".`);
   } else {
-    console.log(`\nFAIL: WebGPU diverges from WebGL baseline. Inspect diff-${SCENE}.png.`);
+    console.log(`\nFAIL: ${testLabel} diverges from WebGL baseline. Inspect diff-${SCENE}-${testLabel}.png.`);
     process.exitCode = 1;
   }
 } finally {

@@ -14,7 +14,7 @@ import { resolveRendererPolicy } from './renderer-policy.js';
 
 const USE_NODE_MATERIALS = resolveRendererPolicy(
   typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams(),
-).backend === 'webgpu';
+).useNodeMaterials;
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
