@@ -13,7 +13,7 @@ assert.equal(galaxy.id, ACTIVE_GALAXY_ID);
 assert.equal(galaxy.seed, 'MILKY-038', 'release Milky Way must use the visually reviewed finite seed');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
-}), {}, 'the new finite universe must not inherit NAVEMI-382 body tuning');
+}), {}, 'the finite Milky Way catalogue must not carry inherited body tuning');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
   worldLabParams: new URLSearchParams('system=0,0,0&body=planet-0&sea=-610&clouds=0.58'),

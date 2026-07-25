@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { startServer } from './server.js';
 import { launchBrowser } from './browser.js';
 
-const seeds = (process.env.SEEDS || 'NAVEMI-382').split(',').map((seed) => seed.trim()).filter(Boolean);
+const seeds = (process.env.SEEDS || 'MILKY-038').split(',').map((seed) => seed.trim()).filter(Boolean);
 const out = process.env.OUT || 'test-results/world-candidates';
 const galaxy = process.env.GALAXY || 'milky-way';
 const homeOnly = process.env.HOME_ONLY === '1';

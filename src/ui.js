@@ -244,7 +244,7 @@ export class UI {
     document.body.classList.toggle('hero-active', show);
     if (this.els.heroSeed) {
       this.els.heroSeed.textContent = this.cb.worldLab
-        ? new URLSearchParams(location.search).get('seed') || 'NAVEMI-382'
+        ? new URLSearchParams(location.search).get('seed') || 'MILKY-038'
         : 'DEEP SPACE';
     }
     if (this.els.heroBuild) this.els.heroBuild.textContent = document.getElementById('version')?.textContent || '—';
