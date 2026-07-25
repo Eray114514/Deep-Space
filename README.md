@@ -1,5 +1,19 @@
 # 深空 · Deep Space
 
+<p align="center">
+  <a href="https://deep-space-nu.vercel.app"><img src="docs/hero.jpg" alt="深空 · Deep Space"></a>
+</p>
+
+<p align="center">
+  <a href="https://deep-space-nu.vercel.app"><img src="https://img.shields.io/badge/▶_在线试玩-deep--space--nu.vercel.app-7c3aed?style=for-the-badge" alt="Play now"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-3178c6?style=for-the-badge" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/WebGL_2-990000?style=for-the-badge&logo=webgl&logoColor=white" alt="WebGL 2">
+  <img src="https://img.shields.io/badge/Three.js-black?style=for-the-badge&logo=threedotjs&logoColor=white" alt="Three.js">
+  <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black" alt="JavaScript">
+  <img src="https://img.shields.io/badge/ESM-222?style=for-the-badge&logo=javascript&logoColor=f7df1e" alt="ES Modules">
+  <img src="https://img.shields.io/badge/Vercel-000?style=for-the-badge&logo=vercel&logoColor=white" alt="Deployed on Vercel">
+</p>
+
 一个完全过程化、可在浏览器中无缝探索的宇宙。从恒星际空间滚动到任意行星表面并**踏上任何一颗星球**——海洋、河流、冰盖、陨石坑、沙丘、熔岩海、云层、星环与卫星，全部由种子生成，离开再回来，同一块石头还在原地。
 
 基于原生 ES 模块与 Three.js 构建，开发期直接运行，也能产出自包含的静态部署到 `dist/`。渲染管线使用 WebGL 2。
