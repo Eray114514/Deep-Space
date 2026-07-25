@@ -11,6 +11,7 @@ tmp/
 tools/_*.mjs
 tools/_*.js
 design-qa.md
+requirements.md
 
 # WebGPU 迁移实验期间产生的临时对比/诊断文件
 exp-*.png
@@ -21,3 +22,11 @@ tools/color-probe.js
 tools/dump-shaders.js
 tools/capture-one.js
 tools/transpile-glsl.js
+
+# 编辑器 / 操作系统私有文件
+.trae/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

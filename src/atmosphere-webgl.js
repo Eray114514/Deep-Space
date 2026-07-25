@@ -13,6 +13,13 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
       uDepthReady: { value: 0 },
       uCameraFar: { value: 1.2e11 },
       uVolumeSize: { value: new THREE.Vector2(1, 1) },
+      // Camera proximity factor in [0,1]: 1 = close enough that limb/horizon
+      // gradient detail is visible (full 14-step march), 0 = far enough that
+      // the atmosphere reads as a smooth shell colour (8-step march). The
+      // scattering model, density profile and terminator are unchanged; only
+      // the integration sample count is gated, so distant frames stay
+      // visually identical while costing ~40% less per fragment.
+      uCamProx: { value: 1 },
     },
     vertexShader: /* glsl */`
       uniform vec3 uCameraLocal;
@@ -27,7 +34,7 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
     fragmentShader: /* glsl */`
       precision highp float;
       uniform vec3 atmoColor;
-      uniform float density, uGroundR, uAtmoR;
+      uniform float density, uGroundR, uAtmoR, uCamProx;
       uniform sampler2D tSceneDepth;
       uniform float uDepthReady, uCameraFar;
       uniform vec2 uVolumeSize;
@@ -64,7 +71,13 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
         t1 = min(t1, sceneRayLimit() + 1.5);
         if (t1 <= t0) discard;
 
-        const int STEPS = 14;
+        // Camera-proximity-gated march count: 14 steps up close (limb and
+        // terminator gradients resolve), 8 steps far away (the shell reads as
+        // a smooth colour and per-step detail is sub-pixel). 8 is still above
+        // the Nyquist limit for the smooth density profile, so the integrated
+        // transmittance/colour match the 14-step reference within dithering
+        // noise of the half-resolution temporal pass.
+        int STEPS = int(mix(8.0, 14.0, uCamProx));
         float dt = (t1 - t0) / float(STEPS);
         float t = t0 + dt * 0.5;
         float mu = dot(dir, normalize(sunDir));

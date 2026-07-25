@@ -967,14 +967,24 @@ export class Planet {
       this.waterLod.focused = focused;
       this.waterLod.update(camLocal, dt);
     }
+    // shells vanish near their own altitude so you fly through, not pop through;
+    // each deck also gets the sun direction in its own rotating frame
+    const camR = camLocal.length();
     if (this.atmoMesh) {
       const au = this.atmoMesh.material.uniforms;
       if (au.uCameraLocal) au.uCameraLocal.value.copy(camLocal);
+      // Camera-proximity-gated march quality: the 14-step atmosphere march
+      // is only justified when the camera is close enough for limb/terminator
+      // detail to resolve on screen. Far away the shell reads as a smooth
+      // colour and 8 steps reproduce the same integrated transmittance within
+      // dithering noise of the half-resolution temporal pass.
+      if (au.uCamProx) {
+        const atmoR = au.uAtmoR.value;
+        const ratio = Math.max(1.0, camR / atmoR);
+        au.uCamProx.value = 1 - smoothstep(2.0, 5.0, ratio);
+      }
     }
-    // shells vanish near their own altitude so you fly through, not pop through;
-    // each deck also gets the sun direction in its own rotating frame
     if (this.cloudBands.length) {
-      const camR = camLocal.length();
       const surfaceView = smoothstep(1.8, 1.08, camR / this.R);
       for (const b of this.cloudBands) {
         const sh = b.mesh.material.userData.shader;
@@ -1020,6 +1030,17 @@ export class Planet {
         u.uSpin.value.setFromMatrix4(_m4);
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
+        // Camera-proximity-gated raymarch quality: individual billows
+        // resolve on screen only when the camera is within a few shell
+        // radii. Far away the cloud signal is sub-pixel, so the expensive
+        // 46–88 step high-tier march can drop to the 28–52 step low-tier
+        // range without visible change. Coverage, footprint and silhouette
+        // come from the density field — they do not depend on step count.
+        if (u.uCamProx) {
+          const rOut = u.uRout.value;
+          const ratio = Math.max(1.0, camR / rOut);
+          u.uCamProx.value = 1 - smoothstep(2.0, 5.0, ratio);
+        }
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
         this.cloudMesh.visible = this.cloudMesh.material.opacity > 0.005;

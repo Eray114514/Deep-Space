@@ -522,7 +522,6 @@ let loadingCleared = false;
 // pipeline readiness instead of an infinite CSS sweep.
 let loadingProgress = 0;
 let paused = false;
-let blackHoleObservatoryOpen = false;
 let pointerLockRequest = null;
 let timeWarp = null;
 let photoMode = false;
@@ -755,11 +754,6 @@ renderer.domElement.addEventListener('pointerdown', () => {
 
 window.addEventListener('keydown', (e) => {
   unlockAudio();
-  if (blackHoleObservatoryOpen) {
-    if (e.code === 'Escape' || e.code === 'KeyO') closeBlackHoleObservatory();
-    e.preventDefault();
-    return;
-  }
   if (e.code === 'KeyM' || e.code === 'Tab') {
     e.preventDefault();
     if (starMap?.isOpen) closeStarMap();
@@ -782,10 +776,6 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'KeyL') tryLand();
-  if (!e.repeat && e.code === 'KeyO') {
-    const blackHole = nearbyBlackHole();
-    if (blackHole) openBlackHoleObservatory(blackHole);
-  }
   if (!e.repeat && e.code === 'Space' && state === 'space') {
     e.preventDefault();
     triggerPulse();
@@ -891,18 +881,6 @@ const pauseOverlay = document.getElementById('pause-overlay');
 const pausePanel = pauseOverlay.querySelector('.pause-panel');
 const pauseStatus = document.getElementById('pause-status');
 const resumeButton = document.getElementById('resume-btn');
-const blackHoleObservatory = document.getElementById('black-hole-observatory');
-const blackHoleFrame = document.getElementById('black-hole-frame');
-const blackHoleClose = document.getElementById('black-hole-close');
-const blackHoleSlingshot = document.getElementById('black-hole-slingshot');
-const blackHoleTitle = document.getElementById('black-hole-title');
-const blackHoleRadius = document.getElementById('black-hole-radius');
-const blackHoleDistance = document.getElementById('black-hole-distance');
-const blackHoleSpeed = document.getElementById('black-hole-speed');
-const blackHoleTime = document.getElementById('black-hole-time');
-let blackHoleStatsTimer = null;
-let observedBlackHole = null;
-
 function nearbyBlackHole() {
   let closest = null;
   let distance = Infinity;
@@ -913,67 +891,6 @@ function nearbyBlackHole() {
   return closest && distance < closest.spec.accretionRadius * 7 ? closest : null;
 }
 
-function updateBlackHoleReadouts() {
-  const stats = blackHoleFrame.contentWindow?.BlackHoleSlingshotObservatory?.getStats?.();
-  if (!stats) return;
-  blackHoleRadius.textContent = `${stats.radiusKm.toLocaleString('zh-CN', { maximumFractionDigits: 0 })} km`;
-  blackHoleDistance.textContent = `${stats.distanceKm.toLocaleString('zh-CN', { maximumFractionDigits: 0 })} km`;
-  blackHoleSpeed.textContent = `${stats.speedC.toFixed(3)} c`;
-  blackHoleTime.textContent = `${stats.timeDilation.toFixed(3)}×`;
-}
-
-function applyBlackHoleScene(index = 0, play = true) {
-  const bridge = blackHoleFrame.contentWindow?.BlackHoleSlingshotObservatory;
-  if (!bridge) return false;
-  bridge.applyScene(index, observedBlackHole?.spec?.blackHole?.massSolar);
-  if (play) bridge.play();
-  else bridge.pause();
-  updateBlackHoleReadouts();
-  return true;
-}
-
-function openBlackHoleObservatory(blackHole = nearbyBlackHole()) {
-  if (!blackHole || blackHoleObservatoryOpen) return false;
-  blackHoleObservatoryOpen = true;
-  observedBlackHole = blackHole;
-  clearFlightInput();
-  spaceCtl.enabled = false;
-  if (document.pointerLockElement) document.exitPointerLock();
-  blackHoleTitle.textContent = `${blackHole.name} · 引力弹弓观测`;
-  blackHoleObservatory.classList.remove('hidden');
-  document.body.classList.add('black-hole-mode');
-  if (!blackHoleFrame.getAttribute('src')) blackHoleFrame.src = '/assets/vendor/black-hole/demo.html';
-  clearInterval(blackHoleStatsTimer);
-  blackHoleStatsTimer = setInterval(updateBlackHoleReadouts, 350);
-  if (!applyBlackHoleScene(0, true)) {
-    const retry = setInterval(() => {
-      if (applyBlackHoleScene(0, true) || !blackHoleObservatoryOpen) clearInterval(retry);
-    }, 250);
-  }
-  return true;
-}
-
-function closeBlackHoleObservatory() {
-  if (!blackHoleObservatoryOpen) return false;
-  blackHoleObservatoryOpen = false;
-  observedBlackHole = null;
-  clearInterval(blackHoleStatsTimer);
-  blackHoleStatsTimer = null;
-  blackHoleFrame.contentWindow?.BlackHoleSlingshotObservatory?.pause?.();
-  blackHoleObservatory.classList.add('hidden');
-  document.body.classList.remove('black-hole-mode');
-  spaceCtl.enabled = state === 'space';
-  ui.setHint('已返回驾驶舱 · 点击画面重新接管视角 · O 再次观测', true);
-  return true;
-}
-
-blackHoleClose.addEventListener('click', closeBlackHoleObservatory);
-blackHoleSlingshot.addEventListener('click', () => applyBlackHoleScene(6, true));
-window.addEventListener('message', (event) => {
-  if (event.origin !== location.origin || event.source !== blackHoleFrame.contentWindow) return;
-  if (event.data?.type === 'black-hole-observatory:bridge-ready'
-      || event.data?.type === 'black-hole-observatory:ready') applyBlackHoleScene(0, true);
-});
 resumeButton.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || !paused) return;
   // Pointer Lock can cancel the click that follows pointerdown. Complete the
@@ -1269,7 +1186,7 @@ document.addEventListener('pointerlockchange', () => {
     return;
   }
   if (!window.NMS_NOLOCK && pointerLockInput && !document.pointerLockElement
-      && !paused && !blackHoleObservatoryOpen && !starMap?.isOpen && !pendingRoute && !riftRoute
+      && !paused && !starMap?.isOpen && !pendingRoute && !riftRoute
       && (state === 'space' || state === 'walk')) {
     pauseGame();
   }
@@ -1682,7 +1599,7 @@ function approachBlackHole(blackHole) {
   lookQuatAt(nav.pos, blackHole.posUniv, nav.quat);
   focusPlanet = null;
   spaceCtl.focus = null;
-  ui.setHint(`已抵达 ${blackHole.name} 安全观测距离 · O 进入相对论弹弓实验`, true);
+  ui.setHint(`已抵达 ${blackHole.name} 安全观测距离`, true);
   return true;
 }
 
@@ -2313,12 +2230,10 @@ function startHeroPullBack(onDone) {
     const e = easeInOut(k);
     nav.pos.lerpVectors(startPos, endPos, e);
     nav.quat.copy(startQuat).slerp(endQuat, e);
-    if (Math.floor(k * 20) !== Math.floor((k - 0.001) * 20)) console.log(`[diag] heroTween k=${k.toFixed(2)} navPos=${nav.pos.toArray().map(v=>v.toFixed(1)).join(',')}`);
     // Ship enters frame during the second half of the pull-back.
     const sk = smoothstep(0.4, 1, k);
     ship.introOffset.set(160 * (1 - sk), -110 * (1 - sk), 60 * (1 - sk));
   }, () => {
-    console.log('[diag] heroTween DONE onDone fired');
     ship.introOffset.set(0, 0, 0);
     onDone?.();
   });
@@ -2595,7 +2510,19 @@ function frame() {
       nav.pos.addScaledVector(pulseBurst.direction,
         pulseBurst.distance * Math.max(0, progress - pulseBurst.progress));
       pulseBurst.progress = progress;
-      if (pulseBurst.elapsed >= PULSE_DURATION) cancelPulseBurst();
+      if (pulseBurst.elapsed >= PULSE_DURATION) {
+        // 脉冲位移由三次曲线收敛到 0,但 nav.vel 在脉冲期间被阻力衰减到接
+        // 近 0;直接收尾会从“高速位移”瞬间跌落到“几乎静止”,体感割裂。
+        // 沿脉冲方向补一档低于加力上限的延续速度,让 drag 平滑接管减速。
+        const boostLimit = flightBoostSpeedLimit(
+          spaceCtl.speedScale, spaceCtl.atmosphereFactor, spaceCtl.gravityPower);
+        const residual = boostLimit * 0.55;
+        const currentAlong = nav.vel.dot(pulseBurst.direction);
+        if (currentAlong < residual) {
+          nav.vel.addScaledVector(pulseBurst.direction, residual - currentAlong);
+        }
+        cancelPulseBurst();
+      }
     }
     if (nearest) {
       _v.copy(nav.pos).sub(nearest.posUniv);
@@ -3595,9 +3522,6 @@ window.NMS = {
     warpTo(destination, 'black-hole-0');
     return true;
   },
-  openBlackHoleObservatory: () => openBlackHoleObservatory(),
-  closeBlackHoleObservatory: () => closeBlackHoleObservatory(),
-  get blackHoleObservatoryOpen() { return blackHoleObservatoryOpen; },
   setStarMapMode(mode) {
     if (!starMap?.isOpen || !['galaxy', 'system'].includes(mode)) return false;
     starMap.setMode(mode);

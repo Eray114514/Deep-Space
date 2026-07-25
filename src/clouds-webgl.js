@@ -135,6 +135,13 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       // value changes integration cost only; cloud placement and coverage do
       // not depend on it.
       uQuality: { value: qualityValue },
+      // Camera proximity factor in [0,1]: 1 = close enough that individual
+      // billows resolve on screen (full march cost), 0 = far enough that cloud
+      // detail is sub-pixel (reduced march cost). Coverage, footprint and
+      // silhouette are independent of this — only raymarch sample count and
+      // the third sun-march lookup are gated, so distant frames stay
+      // visually identical while costing a fraction of the close-up shader.
+      uCamProx: { value: 1 },
     },
     vertexShader: /* glsl */`
       uniform vec3 uCameraLocal;
@@ -152,7 +159,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uniform sampler3D uNoise3;
       uniform sampler2D uCloudNoise;
       uniform sampler2D tSceneDepth;
-      uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality;
+      uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uCamProx;
       uniform float uDepthReady, uCameraFar;
       uniform vec2 uVolumeSize;
       uniform vec3 uCOff, uStormA, uStormB, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
@@ -325,10 +332,20 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // This material is rendered by the half-resolution temporal volume
         // pass. A fresh jittered 44–84 sample signal reconstructs more cleanly
         // than 120 static steps and avoids the old grazing-angle brush tails.
-        float minSteps = mix(28.0, 46.0, uQuality);
-        float maxSteps = mix(52.0, 88.0, uQuality);
-        int STEPS = int(clamp(seg / (thick * mix(0.052, 0.032, uQuality)),
-          minSteps, maxSteps));
+        // uCamProx reduces sample count when the camera is far enough that
+        // individual billows are sub-pixel: at uCamProx=1 the high tier keeps
+        // its authored 46–88 step range; at uCamProx=0 it drops to the low
+        // tier's 28–52 step range. Silhouette and coverage come from the same
+        // density field regardless of step count, so distant frames remain
+        // visually equivalent while the raymarch cost falls by ~40%.
+        float tierMin = mix(28.0, 46.0, uQuality);
+        float tierMax = mix(52.0, 88.0, uQuality);
+        float lowMin = 28.0;
+        float lowMax = 52.0;
+        float minSteps = mix(lowMin, tierMin, uCamProx);
+        float maxSteps = mix(lowMax, tierMax, uCamProx);
+        float stride = mix(0.052, mix(0.052, 0.032, uQuality), uCamProx);
+        int STEPS = int(clamp(seg / (thick * stride), minSteps, maxSteps));
         float dt = seg / float(STEPS);
         float framePhase = mod(uFrame, 16.0);
         float jitter = hash12(gl_FragCoord.xy
@@ -358,12 +375,14 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
             float ls = thick * 0.35;
             od += densityAt(local + uSunDir * ls * 0.6, 1.0, systemMask) * ls * 0.6;
             od += densityAt(local + uSunDir * ls * 1.5, 1.0, systemMask) * ls * 0.9;
-            if (uQuality > 0.5) {
+            if (uQuality > 0.5 && uCamProx > 0.35) {
               od += densityAt(local + uSunDir * ls * 2.8, 1.0, systemMask) * ls * 1.3;
             } else {
               // Preserve approximately the same optical depth with one fewer
-              // lookup on the low tier, so the silhouette and coverage stay
-              // stable while only fine self-shadow detail is reduced.
+              // lookup on the low tier (or when the camera is far enough that
+              // the third self-shadow sample is below perceptual threshold), so
+              // the silhouette and coverage stay stable while only fine
+              // self-shadow detail is reduced.
               od *= 1.18;
             }
             float Tsun = exp(-od * sigma * 0.9);

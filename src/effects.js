@@ -181,7 +181,6 @@ export class Ship {
     this.group = g;
     this.foregroundOnly = true;
     scene.add(g);
-    console.log('Ship group parent', g.parent?.type, g.parent?.uuid, 'visible', g.visible);
 
     this.smQuat = new THREE.Quaternion();
     this.roll = 0;
