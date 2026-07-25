@@ -281,11 +281,17 @@ function finishSurfaceBootstrap() {
 }
 
 function prewarmPlanetVolumePipelines(planet) {
-  // Avoid a 3000-4000 m hitch when the player descends through the atmosphere
-  // of a planet other than the one that was warmed during startup.  The shared
-  // topology is the same, but each planet owns its own atmosphere/cloud
-  // material instance, so the first visible frame on a new body can still
-  // trigger an on-demand compile.
+  // Avoid a hitch when the player approaches a planet other than the one
+  // warmed during startup.  Each planet owns its own atmosphere/cloud
+  // material instance, so the first frame on a new body can still trigger
+  // an on-demand compile.  renderer.compileAsync collects materials via
+  // scene.traverse (NOT traverseVisible), so the meshes do not need to be
+  // made visible — and making them visible is actively harmful: while
+  // compileAsync polls program.isReady(), the live render loop (which uses
+  // traverseVisible) would draw these meshes with half-compiled programs,
+  // producing a black frame plus GL_INVALID_VALUE /
+  // GL_INVALID_FRAMEBUFFER_OPERATION errors before the player has even
+  // reached the atmosphere.
   if (QUALITY_LOW || !planet || planet.isGasGiant || volumePrewarmInProgress
     || typeof renderer.compileAsync !== 'function') return;
   if (warmedVolumePlanets.has(planet)) return;
@@ -294,15 +300,11 @@ function prewarmPlanetVolumePipelines(planet) {
     warmedVolumePlanets.add(planet);
     return;
   }
-  const wereVisible = meshes.map((m) => m.visible);
-  for (const mesh of meshes) mesh.visible = true;
   volumePrewarmInProgress = true;
   nodePipeline.compileAsync().then(() => {
-    for (let i = 0; i < meshes.length; i++) meshes[i].visible = wereVisible[i];
     warmedVolumePlanets.add(planet);
     volumePrewarmInProgress = false;
   }).catch((error) => {
-    for (let i = 0; i < meshes.length; i++) meshes[i].visible = wereVisible[i];
     volumePrewarmInProgress = false;
     console.warn('planet volume prewarm failed', error);
   });
@@ -375,18 +377,12 @@ function prewarmSurfacePipelines(planet) {
   }
 
   // Prewarm the EffectComposer render pipeline. renderer.compileAsync(scene,
-  // camera) only compiles materials; it does not build the volume-pass
-  // shaders that first execute when the cloud shell becomes visible, which
-  // caused a multi-second hitch at 3000-3400 m. Briefly expose volume shells
-  // and the real shadow light so the compiled variants match the live frame.
-  const volumeMeshesToPrewarm = [];
-  for (const mesh of [planet.atmoMesh, planet.volCloudMesh]) {
-    if (mesh && !mesh.visible) {
-      volumeMeshesToPrewarm.push(mesh);
-      mesh.visible = true;
-    }
-  }
-
+  // camera) collects materials via scene.traverse (NOT traverseVisible), so
+  // atmosphere/cloud shells do NOT need to be made visible to compile their
+  // shaders — and making them visible would let the live render loop draw
+  // them with half-compiled programs, causing a black frame before the
+  // player reaches the atmosphere. Only the shadow light needs to be
+  // visible, because compile() gathers lights via traverseVisible.
   const lightWasVisible = sunShadow.visible;
   const lightIntensity = sunShadow.intensity;
   sunShadow.visible = true;
@@ -398,11 +394,9 @@ function prewarmSurfacePipelines(planet) {
   // The private 2×2 bootstrap render below warms the real shadow materials
   // without injecting an incompatible MeshDepthMaterial.
   Promise.all(tasks).then(() => {
-    for (const mesh of volumeMeshesToPrewarm) mesh.visible = false;
     if (planet) warmedVolumePlanets.add(planet);
     if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
-    for (const mesh of volumeMeshesToPrewarm) mesh.visible = false;
     surfacePipelinesReady = true;
     console.warn('surface pipeline prewarm failed', error);
   });
