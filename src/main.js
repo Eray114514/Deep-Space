@@ -2511,15 +2511,18 @@ function frame() {
         pulseBurst.distance * Math.max(0, progress - pulseBurst.progress));
       pulseBurst.progress = progress;
       if (pulseBurst.elapsed >= PULSE_DURATION) {
-        // 脉冲位移由三次曲线收敛到 0,但 nav.vel 在脉冲期间被阻力衰减到接
-        // 近 0;直接收尾会从“高速位移”瞬间跌落到“几乎静止”,体感割裂。
-        // 沿脉冲方向补一档低于加力上限的延续速度,让 drag 平滑接管减速。
+        // 脉冲位移直接驱动 nav.pos,nav.vel 在脉冲期间被 drag 衰减到远低
+        // 于 HUD 显示速度(pulseDisplaySpeed = boostLimit*(1+pulseVisual*
+        // 1.8),由 pulseVisual 放大营造)。脉冲结束 pulseVisual 以 14/s
+        // 快速衰减,显示速度会从脉冲末段值暴跌到 nav.vel 真实值,体感
+        // “超快减速”。沿脉冲方向注入接近当前显示速度的残留,让 drag 平
+        // 滑接管减速到巡航速度。
         const boostLimit = flightBoostSpeedLimit(
           spaceCtl.speedScale, spaceCtl.atmosphereFactor, spaceCtl.gravityPower);
-        const residual = boostLimit * 0.55;
+        const pulsePeakSpeed = boostLimit * (1 + pulseVisual * 1.8);
         const currentAlong = nav.vel.dot(pulseBurst.direction);
-        if (currentAlong < residual) {
-          nav.vel.addScaledVector(pulseBurst.direction, residual - currentAlong);
+        if (currentAlong < pulsePeakSpeed) {
+          nav.vel.addScaledVector(pulseBurst.direction, pulsePeakSpeed - currentAlong);
         }
         cancelPulseBurst();
       }
