@@ -125,9 +125,6 @@ export class SpaceControls {
     this.surfaceUp = new THREE.Vector3(0, 1, 0);
     this.horizonAssist = 0;
     this.boosting = false;
-    // 0 = 普通阻力曲线,1 = 加力阻力曲线。松开加力时平滑回升,避免阻力
-    // 系数瞬间跳变 4 倍带来的“被拽住”体感。
-    this.boostDragBlend = 0;
     this.firing = false;
     this.firePressed = false;
     this.wheelImpulse = 0;
@@ -320,13 +317,11 @@ export class SpaceControls {
     // Boost has its own lower drag curve. Previously the ordinary 2.4/s
     // damping cancelled most of the boost acceleration, so RMB looked active
     // while the ship barely gained speed.
-    // 按下立刻切到低阻力(保留原加力手感与满刻度加速效率),松开后让阻力
-    // 平滑回升,避免速度衰减率瞬间跳变 4 倍带来的“被拽住”割裂感。
-    if (boosting) this.boostDragBlend = 1;
-    else this.boostDragBlend += (0 - this.boostDragBlend) * (1 - Math.exp(-dt * 3.2));
-    const boostDrag = 0.42 + this.atmosphereFactor * 0.46;
-    const normalDrag = 1.65 + this.atmosphereFactor * 0.75;
-    const drag = normalDrag + (boostDrag - normalDrag) * this.boostDragBlend;
+    const drag = boosting
+      ? (0.42 + this.atmosphereFactor * 0.46)
+      // Keep some inertia in open space, while dense air still settles the
+      // ship promptly enough for a precise landing approach.
+      : (1.65 + this.atmosphereFactor * 0.75);
     nav.vel.multiplyScalar(Math.exp(-dt * drag));
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);

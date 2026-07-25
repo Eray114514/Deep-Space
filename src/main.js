@@ -534,6 +534,12 @@ let pulseFuel = PULSE_FUEL_MAX;
 let pulseActive = false;
 let pulseBurst = null;
 let pulseRechargeDelay = 0;
+// 脉冲结束后行星接近限速不能硬切回普通档,否则向内速度会从脉冲延续值
+// (boostLimit 量级)瞬间被砍到 safeInward(~55-几百),体感骤降。让
+// pulseActive 多保持一小段并平滑回落到 0,使 safeInward 的 ×1.18 放大
+// 也平滑过渡,行星限速渐进收紧。
+let pulseSettle = 0;
+const PULSE_SETTLE_SECONDS = 0.8;
 let weaponCooldown = 0;
 let flightPower = {
   weapon: 1, navigation: 1, thermal: 1, gravity: 1, shield: 1, warp: 0,
@@ -727,7 +733,9 @@ const walkCtl = new WalkControls(renderer.domElement, {
 
 function cancelPulseBurst() {
   pulseBurst = null;
-  pulseActive = false;
+  // 不立刻清 pulseActive:启动一段 settle 窗口,让行星接近限速的
+  // pulseActive 放大平滑回落,避免向内速度骤降。
+  if (pulseSettle <= 0) pulseSettle = PULSE_SETTLE_SECONDS;
 }
 
 function triggerPulse() {
@@ -742,6 +750,9 @@ function triggerPulse() {
   pulseRechargeDelay = 1.4 / Math.max(.1, flightPower.thermal);
   pulseBurst = { elapsed: 0, progress: 0, direction, distance };
   pulseActive = true;
+  // 新脉冲开始:清掉上次脉冲的 settle,避免 cancelPulseBurst 因 pulseSettle
+  // 仍 >0 而不重启 settle 窗口。
+  pulseSettle = 0;
   return true;
 }
 
@@ -2485,6 +2496,17 @@ function frame() {
       spaceCtl.horizonAssist = 0;
     }
     pulseActive = !!pulseBurst;
+    // settle 期间保持 pulseActive=true,使行星接近限速的放大保持;衰减
+    // 到 0 后才真正切回普通档,完成向内速度的平滑收紧。
+    if (pulseSettle > 0 && !pulseBurst) {
+      pulseSettle = Math.max(0, pulseSettle - dt);
+      pulseActive = true;
+    }
+    // 接近限速放大系数:脉冲/settle 期间为 1.18,settle 末段平滑回落到
+    // 1.0,避免向内速度被瞬间砍低。settle 进度驱动回落曲线。
+    const pulseApproachScale = pulseActive
+      ? 1 + 0.18 * (pulseBurst ? 1 : Math.max(0, pulseSettle / PULSE_SETTLE_SECONDS))
+      : 1;
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
       // A distance-shaped radial cap preserves the scale of the world and
@@ -2498,7 +2520,7 @@ function frame() {
       const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
-        * (pulseActive ? 1.18 : 1);
+        * pulseApproachScale;
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, 0);
     }
@@ -2531,7 +2553,7 @@ function frame() {
       const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
-        * (pulseActive ? 1.18 : 1);
+        * pulseApproachScale;
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, dt);
     }

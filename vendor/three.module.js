@@ -17491,10 +17491,21 @@ class WebGLRenderer {
 
 					materials.forEach( function ( material ) {
 
+						// Guard against a race where the live render loop
+						// invalidates or disposes a material between compile()
+						// and this setTimeout-polled readiness check, leaving
+						// materialProperties or currentProgram undefined. Drop
+						// the material so polling can resolve instead of
+						// throwing an uncaught TypeError from setTimeout.
 						const materialProperties = properties.get( material );
-						const program = materialProperties.currentProgram;
+						if ( ! materialProperties ) {
 
-						if ( program.isReady() ) {
+							materials.delete( material );
+							return;
+
+						}
+						const program = materialProperties.currentProgram;
+						if ( program && program.isReady() ) {
 
 							// remove any programs that report they're ready to use from the list
 							materials.delete( material );
