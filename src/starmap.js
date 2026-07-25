@@ -812,8 +812,13 @@ export class StarMap {
       // star sprites crisp at every DPI.
       const geometry = new THREE.PlaneGeometry(1, 1);
       geometry.rotateX(-Math.PI / 2);
+      // vertexColors must stay false: PlaneGeometry has no color attribute, so
+      // enabling it makes the shader sample a default (0,0,0) and zero out
+      // vColor — even instanceColor cannot recover from that, rendering every
+      // star sprite black. instanceColor is applied via USE_INSTANCING_COLOR,
+      // which is independent of vertexColors.
       const material = new THREE.MeshBasicMaterial({
-        map: this.starTexture, vertexColors: true,
+        map: this.starTexture,
         transparent: true, opacity, blending: THREE.AdditiveBlending,
         depthWrite: false, fog: false, toneMapped: false,
       });
