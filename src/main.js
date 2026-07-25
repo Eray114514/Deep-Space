@@ -535,9 +535,9 @@ let pulseActive = false;
 let pulseBurst = null;
 let pulseRechargeDelay = 0;
 // 脉冲结束后行星接近限速不能硬切回普通档,否则向内速度会从脉冲延续值
-// (boostLimit 量级)瞬间被砍到 safeInward(~55-几百),体感骤降。让
-// pulseActive 多保持一小段并平滑回落到 0,使 safeInward 的 ×1.18 放大
-// 也平滑过渡,行星限速渐进收紧。
+// (boostLimit 量级)瞬间被砍到 safeInward(~55-几百),体感骤降。settle
+// 期间 approachLimit 从 boostLimit 平滑收紧到 safeInwardBase,nav.vel
+// 随之渐进被限,避免硬切跳变。
 let pulseSettle = 0;
 const PULSE_SETTLE_SECONDS = 0.8;
 let weaponCooldown = 0;
@@ -733,8 +733,8 @@ const walkCtl = new WalkControls(renderer.domElement, {
 
 function cancelPulseBurst() {
   pulseBurst = null;
-  // 不立刻清 pulseActive:启动一段 settle 窗口,让行星接近限速的
-  // pulseActive 放大平滑回落,避免向内速度骤降。
+  // 启动 settle 窗口:让 approachLimit 从 boostLimit 平滑收紧到
+  // safeInwardBase,避免脉冲结束注入的 nav.vel 被行星限速硬切跳变。
   if (pulseSettle <= 0) pulseSettle = PULSE_SETTLE_SECONDS;
 }
 
@@ -2496,17 +2496,24 @@ function frame() {
       spaceCtl.horizonAssist = 0;
     }
     pulseActive = !!pulseBurst;
-    // settle 期间保持 pulseActive=true,使行星接近限速的放大保持;衰减
-    // 到 0 后才真正切回普通档,完成向内速度的平滑收紧。
     if (pulseSettle > 0 && !pulseBurst) {
       pulseSettle = Math.max(0, pulseSettle - dt);
-      pulseActive = true;
     }
-    // 接近限速放大系数:脉冲/settle 期间为 1.18,settle 末段平滑回落到
-    // 1.0,避免向内速度被瞬间砍低。settle 进度驱动回落曲线。
-    const pulseApproachScale = pulseActive
-      ? 1 + 0.18 * (pulseBurst ? 1 : Math.max(0, pulseSettle / PULSE_SETTLE_SECONDS))
-      : 1;
+    // 行星接近限速目标。脉冲期间沿用原 1.18 放大;settle 期间从 boostLimit
+    // 平滑收紧到 safeInwardBase,让脉冲结束注入的 nav.vel 不会被硬切,
+    // 而是随 settle 进度渐进被限;正常飞行用 safeInwardBase。
+    const safeInwardBase = 55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6;
+    const boostLimitForApproach = flightBoostSpeedLimit(
+      spaceCtl.speedScale, spaceCtl.atmosphereFactor, spaceCtl.gravityPower);
+    let approachLimit;
+    if (pulseBurst) {
+      approachLimit = safeInwardBase * 1.18;
+    } else if (pulseSettle > 0) {
+      const settleProgress = 1 - pulseSettle / PULSE_SETTLE_SECONDS;
+      approachLimit = lerp(boostLimitForApproach, safeInwardBase, settleProgress);
+    } else {
+      approachLimit = safeInwardBase;
+    }
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
       // A distance-shaped radial cap preserves the scale of the world and
@@ -2519,10 +2526,8 @@ function frame() {
       const centerDistance = _v.length();
       const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
-      const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
-        * pulseApproachScale;
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
-        nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, 0);
+        nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), approachLimit, 0);
     }
     flightStepStart.copy(nav.pos);
     spaceCtl.update(dt);
@@ -2552,10 +2557,8 @@ function frame() {
       const centerDistance = _v.length();
       const radialOut = _v.multiplyScalar(1 / Math.max(centerDistance, 1));
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
-      const safeInward = (55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6)
-        * pulseApproachScale;
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
-        nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), safeInward, dt);
+        nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), approachLimit, dt);
     }
     // Sweep the camera's whole frame step against procedural terrain. Checking
     // only last frame's altitude allowed a low-FPS step to enter or cross a
@@ -2824,7 +2827,9 @@ function frame() {
   // directly and may be terrain-capped, so its cockpit value is expressed as
   // full boost speed plus the pulse envelope, while still honoring a larger
   // true frame displacement. The pointer itself remains capped at full boost.
-  const pulseDisplaySpeed = state === 'space' && (pulseActive || pulseVisual > 0.01)
+  // 仅在脉冲进行中(pulseBurst 存在)虚高显示;settle 期间交由 nav.vel 真实
+  // 值(被 approachLimit 平滑限速)驱动指针,避免脉冲结束显示硬切跳变。
+  const pulseDisplaySpeed = state === 'space' && pulseBurst
     ? Math.max(_velActual.length(), boostSpeedLimit * (1 + pulseVisual * 1.8))
     : 0;
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
