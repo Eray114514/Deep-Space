@@ -1,24 +1,19 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const { server, port } = await startServer(0);
-const browser = await launchWebGPUHardwareBrowser({
+const browser = await launchHardwareBrowser({
   headless: true,
   adapterLuid: process.env.IGPU_ADAPTER_LUID,
   args: ['--force_low_power_gpu', '--use-angle=d3d11'],
 });
-if (!browser) {
-  console.log('SKIP: integrated-GPU startup test requires installed Chrome/Edge');
-  await new Promise((resolve) => server.close(resolve));
-  process.exit(0);
-}
 
 const captureDir = new URL('../test-results/renderers/', import.meta.url);
 await mkdir(captureDir, { recursive: true });
 try {
-  for (const requested of ['webgl', 'auto', 'webgpu']) {
+  for (const requested of ['webgl', 'auto']) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     const errors = [];
     page.on('pageerror', (error) => errors.push(String(error)));

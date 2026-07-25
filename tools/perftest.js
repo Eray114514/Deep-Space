@@ -4,7 +4,7 @@
 // Optional: PERF_ADAPTER_LUID=0,88763 PERF_ASSERT=1 npm run test:performance
 
 import { startServer } from './server.js';
-import { launchHardwareBrowser, launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const width = Number(process.env.PERF_WIDTH) || 1920;
 const height = Number(process.env.PERF_HEIGHT) || 1080;
@@ -17,8 +17,7 @@ let server;
 try {
   const started = await startServer(0);
   server = started.server;
-  browser = await launchWebGPUHardwareBrowser({ headless: true })
-    || await launchHardwareBrowser({ headless: true });
+  browser = await launchHardwareBrowser({ headless: true });
   const page = await browser.newPage({ viewport: { width, height } });
   page.on('pageerror', (error) => errors.push(String(error)));
 

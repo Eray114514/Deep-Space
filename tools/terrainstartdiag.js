@@ -1,10 +1,9 @@
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 import assert from 'node:assert/strict';
 
 const { server, port } = await startServer(0);
-const browser = await launchWebGPUHardwareBrowser({ headless: true });
-if (!browser) throw new Error('System Chrome/Edge is required for terrain startup diagnostics.');
+const browser = await launchHardwareBrowser({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
 const errors = [];
 page.on('pageerror', (error) => errors.push(String(error)));

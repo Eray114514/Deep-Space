@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const seeds = process.argv.slice(2).length
   ? process.argv.slice(2)
@@ -8,8 +8,7 @@ const seeds = process.argv.slice(2).length
 const output = 'docs/curation/finite-worlds-v2';
 await mkdir(output, { recursive: true });
 const { server, port } = await startServer(0);
-const browser = await launchWebGPUHardwareBrowser({ headless: true });
-if (!browser) throw new Error('System Chrome/Edge is required for finalist captures.');
+const browser = await launchHardwareBrowser({ headless: true });
 
 async function settle(page, timeout = 60000) {
   try {

@@ -18,7 +18,9 @@ Treat seeded outputs and RNG namespaces as content APIs. In particular, changing
 
 - `npm install` installs the Node tooling and Playwright.
 - `npm run dev` serves the game at `http://127.0.0.1:8000` with the development FPS marker.
-- `npm test` parses every `src/*.js` module and verifies the version contract.
+- `npm test` parses every `src/*.js` module and verifies the version contract (fast, pure Node, ~3 s).
+- `npm run test:smoke` boots the game once in headless Chromium and checks the paths most likely to break in a large change: shader/runtime errors, galaxy+planet generation, render pipeline, flight input, pause UI (~1 min).
+- `npm run test:full` runs every focused browser suite (gameplay, pointer lock, star map, rift, astronomy, sysview, seam, touch) — the thorough pre-PR/verification layer.
 - `npm run test:terrain` runs procedural terrain and LOD checks.
 - `npm run test:gameplay` runs gameplay checks; `npm run test:astronomy:browser` exercises astronomy in Chromium.
 - `npm run build` runs `npm test`, then recreates the deployable `dist/` directory. Do not hand-edit `dist/`.
@@ -31,7 +33,7 @@ Use ES modules, two-space indentation, semicolons, and single quotes, matching e
 
 ## Testing Guidelines
 
-Run `npm test` for every code change. Run the targeted terrain, gameplay, seam, touch, or screenshot command when your change affects that area. Tests are executable scripts in `tools/`, not a separate test directory; name new checks `*test.js` and keep assertions deterministic.
+Tests are layered by cost. For every code change run `npm test` (pure-Node contract checks, ~3 s). After a large change run `npm run test:smoke` (one browser boot, ~1 min) to catch the regressions Node tests cannot see (render, shader, input, UI). Before a PR or release run `npm run test:full` (every focused browser suite) plus the targeted terrain, gameplay, seam, touch, or screenshot command for the area you touched. Tests are executable scripts in `tools/`, not a separate test directory; name new checks `*test.js` and keep assertions deterministic. Prefer sharing a single booted page across assertions (see `tools/browsertest.js`) over launching a fresh Chromium per check.
 
 ## Commit & Pull Request Guidelines
 

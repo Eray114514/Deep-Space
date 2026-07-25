@@ -320,11 +320,10 @@ export class SpaceControls {
     // Boost has its own lower drag curve. Previously the ordinary 2.4/s
     // damping cancelled most of the boost acceleration, so RMB looked active
     // while the ship barely gained speed.
-    // 起效要快(按下立刻有低阻力手感),松开后让阻力平滑回升,避免速度
-    // 衰减率瞬间跳变 4 倍带来的“被拽住”割裂感。
-    const boostDragTarget = boosting ? 1 : 0;
-    this.boostDragBlend += (boostDragTarget - this.boostDragBlend)
-      * (1 - Math.exp(-dt * (boosting ? 7.5 : 3.2)));
+    // 按下立刻切到低阻力(保留原加力手感与满刻度加速效率),松开后让阻力
+    // 平滑回升,避免速度衰减率瞬间跳变 4 倍带来的“被拽住”割裂感。
+    if (boosting) this.boostDragBlend = 1;
+    else this.boostDragBlend += (0 - this.boostDragBlend) * (1 - Math.exp(-dt * 3.2));
     const boostDrag = 0.42 + this.atmosphereFactor * 0.46;
     const normalDrag = 1.65 + this.atmosphereFactor * 0.75;
     const drag = normalDrag + (boostDrag - normalDrag) * this.boostDragBlend;

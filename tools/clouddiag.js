@@ -2,11 +2,10 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { PNG } from 'pngjs';
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const { server, port } = await startServer(0);
-const browser = await launchWebGPUHardwareBrowser({ headless: true });
-if (!browser) throw new Error('System Chrome/Edge is required for cloud diagnostics.');
+const browser = await launchHardwareBrowser({ headless: true });
 const outDir = new URL('../test-results/cloud-diagnostics/', import.meta.url);
 await mkdir(outDir, { recursive: true });
 

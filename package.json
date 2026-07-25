@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "node tools/server.js",
     "test": "node tools/test.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js && node tools/gputiertest.js",
+    "test:smoke": "node tools/browsertest.js",
+    "test:full": "node tools/browsertest.js && node tools/gameplaytest.js && node tools/pointerlocktest.js && node tools/starmaptest.js && node tools/rifttest.js && node tools/astroplaytest.js && node tools/sysviewtest.js && node tools/seamtest.js && node tools/touchtest.js",
     "test:galaxy": "node tools/galaxycatalogtest.js",
     "test:starmap": "node tools/starmaptest.js",
     "test:artificial": "node tools/artificialtest.js && node tools/artificialplaytest.js",

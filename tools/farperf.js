@@ -4,7 +4,7 @@
 // Optional: PERF_FACTOR=4 PERF_QUALITY=high node tools/farperf.js
 
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const width = Number(process.env.PERF_WIDTH) || 1920;
 const height = Number(process.env.PERF_HEIGHT) || 1080;
@@ -18,8 +18,7 @@ let browser, server;
 try {
   const started = await startServer(0);
   server = started.server;
-  browser = await launchWebGPUHardwareBrowser({ headless: true });
-  if (!browser) throw new Error('System Chrome/Edge is required for far-perf.');
+  browser = await launchHardwareBrowser({ headless: true });
   const page = await browser.newPage({ viewport: { width, height } });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
