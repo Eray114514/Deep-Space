@@ -1,11 +1,11 @@
 # 深空 · Deep Space
 
 <p align="center">
-  <a href="https://deep-space-nu.vercel.app"><img src="docs/hero.jpg" alt="深空 · Deep Space"></a>
+  <a href="https://dp.eray.top"><img src="docs/hero.jpg" alt="深空 · Deep Space"></a>
 </p>
 
 <p align="center">
-  <a href="https://deep-space-nu.vercel.app"><img src="https://img.shields.io/badge/▶_在线试玩-deep--space--nu.vercel.app-7c3aed?style=for-the-badge" alt="Play now"></a>
+  <a href="https://dp.eray.top"><img src="https://img.shields.io/badge/▶_在线试玩-dp.eray.top-7c3aed?style=for-the-badge" alt="Play now"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-3178c6?style=for-the-badge" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/WebGL_2-990000?style=for-the-badge&logo=webgl&logoColor=white" alt="WebGL 2">
   <img src="https://img.shields.io/badge/Three.js-black?style=for-the-badge&logo=threedotjs&logoColor=white" alt="Three.js">
