@@ -98,9 +98,10 @@ function stormCenters(offX, offY, offZ) {
 }
 
 export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
-  { quality = 'high' } = {}) {
+  { quality = 'ultra', steps = 124 } = {}) {
   const thick = band.rOut - band.rIn;
-  const qualityValue = quality === 'low' ? 0 : 1;
+  const qualityValue = quality === 'performance' || quality === 'low' ? 0
+    : quality === 'balanced' ? 0.55 : 1;
   const [stormA, stormB] = stormCenters(band.ox, band.oy, band.oz);
   const mat = new THREE.ShaderMaterial({
     transparent: true,
@@ -121,7 +122,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
       uRin: { value: band.rIn },
       uRout: { value: band.rOut },
-      uGroundR: { value: planet.R + Math.max(0, planet.seaLevel || 0) },
+      uGroundR: { value: planet.hasLiquid ? planet.seaRadius : planet.R },
       tSceneDepth: { value: null },
       uDepthReady: { value: 0 },
       uCameraFar: { value: 1.2e11 },
@@ -135,6 +136,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       // value changes integration cost only; cloud placement and coverage do
       // not depend on it.
       uQuality: { value: qualityValue },
+      uMaxSteps: { value: Math.max(16, Math.min(124, steps)) },
     },
     vertexShader: /* glsl */`
       uniform vec3 uCameraLocal;
@@ -152,7 +154,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uniform sampler3D uNoise3;
       uniform sampler2D uCloudNoise;
       uniform sampler2D tSceneDepth;
-      uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality;
+      uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uMaxSteps;
       uniform float uDepthReady, uCameraFar;
       uniform vec2 uVolumeSize;
       uniform vec3 uCOff, uStormA, uStormB, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
@@ -325,8 +327,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // This material is rendered by the half-resolution temporal volume
         // pass. A fresh jittered 44–84 sample signal reconstructs more cleanly
         // than 120 static steps and avoids the old grazing-angle brush tails.
-        float minSteps = mix(28.0, 46.0, uQuality);
-        float maxSteps = mix(52.0, 88.0, uQuality);
+        float minSteps = max(18.0, uMaxSteps * mix(0.58, 0.38, uQuality));
+        float maxSteps = uMaxSteps;
         int STEPS = int(clamp(seg / (thick * mix(0.052, 0.032, uQuality)),
           minSteps, maxSteps));
         float dt = seg / float(STEPS);

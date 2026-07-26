@@ -10,9 +10,14 @@ import {
   max, mix, normalLocal, normalize, positionLocal, pow, screenUV, sin,
   smoothstep, step, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
+import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
 
-const USE_NODE_MATERIALS = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const rendererParams = typeof location !== 'undefined'
+  ? new URLSearchParams(location.search) : new URLSearchParams();
+const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  rendererParamsForSettings(rendererSettings, rendererParams)).backend === 'webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
@@ -226,6 +231,7 @@ export class SkyDome {
           uZenith: { value: new THREE.Color(0x224488) },
           uSunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
           uAlpha: { value: 0 },
+          uHorizonOnly: { value: 0 },
         },
         vertexShader: /* glsl */`
           #include <common>
@@ -240,7 +246,7 @@ export class SkyDome {
           #include <common>
           #include <logdepthbuf_pars_fragment>
           uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
-          uniform float uAlpha;
+          uniform float uAlpha, uHorizonOnly;
           varying vec3 vDir;
           void main() {
             #include <logdepthbuf_fragment>
@@ -250,7 +256,8 @@ export class SkyDome {
             vec3 col = mix(uZenith, uHorizon * 0.92, t);
             float sd = max(dot(dir, uSunDir), 0.0);
             col += uSunTint * (pow(sd, 700.0) * 1.3 + pow(sd, 16.0) * 0.16);
-            float a = uAlpha * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
+            float directional = mix(1.0, pow(1.0 - abs(u), 3.0), uHorizonOnly);
+            float a = uAlpha * directional * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
             gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
           }`,
         side: THREE.BackSide,
@@ -272,6 +279,7 @@ export class SkyDome {
       uZenith: uniform(new THREE.Color(0x224488)),
       uSunTint: uniform(new THREE.Color(1.0, 0.92, 0.78)),
       uAlpha: uniform(0),
+      uHorizonOnly: uniform(0),
     };
     const dir = normalize(positionLocal);
     const upDot = dot(dir, nodes.uUp);
@@ -284,7 +292,8 @@ export class SkyDome {
       side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: true,
     });
     this.mat.colorNode = sky;
-    this.mat.opacityNode = nodes.uAlpha.mul(belowFade);
+    const directionalAlpha = mix(float(1), pow(float(1).sub(abs(upDot)), 3), nodes.uHorizonOnly);
+    this.mat.opacityNode = nodes.uAlpha.mul(directionalAlpha).mul(belowFade);
     this.mat.uniforms = Object.fromEntries(Object.entries(nodes).map(([key, node]) => [key, node]));
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
     this.mesh.renderOrder = -7;
@@ -293,13 +302,14 @@ export class SkyDome {
     scene.add(this.mesh);
   }
 
-  update(up, sunDir, horizon, zenith, alpha, sunset = 0) {
+  update(up, sunDir, horizon, zenith, alpha, sunset = 0, horizonOnly = 0) {
     const u = this.mat.uniforms;
     u.uUp.value.copy(up);
     u.uSunDir.value.copy(sunDir);
     u.uHorizon.value.copy(horizon);
     u.uZenith.value.copy(zenith);
     u.uAlpha.value = alpha;
+    u.uHorizonOnly.value = horizonOnly;
     u.uSunTint.value.setRGB(1.0, 0.92 - sunset * 0.6, 0.78 - sunset * 0.68);
     this.mesh.visible = alpha > 0.01;
   }

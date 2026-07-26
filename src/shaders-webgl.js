@@ -7,6 +7,9 @@
 import * as THREE from 'three';
 import { Simplex } from './noise.js';
 import { makeRng } from './rng.js';
+import { WATER_IMPULSE_CAP, waterInteraction } from './water-interaction.js';
+import { SURFACE_INTERACTION_CAP, surfaceInteraction } from './surface-interaction.js';
+import { surfaceMaterialSlots } from './surface-materials.js';
 
 // one global clock drives water and wind everywhere
 export const TIME = { value: 0 };
@@ -190,6 +193,13 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     // compiled at first render — by then the planet knows if it has clouds
     const cloudTex = planet.cloudShadowTex || blankTexture();
     shader.uniforms.uDetailTex = { value: tex };
+    shader.uniforms.uGrassColor = surfaceMaterialSlots.grassColor;
+    shader.uniforms.uGrassNormal = surfaceMaterialSlots.grassNormal;
+    shader.uniforms.uGrassOrm = surfaceMaterialSlots.grassOrm;
+    shader.uniforms.uRockColor = surfaceMaterialSlots.rockColor;
+    shader.uniforms.uRockNormal = surfaceMaterialSlots.rockNormal;
+    shader.uniforms.uRockRoughness = surfaceMaterialSlots.rockRoughness;
+    shader.uniforms.uEarthLike = { value: planet.type === 'lush' || planet.type === 'ocean' ? 1 : 0 };
     shader.uniforms.uDetailK = { value: strength };
     shader.uniforms.uMacroK = { value: macroK };
     shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
@@ -236,6 +246,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
+        uniform float uTime;
         attribute vec3 aLocal;
         attribute vec3 aMat;
         attribute vec4 aExtra;
@@ -251,6 +262,13 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
+        uniform sampler2D uGrassColor;
+        uniform sampler2D uGrassNormal;
+        uniform sampler2D uGrassOrm;
+        uniform sampler2D uRockColor;
+        uniform sampler2D uRockNormal;
+        uniform sampler2D uRockRoughness;
+        uniform float uEarthLike;
         uniform float uDetailK;
         uniform float uMacroK;
         uniform vec2 uDetailS;
@@ -292,6 +310,13 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         varying vec4 vExtra;
         float gSnowW = 0.0;
         float gPatch = 0.0;
+        float gSurfaceRoughness = 0.82;
+        vec2 surfaceMaterialUv(vec3 p, vec3 n) {
+          vec3 an = abs(n);
+          if (an.x > an.y && an.x > an.z) return p.yz * 0.085;
+          if (an.y > an.z) return p.zx * 0.085;
+          return p.xy * 0.085;
+        }
         float triDetail(vec3 p, vec3 w, float s, int ch) {
           vec2 a = texture2D(uDetailTex, p.yz * s).rg;
           vec2 b = texture2D(uDetailTex, p.zx * s).rg;
@@ -334,7 +359,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
 
           // ---- baked ray-marched sun shadows: mountains shade whole
           // valleys, kilometres beyond the realtime shadow map's reach
-          diffuseColor.rgb *= mix(0.42, 1.0, vMat.z);
+          diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.78, 0.82, 0.9),
+            diffuseColor.rgb, vMat.z);
 
           // ---- micro grain, biome-styled
           vec3 w = pow(abs(normalize(vLocalNrm)), vec3(4.0));
@@ -345,6 +371,22 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           float d = mix(grain, grain * 0.5 + strat * 1.15, vMat.x);
           d += (triDetail(vLocalPos, w, uDetailS.y * 0.32, 0) - 0.5) * vMat.y * 0.75;
           diffuseColor.rgb *= 1.0 + d * uDetailK;
+
+          // Compressed scanned structure is restricted to the near field.
+          // Alien palettes retain their authored hue while still inheriting
+          // real soil/stone grain and roughness.
+          float pbrNear = 1.0 - smoothstep(18.0, 92.0, length(vViewPosition));
+          float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
+          vec2 pbrUv = surfaceMaterialUv(vLocalPos, normalize(vLocalNrm));
+          vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb;
+          vec3 pbrStone = texture2D(uRockColor, pbrUv * 0.78 + 0.17).rgb;
+          vec3 pbrSample = mix(pbrGrass, pbrStone, pbrRock);
+          float pbrLum = dot(pbrSample, vec3(0.2126, 0.7152, 0.0722));
+          vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, uEarthLike * 0.42);
+          pbrStructure = clamp(pbrStructure * 1.45, vec3(0.58), vec3(1.42));
+          diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.48);
+          gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
+            texture2D(uRockRoughness, pbrUv * 0.78 + 0.17).r, pbrRock);
 
           // ---- continental-scale tint drift: dry-brown swathes
           float macro = triDetail(vLocalPos, w, 0.0013, 0)
@@ -384,7 +426,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         // snow glints, damp hollows go faintly glossy, dry rises stay matte —
         // low-sun specular variation is a big part of ground reading as real
-        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.42 + gPatch * 0.14, 0.05, 1.0);`)
+        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.34 + gPatch * 0.12, 0.38, 1.0);
+        float pbrNearRough = 1.0 - smoothstep(18.0, 92.0, length(vViewPosition));
+        roughnessFactor = mix(roughnessFactor, clamp(gSurfaceRoughness, 0.38, 1.0), pbrNearRough * 0.35);`)
       .replace('#include <fog_fragment>', `
         #ifdef USE_FOG
         {
@@ -407,12 +451,22 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
                    - triDetail(vLocalPos - vec3(0.35, 0.0, 0.0), wN, uDetailS.y, 1);
           float gy = triDetail(vLocalPos + vec3(0.0, 0.35, 0.0), wN, uDetailS.y, 1)
                    - triDetail(vLocalPos - vec3(0.0, 0.35, 0.0), wN, uDetailS.y, 1);
+          vec3 ndPbr = normalize(vLocalPos);
+          float slopePbr = 1.0 - clamp(dot(normalize(vLocalNrm), ndPbr), 0.0, 1.0);
+          float rockPbr = smoothstep(uSlopeLo, uSlopeHi, slopePbr);
+          vec2 uvPbr = surfaceMaterialUv(vLocalPos, normalize(vLocalNrm));
+          vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
+          vec2 rockN = texture2D(uRockNormal, uvPbr * 0.78 + 0.17).xy * 2.0 - 1.0;
+          vec2 scanN = mix(grassN, rockN, rockPbr);
+          float scanNear = 1.0 - smoothstep(8.0, 72.0, length(vViewPosition));
+          gx += scanN.x * scanNear * 0.34;
+          gy += scanN.y * scanNear * 0.34;
           vec3 tang = normalize(cross(normal, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
           vec3 bitn = cross(normal, tang);
           normal = normalize(normal + (tang * gx + bitn * gy) * uDetailK * (1.7 + vMat.x * 1.5));
         }`);
   };
-  material.customProgramCacheKey = () => 'terrain-palette-v4';
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v6-ktx2';
 }
 
 // Living water: scrolling normal perturbation, plus Beer–Lambert depth
@@ -421,6 +475,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
 export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   const tex = detailTexture();
   if (!tex) return;
+  material.depthWrite = true;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDetailTex = { value: tex };
     shader.uniforms.uTime = TIME;
@@ -436,18 +491,32 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     // grazing angles mirror the sky instead of showing the deep diffuse —
     // without this, water toward the horizon reads as a near-black sheet
     const sky = planet && planet.skyColor
-      ? planet.skyColor.clone().convertSRGBToLinear().multiplyScalar(0.6)
+      ? planet.skyColor.clone().convertSRGBToLinear().multiplyScalar(1.15)
       : new THREE.Color(0.25, 0.4, 0.55);
     shader.uniforms.uSkyC = { value: sky };
+    shader.uniforms.uRipplePos = { value: waterInteraction.positions };
+    shader.uniforms.uRippleData = { value: waterInteraction.data };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
+        uniform float uTime;
         attribute vec3 aLocal;
         attribute float aDepth;
         varying vec3 vLocalPos;
+        varying vec3 vWaveT;
+        varying vec3 vWaveB;
         varying float vDepth;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vLocalPos = aLocal;
-        vDepth = aDepth;`);
+        vDepth = aDepth;
+        vec3 waveUp = normalize(aLocal);
+        vec3 waveT = normalize(cross(waveUp, abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+        vec3 waveB = cross(waveUp, waveT);
+        float macroWave = sin((aLocal.x + aLocal.z) * 0.016 + uTime * 0.82) * 0.26
+          + sin((aLocal.z - aLocal.y * 0.7) * 0.027 - uTime * 1.07) * 0.14
+          + sin((aLocal.x * 0.55 + aLocal.y) * 0.043 + uTime * 1.34) * 0.07;
+        transformed += waveUp * macroWave;
+        vWaveT = normalize(normalMatrix * waveT);
+        vWaveB = normalize(normalMatrix * waveB);`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
@@ -456,7 +525,11 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform vec3 uDeepC;
         uniform vec3 uShallowC;
         uniform vec3 uSkyC;
+        uniform vec3 uRipplePos[${WATER_IMPULSE_CAP}];
+        uniform vec4 uRippleData[${WATER_IMPULSE_CAP}];
         varying vec3 vLocalPos;
+        varying vec3 vWaveT;
+        varying vec3 vWaveB;
         varying float vDepth;`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
@@ -470,17 +543,44 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition))), 5.0);
           diffuseColor.rgb = mix(diffuseColor.rgb, uSkyC, fres * 0.65);
           diffuseColor.a = mix(diffuseColor.a, min(1.0, diffuseColor.a * 2.2 + 0.25), fres);
+          float shoreFoam = (1.0 - smoothstep(0.25, 3.2, dep))
+            * (0.55 + 0.45 * sin(dep * 7.0 + uTime * 1.8));
+          float wakeFoam = 0.0;
+          for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
+            vec4 rd = uRippleData[i];
+            vec3 delta = vLocalPos - uRipplePos[i];
+            float dist = length(delta);
+            float ring = dist - rd.x * rd.y;
+            float envelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
+            wakeFoam += (0.32 + 0.68 * max(0.0, sin(ring * 1.4)))
+              * envelope * rd.w * 1.75;
+          }
+          float foam = clamp(shoreFoam * 0.42 + wakeFoam, 0.0, 0.92);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.97, 1.0), foam);
         }`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
-          vec2 uv1 = vLocalPos.xy * uWaveS + vec2(uTime * 0.021, uTime * -0.013);
-          vec2 uv2 = vLocalPos.yz * uWaveS * 3.7 + vec2(uTime * -0.033, uTime * 0.027);
+          vec3 upL = normalize(vLocalPos);
+          vec3 tanL = normalize(cross(upL, abs(upL.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+          vec3 bitL = cross(upL, tanL);
+          vec2 surfaceUv = vec2(dot(vLocalPos, tanL), dot(vLocalPos, bitL));
+          vec2 uv1 = surfaceUv * uWaveS + vec2(uTime * 0.021, uTime * -0.013);
+          vec2 uv2 = surfaceUv * uWaveS * 3.7 + vec2(uTime * -0.033, uTime * 0.027);
           vec2 g = (texture2D(uDetailTex, uv1).rg - 0.5) * 0.5
                  + (texture2D(uDetailTex, uv2).rg - 0.5) * 0.3;
-          normal = normalize(normal + vec3(g.x, g.y, 0.0) * 0.55);
+          for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
+            vec4 rd = uRippleData[i];
+            vec3 delta = vLocalPos - uRipplePos[i];
+            vec2 planar = vec2(dot(delta, tanL), dot(delta, bitL));
+            float dist = length(planar);
+            float ring = dist - rd.x * rd.y;
+            float envelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
+            g += planar / max(dist, 0.05) * cos(ring * 1.4) * envelope * 0.72;
+          }
+          normal = normalize(normal + (vWaveT * g.x + vWaveB * g.y) * 0.55);
         }`);
   };
-  material.customProgramCacheKey = () => 'water-depth-waves';
+  material.customProgramCacheKey = () => 'water-tangent-wakes-v3';
 }
 
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
@@ -597,16 +697,20 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
 // camera climbs out — thousands of props must never blink out in one frame
 export const GROW = { value: 1 };
 
-export function applyWindSway(material, amount) {
+export function applyWindSway(material, amount, foliageLighting = false) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = TIME;
     shader.uniforms.uGrow = GROW;
     shader.uniforms.uSway = { value: amount };
+    shader.uniforms.uBendPos = { value: surfaceInteraction.positions };
+    shader.uniforms.uBendData = { value: surfaceInteraction.data };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
         uniform float uGrow;
-        uniform float uSway;`)
+        uniform float uSway;
+        uniform vec4 uBendPos[${SURFACE_INTERACTION_CAP}];
+        uniform vec4 uBendData[${SURFACE_INTERACTION_CAP}];`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         #ifdef USE_INSTANCING
         {
@@ -616,8 +720,34 @@ export function applyWindSway(material, amount) {
           float k = uSway * max(transformed.y, 0.0);
           transformed.x += (sin(uTime * 1.6 + ph) + 0.4 * sin(uTime * 3.7 + ph * 1.7)) * k;
           transformed.z += (cos(uTime * 1.3 + ph * 1.3) + 0.4 * sin(uTime * 2.9 + ph)) * k * 0.7;
+          float pressure = 0.0;
+          for (int i = 0; i < ${SURFACE_INTERACTION_CAP}; i++) {
+            float d = distance(ip, uBendPos[i].xyz);
+            float recovery = exp(-uBendData[i].x);
+            pressure = max(pressure, (1.0 - smoothstep(0.0, uBendPos[i].w, d))
+              * uBendData[i].y * recovery);
+          }
+          float tip = smoothstep(0.0, 0.65, max(transformed.y, 0.0));
+          transformed.x += sin(ph) * pressure * tip * 0.7;
+          transformed.z += cos(ph) * pressure * tip * 0.7;
+          transformed.y *= 1.0 - pressure * tip * 0.68;
         }
         #endif`);
+    if (material.vertexColors) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        #ifdef USE_COLOR
+          totalEmissiveRadiance *= vColor.rgb;
+        #endif`);
+    }
+    if (foliageLighting) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <normal_fragment_begin>', `#include <normal_fragment_begin>
+        #ifdef DOUBLE_SIDED
+          normal *= faceDirection;
+          nonPerturbedNormal = normal;
+        #endif`);
+    }
   };
-  material.customProgramCacheKey = () => 'wind-sway-' + amount;
+  material.customProgramCacheKey = () => 'wind-sway-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
 }

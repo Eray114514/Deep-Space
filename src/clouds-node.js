@@ -83,7 +83,7 @@ function stormCenters(offX, offY, offZ) {
 }
 
 export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
-  { quality = 'high' } = {}) {
+  { quality = 'ultra' } = {}) {
   const [stormA, stormB] = stormCenters(band.ox, band.oy, band.oz);
   const nodes = {
     uNoise3: uniform(cloudNoiseTexture(), 'texture3D'),
@@ -94,14 +94,14 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
     uCameraLocal: uniform(new THREE.Vector3()), uSpin: uniform(new THREE.Matrix3()),
     uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
     uRin: uniform(band.rIn), uRout: uniform(band.rOut),
-    uGroundR: uniform(planet.R + Math.max(0, planet.seaLevel || 0)),
+    uGroundR: uniform(planet.hasLiquid ? planet.seaRadius : planet.R),
     tSceneDepth: uniform(null, 'texture'), uDepthReady: uniform(0),
     uCameraFar: uniform(1.2e11), uVolumeSize: uniform(new THREE.Vector2(1, 1)),
     uSunC: uniform(new THREE.Color(1, 0.98, 0.94)),
     uAmbC: uniform(new THREE.Color(0.35, 0.42, 0.55)),
     uTint: uniform(new THREE.Color(band.tint || 0xffffff)),
     uEngage: uniform(0), uFrame: uniform(0),
-    uQuality: uniform(quality === 'low' ? 0 : 1),
+    uQuality: uniform(quality === 'performance' || quality === 'low' ? 0 : 1),
   };
   const weatherUV = (d) => vec2(
     float(0.5).add(atan(d.z, d.x.negate()).mul(0.15915494)),
@@ -117,9 +117,25 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
     const t1 = bOuter.negate().add(outerRoot).toVar();
     const bInner = dot(origin, ray);
     const innerDisc = bInner.mul(bInner).sub(dot(origin, origin)).add(nodes.uRin.mul(nodes.uRin));
-    const innerNear = bInner.negate().sub(sqrt(innerDisc.max(0)));
+    const innerRoot = sqrt(innerDisc.max(0));
+    const innerNear = bInner.negate().sub(innerRoot);
+    const innerFar = bInner.negate().add(innerRoot);
     const clipsInner = innerDisc.greaterThan(0).and(innerNear.greaterThan(t0));
     t1.assign(clipsInner.select(innerNear.min(t1), t1));
+    // Below cloud base, begin at the outward inner-shell crossing. Without
+    // this branch a downward ray starts at the camera and eventually samples
+    // the far-side cloud shell through the planet.
+    If(origin.length().lessThan(nodes.uRin)
+      .and(innerDisc.greaterThan(0)).and(innerFar.greaterThan(0)), () => {
+      t0.assign(innerFar.max(0));
+      t1.assign(bOuter.negate().add(outerRoot));
+    });
+    const bGround = dot(origin, ray);
+    const groundDisc = bGround.mul(bGround).sub(dot(origin, origin))
+      .add(nodes.uGroundR.mul(nodes.uGroundR));
+    const groundNear = bGround.negate().sub(sqrt(groundDisc.max(0)));
+    const clipsGround = groundDisc.greaterThan(0).and(groundNear.greaterThan(0));
+    t1.assign(clipsGround.select(groundNear.min(t1), t1));
     const span = t1.sub(t0).max(0);
     const stepCount = mix(10, 16, nodes.uQuality).toVar();
     const stepLength = span.div(stepCount);
@@ -136,7 +152,11 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         const lowerProfile = smoothstep(0.02, 0.17, height)
           .mul(smoothstep(0.78, 0.54, height));
         const uv = weatherUV(direction);
-        const weather = texture(weatherMap, uv).a;
+        // Canvas weather atlases carry the same density in RGB and alpha.
+        // Chromium's WebGPU upload path may expand the canvas as an opaque
+        // colour texture, making `.a` equal one over the whole planet.  Read
+        // the authored density channel explicitly so clear cells stay clear.
+        const weather = texture(weatherMap, uv).r;
         const volumeUV = direction.mul(2.15).add(vec3(0.5))
           .add(vec3(height.mul(0.21), height.mul(0.37), height.mul(0.16)));
         const detail = texture3D(cloudNoiseTexture(), volumeUV).r;
@@ -153,12 +173,17 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         const density = weather.mul(verticalShape)
           .mul(float(0.78).add(erosion.mul(0.36))).clamp(0, 1);
         const sunWeather = texture(weatherMap, weatherUV(
-          direction.add(nodes.uSunDir.normalize().mul(0.018)).normalize())).a;
+          direction.add(nodes.uSunDir.normalize().mul(0.018)).normalize())).r;
         const selfShadow = float(1).sub(sunWeather.sub(weather).mul(2.8)).clamp(0.34, 1.12);
         const day = smoothstep(-0.16, 0.24, dot(direction, nodes.uSunDir.normalize()));
-        const heightLight = mix(0.78, 1.12, height);
+        // The lower cloud body receives mostly skylight; direct sun reaches
+        // the bright crown progressively.  Lighting every sample with the
+        // full sun colour made an overcast deck a flat white screen from the
+        // ground even though the density silhouette was correct.
+        const directLight = day.mul(selfShadow).mul(mix(0.16, 1, height));
+        const heightLight = mix(0.68, 1.08, height);
         const cloudColor = mix(nodes.uAmbC, nodes.uSunC,
-          day.mul(selfShadow)).mul(nodes.uTint).mul(heightLight);
+          directLight).mul(nodes.uTint).mul(heightLight);
         const alphaStep = float(1).sub(exp(density.mul(stepLength).div(thickness).mul(-3.4)));
         integrated.addAssign(cloudColor.mul(transmission).mul(alphaStep));
         transmission.mulAssign(float(1).sub(alphaStep));

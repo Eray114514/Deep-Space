@@ -25,6 +25,11 @@ export class UI {
       brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
+      heroSettings: $('hero-settings-btn'), graphicsPanel: $('graphics-settings-panel'),
+      graphicsClose: $('graphics-settings-close'), graphicsCancel: $('graphics-settings-cancel'),
+      graphicsApply: $('graphics-settings-apply'), graphicsGpu: $('graphics-gpu'),
+      graphicsBackend: $('graphics-backend'), graphicsNote: $('graphics-settings-note'),
+      graphicsRestartMask: $('graphics-restart-mask'),
       heroSplash: $('hero-splash'),
       heroPerfHint: $('hero-perf-hint'), perfTutorial: $('perf-tutorial'), perfTutorialClose: $('perf-tutorial-close'),
       arrivalTitle: $('arrival-title'), arrivalKicker: $('arrival-kicker'),
@@ -47,6 +52,17 @@ export class UI {
       this.cb.onStart?.();
       window.dispatchEvent(new CustomEvent('game-user-start'));
     });
+    this.els.heroSettings?.addEventListener('click', () => this.showGraphicsSettings(true));
+    this.els.graphicsClose?.addEventListener('click', () => this.showGraphicsSettings(false));
+    this.els.graphicsCancel?.addEventListener('click', () => this.showGraphicsSettings(false));
+    this.els.graphicsPanel?.addEventListener('click', (event) => {
+      if (event.target === this.els.graphicsPanel) this.showGraphicsSettings(false);
+    });
+    this.els.graphicsApply?.addEventListener('click', () => {
+      const quality = this.els.graphicsPanel.querySelector('input[name="graphics-quality"]:checked')?.value || 'auto';
+      this.els.graphicsRestartMask?.classList.remove('hidden');
+      this.cb.onApplyGraphics?.({ quality });
+    });
     if (this.els.heroPerfHint) {
       this.els.heroPerfHint.addEventListener('click', () => this.showPerfTutorial(true));
     }
@@ -60,6 +76,11 @@ export class UI {
       });
     }
     this._perfTutorialKey = (e) => {
+      if (e.key === 'Escape' && this.els.graphicsPanel && !this.els.graphicsPanel.classList.contains('hidden')) {
+        e.stopImmediatePropagation();
+        this.showGraphicsSettings(false);
+        return;
+      }
       if (e.key === 'Escape' && this.els.perfTutorial && !this.els.perfTutorial.classList.contains('hidden')) {
         this.showPerfTutorial(false);
       }
@@ -356,6 +377,31 @@ export class UI {
     this.els.routeChoice.classList.toggle('hidden', !show);
     document.body.classList.toggle('route-choice-active', show);
     if (show) this._setText(this.els.routeChoiceName, name || '未命名星系');
+  }
+
+  setGraphicsSettings(settings, profile, { gpu = '', requestedBackend = 'auto', actualBackend = '', reason = '' } = {}) {
+    const panel = this.els.graphicsPanel;
+    if (!panel) return;
+    const quality = panel.querySelector(`input[name="graphics-quality"][value="${settings.quality}"]`);
+    if (quality) quality.checked = true;
+    for (const label of panel.querySelectorAll('.graphics-quality-grid label')) {
+      label.classList.toggle('is-recommended', label.querySelector('input')?.value === profile.id);
+    }
+    this._setText(this.els.graphicsGpu, gpu || '未能读取设备名称');
+    this._setText(this.els.graphicsBackend,
+      `自动 WebGPU · 实际 ${(actualBackend || 'unknown').toUpperCase()} · 当前 ${profile.label}`);
+    if (reason?.includes('fallback')) {
+      this._setText(this.els.graphicsNote, `WebGPU 未能启动，已自动回落 WebGL 2（${reason}）。调整画质后将重新启动。`);
+    }
+  }
+
+  showGraphicsSettings(show = true) {
+    const panel = this.els.graphicsPanel;
+    if (!panel) return;
+    panel.classList.toggle('hidden', !show);
+    this.els.heroSettings?.setAttribute('aria-expanded', String(show));
+    if (show) queueMicrotask(() => panel.querySelector('input:checked')?.focus());
+    else this.els.heroSettings?.focus();
   }
 
   beginTravel() {

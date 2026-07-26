@@ -10,14 +10,14 @@ if (!browser) throw new Error('System Chrome/Edge is required for cloud diagnost
 const outDir = new URL('../test-results/cloud-diagnostics/', import.meta.url);
 await mkdir(outDir, { recursive: true });
 
-async function capture(vclouds, factor, label, horizon = false, quality = 'high') {
+async function capture(vclouds, factor, label, horizon = false, quality = 'ultra') {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.stack || String(error)));
   page.on('console', (message) => {
     if (message.type() === 'error') errors.push(message.text());
   });
-  const url = `http://127.0.0.1:${port}/?renderer=auto&quality=${quality}&vclouds=${vclouds}`
+  const url = `http://127.0.0.1:${port}/?renderer=webgl&quality=${quality}&vclouds=${vclouds}`
     + `&farflora=0&nohero=1&freeze=1&scene=orbit&planet=0&factor=${factor}`;
   await page.goto(url);
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
@@ -78,9 +78,9 @@ try {
   const volumeHorizon = await capture(1, 0.02, 'volume-horizon', true);
   const flatSurface = await capture(0, 0.001, 'flat-surface', true);
   const volumeSurface = await capture(1, 0.001, 'volume-surface', true);
-  const lowOrbit = await capture(1, 0.72, 'volume-low-quality-orbit', false, 'low');
-  const lowHorizon = await capture(1, 0.02, 'volume-low-quality-horizon', true, 'low');
-  const lowSurface = await capture(1, 0.001, 'volume-low-quality-surface', true, 'low');
+  const lowOrbit = await capture(1, 0.72, 'volume-low-quality-orbit', false, 'performance');
+  const lowHorizon = await capture(1, 0.02, 'volume-low-quality-horizon', true, 'performance');
+  const lowSurface = await capture(1, 0.001, 'volume-low-quality-surface', true, 'performance');
   const result = {
     flatOrbit: flatOrbit.state,
     volumeOrbit: volumeOrbit.state,
@@ -105,7 +105,7 @@ try {
   for (const state of [result.volumeOrbit, result.volumeLow,
     result.volumeHorizon, result.volumeSurface]) {
     assert.equal(state.renderer, 'webgl2');
-    assert.equal(state.quality, 'high');
+    assert.equal(state.quality, 'ultra');
     assert.equal(state.volumeExists, true);
     assert.equal(state.volumeVisible, true);
     assert.ok(state.engage > 0.98, `volume engage too low: ${state.engage}`);
@@ -116,7 +116,7 @@ try {
   for (const state of [result.lowQualityOrbit, result.lowQualityHorizon,
     result.lowQualitySurface]) {
     assert.equal(state.renderer, 'webgl2');
-    assert.equal(state.quality, 'low');
+    assert.equal(state.quality, 'performance');
     assert.equal(state.volumeExists, true);
     assert.equal(state.volumeVisible, true);
     assert.ok(state.engage > 0.98, `low-tier volume engage too low: ${state.engage}`);

@@ -29,6 +29,7 @@ const ADDON_ENTRIES = [
   'controls/OrbitControls.js',
   'geometries/RoundedBoxGeometry.js',
   'loaders/GLTFLoader.js',
+  'loaders/KTX2Loader.js',
   'libs/meshopt_decoder.module.js',
 ];
 

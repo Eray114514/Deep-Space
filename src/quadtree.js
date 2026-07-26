@@ -7,9 +7,9 @@ import * as THREE from 'three';
 
 export let GRID_CELLS = 24;            // quads per chunk edge
 export function setGridCells(n) { GRID_CELLS = n; }   // quality presets
-const SPLIT = 4.0;                     // split when dist < size * SPLIT
-const MERGE = 5.2;                     // merge when dist > size * MERGE
-const PREFETCH = 5.0;                  // BUILD children this early — by the
+let SPLIT = 4.0;                       // split when dist < size * SPLIT
+let MERGE = 5.2;                       // merge when dist > size * MERGE
+let PREFETCH = 5.0;                    // BUILD children this early — by the
                                        // time they're wanted on screen the
                                        // morph starts at once, while chunks
                                        // are still small enough not to notice
@@ -28,6 +28,14 @@ export function lodStatsReset() {
 }
 let PX_PER_RAD = 900;                  // set by main from the real projection
 export function setPxPerRad(v) { PX_PER_RAD = v; }
+export function setTerrainScreenError(error = 1) {
+  const value = Math.max(0.65, Math.min(1.5, Number(error) || 1));
+  // Even performance keeps the near field at the historical highest detail;
+  // the profile only changes how aggressively the middle/far field refines.
+  SPLIT = Math.max(4.5, 5 / value);
+  MERGE = SPLIT * 1.3;
+  PREFETCH = SPLIT * 1.25;
+}
 
 const FACE_FN = [
   (u, v, out) => out.set(1, v, -u),

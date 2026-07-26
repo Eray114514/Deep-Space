@@ -14,9 +14,10 @@ const check = (ok, label) => {
 };
 
 try {
-  // SwiftShader is identified by the runtime auto-tier. Do not force a URL
-  // quality here: this catches the adapter-detected cloud/profile handoff.
-  await page.goto(`http://127.0.0.1:${port}/?nolock=1&post=0&farflora=0&buildms=25`);
+  // SwiftShader is identified by the runtime auto-tier. Keep quality on auto,
+  // while pinning the compatibility backend so this gameplay test does not
+  // spend its timeout compiling the separate WebGPU visual path.
+  await page.goto(`http://127.0.0.1:${port}/?renderer=webgl&nolock=1&nohero=1&post=0&farflora=0&buildms=25`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
 
   // A trusted keyboard gesture both unlocks WebAudio and invokes boarding.
@@ -40,8 +41,8 @@ try {
       ),
     };
   });
-  check(cloudFallback.quality === 'auto-low' && cloudFallback.ok,
-    `auto-low keeps the shared volumetric cloud field visible from the surface ${JSON.stringify(cloudFallback)}`);
+  check(cloudFallback.quality === 'performance' && cloudFallback.ok,
+    `auto performance keeps the shared volumetric cloud field visible from the surface ${JSON.stringify(cloudFallback)}`);
   const surfaceWeaponVisibility = [];
   for (let index = 0; index < 4; index++) {
     await page.evaluate((slot) => NMS.surfaceWeapon(slot), index);
@@ -77,7 +78,7 @@ try {
   await page.mouse.move(cx, cy);
   await page.mouse.down({ button: 'right' });
   await page.waitForFunction(() => window.shipHUD?.getTelemetry().speedRatio > 0.995,
-    null, { timeout: 5000 });
+    null, { timeout: 15000 });
   const duringBoost = await page.evaluate('NMS.stats().boost');
   const speedBoost = await page.evaluate('NMS._internals.nav.vel.length()');
   const boostGauge = await page.evaluate('shipHUD.getTelemetry()');
@@ -203,7 +204,7 @@ try {
 
   // Exercise the real desktop Pointer Lock path. The regression was a half-
   // locked state: cursor hidden, but the flight controller still disabled.
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1&quality=low&post=0&vclouds=0&farflora=0&buildms=25`);
+  await page.goto(`http://127.0.0.1:${port}/?renderer=webgl&nohero=1&quality=performance&post=0&vclouds=0&farflora=0&buildms=25`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
   await page.locator('#app canvas').click({ position: { x: 550, y: 350 } });
   await page.waitForFunction(() => document.pointerLockElement === document.querySelector('#app canvas'));

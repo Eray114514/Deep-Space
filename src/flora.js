@@ -131,9 +131,30 @@ function buildTree(rng, pal, canopyColor) {
   const leanX = (rng() - 0.5) * 0.65, leanZ = (rng() - 0.5) * 0.65;
   const bulb = rng() < 0.35 ? 1.8 + rng() : 1;      // some trunks are bulbous
   const r0 = (0.05 + h * 0.028) * bulb, r1 = r0 * (0.22 + rng() * 0.2);
-  const trunk = bentTube(rng, pal, h, r0, r1, leanX, leanZ, pal.trunk);
+  const trunk = bentTube(rng, pal, h, r0, r1, leanX, leanZ, pal.trunk, 7, 8);
   const parts = trunk.parts;
   const top = trunk.top;
+
+  // Secondary branches give the near tier a real hierarchy instead of the
+  // old pole-plus-primitive silhouette. Attachment height, taper and crown
+  // size remain species-seeded and therefore stable across every visit.
+  const branchCount = 3 + (rng() * 3) | 0;
+  for (let i = 0; i < branchCount; i++) {
+    const t = 0.46 + i / Math.max(1, branchCount - 1) * 0.34;
+    const a = i / branchCount * Math.PI * 2 + rng() * 0.7;
+    const len = h * (0.16 + rng() * 0.11);
+    const dir = new THREE.Vector3(Math.cos(a), 0.34 + rng() * 0.28, Math.sin(a)).normalize();
+    const branch = new THREE.CylinderGeometry(r1 * 0.34, r0 * 0.34, len, 6, 2);
+    paint(branch, pal.trunk, rng, 0.08);
+    _q.setFromUnitVectors(Y, dir);
+    const base = new THREE.Vector3(leanX * h * t * t, h * t, leanZ * h * t * t);
+    const mid = base.clone().addScaledVector(dir, len * 0.5);
+    parts.push(place(branch, mid.x, mid.y, mid.z, _q.clone()));
+    if (style === 'orbs' || style === 'fronds') {
+      const tip = base.addScaledVector(dir, len);
+      parts.push(place(blob(rng, h * (0.07 + rng() * 0.05), canopyColor), tip.x, tip.y, tip.z));
+    }
+  }
 
   if (style === 'orbs') {
     const n = 3 + (rng() * 3) | 0;
@@ -241,21 +262,33 @@ function buildPodPlant(rng, pal) {
   return { geo: shadeVertical(mergeGeos(parts), 0.78, 1.1), glow: pal.accent.clone() };
 }
 
-function buildGrassTuft(rng) {
+function buildGrassTuft(rng, bladeRange = [7, 10], rows = 4) {
   // real blades (white — each instance is tinted per-planet at placement).
   // The baked root→tip brightness gradient is what makes grass read as
   // grass instead of spikes: dark at the soil, light where the sun sits.
   const white = new THREE.Color(1, 1, 1);
   const parts = [];
-  const n = 7 + (rng() * 3) | 0;
+  const n = bladeRange[0] + (rng() * (bladeRange[1] - bladeRange[0])) | 0;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rng();
     const len = 0.55 + rng() * 0.45;
-    const f = frond(rng, len, 0.055, 0.8 + rng() * 0.9, white);
+    const f = new THREE.PlaneGeometry(0.055, len, 1, rows);
+    f.translate(0, len / 2, 0);
+    const fp = f.attributes.position;
+    for (let v = 0; v < fp.count; v++) {
+      const t = Math.max(0, Math.min(1, fp.getY(v) / len));
+      fp.setX(v, fp.getX(v) * (1 - t * 0.8));
+      fp.setZ(v, Math.sin(t * (0.8 + rng() * 0.9)) * len * 0.35);
+    }
+    paint(f, white, rng, 0.12);
     const pos = f.attributes.position, col = f.attributes.color;
     for (let v = 0; v < pos.count; v++) {
       const t = Math.max(0, Math.min(1, pos.getY(v) / len));
-      const k = 0.45 + 0.75 * t;
+      // Strong root occlusion is more important than a bright tip.  The old
+      // 1.2x tip multiplier made the double-sided blades look self-lit under
+      // an overcast sky.  A curved rise keeps the base planted while the tip
+      // still catches the sky.
+      const k = 0.3 + 0.74 * Math.sqrt(t);
       col.setXYZ(v, col.getX(v) * k, col.getY(v) * k, col.getZ(v) * k);
     }
     _q.setFromAxisAngle(Y, a).multiply(
@@ -297,10 +330,18 @@ function shadeVertical(geo, k0 = 0.68, k1 = 1.14) {
 export function floraPalette(planet, rng) {
   const base = (planet.pal.forest || planet.pal.land[Math.min(2, planet.pal.land.length - 1)].c).clone();
   // alien hue drift: exotic/toxic worlds shift hard, lush worlds sometimes
-  const shift = planet.type === 'exotic' ? 0.15 + rng() * 0.5
-    : planet.type === 'toxic' ? 0.1 + rng() * 0.3
-      : rng() < 0.4 ? 0.06 + rng() * 0.24 : (rng() - 0.5) * 0.08;
-  const canopy = base.clone().offsetHSL(shift, 0.18, 0.06);
+  // drift only inside a natural green range.  Keep the two historical RNG
+  // draws on ordinary worlds so later authored species remain deterministic.
+  let shift;
+  if (planet.type === 'exotic') shift = 0.15 + rng() * 0.5;
+  else if (planet.type === 'toxic') shift = 0.1 + rng() * 0.3;
+  else {
+    const variant = rng();
+    const hue = rng();
+    shift = (hue - 0.5) * (variant < 0.12 ? 0.1 : 0.035);
+  }
+  const alien = planet.type === 'exotic' || planet.type === 'toxic';
+  const canopy = base.clone().offsetHSL(shift, alien ? 0.18 : 0.08, alien ? 0.06 : 0.025);
   const canopy2 = canopy.clone().offsetHSL(0.3 + rng() * 0.35, 0.05, (rng() - 0.5) * 0.1);
   const trunk = (planet.pal.rock || base).clone()
     .lerp(new THREE.Color(0.24, 0.15, 0.1), 0.45 + rng() * 0.3);
@@ -315,16 +356,22 @@ export function buildFlora(planet) {
   const pod = buildPodPlant(rng, pal);
   const t0 = buildTree(rng, pal, pal.canopy);
   const t1 = buildTree(rng, pal, pal.canopy2);
+  const grass = buildGrassTuft(rng);
   return {
     tree0: t0.geo,
     tree1: t1.geo,
     shrub: buildShrub(rng, pal),
     pod: pod.geo,
     podGlow: pod.glow,
-    grass: buildGrassTuft(rng),
+    // The three meshes share the same deterministic placement field. Only
+    // their blade complexity changes with distance: a dense meadow therefore
+    // keeps its silhouette without paying near-blade cost at the far rim.
+    grass,
+    grassMid: buildGrassTuft(rng, [4, 6], 2),
+    grassFar: buildGrassTuft(rng, [2, 3], 1),
     // meadows lean toward the planet's canopy colour instead of bare dirt —
     // the ground tint alone made grass vanish on dark soils
-    grassTint: pal.canopy.clone().offsetHSL(0, 0.12, 0.14),
+    grassTint: pal.canopy.clone().offsetHSL(0, 0.08, 0.025),
     // horizon-range proxies for the far tier
     far0: buildFarTree(rng, pal, t0.style, t0.h, pal.canopy),
     far1: buildFarTree(rng, pal, t1.style, t1.h, pal.canopy2),

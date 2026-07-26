@@ -20,6 +20,7 @@ export class FlightAudio {
     this.lastCue = null;
     this.lastState = null;
     this.lastAtmosphere = 0;
+    this.lastWater = 0;
     this.started = false;
     this.pendingCues = [];
     this.disposed = false;
@@ -104,6 +105,18 @@ export class FlightAudio {
     this.airGain.gain.value = 0;
     this.airNoise.connect(this.airFilter).connect(this.airGain).connect(this.master);
     this.airNoise.start();
+
+    this.waterNoise = ctx.createBufferSource();
+    this.waterNoise.buffer = this.noiseBuffer;
+    this.waterNoise.loop = true;
+    this.waterFilter = ctx.createBiquadFilter();
+    this.waterFilter.type = 'bandpass';
+    this.waterFilter.frequency.value = 980;
+    this.waterFilter.Q.value = 0.55;
+    this.waterGain = ctx.createGain();
+    this.waterGain.gain.value = 0;
+    this.waterNoise.connect(this.waterFilter).connect(this.waterGain).connect(this.master);
+    this.waterNoise.start();
 
     this.warpNoise = ctx.createBufferSource();
     this.warpNoise.buffer = this.noiseBuffer;
@@ -259,10 +272,12 @@ export class FlightAudio {
     } else if (kind === 'fire') {
       this.tone({ from: 1160, to: 390, duration: 0.078, gain: 0.065, type: 'sawtooth', lowpass: 3400 });
       this.noiseBurst({ duration: 0.045, gain: 0.026, from: 3600, to: 1300, q: 1.25 });
+    } else if (kind === 'water-splash') {
+      this.noiseBurst({ duration: 0.32, gain: 0.085, from: 1600, to: 420, q: 0.48 });
     }
   }
 
-  update({ state, speed, atmosphere, boosting, warp, rift = 0, paused }) {
+  update({ state, speed, atmosphere, boosting, warp, rift = 0, water = 0, underwater = false, paused }) {
     if (this.disposed) return;
     if (!this.ready || !this.ctx) return;
     const now = this.ctx.currentTime;
@@ -291,6 +306,10 @@ export class FlightAudio {
     set(this.riftLow.frequency, 31 + riftK * 8, 0.16);
     set(this.riftHarmonic.frequency, 65 + riftK * 15, 0.13);
     set(this.riftNoiseFilter.frequency, 520 + riftK * 1250, 0.11);
+    const waterK = clamp01(water);
+    set(this.waterGain.gain, active * waterK * (state === 'walk' ? 0.12 : 0.22), 0.09);
+    set(this.waterFilter.frequency, underwater ? 260 : 680 + waterK * 1700, 0.1);
+    set(this.engineFilter.frequency, underwater ? 240 : 390 + speedK * 1750 + boostK * 1350, 0.07);
 
     if (this.lastState !== null && state !== this.lastState) {
       if (state === 'landing') this.cue('landing');
@@ -300,8 +319,10 @@ export class FlightAudio {
     if (atmosphere > 0.18 && this.lastAtmosphere <= 0.18 && speed > 180) this.cue('atmosphere');
     if (boostK && !this.wasBoosting) this.cue('boost');
     if (warpK > 0.08 && !this.wasWarping) this.cue('warp');
+    if (waterK > 0.18 && this.lastWater <= 0.18) this.cue('water-splash');
     this.lastState = state;
     this.lastAtmosphere = atmosphere;
+    this.lastWater = waterK;
     this.wasBoosting = !!boostK;
     this.wasWarping = warpK > 0.08;
   }
@@ -331,6 +352,7 @@ export class FlightAudio {
     stop(this.airNoise);
     stop(this.warpNoise);
     stop(this.riftNoise);
+    stop(this.waterNoise);
     const ctx = this.ctx;
     this.ctx = null;
     if (ctx && ctx.state !== 'closed') {

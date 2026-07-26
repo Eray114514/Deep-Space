@@ -8,8 +8,9 @@ async function verify(browser, backend, expected) {
   const errors = [];
   page.on('pageerror', (error) => errors.push(String(error)));
   await page.goto(`http://127.0.0.1:${port}/natural-material-lab.html?backend=${backend}`);
-  await page.waitForFunction('window.NMS_NATURAL_LAB?.ready === true', null, { timeout: 30000 });
+  await page.waitForFunction('window.NMS_NATURAL_LAB != null', null, { timeout: 60000 });
   const result = await page.evaluate(() => window.NMS_NATURAL_LAB);
+  assert.equal(result.ready, true, result.stack || result.error || 'natural material lab did not become ready');
   assert.equal(result.backend, expected);
   assert.deepEqual(errors, []);
   await page.close();

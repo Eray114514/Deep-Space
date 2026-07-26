@@ -16,6 +16,14 @@ import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { positionLocal, uniform, vertexColor } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
+import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
+
+const rendererParams = typeof location !== 'undefined'
+  ? new URLSearchParams(location.search) : new URLSearchParams();
+const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  rendererParamsForSettings(rendererSettings, rendererParams)).backend === 'webgpu';
 
 const TILE_M = 1024;         // metres per cache tile
 const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
@@ -58,9 +66,7 @@ const Y = new THREE.Vector3(0, 1, 0);
 // bubble boundary made every tree the pilot approached appear to sink into
 // the terrain before the ship could reach it.
 function applyFarFade(mat, uniforms) {
-  const useNodeMaterials = typeof location !== 'undefined'
-    && new URLSearchParams(location.search).get('renderer') === 'webgpu';
-  if (!useNodeMaterials) {
+  if (!USE_NODE_MATERIALS) {
     mat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms);
       shader.vertexShader = shader.vertexShader
@@ -100,7 +106,8 @@ function applyFarFade(mat, uniforms) {
 }
 
 export class FarFlora {
-  constructor({ streamBudgetMs = STREAM_BUDGET_MS, repackIntervalMs = REPACK_INTERVAL_MS } = {}) {
+  constructor({ streamBudgetMs = STREAM_BUDGET_MS, repackIntervalMs = REPACK_INTERVAL_MS,
+    density = 1 } = {}) {
     this.planet = null;
     this.meshes = null;       // [tree0 proxies, tree1 proxies]
     this.tiles = new Map();   // packed tile key -> {m0: Float32Array, n0, m1, n1}
@@ -114,6 +121,8 @@ export class FarFlora {
     this.dirty = false;
     this.streamBudgetMs = streamBudgetMs;
     this.repackIntervalMs = repackIntervalMs;
+    this.density = Math.max(0.35, Math.min(1, density));
+    this.displayDensity = 1;
     this.lastRepackAt = -Infinity;
     this.metrics = {
       builtTiles: 0, repacks: 0,
@@ -169,6 +178,14 @@ export class FarFlora {
   }
 
   pending() { return this.queue.length + (this.job ? 1 : 0); }
+
+  setDisplayDensity(density) {
+    const next = Math.max(0.35, Math.min(1, density));
+    if (Math.abs(next - this.displayDensity) < 0.025) return;
+    this.displayDensity = next;
+    this.dirty = true;
+    if (this.pending() === 0) this.repack();
+  }
 
   debugStats() {
     return {
@@ -279,11 +296,12 @@ export class FarFlora {
     }
 
     if (this.dirty) {
-      const now = performance.now();
       const firstVisibleBatch = visible
         && this.meshes[0].count + this.meshes[1].count === 0 && completed > 0;
-      const visibleBatch = visible && now - this.lastRepackAt >= this.repackIntervalMs;
-      if (firstVisibleBatch || visibleBatch || this.pending() === 0) {
+      // Keep the previous complete ring resident while the next one streams.
+      // Repacking every 160 ms uploaded all 24k matrices repeatedly and was
+      // the source of the old <16 km periodic hitch.
+      if (firstVisibleBatch || this.pending() === 0) {
         this.repack();
         this.lastRepackAt = performance.now();
       }
@@ -365,7 +383,7 @@ export class FarFlora {
           const dens = FAR_DENSITY[p.biomeAt(_up, hgt)];
           if (!dens) continue;
           const sel = hashFloat(h0, 0);
-          if (sel >= dens[0]) continue;
+          if (sel >= dens[0] * this.density) continue;
           // jitter inside the cell, ground the tree at full terrain detail
           frame(_up, _ce1, _ce2);
           _jd.copy(_up)
@@ -419,7 +437,10 @@ export class FarFlora {
     const a1 = this.meshes[1].instanceMatrix.array;
     for (const k of keys) {
       const t = this.tiles.get(k);
-      const c0 = Math.min(t.n0, CAP - n0), c1 = Math.min(t.n1, CAP - n1);
+      // Tiles are generated in stable hash order; retaining a prefix is a
+      // deterministic far-density reduction and does not make trees shuffle.
+      const c0 = Math.min(Math.floor(t.n0 * this.displayDensity), CAP - n0);
+      const c1 = Math.min(Math.floor(t.n1 * this.displayDensity), CAP - n1);
       if (c0 > 0) { a0.set(t.m0.subarray(0, c0 * 16), n0 * 16); n0 += c0; }
       if (c1 > 0) { a1.set(t.m1.subarray(0, c1 * 16), n1 * 16); n1 += c1; }
     }

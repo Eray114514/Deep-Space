@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js",
+    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js",
     "test:galaxy": "node tools/galaxycatalogtest.js",
     "test:starmap": "node tools/starmaptest.js",
     "test:artificial": "node tools/artificialtest.js && node tools/artificialplaytest.js",
@@ -18,6 +18,9 @@
     "test:terrain": "node tools/sanity.js",
     "test:gameplay": "node tools/gameplaytest.js",
     "test:performance": "node tools/perftest.js",
+    "test:graphics": "node tools/waterinteractiontest.js && node tools/graphicsplaytest.js",
+    "test:visual-smoke": "node tools/visualsmoke.js",
+    "test:vegetation": "node tools/vegetationtest.js",
     "test:rift": "node tools/rifttest.js",
     "test:pointerlock": "node tools/pointerlocktest.js",
     "test:astronomy:browser": "node tools/astroplaytest.js",

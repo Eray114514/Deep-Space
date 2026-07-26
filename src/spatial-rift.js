@@ -1,5 +1,11 @@
+import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
+
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
-const implementation = await import(params?.get('renderer') === 'webgpu'
+const settings = resolveGraphicsSettings({ params: params || new URLSearchParams() });
+const useNodeMaterials = resolveRendererPolicy(rendererParamsForSettings(settings,
+  params || new URLSearchParams())).backend === 'webgpu';
+const implementation = await import(useNodeMaterials
   ? './spatial-rift-node.js'
   : './spatial-rift-webgl.js');
 

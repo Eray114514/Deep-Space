@@ -18,25 +18,32 @@ import { makeCloudVolumeMaterial } from './clouds.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { floraPalette } from './flora.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
+import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
 
-const USE_NODE_MATERIALS = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('renderer') === 'webgpu';
+const rendererParams = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  rendererParamsForSettings(rendererSettings, rendererParams)).backend === 'webgpu';
 
 // Volumetric clouds are the primary cloud representation in every runtime
 // quality tier. Low quality changes only the ray budget and volume-buffer
 // resolution; it never swaps to a different flat weather rendering.
 let volumetricCloudsEnabled = typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('vclouds') !== '0';
-let volumetricCloudQuality = typeof location !== 'undefined'
-  && new URLSearchParams(location.search).get('quality') === 'low' ? 'low' : 'high';
+let volumetricCloudProfile = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('quality') === 'low'
+  ? { quality: 'performance', steps: 48 } : { quality: 'ultra', steps: 124 };
 
 // GPU auto-tiering happens after the WebGL renderer identifies the adapter,
 // but before the first Universe is constructed. Keeping this as a runtime
 // capability (rather than URL-only constants) also covers the auto-low iGPU
 // path selected after renderer creation.
-export function setVolumetricCloudsEnabled(enabled, quality = volumetricCloudQuality) {
+export function setVolumetricCloudsEnabled(enabled, profile = volumetricCloudProfile) {
   volumetricCloudsEnabled = !!enabled;
-  volumetricCloudQuality = quality === 'low' ? 'low' : 'high';
+  volumetricCloudProfile = typeof profile === 'string'
+    ? { quality: profile === 'low' ? 'performance' : 'ultra', steps: profile === 'low' ? 48 : 124 }
+    : { quality: profile.quality || 'balanced', steps: Math.max(8, Math.min(124, profile.steps || 80)) };
 }
 
 export const TYPES = {
@@ -208,10 +215,9 @@ export class Planet {
     this.canonicalMaxLevel = clamp(Math.round(Math.log2(rootCell / 1.5)), 4, 13);
     this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
-    // 8/3× grouping is intentionally wider than the old 2× prototype. The
-    // renderer oversamples the same authored frequency cap, improving curved
-    // silhouettes and reducing chunk-edge overhead without changing terrain
-    // identity, collision height, or the canonical universe lock.
+    // Grouping reduces draw overhead without sacrificing the authored finest
+    // vertex spacing. Keep the near field within one level of canonical so
+    // performance profiles never turn the terrain under the player low-poly.
     const lowTierGrouping = canonicalGridCells <= 18;
     const wideGroupFactor = lowTierGrouping ? 4 : (8 / 3);
     this.gridCells = Math.round(canonicalGridCells * wideGroupFactor);
@@ -828,7 +834,7 @@ export class Planet {
         };
         this.volCloudMat = makeCloudVolumeMaterial(
           this, band, detailTexture(), this.cloudShadowTex,
-          { quality: volumetricCloudQuality });
+          volumetricCloudProfile);
         this.volCloudMat.uniforms.uAmbC.value
           .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.58);
         this.volCloudMesh = new THREE.Mesh(
@@ -1027,6 +1033,9 @@ export class Planet {
         if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
+        if (this.cloudMesh.material.userData.opacityNodeUniform) {
+          this.cloudMesh.material.userData.opacityNodeUniform.value = this.cloudMesh.material.opacity;
+        }
         this.cloudMesh.visible = this.cloudMesh.material.opacity > 0.005;
       }
     }
@@ -1037,6 +1046,9 @@ export class Planet {
       if (this.volCloudMesh) {
         const e = clamp(this.volumeBlend || 0, 0, 1);
         this.cloudMesh2.material.opacity = 0.28 * (1 - e);
+        if (this.cloudMesh2.material.userData.opacityNodeUniform) {
+          this.cloudMesh2.material.userData.opacityNodeUniform.value = this.cloudMesh2.material.opacity;
+        }
         this.cloudMesh2.visible = this.cloudMesh2.material.opacity > 0.005;
       } else {
         // Headless generation and explicit ?vclouds=0 retain the analytic

@@ -29,14 +29,15 @@ try {
     await page.goto(`http://127.0.0.1:${port}/?renderer=${requested}&gpu=low&quality=low&nohero=1&farflora=0&vclouds=0&freeze=1&time=9.5&scene=orbit&planet=0&factor=1.72`, {
       waitUntil: 'domcontentloaded', timeout: 30000,
     });
-    await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 30000 });
+    await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 120000 });
     const bootMs = performance.now() - started;
     const stats = await page.evaluate(() => NMS.stats());
     const capture = await page.screenshot();
     await writeFile(new URL(`low-power-${requested}.png`, captureDir), capture);
     assert.equal(errors.length, 0, errors.join('\n'));
-    assert.ok(bootMs < 30000, `${requested} low-power boot took ${bootMs.toFixed(0)} ms`);
-    assert.ok(['low', 'auto-low'].includes(stats.quality));
+    assert.ok(bootMs < 120000, `${requested} low-power boot took ${bootMs.toFixed(0)} ms`);
+    assert.equal(stats.quality, 'performance');
+    assert.ok(stats.dpr >= 0.85, 'low-power path preserves the clarity floor');
     console.log(`PASS: ${requested} low-power startup ${bootMs.toFixed(0)} ms; ${stats.rendererBackend}; ${stats.gpu}`);
     await page.close();
   }

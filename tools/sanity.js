@@ -142,7 +142,10 @@ for (const type of Object.keys(TYPES)) {
         for (let i = 0; i < im.count; i++) {
           im.getMatrixAt(i, m4);
           const x = m4.elements[12], y = m4.elements[13], z = m4.elements[14];
-          map.set(kind + ':' + x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3), [x, y, z]);
+          // Grass deliberately migrates between near/mid/far geometry pools.
+          // Its world-space candidate is the identity; the LOD pool is not.
+          const stableKind = kind.startsWith('grass') ? 'grass' : kind;
+          map.set(stableKind + ':' + x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3), [x, y, z]);
         }
       }
       return { map, cnt };
