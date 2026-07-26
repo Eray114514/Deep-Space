@@ -12,12 +12,11 @@
 // forest.
 
 import * as THREE from 'three';
-import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { positionLocal, uniform, vertexColor } from 'three/tsl';
+import { resolveRendererPolicy } from './renderer-policy.js';
+import { applyFarFadeV2 } from './flora-system.js';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
 
 const rendererParams = typeof location !== 'undefined'
   ? new URLSearchParams(location.search) : new URLSearchParams();
@@ -92,17 +91,7 @@ function applyFarFade(mat, uniforms) {
     mat.customProgramCacheKey = () => 'far-flora';
     return mat;
   }
-  const alt = uniform(uniforms.uAltK.value).onFrameUpdate(() => uniforms.uAltK.value);
-  const nodeMaterial = new MeshStandardNodeMaterial({
-    color: 0xffffff, vertexColors: true, roughness: mat.roughness,
-    flatShading: mat.flatShading,
-  });
-  nodeMaterial.positionNode = positionLocal.mul(alt.mul(1.15));
-  nodeMaterial.colorNode = vertexColor();
-  nodeMaterial.emissiveNode = vertexColor().mul(0.12);
-  nodeMaterial.userData.nodeMaterial = 'far-flora-v1';
-  mat.dispose();
-  return nodeMaterial;
+  return applyFarFadeV2(mat, uniforms);
 }
 
 export class FarFlora {
@@ -134,26 +123,19 @@ export class FarFlora {
   }
 
   setPlanet(planet) {
+    // 植物系统重做中 — 完全禁用远景植物(proxy tree)渲染。
+    // 现有实现的问题:applyFarFadeV2 用 positionLocal.sub(uCamL) 算距离,
+    // TSL positionLocal 不含 instanceMatrix,所有实例同步位移→石头/树同步抖动;
+    // positionNode = positionLocal.sub(positionGeometry.mul(1-g)) 在 g 变化时
+    // 顶点偏移每帧变化→幅度抖动。代码保留供重做参考。
     this.clear();
-    this.planet = planet;
-    if (!planet) return;
-    const flora = planet.flora || (planet.flora = buildFlora(planet));
-    this.meshes = [flora.far0, flora.far1].map((geo) => {
-      let mat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, vertexColors: true, roughness: 0.95, flatShading: true,
-      });
-      mat.emissive.setScalar(0.22);
-      mat = applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
-      const im = new THREE.InstancedMesh(geo, mat, CAP);
-      im.count = 0;
-      im.visible = false;
-      im.frustumCulled = false;
-      im.receiveShadow = true;
-      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      planet.group.add(im);
-      return im;
-    });
+    this.planet = null;
+    return;
   }
+  // 原始远景植物创建代码已禁用(重做中)。保留如下供参考:
+  // const flora = planet.flora || (planet.flora = buildFlora(planet));
+  // this.meshes = [flora.far0, flora.far1].map((geo) => { ... applyFarFade ... });
+  // 详见 git 历史或 docs/optimization-roadmap.md 批次 C。
 
   clear() {
     if (this.planet && this.meshes) {

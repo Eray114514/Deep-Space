@@ -4,8 +4,8 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial, MeshPhysicalNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu';
 import {
-  abs, acos, atan, attribute, color, cos, dot, exp, float, fract, instanceIndex, length, mix,
-  mx_fractal_noise_float, normalLocal, normalView, normalViewGeometry, positionLocal,
+  abs, acos, atan, attribute, color, cos, cross, dot, exp, float, fract, instanceIndex, length, mix,
+  mx_fractal_noise_float, normalLocal, normalView, normalViewGeometry, positionGeometry, positionLocal,
   positionView, positionViewDirection, pow, select, sign, sin, smoothstep, texture, time,
   transformNormalToView, uniform,
   vec2, vec3, vertexColor,
@@ -298,13 +298,16 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     material.colorNode = mix(material.colorNode, uMistColor, mist);
   }
 
-  // NodeMaterial normalNode consumes a tangent-space perturbation. Supplying
-  // a planet-local radial vector here made the WebGPU path reinterpret object
-  // coordinates as tangent coordinates, blacking out most of the lit
-  // hemisphere. Keep the geometric normal authoritative until the detail
-  // gradient has been converted through a proper TBN node below the 15 m
-  // micro-detail range.
+  // Micro-relief: bend the shading normal with the detail gradient and the
+  // KTX2 surface normal maps. A proper TBN (tangent/bitangent from the
+  // geometric normal) carries the perturbation into the same space the
+  // PBR N·L uses; transformNormalToView hands the result to NodeMaterial's
+  // view-space normal slot. The earlier tangent-space (gx, gy, 1) shortcut
+  // made the ground black when looking up (N·L→0 at oblique angles).
   {
+    const nrm = normalLocal.normalize();
+    const tang = nrm.cross(vec3(0, 1, 0)).add(vec3(1e-4, 1e-4, 1e-4)).normalize();
+    const bitn = nrm.cross(tang);
     const dx = vec3(0.35, 0, 0), dy = vec3(0, 0.35, 0);
     const gx = triDetail(local.add(dx), 1 / 3.2, 'g')
       .sub(triDetail(local.sub(dx), 1 / 3.2, 'g'));
@@ -315,8 +318,9 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     const grassNormal = grassNormalMap.sample(surfaceUv).xy.mul(2).sub(1);
     const rockNormal = rockNormalMap.sample(surfaceUv.mul(0.78).add(0.17)).xy.mul(2).sub(1);
     const scanNormal = mix(grassNormal, rockNormal, pbrRock).mul(scanNear).mul(0.34);
-    material.normalNode = vec3(gx.mul(detailStrength).add(scanNormal.x),
-      gy.mul(detailStrength).add(scanNormal.y), 1).normalize();
+    const bend = tang.mul(gx.add(scanNormal.x)).add(bitn.mul(gy.add(scanNormal.y)))
+      .mul(detailStrength);
+    material.normalNode = transformNormalToView(nrm.add(bend).normalize());
   }
 
   material.userData.shader = { uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK } };
@@ -466,13 +470,33 @@ export const GROW = { value: 1 };
 export function applyWindSway(source, amount, foliageLighting = false) {
   const material = copyMaterialFlags(source, new MeshStandardNodeMaterial({
     roughness: source.roughness, metalness: source.metalness,
+    emissive: source.emissive?.clone?.() || new THREE.Color(),
+    emissiveIntensity: source.emissiveIntensity ?? 1,
   }));
   const grow = uniform(GROW.value).onFrameUpdate(() => GROW.value);
   const clock = uniform(TIME.value).onFrameUpdate(() => TIME.value);
-  const phase = fract(float(instanceIndex).mul(0.6180339)).mul(6.28318);
-  const height = positionLocal.y.max(0);
-  const sway = sin(clock.mul(1.6).add(phase)).add(sin(clock.mul(3.7).add(phase.mul(1.7))).mul(0.4))
-    .mul(amount).mul(height);
+  // Phase based on instance position (via positionLocal, which carries the
+  // instance translation) — matches the WebGL deck's
+  // ph = ip.x*0.61 + ip.y*0.53 + ip.z*0.47. Using instanceIndex gave every
+  // neighbouring blade a random phase, so the whole field oscillated
+  // out-of-sync and read as "earthquake jitter".
+  const phase = positionLocal.x.mul(0.61)
+    .add(positionLocal.y.mul(0.53))
+    .add(positionLocal.z.mul(0.47));
+  // positionGeometry is the raw attribute — untouched by instancing — so its
+  // y gives the true 0–5 m local height the sway was tuned against. Using
+  // positionLocal.y would read the world-space coordinate (~90k) and produce
+  // enormous sway offsets (the "plants flying into the sky" bug).
+  const height = positionGeometry.y.max(0);
+  const swayX = sin(clock.mul(1.6).add(phase))
+    .add(sin(clock.mul(3.7).add(phase.mul(1.7))).mul(0.4))
+    .mul(amount).mul(height).mul(grow);
+  const swayZ = cos(clock.mul(1.3).add(phase.mul(1.3)))
+    .add(sin(clock.mul(2.9).add(phase)).mul(0.4))
+    .mul(amount).mul(height).mul(0.7).mul(grow);
+  // Surface interaction pressure (landing/collision push). positionLocal is
+  // used here (not positionGeometry) because the anchor attribute is in
+  // instance-local space and the instance matrix is already applied.
   const anchor = attribute('iAnchor', 'vec3');
   let pressure = float(0);
   for (let i = 0; i < surfaceInteraction.positions.length; i++) {
@@ -484,13 +508,21 @@ export function applyWindSway(source, amount, foliageLighting = false) {
   }
   const tip = smoothstep(0, 0.65, height);
   const push = pressure.mul(tip);
-  material.positionNode = positionLocal.mul(grow)
-    .add(vec3(sway.add(sin(phase).mul(push).mul(0.7)),
-      height.mul(push).mul(-0.68), sway.mul(0.7).add(cos(phase).mul(push).mul(0.7))));
+  // Do NOT multiply positionLocal by grow: it includes the instance
+  // translation, so scaling it would drag every plant toward the world
+  // origin. Grow only modulates sway strength; visibility is handled by
+  // scatter via mesh.visible.
+  material.positionNode = positionLocal
+    .add(vec3(swayX.add(sin(phase).mul(push).mul(0.7)),
+      height.mul(push).mul(-0.68), swayZ.add(cos(phase).mul(push).mul(0.7))));
   material.colorNode = source.vertexColors ? vertexColor() : uniform(source.color?.clone() || new THREE.Color(1, 1, 1));
   if (foliageLighting) material.normalNode = normalViewGeometry;
-  if (source.emissive) material.emissiveNode = uniform(source.emissive.clone())
-    .mul(source.vertexColors ? vertexColor() : 1);
+  // emissive is already set via constructor (emissive/emissiveIntensity).
+  // For vertex-coloured flora, multiply emissive by vertex colour to match
+  // the WebGL deck's totalEmissiveRadiance *= vColor.rgb.
+  if (source.vertexColors && source.emissive) {
+    material.emissiveNode = uniform(source.emissive.clone()).mul(vertexColor());
+  }
   material.userData.nodeMaterial = 'wind-sway-v2-interaction';
   source.dispose?.();
   return material;

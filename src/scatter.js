@@ -146,60 +146,18 @@ export class Scatter {
   }
 
   setPlanet(planet) {
+    // 植物系统重做中 — 完全禁用地表植物渲染。
+    // 现有实现的问题:TSL positionLocal 不含 instanceMatrix,phase 无法基于
+    // 实例位置(同步摆动=地震感);GROW 每帧变化导致幅度抖动;emissive 丢失。
+    // 代码保留供重做参考。
     this.clear();
-    this.planet = planet;
-    if (!planet) return;
-    const colors = propColors(planet);
-    for (const kind of Object.keys(GEO)) {
-      // a touch of self-light keeps the stylized props readable in shadow
-      const glow = kind === 'crystal' ? 0.35
-        : (kind === 'rock' || kind === 'boulder') ? 0.08 : 0.3;
-      let mat = new THREE.MeshStandardMaterial({
-        color: colors[kind], roughness: 0.95, flatShading: true,
-        emissive: colors[kind].clone().multiplyScalar(glow),
-      });
-      mat = applyWindSway(mat, SWAY[kind] || 0);   // 0 sway still wires the grow scale
-      this.addMesh(planet, kind, GEO[kind], mat);
-    }
-    // this world's own species: geometry seeded by the planet, colours baked
-    // per-vertex (material stays white; instance colour adds per-plant drift).
-    // The planet owns the geometries — the far tier shares them.
-    this.flora = planet.flora || (planet.flora = buildFlora(planet));
-    for (const kind of FLORA_KINDS) {
-      let mat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, vertexColors: true, roughness: 0.9,
-        // grass carries hand-authored up-normals (field-soft lighting) that
-        // flat shading would discard
-        flatShading: kind !== 'grass', side: THREE.DoubleSide,
-      });
-      mat.emissive.setScalar(FLORA_GLOW[kind]);
-      mat = applyWindSway(mat, SWAY[kind] || 0);
-      const im = this.addMesh(planet, kind, this.flora[kind], mat);
-    }
-    for (const [kind, geometryKey] of GRASS_LODS) {
-      let mat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, vertexColors: true, roughness: 0.94,
-        flatShading: false, side: THREE.DoubleSide,
-      });
-      mat.emissive.copy(this.flora.grassTint).multiplyScalar(FLORA_GLOW.grass);
-      // Grass is a paper-thin blade but both sides represent the same upward
-      // leaf surface.  Tell both renderer paths not to invert its lighting
-      // normal on back faces.
-      mat = applyWindSway(mat, SWAY[kind], true);
-      const im = this.addMesh(planet, kind, this.flora[geometryKey], mat);
-      im.castShadow = false;
-    }
-    for (const kind in this.meshes) {
-      const cap = capFor(kind);
-      const im = this.meshes[kind];
-      im.setColorAt(0, _ic.setRGB(1, 1, 1));
-      this.staging[kind] = {
-        matrix: new Float32Array(cap * 16),
-        color: new Float32Array(cap * 3),
-      };
-    }
-    this.lastKey = '';
+    this.planet = null;
+    return;
   }
+  // 原始植物创建代码已禁用(重做中)。保留如下供参考:
+  // const colors = propColors(planet);
+  // ...GEO/FLORA_KINDS/GRASS_LODS 材质创建 + addMesh...
+  // 详见 git 历史或 docs/optimization-roadmap.md 批次 C。
 
   addMesh(planet, kind, geo, mat) {
     const im = new THREE.InstancedMesh(geo, mat, capFor(kind));
