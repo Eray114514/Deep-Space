@@ -229,9 +229,22 @@ export class ChunkedLOD {
     if (this._orbitCapped == null) this._orbitCapped = radiusRatio > 1.12;
     else if (this._orbitCapped && radiusRatio < 1.08) this._orbitCapped = false;
     else if (!this._orbitCapped && radiusRatio > 1.16) this._orbitCapped = true;
-    this._levelCap = this._orbitCapped && Number.isFinite(this.planet.orbitLevelCap)
-      ? Math.min(this.planet.maxLevel, this.planet.orbitLevelCap)
-      : this.planet.maxLevel;
+    if (this._orbitCapped && Number.isFinite(this.planet.orbitLevelCap)) {
+      // "Orbit" spans a full-disk view and a planet-filling 120 km approach;
+      // one fixed cap cannot serve both. The old level-4 cap left ~2.7 km
+      // triangles on the 900 km homeworld until only 72 km above terrain,
+      // exactly the broad polygonal facets visible in orbital descent. Add
+      // detail continuously through the approach while retaining the cheap
+      // full-disk cap at long range.
+      let approachLevels = 0;
+      if (radiusRatio < 1.32) approachLevels++;
+      if (radiusRatio < 1.20) approachLevels++;
+      if (radiusRatio < 1.12) approachLevels++;
+      this._levelCap = Math.min(this.planet.maxLevel,
+        this.planet.orbitLevelCap + approachLevels);
+    } else {
+      this._levelCap = this.planet.maxLevel;
+    }
     // a planet that fills the screen must never show a polygonal limb:
     // force a minimum subdivision depth from its apparent size
     const d = Math.max(camLocal.length() - this.planet.R, 1);
@@ -498,35 +511,7 @@ export class ChunkedLOD {
 
         faceFn(u, v, _dirV).normalize();
         sampleSurface(p, _dirV, maxFreq, eps, _p0, _n);
-        const onHorizontalEdge = node.level > 0 && (j === 0 || j === N);
-        const onVerticalEdge = node.level > 0 && (i === 0 || i === N);
-        const edgeConstrained = onHorizontalEdge || onVerticalEdge;
-        if (edgeConstrained) {
-          // A child has twice as many edge samples as the corresponding half
-          // of its parent. Constrain every child boundary to the parent's
-          // actual piecewise-linear edge: even samples hit parent vertices;
-          // odd samples interpolate the same parent chord. This makes equal-
-          // and mixed-level neighbours share one watertight position without
-          // exposing radial skirts as dark dotted seams.
-          const edgeIndex = onHorizontalEdge ? i : j;
-          const edge0 = edgeIndex - (edgeIndex % 2);
-          const edge1 = Math.min(N, edge0 + 2);
-          const edgeT = (edgeIndex - edge0) / Math.max(1, edge1 - edge0);
-          const u0 = onHorizontalEdge
-            ? node.u0 + (node.u1 - node.u0) * (edge0 / N) : u;
-          const u1 = onHorizontalEdge
-            ? node.u0 + (node.u1 - node.u0) * (edge1 / N) : u;
-          const v0 = onHorizontalEdge
-            ? v : node.v0 + (node.v1 - node.v0) * (edge0 / N);
-          const v1 = onHorizontalEdge
-            ? v : node.v0 + (node.v1 - node.v0) * (edge1 / N);
-          faceFn(u0, v0, _edgeD0).normalize();
-          faceFn(u1, v1, _edgeD1).normalize();
-          sampleSurface(p, _edgeD0, parentFreq, eps * 2, _edgeP0, _edgeN0);
-          sampleSurface(p, _edgeD1, parentFreq, eps * 2, _edgeP1, _edgeN1);
-          _p0.lerpVectors(_edgeP0, _edgeP1, edgeT);
-          _n.lerpVectors(_edgeN0, _edgeN1, edgeT).normalize();
-        }
+        const edgeConstrained = false;
         let h = _p0.length() - p.R;
         let slope = Math.max(0, 1 - _n.dot(_dirV));
 
@@ -550,12 +535,7 @@ export class ChunkedLOD {
         if (hasMorph) {
           // the same vertex as the parent level sees it (coarser cutoff,
           // parent's sampling eps) — stored relative to the fine vertex
-          if (edgeConstrained) {
-            _cP.copy(_p0);
-            _cN.copy(_n);
-          } else {
-            sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
-          }
+          sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
           dPos[idx * 3] = _cP.x - _p0.x;
           dPos[idx * 3 + 1] = _cP.y - _p0.y;
           dPos[idx * 3 + 2] = _cP.z - _p0.z;
