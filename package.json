@@ -16,6 +16,8 @@
     "test:natural-nodes": "node tools/naturalnodetest.js",
     "test:sysview": "node tools/sysviewtest.js",
     "test:terrain": "node tools/sanity.js",
+    "test:stage-a": "node tools/stageatest.js && node tools/terrainnoisediag.js && node tools/stageavisualtest.js",
+    "test:stage-b": "node tools/stagebatmospheretest.js && node tools/weathertest.js && node tools/stagebtest.js && node tools/stagebvisualtest.js",
     "test:gameplay": "node tools/gameplaytest.js",
     "test:performance": "node tools/perftest.js",
     "test:graphics": "node tools/waterinteractiontest.js && node tools/graphicsplaytest.js",

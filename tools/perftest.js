@@ -57,6 +57,29 @@ try {
     settled = false;
   }
   await page.waitForTimeout(1000);
+  const featureMask = {
+    terrain: process.env.PERF_TERRAIN !== '0',
+    water: process.env.PERF_WATER !== '0',
+    shadows: process.env.PERF_SHADOWS !== '0',
+  };
+  if (!featureMask.terrain || !featureMask.water || !featureMask.shadows) {
+    await page.evaluate((mask) => {
+      const hideTree = (lod) => {
+        if (!lod) return;
+        lod.update = () => {};
+        const hide = (node) => {
+          if (node.mesh) node.mesh.visible = false;
+          if (node.children) node.children.forEach(hide);
+        };
+        lod.roots.forEach(hide);
+      };
+      for (const planet of NMS._internals.universe.planets()) {
+        if (!mask.terrain) hideTree(planet.lod);
+        if (!mask.water) hideTree(planet.waterLod);
+      }
+      if (!mask.shadows) NMS._renderer.shadowMap.enabled = false;
+    }, featureMask);
+  }
   await page.evaluate(() => NMS.resetAdaptiveQuality());
   await page.waitForTimeout(Number(process.env.PERF_ADAPT_MS) || 15000);
   await page.evaluate(() => NMS.resetPerformanceStats());
@@ -104,6 +127,7 @@ try {
     || (result.stats.quality === 'ultra' ? 50 : result.stats.quality === 'performance' ? 30 : 38);
   const report = {
     viewport: `${width}x${height}`,
+    featureMask,
     bootMs,
     settleMs,
     settled,
