@@ -1,5 +1,8 @@
 import * as THREE from 'three/webgpu';
-import { float, max, mix, pass, rtt, uniform, vec4 } from 'three/tsl';
+import {
+  abs, exp, float, floor, fract, logarithmicDepthToViewZ, max, mix, pass, rtt,
+  screenUV, uniform, vec2, vec4,
+} from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { SKY_BACKDROP_LAYER } from './render-layers.js';
@@ -12,6 +15,71 @@ function over(base, overlay) {
   // premultiplied equation below).
   return vec4(overlay.rgb.add(base.rgb.mul(float(1).sub(overlay.a))),
     overlay.a.add(base.a.mul(float(1).sub(overlay.a))));
+}
+
+function depthGuidedVolumeUpsample(volumeTexture, sceneDepthTexture, nodes) {
+  // Reconstruct the four texels that hardware bilinear filtering would blend,
+  // then reject taps across an opaque-depth discontinuity. A half-resolution
+  // cloud texel at the planet limb otherwise contains a long background ray
+  // and gets interpolated across nearby terrain as a blue/white halo.
+  const volumePixel = screenUV.mul(nodes.uVolumeResolution).sub(0.5);
+  const basePixel = floor(volumePixel);
+  const fraction = fract(volumePixel);
+  const invResolution = vec2(1).div(nodes.uVolumeResolution);
+  const uv00 = basePixel.add(vec2(0.5, 0.5)).mul(invResolution).clamp(0, 1);
+  const uv10 = basePixel.add(vec2(1.5, 0.5)).mul(invResolution).clamp(0, 1);
+  const uv01 = basePixel.add(vec2(0.5, 1.5)).mul(invResolution).clamp(0, 1);
+  const uv11 = basePixel.add(vec2(1.5, 1.5)).mul(invResolution).clamp(0, 1);
+  const oneMinusX = float(1).sub(fraction.x);
+  const oneMinusY = float(1).sub(fraction.y);
+
+  const centerRawDepth = sceneDepthTexture.sample(screenUV).r;
+  const centerHasDepth = nodes.uDepthReversed.greaterThan(0.5)
+    .select(centerRawDepth.greaterThan(0.000001),
+      centerRawDepth.lessThan(0.999999));
+  const centerViewDepth = logarithmicDepthToViewZ(
+    centerRawDepth,
+    nodes.uCameraNear,
+    nodes.uCameraFar,
+  ).negate().max(0);
+
+  const guidedTap = (uv, spatialWeight) => {
+    const tapRawDepth = sceneDepthTexture.sample(uv).r;
+    const tapHasDepth = nodes.uDepthReversed.greaterThan(0.5)
+      .select(tapRawDepth.greaterThan(0.000001),
+        tapRawDepth.lessThan(0.999999));
+    const tapViewDepth = logarithmicDepthToViewZ(
+      tapRawDepth,
+      nodes.uCameraNear,
+      nodes.uCameraFar,
+    ).negate().max(0);
+    // Relative view-space depth makes the edge threshold stable from cockpit
+    // metres to a 900 km planet. Two metres keep nearby coplanar geometry from
+    // being rejected by float/log-depth quantisation.
+    const depthScale = max(centerViewDepth, tapViewDepth).mul(0.0125).add(2);
+    const relativeDelta = abs(centerViewDepth.sub(tapViewDepth)).div(depthScale);
+    const sameSurfaceWeight = exp(relativeDelta.mul(relativeDelta).negate());
+    // Background and opaque samples are different ownership classes. Never
+    // borrow a full-atmosphere background ray for an opaque silhouette pixel,
+    // or an opaque-clipped ray for a sky pixel.
+    const depthWeight = centerHasDepth.select(
+      tapHasDepth.select(sameSurfaceWeight, 0),
+      tapHasDepth.select(0, 1),
+    );
+    const weight = spatialWeight.mul(depthWeight);
+    return { color: volumeTexture.sample(uv).mul(weight), weight };
+  };
+
+  const tap00 = guidedTap(uv00, oneMinusX.mul(oneMinusY));
+  const tap10 = guidedTap(uv10, fraction.x.mul(oneMinusY));
+  const tap01 = guidedTap(uv01, oneMinusX.mul(fraction.y));
+  const tap11 = guidedTap(uv11, fraction.x.mul(fraction.y));
+  const weightSum = tap00.weight.add(tap10.weight).add(tap01.weight).add(tap11.weight);
+  // If a sub-pixel opaque feature has no matching low-resolution tap, zero
+  // volume is the conservative result. Dividing by epsilon preserves that
+  // transparent result instead of falling back to the leaking center sample.
+  return tap00.color.add(tap10.color).add(tap01.color).add(tap11.color)
+    .div(weightSum.max(0.00001));
 }
 
 export class GameNodePipeline {
@@ -29,6 +97,11 @@ export class GameNodePipeline {
     this.renderer = renderer;
     this.camera = camera;
     this.volumeScale = volumeScale;
+    this._volumeResolution = uniform(new THREE.Vector2(1, 1));
+    this._volumeUpsample = uniform(volumeScale < 0.999 ? 1 : 0);
+    this._volumeNear = uniform(camera.near);
+    this._volumeFar = uniform(camera.far);
+    this._volumeDepthReversed = uniform(renderer.reversedDepthBuffer ? 1 : 0);
     this.pipeline = new THREE.RenderPipeline(renderer);
     this.scenePass = pass(scene, camera, { samples: 4 });
     this.scenePass.name = 'Main scene';
@@ -52,8 +125,27 @@ export class GameNodePipeline {
       this.volumePass.name = 'Local volume layer';
       this.volumePass.setLayers(layers);
       this.volumePass.setResolutionScale(volumeScale);
-      colorNode = over(colorNode, this.volumePass.getTextureNode('output'));
+      const volumeTexture = this.volumePass.getTextureNode('output');
+      const guidedVolume = depthGuidedVolumeUpsample(
+        volumeTexture,
+        this.scenePass.getTextureNode('depth'),
+        {
+          uVolumeResolution: this._volumeResolution,
+          uCameraNear: this._volumeNear,
+          uCameraFar: this._volumeFar,
+          uDepthReversed: this._volumeDepthReversed,
+        },
+      );
+      // Full-resolution volume needs no reconstruction. Keeping the direct
+      // path also makes scale=1 an exact reference for visual diagnostics.
+      const reconstructedVolume = mix(
+        volumeTexture.sample(screenUV),
+        guidedVolume,
+        this._volumeUpsample,
+      );
+      colorNode = over(colorNode, reconstructedVolume);
     }
+    this._syncVolumeResolution();
 
     // Travel distortion owns the complete world image. Applying it before
     // atmosphere/cloud compositing left the solid planet warped while its
@@ -110,13 +202,25 @@ export class GameNodePipeline {
     };
   }
 
+  _syncVolumeResolution() {
+    this.renderer.getDrawingBufferSize(this._volumeResolution.value);
+    this._volumeResolution.value.multiplyScalar(this.volumeScale).floor();
+    this._volumeResolution.value.max(new THREE.Vector2(1, 1));
+    this._volumeNear.value = this.camera.near;
+    this._volumeFar.value = this.camera.far;
+    this._volumeDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
+  }
+
   setSize() {
     // PassNode and BloomNode follow the renderer drawing-buffer size.
+    this._syncVolumeResolution();
   }
 
   setVolumeScale(scale) {
     this.volumeScale = THREE.MathUtils.clamp(scale, 0.3, 1);
     this.volumePass?.setResolutionScale(this.volumeScale);
+    this._volumeUpsample.value = this.volumeScale < 0.999 ? 1 : 0;
+    this._syncVolumeResolution();
   }
 
   setSunShafts({ x = 0.5, y = 0.5, strength = 0, color = null } = {}) {
@@ -127,6 +231,7 @@ export class GameNodePipeline {
 
   bindVolumeDepth(planet) {
     if (!planet || !this.volumePass) return false;
+    this._syncVolumeResolution();
     let bound = false;
     for (const material of [planet.atmoMesh?.material, planet.volCloudMat]) {
       const uniforms = material?.uniforms;
