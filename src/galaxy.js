@@ -20,6 +20,8 @@ import { buildCivilizationSites, civilizationSitesForSystem } from './civilizati
 import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
+import { applySystemBodyTuning } from './world-config.js';
+import { blackbodyLinearRgb, buildStellarLightField } from './stellar-radiometry.js';
 
 export { CELL } from './galaxy-layout.js';
 
@@ -509,11 +511,17 @@ export class Universe {
   relativizeSystem(sys, camPos) {
     const d = camPos.distanceTo(sys.star.pos);
     const tg = clamp((4.2e9 - d) / 2.2e9, 0, 1);
-    for (const starView of sys.starViews) {
+    const stellarField = sys.stellarLightFieldFrom(camPos);
+    const totalLuminosity = sys.starViews.reduce(
+      (sum, view) => sum + view.spec.luminositySolar, 0);
+    const systemIntensity = 3.2 * clamp(Math.sqrt(totalLuminosity), 0.7, 2.2)
+      * clamp((FADE_DIST - d) / 3e9, 0, 1);
+    for (let index = 0; index < sys.starViews.length; index++) {
+      const starView = sys.starViews[index];
       starView.group.position.copy(starView.positionUniv).sub(camPos);
       starView.light.position.copy(starView.group.position);
-      starView.light.intensity = 3.2 * Math.min(2.2, Math.sqrt(starView.spec.luminositySolar))
-        * clamp((FADE_DIST - d) / 3e9, 0, 1);
+      starView.light.intensity = systemIntensity
+        * (stellarField.sources[index]?.irradianceFraction || 0);
       starView.glow.material.opacity = tg * tg * (3 - 2 * tg) * (starView.glowExt ?? 1);
     }
     for (const p of [...sys.planets, ...sys.compactObjects]) {
@@ -593,13 +601,16 @@ export class StarSystem {
   constructor(universe, star, { deferred = false, fadeInPlanets = deferred, timeHours = 0 } = {}) {
     this.universe = universe;
     this.star = star;
-    this.spec = generateSystemSpec(universe.seed, star);
+    this.spec = applySystemBodyTuning(
+      generateSystemSpec(universe.seed, star),
+      (bodyId) => universe.bodyTuning?.(star.id, bodyId) || null,
+    );
     this.name = this.spec.name;
     this.catalogId = this.spec.catalogId;
     this.isHome = this.spec.isHome;
     this.starViews = this.spec.stars.map((spec) => {
       const group = new THREE.Group();
-      const color = new THREE.Color(spec.color);
+      const color = new THREE.Color().fromArray(blackbodyLinearRgb(spec.temperatureK));
       const material = new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(4), fog: false });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(spec.radiusRender, 48, 32), material);
       group.add(mesh);
@@ -608,7 +619,7 @@ export class StarSystem {
         transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
       }));
       glow.scale.setScalar(spec.radiusRender * 7); group.add(glow);
-      const light = new THREE.PointLight(color.clone().lerp(new THREE.Color(0xffffff), 0.7), 3.2, 0, 0);
+      const light = new THREE.PointLight(color, 3.2, 0, 0);
       universe.group.add(group, light);
       return { spec, group, mesh, glow, light, baseColor: material.color.clone(), glowBase: glow.material.color.clone(), glowExt: 1, positionUniv: star.pos.clone() };
     });
@@ -669,7 +680,7 @@ export class StarSystem {
     planet.orbitIndex = s.orbitIndex;
     if (s.parentId) planet.parentPlanet = this.bodyById.get(s.parentId) || null;
     planet.setFrame(frame.orientation);
-    planet.setSunDir(this.sunDirFrom(frame.position, _v));
+    planet.setStellarLights?.(this.stellarLightFieldFrom(frame.position));
     this.planets.push(planet);
     this.bodyById.set(s.bodyId, planet);
     this.universe.group.add(planet.group);
@@ -752,7 +763,9 @@ export class StarSystem {
       const body = this.bodyById.get(spec.bodyId);
       if (!body) continue;
       body.posUniv.copy(frame.position); body.frameVelocity.copy(frame.velocity);
-      body.setFrame(frame.orientation); body.setSunDir(this.sunDirFrom(body.posUniv, _v));
+      body.setFrame(frame.orientation);
+      body.setStellarLights?.(this.stellarLightFieldFrom(body.posUniv));
+      body.setWeatherTime?.(timeHours);
     }
     for (const habitat of this.planets.filter((body) => body instanceof ArtificialHabitat)) {
       habitat.followParent();
@@ -772,6 +785,16 @@ export class StarSystem {
 
   sunDirFrom(pos, out) {
     return out.copy(this.dominantStarFrom(pos).positionUniv).sub(pos).normalize();
+  }
+
+  stellarLightFieldFrom(pos, visibility = null) {
+    return buildStellarLightField(this.starViews.map((view, index) => ({
+      id: view.spec.starId || `${this.catalogId}:star-${index}`,
+      positionUniv: view.positionUniv,
+      luminositySolar: view.spec.luminositySolar,
+      temperatureK: view.spec.temperatureK,
+      visibility: Array.isArray(visibility) ? visibility[index] ?? 1 : 1,
+    })), pos);
   }
 
   dominantStarFrom(pos) {

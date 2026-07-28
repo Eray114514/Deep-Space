@@ -13,7 +13,7 @@ import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { createWarpDriveNode, landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
-import { tickShaders } from './shaders.js';
+import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord } from './names.js';
@@ -38,6 +38,7 @@ import { createEnvironmentState, updateEnvironmentState } from './environment-st
 import { waterInteraction } from './water-interaction.js';
 import { surfaceInteraction } from './surface-interaction.js';
 import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
+import { WeatherEffects } from './weather-effects.js';
 
 const qs = new URLSearchParams(location.search);
 const graphicsSettings = resolveGraphicsSettings({ params: qs });
@@ -564,14 +565,18 @@ let currentWalkSnowWeight = 0;
 function walkWeatherFor(planet, localUp, sunLocal) {
   if (!planet) return 'clear';
   const terrainHeight = planet.height(localUp, 64);
+  const direction = planet.worldOffsetToLocal?.(localUp, new THREE.Vector3()).normalize()
+    || localUp;
+  const weather = planet.weatherAt?.(direction);
+  if (weather) {
+    if (weather.kind === 'storm') return 'storm';
+    if (weather.precipitationKind === 'snow' && weather.precipitation > 0.14) return 'snow';
+    if (weather.precipitationKind === 'rain' && weather.precipitation > 0.14) return 'rain';
+    if (weather.kind === 'stratus' && weather.visibility < 0.62) return 'rain';
+    return 'clear';
+  }
   if (planet.type === 'ice' || planet.snowWeightAt?.(localUp, terrainHeight) > 0.32) return 'snow';
-  const coverage = Number(planet.cloudCoverage) || 0;
-  if (coverage < 0.48) return 'clear';
-  if (planet.type === 'toxic' || planet.type === 'lava') return 'storm';
-  // A cloud deck is only precipitation locally when the surface is beneath
-  // the lit, moisture-bearing side; clear skies remain the default elsewhere.
-  const sunAltitude = localUp.dot(sunLocal);
-  return sunAltitude > -0.35 && coverage > 0.62 ? 'rain' : 'clear';
+  return 'clear';
 }
 
 // ---- world ------------------------------------------------------------------
@@ -596,6 +601,7 @@ const farFlora = new FarFlora({
   streamBudgetMs: QUALITY_LOW ? 0.85 : 1.25,
 });
 const skyDome = new SkyDome(scene);
+const weatherEffects = new WeatherEffects(scene);
 const ship = new Ship(scene, {
   anisotropy: Math.min(16, renderer.getMaxAnisotropy?.()
     ?? renderer.capabilities?.getMaxAnisotropy?.()
@@ -643,7 +649,9 @@ let warpIntensity = 0;
 let warpArrival = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
+let activeWeather = null;
 let envUnderwater = false;
+let devHeadlampEnabled = true;
 const environmentState = createEnvironmentState();
 const prevNavPos = new THREE.Vector3();
 const _velActual = new THREE.Vector3();
@@ -670,7 +678,59 @@ const _cloudCol = new THREE.Color();
 const _warmA = new THREE.Color();
 const _warmB = new THREE.Color();
 const _warmC = new THREE.Color();
+const _shaftTint = new THREE.Color();
 let envSunset = 0;
+let skyOvercast = 0;
+let sunShaftDebug = { reason: 'not-updated', strength: 0 };
+
+function updateSunShafts() {
+  if (!nodePipeline.setSunShafts || !nearest || !usePost || QUALITY_LOW
+    || envInAtmo < 0.04 || envUnderwater) {
+    sunShaftDebug = {
+      reason: !nearest ? 'no-nearest' : !usePost ? 'post-disabled'
+        : QUALITY_LOW ? 'low-quality' : envUnderwater ? 'underwater' : 'outside-atmosphere',
+      strength: 0,
+    };
+    nodePipeline.setSunShafts?.({ strength: 0 });
+    return;
+  }
+  const source = nearest.stellarLightField?.sources?.[0];
+  const direction = source?.worldDirection || nearest.sunDirWorld;
+  if (!direction) {
+    sunShaftDebug = { reason: 'no-stellar-direction', strength: 0 };
+    nodePipeline.setSunShafts({ strength: 0 });
+    return;
+  }
+  _v.copy(direction).applyQuaternion(_q.copy(camera.quaternion).invert());
+  const forward = -_v.z;
+  const tangent = Math.tan(camera.fov * Math.PI / 360);
+  const ndcX = forward > 1e-5 ? _v.x / (forward * tangent * camera.aspect) : 99;
+  const ndcY = forward > 1e-5 ? _v.y / (forward * tangent) : 99;
+  const inFrame = smoothstep(1.32, 0.82, Math.max(Math.abs(ndcX), Math.abs(ndcY)));
+  // Interaction code reuses `_up` in planet-local space. Reconstruct the
+  // world-space radial here so the horizon gate cannot silently compare
+  // vectors from different coordinate systems.
+  const elevation = _v2.copy(nav.pos).sub(nearest.posUniv).normalize().dot(direction);
+  const horizonBand = smoothstep(-0.2, 0.04, elevation)
+    * (1 - smoothstep(0.08, 0.42, elevation));
+  const moisture = activeWeather
+    ? 0.12 + activeWeather.humidity * 0.34 + activeWeather.coverage * 0.24
+      - activeWeather.precipitation * 0.18
+    : 0.16;
+  const strength = clamp(envInAtmo * horizonBand * inFrame * moisture, 0, 0.14);
+  sunShaftDebug = {
+    reason: strength > 0 ? 'active' : 'gated',
+    strength, ndc: [ndcX, ndcY], elevation, horizonBand, inFrame, moisture,
+  };
+  _shaftTint.copy(source?.colorValue || _warmC.setRGB(1, 0.82, 0.62))
+    .lerp(_warmC.setRGB(1, 0.36, 0.08), envSunset * 0.72);
+  nodePipeline.setSunShafts({
+    x: ndcX * 0.5 + 0.5,
+    y: ndcY * 0.5 + 0.5,
+    strength,
+    color: _shaftTint,
+  });
+}
 let envEclipse = 0;
 
 function lookQuatAt(fromUniv, targetUniv, out, upHint) {
@@ -2316,6 +2376,7 @@ function ambience(dt = 1 / 60) {
   let inAtmo = 0, day = 1, skyStrength = 0;
   envEclipse = 0;
   envUnderwater = false;
+  activeWeather = null;
   scene.fog.density = 0;
   if (nearest) {
     const p = nearest;
@@ -2325,20 +2386,25 @@ function ambience(dt = 1 / 60) {
       .filter((body) => body !== p)
       .map((body) => ({ position: body.posUniv, radius: body.R }));
     let totalFlux = 0, litFlux = 0, clearLitFlux = 0;
+    const stellarVisibility = [];
     for (const view of universe.system.starViews) {
       const delta = _v2.copy(view.positionUniv).sub(nav.pos);
       const flux = view.spec.luminositySolar / Math.max(1, delta.lengthSq());
       const directDay = smoothstep(-0.22, 0.28, _up.dot(delta.normalize()));
       const visibility = eclipseFraction(nav.pos, view.positionUniv, view.spec.radiusRender, blockers);
+      stellarVisibility.push(visibility);
       totalFlux += flux;
       clearLitFlux += flux * directDay;
       litFlux += flux * directDay * (0.08 + visibility * 0.92);
     }
     day = totalFlux > 0 ? clamp(litFlux / totalFlux, 0, 1) : 0;
     envEclipse = clearLitFlux > 0 ? clamp(1 - litFlux / clearLitFlux, 0, 1) : 0;
+    p.setStellarLights?.(universe.system.stellarLightFieldFrom(p.posUniv, stellarVisibility));
     const sunElev = _up.dot(sunDir);
 
     const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
+    const weatherDirection = p.worldOffsetToLocal?.(_up, _v3).normalize() || _up;
+    activeWeather = p.weatherAt?.(weatherDirection) || null;
     const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
     envUnderwater = p.hasLiquid && camR < p.seaRadius + 0.4;
     updateEnvironmentState(environmentState, {
@@ -2354,11 +2420,16 @@ function ambience(dt = 1 / 60) {
     inAtmo = environmentState.atmosphere;
     day = environmentState.day;
     envSunset = environmentState.sunset;
+    skyOvercast = 0;
 
-    if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone().convertSRGBToLinear();
+    // skyColor/liquidColor come from `new THREE.Color(hex)`, which already
+    // decodes sRGB into the linear working space. The `Lin` copies exist only
+    // so the per-frame path does not clone; they must not re-decode.
+    if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone();
     skyStrength = environmentState.skyIrradiance * 0.92;
     _sky.copy(p.skyColorLin).multiplyScalar(skyStrength);
-    _sky.lerp(_warmA.setRGB(0.55, 0.2, 0.08).multiplyScalar(Math.max(skyStrength, 0.12)), envSunset * 0.45);
+    _sky.lerp(_warmA.setRGB(1.0, 0.14, 0.018)
+      .multiplyScalar(Math.max(skyStrength, 0.14)), clamp(envSunset * 0.9, 0, 1));
 
     // Global FogExp2 no longer impersonates the atmosphere. The atmospheric
     // shells own transmittance + in-scattering; scene fog is strictly local.
@@ -2368,9 +2439,21 @@ function ambience(dt = 1 / 60) {
       _sky.lerp(_cloudCol.setRGB(0.6, 0.64, 0.7).multiplyScalar(0.2 + 0.8 * day),
         Math.min(1, transit * 1.5));
     }
+    if (activeWeather && nearestAlt < p.atmoHeight * 0.24) {
+      const surfaceAir = 1 - smoothstep(p.atmoHeight * 0.04, p.atmoHeight * 0.24,
+        Math.max(0, nearestAlt));
+      const weatherFog = (activeWeather.fog * 0.00022
+        + activeWeather.precipitation * 0.00008) * surfaceAir;
+      fogDensity = Math.max(fogDensity, weatherFog);
+      const overcast = clamp(activeWeather.coverage * 0.42
+        + activeWeather.precipitation * 0.36, 0, 0.72);
+      skyOvercast = overcast;
+      _sky.lerp(_cloudCol.setRGB(0.42, 0.48, 0.58)
+        .multiplyScalar(0.16 + day * 0.52), overcast);
+    }
 
     if (envUnderwater) {
-      if (!p.liquidColorLin) p.liquidColorLin = p.liquidColor.clone().convertSRGBToLinear();
+      if (!p.liquidColorLin) p.liquidColorLin = p.liquidColor.clone();
       _sky.copy(p.liquidColorLin).multiplyScalar(0.25 + 0.55 * day);
       if (p.liquid === 'lava') _sky.set(1.2, 0.25, 0.02);
       fogDensity = p.liquid === 'lava' ? 0.2 : 0.03;
@@ -2379,6 +2462,15 @@ function ambience(dt = 1 / 60) {
 
     scene.fog.color.copy(_sky);
     scene.fog.density = fogDensity;
+    const cloudUniforms = p.volCloudMat?.uniforms;
+    if (cloudUniforms?.uAmbC) {
+      // Cloud skylight follows the same live day/night/weather radiance as
+      // the atmosphere. Keeping the construction-time daytime colour made an
+      // overcast deck glow pale blue at midnight and, through soft depth
+      // edges, wash the night-side terrain toward white.
+      cloudUniforms.uAmbC.value.copy(_sky)
+        .multiplyScalar(0.38 + day * 0.62);
+    }
 
     // valley mist tracks the live fog/sky tint (sunset mist comes free)
     const tsh = p.terrainMaterial.userData.shader;
@@ -2388,14 +2480,26 @@ function ambience(dt = 1 / 60) {
 
     // Cool sky irradiance preserves the silhouette on the night side without
     // washing the whole planet with a global ambient light.
-    hemi.intensity = 0.025 * (1 - Math.max(0, inAtmo))
-      + Math.sqrt(Math.max(0, inAtmo)) * (0.10 + 0.85 * day);
-    hemi.color.copy(p.skyColorLin || _sky);
+    const clearSpace = 1 - Math.max(0, inAtmo);
+    hemi.intensity = (0.055 + (1 - day) * 0.06) * clearSpace
+      + Math.sqrt(Math.max(0, inAtmo)) * (0.018
+        + day * environmentState.directTransmittance * 0.36
+        + environmentState.skyIrradiance * 0.18
+        + envSunset * 0.11);
+    hemi.color.copy(p.skyColorLin || _sky)
+      .lerp(_warmC.setRGB(0.72, 0.24, 0.16), envSunset * 0.42);
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
 
     // the sky dome: horizon glow, deeper zenith, sun halo
-    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.0, 0.42, 0.16), envSunset * 0.75);
-    _c2.copy(p.skyColorLin).multiply(_zenithMul);
+    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.08, 0.13, 0.022),
+      clamp(envSunset * 0.48, 0, 1));
+    _c2.copy(p.skyColorLin).multiply(_zenithMul)
+      .lerp(_warmA.setRGB(0.12, 0.022, 0.085), envSunset * 0.34);
+    if (skyOvercast > 0.01) {
+      _horC.lerp(_cloudCol.setRGB(0.24, 0.27, 0.33), skyOvercast * 0.72);
+      _c2.lerp(_cloudCol.setRGB(0.09, 0.105, 0.14), skyOvercast * 0.82);
+    }
+    p.setWaterEnvironment?.(_c2, _horC, day, envSunset);
     // This dome only paints background pixels; it never overlays terrain.
     // The volume shell still owns aerial perspective and limb scattering,
     // while this low-frequency term restores a readable zenith below it.
@@ -2403,12 +2507,13 @@ function ambience(dt = 1 / 60) {
     const skyBackdrop = envUnderwater ? 0
       : Math.min(inAtmo, 1) * (0.08 + 0.92 * day) * 0.42;
     skyDome.update(_up, sunDir, _horC, _c2, skyBackdrop, envSunset,
-      smoothstep(0.28, 0.72, altitudeFraction));
+      smoothstep(0.28, 0.72, altitudeFraction), p.stellarLightField);
   } else {
     hemi.intensity = 0.035;
     hemi.color.setRGB(0.18, 0.24, 0.38);
     hemi.groundColor.setRGB(0.035, 0.045, 0.07);
     envSunset = 0;
+    skyOvercast = 0;
     updateEnvironmentState(environmentState, { dt });
     skyDome.update(_up, _up, _sky, _sky, 0, 0);
   }
@@ -2424,8 +2529,11 @@ function ambience(dt = 1 / 60) {
     ? clamp(envSunset + (1 - environmentState.directTransmittance) * 0.18, 0, 1) : 0);
   // candela-scale: with physical decay, ~2 units of intensity is invisible —
   // a real lamp needs tens of candela to paint a pool on the ground
-  headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 80 : 0;
-  ambient.intensity = 0.025 + Math.sqrt(Math.max(0, inAtmo)) * (0.04 + day * 0.12);
+  headlamp.intensity = devHeadlampEnabled && state === 'walk' && day < 0.4
+    ? (0.4 - day) * 80 : 0;
+  const atmosphereRoot = Math.sqrt(Math.max(0, inAtmo));
+  ambient.intensity = (0.045 + (1 - day) * 0.035) * (1 - atmosphereRoot)
+    + atmosphereRoot * (0.012 + day * 0.153 + envSunset * 0.038);
   renderer.toneMappingExposure = environmentState.exposure;
   envInAtmo = inAtmo;
   envDay = day;
@@ -2496,12 +2604,11 @@ function updateWaterInteraction(dt) {
       waterWakeTimer = lerp(0.14, 0.045, clamp(tangentSpeed / 450, 0, 1));
       waterVelocity.normalize();
       waterSide.crossVectors(_up, waterVelocity).normalize();
-      // `nav.pos` is the camera/control origin.  The visible third-person
-      // hull flies about 19 m ahead of it, so a wake projected from nav.pos
-      // was born behind the camera and could never enter the frame.  Project
-      // the actual foreground hull position onto the sea, then move back to
-      // its thrusters.
-      waterShipCenter.copy(waterLocal).addScaledVector(waterVelocity, 19)
+      // `nav.pos` is the camera/control origin, not the foreground hull. The
+      // old 19 m estimate left the thrusters only 11.5 m ahead of the camera;
+      // at skimming speed every ring passed behind the view in <0.16 s. Keep
+      // the visible trail between camera and hull, then project it to the sea.
+      waterShipCenter.copy(waterLocal).addScaledVector(waterVelocity, 55)
         .normalize().multiplyScalar(p.seaRadius);
       const center = waterWakePoint.copy(waterShipCenter)
         .addScaledVector(waterVelocity, -7.5);
@@ -2512,18 +2619,23 @@ function updateWaterInteraction(dt) {
         { strength, speed: 7 + tangentSpeed * 0.012, foam: 0.72 + waterContact * 0.8 });
     }
   } else if (state === 'walk' && walkCtl.planet === p) {
-    const feetRadius = walkCtl.posLocal.length() - 1.45;
+    // posLocal is the eye, so subtract the controller's actual eye height.
+    // The old hard-coded 1.45 m left the sampled "feet" 25 cm in the air and
+    // made a 0.9 m wade report negative depth, suppressing every foot ripple.
+    const feetRadius = walkCtl.posLocal.length() - walkCtl.eyeHeight + 0.08;
     const waterDepth = p.seaRadius - feetRadius;
     const speed = walkCtl.hSpeed.length();
-    waterContact = smoothstep(0.02, 0.3, waterDepth) * (1 - smoothstep(2.2, 4.5, waterDepth))
-      * smoothstep(0.2, 2.4, speed);
+    const immersion = smoothstep(0.02, 0.3, waterDepth)
+      * (1 - smoothstep(2.2, 4.5, waterDepth));
+    const movingContact = immersion * smoothstep(0.02, 0.65, speed);
+    waterContact = immersion;
     footRippleTimer -= dt;
-    if (waterContact > 0.03 && footRippleTimer <= 0) {
+    if (movingContact > 0.03 && footRippleTimer <= 0) {
       footRippleTimer = clamp(0.48 / Math.max(0.7, speed), 0.16, 0.48);
       _up.copy(walkCtl.posLocal).normalize();
       waterWakePoint.copy(_up).multiplyScalar(p.seaRadius);
       waterInteraction.inject(waterWakePoint,
-        { strength: 0.22 + waterContact * 0.62, speed: 4.4 + speed, foam: waterContact * 0.55 });
+        { strength: 0.22 + movingContact * 0.62, speed: 4.4 + speed, foam: movingContact * 0.55 });
     }
   }
 }
@@ -2559,6 +2671,7 @@ let devFpsFrames = 0;
 let perfEmaMs = 16.7;
 let dprAcc = 0;
 let adaptiveStage = 0;
+let adaptiveQualityLocked = false;
 let adaptiveStableSince = 0;
 const perfFrameTimes = [];
 let perfLongFrames = 0;
@@ -2928,6 +3041,27 @@ function frame() {
   }
 
   ambience(dt);
+  if (nearest && activeWeather && nearestAlt < nearest.atmoHeight * 0.22) {
+    setWeatherWind(activeWeather.wind,
+      clamp((activeWeather.wind?.speed || 0) / 18, 0.18, 1.8),
+      activeWeather.gust || 0);
+    const windLocal = _v2.set(
+      activeWeather.wind?.x || 0,
+      activeWeather.wind?.y || 0,
+      activeWeather.wind?.z || 0,
+    );
+    nearest.localOffsetToWorld(windLocal, _v3);
+    const surfaceWeather = envInAtmo * (1 - smoothstep(
+      nearest.atmoHeight * 0.04,
+      nearest.atmoHeight * 0.22,
+      Math.max(0, nearestAlt),
+    ));
+    weatherEffects.update(activeWeather, _up, _v3, clock.elapsedTime, surfaceWeather);
+  } else {
+    setWeatherWind(null, 0.18, 0);
+    weatherEffects.update(null, _up.set(0, 1, 0), _v3.set(1, 0, 0),
+      clock.elapsedTime, 0);
+  }
   updateWaterInteraction(dt);
   updateSurfaceInteraction(dt);
   if (nearest?.isGasGiant && nearestAlt < nearest.atmoHeight) {
@@ -2984,6 +3118,7 @@ function frame() {
   universe.updateRelative(nav.pos);
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
+  updateSunShafts();
   // Weapons stay cold while paused; surface weapons keep their pose but get no
   // trigger input because dt=0 and the fire state is disconnected upstream.
   activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
@@ -2995,12 +3130,23 @@ function frame() {
   document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
   // sun → shadow-light crossfade (after updateRelative, which sets intensities)
+  if (nearest && shadowBlend > 0.02) {
+    const localWorldUp = _v2.copy(nav.pos).sub(nearest.posUniv).normalize();
+    for (const view of universe.system.starViews) {
+      const stellarDirection = _v3.copy(view.positionUniv).sub(nav.pos).normalize();
+      // Point lights do not know that the planet blocks a star below the
+      // local horizon. Gate every binary component explicitly before the
+      // dominant source is handed to the shadow-casting directional light.
+      view.light.intensity *= smoothstep(-0.025, 0.035,
+        localWorldUp.dot(stellarDirection));
+    }
+  }
   sunShadow.visible = shadowBlend > 0.02;
   if (sunShadow.visible) {
     const dominantView = universe.system.dominantStarFrom(nearest?.posUniv || nav.pos);
     const sysLight = dominantView.light;
     sunShadow.intensity = sysLight.intensity * shadowBlend
-      * environmentState.directTransmittance;
+      * environmentState.directTransmittance * environmentState.day;
     sunShadow.color.copy(sysLight.color)
       .lerp(_warmC.setRGB(1, 0.45, 0.2), envSunset * 0.55);
     sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
@@ -3151,6 +3297,7 @@ function frame() {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     const previousVolumePlanet = volumePass.activePlanet;
     volumePass.setActivePlanet(nearest?.isGasGiant || nearest?.type === 'artificialHabitat' ? null : nearest, nav.pos, motion);
+    nodePipeline.bindVolumeDepth?.(volumePass.activePlanet);
     nodePipeline.setVolumeMotion?.(motion,
       previousVolumePlanet === volumePass.activePlanet && volumePass.historyValid);
     volumePass.historyValid = !!volumePass.activePlanet;
@@ -3186,7 +3333,7 @@ function frame() {
   const adaptiveReady = loadingCleared && pendingChunks() === 0
     && (!FARFLORA || farFlora.pending() === 0);
   if (!adaptiveReady) adaptiveStableSince = performance.now();
-  if (dprAcc > adaptInterval && !FREEZE && adaptiveReady
+  if (dprAcc > adaptInterval && !FREEZE && !adaptiveQualityLocked && adaptiveReady
     && performance.now() - adaptiveStableSince > 5000) {
     dprAcc = 0;
     if (perfEmaMs > targetFrameMs * 1.08 && adaptiveStage < 7) {
@@ -3330,12 +3477,107 @@ window.NMS = {
   _ff: farFlora,           // debug handle (headless diagnostics)
   _renderer: renderer,
   _THREE: THREE,
+  _planet(i = 0) { return universe.system.planets[i] || null; },
   get booted() {
     return loadingCleared;
   },
   get state() { return state; },
   resetPerformanceStats,
   resetAdaptiveQuality,
+  setAdaptiveQualityLocked(value = true) {
+    adaptiveQualityLocked = !!value;
+    return adaptiveQualityLocked;
+  },
+  setHeadlampEnabled(value = true) {
+    if (!DEV_SERVER) return null;
+    devHeadlampEnabled = !!value;
+    return devHeadlampEnabled;
+  },
+  setWeatherFixture(i, name = null) {
+    if (!DEV_SERVER) return null;
+    const planet = universe.system.planets[i];
+    if (!planet?.setWeatherFixture) return null;
+    planet.setWeatherFixture(name);
+    return this.weatherState(i);
+  },
+  weatherState(i = null, direction = null) {
+    const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
+    if (!planet?.weatherAt) return null;
+    let localDirection;
+    if (direction) localDirection = new THREE.Vector3(...direction).normalize();
+    else if (planet === nearest) {
+      localDirection = planet.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
+    } else localDirection = new THREE.Vector3(0, 1, 0);
+    return {
+      ...planet.weatherAt(localDirection),
+      hours: planet.weatherHours,
+      fingerprint: planet.weatherFingerprint?.(64),
+      effects: planet === nearest ? { ...weatherEffects.state } : null,
+    };
+  },
+  stellarState(i = null) {
+    const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
+    const field = planet?.stellarLightField;
+    if (!field) return null;
+    return {
+      count: field.sources.length,
+      dominantIndex: field.dominantIndex,
+      sources: field.sources.map((source) => ({
+        id: source.id,
+        direction: source.worldDirection.toArray(),
+        localDirection: source.localDirection.toArray(),
+        color: source.colorValue.toArray(),
+        irradiance: source.irradianceFraction,
+        visibility: source.visibility,
+      })),
+    };
+  },
+  surfaceState(i = null) {
+    const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
+    if (!planet) return null;
+    const localDirection = planet.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
+    const height = planet.height(localDirection, planet.fullMaxFreq || 128);
+    return {
+      direction: localDirection.toArray(),
+      height,
+      hAmp: planet.hAmp,
+      seaLevel: planet.seaLevel ?? null,
+      snowLine: planet.pal?.snowLine ?? null,
+      capLat: planet.pal?.capLat ?? null,
+      biome: planet.biomeAt?.(localDirection, height) || null,
+      snowWeight: planet.snowWeightAt?.(localDirection, height) || 0,
+      terrainColor: planet.colorAt
+        ? planet.colorAt(localDirection, height, 0, planet.fullMaxFreq || 128,
+          new THREE.Color()).toArray()
+        : null,
+    };
+  },
+  lightingState() {
+    return {
+      ambient: ambient.intensity,
+      hemisphere: hemi.intensity,
+      headlamp: headlamp.intensity,
+      sunShadow: sunShadow.intensity,
+      stars: universe.system.starViews.map((view) => view.light.intensity),
+    };
+  },
+  volumeState() {
+    const planet = volumePass?.activePlanet || null;
+    const uniforms = planet?.volCloudMat?.uniforms;
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    return {
+      activeBodyId: planet?.bodyId || null,
+      depthReady: planet?.atmoMesh?.material?.uniforms?.uDepthReady?.value || 0,
+      cloudDepthReady: uniforms?.uDepthReady?.value || 0,
+      steps: uniforms?.uMaxSteps?.value || 0,
+      scale: effectiveVolumeScale,
+      drawingBuffer: [size.x, size.y],
+      weatherTime: uniforms?.uWeatherTime?.value || 0,
+      sunShaftStrength: nodePipeline.sunShafts?.uniforms?.uStrength?.value || 0,
+      sunShaftUv: nodePipeline.sunShafts?.uniforms?.uSunUv?.value?.toArray?.() || null,
+      sunShaftDebug: { ...sunShaftDebug },
+    };
+  },
   get paused() { return paused; },
   seed: () => SEED,
   galaxy: () => ({ id: GALAXY_ID, name: GALAXY.name }),
@@ -3537,10 +3779,34 @@ window.NMS = {
     const sunDir = p.sunDirLocal.clone();
     const meadow = bias === 'meadow';
     const snowy = bias === 'snow';
+    const avoidSnow = (meadow || bias === 'sunset') && p.type !== 'ice';
     let prefer = sunDir, ring = null;
     if (bias === 'night') prefer = sunDir.clone().negate();
     else if (bias === 'sunset') { prefer = null; ring = sunDir; }
     let dir = p.scenicDir(prefer, ring);
+    if (avoidSnow && p.snowWeightAt(dir, p.height(dir, 128)) > 0.16) {
+      let bestClear = null, bestClearScore = -Infinity;
+      for (let k = 0; k < 1800; k++) {
+        const y = 1 - (2 * (k + 0.5)) / 1800;
+        const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+        _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+        const h = p.height(_v, 128);
+        if ((p.hasLiquid && h < p.seaLevel + 4)
+          || p.snowWeightAt(_v, h) > 0.12) continue;
+        const lightScore = bias === 'sunset'
+          ? 1 - Math.abs(_v.dot(sunDir))
+          : Math.max(0, _v.dot(sunDir));
+        const biome = p.biomeAt(_v, h);
+        const biomeScore = ['grass', 'forest', 'dryland', 'slime', 'weird'].includes(biome)
+          ? 1 : 0;
+        const score = lightScore * 12 + biomeScore * 4 - Math.abs(h) / Math.max(p.hAmp, 1);
+        if (score > bestClearScore) {
+          bestClearScore = score;
+          bestClear = _v.clone();
+        }
+      }
+      if (bestClear) dir.copy(bestClear);
+    }
     if (snowy) {
       let bestSnow = null, bestSnowScore = -Infinity;
       const snowProbe = new THREE.Vector3(), snowTangent = new THREE.Vector3();
@@ -3584,6 +3850,7 @@ window.NMS = {
       const h = p.height(cand, sampleFreq);
       if (p.hasLiquid && h - p.seaLevel < 2) continue;
       if (snowy && p.snowWeightAt(cand, h) <= 0.28) continue;
+      if (avoidSnow && p.snowWeightAt(cand, h) > 0.16) continue;
       frame(cand, e1, e2);
       sunH.copy(sunDir).addScaledVector(cand, -sunDir.dot(cand));
       if (sunH.lengthSq() > 1e-4) sunH.normalize(); else sunH.set(0, 0, 0);
@@ -3612,13 +3879,15 @@ window.NMS = {
         if (pinSun) {
           // the sun sits at elevation ~0.11 — the SKYLINE toward it must stay
           // lower. Walk the whole ray: point probes miss ridges between them.
-          let maxEl = -1;
+          let maxEl = -1, waterSteps = 0;
           for (let dd = 250; dd <= 6000; dd += 250) {
             probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
-            const el = (p.height(probe, 128) - h) / dd;
+            const probeHeight = p.height(probe, 128);
+            const el = (probeHeight - h) / dd;
             if (el > maxEl) maxEl = el;
+            if (p.hasLiquid && probeHeight < p.seaLevel + 3) waterSteps++;
           }
-          s = -Math.max(0, maxEl - 0.06) * 400;
+          s = -Math.max(0, maxEl - 0.06) * 400 - waterSteps * 0.55;
         } else {
           for (const dd of [120, 350, 900]) {
             probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
@@ -3664,6 +3933,10 @@ window.NMS = {
   dive(i) {
     const p = universe.system.planets[i];
     if (!p || !p.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) return false;
+    // The deterministic flight-wake fixture temporarily owns nav.pos. A
+    // subsequent dive is a new camera fixture and must release that ownership,
+    // otherwise the wake updater pulls the walker back above the sea.
+    devWaterWakeFixture = null;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
@@ -3735,7 +4008,7 @@ window.NMS = {
     universe.updateRelative(nav.pos);
     return celestialClock.snapshot();
   },
-  setSunAltitude(i, degrees) {
+  setSunAltitude(i, degrees, { faceSun = false } = {}) {
     if (!DEV_SERVER) return null;
     const p = universe.system.planets[i];
     if (!p || p.isGasGiant) return null;
@@ -3759,11 +4032,25 @@ window.NMS = {
     }
     celestialClock.set(bestTime);
     universe.update(nav.pos, false, bestTime);
+    if (faceSun) {
+      const localUp = walkCtl.posLocal.clone().normalize();
+      const sunHorizon = p.sunDirLocal.clone()
+        .addScaledVector(localUp, -p.sunDirLocal.dot(localUp));
+      if (sunHorizon.lengthSq() > 1e-4) {
+        walkCtl.enter(p, walkCtl.posLocal, sunHorizon.normalize());
+        walkCtl.pitch = 0.02;
+        walkCtl.update(0.001);
+      }
+    }
     p.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
     universe.updateRelative(nav.pos);
-    return { hours: bestTime, requestedDegrees: degrees,
-      actualDegrees: Math.asin(clamp(bestElevation, -1, 1)) * 180 / Math.PI };
+    return {
+      hours: bestTime,
+      requestedDegrees: degrees,
+      actualDegrees: Math.asin(clamp(bestElevation, -1, 1)) * 180 / Math.PI,
+      faceSun,
+    };
   },
   setAtmosphereAltitude(i, metres, opts = {}) {
     if (!DEV_SERVER) return false;
@@ -3821,7 +4108,7 @@ window.NMS = {
     const side = new THREE.Vector3().crossVectors(up, tangent).normalize();
     nav.quat.copy(p.frameOrientation).multiply(horizonQuat(up, tangent, new THREE.Quaternion()));
     nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), height > 15 ? -0.22 : -0.48));
-    const wakeCenter = up.clone().multiplyScalar(p.seaRadius).addScaledVector(tangent, -7.5);
+    const wakeCenter = up.clone().multiplyScalar(p.seaRadius).addScaledVector(tangent, 47.5);
     waterInteraction.setPlanet(p.bodyId || p.seed);
     waterInteraction.inject(wakeCenter.clone().addScaledVector(side, 4.2),
       { strength: 1.4, speed: 8.5, foam: 1.1 });
@@ -3846,38 +4133,154 @@ window.NMS = {
     };
     return true;
   },
-  setWade(i, { depth = 0.9 } = {}) {
+  setWade(i, { depth = 0.9, overview = false } = {}) {
     if (!DEV_SERVER) return false;
     const p = universe.system.planets[i];
     if (!p || !p.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) return false;
+    devWaterWakeFixture = null;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
-    let best = null, bestError = Infinity;
-    for (let k = 0; k < 2400; k++) {
-      const y = 1 - (2 * (k + 0.5)) / 2400;
+    const targetDepth = clamp(Number(depth) || 0.9, 0.45, 2);
+    const center = new THREE.Vector3();
+    const edge = new THREE.Vector3();
+    const mid = new THREE.Vector3();
+    const axisA = new THREE.Vector3();
+    const axisB = new THREE.Vector3();
+    let best = null, bestLand = null, bestError = Infinity, bestScore = -Infinity;
+    // A 900 km body leaves tens of kilometres between global Fibonacci
+    // samples, so looking for an exact one-metre depth by chance is not a
+    // shoreline solver. Find a local segment that brackets the requested
+    // depth, then bisect it on the sphere.
+    for (let k = 0; k < 1800; k++) {
+      const y = 1 - (2 * (k + 0.5)) / 1800;
       const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
-      _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
-      const actualDepth = p.seaLevel - p.height(_v, p.fullMaxFreq);
-      const error = Math.abs(actualDepth - depth);
-      if (actualDepth > 0.4 && actualDepth < 2.2 && error < bestError) {
-        bestError = error;
-        best = _v.clone();
+      center.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+      const centerDepth = p.seaLevel - p.height(center, p.fullMaxFreq);
+      axisA.crossVectors(center,
+        Math.abs(center.y) < 0.9 ? _v2.set(0, 1, 0) : _v2.set(1, 0, 0)).normalize();
+      axisB.crossVectors(center, axisA).normalize();
+      for (let sample = 0; sample < 12; sample++) {
+        const angle = sample / 12 * Math.PI * 2;
+        edge.copy(center)
+          .addScaledVector(axisA, Math.cos(angle) * 24000 / p.R)
+          .addScaledVector(axisB, Math.sin(angle) * 24000 / p.R).normalize();
+        let edgeDepth = p.seaLevel - p.height(edge, p.fullMaxFreq);
+        if ((centerDepth - targetDepth) * (edgeDepth - targetDepth) > 0) continue;
+        // Preserve the coarse bracketing endpoint on the landward side. The
+        // final bisection endpoints are centimetres apart and cannot provide
+        // a stable QA camera heading.
+        const landAnchor = (centerDepth < edgeDepth ? center : edge).clone();
+        let a = center.clone(), b = edge.clone();
+        let aDepth = centerDepth;
+        for (let step = 0; step < 24; step++) {
+          mid.copy(a).add(b).normalize();
+          const midDepth = p.seaLevel - p.height(mid, p.fullMaxFreq);
+          if ((aDepth - targetDepth) * (midDepth - targetDepth) <= 0) {
+            b.copy(mid);
+            edgeDepth = midDepth;
+          } else {
+            a.copy(mid);
+            aDepth = midDepth;
+          }
+        }
+        const actualDepth = p.seaLevel - p.height(mid, p.fullMaxFreq);
+        const error = Math.abs(actualDepth - targetDepth);
+        const sunlight = mid.dot(p.sunDirLocal);
+        const score = sunlight - error * 4;
+        if (score > bestScore) {
+          bestScore = score;
+          bestError = error;
+          best = mid.clone();
+          bestLand = landAnchor;
+        }
+        if (bestError < 0.015 && sunlight > 0.72) break;
       }
+      if (bestError < 0.015 && bestScore > 0.72) break;
     }
     if (!best) return false;
-    parkShipNear(p, best);
+    // Resolve the *local* uphill direction. The 24 km bracket endpoint only
+    // tells us which side eventually reaches land; a non-monotonic coast can
+    // cross that segment several times, so it is not a reliable camera axis.
+    axisA.crossVectors(best,
+      Math.abs(best.y) < 0.9 ? _v2.set(0, 1, 0) : _v2.set(1, 0, 0)).normalize();
+    axisB.crossVectors(best, axisA).normalize();
+    const gradientStep = 80 / p.R;
+    const gradientProbe = new THREE.Vector3();
+    const hAp = p.height(gradientProbe.copy(best).addScaledVector(axisA, gradientStep).normalize(),
+      p.fullMaxFreq);
+    const hAn = p.height(gradientProbe.copy(best).addScaledVector(axisA, -gradientStep).normalize(),
+      p.fullMaxFreq);
+    const hBp = p.height(gradientProbe.copy(best).addScaledVector(axisB, gradientStep).normalize(),
+      p.fullMaxFreq);
+    const hBn = p.height(gradientProbe.copy(best).addScaledVector(axisB, -gradientStep).normalize(),
+      p.fullMaxFreq);
+    const landward = axisA.clone().multiplyScalar(hAp - hAn)
+      .addScaledVector(axisB, hBp - hBn);
+    if (landward.lengthSq() < 1e-6) {
+      landward.copy(bestLand).addScaledVector(best, -bestLand.dot(best));
+    }
+    landward.normalize();
+    if (overview) {
+      // Visual QA needs a readable patch of both materials. A real wading eye
+      // is less than a metre above the water and collapses the entire shore
+      // transition to the horizon, so provide a small stationary drone view
+      // over the exact same solved coastline.
+      if (walkCtl.active) walkCtl.exit();
+      setState('space');
+      const cameraDir = new THREE.Vector3();
+      for (let distance = 40; distance <= 600; distance += 20) {
+        cameraDir.copy(best).addScaledVector(landward, -distance / p.R).normalize();
+        const cameraDepth = p.seaLevel - p.height(cameraDir, p.fullMaxFreq);
+        if (cameraDepth >= 14) break;
+      }
+      const targetDir = new THREE.Vector3();
+      for (let distance = 20; distance <= 600; distance += 20) {
+        targetDir.copy(best).addScaledVector(landward, distance / p.R).normalize();
+        if (p.height(targetDir, p.fullMaxFreq) >= p.seaLevel + 6) break;
+      }
+      const cameraLocal = cameraDir.clone().multiplyScalar(p.seaRadius + 45);
+      p.localPositionToWorld(cameraLocal, nav.pos);
+      nav.vel.set(0, 0, 0);
+      const targetLocal = targetDir.clone().multiplyScalar(p.surfaceRadius(targetDir) + 2);
+      const targetWorld = p.localPositionToWorld(targetLocal, new THREE.Vector3());
+      // Aim at the solved land point directly. Reconstructing this with a
+      // horizon quaternion plus a signed pitch inverted on some rotating
+      // frames and put the camera under the terrain instead of over the coast.
+      lookQuatAt(nav.pos, targetWorld, nav.quat);
+      focusPlanet = p;
+      spaceCtl.focus = p;
+      return {
+        requestedDepth: targetDepth,
+        actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq),
+        overview: true,
+      };
+    }
     _v2.copy(best).multiplyScalar(p.surfaceRadius(best) + 1.7);
-    _v3.crossVectors(p.sunDirLocal, best).normalize();
+    // Face the resolved coast so the fixture demonstrates the wet band and
+    // shore break instead of placing both outside the screenshot.
+    _v3.copy(landward);
+    if (_v3.lengthSq() < 0.1) _v3.crossVectors(p.sunDirLocal, best).normalize();
     if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
     walkCtl.enter(p, _v2, _v3);
-    walkCtl.pitch = -0.12;
+    // Look into the near-shore transition rather than flattening its
+    // metre-scale wet/foam bands into a one-pixel horizon line.
+    walkCtl.pitch = -0.38;
     walkCtl.update(0.001);
     p.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
     focusPlanet = p;
     spaceCtl.focus = p;
     setState('walk');
-    return { requestedDepth: depth, actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq) };
+    // Entering the solved shallows displaces water even before the first full
+    // stride; this also gives the ripple field a stable initial condition.
+    waterInteraction.setPlanet(p.bodyId || p.seed);
+    waterInteraction.inject(best.clone().multiplyScalar(p.seaRadius),
+      { strength: 0.38, speed: 4.8, foam: 0.28 });
+    return {
+      requestedDepth: targetDepth,
+      actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq),
+      overview: false,
+    };
   },
   setWalkDirection(direction) {
     if (!DEV_SERVER || state !== 'walk' || !walkCtl.planet || !Array.isArray(direction)) return false;
