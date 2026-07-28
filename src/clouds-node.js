@@ -6,9 +6,10 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
   acos, atan, dot, exp, float, Fn, If, Loop, mix, positionLocal, positionView,
-  screenUV, sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
+  sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
+import { sceneRayLimit } from './volume-depth-node.js';
 
 let _noiseTex = null;
 
@@ -100,7 +101,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
     uRin: uniform(band.rIn), uRout: uniform(band.rOut),
     uGroundR: uniform(planet.hasLiquid ? planet.seaRadius : planet.R),
     tSceneDepth: texture(new THREE.Texture()), uDepthReady: uniform(0),
-    uDepthReversed: uniform(0), uCameraFar: uniform(1.2e11),
+    uDepthReversed: uniform(0), uCameraNear: uniform(0.12), uCameraFar: uniform(1.2e11),
     uVolumeSize: uniform(new THREE.Vector2(1, 1)),
     uSunC: uniform(new THREE.Color(1, 0.98, 0.94)),
     uAmbC: uniform(new THREE.Color(0.35, 0.42, 0.55)),
@@ -146,14 +147,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
     // The main opaque pass owns visibility. Sampling its depth prevents the
     // half-resolution participating-medium pass from bleeding across real
     // mountains, buildings and the ship silhouette.
-    const rawDepth = nodes.tSceneDepth.sample(screenUV).r;
-    const sceneDepth = mix(rawDepth, float(1).sub(rawDepth), nodes.uDepthReversed);
-    const hasSceneDepth = nodes.uDepthReady.greaterThan(0.5)
-      .and(sceneDepth.lessThan(0.999999));
-    const forwardDistance = nodes.uCameraFar.add(1).pow(sceneDepth).sub(1);
     const forwardCos = positionView.normalize().z.negate().max(0.035);
-    const sceneLimit = forwardDistance.div(forwardCos).add(1.5);
-    t1.assign(hasSceneDepth.select(t1.min(sceneLimit), t1));
+    const sceneDepth = sceneRayLimit(nodes, forwardCos, 0.35);
+    t1.assign(sceneDepth.hasOpaqueDepth.select(t1.min(sceneDepth.rayDistance), t1));
     const span = t1.sub(t0).max(0);
     const stepCount = nodes.uMaxSteps.clamp(8, 32).toVar();
     const stepLength = span.div(stepCount);

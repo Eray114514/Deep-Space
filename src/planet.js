@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  dot, exp, float, Fn, Loop, mix, positionLocal, positionView, pow, screenUV,
+  dot, exp, float, Fn, Loop, mix, positionLocal, positionView, pow,
   sqrt, smoothstep as nodeSmoothstep, texture, uniform, vec3, vec4,
 } from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
@@ -24,6 +24,7 @@ import {
   advanceWeatherField, createWeatherField, sampleWeatherField,
   weatherFieldFingerprint,
 } from './weather-field.js';
+import { sceneRayLimit } from './volume-depth-node.js';
 
 const rendererParams = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
@@ -1447,7 +1448,7 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     uCameraLocal: uniform(new THREE.Vector3()),
     uGroundR: uniform(groundR), uAtmoR: uniform(atmoR),
     tSceneDepth: texture(new THREE.Texture()), uDepthReady: uniform(0),
-    uDepthReversed: uniform(0), uCameraFar: uniform(1.2e11),
+    uDepthReversed: uniform(0), uCameraNear: uniform(0.12), uCameraFar: uniform(1.2e11),
     uVolumeSize: uniform(new THREE.Vector2(1, 1)),
   };
   // Meter-scaled TSL participating medium. The gameplay atmosphere keeps its
@@ -1467,13 +1468,9 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     const groundNear = bGround.negate().sub(sqrt(discGround.max(0)));
     const clipsGround = discGround.greaterThan(0).and(groundNear.greaterThan(t0));
     t1.assign(clipsGround.select(groundNear.min(t1), t1));
-    const rawDepth = nodes.tSceneDepth.sample(screenUV).r;
-    const sceneDepth = mix(rawDepth, float(1).sub(rawDepth), nodes.uDepthReversed);
-    const hasSceneDepth = nodes.uDepthReady.greaterThan(0.5)
-      .and(sceneDepth.lessThan(0.999999));
-    const forwardDistance = nodes.uCameraFar.add(1).pow(sceneDepth).sub(1);
     const forwardCos = positionView.normalize().z.negate().max(0.035);
-    t1.assign(hasSceneDepth.select(t1.min(forwardDistance.div(forwardCos).add(2)), t1));
+    const sceneDepth = sceneRayLimit(nodes, forwardCos, 0.35);
+    t1.assign(sceneDepth.hasOpaqueDepth.select(t1.min(sceneDepth.rayDistance), t1));
     const span = t1.sub(t0).max(0);
     const stepLength = span.div(20);
     const t = t0.add(stepLength.mul(0.5)).toVar();

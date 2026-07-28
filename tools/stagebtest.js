@@ -289,7 +289,7 @@ if (createWeatherField && sampleWeatherField && advanceWeatherField && weatherFi
 // ---- Render-graph and runtime wiring ---------------------------------------
 
 const [pipelineSource, planetSource, cloudSource, mainSource,
-  shaftSource, nodeShaderSource, weatherEffectsSource] = await Promise.all([
+  shaftSource, nodeShaderSource, weatherEffectsSource, volumeDepthSource] = await Promise.all([
   loadSource('src/node-render-pipeline.js'),
   loadSource('src/planet.js'),
   loadSource('src/clouds-node.js'),
@@ -297,6 +297,7 @@ const [pipelineSource, planetSource, cloudSource, mainSource,
   loadSource('src/sun-shafts-node.js'),
   loadSource('src/shaders-node.js'),
   loadSource('src/weather-effects.js'),
+  loadSource('src/volume-depth-node.js'),
 ]);
 
 check(/scenePass\.getTexture(?:Node)?\(\s*['"]depth['"]\s*\)|scenePass\.getDepthNode\(/.test(pipelineSource),
@@ -322,8 +323,8 @@ check(/sceneDepthTexture\.sample/.test(shaftSource)
   'sun shafts reject opaque terrain and water as light sources',
   'sampling the complete HDR scene without its depth mask smears snow and water into light sabres');
 
-consumedUniform(cloudSource, 'tSceneDepth', 'WebGPU cloud shader');
-consumedUniform(cloudSource, 'uDepthReady', 'WebGPU cloud shader');
+consumedUniform(`${cloudSource}\n${volumeDepthSource}`, 'tSceneDepth', 'WebGPU cloud shader');
+consumedUniform(`${cloudSource}\n${volumeDepthSource}`, 'uDepthReady', 'WebGPU cloud shader');
 check(/(?:uStarDirs|uLightDirs|uStellarDirections)/.test(cloudSource),
   'WebGPU cloud shader declares a multi-star direction field',
   `a single uSunDir cannot represent binary lighting`);
@@ -349,8 +350,12 @@ check(/(?:uWeatherLo|uWeatherHi|weatherLo|weatherHi)/.test(cloudSource)
   'WebGPU clouds consume multi-channel weather data',
   `one static red-channel coverage texture cannot encode cloud type, high cloud, storm, and precipitation`);
 
-consumedUniform(planetSource, 'tSceneDepth', 'WebGPU atmosphere shader');
-consumedUniform(planetSource, 'uDepthReady', 'WebGPU atmosphere shader');
+consumedUniform(`${planetSource}\n${volumeDepthSource}`, 'tSceneDepth', 'WebGPU atmosphere shader');
+consumedUniform(`${planetSource}\n${volumeDepthSource}`, 'uDepthReady', 'WebGPU atmosphere shader');
+check(/perspectiveDepthToViewZ/.test(volumeDepthSource)
+    && !/pow\s*\(\s*(?:nodes\.)?uCameraFar/.test(volumeDepthSource),
+  'WebGPU volumes linearize perspective depth in view space',
+  'depth-buffer values are not logarithmic distances; use perspectiveDepthToViewZ before clipping raymarches');
 check(/(?:uStarDirs|uLightDirs|uStellarDirections)/.test(planetSource),
   'WebGPU atmosphere declares a multi-star direction field',
   `the atmosphere must not collapse buildStellarLightField() back to one sunDir`);

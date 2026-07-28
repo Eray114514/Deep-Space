@@ -26,6 +26,7 @@ export class GameNodePipeline {
     createRiftDistortionNode,
   } = {}) {
     this.renderer = renderer;
+    this.camera = camera;
     this.pipeline = new THREE.RenderPipeline(renderer);
     this.scenePass = pass(scene, camera, { samples: 4 });
     this.scenePass.name = 'Main scene';
@@ -122,6 +123,8 @@ export class GameNodePipeline {
       if (!uniforms?.tSceneDepth || !uniforms?.uDepthReady) continue;
       uniforms.tSceneDepth.value = this.sceneDepthTexture;
       uniforms.uDepthReady.value = 1;
+      if (uniforms.uCameraNear) uniforms.uCameraNear.value = this.camera.near;
+      if (uniforms.uCameraFar) uniforms.uCameraFar.value = this.camera.far;
       if (uniforms.uDepthReversed) {
         uniforms.uDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
       }
