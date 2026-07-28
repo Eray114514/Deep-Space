@@ -34,6 +34,28 @@ function imageStats(buffer) {
   };
 }
 
+function roiDifference(aBuffer, bBuffer, {
+  x0 = 0.25, x1 = 0.75, y0 = 0.48, y1 = 0.94,
+} = {}) {
+  const a = PNG.sync.read(aBuffer);
+  const b = PNG.sync.read(bBuffer);
+  assert.equal(a.width, b.width);
+  assert.equal(a.height, b.height);
+  let sum = 0, changed = 0, count = 0;
+  for (let y = Math.floor(a.height * y0); y < Math.floor(a.height * y1); y++) {
+    for (let x = Math.floor(a.width * x0); x < Math.floor(a.width * x1); x++) {
+      const index = (y * a.width + x) * 4;
+      const delta = (Math.abs(a.data[index] - b.data[index])
+        + Math.abs(a.data[index + 1] - b.data[index + 1])
+        + Math.abs(a.data[index + 2] - b.data[index + 2])) / 3;
+      sum += delta;
+      if (delta > 8) changed++;
+      count++;
+    }
+  }
+  return { mae: sum / count, changedRatio: changed / count };
+}
+
 async function capture(page, name) {
   const buffer = await page.screenshot();
   await writeFile(join(OUT, `${name}.png`), buffer);
@@ -115,7 +137,7 @@ try {
   assert.equal(contract.waterMaterialOwned, true);
   assert.equal(contract.waterUnderlay, false,
     'water must not hide transmission behind a coplanar flat-colour underlay');
-  assert.equal(contract.nodeMaterial, 'water-directional-spectrum-v6');
+  assert.equal(contract.nodeMaterial, 'water-cross-sea-spectrum-v7');
   assert.equal(contract.profile?.spectrum?.model, 'directional-jonswap-inspired');
   assert.equal(contract.profile?.spectrum?.wavelengths?.length, 16);
   assert.equal(contract.profile?.spectrum?.amplitudes?.length, 16);
@@ -152,13 +174,22 @@ try {
     field: NMS.waterField().filter((entry) => entry.active),
   }));
   assert.ok(wakeState.stats.waterInteractions > 0);
-  assert.ok(wakeState.stats.waterContact > 0);
+  assert.ok(wakeState.stats.waterContact > 0,
+    `visible hull must contact water: ${JSON.stringify(wakeState.stats)}`);
   assert.ok(wakeState.field.length >= 2, 'directional hull wake segments are active');
   assert.ok(wakeState.field.filter((entry) =>
     Math.abs(entry.screen[0]) <= 1 && Math.abs(entry.screen[1]) <= 1
       && entry.screen[2] >= -1 && entry.screen[2] <= 1).length >= 2,
-    'directional wake segments remain inside the player view instead of falling behind the camera');
+  `directional wake segments remain inside view: ${JSON.stringify(wakeState.field)}`);
   const wake = await capture(page, 'water-wake');
+  const wakeOnBuffer = await page.screenshot();
+  assert.equal(await page.evaluate(() => NMS.muteWaterWake(true)), true);
+  await page.waitForTimeout(180);
+  const wakeOffBuffer = await page.screenshot();
+  await writeFile(join(OUT, 'water-wake-off.png'), wakeOffBuffer);
+  const wakeDifference = roiDifference(wakeOnBuffer, wakeOffBuffer);
+  assert.ok(wakeDifference.mae > 0.45 && wakeDifference.changedRatio > 0.012,
+    `wake must visibly displace/foam the water ROI: ${JSON.stringify(wakeDifference)}`);
 
   const overviewResult = await page.evaluate(() => NMS.setWade(0, { depth: 0.9, overview: true }));
   assert.ok(Math.abs(overviewResult.actualDepth - 0.9) < 0.5,
@@ -248,7 +279,7 @@ try {
   console.log('PASS: Stage A WebGPU orbit, open ocean, shore, sunset reflection, wake, underwater and ocean-world preview scenes');
   console.log(JSON.stringify({
     contract, previewContract, overviewResult, wadeResult, sunsetResult,
-    orbit, ocean, shore, sunset, wake, underwater, systemPreview,
+    orbit, ocean, shore, sunset, wake, wakeDifference, underwater, systemPreview,
   }, null, 2));
 } finally {
   await page.close();

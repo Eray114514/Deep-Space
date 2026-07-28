@@ -464,10 +464,13 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // and reveals the bathymetry triangles as a black coastline.
   material.polygonOffset = false;
   const local = attribute('aLocal', 'vec3');
-  const vertexBathymetry = attribute('aDepth', 'float').max(0);
-  // LOD-matched bathymetry comes from the same deterministic height authority
-  // as collision. Framebuffer depth exposed terrain T-junctions as dark lines
-  // through otherwise clear water.
+  const lodMorph = reference('userData.lodMorph', 'float');
+  const vertexBathymetry = attribute('aDepth', 'float')
+    .add(attribute('aDepthDelta', 'float').mul(lodMorph)).max(0);
+  // Bathymetry follows the exact parent triangle while a child relaxes into
+  // detail. A hard aDepth swap made kilometres of absorption, foam and shore
+  // colour change along a square even though the spherical water positions
+  // themselves appeared continuous.
   const depth = vertexBathymetry;
   const nodes = {
     uSkyZenith: uniform((planet?.skyColor || new THREE.Color(0x6faee0)).clone().multiplyScalar(0.72)),
@@ -512,16 +515,15 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // green bridges the transition. That difference in *rate* produces a
   // continuous turquoise → cyan → blue → indigo ramp instead of a single fill.
   //
-  // Clarity is normalised to each planet's own bathymetry so shallow and
-  // abyssal worlds are both well exposed: blue reaches ~90% extinction at 45%
-  // of the deepest water (this planet's measured p90 sits at 43.8% of max).
   const clarity = planet?.waterStyle?.clarity || 1;
   const depthScale = Math.max(60, ((planet?.seaLevel ?? 0) + (planet?.hAmp ?? 1200) * 0.6) * clarity);
-  // The green and blue bands intentionally retain energy over hundreds to
-  // thousands of metres. This produces measurable colour separation through
-  // the real bathymetry instead of saturating every open-ocean pixel.
-  const extinction = uniform(new THREE.Vector3(1.8, 1.2, 0.6)
-    .multiplyScalar(2.3 / (0.9 * depthScale)));
+  // Meter-scaled clear-water attenuation. Red light is almost gone after
+  // about 20 m of round-trip travel, green after ~65 m and blue after ~190 m.
+  // The retired planet-normalized coefficients let red survive for kilometres,
+  // which is why a genuinely deep lake still looked like pale knee-deep glass.
+  const extinctionValues = [0.11, 0.035, 0.012]
+    .map((value) => value / Math.max(0.45, clarity));
+  const extinction = uniform(new THREE.Vector3(...extinctionValues));
   const transmit = exp(extinction.mul(depth.mul(-2)));
   // Suspended particles add a non-linear depth haze on top of molecular
   // absorption. It acts on the surviving sea-floor light, so it preserves
@@ -555,13 +557,15 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // before they fall below a pixel, integrating their mean-square slope into
   // roughness instead of aliasing into orbit-scale stripes.
   const seaState = THREE.MathUtils.clamp(planet?.waterStyle?.swell || 1, 0.35, 2.4);
-  const spectrumRng = makeRng(`${planet?.seed || 'water'}:directional-spectrum:v2`);
+  const spectrumRng = makeRng(`${planet?.seed || 'water'}:directional-spectrum:v3`);
   const baseHeading = spectrumRng() * Math.PI * 2;
+  const crossHeading = baseHeading
+    + (spectrumRng() > 0.5 ? 1 : -1) * (0.82 + spectrumRng() * 0.48);
   const wavelengths = [680, 470, 330, 235, 168, 121, 88, 64, 46, 33, 23, 16, 11, 7.5, 4.8, 3.0];
   const amplitudes = [1.06, 0.82, 0.61, 0.45, 0.33, 0.24, 0.175, 0.126,
     0.09, 0.064, 0.044, 0.03, 0.019, 0.012, 0.007, 0.004];
-  const spreading = [0, 0.09, -0.13, 0.2, -0.25, 0.31, -0.38, 0.46,
-    -0.55, 0.65, -0.76, 0.88, -1.02, 1.17, -1.31, 1.46];
+  const phaseWarp = mx_fractal_noise_float(local.mul(1 / 1900)
+    .add(vec3(clock.mul(0.004), 0, clock.mul(-0.003))), 3).sub(0.5);
   let macroWave = float(0);
   let choppyOffset = vec3(0);
   let waveGradient = vec3(0);
@@ -572,7 +576,19 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     const k = Math.PI * 2 / wavelength;
     const omega = Math.sqrt(9.81 * k);
     const amplitude = amplitudes[i] * seaState;
-    const heading = baseHeading + spreading[i] + (spectrumRng() - 0.5) * 0.055;
+    // A real sea combines a dominant wind sea, one or more remote swells and
+    // almost isotropic short gravity/capillary waves. The old hand-authored
+    // +/- sequence kept every energetic long band nearly parallel, producing
+    // the repeated ruled-paper pattern visible from low flight.
+    let heading;
+    if (i < 4) {
+      heading = (i % 2 === 0 ? baseHeading : crossHeading)
+        + (spectrumRng() - 0.5) * 0.16;
+    } else if (i < 12) {
+      heading = baseHeading + (spectrumRng() - 0.5) * 1.35;
+    } else {
+      heading = spectrumRng() * Math.PI * 2;
+    }
     // A small non-coplanar component prevents a single preferred axis from
     // collapsing at the sphere's poles; projection below restores tangency.
     const globalDirection = new THREE.Vector3(
@@ -588,7 +604,9 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     // preserves metre-scale phase precision in float32 shader arithmetic.
     const spatialPhase = fract(dot(local, direction).mul(1 / wavelength)
       .add(phaseOffset / (Math.PI * 2))).mul(Math.PI * 2);
-    const phase = spatialPhase.sub(clock.mul(omega * (i % 3 === 1 ? -1 : 1)));
+    const phase = spatialPhase
+      .add(phaseWarp.mul(i < 4 ? 0.75 : 1.8))
+      .sub(clock.mul(omega * (i % 3 === 1 ? -1 : 1)));
     // At orbital pixel footprints even 500 m swell is unresolved. Preserve
     // its statistical roughness, not its phase; otherwise the last surviving
     // two bands turn into kilometre-long identical diagonal hatch marks.
@@ -614,7 +632,7 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   }
   const waveTangent = dot(waveGradient, tangent);
   const waveBitangent = dot(waveGradient, bitangent);
-  let rippleGradient = vec2(0), wakeFoam = float(0);
+  let rippleGradient = vec2(0), interactionHeight = float(0), wakeFoam = float(0);
   for (let i = 0; i < waterInteraction.capacity; i++) {
     const impulsePosition = uniform(waterInteraction.positions[i]);
     const impulse = uniform(waterInteraction.data[i]);
@@ -660,10 +678,19 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
       .sub(wakeAxis.mul(centreEnvelope.mul(0.08)));
     const wakeGradient = vec2(dot(wakeGradientObject, tangent),
       dot(wakeGradientObject, bitangent));
-    const directionalFoam = armEnvelope.add(centreEnvelope.mul(0.42))
-      .mul(impulse.w).mul(0.2);
+    const bowPressure = exp(abs(lateral).mul(-0.2))
+      .mul(exp(abs(along).mul(-0.24))).mul(wakeEnvelope);
+    const directionalFoam = armEnvelope.mul(1.15)
+      .add(centreEnvelope.mul(0.5))
+      .add(bowPressure.mul(0.7))
+      .mul(impulse.w).mul(3.2);
     const isWake = smoothstep(0.5, 0.51, impulseDirection.w);
     rippleGradient = rippleGradient.add(mix(impactGradient, wakeGradient, isWake));
+    const impactHeight = sin(ring.mul(1.4)).mul(impactEnvelope).mul(0.58);
+    const wakeHeight = armOscillation.mul(armEnvelope).mul(0.68)
+      .add(bowPressure.mul(0.42))
+      .sub(centreEnvelope.mul(0.16));
+    interactionHeight = interactionHeight.add(mix(impactHeight, wakeHeight, isWake));
     wakeFoam = wakeFoam.add(mix(impactFoam, directionalFoam, isWake));
   }
   // The previous derivative-based widening operated on vertex-baked depth.
@@ -749,12 +776,16 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     .mul(float(1).sub(orbital));
   const baseWater = bodyWater.mul(float(0.9).add(surfaceVariation.mul(0.09)))
     .add(uniform(shallow).mul(crestScatter));
-  material.colorNode = mix(baseWater, vec3(0.92, 0.97, 1), foam)
+  // Open water has very little Lambertian albedo. Most of what the eye reads
+  // is reflected sky plus depth-dependent volume scattering; treating the
+  // water body as a bright diffuse sheet erased both wave contrast and depth.
+  const bodyDiffuse = mix(float(0.72), float(0.3), smoothstep(2, 120, depth));
+  material.colorNode = mix(baseWater.mul(bodyDiffuse), vec3(0.92, 0.97, 1), foam)
     .mul(mix(float(0.5), float(1), eclipseVisibility));
   // Reflected radiance is not diffuse albedo: putting it in colorNode caused
   // the lighting pass to darken sunsets a second time. Keep the water body in
   // the physical BRDF and feed live sky/cloud/sun radiance through emissive.
-  material.emissiveNode = reflectedSky.min(vec3(1.4)).mul(skyResponse.mul(0.28))
+  material.emissiveNode = reflectedSky.min(vec3(1.4)).mul(skyResponse.mul(0.52))
     .mul(mix(float(0.72), float(1), eclipseVisibility))
     // Foam is bright because it is diffuse aerated water, not a light source.
     // Keeping only a small skylight term avoids the former full-screen white
@@ -801,13 +832,16 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // A centimetre-scale bias avoids coplanar flicker at the exact zero contour
   // without lifting water metres through low beaches and inland terrain.
   const shoreOverlap = float(0.12);
-  material.positionNode = positionLocal.add(up.mul(macroWave.add(shoreOverlap)))
+  material.positionNode = positionLocal.add(up.mul(
+    macroWave.add(interactionHeight).add(shoreOverlap),
+  ))
     .add(choppyOffset);
   material.userData.shader = { uniforms: nodes };
   material.userData.waterCloudTexture = waterCloudTexture;
   material.userData.waterProfile = {
     depthScale,
-    extinction: [1.8, 1.2, 0.6],
+    extinction: extinctionValues,
+    extinctionUnits: 'inverse-metres',
     depthHaze: { distance: depthScale * 0.4, strength: 0.9 },
     spectrum: {
       model: 'directional-jonswap-inspired',
@@ -818,6 +852,7 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
       jacobianWhitecaps: true,
       meanSquareSlopeFiltering: true,
     },
+    interactiveDisplacement: true,
     transmission: true,
     dynamicSky: true,
     cloudReflection: true,
@@ -825,7 +860,7 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     wetShore: true,
     deterministicBathymetry: true,
   };
-  material.userData.nodeMaterial = 'water-directional-spectrum-v6';
+  material.userData.nodeMaterial = 'water-cross-sea-spectrum-v7';
   material.userData.opacityNodeUniform = opacity;
   source.dispose?.();
   return material;

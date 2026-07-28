@@ -119,7 +119,8 @@ try {
     .map((height) => home.seaLevel - height);
   const depthScale = Math.max(60,
     (home.seaLevel + home.hAmp * 0.6) * home.waterStyle.clarity);
-  const extinction = [1.8, 1.2, 0.6].map((value) => value * 2.3 / (0.9 * depthScale));
+  const extinction = [0.11, 0.035, 0.012]
+    .map((value) => value / Math.max(0.45, home.waterStyle.clarity));
   const absorption = depths.map((depth) => {
     const hazeT = Math.min(1, Math.max(0, depth / (depthScale * 0.4)));
     const depthHaze = hazeT * hazeT * (3 - 2 * hazeT) * 0.9;
@@ -128,10 +129,20 @@ try {
     return 1 - (0.2126 * transmission[0] + 0.7152 * transmission[1] + 0.0722 * transmission[2]);
   });
   const absorptionStats = stats(absorption);
-  assert.ok(absorptionStats.sd >= 0.25,
-    `effective water-column spread ${absorptionStats.sd.toFixed(4)} must meet the 0.25 contract`);
-  const red99Depth = -Math.log(0.01) / (2 * extinction[0]);
-  assert.ok(red99Depth >= 400, 'even the red channel must not saturate at the old 92 m shoreline');
+  assert.ok(absorptionStats.sd >= 0.04,
+    `effective water-column spread ${absorptionStats.sd.toFixed(4)} must remain visible`);
+  const attenuation99 = extinction.map((value) => -Math.log(0.01) / (2 * value));
+  assert.ok(attenuation99[0] >= 15 && attenuation99[0] <= 35,
+    'red water-column attenuation must occur over tens of metres');
+  assert.ok(attenuation99[1] >= 45 && attenuation99[1] <= 100,
+    'green water-column attenuation must outlive red without surviving kilometres');
+  assert.ok(attenuation99[2] >= 140 && attenuation99[2] <= 280,
+    'blue water-column attenuation must penetrate deepest');
+  const channelTransmissionAt55m = extinction.map((value) => Math.exp(-2 * value * 55));
+  assert.ok(channelTransmissionAt55m[0] < 0.01
+    && channelTransmissionAt55m[1] < 0.08
+    && channelTransmissionAt55m[2] > channelTransmissionAt55m[1] * 4,
+  '55 m water must read blue/deep rather than reveal a pale sea floor');
 
   assert.equal(skirtDropForMorph(0), 0.08);
   assert.ok(Math.abs(skirtDropForMorph(100) - 112.04) < 1e-9);
@@ -190,7 +201,7 @@ try {
     worstRms,
     mountainFree,
     absorption: absorptionStats,
-    red99Depth,
+    attenuation99,
   }, null, 2));
 } finally {
   home.dispose();

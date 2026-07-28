@@ -843,9 +843,10 @@ export class Planet {
       // physical surface. The swash overlap in the water vertex shader now
       // closes the coast itself, so there is deliberately no visual backing.
       this.waterUnderlayMaterial = null;
-      // Seas are a second morph-less chunked LOD: a uniform sphere mesh would
-      // sag metres between vertices, while mixed cube-sphere levels need short
-      // radial skirts to seal their coarse-chord/fine-arc T junctions.
+      // Seas use the same parent-triangle geomorph contract as terrain.
+      // Geometry is nominally spherical, but bathymetry, shore foam and
+      // absorption are not: swapping their vertex fields per chunk exposed
+      // rectangular depth bands even when the water silhouette looked smooth.
       // Geometric swell bottoms out at 146 m wavelength. The former
       // 24-vertex, level-7 near field left ~460 m cells on the 900 km home
       // world, so those waves could only exist in the normal shader. Keep at
@@ -861,7 +862,8 @@ export class Planet {
         // A 2.5 m skirt was vastly larger than the gap and exposed dark walls
         // whenever the water was translucent. Dense adjacent shells therefore
         // meet directly; the coast overlap handles the independent land edge.
-        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: false, skirtDrop: 0.08,
+        R: this.seaRadius, hAmp: 2, noMorph: false, noSkirt: true,
+        faceBoundarySkirts: false,
         noShadow: true,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,

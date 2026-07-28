@@ -626,12 +626,15 @@ export class ChunkedLOD {
     const dExtra = aExtra ? new Float32Array(total * 4) : null;
     // water depth beneath each sea-surface vertex (Beer–Lambert absorption)
     const aDepth = p.bakeDepth ? new Float32Array(total) : null;
+    const dDepth = aDepth ? new Float32Array(total) : null;
     const dPos = hasMorph ? new Float32Array(total * 3) : null;
     const dNrm = hasMorph ? new Float32Array(total * 3) : null;
     const parentMatAttribute = hasMorph
       ? node.parent?.mesh?.geometry?.getAttribute('aMat') : null;
     const parentExtraAttribute = hasMorph
       ? node.parent?.mesh?.geometry?.getAttribute('aExtra') : null;
+    const parentDepthAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('aDepth') : null;
 
     const faceFn = FACE_FN[node.face];
     let maxMorphHeightDelta = 0;
@@ -738,6 +741,11 @@ export class ChunkedLOD {
                 + parentExtraAttribute.getW(i1) * w1
                 + parentExtraAttribute.getW(i2) * w2 - aExtra[idx * 4 + 3];
             }
+            if (dDepth && parentDepthAttribute) {
+              dDepth[idx] = parentDepthAttribute.getX(i0) * w0
+                + parentDepthAttribute.getX(i1) * w1
+                + parentDepthAttribute.getX(i2) * w2 - aDepth[idx];
+            }
           } else {
             // Root/bootstrap fallback; normal child builds always have a
             // committed parent mesh because display ownership is top-down.
@@ -841,6 +849,7 @@ export class ChunkedLOD {
         dExtra[dst * 4 + 3] = dExtra[src * 4 + 3];
       }
       if (aDepth) aDepth[dst] = aDepth[src];
+      if (dDepth) dDepth[dst] = dDepth[src];
       if (hasMorph) {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
         dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
@@ -907,6 +916,7 @@ export class ChunkedLOD {
     if (dMat) geo.setAttribute('aMatDelta', new THREE.BufferAttribute(dMat, 3));
     if (dExtra) geo.setAttribute('aExtraDelta', new THREE.BufferAttribute(dExtra, 4));
     if (aDepth) geo.setAttribute('aDepth', new THREE.BufferAttribute(aDepth, 1));
+    if (dDepth) geo.setAttribute('aDepthDelta', new THREE.BufferAttribute(dDepth, 1));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
       geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];

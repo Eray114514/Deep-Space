@@ -2527,6 +2527,9 @@ const waterLocal = new THREE.Vector3();
 const waterVelocity = new THREE.Vector3();
 const waterWakePoint = new THREE.Vector3();
 const waterShipCenter = new THREE.Vector3();
+const waterShipWorld = new THREE.Vector3();
+const waterWakeSide = new THREE.Vector3();
+const waterShipRay = new THREE.Vector3();
 
 function updateDevWaterWakeFixture() {
   if (!DEV_SERVER || !devWaterWakeFixture) return;
@@ -2542,7 +2545,9 @@ function updateDevWaterWakeFixture() {
   fixture.motion.copy(fixture.tangent)
     .addScaledVector(fixture.direction, -fixture.tangent.dot(fixture.direction)).normalize();
   fixture.planet.localPositionToWorld(
-    fixture.direction.clone().multiplyScalar(fixture.planet.seaRadius + fixture.height), nav.pos);
+    fixture.direction.clone().multiplyScalar(
+      fixture.planet.seaRadius + fixture.height + (fixture.cameraToKeel || 0),
+    ), nav.pos);
   fixture.planet.localOffsetToWorld(fixture.motion.clone()
     .multiplyScalar(travelTime > 0 ? fixture.speed : 0), nav.vel);
   nav.quat.copy(fixture.planet.frameOrientation)
@@ -2562,37 +2567,60 @@ function updateWaterInteraction(dt) {
   }
   waterInteraction.setPlanet(p.bodyId || p.seed);
   p.worldPositionToLocal(nav.pos, waterLocal);
-  const radius = waterLocal.length();
-  const waterHeight = radius - p.seaRadius;
+  // The visible hull is a real camera-relative transform, not the camera
+  // origin. Sample its centre and keel so wake contact agrees with the ship
+  // the player sees skimming the surface.
+  waterShipWorld.copy(nav.pos).add(ship.group.position);
+  p.worldPositionToLocal(waterShipWorld, waterShipCenter);
+  const hullHeight = waterShipCenter.length() - p.seaRadius - 2.4;
+  const waterHeight = (state === 'space' || state === 'flyto')
+    ? hullHeight : waterLocal.length() - p.seaRadius;
   waterSurfaceHeight = waterHeight;
 
-  if ((state === 'space' || state === 'flyto') && waterHeight > -3 && waterHeight < 38) {
+  if ((state === 'space' || state === 'flyto') && waterHeight > -8 && waterHeight < 38) {
     p.worldOffsetToLocal(nav.vel, waterVelocity);
-    _up.copy(waterLocal).normalize();
+    _up.copy(waterShipCenter).normalize();
     waterVelocity.addScaledVector(_up, -waterVelocity.dot(_up));
     const tangentSpeed = waterVelocity.length();
     waterTangentSpeed = tangentSpeed;
     waterContact = smoothstep(18, 180, tangentSpeed) * (1 - smoothstep(4, 38, waterHeight));
     waterWakeTimer -= dt;
-    if (waterContact > 0.03 && waterWakeTimer <= 0) {
+    if (waterContact > 0.03 && waterWakeTimer <= 0
+      && !devWaterWakeFixture?.muted) {
       waterWakeTimer = lerp(0.14, 0.045, clamp(tangentSpeed / 450, 0, 1));
       waterVelocity.normalize();
-      // `nav.pos` is the camera/control origin, not the foreground hull. The
-      // old 19 m estimate left the thrusters only 11.5 m ahead of the camera;
-      // at skimming speed every ring passed behind the view in <0.16 s. Keep
-      // the visible trail between camera and hull, then project it to the sea.
-      waterShipCenter.copy(waterLocal).addScaledVector(waterVelocity, 55)
-        .normalize().multiplyScalar(p.seaRadius);
-      const center = waterWakePoint.copy(waterShipCenter)
-        .addScaledVector(waterVelocity, -7.5);
+      // Foreground ships render after world depth, so radial projection does
+      // not land under their screen-space silhouette. Intersect the camera→
+      // hull ray with the sea sphere; this is the actual visible contact point
+      // and keeps spray/wake attached to the ship at every camera pitch.
+      waterShipRay.copy(waterShipCenter).sub(waterLocal).normalize();
+      const rayB = waterLocal.dot(waterShipRay);
+      const rayDisc = rayB * rayB - waterLocal.lengthSq()
+        + p.seaRadius * p.seaRadius;
+      const rayT = rayDisc >= 0 ? -rayB - Math.sqrt(rayDisc) : -1;
+      if (rayT > 0) {
+        waterShipCenter.copy(waterLocal).addScaledVector(waterShipRay, rayT);
+      } else {
+        waterShipCenter.normalize().multiplyScalar(p.seaRadius);
+      }
+      waterWakeSide.crossVectors(_up, waterVelocity).normalize();
       const strength = 0.22 + waterContact * 0.68;
-      waterInteraction.inject(center, {
-        strength,
-        speed: 7 + tangentSpeed * 0.012,
-        foam: 0.28 + waterContact * 0.34,
-        direction: waterVelocity,
-        kind: 'wake',
-      });
+      // Two pressure rails follow the real hull shoulders. Their interference
+      // forms a Kelvin-like centre trough and divergent shoulders instead of
+      // one synthetic line emitted from an arbitrary point ahead of camera.
+      for (const lateral of [-4.8, 4.8]) {
+        waterWakePoint.copy(waterShipCenter)
+          .addScaledVector(waterVelocity, 2.5)
+          .addScaledVector(waterWakeSide, lateral)
+          .normalize().multiplyScalar(p.seaRadius);
+        waterInteraction.inject(waterWakePoint, {
+          strength: strength * 0.72,
+          speed: 7 + tangentSpeed * 0.012,
+          foam: 0.2 + waterContact * 0.28,
+          direction: waterVelocity,
+          kind: 'wake',
+        });
+      }
     }
   } else if (state === 'walk' && walkCtl.planet === p) {
     // posLocal is the eye, so subtract the controller's actual eye height.
@@ -3070,7 +3098,6 @@ function frame() {
     weatherEffects.update(null, _up.set(0, 1, 0), _v3.set(1, 0, 0),
       clock.elapsedTime, 0);
   }
-  updateWaterInteraction(dt);
   updateSurfaceInteraction(dt);
   if (nearest?.isGasGiant && nearestAlt < nearest.atmoHeight) {
     const depth = clamp(-nearestAlt / (nearest.R * 0.1), 0, 1);
@@ -3198,6 +3225,7 @@ function frame() {
     yaw: spaceCtl.lookInput.yaw,
     pitch: spaceCtl.lookInput.pitch,
   });
+  updateWaterInteraction(dt);
   prewarmLoadedShipPipelines();
   audio.update({
     state,
@@ -4107,7 +4135,14 @@ window.NMS = {
       }
     }
     if (!waterDir || bestWaterDepth < 5) return false;
-    p.localPositionToWorld(waterDir.multiplyScalar(p.seaRadius + height), nav.pos);
+    // `height` is the requested visible keel clearance. The camera/control
+    // origin sits above and behind the foreground hull, so place that origin
+    // high enough for the actual formation transform to skim rather than
+    // letting a depth-independent foreground ship pass through the sea.
+    const cameraToKeel = 15.25;
+    p.localPositionToWorld(
+      waterDir.multiplyScalar(p.seaRadius + height + cameraToKeel), nav.pos,
+    );
     up.copy(waterDir).normalize();
     const tangentA = new THREE.Vector3().crossVectors(up,
       Math.abs(up.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)).normalize();
@@ -4151,11 +4186,29 @@ window.NMS = {
       motion: tangent.clone().normalize(),
       rotation: new THREE.Quaternion(),
       height,
+      cameraToKeel,
       speed,
       startedAt: performance.now(),
       settleTime: 2,
       duration: 8,
     };
+    return true;
+  },
+  muteWaterWake(muted = true) {
+    if (!DEV_SERVER || !devWaterWakeFixture) return false;
+    devWaterWakeFixture.muted = !!muted;
+    if (muted) {
+      // Hold the exact same camera/water sample for an A/B render. Resetting
+      // only the interaction field while the 210 m/s fixture kept travelling
+      // compared two different bathymetry patches and falsely "proved" a
+      // visible wake.
+      devWaterWakeFixture.origin.copy(devWaterWakeFixture.direction);
+      devWaterWakeFixture.startedAt = performance.now();
+      devWaterWakeFixture.settleTime = 0;
+      devWaterWakeFixture.speed = 0;
+      waterInteraction.clear();
+    }
+    waterWakeTimer = 0;
     return true;
   },
   setWade(i, { depth = 0.9, overview = false } = {}) {
