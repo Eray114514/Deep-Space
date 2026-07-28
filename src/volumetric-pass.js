@@ -3,8 +3,9 @@
 // only carries simulation-facing state shared by atmosphere/cloud materials.
 
 import * as THREE from 'three';
+import { VOLUME_LAYER, WORLD_LAYER } from './render-layers.js';
 
-export const VOLUME_LAYER = 2;
+export { VOLUME_LAYER };
 
 export class VolumetricPass {
   constructor() {
@@ -17,6 +18,15 @@ export class VolumetricPass {
   }
 
   setActivePlanet(planet, nav, motion = 0) {
+    const previous = this.activePlanet;
+    if (previous && previous !== planet) {
+      previous.volumeActive = false;
+      previous.atmoMesh?.layers.set(WORLD_LAYER);
+      if (previous.volCloudMesh) previous.volCloudMesh.visible = false;
+      for (const material of [previous.atmoMesh?.material, previous.volCloudMat]) {
+        if (material?.uniforms?.uDepthReady) material.uniforms.uDepthReady.value = 0;
+      }
+    }
     if (!planet?.atmoMesh) {
       this.activePlanet = null;
       this.historyValid = false;
@@ -26,6 +36,8 @@ export class VolumetricPass {
     }
     if (this.activePlanet !== planet) this.historyValid = false;
     this.activePlanet = planet;
+    planet.volumeActive = true;
+    planet.atmoMesh.layers.set(VOLUME_LAYER);
     this.nav.copy(nav);
     this.center.copy(planet.posUniv).sub(nav);
     this.radius = planet.R + planet.atmoHeight;
@@ -46,5 +58,11 @@ export class VolumetricPass {
     this.historyValid = false;
   }
 
-  dispose() {}
+  dispose() {
+    if (!this.activePlanet) return;
+    this.activePlanet.volumeActive = false;
+    this.activePlanet.atmoMesh?.layers.set(WORLD_LAYER);
+    if (this.activePlanet.volCloudMesh) this.activePlanet.volCloudMesh.visible = false;
+    this.activePlanet = null;
+  }
 }

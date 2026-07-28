@@ -24,9 +24,9 @@ try {
     + '&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=0.86&time=9.5');
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
   await page.evaluate(() => NMS.setAdaptiveQualityLocked(true));
-  for (const fixture of ['cumulus', 'stratus', 'storm', 'clear']) {
+  for (const fixture of ['default', 'cumulus', 'stratus', 'storm', 'clear']) {
     const state = await page.evaluate((name) => {
-      NMS.setWeatherFixture(0, name);
+      NMS.setWeatherFixture(0, name === 'default' ? null : name);
       const planet = NMS._planet(0);
       const lo = planet.cloudShadowTex?.image;
       const hi = planet.cloudWeatherHiTex?.image;

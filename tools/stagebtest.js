@@ -289,7 +289,8 @@ if (createWeatherField && sampleWeatherField && advanceWeatherField && weatherFi
 // ---- Render-graph and runtime wiring ---------------------------------------
 
 const [pipelineSource, planetSource, cloudSource, mainSource,
-  shaftSource, nodeShaderSource, weatherEffectsSource, volumeDepthSource] = await Promise.all([
+  shaftSource, nodeShaderSource, weatherEffectsSource, volumeDepthSource,
+  volumePassSource] = await Promise.all([
   loadSource('src/node-render-pipeline.js'),
   loadSource('src/planet.js'),
   loadSource('src/clouds-node.js'),
@@ -298,6 +299,7 @@ const [pipelineSource, planetSource, cloudSource, mainSource,
   loadSource('src/shaders-node.js'),
   loadSource('src/weather-effects.js'),
   loadSource('src/volume-depth-node.js'),
+  loadSource('src/volumetric-pass.js'),
 ]);
 
 check(/scenePass\.getTexture(?:Node)?\(\s*['"]depth['"]\s*\)|scenePass\.getDepthNode\(/.test(pipelineSource),
@@ -362,6 +364,18 @@ check(/stratusProfile/.test(cloudSource)
     && /anvilProfile/.test(cloudSource),
   'WebGPU cloud density has distinct low, mid, high and convective profiles',
   'one generic shell cannot represent stratus, cumulus, alto, cirrus and cumulonimbus anvils');
+check(/stratocumulusProfile/.test(cloudSource)
+    && /nimbostratusProfile/.test(cloudSource)
+    && /altocumulusProfile/.test(cloudSource)
+    && /cirrocumulusProfile/.test(cloudSource)
+    && /lenticularProfile/.test(cloudSource)
+    && /towerProfile/.test(cloudSource),
+  'WebGPU cloud volume renders the extended low/mid/high genus set',
+  'cloud family names are insufficient unless each family owns a distinct density profile');
+check(/rayJitter/.test(cloudSource) && /uVolumeSize/.test(cloudSource)
+    && /weatherPosition\.mul\(1\s*\/\s*42000\)/.test(cloudSource),
+  'cloud traversal uses metre-scaled detail and interleaved ray jitter',
+  'unit-sphere noise and fixed midpoint samples create kilometre-wide lobes and white brush bands');
 check(/phaseForward/.test(cloudSource) && /phaseBack/.test(cloudSource)
     && /powder/.test(cloudSource),
   'WebGPU cloud lighting uses dual-lobe phase and powder response',
@@ -395,9 +409,37 @@ check(/setWeatherFixture[\s\S]{0,1800}weatherLoTextureNode/.test(planetSource)
     && /setWeatherFixture[\s\S]{0,1800}weatherHiTextureNode/.test(planetSource),
   'weather fixtures rebind both cloud atlases used by the volume renderer',
   'changing rain metadata without replacing the sampled Lo/Hi atlas leaves a clear sky during storms');
-check(/wetMask/.test(nodeShaderSource) && /alphaTest\s*=\s*0\.01/.test(nodeShaderSource),
-  'water shell discards zero-depth dry land',
-  'polygon offset must never pull the closed sea sphere in front of continents at grazing angles');
+check(/applyNoctilucentField/.test(planetSource)
+    && /cloudMeshNoctilucent/.test(planetSource)
+    && /noctilucent-mesosphere-v1/.test(nodeShaderSource),
+  'mesospheric noctilucent clouds own a separate terminator shell',
+  'placing noctilucent clouds in the tropospheric volume gives them the wrong altitude and traversal');
+check(/material\.polygonOffset\s*=\s*false/.test(nodeShaderSource)
+    && /material\.alphaTest\s*=\s*0/.test(nodeShaderSource)
+    && /continuous physical shell/.test(nodeShaderSource),
+  'water uses terrain depth occlusion instead of coarse bathymetry alpha cutouts',
+  'a vertex wet-mask creates black coastline cracks at orbital LOD');
+check(!/fogDensity\s*=\s*transit\s*\*/.test(mainSource),
+  'cloud traversal never drives global FogExp2',
+  'cloud proximity must be integrated by the depth-aware volume, not replace the frame as pseudo-loading fog');
+check(/SKY_BACKDROP_LAYER/.test(pipelineSource)
+    && /skyPass\s*=\s*pass/.test(pipelineSource)
+    && /over\(this\.skyPass\.getTextureNode\('output'\),\s*sceneColor\)/.test(pipelineSource),
+  'WebGPU sky owns a dedicated backdrop pass below the opaque world',
+  'a finite transparent sphere can pass the depth test and cover distant terrain');
+check(/previous\.volumeActive\s*=\s*false/.test(volumePassSource)
+    && /planet\.volumeActive\s*=\s*true/.test(volumePassSource)
+    && /previous\.atmoMesh\?\.layers\.set\(WORLD_LAYER\)/.test(volumePassSource),
+  'local participating media has one explicit active-planet owner',
+  'inactive moon and planet atmospheres must not remain in an unoccluded overlay pass');
+check(/focused\s*&&\s*this\.volumeActive/.test(planetSource)
+    && /this\.volumeActive\s*&&\s*e\s*>\s*0\.01/.test(planetSource),
+  'inactive volumetric cloud shells cannot render above the active planet',
+  'focused-distance fades alone do not establish cross-body depth ownership');
+check(/fog:\s*false/.test(cloudSource)
+    && /atmoMesh\.material\.fog\s*=\s*false/.test(planetSource),
+  'integrated atmosphere and cloud media opt out of global scene fog',
+  'FogExp2 must not recolor a participating medium after it has integrated extinction');
 
 check(/setCloudStepBudget\s*\([^)]*\)[\s\S]{0,500}uMaxSteps/.test(mainSource),
   'main adaptive cloud budget writes the shader uniform',

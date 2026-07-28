@@ -7,8 +7,8 @@
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex } from './noise.js';
 
-export const WEATHER_FIELD_VERSION = 1;
-export const WEATHER_NAMESPACE_SUFFIX = ':weather:v1';
+export const WEATHER_FIELD_VERSION = 2;
+export const WEATHER_NAMESPACE_SUFFIX = ':weather:v2';
 
 const TAU = Math.PI * 2;
 const DEFAULT_PROFILE = Object.freeze({
@@ -67,6 +67,7 @@ function clamp(value, low = 0, high = 1) {
 }
 
 function smoothstep(low, high, value) {
+  if (high < low) return 1 - smoothstep(high, low, value);
   const t = clamp((value - low) / Math.max(high - low, 1e-9));
   return t * t * (3 - 2 * t);
 }
@@ -248,6 +249,34 @@ function stormCell(direction, center, core, edge) {
   return smoothstep(edge, core, dot(direction, center));
 }
 
+function cycloneFeatures(direction, center, phase) {
+  const tangentA = tangentVector(center, { x: 0, y: 1, z: 0 });
+  const tangentB = normalize(cross(center, tangentA));
+  const angularRadius = Math.acos(clamp(dot(direction, center), -1, 1));
+  const azimuth = Math.atan2(dot(direction, tangentB), dot(direction, tangentA));
+  const shield = smoothstep(0.62, 0.075, angularRadius);
+  const eye = 1 - smoothstep(0.018, 0.058, angularRadius);
+  const eyewall = smoothstep(0.018, 0.052, angularRadius)
+    * smoothstep(0.105, 0.058, angularRadius);
+  const spiralWave = Math.sin(azimuth * 2.6 + angularRadius * 18 - phase) * 0.5 + 0.5;
+  const spiral = shield * smoothstep(0.24, 0.78, spiralWave) * (1 - eye);
+  const outflow = smoothstep(0.5, 0.16, angularRadius)
+    * (0.45 + 0.55 * (Math.sin(azimuth * 5.2 - phase * 0.63) * 0.5 + 0.5));
+
+  // A front is a long, narrow great-circle band trailing away from the low.
+  // Its normal rotates with the same absolute-time phase as the cyclone, so
+  // weather, cloud shadows and precipitation reconstruct it identically.
+  const frontNormal = normalize({
+    x: tangentA.x * Math.cos(phase * 0.37) + tangentB.x * Math.sin(phase * 0.37),
+    y: tangentA.y * Math.cos(phase * 0.37) + tangentB.y * Math.sin(phase * 0.37),
+    z: tangentA.z * Math.cos(phase * 0.37) + tangentB.z * Math.sin(phase * 0.37),
+  });
+  const frontDistance = Math.abs(dot(direction, frontNormal));
+  const frontReach = smoothstep(-0.58, 0.58, dot(direction, center));
+  const front = smoothstep(0.15, 0.018, frontDistance) * frontReach;
+  return { shield, eye, eyewall, spiral, outflow, front };
+}
+
 function classifyWeather(coverage, cloudType, stratusMask, precipitation,
   precipitationKind, convective, fog) {
   if (fog > 0.72 && precipitation < 0.2) return 'fog';
@@ -300,10 +329,21 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
 
   const movingStormA = rotateAroundAxis(field.stormCenterA, field.windAxis, lowAngle * 0.76);
   const movingStormB = rotateAroundAxis(field.stormCenterB, field.secondaryAxis, highAngle * -0.48);
+  const cycloneA = cycloneFeatures(direction, movingStormA, field.basePhase + lowAngle * 2.1);
+  const cycloneB = cycloneFeatures(direction, movingStormB, field.detailPhase - highAngle * 1.6);
   const stormSystems = Math.max(
     stormCell(direction, movingStormA, 0.986, 0.78),
     stormCell(direction, movingStormB, 0.992, 0.84) * 0.78,
+    cycloneA.eyewall,
+    cycloneB.eyewall * 0.72,
   );
+  const cycloneCloud = Math.max(
+    cycloneA.spiral, cycloneA.shield * 0.34,
+    cycloneB.spiral * 0.72, cycloneB.shield * 0.22,
+  );
+  const frontalCloud = Math.max(cycloneA.front, cycloneB.front * 0.68);
+  const cycloneEye = Math.max(cycloneA.eye, cycloneB.eye * 0.82);
+  const anvilOutflow = Math.max(cycloneA.outflow, cycloneB.outflow * 0.76);
 
   const latitude = Math.abs(direction.y);
   const oceanicHumidity = profile.humidity
@@ -313,17 +353,22 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
   // applying it so a wet planet does not become a featureless white shell.
   const coverageSource = macro * 0.52 + detail * 0.16
     + (profile.cloudiness - 0.45) * 0.82
-    + (humidity - 0.5) * 0.22 + stormSystems * 0.42;
-  const coverage = smoothstep(0.02, 0.44, coverageSource);
+    + (humidity - 0.5) * 0.22 + stormSystems * 0.42
+    + cycloneCloud * 0.48 + frontalCloud * 0.34;
+  const coverage = smoothstep(0.02, 0.44, coverageSource)
+    * (1 - cycloneEye * 0.96);
   const stratusSource = humidity * 0.58 + macro * 0.22
-    - Math.abs(detail) * 0.18 + profile.fogginess * 0.25;
+    - Math.abs(detail) * 0.18 + profile.fogginess * 0.25
+    + frontalCloud * 0.32;
   const stratusMask = smoothstep(0.46, 0.84, stratusSource) * coverage;
   const convectiveSource = coverage * humidity * (0.54 + profile.storminess * 0.7)
-    + stormSystems * 0.72 + Math.max(0, detail) * 0.13 - stratusMask * 0.2;
+    + stormSystems * 0.72 + Math.max(cycloneA.eyewall, cycloneB.eyewall * 0.72) * 0.9
+    + Math.max(0, detail) * 0.13 - stratusMask * 0.2;
   const convective = smoothstep(0.42, 1.18, convectiveSource);
   const cloudType = clamp(convective * 0.92 + stormSystems * 0.2);
   const highMask = clamp(smoothstep(-0.08, 0.48, highPattern
-    + profile.highClouds * 0.72 + convective * 0.22 - 0.34));
+    + profile.highClouds * 0.72 + convective * 0.22
+    + anvilOutflow * 0.26 - 0.34));
   const highType = clamp(0.5 + detail * 0.38 + convective * 0.28);
   const multipleScatter = clamp(coverage * 0.54 + highMask * 0.22
     + humidity * 0.16 + convective * 0.2);

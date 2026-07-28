@@ -2,6 +2,7 @@ import * as THREE from 'three/webgpu';
 import { float, max, mix, pass, rtt, uniform, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
+import { SKY_BACKDROP_LAYER } from './render-layers.js';
 import { createSunShaftNode } from './sun-shafts-node.js';
 
 function over(base, overlay) {
@@ -10,7 +11,7 @@ function over(base, overlay) {
   // only on the WebGPU path (the legacy volume composite has always used the
   // premultiplied equation below).
   return vec4(overlay.rgb.add(base.rgb.mul(float(1).sub(overlay.a))),
-    max(base.a, overlay.a));
+    overlay.a.add(base.a.mul(float(1).sub(overlay.a))));
 }
 
 export class GameNodePipeline {
@@ -27,13 +28,21 @@ export class GameNodePipeline {
   } = {}) {
     this.renderer = renderer;
     this.camera = camera;
+    this.volumeScale = volumeScale;
     this.pipeline = new THREE.RenderPipeline(renderer);
     this.scenePass = pass(scene, camera, { samples: 4 });
     this.scenePass.name = 'Main scene';
     this.scenePass.setLayers(new THREE.Layers());
     const sceneColor = this.scenePass.getTextureNode('output');
     this.sceneDepthTexture = this.scenePass.getTexture('depth');
-    let colorNode = sceneColor;
+    const skyLayers = new THREE.Layers();
+    skyLayers.set(SKY_BACKDROP_LAYER);
+    this.skyPass = pass(scene, camera, { depthBuffer: false, samples: 0 });
+    this.skyPass.name = 'Atmosphere sky backdrop';
+    this.skyPass.setLayers(skyLayers);
+    // Sky is explicitly under the opaque world. A transparent sphere can no
+    // longer cover terrain merely because its finite radius is closer.
+    let colorNode = over(this.skyPass.getTextureNode('output'), sceneColor);
 
     this.volumePass = null;
     if (volume) {
@@ -106,7 +115,8 @@ export class GameNodePipeline {
   }
 
   setVolumeScale(scale) {
-    this.volumePass?.setResolutionScale(THREE.MathUtils.clamp(scale, 0.3, 1));
+    this.volumeScale = THREE.MathUtils.clamp(scale, 0.3, 1);
+    this.volumePass?.setResolutionScale(this.volumeScale);
   }
 
   setSunShafts({ x = 0.5, y = 0.5, strength = 0, color = null } = {}) {
@@ -125,6 +135,10 @@ export class GameNodePipeline {
       uniforms.uDepthReady.value = 1;
       if (uniforms.uCameraNear) uniforms.uCameraNear.value = this.camera.near;
       if (uniforms.uCameraFar) uniforms.uCameraFar.value = this.camera.far;
+      if (uniforms.uVolumeSize?.value) {
+        this.renderer.getDrawingBufferSize(uniforms.uVolumeSize.value);
+        uniforms.uVolumeSize.value.multiplyScalar(this.volumeScale);
+      }
       if (uniforms.uDepthReversed) {
         uniforms.uDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
       }
@@ -138,6 +152,7 @@ export class GameNodePipeline {
   }
 
   async compileAsync() {
+    await this.skyPass.compileAsync(this.renderer);
     await this.scenePass.compileAsync(this.renderer);
     if (this.volumePass) await this.volumePass.compileAsync(this.renderer);
     await this.foregroundPass.compileAsync(this.renderer);
@@ -145,6 +160,7 @@ export class GameNodePipeline {
   }
 
   dispose() {
+    this.skyPass.dispose();
     this.scenePass.dispose();
     this.volumePass?.dispose();
     this.worldBase?.dispose();

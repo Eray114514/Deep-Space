@@ -13,9 +13,13 @@ import {
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
-import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudBaseDensityCPU, cloudDensityCPU, detailTexture } from './shaders.js';
+import {
+  applyTerrainDetail, applyWaterWaves, applyCloudField, applyNoctilucentField,
+  cloudBaseDensityCPU, cloudDensityCPU, detailTexture,
+} from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
+import { WORLD_LAYER } from './render-layers.js';
 import { floraPalette } from './flora.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
@@ -250,10 +254,13 @@ export class Planet {
     const wideGroupFactor = lowTierGrouping ? 4 : (4 / 3);
     this.gridCells = Math.round(canonicalGridCells * wideGroupFactor);
     this.gridCellsAtLevel = () => this.gridCells;
-    // Child edges are constrained to parent chords; fitted skirts remain as a
-    // conservative seal while asynchronously built neighbours differ by more
-    // than one level.
-    this.noSkirt = false;
+    // Terrain chunk boundaries stay on the continuous planet surface. Forcing
+    // every child edge down to the parent chord created a low-frequency trench
+    // around every square; radial skirts then rendered those trenches as dark
+    // dotted walls. Mixed-level ownership is handled by keeping the parent
+    // visible until its complete child set is ready and by geomorphing the
+    // child surface, not by modifying permanent fine-level boundary vertices.
+    this.noSkirt = true;
     // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
@@ -327,6 +334,12 @@ export class Planet {
     if (this.liquidMat) this._fades.push({ mat: this.liquidMat, base: this.liquidMat.opacity });
     if (this.cloudMesh) this._fades.push({ mat: this.cloudMesh.material, base: this.cloudMesh.material.opacity });
     if (this.cloudMesh2) this._fades.push({ mat: this.cloudMesh2.material, base: this.cloudMesh2.material.opacity });
+    if (this.cloudMeshNoctilucent) {
+      this._fades.push({
+        mat: this.cloudMeshNoctilucent.material,
+        base: this.cloudMeshNoctilucent.material.opacity,
+      });
+    }
     if (this.ringMesh) this._fades.push({ mat: this.ringMesh.material, base: this.ringMesh.material.opacity });
     this._atmoBaseDensity = this.atmoMesh ? this.atmoMesh.material.uniforms.density.value : 0;
     if (this.appear < 1) this.applyAppear();
@@ -863,7 +876,11 @@ export class Planet {
       // Atmosphere is the first participating-medium layer; clouds composite
       // over it in the shared half-resolution volume pass.
       this.atmoMesh.renderOrder = 1;
-      if (volumetricCloudsEnabled) this.atmoMesh.layers.set(VOLUME_LAYER);
+      // Distant-body atmosphere belongs to the world pass so ordinary depth
+      // naturally occludes it. VolumetricPass moves only the active planet to
+      // VOLUME_LAYER and binds opaque scene depth for local integration.
+      this.atmoMesh.layers.set(WORLD_LAYER);
+      this.atmoMesh.material.fog = false;
       this.atmoMesh.frustumCulled = false;
       this.group.add(this.atmoMesh);
       this.atmoHeight = atmoR - R;
@@ -955,6 +972,7 @@ export class Planet {
       this.cloudBands.push({
         r: cloudR, mesh: this.cloudMesh, opacity: 0.88,
         halfThickness: Math.max(this.hAmp * 0.8, R * this.cloudThicknessFraction * 0.5, 1800),
+        thickness: thick,
         cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
         ox: o1[0], oy: o1[1], oz: o1[2],
       });
@@ -1012,6 +1030,28 @@ export class Planet {
           cov0: 0.55 - coverage * 0.42 * 0.24, cov1: 0.86 - coverage * 0.42 * 0.14,
           ox: o2[0], oy: o2[1], oz: o2[2],
         });
+      }
+      // Noctilucent ice belongs near the mesopause, not in the tropospheric
+      // volume. A very thin, terminator-only shell gives orbit the authentic
+      // silver-blue hairline without contaminating daytime surface views.
+      if (this.atmoHeight > 30000 && coverage > 0.18) {
+        const noctilucentAltitude = Math.min(82000, this.atmoHeight * 0.86);
+        const noctilucentSource = new THREE.MeshBasicMaterial({
+          color: 0xaadfff,
+          transparent: true,
+          depthWrite: false,
+          opacity: 0.12,
+          side: THREE.DoubleSide,
+        });
+        const noctilucentMat = applyNoctilucentField(noctilucentSource,
+          clamp(coverage * 0.62, 0.08, 0.5), o1[0], o1[1], o1[2],
+          this.cloudWeatherHiTex);
+        this.cloudMeshNoctilucent = new THREE.Mesh(
+          new THREE.SphereGeometry(R + noctilucentAltitude, 192, 128),
+          noctilucentMat);
+        this.cloudMeshNoctilucent.renderOrder = 2;
+        this.cloudMeshNoctilucent.frustumCulled = false;
+        this.group.add(this.cloudMeshNoctilucent);
       }
     }
 
@@ -1220,24 +1260,50 @@ export class Planet {
     return out.copy(worldPosition).sub(this.posUniv).applyQuaternion(this._invFrame);
   }
 
-  // How deep in a cloud the camera is (0..1): drives transit white-out fog.
-  // Samples the same field the shader draws, in the deck's rotated frame.
+  // How deep in a cloud the camera is (0..1). This is simulation state for
+  // weather/audio only; visible extinction belongs to the depth-aware volume
+  // itself. The retired path used raw weather *coverage* here and then fed it
+  // to global FogExp2, so entering nominally clear air could replace the whole
+  // frame with blue/white before the player reached a real cloud.
   cloudTransit(camLocal) {
     if (!this.cloudBands.length) return 0;
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
     const camR = camLocal.length();
     let t = 0;
     for (const b of this.cloudBands) {
-      const prox = 1 - Math.min(1, Math.abs(camR - b.r) / (b.halfThickness || 1800));
-      if (prox <= 0) continue;
+      const thickness = Math.max(1, b.thickness || (b.halfThickness || 1800) * 2);
+      const height = (camR - b.r) / thickness;
+      if (height <= 0 || height >= 1) continue;
       _dir.copy(camLocal).multiplyScalar(1 / camR)
         .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
-      const liveWeather = this.weatherAt?.(camLocal.clone().normalize());
-      const d = Math.max(
-        cloudDensityCPU(_dir, b.cov0, b.cov1, b.ox, b.oy, b.oz),
-        liveWeather?.coverage || 0,
-      );
-      t = Math.max(t, prox * d * b.opacity);
+      const liveWeather = this.weatherAt?.(_dir) || {};
+      const base = cloudDensityCPU(_dir, b.cov0, b.cov1, b.ox, b.oy, b.oz);
+      const coverage = clamp(liveWeather.coverage || 0, 0, 1);
+      const cloudType = clamp(liveWeather.cloudType || 0, 0, 1);
+      const stratusMask = clamp(liveWeather.stratusMask || 0, 0, 1);
+      const highMask = clamp(liveWeather.highMask || 0, 0, 1);
+      const highType = clamp(liveWeather.highType || 0, 0, 1);
+      const convective = clamp(liveWeather.convective || 0, 0, 1);
+      const weatherRaw = clamp(base * (0.4 + coverage * 0.5) * 0.8
+        + coverage * (0.18 + base * 0.2), 0, 1);
+      const threshold = lerp(0.36, 0.22, cloudType);
+      const formed = smoothstep(threshold, threshold + 0.42, weatherRaw);
+      const stratus = smoothstep(0.015, 0.055, height)
+        * smoothstep(0.25, 0.13, height) * stratusMask;
+      const cumulusTop = clamp(lerp(0.34, 0.78, cloudType)
+        + convective * 0.16, 0.3, 0.94);
+      const cumulus = smoothstep(0.025, 0.09, height)
+        * smoothstep(cumulusTop, cumulusTop - 0.18, height)
+        * (1 - stratusMask * 0.72);
+      const alto = smoothstep(0.27, 0.39, height)
+        * smoothstep(0.62, 0.49, height) * highMask * (1 - highType);
+      const cirrus = smoothstep(0.62, 0.72, height)
+        * smoothstep(0.99, 0.88, height) * highMask * (0.42 + highType * 0.58);
+      const anvil = smoothstep(0.57, 0.66, height)
+        * smoothstep(0.88, 0.78, height) * convective * cloudType;
+      const density = Math.max(formed * Math.max(stratus, cumulus),
+        highMask * Math.max(alto, cirrus, anvil));
+      t = Math.max(t, density * b.opacity);
     }
     return t;
   }
@@ -1321,7 +1387,7 @@ export class Planet {
         // every viewing distance. The analytic sphere is strictly a distant-
         // body LOD; leaving it over the active volume made high quality look
         // exactly like the low-quality texture deck.
-        const target = focused ? 1 : 0;
+        const target = focused && this.volumeActive ? 1 : 0;
         // Initialize directly in the correct ownership state. Fading from the
         // analytic deck after the first controllable frame exposed a visible
         // flat-to-volume cloud replacement during startup.
@@ -1334,7 +1400,7 @@ export class Planet {
         u.uSpin.value.setFromMatrix4(_m4);
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
         if (u.uWeatherTime) u.uWeatherTime.value = this.weatherHours;
-        this.volCloudMesh.visible = e > 0.01;
+        this.volCloudMesh.visible = this.volumeActive && e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
         if (this.cloudMesh.material.userData.opacityNodeUniform) {
           this.cloudMesh.material.userData.opacityNodeUniform.value = this.cloudMesh.material.opacity;
@@ -1359,6 +1425,15 @@ export class Planet {
         // deck; runtime high/low quality both construct the shared volume.
         this.cloudMesh2.material.opacity = 0.28;
         this.cloudMesh2.visible = true;
+      }
+    }
+    if (this.cloudMeshNoctilucent) {
+      this.cloudMeshNoctilucent.quaternion.copy(this.axisQuat)
+        .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin * 1.18));
+      const noctilucentShader = this.cloudMeshNoctilucent.material.userData.shader;
+      if (noctilucentShader?.uniforms.uSunDir) {
+        noctilucentShader.uniforms.uSunDir.value.copy(this.sunDirLocal)
+          .applyQuaternion(_q2.copy(this.cloudMeshNoctilucent.quaternion).invert());
       }
     }
   }

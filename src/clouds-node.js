@@ -5,8 +5,8 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  acos, atan, dot, exp, float, Fn, If, Loop, mix, positionLocal, positionView,
-  pow, sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
+  acos, atan, dot, exp, float, Fn, fract, If, Loop, mix, positionLocal, positionView,
+  pow, screenUV, sin, sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
 import { sceneRayLimit } from './volume-depth-node.js';
@@ -157,7 +157,14 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     const stepCount = nodes.uMaxSteps.clamp(16, 64).toVar();
     const stepLength = span.div(stepCount);
     const thickness = nodes.uRout.sub(nodes.uRin).max(1);
-    const t = t0.add(stepLength.mul(0.5)).toVar();
+    // Interleaved-gradient jitter removes coherent shell slices. A fixed
+    // midpoint made all neighbouring pixels cross the same 56 radial samples,
+    // producing the vertical white brush marks seen during cloud traversal.
+    // Keep the pattern temporally stable: without a history buffer, frame-
+    // varying blue noise would trade those bands for distracting shimmer.
+    const rayJitter = fract(sin(dot(screenUV.mul(nodes.uVolumeSize),
+      vec2(12.9898, 78.233))).mul(43758.5453));
+    const t = t0.add(stepLength.mul(float(0.12).add(rayJitter.mul(0.76)))).toVar();
     const integrated = vec3(0).toVar();
     const transmission = float(1).toVar();
     Loop(64, ({ i }) => {
@@ -219,28 +226,67 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         );
         // Planet-scale weather decides placement; higher-frequency 3D
         // Perlin-Worley and erosion decide cauliflower lobes and wispy edges.
-        const volumeUV = weatherDirection.mul(18.5).add(vec3(0.5)).add(slowWind)
-          .add(vec3(height.mul(0.63), height.mul(0.91), height.mul(0.47)));
+        // Detail is metre-scaled, not unit-sphere-scaled. Multiplying only the
+        // direction by 18.5 created cloud lobes hundreds of kilometres wide;
+        // from inside, each ray then sampled almost the same column and exposed
+        // marching bands. 42 km weather cells with an 11.5 km erosion cascade
+        // preserve orbital systems while resolving cauliflower structure in
+        // low flight.
+        const weatherPosition = nodes.uSpin.mul(samplePosition);
+        const volumeUV = weatherPosition.mul(1 / 42000).add(vec3(0.5)).add(slowWind)
+          .add(vec3(height.mul(0.37), height.mul(1.4), height.mul(0.23)));
         const detail = texture3D(cloudNoiseTexture(), volumeUV).r;
-        const upperDetail = texture3D(cloudNoiseTexture(), volumeUV.mul(2.73).add(detailWind)
+        const upperDetail = texture3D(cloudNoiseTexture(),
+          weatherPosition.mul(1 / 11500).add(volumeUV.mul(0.19)).add(detailWind)
           .add(vec3(0.37, 0.61, 0.19))).g;
         const erosion = texture(detailTex,
           uv.mul(vec2(54, 27)).add(nodes.uCOff.xy.mul(0.09))
             .add(nodes.uWeatherTime.mul(vec2(0.0007, -0.00031)))).g;
         const billowShape = float(0.34).add(detail.mul(0.92))
           .sub(float(1).sub(upperDetail).mul(mix(0.16, 0.42, height)));
+        // Secondary genera share the same meteorological Lo/Hi channels but
+        // occupy distinct vertical shapes. This is more than naming metadata:
+        // each term changes the actual density sampled by the ray marcher.
+        const stratocumulusProfile = smoothstep(0.055, 0.11, height)
+          .mul(smoothstep(0.34, 0.24, height))
+          .mul(stratusMask).mul(float(1).sub(cloudType.mul(0.68)))
+          .mul(float(0.42).add(detail.mul(0.76)));
+        const nimbostratusProfile = smoothstep(0.02, 0.07, height)
+          .mul(smoothstep(0.48, 0.34, height))
+          .mul(stratusMask).mul(humidity)
+          .mul(float(0.54).add(convective.mul(0.32)));
+        const altocumulusProfile = smoothstep(0.28, 0.37, height)
+          .mul(smoothstep(0.62, 0.49, height))
+          .mul(highMask).mul(float(1).sub(highType.mul(0.72)))
+          .mul(smoothstep(0.38, 0.68, detail));
+        const lenticularProfile = smoothstep(0.34, 0.39, height)
+          .mul(smoothstep(0.48, 0.43, height))
+          .mul(highMask).mul(float(1).sub(convective))
+          .mul(smoothstep(0.68, 0.84, erosion));
+        const cirrocumulusProfile = smoothstep(0.7, 0.76, height)
+          .mul(smoothstep(0.96, 0.88, height))
+          .mul(highMask).mul(highType)
+          .mul(smoothstep(0.46, 0.72, upperDetail));
+        const towerProfile = smoothstep(0.04, 0.12, height)
+          .mul(smoothstep(0.86, 0.68, height))
+          .mul(convective).mul(cloudType)
+          .mul(float(0.28).add(detail.mul(1.02)));
         const lowShape = stratusProfile.mul(float(0.82).add(erosion.mul(0.22)))
           .max(cumulusProfile.mul(billowShape));
+        const lowFamilies = lowShape.max(stratocumulusProfile)
+          .max(nimbostratusProfile).max(towerProfile);
         const thinShape = altoProfile.mul(float(0.44).add(detail.mul(0.42)))
           .max(cirrusProfile.mul(float(0.25).add(erosion.mul(0.5))))
-          .max(anvilProfile.mul(float(0.48).add(detail.mul(0.54))));
-        const lowDensity = weather.mul(lowShape)
+          .max(anvilProfile.mul(float(0.48).add(detail.mul(0.54))))
+          .max(altocumulusProfile).max(lenticularProfile)
+          .max(cirrocumulusProfile);
+        const lowDensity = weather.mul(lowFamilies)
           .mul(float(0.72).add(humidity.mul(0.34)));
         const highDensity = highMask.mul(thinShape)
           .mul(float(0.44).add(highType.mul(0.38)));
-        const density = lowDensity.max(highDensity)
+        const density = pow(lowDensity.max(highDensity)
           .sub(float(1).sub(upperDetail).mul(0.11))
-          .clamp(0, 1);
+          .clamp(0, 1), 1.18);
         const primaryDir = nodes.uStellarDirections0.normalize();
         const secondaryDir = nodes.uStellarDirections1.normalize();
         const sunWeather = weatherLoTextureNode.sample(weatherUV(
@@ -278,8 +324,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
           .add(multipleScatter.mul(0.48)).add(powder.mul(0.18)));
         const cloudColor = internalLight.add(stellarColor.mul(directLight))
           .mul(nodes.uTint).mul(heightLight);
+        const extinctionStrength = float(3.4).add(convective.mul(1.8))
+          .add(stratusMask.mul(humidity).mul(0.65));
         const alphaStep = float(1).sub(exp(
-          density.mul(stepLength).div(thickness).mul(-3.6)));
+          density.mul(stepLength).div(thickness).mul(extinctionStrength).negate()));
         integrated.addAssign(cloudColor.mul(transmission).mul(alphaStep));
         transmission.mulAssign(float(1).sub(alphaStep));
         t.addAssign(stepLength);
@@ -293,7 +341,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
   })();
   const material = new MeshBasicNodeMaterial({
     transparent: true, premultipliedAlpha: true, depthWrite: false,
-    depthTest: true, side: THREE.BackSide,
+    depthTest: true, side: THREE.BackSide, fog: false,
   });
   // MeshBasicNodeMaterial applies premultiplication for a material carrying
   // premultipliedAlpha.  The raymarch accumulator is already premultiplied,
@@ -308,5 +356,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
   material.userData.weatherHiTexture = weatherHiMap;
   material.userData.weatherLoTextureNode = weatherLoTextureNode;
   material.userData.weatherHiTextureNode = weatherHiTextureNode;
+  material.userData.cloudFamilies = [
+    'stratus', 'stratocumulus', 'nimbostratus', 'cumulus',
+    'cumulonimbus', 'altocumulus', 'altostratus',
+    'cirrus', 'cirrocumulus', 'lenticular', 'anvil',
+  ];
   return material;
 }

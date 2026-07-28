@@ -504,8 +504,11 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     const spatialPhase = fract(dot(local, direction).mul(1 / wavelength)
       .add(phaseOffset / (Math.PI * 2))).mul(Math.PI * 2);
     const phase = spatialPhase.sub(clock.mul(omega * (i % 3 === 1 ? -1 : 1)));
-    const visibility = float(1).sub(smoothstep(wavelength * 110,
-      wavelength * 1050, viewDist));
+    // At orbital pixel footprints even 500 m swell is unresolved. Preserve
+    // its statistical roughness, not its phase; otherwise the last surviving
+    // two bands turn into kilometre-long identical diagonal hatch marks.
+    const visibility = float(1).sub(smoothstep(wavelength * 22,
+      wavelength * 120, viewDist));
     const shallowSuppression = smoothstep(0.45, Math.min(18, wavelength * 0.12 + 3), depth);
     const shoaling = float(1).add(float(1).sub(smoothstep(3, 34, depth)).mul(0.24));
     const response = visibility.mul(shallowSuppression).mul(shoaling);
@@ -796,6 +799,55 @@ export function applyCloudField(source, coverage, offX, offY, offZ, relief = 0, 
   material.userData.shader = { uniforms: nodes };
   material.userData.nodeMaterial = 'cloud-deck-v2-faithful';
   material.userData.opacityNodeUniform = nodes.uOpacity;
+  source.dispose?.();
+  return material;
+}
+
+export function applyNoctilucentField(source, coverage, offX, offY, offZ,
+  weatherMap = null) {
+  const material = copyMaterialFlags(source, new MeshBasicNodeMaterial({
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+  }));
+  const detailMap = detailTexture();
+  const highWeather = texture(weatherMap || cloudSystemTexture(offX, offY, offZ));
+  const nodes = {
+    uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
+    uOpacity: uniform(source.opacity ?? 0.12),
+    uOffset: uniform(new THREE.Vector3(offX, offY, offZ)),
+  };
+  const direction = positionLocal.normalize();
+  const uv = vec2(
+    float(0.5).add(atan(direction.z, direction.x.negate()).mul(0.15915494)),
+    float(1).sub(acos(direction.y.clamp(-1, 1)).mul(0.31830988)),
+  );
+  const system = highWeather.sample(uv).r;
+  const filaments = texture(detailMap,
+    uv.mul(vec2(96, 18)).add(nodes.uOffset.xy.mul(0.13))).g.mul(0.62)
+    .add(texture(detailMap,
+      uv.mul(vec2(211, 37)).sub(nodes.uOffset.zx.mul(0.09))).r.mul(0.38));
+  const wisps = smoothstep(0.32, 0.68, system)
+    .mul(smoothstep(0.46, 0.72, filaments))
+    .mul(coverage);
+  const sunElevation = dot(direction, nodes.uSunDir.normalize());
+  // Mesospheric ice remains sunlit after the ground has entered shadow. Limit
+  // it to the terminator belt so it appears as the real silver-blue hairline
+  // seen from orbit, never as another daytime painted cloud shell.
+  const twilight = smoothstep(-0.42, -0.08, sunElevation)
+    .mul(smoothstep(0.14, -0.035, sunElevation));
+  const grazing = pow(float(1).sub(abs(dot(normalView.normalize(),
+    positionViewDirection))), 2.2);
+  material.colorNode = mix(vec3(0.18, 0.42, 0.78), vec3(0.72, 0.9, 1.18),
+    filaments).mul(float(0.48).add(grazing.mul(0.8)));
+  material.opacityNode = wisps.mul(twilight).mul(nodes.uOpacity)
+    .mul(float(0.25).add(grazing.mul(0.95))).clamp(0, 0.22);
+  material.positionNode = positionLocal.add(direction.mul(filaments.sub(0.5).mul(260)));
+  material.uniforms = nodes;
+  material.userData.shader = { uniforms: nodes };
+  material.userData.opacityNodeUniform = nodes.uOpacity;
+  material.userData.nodeMaterial = 'noctilucent-mesosphere-v1';
   source.dispose?.();
   return material;
 }

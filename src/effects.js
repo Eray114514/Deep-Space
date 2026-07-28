@@ -12,6 +12,7 @@ import {
 } from 'three/tsl';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
+import { SKY_BACKDROP_LAYER } from './render-layers.js';
 
 const rendererParams = typeof location !== 'undefined'
   ? new URLSearchParams(location.search) : new URLSearchParams();
@@ -279,10 +280,12 @@ export class SkyDome {
         side: THREE.BackSide,
         transparent: true,
         depthWrite: false,
-        depthTest: true,
+        depthTest: false,
+        fog: false,
       });
       this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
       this.mesh.renderOrder = -7;
+      this.mesh.layers.set(SKY_BACKDROP_LAYER);
       this.mesh.frustumCulled = false;
       this.mesh.visible = false;
       scene.add(this.mesh);
@@ -319,7 +322,8 @@ export class SkyDome {
       .mul(nodes.uSecondarySunEnergy));
     const belowFade = mix(float(1), clamp(float(1).add(upDot.mul(2.4)), 0, 1), upDot.lessThan(0));
     this.mat = new MeshBasicNodeMaterial({
-      side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: true,
+      side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: false,
+      fog: false,
     });
     this.mat.colorNode = multiStarSky;
     const directionalAlpha = mix(float(1), pow(float(1).sub(abs(upDot)), 3), nodes.uHorizonOnly);
@@ -327,6 +331,7 @@ export class SkyDome {
     this.mat.uniforms = Object.fromEntries(Object.entries(nodes).map(([key, node]) => [key, node]));
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(4e5, 48, 32), this.mat);
     this.mesh.renderOrder = -7;
+    this.mesh.layers.set(SKY_BACKDROP_LAYER);
     this.mesh.frustumCulled = false;
     this.mesh.visible = false;
     scene.add(this.mesh);

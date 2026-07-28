@@ -25,5 +25,7 @@ export const applyWaterWaves = (material, ...args) =>
   implementation.applyWaterWaves(material, ...args) || material;
 export const applyCloudField = (material, ...args) =>
   implementation.applyCloudField(material, ...args) || material;
+export const applyNoctilucentField = (material, ...args) =>
+  implementation.applyNoctilucentField?.(material, ...args) || material;
 export const applyWindSway = (material, ...args) =>
   implementation.applyWindSway(material, ...args) || material;

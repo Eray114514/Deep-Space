@@ -117,6 +117,16 @@ for (let index = 0; index < 1024; index++) {
 assert.ok(Math.max(...ranges.map((sample) => sample.coverage))
   - Math.min(...ranges.map((sample) => sample.coverage)) > 0.55,
 'default weather must contain meaningfully different regional coverage');
+const meanCoverage = ranges.reduce((sum, sample) => sum + sample.coverage, 0) / ranges.length;
+const meanConvective = ranges.reduce((sum, sample) => sum + sample.convective, 0) / ranges.length;
+const clearFraction = ranges.filter((sample) => sample.coverage < 0.15).length / ranges.length;
+const overcastFraction = ranges.filter((sample) => sample.coverage > 0.85).length / ranges.length;
+assert.ok(meanCoverage > 0.12 && meanCoverage < 0.72,
+  `default weather must preserve open sky and cloud systems; mean coverage was ${meanCoverage}`);
+assert.ok(meanConvective < 0.58,
+  `cyclone systems must remain regional rather than globally convective; mean was ${meanConvective}`);
+assert.ok(clearFraction > 0.08 && overcastFraction > 0.015,
+  `default weather needs clear air and dense systems; fractions were ${clearFraction}/${overcastFraction}`);
 assert.ok(new Set(ranges.map((sample) => sample.kind)).size >= 2,
   'default weather must contain more than one regional weather class');
 

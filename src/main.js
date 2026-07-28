@@ -2363,11 +2363,10 @@ function ambience(dt = 1 / 60) {
     // Global FogExp2 no longer impersonates the atmosphere. The atmospheric
     // shells own transmittance + in-scattering; scene fog is strictly local.
     let fogDensity = 0;
-    if (transit > 0.004) {
-      fogDensity = transit * 0.0032;
-      _sky.lerp(_cloudCol.setRGB(0.6, 0.64, 0.7).multiplyScalar(0.2 + 0.8 * day),
-        Math.min(1, transit * 1.5));
-    }
+    // Do not turn cloud proximity into global screen fog. The WebGPU volume
+    // integrates extinction only along rays that actually cross vapour and
+    // clips those rays against opaque scene depth. The old FogExp2 shortcut
+    // was the abrupt blue/white pseudo-loading screen during descent.
     if (activeWeather && nearestAlt < p.atmoHeight * 0.24) {
       const surfaceAir = 1 - smoothstep(p.atmoHeight * 0.04, p.atmoHeight * 0.24,
         Math.max(0, nearestAlt));
