@@ -352,10 +352,10 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
   // Cloudiness is an areal target, not an opacity bias. Center humidity before
   // applying it so a wet planet does not become a featureless white shell.
   const coverageSource = macro * 0.52 + detail * 0.16
-    + (profile.cloudiness - 0.45) * 0.82
+    + (profile.cloudiness - 0.35) * 1.06
     + (humidity - 0.5) * 0.22 + stormSystems * 0.42
     + cycloneCloud * 0.48 + frontalCloud * 0.34;
-  const coverage = smoothstep(0.02, 0.44, coverageSource)
+  const coverage = smoothstep(-0.015, 0.395, coverageSource)
     * (1 - cycloneEye * 0.96);
   const stratusSource = humidity * 0.58 + macro * 0.22
     - Math.abs(detail) * 0.18 + profile.fogginess * 0.25
