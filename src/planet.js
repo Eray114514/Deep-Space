@@ -250,11 +250,19 @@ export class Planet {
     const wideGroupFactor = lowTierGrouping ? 4 : (4 / 3);
     this.gridCells = Math.round(canonicalGridCells * wideGroupFactor);
     this.gridCellsAtLevel = () => this.gridCells;
+    // Child edges are constrained to parent chords; fitted skirts remain as a
+    // conservative seal while asynchronously built neighbours differ by more
+    // than one level.
+    this.noSkirt = false;
     // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
     this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2));
-    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 1 : 2);
+    // A cap of level 1/2 left 7–14 km triangles on the 900 km home world,
+    // visibly polygonal at 52–140 km and even in a full-disk 2K view. Keep
+    // enough orbital geometry for the actual display Nyquist rate; noise
+    // frequency still follows each level, so this is not fake micro-detail.
+    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 3 : 4);
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
@@ -815,12 +823,12 @@ export class Planet {
         // A 2.5 m skirt was vastly larger than the gap and exposed dark walls
         // whenever the water was translucent. Dense adjacent shells therefore
         // meet directly; the coast overlap handles the independent land edge.
-        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: false, skirtDrop: 0.05,
+        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: false, skirtDrop: 0.08,
         noShadow: true,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
         maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 0)),
-        orbitLevelCap: lowTierGrouping ? 1 : 2,
+        orbitLevelCap: lowTierGrouping ? 3 : 4,
         orbitPrewarmRadiusRatio: 1.75,
         lodDistanceScale: (waterCanonicalGrid / waterGridCells) * (lowTierGrouping ? 0.25 : 1),
         lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))

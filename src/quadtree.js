@@ -58,6 +58,12 @@ const _n = new THREE.Vector3();
 const _dirV = new THREE.Vector3();
 const _cP = new THREE.Vector3();
 const _cN = new THREE.Vector3();
+const _edgeP0 = new THREE.Vector3();
+const _edgeP1 = new THREE.Vector3();
+const _edgeN0 = new THREE.Vector3();
+const _edgeN1 = new THREE.Vector3();
+const _edgeD0 = new THREE.Vector3();
+const _edgeD1 = new THREE.Vector3();
 const _ex = new THREE.Vector4();
 const _camDir = new THREE.Vector3();
 
@@ -453,13 +459,18 @@ export class ChunkedLOD {
     // non-root chunks carry their parent's shape as a morph target, so LOD
     // transitions can relax between levels instead of popping
     const hasMorph = node.level > 0 && !p.noMorph;
-    const coarseFreq = hasMorph ? p.freqAtLevel(node.level - 1) : 0;
+    const parentFreq = node.level > 0 ? p.freqAtLevel(node.level - 1) : 0;
+    const coarseFreq = hasMorph ? parentFreq : 0;
 
     const gridVerts = (N + 1) * (N + 1);
     // A spherical level surface can still crack at mixed quadtree levels:
     // the coarse edge is a longer chord while the fine edge follows the arc.
     // Water therefore uses short, radial skirts rather than skipping them.
-    const hasSkirt = !p.noSkirt && (Number.isFinite(p.skirtDrop) || node.level < 3);
+    // Parent-edge constraints remove T-junction disagreement; a tightly
+    // fitted skirt remains as a conservative seal for arbitrary neighbour
+    // level differences while the asynchronous tree refines. Limiting skirts
+    // to levels < 3 left the moving fine/coarse frontier visibly unsealed.
+    const hasSkirt = !p.noSkirt;
     const skirtVerts = hasSkirt ? 4 * (N + 1) : 0;
     const total = gridVerts + skirtVerts;
     const positions = new Float32Array(total * 3);
@@ -487,7 +498,37 @@ export class ChunkedLOD {
 
         faceFn(u, v, _dirV).normalize();
         sampleSurface(p, _dirV, maxFreq, eps, _p0, _n);
-        const h = _ss.h, slope = _ss.slope;
+        const onHorizontalEdge = node.level > 0 && (j === 0 || j === N);
+        const onVerticalEdge = node.level > 0 && (i === 0 || i === N);
+        const edgeConstrained = onHorizontalEdge || onVerticalEdge;
+        if (edgeConstrained) {
+          // A child has twice as many edge samples as the corresponding half
+          // of its parent. Constrain every child boundary to the parent's
+          // actual piecewise-linear edge: even samples hit parent vertices;
+          // odd samples interpolate the same parent chord. This makes equal-
+          // and mixed-level neighbours share one watertight position without
+          // exposing radial skirts as dark dotted seams.
+          const edgeIndex = onHorizontalEdge ? i : j;
+          const edge0 = edgeIndex - (edgeIndex % 2);
+          const edge1 = Math.min(N, edge0 + 2);
+          const edgeT = (edgeIndex - edge0) / Math.max(1, edge1 - edge0);
+          const u0 = onHorizontalEdge
+            ? node.u0 + (node.u1 - node.u0) * (edge0 / N) : u;
+          const u1 = onHorizontalEdge
+            ? node.u0 + (node.u1 - node.u0) * (edge1 / N) : u;
+          const v0 = onHorizontalEdge
+            ? v : node.v0 + (node.v1 - node.v0) * (edge0 / N);
+          const v1 = onHorizontalEdge
+            ? v : node.v0 + (node.v1 - node.v0) * (edge1 / N);
+          faceFn(u0, v0, _edgeD0).normalize();
+          faceFn(u1, v1, _edgeD1).normalize();
+          sampleSurface(p, _edgeD0, parentFreq, eps * 2, _edgeP0, _edgeN0);
+          sampleSurface(p, _edgeD1, parentFreq, eps * 2, _edgeP1, _edgeN1);
+          _p0.lerpVectors(_edgeP0, _edgeP1, edgeT);
+          _n.lerpVectors(_edgeN0, _edgeN1, edgeT).normalize();
+        }
+        let h = _p0.length() - p.R;
+        let slope = Math.max(0, 1 - _n.dot(_dirV));
 
         positions[idx * 3] = _p0.x;
         positions[idx * 3 + 1] = _p0.y;
@@ -509,7 +550,12 @@ export class ChunkedLOD {
         if (hasMorph) {
           // the same vertex as the parent level sees it (coarser cutoff,
           // parent's sampling eps) — stored relative to the fine vertex
-          sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
+          if (edgeConstrained) {
+            _cP.copy(_p0);
+            _cN.copy(_n);
+          } else {
+            sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
+          }
           dPos[idx * 3] = _cP.x - _p0.x;
           dPos[idx * 3 + 1] = _cP.y - _p0.y;
           dPos[idx * 3 + 2] = _cP.z - _p0.z;

@@ -231,7 +231,13 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   const rockRoughnessMap = dynamicSurfaceTexture('rockRoughness');
   landSurface = mix(landSurface, uniform(U.rock || palette.rock),
     smoothstep(U.slopeLo ?? 0.08, U.slopeHi ?? 0.34, slope));
-  let surface = U.hasSea ? select(h.lessThan(U.t0), seaSurface, landSurface) : landSurface;
+  // The geological coast is a material transition with wet sediment and
+  // suspended shallows, not a binary height branch. A hard select exposed the
+  // dark seabed in one antialiased pixel and read as a black ink outline.
+  const coastWidth = Math.max(6, planet.hAmp * 0.0018);
+  const coastMaterial = smoothstep((U.t0 || 0) - coastWidth,
+    (U.t0 || 0) + coastWidth, h);
+  let surface = U.hasSea ? mix(seaSurface, landSurface, coastMaterial) : landSurface;
 
   const detailMap = detailTexture();
   const weights0 = pow(abs(normalLocal.normalize()), vec3(4));
@@ -291,7 +297,16 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     snowWeight = smoothstep(snowLine, snowLine.add(planet.hAmp * 0.1), h)
       .max(smoothstep(planet.pal.capLat, planet.pal.capLat + 0.07, latitude))
       .mul(float(1).sub(smoothstep(0.55, 0.8, slope).mul(0.85)));
-    surface = mix(surface, uniform(planet.pal.snow), snowWeight);
+    // Snow retains blue-grey self-shadow, wind-packed grain and exposed-rock
+    // modulation. A pure white constant clipped under ACES and turned entire
+    // mountain ranges into flat unlit polygons at 45–140 km.
+    const snowGrain = triDetail(local, 1 / 42, 'g').sub(0.5)
+      .add(triDetail(local, 1 / 9, 'r').sub(0.5).mul(0.38));
+    const snowShade = float(0.78).add(snowGrain.mul(0.22))
+      .sub(slope.mul(0.28)).clamp(0.5, 0.94);
+    const snowSurface = uniform(planet.pal.snow)
+      .mul(vec3(0.78, 0.84, 0.92)).mul(snowShade);
+    surface = mix(surface, snowSurface, snowWeight.mul(0.92));
   }
 
   const cloudMap = texture(planet.cloudShadowTex || blankTexture());
@@ -364,9 +379,10 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // depth even while blending, or far-side chunks and the sky repeatedly
   // accumulate through the near surface as bright cloud-shaped patches.
   material.depthWrite = true;
-  material.polygonOffset = true;
-  material.polygonOffsetFactor = -1;
-  material.polygonOffsetUnits = -2;
+  // The water shell sits at the physical sea radius. Pulling it toward the
+  // camera with polygon offset defeats terrain occlusion at grazing angles
+  // and reveals the bathymetry triangles as a black coastline.
+  material.polygonOffset = false;
   const local = attribute('aLocal', 'vec3');
   const vertexBathymetry = attribute('aDepth', 'float').max(0);
   // LOD-matched bathymetry comes from the same deterministic height authority
@@ -567,20 +583,18 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     .add(vec3(0.88, 0.95, 1).mul(foam.mul(1.05)));
   const opacity = uniform(source.opacity ?? 1);
   const depthOpacity = float(1).sub(exp(depth.mul(-0.055)));
-  // The sea is a closed sphere for crack-free LOD, but it must not exist
-  // beneath continents. Relying only on terrain depth worked head-on; at a
-  // grazing angle the water polygon offset pulled the zero-depth shell in
-  // front of dry land, producing a continent-sized white "ocean" sheet.
-  // Vertex bathymetry is authoritative, so discard the dry shell explicitly.
-  const wetMask = smoothstep(0.01, 0.22, depth);
+  // The sea is a continuous physical shell. Dry terrain is already outside
+  // that radius and wins the depth test; using vertex-baked bathymetry as an
+  // alpha cutout made a single orbit triangle decide kilometres of coastline.
+  // Depth still controls absorption, foam and transmission, never existence.
   // Even optically shallow water is a refractive participating surface, not a
   // 32%-alpha overlay. Keeping it mostly present prevents the opaque terrain
   // silhouette from leaking the renderer's clear-black resolve through the
   // first swash pixels; transmission still carries the visible sea floor.
   const waterAlpha = mix(opacity.mul(0.78), opacity.max(0.96), depthOpacity);
   material.opacityNode = mix(waterAlpha, waterAlpha.mul(2.1).add(0.2).min(1), fresnel)
-    .mul(wetMask);
-  material.alphaTest = 0.01;
+    .max(0.72);
+  material.alphaTest = 0;
   material.transmissionNode = bodyTransmit.b.mul(float(1).sub(fresnel))
     // Direct seabed visibility belongs to genuinely shallow water. Letting
     // 50–140 m columns transmit exposed terrain LOD boundaries and made deep
@@ -602,10 +616,9 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // terrain silhouette's antialias samples. It is depth-tested, so dry land
   // still wins immediately inland; visually this becomes the wet swash/foam
   // edge instead of a one-pixel clear-black crack.
-  // A real swash sheet runs a few metres over the nominal still-water contour.
-  // Besides looking more natural, this deliberately overlaps the sub-pixel
-  // terrain silhouette so MSAA never resolves the coast against clear black.
-  const shoreOverlap = float(3.5);
+  // A centimetre-scale bias avoids coplanar flicker at the exact zero contour
+  // without lifting water metres through low beaches and inland terrain.
+  const shoreOverlap = float(0.12);
   material.positionNode = positionLocal.add(up.mul(macroWave.mul(swell).add(shoreOverlap)));
   material.userData.shader = { uniforms: nodes };
   material.userData.waterCloudTexture = waterCloudTexture;
