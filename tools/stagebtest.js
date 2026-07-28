@@ -349,13 +349,30 @@ check(/(?:uWeatherLo|uWeatherHi|weatherLo|weatherHi)/.test(cloudSource)
       && new Set(cloudSource.match(/weather[^;\n]*\.[rgba]\b/g) || []).size >= 2),
   'WebGPU clouds consume multi-channel weather data',
   `one static red-channel coverage texture cannot encode cloud type, high cloud, storm, and precipitation`);
+check(/weatherLoTextureNode/.test(cloudSource)
+    && /weatherHiTextureNode/.test(cloudSource)
+    && /stratusMask/.test(cloudSource)
+    && /highType/.test(cloudSource),
+  'WebGPU clouds preserve separate low/high meteorological atlases',
+  'packing stratus and high-cloud type into one atlas silently drops requested cloud families');
+check(/stratusProfile/.test(cloudSource)
+    && /cumulusProfile/.test(cloudSource)
+    && /altoProfile/.test(cloudSource)
+    && /cirrusProfile/.test(cloudSource)
+    && /anvilProfile/.test(cloudSource),
+  'WebGPU cloud density has distinct low, mid, high and convective profiles',
+  'one generic shell cannot represent stratus, cumulus, alto, cirrus and cumulonimbus anvils');
+check(/phaseForward/.test(cloudSource) && /phaseBack/.test(cloudSource)
+    && /powder/.test(cloudSource),
+  'WebGPU cloud lighting uses dual-lobe phase and powder response',
+  'flat ambient-plus-sun tint cannot preserve bright rims and readable cloud interiors');
 
 consumedUniform(`${planetSource}\n${volumeDepthSource}`, 'tSceneDepth', 'WebGPU atmosphere shader');
 consumedUniform(`${planetSource}\n${volumeDepthSource}`, 'uDepthReady', 'WebGPU atmosphere shader');
-check(/perspectiveDepthToViewZ/.test(volumeDepthSource)
+check(/logarithmicDepthToViewZ/.test(volumeDepthSource)
     && !/pow\s*\(\s*(?:nodes\.)?uCameraFar/.test(volumeDepthSource),
-  'WebGPU volumes linearize perspective depth in view space',
-  'depth-buffer values are not logarithmic distances; use perspectiveDepthToViewZ before clipping raymarches');
+  'WebGPU volumes invert the production logarithmic depth in view space',
+  'the renderer writes logarithmic depth; perspective linearization clips clouds to a limb or overlays terrain');
 check(/(?:uStarDirs|uLightDirs|uStellarDirections)/.test(planetSource),
   'WebGPU atmosphere declares a multi-star direction field',
   `the atmosphere must not collapse buildStellarLightField() back to one sunDir`);
@@ -374,8 +391,9 @@ check(/createWeatherField|WeatherField/.test(planetSource),
 check(/advanceWeatherField|sampleWeatherField|weather(?:Hours|Time|Phase)|updateWeather\s*\(/.test(planetSource),
   'Planet samples weather at deterministic celestial time',
   `weather must evolve from the shared celestial clock so reloads and time warp reconstruct the same field`);
-check(/setWeatherFixture[\s\S]{0,1200}weatherSystemTextureNode/.test(planetSource),
-  'weather fixtures rebind the cloud atlas used by the volume renderer',
+check(/setWeatherFixture[\s\S]{0,1800}weatherLoTextureNode/.test(planetSource)
+    && /setWeatherFixture[\s\S]{0,1800}weatherHiTextureNode/.test(planetSource),
+  'weather fixtures rebind both cloud atlases used by the volume renderer',
   'changing rain metadata without replacing the sampled Lo/Hi atlas leaves a clear sky during storms');
 check(/wetMask/.test(nodeShaderSource) && /alphaTest\s*=\s*0\.01/.test(nodeShaderSource),
   'water shell discards zero-depth dry land',

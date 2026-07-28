@@ -1,24 +1,26 @@
 // Shared WebGPU volume-depth contract.
 //
-// A perspective depth buffer is not logarithmic distance. The retired volume
-// path treated it as `pow(far + 1, depth) - 1`, which only happened to look
-// plausible in a few fixed cameras and let atmosphere/clouds composite in
-// front of opaque terrain during a real descent. Every participating medium
-// now resolves the same view-space distance from the opaque pass.
+// The production camera writes logarithmic depth across centimetres-to-AU
+// scale. The retired volume path approximated that curve without the near
+// plane and a later repair incorrectly used perspective-depth linearization.
+// Both errors could make atmosphere/clouds cover terrain or vanish inside the
+// planet disk. Every participating medium now shares this exact contract.
 
-import {
-  float, mix, perspectiveDepthToViewZ, screenUV,
-} from 'three/tsl';
+import { logarithmicDepthToViewZ, screenUV } from 'three/tsl';
 
 export function sceneRayLimit(nodes, forwardCos, padding = 0) {
   const rawDepth = nodes.tSceneDepth.sample(screenUV).r;
-  // Three's WebGPU backend uses reversed depth when supported. Convert both
-  // layouts to the conventional near=0/far=1 form before linearization.
-  const perspectiveDepth = mix(rawDepth, float(1).sub(rawDepth), nodes.uDepthReversed);
+  // The production renderer writes logarithmic fragment depth because one
+  // camera spans cockpit centimetres and astronomical distances. Perspective
+  // linearization therefore underestimates a 700 km surface hit to the near
+  // plane and clips the entire cloud disk, leaving only a bright limb.
+  const conventionalHasDepth = rawDepth.lessThan(0.999999);
+  const reversedHasDepth = rawDepth.greaterThan(0.000001);
   const hasOpaqueDepth = nodes.uDepthReady.greaterThan(0.5)
-    .and(perspectiveDepth.lessThan(0.999999));
-  const viewZ = perspectiveDepthToViewZ(
-    perspectiveDepth,
+    .and(nodes.uDepthReversed.greaterThan(0.5)
+      .select(reversedHasDepth, conventionalHasDepth));
+  const viewZ = logarithmicDepthToViewZ(
+    rawDepth,
     nodes.uCameraNear,
     nodes.uCameraFar,
   );

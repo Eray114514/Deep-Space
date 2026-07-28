@@ -900,9 +900,14 @@ export class Planet {
         profile: this.weatherProfile,
         fixture: DEV_WEATHER_FIXTURE || undefined,
       });
-      // This atlas is the single weather field for orbit, cloud shadows and
-      // the local volume. It is planet-local and cannot change with the camera.
-      this.cloudShadowTex = makeCloudTexture(this.nD, coverage, o1, this.weatherField);
+      // The meteorological authority is split into the same Lo/Hi contract
+      // used by the volume shader. Keeping cloud type and stratus in Lo and
+      // high-deck type/multiple scattering in Hi avoids throwing away entire
+      // cloud families merely to fit one RGBA atlas.
+      this.cloudShadowTex = makeCloudTexture(
+        this.nD, coverage, o1, this.weatherField, 'low');
+      this.cloudWeatherHiTex = makeCloudTexture(
+        this.nD, coverage, o1, this.weatherField, 'high');
       const terrainCloudNode = this.terrainMaterial.userData.cloudShadowTextureNode;
       if (terrainCloudNode) terrainCloudNode.value = this.cloudShadowTex;
       const terrainShader = this.terrainMaterial.userData.shader;
@@ -912,17 +917,18 @@ export class Planet {
       }
       const waterShader = this.liquidMat?.userData.shader;
       if (waterShader?.uniforms.uCloudK) waterShader.uniforms.uCloudK.value = 0.72;
-      // Keep the weather visibly inside the atmosphere. The old mountain×2
-      // base put cloud tops on (or beyond) the atmospheric boundary, producing
-      // a white crust around the limb instead of separated ground/cloud/air.
+      // A single physical volume spans the tropospheric families. Density
+      // profiles inside it place stratus/cumulus low, alto clouds mid-level
+      // and cirrus/anvils high. The previous mountain-scaled cloud base could
+      // start tens of kilometres above sea level and read as a white crust.
       const cloudBaseAlt = Math.min(
-        Math.max(this.hAmp * 1.12 + 1400, R * this.cloudBaseFraction * 0.68),
-        this.atmoHeight * 0.58,
+        Math.max(650, this.hAmp * 0.045),
+        this.atmoHeight * 0.08,
       );
       const cloudR = R + cloudBaseAlt;
       const thick = Math.min(
-        Math.max(this.hAmp * 0.86, R * this.cloudThicknessFraction * 0.72, 4200),
-        this.atmoHeight * 0.38,
+        Math.max(14000, this.hAmp * 1.15),
+        this.atmoHeight * 0.24,
       );
       const cmat = new THREE.MeshBasicMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
@@ -953,13 +959,14 @@ export class Planet {
         // clusters supply close parallax and real separation through the
         // atmosphere without a screen-space raymarch curtain.
         const band = {
-          rIn: cloudR - thick * 0.45, rOut: cloudR + thick * 0.55,
+          rIn: cloudR, rOut: cloudR + thick,
           cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
           ox: o1[0], oy: o1[1], oz: o1[2],
           tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         };
         this.volCloudMat = makeCloudVolumeMaterial(
           this, band, detailTexture(), this.cloudShadowTex,
+          this.cloudWeatherHiTex,
           volumetricCloudProfile);
         this.volCloudMat.uniforms.uAmbC.value
           .copy(this.skyColor).multiplyScalar(0.58);
@@ -1126,19 +1133,33 @@ export class Planet {
     });
     if (this.cloudShadowTex && this.cloudOffsets) {
       const previous = this.cloudShadowTex;
+      const previousHi = this.cloudWeatherHiTex;
       this.cloudShadowTex = makeCloudTexture(
-        this.nD, this.cloudCoverage || 0.5, this.cloudOffsets, this.weatherField);
+        this.nD, this.cloudCoverage || 0.5, this.cloudOffsets,
+        this.weatherField, 'low');
+      this.cloudWeatherHiTex = makeCloudTexture(
+        this.nD, this.cloudCoverage || 0.5, this.cloudOffsets,
+        this.weatherField, 'high');
       const terrainNode = this.terrainMaterial.userData.cloudShadowTextureNode;
       if (terrainNode) terrainNode.value = this.cloudShadowTex;
       if (this.liquidMat?.userData.waterCloudTexture) {
         this.liquidMat.userData.waterCloudTexture.value = this.cloudShadowTex;
       }
-      for (const material of [this.cloudMesh?.material, this.volCloudMat]) {
+      for (const material of [this.cloudMesh?.material]) {
         const weatherNode = material?.userData.weatherSystemTextureNode;
         if (weatherNode) weatherNode.value = this.cloudShadowTex;
         if (material?.userData) material.userData.weatherSystemTexture = this.cloudShadowTex;
       }
+      const volumeLoNode = this.volCloudMat?.userData.weatherLoTextureNode;
+      const volumeHiNode = this.volCloudMat?.userData.weatherHiTextureNode;
+      if (volumeLoNode) volumeLoNode.value = this.cloudShadowTex;
+      if (volumeHiNode) volumeHiNode.value = this.cloudWeatherHiTex;
+      if (this.volCloudMat?.userData) {
+        this.volCloudMat.userData.weatherLoTexture = this.cloudShadowTex;
+        this.volCloudMat.userData.weatherHiTexture = this.cloudWeatherHiTex;
+      }
       previous.dispose();
+      previousHi?.dispose();
     }
     return this.setWeatherTime(this.weatherHours);
   }
@@ -1406,6 +1427,7 @@ export class Planet {
     this.liquidMat?.dispose();
     this.waterUnderlayMaterial?.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
+    if (this.cloudWeatherHiTex) this.cloudWeatherHiTex.dispose();
     if (this.cloudShadowTex2) this.cloudShadowTex2.dispose();
     if (this.flora) {
       for (const k in this.flora) if (this.flora[k] && this.flora[k].dispose) this.flora[k].dispose();
@@ -1555,7 +1577,8 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   return material;
 }
 
-function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0], weatherField = null) {
+function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0],
+  weatherField = null, layer = 'low') {
   const W = 1024, H = 512;
   const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
   if (!canvas) return null;
@@ -1588,13 +1611,21 @@ function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0], weatherField =
         : v * (0.4 + weatherCoverage * 0.5) * (0.66 + erosion * 0.28)
           + weatherCoverage * (0.18 + erosion * 0.2), 0, 1);
       const k = (j * W + i) * 4;
-      // Lo/Hi weather atlas packed for every consumer:
-      // R=coverage/density, G=convective cloud type,
-      // B=high-cloud mask, A=multiple-scattering weight.
-      d[k] = (v * 255) | 0;
-      d[k + 1] = ((weather?.cloudType || 0) * 255) | 0;
-      d[k + 2] = ((weather?.highMask || 0) * 255) | 0;
-      d[k + 3] = ((weather?.multipleScatter ?? v) * 255) | 0;
+      if (layer === 'high') {
+        // Hi: cirrus coverage/type, precipitation/convective energy and the
+        // multiple-scattering field used to keep thick cloud interiors alive.
+        d[k] = ((weather?.highMask || 0) * 255) | 0;
+        d[k + 1] = ((weather?.highType || 0) * 255) | 0;
+        d[k + 2] = ((weather?.convective || weather?.precipitation || 0) * 255) | 0;
+        d[k + 3] = ((weather?.multipleScatter ?? v) * 255) | 0;
+      } else {
+        // Lo: actual deck density, vertical cloud family, stratus compression
+        // and humidity. This texture is also the ground/ocean shadow atlas.
+        d[k] = (v * 255) | 0;
+        d[k + 1] = ((weather?.cloudType || 0) * 255) | 0;
+        d[k + 2] = ((weather?.stratusMask || 0) * 255) | 0;
+        d[k + 3] = ((weather?.humidity ?? v) * 255) | 0;
+      }
     }
   }
   ctx.putImageData(img, 0, 0);
