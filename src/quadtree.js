@@ -7,9 +7,9 @@ import * as THREE from 'three';
 
 export let GRID_CELLS = 24;            // quads per chunk edge
 export function setGridCells(n) { GRID_CELLS = n; }   // quality presets
-const SPLIT = 4.0;                     // split when dist < size * SPLIT
-const MERGE = 5.2;                     // merge when dist > size * MERGE
-const PREFETCH = 5.0;                  // BUILD children this early — by the
+let SPLIT = 4.0;                       // split when dist < size * SPLIT
+let MERGE = 5.2;                       // merge when dist > size * MERGE
+let PREFETCH = 5.0;                    // BUILD children this early — by the
                                        // time they're wanted on screen the
                                        // morph starts at once, while chunks
                                        // are still small enough not to notice
@@ -28,6 +28,14 @@ export function lodStatsReset() {
 }
 let PX_PER_RAD = 900;                  // set by main from the real projection
 export function setPxPerRad(v) { PX_PER_RAD = v; }
+export function setTerrainScreenError(error = 1) {
+  const value = Math.max(0.65, Math.min(1.5, Number(error) || 1));
+  // Even performance keeps the near field at the historical highest detail;
+  // the profile only changes how aggressively the middle/far field refines.
+  SPLIT = Math.max(4.5, 5 / value);
+  MERGE = SPLIT * 1.3;
+  PREFETCH = SPLIT * 1.25;
+}
 
 const FACE_FN = [
   (u, v, out) => out.set(1, v, -u),
@@ -56,6 +64,13 @@ const _camDir = new THREE.Vector3();
 // position/normal of the surface at one LOD cutoff; height and slope are
 // left in _ss for the caller (colors are the fragment shader's job now)
 const _ss = { h: 0, slope: 0 };
+
+export function skirtDropForMorph(maxMorphHeightDelta) {
+  // The skirt only seals the actual parent/fine height delta. A fixed six
+  // metre minimum turned centimetre-scale high-LOD seams into visible black
+  // canyon walls, most obviously through shallow water and at the limb.
+  return Math.max(0.08, Math.max(0, maxMorphHeightDelta) * 1.12 + 0.04);
+}
 function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
   const h = p.height(dir, maxFreq);
   outPos.copy(dir).multiplyScalar(p.R + h);
@@ -167,6 +182,7 @@ function makeNode(lod, face, level, ix, iy) {
 export class ChunkedLOD {
   constructor(planet) {
     this.planet = planet;
+    this.visible = true;
     this.camLocal = new THREE.Vector3(1e9, 0, 0);
     this.roots = [];
     for (let f = 0; f < 6; f++) {
@@ -224,6 +240,16 @@ export class ChunkedLOD {
         Math.max(0, baseForceLevel - detailOffset));
     }
     for (const root of this.roots) this.process(root);
+    if (!this.visible) {
+      for (const root of this.roots) this.hideSubtree(root);
+    }
+  }
+
+  setVisible(visible) {
+    this.visible = visible;
+    if (!visible) {
+      for (const root of this.roots) this.hideSubtree(root);
+    }
   }
 
   setMorph(node, v) {
@@ -424,16 +450,17 @@ export class ChunkedLOD {
     const cellAngle = (Math.PI / 2) / (N * (1 << node.level));
     const maxFreq = p.freqAtLevel(node.level);
     const eps = cellAngle * 0.5;
-    const skirtDrop = p.R * cellAngle * 2.5 + 6;
     // non-root chunks carry their parent's shape as a morph target, so LOD
     // transitions can relax between levels instead of popping
     const hasMorph = node.level > 0 && !p.noMorph;
     const coarseFreq = hasMorph ? p.freqAtLevel(node.level - 1) : 0;
 
     const gridVerts = (N + 1) * (N + 1);
-    // flat liquid surfaces skip skirts — they'd show as a grid through the
-    // transparency, and a level surface can't crack visibly anyway
-    const skirtVerts = p.noSkirt ? 0 : 4 * (N + 1);
+    // A spherical level surface can still crack at mixed quadtree levels:
+    // the coarse edge is a longer chord while the fine edge follows the arc.
+    // Water therefore uses short, radial skirts rather than skipping them.
+    const hasSkirt = !p.noSkirt && (Number.isFinite(p.skirtDrop) || node.level < 3);
+    const skirtVerts = hasSkirt ? 4 * (N + 1) : 0;
     const total = gridVerts + skirtVerts;
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
@@ -450,6 +477,7 @@ export class ChunkedLOD {
     const dNrm = hasMorph ? new Float32Array(total * 3) : null;
 
     const faceFn = FACE_FN[node.face];
+    let maxMorphHeightDelta = 0;
 
     for (let j = 0; j <= N; j++) {
       const v = node.v0 + (node.v1 - node.v0) * (j / N);
@@ -471,7 +499,7 @@ export class ChunkedLOD {
           aExtra[idx * 4] = _ex.x; aExtra[idx * 4 + 1] = _ex.y;
           aExtra[idx * 4 + 2] = _ex.z; aExtra[idx * 4 + 3] = _ex.w;
         }
-        if (aDepth) aDepth[idx] = p.bakeDepth(_dirV);
+        if (aDepth) aDepth[idx] = p.bakeDepth(_dirV, maxFreq, node.level);
         if (aMat) {
           const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
           aMat[idx * 3] = Math.min(1, Math.max(0, sl));
@@ -488,6 +516,8 @@ export class ChunkedLOD {
           dNrm[idx * 3] = _cN.x - _n.x;
           dNrm[idx * 3 + 1] = _cN.y - _n.y;
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
+          maxMorphHeightDelta = Math.max(maxMorphHeightDelta,
+            Math.abs(_cP.length() - _p0.length()));
         }
         // Yield in small cache-friendly batches. Yielding every vertex creates
         // millions of short-lived IteratorResult objects during a descent and
@@ -526,8 +556,14 @@ export class ChunkedLOD {
     }
 
     // skirt vertices: copies of the border ring, pulled toward planet center
+    // A skirt only has to cover the radial gap to the neighbouring parent LOD.
+    // The former radius×cellAngle formula was 14–22× oversized near the
+    // surface, bloating bounds and exposing dark walls at grazing angles.
+    let skirtDrop = Number.isFinite(p.skirtDrop)
+      ? Math.max(0.05, p.skirtDrop)
+      : skirtDropForMorph(maxMorphHeightDelta);
     const edges = [];
-    if (!p.noSkirt) {
+    if (hasSkirt) {
       for (let i = 0; i <= N; i++) edges.push(i);                      // j = 0
       for (let i = 0; i <= N; i++) edges.push(N * (N + 1) + i);        // j = N
       for (let j = 0; j <= N; j++) edges.push(j * (N + 1));            // i = 0
@@ -550,6 +586,7 @@ export class ChunkedLOD {
         aExtra[dst * 4] = aExtra[src * 4]; aExtra[dst * 4 + 1] = aExtra[src * 4 + 1];
         aExtra[dst * 4 + 2] = aExtra[src * 4 + 2]; aExtra[dst * 4 + 3] = aExtra[src * 4 + 3];
       }
+      if (aDepth) aDepth[dst] = aDepth[src];
       if (hasMorph) {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
         dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
@@ -558,7 +595,7 @@ export class ChunkedLOD {
     }
 
     const gridIndexCount = N * N * 6;
-    const skirtIndexCount = p.noSkirt ? 0 : 4 * N * 12;
+    const skirtIndexCount = hasSkirt ? 4 * N * 12 : 0;
     const indices = new Uint16Array(gridIndexCount + skirtIndexCount);
     let indexCursor = 0;
     // all six FACE_FN have du×dv pointing outward, so CCW (front) is (a,b,c)
@@ -584,7 +621,7 @@ export class ChunkedLOD {
         indices[indexCursor++] = s0; indices[indexCursor++] = s1;
       }
     };
-    if (!p.noSkirt) {
+    if (hasSkirt) {
       skirtEdge(0, N + 1, (s) => s);
       skirtEdge(N + 1, N + 1, (s) => N * (N + 1) + s);
       skirtEdge(2 * (N + 1), N + 1, (s) => s * (N + 1));
@@ -622,6 +659,13 @@ export class ChunkedLOD {
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
     mesh.position.copy(node.centerPos);
+    if (p.underlayMaterial) {
+      const underlay = new THREE.Mesh(geo, p.underlayMaterial);
+      underlay.renderOrder = -10;
+      underlay.castShadow = false;
+      underlay.receiveShadow = false;
+      mesh.add(underlay);
+    }
     if (hasMorph && mesh.morphTargetInfluences) mesh.morphTargetInfluences[0] = node.morph;
     mesh.castShadow = !p.noShadow;
     mesh.receiveShadow = true;

@@ -1,34 +1,55 @@
-// WebGL 2 is the sole render backend.
-// WebGPU migration was attempted and retired; the last WebGPU code is
-// preserved at git commit b746772 for reference if migration is reconsidered.
+// WebGPU is the preferred production path on capable browsers. WebGL 2 stays
+// available as a complete compatibility backend and recovery target.
 
-export const RENDER_PIPELINE_VERSION = 1;
-export const WEBGPU_PARITY_READY = false;
+export const RENDER_PIPELINE_VERSION = 2;
+// WebGPU is production-ready. This flag is a routing readiness contract, not
+// a demand that the WebGPU-native atmosphere match the WebGL fallback pixels.
+export const WEBGPU_PARITY_READY = true;
 
-// resolveRendererPolicy keeps its original signature so callers throughout the
-// codebase do not need to change, but the result is now hard-wired to WebGL 2.
-export function resolveRendererPolicy(params = new URLSearchParams()) {
+export function resolveRendererPolicy(params = new URLSearchParams(), gpu = globalThis.navigator?.gpu) {
+  const value = params.get('renderer');
+  const requested = value === 'webgl' ? 'webgl' : value === 'webgpu' ? 'webgpu' : 'auto';
+  const webgpuAvailable = Boolean(gpu);
+  const useWebGPU = webgpuAvailable
+    && (requested === 'webgpu' || (requested === 'auto' && WEBGPU_PARITY_READY));
   return {
-    requested: 'webgl',
-    backend: 'webgl2',
-    useNodeMaterials: false,
-    webgpuAvailable: false,
-    parityReady: false,
-    reason: 'webgl2-only',
+    requested,
+    backend: useWebGPU ? 'webgpu' : 'webgl2',
+    webgpuAvailable,
+    parityReady: WEBGPU_PARITY_READY,
+    reason: requested === 'webgl' ? 'player-forced-webgl2'
+      : requested === 'webgpu' ? 'developer-forced-webgpu'
+        : webgpuAvailable && !WEBGPU_PARITY_READY ? 'visual-parity-pending-fallback'
+          : webgpuAvailable ? 'webgpu-preferred' : 'webgpu-unavailable-fallback',
   };
 }
 
-export function actualRendererBackend() {
-  return 'webgl2';
+export function actualRendererBackend(renderer) {
+  return renderer?.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
 }
 
-export function rendererAdapterLabel(renderer) {
+export function rendererAdapterLabel(renderer, adapterInfo = null) {
+  if (renderer?.backend?.isWebGPUBackend) {
+    const fields = [adapterInfo?.vendor, adapterInfo?.architecture,
+      adapterInfo?.device, adapterInfo?.description].filter(Boolean);
+    return fields.join(' · ') || 'WebGPU high-performance adapter';
+  }
   const gl = renderer?.getContext?.() || renderer?.backend?.getContext?.();
   const ext = gl?.getExtension?.('WEBGL_debug_renderer_info');
   return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'WebGL 2 adapter';
 }
 
-// No longer used — kept as a no-op stub so legacy imports do not break.
-export async function probeAdapterInfo() {
-  return null;
+export async function probeAdapterInfo(gpu = globalThis.navigator?.gpu, powerPreference = 'high-performance') {
+  if (!gpu) return null;
+  try {
+    const adapter = await gpu.requestAdapter({ powerPreference });
+    if (!adapter) return null;
+    const info = adapter.info || {};
+    return {
+      vendor: info.vendor || '', architecture: info.architecture || '',
+      device: info.device || '', description: info.description || '',
+    };
+  } catch {
+    return null;
+  }
 }

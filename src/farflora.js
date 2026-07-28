@@ -12,8 +12,20 @@
 // forest.
 
 import * as THREE from 'three';
+import { resolveRendererPolicy } from './renderer-policy.js';
+import { applyFarFadeV2 } from './flora-system.js';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
+import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
+
+// Temporary subsystem contract: Stage C replaces the proxy-tree architecture.
+export const FAR_FLORA_ENABLED = false;
+
+const rendererParams = typeof location !== 'undefined'
+  ? new URLSearchParams(location.search) : new URLSearchParams();
+const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  rendererParamsForSettings(rendererSettings, rendererParams)).backend === 'webgpu';
 
 const TILE_M = 1024;         // metres per cache tile
 const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
@@ -56,34 +68,38 @@ const Y = new THREE.Vector3(0, 1, 0);
 // bubble boundary made every tree the pilot approached appear to sink into
 // the terrain before the ship could reach it.
 function applyFarFade(mat, uniforms) {
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>
-        uniform vec3 uCamL;
-        uniform float uAltK;`)
-      .replace('#include <begin_vertex>', `#include <begin_vertex>
-        #ifdef USE_INSTANCING
-        {
-          float d = distance(instanceMatrix[3].xyz, uCamL);
-          float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
-          g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
-          transformed *= g;
-        }
+  if (!USE_NODE_MATERIALS) {
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+          uniform vec3 uCamL;
+          uniform float uAltK;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          #ifdef USE_INSTANCING
+          {
+            float d = distance(instanceMatrix[3].xyz, uCamL);
+            float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
+            g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
+            transformed *= g;
+          }
+          #endif`);
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        #ifdef USE_COLOR
+          totalEmissiveRadiance *= vColor.rgb;
         #endif`);
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <emissivemap_fragment>',
-      `#include <emissivemap_fragment>
-      #ifdef USE_COLOR
-        totalEmissiveRadiance *= vColor.rgb;
-      #endif`);
-  };
-  mat.customProgramCacheKey = () => 'far-flora';
-  return mat;
+    };
+    mat.customProgramCacheKey = () => 'far-flora';
+    return mat;
+  }
+  return applyFarFadeV2(mat, uniforms);
 }
 
 export class FarFlora {
-  constructor({ streamBudgetMs = STREAM_BUDGET_MS, repackIntervalMs = REPACK_INTERVAL_MS } = {}) {
+  constructor({ streamBudgetMs = STREAM_BUDGET_MS, repackIntervalMs = REPACK_INTERVAL_MS,
+    density = 1 } = {}) {
     this.planet = null;
     this.meshes = null;       // [tree0 proxies, tree1 proxies]
     this.tiles = new Map();   // packed tile key -> {m0: Float32Array, n0, m1, n1}
@@ -97,6 +113,8 @@ export class FarFlora {
     this.dirty = false;
     this.streamBudgetMs = streamBudgetMs;
     this.repackIntervalMs = repackIntervalMs;
+    this.density = Math.max(0.35, Math.min(1, density));
+    this.displayDensity = 1;
     this.lastRepackAt = -Infinity;
     this.metrics = {
       builtTiles: 0, repacks: 0,
@@ -108,26 +126,19 @@ export class FarFlora {
   }
 
   setPlanet(planet) {
+    // 植物系统重做中 — 完全禁用远景植物(proxy tree)渲染。
+    // 现有实现的问题:applyFarFadeV2 用 positionLocal.sub(uCamL) 算距离,
+    // TSL positionLocal 不含 instanceMatrix,所有实例同步位移→石头/树同步抖动;
+    // positionNode = positionLocal.sub(positionGeometry.mul(1-g)) 在 g 变化时
+    // 顶点偏移每帧变化→幅度抖动。代码保留供重做参考。
     this.clear();
-    this.planet = planet;
-    if (!planet) return;
-    const flora = planet.flora || (planet.flora = buildFlora(planet));
-    this.meshes = [flora.far0, flora.far1].map((geo) => {
-      let mat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, vertexColors: true, roughness: 0.95, flatShading: true,
-      });
-      mat.emissive.setScalar(0.22);
-      mat = applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
-      const im = new THREE.InstancedMesh(geo, mat, CAP);
-      im.count = 0;
-      im.visible = false;
-      im.frustumCulled = false;
-      im.receiveShadow = true;
-      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      planet.group.add(im);
-      return im;
-    });
+    this.planet = null;
+    return;
   }
+  // 原始远景植物创建代码已禁用(重做中)。保留如下供参考:
+  // const flora = planet.flora || (planet.flora = buildFlora(planet));
+  // this.meshes = [flora.far0, flora.far1].map((geo) => { ... applyFarFade ... });
+  // 详见 git 历史或 docs/optimization-roadmap.md 批次 C。
 
   clear() {
     if (this.planet && this.meshes) {
@@ -152,6 +163,14 @@ export class FarFlora {
   }
 
   pending() { return this.queue.length + (this.job ? 1 : 0); }
+
+  setDisplayDensity(density) {
+    const next = Math.max(0.35, Math.min(1, density));
+    if (Math.abs(next - this.displayDensity) < 0.025) return;
+    this.displayDensity = next;
+    this.dirty = true;
+    if (this.pending() === 0) this.repack();
+  }
 
   debugStats() {
     return {
@@ -262,11 +281,12 @@ export class FarFlora {
     }
 
     if (this.dirty) {
-      const now = performance.now();
       const firstVisibleBatch = visible
         && this.meshes[0].count + this.meshes[1].count === 0 && completed > 0;
-      const visibleBatch = visible && now - this.lastRepackAt >= this.repackIntervalMs;
-      if (firstVisibleBatch || visibleBatch || this.pending() === 0) {
+      // Keep the previous complete ring resident while the next one streams.
+      // Repacking every 160 ms uploaded all 24k matrices repeatedly and was
+      // the source of the old <16 km periodic hitch.
+      if (firstVisibleBatch || this.pending() === 0) {
         this.repack();
         this.lastRepackAt = performance.now();
       }
@@ -348,7 +368,7 @@ export class FarFlora {
           const dens = FAR_DENSITY[p.biomeAt(_up, hgt)];
           if (!dens) continue;
           const sel = hashFloat(h0, 0);
-          if (sel >= dens[0]) continue;
+          if (sel >= dens[0] * this.density) continue;
           // jitter inside the cell, ground the tree at full terrain detail
           frame(_up, _ce1, _ce2);
           _jd.copy(_up)
@@ -402,7 +422,10 @@ export class FarFlora {
     const a1 = this.meshes[1].instanceMatrix.array;
     for (const k of keys) {
       const t = this.tiles.get(k);
-      const c0 = Math.min(t.n0, CAP - n0), c1 = Math.min(t.n1, CAP - n1);
+      // Tiles are generated in stable hash order; retaining a prefix is a
+      // deterministic far-density reduction and does not make trees shuffle.
+      const c0 = Math.min(Math.floor(t.n0 * this.displayDensity), CAP - n0);
+      const c1 = Math.min(Math.floor(t.n1 * this.displayDensity), CAP - n1);
       if (c0 > 0) { a0.set(t.m0.subarray(0, c0 * 16), n0 * 16); n0 += c0; }
       if (c1 > 0) { a1.set(t.m1.subarray(0, c1 * 16), n1 * 16); n1 += c1; }
     }

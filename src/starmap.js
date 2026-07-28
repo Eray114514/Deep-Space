@@ -10,6 +10,7 @@ import { generateSystemSpec } from './astronomy.js';
 import { generateCelestialNames } from './names.js';
 import { SystemView } from './sysview.js';
 import { buildGalaxyBackdrop, CELL, GALAXY_LAYOUT_VERSION, GALAXY_RADIUS_CELLS } from './galaxy-layout.js';
+import { applySystemBodyTuning } from './world-config.js';
 
 const AU = 149_597_870_700;
 const STAR_LIMIT = 320;
@@ -149,7 +150,12 @@ function bodyProfile(body, survey) {
 }
 
 function previewSystem(seed, star, currentSystem) {
-  const spec = currentSystem?.star.id === star.id ? currentSystem.spec : generateSystemSpec(seed, star);
+  const spec = currentSystem?.star.id === star.id
+    ? currentSystem.spec
+    : applySystemBodyTuning(
+      generateSystemSpec(seed, star),
+      (bodyId) => currentSystem?.universe?.bodyTuning?.(star.id, bodyId) || null,
+    );
   const allBodies = [...spec.bodies, ...(spec.compactObjects || [])];
   const indexById = new Map(allBodies.map((body, index) => [body.bodyId, index]));
   return {

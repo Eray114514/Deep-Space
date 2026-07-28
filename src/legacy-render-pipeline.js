@@ -82,6 +82,11 @@ export class GameLegacyPipeline {
     this.composer.setSize(width, height);
   }
 
+  setVolumeScale(scale) {
+    if (!this.volumePass) return;
+    this.volumePass.scale = THREE.MathUtils.clamp(scale, 0.3, 1);
+  }
+
   render() {
     this.composer.render();
   }

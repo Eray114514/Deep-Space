@@ -4,6 +4,7 @@
 // real GPU, so the swiftshader flags are mandatory for WebGL to work at all.
 
 import { chromium } from 'playwright';
+import { existsSync } from 'node:fs';
 
 // Default SwiftShader args. Mirrors tools/screenshot.js and is shared by every
 // browser test. `--enable-unsafe-swiftshader` + `--use-angle=swiftshader-webgl`
@@ -25,6 +26,20 @@ export const DEFAULT_ARGS = [
 // hard-coded path that would explode on Linux CI.
 export function resolveExecutablePath() {
   return process.env.PLAYWRIGHT_EXECUTABLE_PATH || chromium.executablePath();
+}
+
+export function resolveSystemChromePath() {
+  if (process.env.WEBGPU_EXECUTABLE_PATH) return process.env.WEBGPU_EXECUTABLE_PATH;
+  const candidates = process.platform === 'win32' ? [
+    `${process.env.PROGRAMFILES || 'C:\\Program Files'}\\Google\\Chrome\\Application\\chrome.exe`,
+    `${process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)'}\\Microsoft\\Edge\\Application\\msedge.exe`,
+    `${process.env.LOCALAPPDATA || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+  ] : process.platform === 'darwin' ? [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ] : [
+    '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/microsoft-edge',
+  ];
+  return candidates.find((candidate) => candidate && existsSync(candidate)) || null;
 }
 
 // Launch Chromium with the shared args. Caller may override anything via opts:
@@ -60,6 +75,26 @@ export async function launchHardwareBrowser(opts = {}) {
   return chromium.launch({
     executablePath: resolveExecutablePath(),
     args,
+    ...rest,
+  });
+}
+
+// Full WebGPU validation must not use the bundled SwiftShader Chromium: on
+// Windows that runtime can expose navigator.gpu yet fail device creation when
+// its DXIL runtime is absent. Prefer an installed Chrome/Edge and return null
+// on headless CI where no system browser is present.
+export async function launchWebGPUHardwareBrowser(opts = {}) {
+  const executablePath = resolveSystemChromePath();
+  if (!executablePath) return null;
+  const { args: extraArgs = [], adapterLuid = process.env.WEBGPU_ADAPTER_LUID, ...rest } = opts;
+  return chromium.launch({
+    executablePath,
+    args: [
+      '--no-sandbox', '--enable-webgpu', '--ignore-gpu-blocklist',
+      '--disable-gpu-sandbox',
+      ...(adapterLuid ? [`--use-adapter-luid=${adapterLuid}`] : []),
+      ...extraArgs,
+    ],
     ...rest,
   });
 }

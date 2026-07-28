@@ -131,9 +131,13 @@ function paintBodyTexture(body, w, h) {
         }
         r += (n3 - 0.5) * 26 * soft; g += (n3 - 0.5) * 24 * soft; b += (n3 - 0.5) * 22 * soft;
       } else if (type === 'lush' || type === 'ocean') {
-        const threshold = type === 'ocean' ? 0.62 : 0.56;
+        // "Ocean" is a distinct pelagic world, not the lush painter with a
+        // slightly shifted slider. Keep only rare volcanic archipelagos so it
+        // reads as an almost entirely blue planet at system-view scale.
+        const threshold = type === 'ocean' ? 1.02 : 0.56;
         const land = n + 0.16 * n2 - threshold;
-        const ice = THREE.MathUtils.smoothstep(lat, 0.74, 0.95);
+        const ice = THREE.MathUtils.smoothstep(lat,
+          type === 'ocean' ? 0.88 : 0.74, type === 'ocean' ? 0.985 : 0.95);
         if (land > 0) {
           const dry = THREE.MathUtils.clamp(0.5 + 0.5 * Math.sin(lat * 5.1 + n2 * 3.0), 0, 1);
           r = 52 + 52 * n + 44 * dry;
@@ -887,7 +891,12 @@ export class SystemView {
       this.world.add(line);
     }
 
-    const visualRadius = isBlackHole ? 2.7 : 0.55 + Math.min(1.05, body.radius / 310_000) * 1.05;
+    // Preserve the authored size hierarchy in the compressed system chart.
+    // The former hard cap made a 900 km planet only ~9% larger than its old
+    // 286 km version, so the numeric scale correction was visually invisible.
+    const visualRadius = isBlackHole
+      ? 2.7
+      : THREE.MathUtils.clamp(0.42 + Math.sqrt(body.radius / 250_000) * 0.9, 0.82, 2.35);
     const group = new THREE.Group();
     const pos = orbitalPosition(body.orbitSpec, timeHours, new THREE.Vector3());
     group.position.set(pos.x * k, pos.y * k + ORBIT_PLANE_Y, pos.z * k);

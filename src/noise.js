@@ -13,6 +13,17 @@ const GRAD = new Float32Array([
 const F3 = 1 / 3;
 const G3 = 1 / 6;
 
+// Fade an octave in over one octave of sampling headroom. At maxFreq === f
+// the grid has only just reached that octave's nominal Nyquist limit, so the
+// contribution starts at zero; it is fully present once maxFreq reaches 2f.
+// This keeps height(dir, maxFreq) continuous as the quadtree morphs between
+// frequency caps instead of admitting an entire octave in one frame.
+export function frequencyBlend(f, maxFreq) {
+  if (!Number.isFinite(maxFreq)) return 1;
+  const t = clamp(Math.log2(Math.max(maxFreq, 1e-12) / Math.max(f, 1e-12)), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
 export class Simplex {
   constructor(rand) {
     const p = new Uint8Array(256);
@@ -88,9 +99,10 @@ export class Simplex {
   fbm(x, y, z, baseFreq, octaves, gain, lacunarity, maxFreq) {
     let sum = 0, amp = 1, norm = 0, f = baseFreq;
     for (let o = 0; o < octaves; o++) {
-      if (o > 0 && f > maxFreq) break;
-      sum += amp * this.noise(x * f, y * f + o * 19.19, z * f);
-      norm += amp;
+      const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
+      if (o > 0 && blend <= 0) break;
+      sum += amp * blend * this.noise(x * f, y * f + o * 19.19, z * f);
+      norm += amp * blend;
       amp *= gain;
       f *= lacunarity;
     }
@@ -106,17 +118,18 @@ export class Simplex {
     let sum = 0, amp = 1, norm = 0, f = baseFreq;
     let gx = 0, gy = 0, gz = 0;
     for (let o = 0; o < octaves; o++) {
-      if (o > 0 && f > maxFreq) break;
+      const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
+      if (o > 0 && blend <= 0) break;
       const oy = o * 19.19;
       const e = 0.25 / f;
       const n0 = this.noise(x * f, y * f + oy, z * f);
       // per-octave gradient, normalised to O(1) regardless of frequency
-      gx += ((this.noise((x + e) * f, y * f + oy, z * f) - n0) / (e * f)) * amp;
-      gy += ((this.noise(x * f, (y + e) * f + oy, z * f) - n0) / (e * f)) * amp;
-      gz += ((this.noise(x * f, y * f + oy, (z + e) * f) - n0) / (e * f)) * amp;
+      gx += ((this.noise((x + e) * f, y * f + oy, z * f) - n0) / (e * f)) * amp * blend;
+      gy += ((this.noise(x * f, (y + e) * f + oy, z * f) - n0) / (e * f)) * amp * blend;
+      gz += ((this.noise(x * f, y * f + oy, (z + e) * f) - n0) / (e * f)) * amp * blend;
       const damp = 1 / (1 + erosion * (gx * gx + gy * gy + gz * gz));
-      sum += amp * n0 * damp;
-      norm += amp;
+      sum += amp * blend * n0 * damp;
+      norm += amp * blend;
       amp *= gain;
       f *= lacunarity;
     }
@@ -127,13 +140,18 @@ export class Simplex {
   ridged(x, y, z, baseFreq, octaves, gain, lacunarity, maxFreq) {
     let sum = 0, amp = 0.5, norm = 0, f = baseFreq, weight = 1;
     for (let o = 0; o < octaves; o++) {
-      if (o > 0 && f > maxFreq) break;
+      const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
+      if (o > 0 && blend <= 0) break;
       let n = 1 - Math.abs(this.noise(x * f, y * f - o * 13.7, z * f));
       n *= n;
       n *= weight;
+      // The feedback chain is evaluated at full strength. Only the octave's
+      // visible contribution is blended. Feeding a half-faded value back into
+      // `weight` corrupts every following octave and was measured to make the
+      // LOD discontinuity 62.5% worse.
       weight = Math.min(1, Math.max(0, n * 2));
-      sum += n * amp;
-      norm += amp;
+      sum += n * amp * blend;
+      norm += amp * blend;
       amp *= gain;
       f *= lacunarity;
     }
@@ -144,9 +162,10 @@ export class Simplex {
   billow(x, y, z, baseFreq, octaves, gain, lacunarity, maxFreq) {
     let sum = 0, amp = 1, norm = 0, f = baseFreq;
     for (let o = 0; o < octaves; o++) {
-      if (o > 0 && f > maxFreq) break;
-      sum += amp * (Math.abs(this.noise(x * f, y * f + o * 7.7, z * f)) * 2 - 1);
-      norm += amp;
+      const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
+      if (o > 0 && blend <= 0) break;
+      sum += amp * blend * (Math.abs(this.noise(x * f, y * f + o * 7.7, z * f)) * 2 - 1);
+      norm += amp * blend;
       amp *= gain;
       f *= lacunarity;
     }

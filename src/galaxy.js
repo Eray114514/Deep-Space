@@ -4,6 +4,11 @@
 // authored galactic boundary.
 
 import * as THREE from 'three';
+import { PointsNodeMaterial } from 'three/webgpu';
+import {
+  attribute, clamp as nodeClamp, float, length as nodeLength, mix,
+  positionView, smoothstep as nodeSmoothstep, uniform, vertexColor,
+} from 'three/tsl';
 import { makeRng } from './rng.js';
 import { clamp } from './noise.js';
 import { Planet } from './planet.js';
@@ -13,6 +18,10 @@ import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, or
 import { buildGalaxyBackdrop, CELL, GalaxyCatalog, HOME_SYSTEM_ID } from './galaxy-layout.js';
 import { buildCivilizationSites, civilizationSitesForSystem } from './civilization.js';
 import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
+import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
+import { resolveRendererPolicy } from './renderer-policy.js';
+import { applySystemBodyTuning } from './world-config.js';
+import { blackbodyLinearRgb, buildStellarLightField } from './stellar-radiometry.js';
 
 export { CELL } from './galaxy-layout.js';
 
@@ -25,78 +34,125 @@ const FADE_DIST = 9e9;
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
+const rendererParams = typeof location !== 'undefined'
+  ? new URLSearchParams(location.search) : new URLSearchParams();
+const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
+const USE_NODE_MATERIALS = resolveRendererPolicy(
+  rendererParamsForSettings(rendererSettings, rendererParams)).backend === 'webgpu';
 
 // Every star in the sky is a real lattice star. Apparent size and brightness
 // fall off with true distance (computed in view space, where the f64 group
 // offset has already been applied).
 function makeStarPointsMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      uDim: { value: 0 },
-      uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
-      uProj: { value: 600 },
-    },
-    vertexShader: /* glsl */`
-      uniform float uPixelRatio;
-      uniform float uProj;
-      attribute float aSize;
-      varying vec3 vColor;
-      varying float vBright;
-      void main() {
-        vColor = color;
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        float dist = length(mv.xyz);
-        float discPx = 1.2e7 * aSize * uProj / max(dist, 1.0);
-        gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
-        vBright = clamp(2.2e10 / max(dist, 1.0), 0.42, 1.0)
-          * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
-        gl_Position = projectionMatrix * mv;
-      }`,
-    fragmentShader: /* glsl */`
-      uniform float uDim;
-      varying vec3 vColor;
-      varying float vBright;
-      void main() {
-        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-        float a = smoothstep(1.0, 0.15, r);
-        gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
-          * a * vBright * (1.0 - uDim * 0.97);
-      }`,
-    vertexColors: true,
+  if (!USE_NODE_MATERIALS) {
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uDim: { value: 0 },
+        uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
+        uProj: { value: 600 },
+      },
+      vertexShader: /* glsl */`
+        uniform float uPixelRatio;
+        uniform float uProj;
+        attribute float aSize;
+        varying vec3 vColor;
+        varying float vBright;
+        void main() {
+          vColor = color;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float dist = length(mv.xyz);
+          float discPx = 1.2e7 * aSize * uProj / max(dist, 1.0);
+          gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
+          vBright = clamp(2.2e10 / max(dist, 1.0), 0.42, 1.0)
+            * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */`
+        uniform float uDim;
+        varying vec3 vColor;
+        varying float vBright;
+        void main() {
+          float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+          float a = smoothstep(1.0, 0.15, r);
+          gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
+            * a * vBright * (1.0 - uDim * 0.97);
+        }`,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+  }
+  const nodes = {
+    uDim: uniform(0),
+    uPixelRatio: uniform(Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2)),
+    uProj: uniform(600),
+  };
+  const starSize = attribute('aSize', 'float');
+  const distance = nodeLength(positionView);
+  const discPx = starSize.mul(1.2e7).mul(nodes.uProj).div(distance.max(1));
+  const pointSize = nodeClamp(discPx.max(float(1.8).add(starSize.mul(0.55))), 1.8, 28)
+    .mul(nodes.uPixelRatio);
+  const brightness = nodeClamp(float(2.2e10).div(distance.max(1)), 0.42, 1)
+    .mul(nodeSmoothstep(9.2e10, 7.5e10, distance))
+    .mul(float(1).sub(nodes.uDim.mul(0.97)));
+  const material = new PointsNodeMaterial({
+    sizeAttenuation: false,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
+  material.sizeNode = pointSize;
+  // pointUV/gl_PointCoord currently has no portable WGSL path in r185.1.
+  // Keep the finite star field backend-neutral; bloom supplies the soft halo.
+  material.colorNode = vertexColor().mul(1.2);
+  material.opacityNode = brightness;
+  material.uniforms = nodes;
+  return material;
 }
 
 function makeBackdropPointsMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: { uDim: { value: 0 } },
-    vertexShader: /* glsl */`
-      attribute float aSize;
-      attribute float aAlpha;
-      varying vec3 vColor;
-      varying float vAlpha;
-      void main() {
-        vColor = color;
-        vAlpha = aAlpha;
-        gl_PointSize = aSize;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: /* glsl */`
-      uniform float uDim;
-      varying vec3 vColor;
-      varying float vAlpha;
-      void main() {
-        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-        float a = smoothstep(1.0, 0.1, r);
-        gl_FragColor = vec4(vColor * 0.78, a * vAlpha * (1.0 - uDim * 0.985));
-      }`,
-    vertexColors: true,
+  if (!USE_NODE_MATERIALS) {
+    return new THREE.ShaderMaterial({
+      uniforms: { uDim: { value: 0 } },
+      vertexShader: /* glsl */`
+        attribute float aSize;
+        attribute float aAlpha;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+          vColor = color;
+          vAlpha = aAlpha;
+          gl_PointSize = aSize;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: /* glsl */`
+        uniform float uDim;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+          float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+          float a = smoothstep(1.0, 0.1, r);
+          gl_FragColor = vec4(vColor * 0.78, a * vAlpha * (1.0 - uDim * 0.985));
+        }`,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+  }
+  const nodes = { uDim: uniform(0) };
+  const material = new PointsNodeMaterial({
+    sizeAttenuation: false,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
+  material.sizeNode = attribute('aSize', 'float');
+  material.colorNode = vertexColor().mul(0.78);
+  material.opacityNode = attribute('aAlpha', 'float').mul(float(1).sub(nodes.uDim.mul(0.985)));
+  material.uniforms = nodes;
+  return material;
 }
 
 function glowTexture(size = 128, inner = 0.0, tight = false) {
@@ -455,11 +511,17 @@ export class Universe {
   relativizeSystem(sys, camPos) {
     const d = camPos.distanceTo(sys.star.pos);
     const tg = clamp((4.2e9 - d) / 2.2e9, 0, 1);
-    for (const starView of sys.starViews) {
+    const stellarField = sys.stellarLightFieldFrom(camPos);
+    const totalLuminosity = sys.starViews.reduce(
+      (sum, view) => sum + view.spec.luminositySolar, 0);
+    const systemIntensity = 3.2 * clamp(Math.sqrt(totalLuminosity), 0.7, 2.2)
+      * clamp((FADE_DIST - d) / 3e9, 0, 1);
+    for (let index = 0; index < sys.starViews.length; index++) {
+      const starView = sys.starViews[index];
       starView.group.position.copy(starView.positionUniv).sub(camPos);
       starView.light.position.copy(starView.group.position);
-      starView.light.intensity = 3.2 * Math.min(2.2, Math.sqrt(starView.spec.luminositySolar))
-        * clamp((FADE_DIST - d) / 3e9, 0, 1);
+      starView.light.intensity = systemIntensity
+        * (stellarField.sources[index]?.irradianceFraction || 0);
       starView.glow.material.opacity = tg * tg * (3 - 2 * tg) * (starView.glowExt ?? 1);
     }
     for (const p of [...sys.planets, ...sys.compactObjects]) {
@@ -539,13 +601,16 @@ export class StarSystem {
   constructor(universe, star, { deferred = false, fadeInPlanets = deferred, timeHours = 0 } = {}) {
     this.universe = universe;
     this.star = star;
-    this.spec = generateSystemSpec(universe.seed, star);
+    this.spec = applySystemBodyTuning(
+      generateSystemSpec(universe.seed, star),
+      (bodyId) => universe.bodyTuning?.(star.id, bodyId) || null,
+    );
     this.name = this.spec.name;
     this.catalogId = this.spec.catalogId;
     this.isHome = this.spec.isHome;
     this.starViews = this.spec.stars.map((spec) => {
       const group = new THREE.Group();
-      const color = new THREE.Color(spec.color);
+      const color = new THREE.Color().fromArray(blackbodyLinearRgb(spec.temperatureK));
       const material = new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(4), fog: false });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(spec.radiusRender, 48, 32), material);
       group.add(mesh);
@@ -554,7 +619,7 @@ export class StarSystem {
         transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
       }));
       glow.scale.setScalar(spec.radiusRender * 7); group.add(glow);
-      const light = new THREE.PointLight(color.clone().lerp(new THREE.Color(0xffffff), 0.7), 3.2, 0, 0);
+      const light = new THREE.PointLight(color, 3.2, 0, 0);
       universe.group.add(group, light);
       return { spec, group, mesh, glow, light, baseColor: material.color.clone(), glowBase: glow.material.color.clone(), glowExt: 1, positionUniv: star.pos.clone() };
     });
@@ -615,7 +680,7 @@ export class StarSystem {
     planet.orbitIndex = s.orbitIndex;
     if (s.parentId) planet.parentPlanet = this.bodyById.get(s.parentId) || null;
     planet.setFrame(frame.orientation);
-    planet.setSunDir(this.sunDirFrom(frame.position, _v));
+    planet.setStellarLights?.(this.stellarLightFieldFrom(frame.position));
     this.planets.push(planet);
     this.bodyById.set(s.bodyId, planet);
     this.universe.group.add(planet.group);
@@ -698,7 +763,9 @@ export class StarSystem {
       const body = this.bodyById.get(spec.bodyId);
       if (!body) continue;
       body.posUniv.copy(frame.position); body.frameVelocity.copy(frame.velocity);
-      body.setFrame(frame.orientation); body.setSunDir(this.sunDirFrom(body.posUniv, _v));
+      body.setFrame(frame.orientation);
+      body.setStellarLights?.(this.stellarLightFieldFrom(body.posUniv));
+      body.setWeatherTime?.(timeHours);
     }
     for (const habitat of this.planets.filter((body) => body instanceof ArtificialHabitat)) {
       habitat.followParent();
@@ -718,6 +785,16 @@ export class StarSystem {
 
   sunDirFrom(pos, out) {
     return out.copy(this.dominantStarFrom(pos).positionUniv).sub(pos).normalize();
+  }
+
+  stellarLightFieldFrom(pos, visibility = null) {
+    return buildStellarLightField(this.starViews.map((view, index) => ({
+      id: view.spec.starId || `${this.catalogId}:star-${index}`,
+      positionUniv: view.positionUniv,
+      luminositySolar: view.spec.luminositySolar,
+      temperatureK: view.spec.temperatureK,
+      visibility: Array.isArray(visibility) ? visibility[index] ?? 1 : 1,
+    })), pos);
   }
 
   dominantStarFrom(pos) {

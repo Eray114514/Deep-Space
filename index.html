@@ -11,6 +11,8 @@
     {
       "imports": {
         "three": "./vendor/three.module.js",
+        "three/webgpu": "./vendor/three.webgpu.js",
+        "three/tsl": "./vendor/three.tsl.js",
         "three/addons/": "./node_modules/three/examples/jsm/"
       }
     }
@@ -197,27 +199,25 @@
       </div>
     </div>
     <section id="graphics-settings-panel" class="graphics-settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="graphics-settings-title">
-      <div class="graphics-settings-card">
-        <header>
-          <div><span>AF/S9 · RENDER CONTROL</span><h2 id="graphics-settings-title">图形设置</h2></div>
-          <button id="graphics-settings-close" type="button" aria-label="关闭图形设置">×</button>
-        </header>
-        <div class="graphics-device">
-          <span>当前图形设备</span><strong id="graphics-gpu">检测中</strong>
-          <small id="graphics-backend">WebGL 2 · 实际检测中</small>
-        </div>
-        <fieldset>
-          <legend>画质档位</legend>
-          <div class="graphics-choice-grid">
-            <label><input type="radio" name="graphics-quality" value="auto"><span><b>自动</b><small>依据设备选择，推荐</small></span></label>
-            <label><input type="radio" name="graphics-quality" value="performance"><span><b>性能</b><small>清晰近景，缩短效果范围</small></span></label>
-            <label><input type="radio" name="graphics-quality" value="balanced"><span><b>均衡</b><small>完整材质与中等采样</small></span></label>
-            <label><input type="radio" name="graphics-quality" value="ultra"><span><b>极致</b><small>最高分辨率与完整效果</small></span></label>
-          </div>
-        </fieldset>
-        <p id="graphics-settings-note" class="graphics-settings-note">渲染后端为 WebGL 2。画质调整将在重新启动后生效。</p>
-        <footer><button id="graphics-settings-cancel" type="button">取消</button><button id="graphics-settings-apply" type="button">应用并重新启动</button></footer>
+      <header>
+        <div><span>AF/S9 · RENDER CONTROL</span><h2 id="graphics-settings-title">图形设置</h2></div>
+        <button id="graphics-settings-close" type="button" aria-label="关闭图形设置">×</button>
+      </header>
+      <div class="graphics-device">
+        <span>当前图形设备</span><strong id="graphics-gpu">检测中</strong>
+        <small id="graphics-backend">请求 AUTO · 实际检测中</small>
       </div>
+      <fieldset>
+        <legend>画质档位</legend>
+        <div class="graphics-choice-grid graphics-quality-grid">
+          <label><input type="radio" name="graphics-quality" value="auto"><span><b>自动</b><small>依据设备选择，推荐</small></span></label>
+          <label><input type="radio" name="graphics-quality" value="performance"><span><b>性能</b><small>清晰近景，缩短效果范围</small></span></label>
+          <label><input type="radio" name="graphics-quality" value="balanced"><span><b>均衡</b><small>完整材质与中等采样</small></span></label>
+          <label><input type="radio" name="graphics-quality" value="ultra"><span><b>极致</b><small>高密度体积与远景</small></span></label>
+        </div>
+      </fieldset>
+      <p id="graphics-settings-note" class="graphics-settings-note">支持设备默认使用 WebGPU；初始化失败时自动回落 WebGL 2。重型图形资源将在重新启动后生效。</p>
+      <footer><button id="graphics-settings-cancel" type="button">取消</button><button id="graphics-settings-apply" type="button">应用并重新启动</button></footer>
     </section>
     <div class="hero-bottomline" aria-hidden="true">
       <span>UNIVERSE <b id="hero-seed">DEEP SPACE</b></span>

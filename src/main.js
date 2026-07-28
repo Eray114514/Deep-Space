@@ -5,14 +5,15 @@
 // (atmosphere, fog, day/night, star dimming).
 
 import { StarSystem, Universe } from './galaxy.js';
-import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad } from './quadtree.js';
+import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad,
+  setTerrainScreenError } from './quadtree.js';
 import { SpaceControls, WalkControls, guidePlanetApproach, keys,
   flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
-import { landingDescentProgress, SHIP_LANDING_PROFILE,
+import { createWarpDriveNode, landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
-import { tickShaders } from './shaders.js';
+import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord } from './names.js';
@@ -22,19 +23,28 @@ import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
+import { VolumetricPass } from './volumetric-pass.js';
 import { createRiftDistortionNode, SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
+import { GameNodePipeline } from './node-render-pipeline.js';
 import { GameLegacyPipeline } from './legacy-render-pipeline.js';
-import { isLowPowerGpu, resolveGraphicsSettings, resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
-import * as THREE from 'three';
+import { isLowPowerGpu, rendererParamsForSettings, resolveGraphicsSettings,
+  resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
+import { createEnvironmentState, updateEnvironmentState } from './environment-state.js';
+import { waterInteraction } from './water-interaction.js';
+import { surfaceInteraction } from './surface-interaction.js';
+import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
+import { WeatherEffects } from './weather-effects.js';
 
 const qs = new URLSearchParams(location.search);
 const graphicsSettings = resolveGraphicsSettings({ params: qs });
-const rendererPolicy = resolveRendererPolicy(qs);
+const rendererPolicy = resolveRendererPolicy(rendererParamsForSettings(graphicsSettings, qs));
+const BOOT_USE_WEBGPU = rendererPolicy.backend === 'webgpu';
+const THREE = await import(BOOT_USE_WEBGPU ? 'three/webgpu' : 'three');
 
 // ---- error surface (also read by the headless test harness) ---------------
 const errBox = document.getElementById('err');
@@ -99,7 +109,7 @@ const rendererOptions = {
 };
 const rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
 if (qs.get('renderer-recovery') === 'device-lost') {
-  // Clean the recovery params from the URL so a refresh does not stick on WebGL.
+  rendererRuntime.reason = 'webgpu-device-lost-fallback';
   const cleanUrl = new URL(location.href);
   cleanUrl.searchParams.delete('renderer');
   cleanUrl.searchParams.delete('renderer-recovery');
@@ -107,28 +117,25 @@ if (qs.get('renderer-recovery') === 'device-lost') {
 }
 const renderer = rendererRuntime.renderer;
 const actualRendererBackend = rendererRuntime.backend;
-const adapterInfo = rendererRuntime.adapterInfo;
+const webgpuAdapterInfo = rendererRuntime.adapterInfo;
 const gpuName = rendererRuntime.gpuName;
+configureSurfaceMaterials(renderer);
+const AUTO_LOW_GPU = graphicsSettings.quality === 'auto' && isLowPowerGpu(gpuName);
 const QUALITY_PROFILE = resolveQualityProfile(graphicsSettings, gpuName, {
   touch: IS_TOUCH, width: window.innerWidth, height: window.innerHeight,
 });
 const QUALITY_LOW = QUALITY_PROFILE.id === 'performance';
-// Near-field terrain density is never a performance-tier casualty.
-setGridCells(QUALITY_PROFILE.gridCells);
+// Chunk vertex density is never a performance-tier casualty. The scheduler
+// reduces distant screen error and effect ranges while the player's near field
+// retains the authored highest LOD.
+setGridCells(24);
+setTerrainScreenError(QUALITY_PROFILE.terrainScreenError);
 renderer.setSize(window.innerWidth, window.innerHeight);
-// DPR 以 devicePixelRatio 为基准:1.0 = 点对点,>1.0 = 超采样。floor 永不低于点对点,
-// 避免升采样糊与纹理锯齿;省性能靠阴影/体积/网格密度。
-const DPR_BASE = window.devicePixelRatio || 1;
-const DPR_FLOOR = DPR_BASE * QUALITY_PROFILE.dprFloorMult;
-const DPR_CEILING = DPR_BASE * QUALITY_PROFILE.dprCeilingMult;
-let renderDpr = Math.min(Math.max(DPR_BASE * QUALITY_PROFILE.dprTargetMult, DPR_FLOOR), DPR_CEILING);
-// 高 DPR + 高分辨率显示器(如 4K@2x)会让 render target 超过 GPU 的
-// maxTextureSize(典型 8192),导致全黑。按能力上限裁剪,保持 floor
-// 不低于 devicePixelRatio 的点对点承诺。
-const maxTexSize = renderer.capabilities?.maxTextureSize || 8192;
-renderDpr = Math.min(renderDpr,
-  maxTexSize / Math.max(1, window.innerWidth),
-  maxTexSize / Math.max(1, window.innerHeight));
+const MAX_DPR = QUALITY_PROFILE.dprMax;
+// Mild supersampling on <=1440p desktop protects the hero ship even when the
+// OS reports DPR 1. Very high-resolution displays stay at native scale.
+const DESKTOP_DPR_FLOOR = QUALITY_PROFILE.dprMin;
+let renderDpr = Math.min(Math.max(window.devicePixelRatio, QUALITY_PROFILE.dprTarget), MAX_DPR);
 renderer.setPixelRatio(renderDpr);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
@@ -139,13 +146,16 @@ console.info(`Renderer: ${renderer.constructor.name}/${actualRendererBackend}`, 
 
 // WebGL context-loss safety net. The renderer auto-restores most GPU
 // resources on the next render after restore, but without an explicit
-// preventDefault the canvas stays black and silent.
+// preventDefault the canvas stays black and silent. WebGPU loss reconstructs
+// the deterministic scene after one guarded reload; WebGL 2 resumes in-place.
 let contextLost = false;
 installDeviceRecovery(renderer, (state, detail) => {
   contextLost = state === 'lost';
   const notice = document.getElementById('performance-notice');
   if (notice && state === 'lost') {
-    notice.textContent = 'WebGL 2 图形上下文已丢失，等待恢复…';
+    notice.textContent = actualRendererBackend === 'webgpu'
+      ? 'WebGPU 设备已重置，正在恢复图形资源…'
+      : 'WebGL 2 图形上下文已丢失，等待恢复…';
     notice.classList.remove('hidden');
   }
   if (notice && state === 'restored') notice.classList.add('hidden');
@@ -191,8 +201,6 @@ const surfaceBootstrapMeshes = [];
 let surfaceBootstrapPending = false;
 const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
-const warmedVolumePlanets = new Set();
-let volumePrewarmInProgress = false;
 const startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
 // Shader compilation may consume most of the general warm-up deadline on a
@@ -280,36 +288,6 @@ function finishSurfaceBootstrap() {
   surfacePipelinesReady = true;
 }
 
-function prewarmPlanetVolumePipelines(planet) {
-  // Avoid a hitch when the player approaches a planet other than the one
-  // warmed during startup.  Each planet owns its own atmosphere/cloud
-  // material instance, so the first frame on a new body can still trigger
-  // an on-demand compile.  renderer.compileAsync collects materials via
-  // scene.traverse (NOT traverseVisible), so the meshes do not need to be
-  // made visible — and making them visible is actively harmful: while
-  // compileAsync polls program.isReady(), the live render loop (which uses
-  // traverseVisible) would draw these meshes with half-compiled programs,
-  // producing a black frame plus GL_INVALID_VALUE /
-  // GL_INVALID_FRAMEBUFFER_OPERATION errors before the player has even
-  // reached the atmosphere.
-  if (QUALITY_LOW || !planet || planet.isGasGiant || volumePrewarmInProgress
-    || typeof renderer.compileAsync !== 'function') return;
-  if (warmedVolumePlanets.has(planet)) return;
-  const meshes = [planet.atmoMesh, planet.volCloudMesh].filter(Boolean);
-  if (meshes.length === 0) {
-    warmedVolumePlanets.add(planet);
-    return;
-  }
-  volumePrewarmInProgress = true;
-  nodePipeline.compileAsync().then(() => {
-    warmedVolumePlanets.add(planet);
-    volumePrewarmInProgress = false;
-  }).catch((error) => {
-    volumePrewarmInProgress = false;
-    console.warn('planet volume prewarm failed', error);
-  });
-}
-
 function prewarmSurfacePipelines(planet) {
   // The low tier intentionally skips the expensive asynchronous surface
   // warm-up.  Mark the shared topology as accounted for so the regular frame
@@ -376,25 +354,21 @@ function prewarmSurfacePipelines(planet) {
     surfaceBootstrapMeshes.push(mesh);
   }
 
-  // Prewarm the EffectComposer render pipeline. renderer.compileAsync(scene,
-  // camera) collects materials via scene.traverse (NOT traverseVisible), so
-  // atmosphere/cloud shells do NOT need to be made visible to compile their
-  // shaders — and making them visible would let the live render loop draw
-  // them with half-compiled programs, causing a black frame before the
-  // player reaches the atmosphere. Only the shadow light needs to be
-  // visible, because compile() gathers lights via traverseVisible.
+  // compileAsync gathers programs synchronously, then lets ANGLE finish them
+  // through KHR_parallel_shader_compile. Temporarily exposing the real shadow
+  // light makes the cached surface variants match the eventual ground pass.
   const lightWasVisible = sunShadow.visible;
   const lightIntensity = sunShadow.intensity;
   sunShadow.visible = true;
   sunShadow.intensity = 1e-7;
-  const tasks = [nodePipeline.compileAsync()];
+  const tasks = [renderer.compileAsync(scene, camera)];
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
-  // The private 2×2 bootstrap render below warms the real shadow materials
-  // without injecting an incompatible MeshDepthMaterial.
+  // WebGPURenderer derives backend-specific shadow materials from the node
+  // surface graph. The private 2×2 bootstrap render below warms those real
+  // variants without injecting an incompatible legacy MeshDepthMaterial.
   Promise.all(tasks).then(() => {
-    if (planet) warmedVolumePlanets.add(planet);
     if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
     surfacePipelinesReady = true;
@@ -432,8 +406,20 @@ function prewarmLoadedShipPipelines() {
 // ---- renderer-specific post chain -------------------------------------------
 const VOLUME_ENABLED = qs.get('vclouds') !== '0';
 const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
-setVolumetricCloudsEnabled(VOLUME_ENABLED, QUALITY_LOW ? 'low' : 'high');
-const Pipeline = GameLegacyPipeline;
+let effectiveVolumeScale = VOLUME_SCALE;
+const PROFILE_CLOUD_STEPS = BOOT_USE_WEBGPU
+  ? QUALITY_PROFILE.cloudStepsWebGPU : QUALITY_PROFILE.cloudSteps;
+let effectiveCloudSteps = PROFILE_CLOUD_STEPS;
+let effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz;
+let effectiveShadowDistance = QUALITY_PROFILE.shadowDistance;
+setVolumetricCloudsEnabled(VOLUME_ENABLED, {
+  quality: QUALITY_PROFILE.id,
+  steps: PROFILE_CLOUD_STEPS,
+});
+const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
+  ? new VolumetricPass()
+  : null;
+const Pipeline = BOOT_USE_WEBGPU ? GameNodePipeline : GameLegacyPipeline;
 const nodePipeline = new Pipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
   volumeScale: VOLUME_SCALE,
@@ -442,9 +428,12 @@ const nodePipeline = new Pipeline(renderer, scene, camera, {
   bloomRadius: 0.4,
   bloomThreshold: 1.05,
   foregroundLayer: SHIP_FOREGROUND_LAYER,
+  createWarpDriveNode,
   createRiftDistortionNode,
 });
-const volumePass = nodePipeline.volumePass;
+const volumePass = BOOT_USE_WEBGPU
+  ? nodeVolumePass
+  : nodePipeline.volumePass;
 const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
 const riftDistortionPass = nodePipeline.rift;
@@ -466,12 +455,12 @@ window.addEventListener('resize', () => {
 });
 
 function setRenderDpr(next) {
-  // 自适应 DPR 在档位 [floor, ceiling] 区间内微调;性能档 floor=ceiling=点对点,
-  // 实际不波动,保证低画质也不糊。同时不能超过 GPU 最大纹理尺寸,否则黑屏。
-  const maxTexSize = renderer.capabilities?.maxTextureSize || 8192;
-  const dpr = Math.min(clamp(next, DPR_FLOOR, DPR_CEILING),
-    maxTexSize / Math.max(1, window.innerWidth),
-    maxTexSize / Math.max(1, window.innerHeight));
+  // The hero ship is a high-frequency foreground asset; dropping below the
+  // display's normal desktop scaling makes its wing silhouette visibly stair-
+  // stepped even with post AA. Low quality remains an explicit opt-in.
+  const qualityFloor = QUALITY_PROFILE.dprMin;
+  const qualityCeiling = Math.max(qualityFloor, MAX_DPR);
+  const dpr = clamp(next, qualityFloor, qualityCeiling);
   if (Math.abs(dpr - renderDpr) < 0.04) return;
   renderDpr = dpr;
   renderer.setPixelRatio(renderDpr);
@@ -581,14 +570,18 @@ let currentWalkSnowWeight = 0;
 function walkWeatherFor(planet, localUp, sunLocal) {
   if (!planet) return 'clear';
   const terrainHeight = planet.height(localUp, 64);
+  const direction = planet.worldOffsetToLocal?.(localUp, new THREE.Vector3()).normalize()
+    || localUp;
+  const weather = planet.weatherAt?.(direction);
+  if (weather) {
+    if (weather.kind === 'storm') return 'storm';
+    if (weather.precipitationKind === 'snow' && weather.precipitation > 0.14) return 'snow';
+    if (weather.precipitationKind === 'rain' && weather.precipitation > 0.14) return 'rain';
+    if (weather.kind === 'stratus' && weather.visibility < 0.62) return 'rain';
+    return 'clear';
+  }
   if (planet.type === 'ice' || planet.snowWeightAt?.(localUp, terrainHeight) > 0.32) return 'snow';
-  const coverage = Number(planet.cloudCoverage) || 0;
-  if (coverage < 0.48) return 'clear';
-  if (planet.type === 'toxic' || planet.type === 'lava') return 'storm';
-  // A cloud deck is only precipitation locally when the surface is beneath
-  // the lit, moisture-bearing side; clear skies remain the default elsewhere.
-  const sunAltitude = localUp.dot(sunLocal);
-  return sunAltitude > -0.35 && coverage > 0.62 ? 'rain' : 'clear';
+  return 'clear';
 }
 
 // ---- world ------------------------------------------------------------------
@@ -601,11 +594,19 @@ let celestialClock = new CelestialClock(SEED, {
 let universe = createUniverse(SEED);
 universe.timeHours = celestialClock.hours;
 universe.system.updateCelestial(celestialClock.hours);
-const scatter = new Scatter();
+const scatter = new Scatter({
+  grassRadius: QUALITY_PROFILE.grassRadius,
+  grassDensity: QUALITY_PROFILE.grassDensity,
+  streamBudgetMs: QUALITY_LOW ? 1.15 : 1.8,
+});
 // far tier: proxy trees to the horizon (?farflora=0 spares SwiftShader tests)
 const FARFLORA = qs.get('farflora') !== '0';
-const farFlora = new FarFlora();
+const farFlora = new FarFlora({
+  density: QUALITY_PROFILE.treeDensity,
+  streamBudgetMs: QUALITY_LOW ? 0.85 : 1.25,
+});
 const skyDome = new SkyDome(scene);
+const weatherEffects = new WeatherEffects(scene);
 const ship = new Ship(scene, {
   anisotropy: Math.min(16, renderer.getMaxAnisotropy?.()
     ?? renderer.capabilities?.getMaxAnisotropy?.()
@@ -653,7 +654,10 @@ let warpIntensity = 0;
 let warpArrival = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
+let activeWeather = null;
 let envUnderwater = false;
+let devHeadlampEnabled = true;
+const environmentState = createEnvironmentState();
 const prevNavPos = new THREE.Vector3();
 const _velActual = new THREE.Vector3();
 
@@ -679,7 +683,59 @@ const _cloudCol = new THREE.Color();
 const _warmA = new THREE.Color();
 const _warmB = new THREE.Color();
 const _warmC = new THREE.Color();
+const _shaftTint = new THREE.Color();
 let envSunset = 0;
+let skyOvercast = 0;
+let sunShaftDebug = { reason: 'not-updated', strength: 0 };
+
+function updateSunShafts() {
+  if (!nodePipeline.setSunShafts || !nearest || !usePost || QUALITY_LOW
+    || envInAtmo < 0.04 || envUnderwater) {
+    sunShaftDebug = {
+      reason: !nearest ? 'no-nearest' : !usePost ? 'post-disabled'
+        : QUALITY_LOW ? 'low-quality' : envUnderwater ? 'underwater' : 'outside-atmosphere',
+      strength: 0,
+    };
+    nodePipeline.setSunShafts?.({ strength: 0 });
+    return;
+  }
+  const source = nearest.stellarLightField?.sources?.[0];
+  const direction = source?.worldDirection || nearest.sunDirWorld;
+  if (!direction) {
+    sunShaftDebug = { reason: 'no-stellar-direction', strength: 0 };
+    nodePipeline.setSunShafts({ strength: 0 });
+    return;
+  }
+  _v.copy(direction).applyQuaternion(_q.copy(camera.quaternion).invert());
+  const forward = -_v.z;
+  const tangent = Math.tan(camera.fov * Math.PI / 360);
+  const ndcX = forward > 1e-5 ? _v.x / (forward * tangent * camera.aspect) : 99;
+  const ndcY = forward > 1e-5 ? _v.y / (forward * tangent) : 99;
+  const inFrame = smoothstep(1.32, 0.82, Math.max(Math.abs(ndcX), Math.abs(ndcY)));
+  // Interaction code reuses `_up` in planet-local space. Reconstruct the
+  // world-space radial here so the horizon gate cannot silently compare
+  // vectors from different coordinate systems.
+  const elevation = _v2.copy(nav.pos).sub(nearest.posUniv).normalize().dot(direction);
+  const horizonBand = smoothstep(-0.2, 0.04, elevation)
+    * (1 - smoothstep(0.08, 0.42, elevation));
+  const moisture = activeWeather
+    ? 0.12 + activeWeather.humidity * 0.34 + activeWeather.coverage * 0.24
+      - activeWeather.precipitation * 0.18
+    : 0.16;
+  const strength = clamp(envInAtmo * horizonBand * inFrame * moisture, 0, 0.14);
+  sunShaftDebug = {
+    reason: strength > 0 ? 'active' : 'gated',
+    strength, ndc: [ndcX, ndcY], elevation, horizonBand, inFrame, moisture,
+  };
+  _shaftTint.copy(source?.colorValue || _warmC.setRGB(1, 0.82, 0.62))
+    .lerp(_warmC.setRGB(1, 0.36, 0.08), envSunset * 0.72);
+  nodePipeline.setSunShafts({
+    x: ndcX * 0.5 + 0.5,
+    y: ndcY * 0.5 + 0.5,
+    strength,
+    color: _shaftTint,
+  });
+}
 let envEclipse = 0;
 
 function lookQuatAt(fromUniv, targetUniv, out, upHint) {
@@ -821,22 +877,18 @@ const ui = new UI({
   onStart: async () => {
     // Pointer Lock must be requested in the original click gesture. Audio
     // was already unlocked when the player entered the hero start page.
-    try {
-      const lockAttempt = requestGameplayPointerLock();
-      // One-shot cinematic: pull the camera back from the home planet's limb to
-      // the full-orbit spawn frame while the ship slides into formation.
-      startHeroPullBack(() => {
-        // A denied initial request falls back to the next canvas click; controls
-        // must be enabled so that click can actually reach SpaceControls.
-        spaceCtl.enabled = state === 'space';
-        // The ship has slid into formation — fade cockpit chrome in now instead
-        // of snapping it on at the start of the pull-back.
-        ui.revealChrome();
-      });
-      await lockAttempt;
-    } catch (e) {
-      console.error('onStart failed:', e);
-    }
+    const lockAttempt = requestGameplayPointerLock();
+    // One-shot cinematic: pull the camera back from the home planet's limb to
+    // the full-orbit spawn frame while the ship slides into formation.
+    startHeroPullBack(() => {
+      // A denied initial request falls back to the next canvas click; controls
+      // must be enabled so that click can actually reach SpaceControls.
+      spaceCtl.enabled = state === 'space';
+      // The ship has slid into formation — fade cockpit chrome in now instead
+      // of snapping it on at the start of the pull-back.
+      ui.revealChrome();
+    });
+    await lockAttempt;
   },
   onLand: tryLand,
   onStarMap: () => starMap?.isOpen ? closeStarMap() : openStarMap(),
@@ -851,9 +903,12 @@ const ui = new UI({
 });
 // Surface a clickable low-power GPU hint on the hero start page before the
 // first frame, so the player can switch the browser to its discrete GPU.
-ui.setHeroPerfHint(graphicsSettings.quality === 'auto' && isLowPowerGpu(gpuName), gpuName);
+ui.setHeroPerfHint(AUTO_LOW_GPU, gpuName);
 ui.setGraphicsSettings(graphicsSettings, QUALITY_PROFILE, {
-  gpu: gpuName, actualBackend: actualRendererBackend, reason: rendererRuntime.reason,
+  gpu: gpuName,
+  requestedBackend: rendererPolicy.requested,
+  actualBackend: actualRendererBackend,
+  reason: rendererRuntime.reason,
 });
 starMap = new StarMap({
   getUniverse: () => universe,
@@ -886,6 +941,7 @@ const pauseOverlay = document.getElementById('pause-overlay');
 const pausePanel = pauseOverlay.querySelector('.pause-panel');
 const pauseStatus = document.getElementById('pause-status');
 const resumeButton = document.getElementById('resume-btn');
+
 function nearbyBlackHole() {
   let closest = null;
   let distance = Infinity;
@@ -2245,66 +2301,88 @@ function startHeroPullBack(onDone) {
 }
 
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
-function ambience() {
+function ambience(dt = 1 / 60) {
   let inAtmo = 0, day = 1, skyStrength = 0;
   envEclipse = 0;
   envUnderwater = false;
+  activeWeather = null;
   scene.fog.density = 0;
   if (nearest) {
     const p = nearest;
-    // The sky transition belongs to the actual atmospheric shell. The old
-    // 2.4× multiplier started the blue clear-color far above it and made entry
-    // feel like a long opaque loading tunnel.
-    const x = clamp(nearestAlt / Math.max(p.atmoHeight, 1), 0, 1.2);
-    inAtmo = (1 - smoothstep(0.14, 1.04, x)) * p.atmoDensity;
     _up.copy(nav.pos).sub(p.posUniv).normalize();
-    // the sun that matters is the one this planet orbits
     const sunDir = nearest.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v);
     const blockers = universe.system.planets
       .filter((body) => body !== p)
       .map((body) => ({ position: body.posUniv, radius: body.R }));
     let totalFlux = 0, litFlux = 0, clearLitFlux = 0;
+    const stellarVisibility = [];
     for (const view of universe.system.starViews) {
       const delta = _v2.copy(view.positionUniv).sub(nav.pos);
       const flux = view.spec.luminositySolar / Math.max(1, delta.lengthSq());
       const directDay = smoothstep(-0.22, 0.28, _up.dot(delta.normalize()));
-      const visibility = inAtmo > 0.02
-        ? eclipseFraction(nav.pos, view.positionUniv, view.spec.radiusRender, blockers)
-        : 1;
+      const visibility = eclipseFraction(nav.pos, view.positionUniv, view.spec.radiusRender, blockers);
+      stellarVisibility.push(visibility);
       totalFlux += flux;
       clearLitFlux += flux * directDay;
       litFlux += flux * directDay * (0.08 + visibility * 0.92);
     }
     day = totalFlux > 0 ? clamp(litFlux / totalFlux, 0, 1) : 0;
     envEclipse = clearLitFlux > 0 ? clamp(1 - litFlux / clearLitFlux, 0, 1) : 0;
-
-    if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone().convertSRGBToLinear();
-    // dense atmospheres read as thicker fog, NOT as an overbright sky —
-    // sky luminance stays below the bloom threshold
-    skyStrength = Math.min(inAtmo, 1) * (0.035 + 0.965 * day) * 0.92;
-    _sky.copy(p.skyColorLin).multiplyScalar(skyStrength);
-
-    // golden hour: sun near the horizon reddens sky, fog and light
+    p.setStellarLights?.(universe.system.stellarLightFieldFrom(p.posUniv, stellarVisibility));
     const sunElev = _up.dot(sunDir);
-    envSunset = (1 - smoothstep(0.12, 0.38, sunElev))
-      * smoothstep(-0.22, -0.04, sunElev) * inAtmo;
-    _sky.lerp(_warmA.setRGB(0.55, 0.2, 0.08).multiplyScalar(Math.max(skyStrength, 0.12)), envSunset * 0.45);
 
-    let fogDensity = inAtmo * lerp(0.00005, 0.00001, clamp(nearestAlt / 2500, 0, 1)) * (0.25 + 0.75 * day);
-
-    // flying through a cloud deck: local density whites out the world
     const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
+    const weatherDirection = p.worldOffsetToLocal?.(_up, _v3).normalize() || _up;
+    activeWeather = p.weatherAt?.(weatherDirection) || null;
+    const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
+    envUnderwater = p.hasLiquid && camR < p.seaRadius + 0.4;
+    updateEnvironmentState(environmentState, {
+      cameraHeight: nearestAlt,
+      atmosphereHeight: p.atmoHeight,
+      atmosphereDensity: p.atmoDensity,
+      solarElevation: sunElev,
+      eclipse: envEclipse,
+      cloudDensity: transit,
+      underwater: envUnderwater,
+      dt,
+    });
+    inAtmo = environmentState.atmosphere;
+    day = environmentState.day;
+    envSunset = environmentState.sunset;
+    skyOvercast = 0;
+
+    // skyColor/liquidColor come from `new THREE.Color(hex)`, which already
+    // decodes sRGB into the linear working space. The `Lin` copies exist only
+    // so the per-frame path does not clone; they must not re-decode.
+    if (!p.skyColorLin) p.skyColorLin = p.skyColor.clone();
+    skyStrength = environmentState.skyIrradiance * 0.92;
+    _sky.copy(p.skyColorLin).multiplyScalar(skyStrength);
+    _sky.lerp(_warmA.setRGB(1.0, 0.14, 0.018)
+      .multiplyScalar(Math.max(skyStrength, 0.14)), clamp(envSunset * 0.9, 0, 1));
+
+    // Global FogExp2 no longer impersonates the atmosphere. The atmospheric
+    // shells own transmittance + in-scattering; scene fog is strictly local.
+    let fogDensity = 0;
     if (transit > 0.004) {
-      fogDensity += transit * 0.0045;
+      fogDensity = transit * 0.0032;
       _sky.lerp(_cloudCol.setRGB(0.6, 0.64, 0.7).multiplyScalar(0.2 + 0.8 * day),
         Math.min(1, transit * 1.5));
     }
+    if (activeWeather && nearestAlt < p.atmoHeight * 0.24) {
+      const surfaceAir = 1 - smoothstep(p.atmoHeight * 0.04, p.atmoHeight * 0.24,
+        Math.max(0, nearestAlt));
+      const weatherFog = (activeWeather.fog * 0.00022
+        + activeWeather.precipitation * 0.00008) * surfaceAir;
+      fogDensity = Math.max(fogDensity, weatherFog);
+      const overcast = clamp(activeWeather.coverage * 0.42
+        + activeWeather.precipitation * 0.36, 0, 0.72);
+      skyOvercast = overcast;
+      _sky.lerp(_cloudCol.setRGB(0.42, 0.48, 0.58)
+        .multiplyScalar(0.16 + day * 0.52), overcast);
+    }
 
-    // submerged?
-    const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
-    if (p.hasLiquid && camR < p.seaRadius + 0.4) {
-      envUnderwater = true;
-      if (!p.liquidColorLin) p.liquidColorLin = p.liquidColor.clone().convertSRGBToLinear();
+    if (envUnderwater) {
+      if (!p.liquidColorLin) p.liquidColorLin = p.liquidColor.clone();
       _sky.copy(p.liquidColorLin).multiplyScalar(0.25 + 0.55 * day);
       if (p.liquid === 'lava') _sky.set(1.2, 0.25, 0.02);
       fogDensity = p.liquid === 'lava' ? 0.2 : 0.03;
@@ -2313,6 +2391,15 @@ function ambience() {
 
     scene.fog.color.copy(_sky);
     scene.fog.density = fogDensity;
+    const cloudUniforms = p.volCloudMat?.uniforms;
+    if (cloudUniforms?.uAmbC) {
+      // Cloud skylight follows the same live day/night/weather radiance as
+      // the atmosphere. Keeping the construction-time daytime colour made an
+      // overcast deck glow pale blue at midnight and, through soft depth
+      // edges, wash the night-side terrain toward white.
+      cloudUniforms.uAmbC.value.copy(_sky)
+        .multiplyScalar(0.38 + day * 0.62);
+    }
 
     // valley mist tracks the live fog/sky tint (sunset mist comes free)
     const tsh = p.terrainMaterial.userData.shader;
@@ -2320,36 +2407,189 @@ function ambience() {
       tsh.uniforms.uMistColor.value.copy(_sky).multiplyScalar(1.06);
     }
 
-    hemi.intensity = inAtmo * 1.08 * (0.025 + 0.975 * day);
-    hemi.color.copy(p.skyColorLin || _sky);
+    // Cool sky irradiance preserves the silhouette on the night side without
+    // washing the whole planet with a global ambient light.
+    const clearSpace = 1 - Math.max(0, inAtmo);
+    hemi.intensity = (0.055 + (1 - day) * 0.06) * clearSpace
+      + Math.sqrt(Math.max(0, inAtmo)) * (0.018
+        + day * environmentState.directTransmittance * 0.36
+        + environmentState.skyIrradiance * 0.18
+        + envSunset * 0.11);
+    hemi.color.copy(p.skyColorLin || _sky)
+      .lerp(_warmC.setRGB(0.72, 0.24, 0.16), envSunset * 0.42);
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
 
     // the sky dome: horizon glow, deeper zenith, sun halo
-    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.0, 0.42, 0.16), envSunset * 0.75);
-    _c2.copy(p.skyColorLin).multiply(_zenithMul);
-    skyDome.update(_up, sunDir, _horC, _c2,
-      envUnderwater ? 0 : Math.min(inAtmo, 1) * (0.04 + 0.96 * day), envSunset);
+    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.08, 0.13, 0.022),
+      clamp(envSunset * 0.48, 0, 1));
+    _c2.copy(p.skyColorLin).multiply(_zenithMul)
+      .lerp(_warmA.setRGB(0.12, 0.022, 0.085), envSunset * 0.34);
+    if (skyOvercast > 0.01) {
+      _horC.lerp(_cloudCol.setRGB(0.24, 0.27, 0.33), skyOvercast * 0.72);
+      _c2.lerp(_cloudCol.setRGB(0.09, 0.105, 0.14), skyOvercast * 0.82);
+    }
+    p.setWaterEnvironment?.(_c2, _horC, day, envSunset);
+    // This dome only paints background pixels; it never overlays terrain.
+    // The volume shell still owns aerial perspective and limb scattering,
+    // while this low-frequency term restores a readable zenith below it.
+    const altitudeFraction = nearestAlt / Math.max(p.atmoHeight, 1);
+    const skyBackdrop = envUnderwater ? 0
+      : Math.min(inAtmo, 1) * (0.08 + 0.92 * day) * 0.42;
+    skyDome.update(_up, sunDir, _horC, _c2, skyBackdrop, envSunset,
+      smoothstep(0.28, 0.72, altitudeFraction), p.stellarLightField);
   } else {
-    hemi.intensity = 0;
+    hemi.intensity = 0.035;
+    hemi.color.setRGB(0.18, 0.24, 0.38);
+    hemi.groundColor.setRGB(0.035, 0.045, 0.07);
     envSunset = 0;
+    skyOvercast = 0;
+    updateEnvironmentState(environmentState, { dt });
     skyDome.update(_up, _up, _sky, _sky, 0, 0);
   }
-  renderer.setClearColor(_sky.multiplyScalar(nearest ? 1 : 0));
-  if (!nearest) renderer.setClearColor(0x000000);
+  // Space is always the clear background. Sky colour is rendered only by
+  // atmospheric scattering, so crossing a shell can never replace the whole
+  // framebuffer with opaque blue.
+  renderer.setClearColor(0x000000);
   renderer.setClearAlpha(0);
-  universe.setStarDimming(clamp(skyStrength * 1.25, 0, 1));
+  universe.setStarDimming(clamp(inAtmo * day * 0.92, 0, 1));
   // a horizon sun seen through air dims and reddens — otherwise sunsets are
   // a white bloom explosion swallowing a third of the sky
-  universe.setSunExtinction(nearest ? envSunset : 0);
+  universe.setSunExtinction(nearest
+    ? clamp(envSunset + (1 - environmentState.directTransmittance) * 0.18, 0, 1) : 0);
   // candela-scale: with physical decay, ~2 units of intensity is invisible —
   // a real lamp needs tens of candela to paint a pool on the ground
-  headlamp.intensity = state === 'walk' && day < 0.4 ? (0.4 - day) * 80 : 0;
-  ambient.intensity = 0.025 + inAtmo * (0.035 + day * 0.16);
+  headlamp.intensity = devHeadlampEnabled && state === 'walk' && day < 0.4
+    ? (0.4 - day) * 80 : 0;
+  const atmosphereRoot = Math.sqrt(Math.max(0, inAtmo));
+  ambient.intensity = (0.045 + (1 - day) * 0.035) * (1 - atmosphereRoot)
+    + atmosphereRoot * (0.012 + day * 0.153 + envSunset * 0.038);
+  renderer.toneMappingExposure = environmentState.exposure;
   envInAtmo = inAtmo;
   envDay = day;
   // hand the sun over to the shadow-casting light near the ground
   shadowBlend = nearest ? 1 - smoothstep(1200, 3500, nearestAlt) : 0;
   if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirWorld);
+}
+
+let waterWakeTimer = 0;
+let footRippleTimer = 0;
+let devWaterWakeFixture = null;
+let waterContact = 0;
+let waterSurfaceHeight = Infinity;
+let waterTangentSpeed = 0;
+const waterLocal = new THREE.Vector3();
+const waterVelocity = new THREE.Vector3();
+const waterSide = new THREE.Vector3();
+const waterWakePoint = new THREE.Vector3();
+const waterShipCenter = new THREE.Vector3();
+
+function updateDevWaterWakeFixture() {
+  if (!DEV_SERVER || !devWaterWakeFixture) return;
+  const fixture = devWaterWakeFixture;
+  const elapsed = (performance.now() - fixture.startedAt) / 1000;
+  if (elapsed > fixture.duration) {
+    devWaterWakeFixture = null;
+    return;
+  }
+  const travelTime = Math.max(0, elapsed - fixture.settleTime);
+  fixture.direction.copy(fixture.origin)
+    .addScaledVector(fixture.tangent, travelTime * fixture.speed / fixture.planet.R).normalize();
+  fixture.motion.copy(fixture.tangent)
+    .addScaledVector(fixture.direction, -fixture.tangent.dot(fixture.direction)).normalize();
+  fixture.planet.localPositionToWorld(
+    fixture.direction.clone().multiplyScalar(fixture.planet.seaRadius + fixture.height), nav.pos);
+  fixture.planet.localOffsetToWorld(fixture.motion.clone()
+    .multiplyScalar(travelTime > 0 ? fixture.speed : 0), nav.vel);
+  nav.quat.copy(fixture.planet.frameOrientation)
+    .multiply(horizonQuat(fixture.direction, fixture.motion, fixture.rotation));
+  nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), fixture.height > 15 ? -0.22 : -0.48));
+}
+
+function updateWaterInteraction(dt) {
+  waterInteraction.update(dt);
+  waterContact = 0;
+  waterSurfaceHeight = Infinity;
+  waterTangentSpeed = 0;
+  const p = nearest;
+  if (!p?.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) {
+    waterInteraction.setPlanet(null);
+    return;
+  }
+  waterInteraction.setPlanet(p.bodyId || p.seed);
+  p.worldPositionToLocal(nav.pos, waterLocal);
+  const radius = waterLocal.length();
+  const waterHeight = radius - p.seaRadius;
+  waterSurfaceHeight = waterHeight;
+
+  if ((state === 'space' || state === 'flyto') && waterHeight > -3 && waterHeight < 38) {
+    p.worldOffsetToLocal(nav.vel, waterVelocity);
+    _up.copy(waterLocal).normalize();
+    waterVelocity.addScaledVector(_up, -waterVelocity.dot(_up));
+    const tangentSpeed = waterVelocity.length();
+    waterTangentSpeed = tangentSpeed;
+    waterContact = smoothstep(18, 180, tangentSpeed) * (1 - smoothstep(4, 38, waterHeight));
+    waterWakeTimer -= dt;
+    if (waterContact > 0.03 && waterWakeTimer <= 0) {
+      waterWakeTimer = lerp(0.14, 0.045, clamp(tangentSpeed / 450, 0, 1));
+      waterVelocity.normalize();
+      waterSide.crossVectors(_up, waterVelocity).normalize();
+      // `nav.pos` is the camera/control origin, not the foreground hull. The
+      // old 19 m estimate left the thrusters only 11.5 m ahead of the camera;
+      // at skimming speed every ring passed behind the view in <0.16 s. Keep
+      // the visible trail between camera and hull, then project it to the sea.
+      waterShipCenter.copy(waterLocal).addScaledVector(waterVelocity, 55)
+        .normalize().multiplyScalar(p.seaRadius);
+      const center = waterWakePoint.copy(waterShipCenter)
+        .addScaledVector(waterVelocity, -7.5);
+      const strength = 0.45 + waterContact * 1.55;
+      waterInteraction.inject(center.clone().addScaledVector(waterSide, 4.2),
+        { strength, speed: 7 + tangentSpeed * 0.012, foam: 0.72 + waterContact * 0.8 });
+      waterInteraction.inject(center.clone().addScaledVector(waterSide, -4.2),
+        { strength, speed: 7 + tangentSpeed * 0.012, foam: 0.72 + waterContact * 0.8 });
+    }
+  } else if (state === 'walk' && walkCtl.planet === p) {
+    // posLocal is the eye, so subtract the controller's actual eye height.
+    // The old hard-coded 1.45 m left the sampled "feet" 25 cm in the air and
+    // made a 0.9 m wade report negative depth, suppressing every foot ripple.
+    const feetRadius = walkCtl.posLocal.length() - walkCtl.eyeHeight + 0.08;
+    const waterDepth = p.seaRadius - feetRadius;
+    const speed = walkCtl.hSpeed.length();
+    const immersion = smoothstep(0.02, 0.3, waterDepth)
+      * (1 - smoothstep(2.2, 4.5, waterDepth));
+    const movingContact = immersion * smoothstep(0.02, 0.65, speed);
+    waterContact = immersion;
+    footRippleTimer -= dt;
+    if (movingContact > 0.03 && footRippleTimer <= 0) {
+      footRippleTimer = clamp(0.48 / Math.max(0.7, speed), 0.16, 0.48);
+      _up.copy(walkCtl.posLocal).normalize();
+      waterWakePoint.copy(_up).multiplyScalar(p.seaRadius);
+      waterInteraction.inject(waterWakePoint,
+        { strength: 0.22 + movingContact * 0.62, speed: 4.4 + speed, foam: movingContact * 0.55 });
+    }
+  }
+}
+
+let surfacePressureTimer = 0;
+function updateSurfaceInteraction(dt) {
+  surfaceInteraction.update(dt);
+  const p = nearest;
+  if (!p || p.isGasGiant || p.type === 'artificialHabitat') {
+    surfaceInteraction.setPlanet(null);
+    return;
+  }
+  surfaceInteraction.setPlanet(p.bodyId || p.seed);
+  surfacePressureTimer -= dt;
+  if (surfacePressureTimer > 0) return;
+  p.worldPositionToLocal(nav.pos, waterWakePoint);
+  _up.copy(waterWakePoint).normalize();
+  waterWakePoint.copy(_up).multiplyScalar(p.surfaceRadius(_up));
+  if (state === 'walk' && walkCtl.hSpeed.length() > 0.18) {
+    surfacePressureTimer = 0.11;
+    surfaceInteraction.inject(waterWakePoint, 1.65, 0.9, 1.25);
+  } else if (state === 'space' && nearestAlt < 24 && nav.vel.length() > 18) {
+    surfacePressureTimer = 0.09;
+    surfaceInteraction.inject(waterWakePoint, 8.5, 0.82, 0.72);
+  }
 }
 
 // ---- main loop --------------------------------------------------------------------
@@ -2359,6 +2599,71 @@ let devFpsElapsed = 0;
 let devFpsFrames = 0;
 let perfEmaMs = 16.7;
 let dprAcc = 0;
+let adaptiveStage = 0;
+let adaptiveQualityLocked = false;
+let adaptiveStableSince = 0;
+const perfFrameTimes = [];
+let perfLongFrames = 0;
+let latestRenderCalls = 0;
+let latestRenderTriangles = 0;
+let previousBackendCalls = 0;
+let previousBackendTriangles = 0;
+
+function performanceSnapshot() {
+  if (!perfFrameTimes.length) return { averageFps: 0, low1Fps: 0, longFrames: 0, longFrameRatio: 0 };
+  const sorted = [...perfFrameTimes].sort((a, b) => a - b);
+  const averageMs = perfFrameTimes.reduce((sum, value) => sum + value, 0) / perfFrameTimes.length;
+  const p99Ms = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
+  return {
+    averageFps: Math.round(10000 / averageMs) / 10,
+    low1Fps: Math.round(10000 / Math.max(0.1, p99Ms)) / 10,
+    longFrames: perfLongFrames,
+    longFrameRatio: Math.round(perfLongFrames / perfFrameTimes.length * 10000) / 10000,
+  };
+}
+
+function resetPerformanceStats() {
+  perfFrameTimes.length = 0;
+  perfLongFrames = 0;
+  perfEmaMs = 16.7;
+  return true;
+}
+
+function resetAdaptiveQuality() {
+  adaptiveStableSince = performance.now();
+  applyAdaptiveStage(0);
+  setRenderDpr(QUALITY_PROFILE.dprTarget);
+  return true;
+}
+
+function setShadowDistance(distance) {
+  effectiveShadowDistance = distance;
+  sunShadow.shadow.camera.left = sunShadow.shadow.camera.bottom = -distance;
+  sunShadow.shadow.camera.right = sunShadow.shadow.camera.top = distance;
+  sunShadow.shadow.camera.updateProjectionMatrix();
+}
+
+function setCloudStepBudget(steps) {
+  effectiveCloudSteps = Math.max(BOOT_USE_WEBGPU ? 8 : 24, Math.round(steps));
+  for (const planet of universe.planets()) {
+    const uniformValue = planet.volCloudMat?.uniforms?.uMaxSteps;
+    if (uniformValue) uniformValue.value = effectiveCloudSteps;
+  }
+}
+
+function applyAdaptiveStage(stage) {
+  adaptiveStage = clamp(Math.round(stage), 0, 7);
+  effectiveVolumeScale = VOLUME_SCALE * (adaptiveStage >= 1 ? 0.78 : 1);
+  nodePipeline.setVolumeScale?.(effectiveVolumeScale);
+  sizePost();
+  setCloudStepBudget(PROFILE_CLOUD_STEPS * (adaptiveStage >= 2 ? 0.72 : 1));
+  effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz
+    * (adaptiveStage >= 3 ? 0.5 : 1);
+  scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * (adaptiveStage >= 4 ? 0.72 : 1));
+  setShadowDistance(QUALITY_PROFILE.shadowDistance * (adaptiveStage >= 5 ? 0.65 : 1));
+  farFlora.setDisplayDensity(adaptiveStage >= 6 ? 0.68 : 1);
+  if (adaptiveStage < 7) setRenderDpr(Math.max(renderDpr, QUALITY_PROFILE.dprTarget));
+}
 
 function frame() {
   requestAnimationFrame(frame);
@@ -2372,6 +2677,15 @@ function frame() {
   // tunnel through terrain. A 100 ms ceiling still gives stable collision at
   // the browser game's supported low-quality floor.
   const dt = clamp(rawDt, 0.0001, 0.1);
+  if (!paused && realDt > 0 && realDt < 0.5) {
+    const ms = realDt * 1000;
+    perfFrameTimes.push(ms);
+    if (ms > 50) perfLongFrames++;
+    if (perfFrameTimes.length > 600) {
+      const removed = perfFrameTimes.shift();
+      if (removed > 50) perfLongFrames--;
+    }
+  }
   frameNo++;
   if (DEV_SERVER) {
     devFpsElapsed += rawDt;
@@ -2457,9 +2771,6 @@ function frame() {
   }
   // 仅在连续跟踪同一颗天体时启用自转跟随，目标切换的本帧跳过增量。
   referenceBodyFrameValid = !!nearest && nearest === prevRef;
-  // Start warming the new planet's atmosphere/cloud materials as soon as it
-  // becomes the nearest body, so descent through its cloud layer is smooth.
-  if (nearest && nearest !== prevRef) prewarmPlanetVolumePipelines(nearest);
 
   // controls / state integration — skipped while paused so player input and
   // any dt-driven drift stay disconnected from the frozen simulation.
@@ -2648,6 +2959,10 @@ function frame() {
   warpDrivePass.uniforms.arrival.value = warpArrival;
   warpDrivePass.uniforms.aspect.value = camera.aspect;
 
+  // Deterministic development fixture: keep a constant-altitude tangent run
+  // long enough for terrain/water LODs and the wake lifecycle to settle.
+  updateDevWaterWakeFixture();
+
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
   // a deferred system (warp or manual approach) materializes one planet/frame
@@ -2656,8 +2971,13 @@ function frame() {
   // Render adapters consume the already-updated simulation frames.
   for (const p of universe.planets()) {
     _v.copy(nav.pos).sub(p.posUniv);
-    p.lod.startupPriority = !loadingCleared && p === nearest;
-    if (p.waterLod) p.waterLod.startupPriority = !loadingCleared && p === nearest;
+    const localRadius = _v.length();
+    const nearSurfacePriority = p === nearest && nearestAlt < 1200;
+    p.lod.startupPriority = (!loadingCleared && p === nearest) || nearSurfacePriority;
+    if (p.waterLod) {
+      const nearWater = p === nearest && Math.abs(localRadius - p.seaRadius) < 520;
+      p.waterLod.startupPriority = (!loadingCleared && p === nearest) || nearWater;
+    }
     p.update(_v, dt, p === nearest, FREEZE || photoMode ? 0 : dt);
   }
   if (nearest && !nearest.isGasGiant) {
@@ -2676,7 +2996,30 @@ function frame() {
     if (farFlora.planet) farFlora.clear();
   }
 
-  ambience();
+  ambience(dt);
+  if (nearest && activeWeather && nearestAlt < nearest.atmoHeight * 0.22) {
+    setWeatherWind(activeWeather.wind,
+      clamp((activeWeather.wind?.speed || 0) / 18, 0.18, 1.8),
+      activeWeather.gust || 0);
+    const windLocal = _v2.set(
+      activeWeather.wind?.x || 0,
+      activeWeather.wind?.y || 0,
+      activeWeather.wind?.z || 0,
+    );
+    nearest.localOffsetToWorld(windLocal, _v3);
+    const surfaceWeather = envInAtmo * (1 - smoothstep(
+      nearest.atmoHeight * 0.04,
+      nearest.atmoHeight * 0.22,
+      Math.max(0, nearestAlt),
+    ));
+    weatherEffects.update(activeWeather, _up, _v3, clock.elapsedTime, surfaceWeather);
+  } else {
+    setWeatherWind(null, 0.18, 0);
+    weatherEffects.update(null, _up.set(0, 1, 0), _v3.set(1, 0, 0),
+      clock.elapsedTime, 0);
+  }
+  updateWaterInteraction(dt);
+  updateSurfaceInteraction(dt);
   if (nearest?.isGasGiant && nearestAlt < nearest.atmoHeight) {
     const depth = clamp(-nearestAlt / (nearest.R * 0.1), 0, 1);
     const pressure = 1 + depth * depth * 340;
@@ -2731,6 +3074,7 @@ function frame() {
   universe.updateRelative(nav.pos);
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
+  updateSunShafts();
   // Weapons stay cold while paused; surface weapons keep their pose but get no
   // trigger input because dt=0 and the fire state is disconnected upstream.
   activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
@@ -2742,11 +3086,23 @@ function frame() {
   document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
   // sun → shadow-light crossfade (after updateRelative, which sets intensities)
+  if (nearest && shadowBlend > 0.02) {
+    const localWorldUp = _v2.copy(nav.pos).sub(nearest.posUniv).normalize();
+    for (const view of universe.system.starViews) {
+      const stellarDirection = _v3.copy(view.positionUniv).sub(nav.pos).normalize();
+      // Point lights do not know that the planet blocks a star below the
+      // local horizon. Gate every binary component explicitly before the
+      // dominant source is handed to the shadow-casting directional light.
+      view.light.intensity *= smoothstep(-0.025, 0.035,
+        localWorldUp.dot(stellarDirection));
+    }
+  }
   sunShadow.visible = shadowBlend > 0.02;
   if (sunShadow.visible) {
     const dominantView = universe.system.dominantStarFrom(nearest?.posUniv || nav.pos);
     const sysLight = dominantView.light;
-    sunShadow.intensity = sysLight.intensity * shadowBlend * (1 - envEclipse * 0.92);
+    sunShadow.intensity = sysLight.intensity * shadowBlend
+      * environmentState.directTransmittance * environmentState.day;
     sunShadow.color.copy(sysLight.color)
       .lerp(_warmC.setRGB(1, 0.45, 0.2), envSunset * 0.55);
     sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
@@ -2798,6 +3154,8 @@ function frame() {
     boosting: boostVisual > 0.12 || pulseVisual > 0.12,
     warp: Math.max(warpIntensity, pulseVisual * 0.68),
     rift: riftRoute ? spatialRift.open * (spatialRift.handoffActive ? 0.35 : 1) : 0,
+    water: waterContact,
+    underwater: envUnderwater,
     paused,
   });
   // Background music director: pickTrack decides what should be playing based
@@ -2895,7 +3253,12 @@ function frame() {
   }
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
+    const previousVolumePlanet = volumePass.activePlanet;
     volumePass.setActivePlanet(nearest?.isGasGiant || nearest?.type === 'artificialHabitat' ? null : nearest, nav.pos, motion);
+    nodePipeline.bindVolumeDepth?.(volumePass.activePlanet);
+    nodePipeline.setVolumeMotion?.(motion,
+      previousVolumePlanet === volumePass.activePlanet && volumePass.historyValid);
+    volumePass.historyValid = !!volumePass.activePlanet;
   }
   // The cockpit hull and the first-person weapon rig share the depth-cleared
   // foreground layer. Walking parks the ship back in world space, but the gun
@@ -2912,7 +3275,7 @@ function frame() {
   statAcc += dt;
   if (statAcc > 0.5) {
     statAcc = 0;
-    const info = renderer.info.render;
+    const info = { calls: latestRenderCalls, triangles: latestRenderTriangles };
     let chunks = 0;
     for (const p of universe.planets()) chunks += p.lod.countChunks();
     ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
@@ -2923,13 +3286,22 @@ function frame() {
   // gracefully instead of silently presenting a single-digit frame rate.
   perfEmaMs += (dt * 1000 - perfEmaMs) * 0.025;
   dprAcc += dt;
-  const adaptInterval = perfEmaMs > 28 ? 0.8 : QUALITY_LOW ? 1.5 : 2.5;
-  if (dprAcc > adaptInterval && !FREEZE) {
+  const targetFrameMs = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.2;
+  const adaptInterval = perfEmaMs > targetFrameMs * 1.35 ? 1.2 : 3.5;
+  const adaptiveReady = loadingCleared && pendingChunks() === 0
+    && (!FARFLORA || farFlora.pending() === 0);
+  if (!adaptiveReady) adaptiveStableSince = performance.now();
+  if (dprAcc > adaptInterval && !FREEZE && !adaptiveQualityLocked && adaptiveReady
+    && performance.now() - adaptiveStableSince > 5000) {
     dprAcc = 0;
-    if (perfEmaMs > 28) setRenderDpr(renderDpr - 0.15);
-    else if (QUALITY_LOW && perfEmaMs > 17.2) setRenderDpr(renderDpr - 0.05);
-    else if (perfEmaMs > 20.5) setRenderDpr(renderDpr - 0.1);
-    else if (perfEmaMs < (QUALITY_LOW ? 15.2 : 14.2)) setRenderDpr(renderDpr + 0.05);
+    if (perfEmaMs > targetFrameMs * 1.08 && adaptiveStage < 7) {
+      applyAdaptiveStage(adaptiveStage + 1);
+    } else if (adaptiveStage >= 7 && perfEmaMs > targetFrameMs * 1.08) {
+      setRenderDpr(renderDpr - (perfEmaMs > targetFrameMs * 1.5 ? 0.12 : 0.05));
+    } else if (perfEmaMs < targetFrameMs * 0.72) {
+      if (renderDpr < QUALITY_PROFILE.dprTarget - 0.04) setRenderDpr(renderDpr + 0.05);
+      else if (adaptiveStage > 0) applyAdaptiveStage(adaptiveStage - 1);
+    }
   }
 
   if (!FREEZE && !photoMode) tickShaders(dt);
@@ -2947,13 +3319,22 @@ function frame() {
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
   if (!contextLost) {
-    // Disabling post only zeros optional effect uniforms; it never swaps
-    // renderer families.
+    // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
+    // only zeros optional effect uniforms; it never swaps renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
-    try {
-      nodePipeline.render();
-    } catch (e) {
-      console.error('nodePipeline.render threw:', e);
+    nodePipeline.render();
+  }
+  {
+    const info = renderer.info.render;
+    if (actualRendererBackend === 'webgpu') {
+      latestRenderCalls = info.calls >= previousBackendCalls ? info.calls - previousBackendCalls : info.calls;
+      latestRenderTriangles = info.triangles >= previousBackendTriangles
+        ? info.triangles - previousBackendTriangles : info.triangles;
+      previousBackendCalls = info.calls;
+      previousBackendTriangles = info.triangles;
+    } else {
+      latestRenderCalls = info.calls;
+      latestRenderTriangles = info.triangles;
     }
   }
   prevNavPos.copy(nav.pos);
@@ -3054,10 +3435,107 @@ window.NMS = {
   _ff: farFlora,           // debug handle (headless diagnostics)
   _renderer: renderer,
   _THREE: THREE,
+  _planet(i = 0) { return universe.system.planets[i] || null; },
   get booted() {
     return loadingCleared;
   },
   get state() { return state; },
+  resetPerformanceStats,
+  resetAdaptiveQuality,
+  setAdaptiveQualityLocked(value = true) {
+    adaptiveQualityLocked = !!value;
+    return adaptiveQualityLocked;
+  },
+  setHeadlampEnabled(value = true) {
+    if (!DEV_SERVER) return null;
+    devHeadlampEnabled = !!value;
+    return devHeadlampEnabled;
+  },
+  setWeatherFixture(i, name = null) {
+    if (!DEV_SERVER) return null;
+    const planet = universe.system.planets[i];
+    if (!planet?.setWeatherFixture) return null;
+    planet.setWeatherFixture(name);
+    return this.weatherState(i);
+  },
+  weatherState(i = null, direction = null) {
+    const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
+    if (!planet?.weatherAt) return null;
+    let localDirection;
+    if (direction) localDirection = new THREE.Vector3(...direction).normalize();
+    else if (planet === nearest) {
+      localDirection = planet.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
+    } else localDirection = new THREE.Vector3(0, 1, 0);
+    return {
+      ...planet.weatherAt(localDirection),
+      hours: planet.weatherHours,
+      fingerprint: planet.weatherFingerprint?.(64),
+      effects: planet === nearest ? { ...weatherEffects.state } : null,
+    };
+  },
+  stellarState(i = null) {
+    const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
+    const field = planet?.stellarLightField;
+    if (!field) return null;
+    return {
+      count: field.sources.length,
+      dominantIndex: field.dominantIndex,
+      sources: field.sources.map((source) => ({
+        id: source.id,
+        direction: source.worldDirection.toArray(),
+        localDirection: source.localDirection.toArray(),
+        color: source.colorValue.toArray(),
+        irradiance: source.irradianceFraction,
+        visibility: source.visibility,
+      })),
+    };
+  },
+  surfaceState(i = null) {
+    const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
+    if (!planet) return null;
+    const localDirection = planet.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
+    const height = planet.height(localDirection, planet.fullMaxFreq || 128);
+    return {
+      direction: localDirection.toArray(),
+      height,
+      hAmp: planet.hAmp,
+      seaLevel: planet.seaLevel ?? null,
+      snowLine: planet.pal?.snowLine ?? null,
+      capLat: planet.pal?.capLat ?? null,
+      biome: planet.biomeAt?.(localDirection, height) || null,
+      snowWeight: planet.snowWeightAt?.(localDirection, height) || 0,
+      terrainColor: planet.colorAt
+        ? planet.colorAt(localDirection, height, 0, planet.fullMaxFreq || 128,
+          new THREE.Color()).toArray()
+        : null,
+    };
+  },
+  lightingState() {
+    return {
+      ambient: ambient.intensity,
+      hemisphere: hemi.intensity,
+      headlamp: headlamp.intensity,
+      sunShadow: sunShadow.intensity,
+      stars: universe.system.starViews.map((view) => view.light.intensity),
+    };
+  },
+  volumeState() {
+    const planet = volumePass?.activePlanet || null;
+    const uniforms = planet?.volCloudMat?.uniforms;
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    return {
+      activeBodyId: planet?.bodyId || null,
+      depthReady: planet?.atmoMesh?.material?.uniforms?.uDepthReady?.value || 0,
+      cloudDepthReady: uniforms?.uDepthReady?.value || 0,
+      steps: uniforms?.uMaxSteps?.value || 0,
+      scale: effectiveVolumeScale,
+      drawingBuffer: [size.x, size.y],
+      weatherTime: uniforms?.uWeatherTime?.value || 0,
+      sunShaftStrength: nodePipeline.sunShafts?.uniforms?.uStrength?.value || 0,
+      sunShaftUv: nodePipeline.sunShafts?.uniforms?.uSunUv?.value?.toArray?.() || null,
+      sunShaftDebug: { ...sunShaftDebug },
+    };
+  },
   get paused() { return paused; },
   seed: () => SEED,
   galaxy: () => ({ id: GALAXY_ID, name: GALAXY.name }),
@@ -3067,11 +3545,10 @@ window.NMS = {
       && frameNo - lastBuildFrame > 8;
   },
   stats() {
-    const info = renderer.info.render;
     let chunks = 0;
     for (const p of universe.planets()) chunks += p.lod.countChunks();
     return {
-      frame: frameNo, calls: info.calls, tris: info.triangles, chunks,
+      frame: frameNo, calls: latestRenderCalls, tris: latestRenderTriangles, chunks,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
@@ -3079,15 +3556,68 @@ window.NMS = {
       warpArrival,
       firing: spaceCtl.firing, bolts: activeBolts,
       cosmicHours: celestialClock.hours, timeScale: celestialClock.scale,
-      dayLight: envDay, eclipse: envEclipse,
+      dayLight: envDay, eclipse: envEclipse, environment: { ...environmentState },
       gpu: gpuName, dpr: renderDpr,
       rendererRequested: rendererPolicy.requested,
       rendererBackend: actualRendererBackend,
       rendererReason: rendererRuntime.reason,
-      adapterInfo,
-      quality: (QUALITY_PROFILE.automatic ? 'auto-' : '') + QUALITY_PROFILE.id,
+      webgpuAvailable: rendererPolicy.webgpuAvailable,
+      adapterInfo: webgpuAdapterInfo,
+      quality: QUALITY_PROFILE.id,
+      qualityRequested: graphicsSettings.quality,
+      qualityAutomatic: QUALITY_PROFILE.automatic,
+      volumeScale: effectiveVolumeScale,
+      cloudSteps: effectiveCloudSteps,
+      shadowMap: SHADOW_MAP,
+      shadowDistance: effectiveShadowDistance,
+      waterInteractionSize: QUALITY_PROFILE.waterInteractionSize,
+      waterReflectionHz: effectiveWaterReflectionHz,
+      adaptiveStage,
+      waterInteractions: waterInteraction.activeCount(),
+      waterContact,
+      waterSurfaceHeight,
+      waterTangentSpeed,
+      surfaceInteractions: surfaceInteraction.activeCount(),
+      surfaceMaterials: surfaceMaterialStatus(),
+      terrainQueue: pendingChunks(),
+      grass: scatter.meshes ? Object.entries(scatter.meshes)
+        .filter(([name]) => name.startsWith('grass'))
+        .reduce((sum, [, mesh]) => sum + (mesh?.count || 0), 0) : 0,
+      grassLods: scatter.meshes ? Object.fromEntries(Object.entries(scatter.meshes)
+        .filter(([name]) => name.startsWith('grass'))
+        .map(([name, mesh]) => [name, mesh?.count || 0])) : {},
+      grassField: scatter.debugStats(),
+      trees: scatter.meshes ? Object.entries(scatter.meshes)
+        .filter(([name]) => name.startsWith('tree'))
+        .reduce((sum, [, mesh]) => sum + (mesh?.count || 0), 0) : 0,
+      ...performanceSnapshot(),
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
+  },
+  waterField() {
+    if (!DEV_SERVER || !nearest?.hasLiquid) return [];
+    const origin = nearest.worldPositionToLocal(nav.pos, new THREE.Vector3())
+      .normalize().multiplyScalar(nearest.seaRadius);
+    const forward = devWaterWakeFixture?.motion || new THREE.Vector3(0, 0, 0);
+    const radial = origin.clone().normalize();
+    const side = new THREE.Vector3().crossVectors(radial, forward).normalize();
+    nearest.group.updateMatrixWorld(true);
+    camera.updateMatrixWorld(true);
+    return waterInteraction.positions.map((position, i) => {
+      const data = waterInteraction.data[i];
+      const delta = position.clone().sub(origin);
+      const screen = nearest.group.localToWorld(position.clone()).project(camera);
+      return {
+        active: data.z > 0.001,
+        age: data.x,
+        strength: data.z,
+        foam: data.w,
+        distance: delta.length(),
+        forward: delta.dot(forward),
+        side: delta.dot(side),
+        screen: [screen.x, screen.y, screen.z],
+      };
+    }).filter((entry) => entry.active);
   },
   planets() {
     return universe.system.planets.map((p, i) => ({
@@ -3207,10 +3737,34 @@ window.NMS = {
     const sunDir = p.sunDirLocal.clone();
     const meadow = bias === 'meadow';
     const snowy = bias === 'snow';
+    const avoidSnow = (meadow || bias === 'sunset') && p.type !== 'ice';
     let prefer = sunDir, ring = null;
     if (bias === 'night') prefer = sunDir.clone().negate();
     else if (bias === 'sunset') { prefer = null; ring = sunDir; }
     let dir = p.scenicDir(prefer, ring);
+    if (avoidSnow && p.snowWeightAt(dir, p.height(dir, 128)) > 0.16) {
+      let bestClear = null, bestClearScore = -Infinity;
+      for (let k = 0; k < 1800; k++) {
+        const y = 1 - (2 * (k + 0.5)) / 1800;
+        const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+        _v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+        const h = p.height(_v, 128);
+        if ((p.hasLiquid && h < p.seaLevel + 4)
+          || p.snowWeightAt(_v, h) > 0.12) continue;
+        const lightScore = bias === 'sunset'
+          ? 1 - Math.abs(_v.dot(sunDir))
+          : Math.max(0, _v.dot(sunDir));
+        const biome = p.biomeAt(_v, h);
+        const biomeScore = ['grass', 'forest', 'dryland', 'slime', 'weird'].includes(biome)
+          ? 1 : 0;
+        const score = lightScore * 12 + biomeScore * 4 - Math.abs(h) / Math.max(p.hAmp, 1);
+        if (score > bestClearScore) {
+          bestClearScore = score;
+          bestClear = _v.clone();
+        }
+      }
+      if (bestClear) dir.copy(bestClear);
+    }
     if (snowy) {
       let bestSnow = null, bestSnowScore = -Infinity;
       const snowProbe = new THREE.Vector3(), snowTangent = new THREE.Vector3();
@@ -3254,6 +3808,7 @@ window.NMS = {
       const h = p.height(cand, sampleFreq);
       if (p.hasLiquid && h - p.seaLevel < 2) continue;
       if (snowy && p.snowWeightAt(cand, h) <= 0.28) continue;
+      if (avoidSnow && p.snowWeightAt(cand, h) > 0.16) continue;
       frame(cand, e1, e2);
       sunH.copy(sunDir).addScaledVector(cand, -sunDir.dot(cand));
       if (sunH.lengthSq() > 1e-4) sunH.normalize(); else sunH.set(0, 0, 0);
@@ -3282,13 +3837,15 @@ window.NMS = {
         if (pinSun) {
           // the sun sits at elevation ~0.11 — the SKYLINE toward it must stay
           // lower. Walk the whole ray: point probes miss ridges between them.
-          let maxEl = -1;
+          let maxEl = -1, waterSteps = 0;
           for (let dd = 250; dd <= 6000; dd += 250) {
             probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
-            const el = (p.height(probe, 128) - h) / dd;
+            const probeHeight = p.height(probe, 128);
+            const el = (probeHeight - h) / dd;
             if (el > maxEl) maxEl = el;
+            if (p.hasLiquid && probeHeight < p.seaLevel + 3) waterSteps++;
           }
-          s = -Math.max(0, maxEl - 0.06) * 400;
+          s = -Math.max(0, maxEl - 0.06) * 400 - waterSteps * 0.55;
         } else {
           for (const dd of [120, 350, 900]) {
             probe.copy(cand).addScaledVector(e2, fx * dd / p.R).addScaledVector(e1, fy * dd / p.R).normalize();
@@ -3334,6 +3891,10 @@ window.NMS = {
   dive(i) {
     const p = universe.system.planets[i];
     if (!p || !p.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) return false;
+    // The deterministic flight-wake fixture temporarily owns nav.pos. A
+    // subsequent dive is a new camera fixture and must release that ownership,
+    // otherwise the wake updater pulls the walker back above the sea.
+    devWaterWakeFixture = null;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     const sunDir = p.sunDirLocal.clone();
@@ -3404,6 +3965,294 @@ window.NMS = {
     universe.update(nav.pos, false, celestialClock.hours);
     universe.updateRelative(nav.pos);
     return celestialClock.snapshot();
+  },
+  setSunAltitude(i, degrees, { faceSun = false } = {}) {
+    if (!DEV_SERVER) return null;
+    const p = universe.system.planets[i];
+    if (!p || p.isGasGiant) return null;
+    if (!walkCtl.active || walkCtl.planet !== p) this.land(i, 0, 'sunset');
+    const target = Math.sin(clamp(Number(degrees) || 0, -89, 89) * Math.PI / 180);
+    const start = celestialClock.hours;
+    const period = Math.max(1, p.spec?.rotationPeriodHours || 24);
+    let bestTime = start, bestError = Infinity, bestElevation = 0;
+    for (let sample = 0; sample <= 720; sample++) {
+      const hours = start + period * sample / 720;
+      celestialClock.set(hours);
+      universe.update(nav.pos, false, hours);
+      const localUp = walkCtl.posLocal.clone().normalize();
+      const elevation = localUp.dot(p.sunDirLocal);
+      const error = Math.abs(elevation - target);
+      if (error < bestError) {
+        bestError = error;
+        bestTime = hours;
+        bestElevation = elevation;
+      }
+    }
+    celestialClock.set(bestTime);
+    universe.update(nav.pos, false, bestTime);
+    if (faceSun) {
+      const localUp = walkCtl.posLocal.clone().normalize();
+      const sunHorizon = p.sunDirLocal.clone()
+        .addScaledVector(localUp, -p.sunDirLocal.dot(localUp));
+      if (sunHorizon.lengthSq() > 1e-4) {
+        walkCtl.enter(p, walkCtl.posLocal, sunHorizon.normalize());
+        walkCtl.pitch = 0.02;
+        walkCtl.update(0.001);
+      }
+    }
+    p.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
+    universe.updateRelative(nav.pos);
+    return {
+      hours: bestTime,
+      requestedDegrees: degrees,
+      actualDegrees: Math.asin(clamp(bestElevation, -1, 1)) * 180 / Math.PI,
+      faceSun,
+    };
+  },
+  setAtmosphereAltitude(i, metres, opts = {}) {
+    if (!DEV_SERVER) return false;
+    const p = universe.system.planets[i];
+    return p ? this.teleport(i, Math.max(0, Number(metres) || 0) / p.R,
+      { horizon: true, pitch: -0.12, ...opts }) : false;
+  },
+  setWaterWake(i, { height = 8, speed = 180 } = {}) {
+    if (!DEV_SERVER || !this.coast(i, height)) return false;
+    const p = universe.system.planets[i];
+    const local = p.worldPositionToLocal(nav.pos, new THREE.Vector3());
+    const up = local.normalize();
+    const axisA = new THREE.Vector3().crossVectors(up,
+      Math.abs(up.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)).normalize();
+    const axisB = new THREE.Vector3().crossVectors(up, axisA);
+    const candidate = new THREE.Vector3();
+    let waterDir = null;
+    let bestWaterDepth = 0;
+    waterSearch: for (let radius = 360; radius <= 18000; radius += 360) {
+      for (let sample = 0; sample < 48; sample++) {
+        const angle = sample / 48 * Math.PI * 2;
+        candidate.copy(up)
+          .addScaledVector(axisA, Math.cos(angle) * radius / p.R)
+          .addScaledVector(axisB, Math.sin(angle) * radius / p.R).normalize();
+        const candidateDepth = p.seaLevel - p.height(candidate, p.fullMaxFreq);
+        if (candidateDepth > bestWaterDepth) {
+          bestWaterDepth = candidateDepth;
+          waterDir = candidate.clone();
+          if (candidateDepth >= 55) break waterSearch;
+        }
+      }
+    }
+    if (!waterDir || bestWaterDepth < 5) return false;
+    p.localPositionToWorld(waterDir.multiplyScalar(p.seaRadius + height), nav.pos);
+    up.copy(waterDir).normalize();
+    const tangentA = new THREE.Vector3().crossVectors(up,
+      Math.abs(up.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)).normalize();
+    let tangent = tangentA.clone();
+    const tangentB = new THREE.Vector3().crossVectors(up, tangentA).normalize();
+    let safestDepth = -Infinity;
+    for (let heading = 0; heading < 24; heading++) {
+      const angle = heading / 24 * Math.PI * 2;
+      const direction = new THREE.Vector3().copy(tangentA).multiplyScalar(Math.cos(angle))
+        .addScaledVector(tangentB, Math.sin(angle)).normalize();
+      let pathDepth = Infinity;
+      for (let distance = 120; distance <= 1200; distance += 120) {
+        candidate.copy(up).addScaledVector(direction, distance / p.R).normalize();
+        pathDepth = Math.min(pathDepth, p.seaLevel - p.height(candidate, p.fullMaxFreq));
+      }
+      if (pathDepth > safestDepth) {
+        safestDepth = pathDepth;
+        tangent = direction;
+      }
+    }
+    const side = new THREE.Vector3().crossVectors(up, tangent).normalize();
+    nav.quat.copy(p.frameOrientation).multiply(horizonQuat(up, tangent, new THREE.Quaternion()));
+    nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), height > 15 ? -0.22 : -0.48));
+    const wakeCenter = up.clone().multiplyScalar(p.seaRadius).addScaledVector(tangent, 47.5);
+    waterInteraction.setPlanet(p.bodyId || p.seed);
+    waterInteraction.inject(wakeCenter.clone().addScaledVector(side, 4.2),
+      { strength: 1.4, speed: 8.5, foam: 1.1 });
+    waterInteraction.inject(wakeCenter.clone().addScaledVector(side, -4.2),
+      { strength: 1.4, speed: 8.5, foam: 1.1 });
+    // Give the deterministic capture a small radial lift so the ship remains
+    // above the surface long enough to observe the generated wake. Normal
+    // gameplay still uses the actual flight controller and gravity.
+    p.localOffsetToWorld(_v2.copy(tangent).multiplyScalar(speed).addScaledVector(up, 82), nav.vel);
+    devWaterWakeFixture = {
+      planet: p,
+      origin: up.clone(),
+      tangent: tangent.clone().normalize(),
+      direction: up.clone(),
+      motion: tangent.clone().normalize(),
+      rotation: new THREE.Quaternion(),
+      height,
+      speed,
+      startedAt: performance.now(),
+      settleTime: 2,
+      duration: 8,
+    };
+    return true;
+  },
+  setWade(i, { depth = 0.9, overview = false } = {}) {
+    if (!DEV_SERVER) return false;
+    const p = universe.system.planets[i];
+    if (!p || !p.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) return false;
+    devWaterWakeFixture = null;
+    window.NMS_NOLOCK = true;
+    tweens.length = 0;
+    const targetDepth = clamp(Number(depth) || 0.9, 0.45, 2);
+    const center = new THREE.Vector3();
+    const edge = new THREE.Vector3();
+    const mid = new THREE.Vector3();
+    const axisA = new THREE.Vector3();
+    const axisB = new THREE.Vector3();
+    let best = null, bestLand = null, bestError = Infinity, bestScore = -Infinity;
+    // A 900 km body leaves tens of kilometres between global Fibonacci
+    // samples, so looking for an exact one-metre depth by chance is not a
+    // shoreline solver. Find a local segment that brackets the requested
+    // depth, then bisect it on the sphere.
+    for (let k = 0; k < 1800; k++) {
+      const y = 1 - (2 * (k + 0.5)) / 1800;
+      const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+      center.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+      const centerDepth = p.seaLevel - p.height(center, p.fullMaxFreq);
+      axisA.crossVectors(center,
+        Math.abs(center.y) < 0.9 ? _v2.set(0, 1, 0) : _v2.set(1, 0, 0)).normalize();
+      axisB.crossVectors(center, axisA).normalize();
+      for (let sample = 0; sample < 12; sample++) {
+        const angle = sample / 12 * Math.PI * 2;
+        edge.copy(center)
+          .addScaledVector(axisA, Math.cos(angle) * 24000 / p.R)
+          .addScaledVector(axisB, Math.sin(angle) * 24000 / p.R).normalize();
+        let edgeDepth = p.seaLevel - p.height(edge, p.fullMaxFreq);
+        if ((centerDepth - targetDepth) * (edgeDepth - targetDepth) > 0) continue;
+        // Preserve the coarse bracketing endpoint on the landward side. The
+        // final bisection endpoints are centimetres apart and cannot provide
+        // a stable QA camera heading.
+        const landAnchor = (centerDepth < edgeDepth ? center : edge).clone();
+        let a = center.clone(), b = edge.clone();
+        let aDepth = centerDepth;
+        for (let step = 0; step < 24; step++) {
+          mid.copy(a).add(b).normalize();
+          const midDepth = p.seaLevel - p.height(mid, p.fullMaxFreq);
+          if ((aDepth - targetDepth) * (midDepth - targetDepth) <= 0) {
+            b.copy(mid);
+            edgeDepth = midDepth;
+          } else {
+            a.copy(mid);
+            aDepth = midDepth;
+          }
+        }
+        const actualDepth = p.seaLevel - p.height(mid, p.fullMaxFreq);
+        const error = Math.abs(actualDepth - targetDepth);
+        const sunlight = mid.dot(p.sunDirLocal);
+        const score = sunlight - error * 4;
+        if (score > bestScore) {
+          bestScore = score;
+          bestError = error;
+          best = mid.clone();
+          bestLand = landAnchor;
+        }
+        if (bestError < 0.015 && sunlight > 0.72) break;
+      }
+      if (bestError < 0.015 && bestScore > 0.72) break;
+    }
+    if (!best) return false;
+    // Resolve the *local* uphill direction. The 24 km bracket endpoint only
+    // tells us which side eventually reaches land; a non-monotonic coast can
+    // cross that segment several times, so it is not a reliable camera axis.
+    axisA.crossVectors(best,
+      Math.abs(best.y) < 0.9 ? _v2.set(0, 1, 0) : _v2.set(1, 0, 0)).normalize();
+    axisB.crossVectors(best, axisA).normalize();
+    const gradientStep = 80 / p.R;
+    const gradientProbe = new THREE.Vector3();
+    const hAp = p.height(gradientProbe.copy(best).addScaledVector(axisA, gradientStep).normalize(),
+      p.fullMaxFreq);
+    const hAn = p.height(gradientProbe.copy(best).addScaledVector(axisA, -gradientStep).normalize(),
+      p.fullMaxFreq);
+    const hBp = p.height(gradientProbe.copy(best).addScaledVector(axisB, gradientStep).normalize(),
+      p.fullMaxFreq);
+    const hBn = p.height(gradientProbe.copy(best).addScaledVector(axisB, -gradientStep).normalize(),
+      p.fullMaxFreq);
+    const landward = axisA.clone().multiplyScalar(hAp - hAn)
+      .addScaledVector(axisB, hBp - hBn);
+    if (landward.lengthSq() < 1e-6) {
+      landward.copy(bestLand).addScaledVector(best, -bestLand.dot(best));
+    }
+    landward.normalize();
+    if (overview) {
+      // Visual QA needs a readable patch of both materials. A real wading eye
+      // is less than a metre above the water and collapses the entire shore
+      // transition to the horizon, so provide a small stationary drone view
+      // over the exact same solved coastline.
+      if (walkCtl.active) walkCtl.exit();
+      setState('space');
+      const cameraDir = new THREE.Vector3();
+      for (let distance = 40; distance <= 600; distance += 20) {
+        cameraDir.copy(best).addScaledVector(landward, -distance / p.R).normalize();
+        const cameraDepth = p.seaLevel - p.height(cameraDir, p.fullMaxFreq);
+        if (cameraDepth >= 14) break;
+      }
+      const targetDir = new THREE.Vector3();
+      for (let distance = 20; distance <= 600; distance += 20) {
+        targetDir.copy(best).addScaledVector(landward, distance / p.R).normalize();
+        if (p.height(targetDir, p.fullMaxFreq) >= p.seaLevel + 6) break;
+      }
+      const cameraLocal = cameraDir.clone().multiplyScalar(p.seaRadius + 45);
+      p.localPositionToWorld(cameraLocal, nav.pos);
+      nav.vel.set(0, 0, 0);
+      const targetLocal = targetDir.clone().multiplyScalar(p.surfaceRadius(targetDir) + 2);
+      const targetWorld = p.localPositionToWorld(targetLocal, new THREE.Vector3());
+      // Aim at the solved land point directly. Reconstructing this with a
+      // horizon quaternion plus a signed pitch inverted on some rotating
+      // frames and put the camera under the terrain instead of over the coast.
+      lookQuatAt(nav.pos, targetWorld, nav.quat);
+      focusPlanet = p;
+      spaceCtl.focus = p;
+      return {
+        requestedDepth: targetDepth,
+        actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq),
+        overview: true,
+      };
+    }
+    _v2.copy(best).multiplyScalar(p.surfaceRadius(best) + 1.7);
+    // Face the resolved coast so the fixture demonstrates the wet band and
+    // shore break instead of placing both outside the screenshot.
+    _v3.copy(landward);
+    if (_v3.lengthSq() < 0.1) _v3.crossVectors(p.sunDirLocal, best).normalize();
+    if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
+    walkCtl.enter(p, _v2, _v3);
+    // Look into the near-shore transition rather than flattening its
+    // metre-scale wet/foam bands into a one-pixel horizon line.
+    walkCtl.pitch = -0.38;
+    walkCtl.update(0.001);
+    p.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
+    focusPlanet = p;
+    spaceCtl.focus = p;
+    setState('walk');
+    // Entering the solved shallows displaces water even before the first full
+    // stride; this also gives the ripple field a stable initial condition.
+    waterInteraction.setPlanet(p.bodyId || p.seed);
+    waterInteraction.inject(best.clone().multiplyScalar(p.seaRadius),
+      { strength: 0.38, speed: 4.8, foam: 0.28 });
+    return {
+      requestedDepth: targetDepth,
+      actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq),
+      overview: false,
+    };
+  },
+  setWalkDirection(direction) {
+    if (!DEV_SERVER || state !== 'walk' || !walkCtl.planet || !Array.isArray(direction)) return false;
+    const p = walkCtl.planet;
+    const dir = new THREE.Vector3().fromArray(direction).normalize();
+    walkCtl.posLocal.copy(dir).multiplyScalar(p.surfaceRadius(dir) + walkCtl.eyeHeight);
+    walkCtl.previousPosLocal.copy(walkCtl.posLocal);
+    walkCtl.hSpeed.set(0, 0, 0);
+    walkCtl.vR = 0;
+    walkCtl.grounded = true;
+    walkCtl.updateQuat();
+    p.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
+    return true;
   },
   advanceTime(hours) {
     celestialClock.advance(hours);
