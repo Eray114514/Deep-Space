@@ -23,13 +23,28 @@ page.on('console', (message) => {
 
 try {
   await page.goto(`http://127.0.0.1:${port}/?renderer=webgpu&quality=high`
-    + `&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=${factor}&time=9.5`);
+    + `&nohero=1&farflora=0&vclouds=0&scene=orbit&planet=0&factor=${factor}&time=9.5`);
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
   await page.evaluate(() => {
     NMS.setAdaptiveQualityLocked(true);
     NMS.setWeatherFixture(0, 'clear');
   });
-  await page.waitForFunction('NMS.idle()', null, { timeout: 90000 });
+  // Global NMS.idle() includes every background body. A close-orbit surface
+  // capture only needs the focused planet's visible quadtree to settle; after
+  // the universe grew to 10 bodies, waiting for unrelated hidden queues could
+  // time out long after the photographed surface had stopped changing.
+  let stableSamples = 0;
+  let previousFocusedChunks = -1;
+  for (let attempt = 0; attempt < 90 && stableSamples < 5; attempt++) {
+    await page.waitForTimeout(1000);
+    const focusedChunks = await page.evaluate(() => NMS._planet(0).lod.countChunks());
+    if (focusedChunks === previousFocusedChunks) stableSamples++;
+    else stableSamples = 0;
+    previousFocusedChunks = focusedChunks;
+  }
+  if (stableSamples < 5) {
+    throw new Error(`Focused terrain did not settle; last chunk count ${previousFocusedChunks}.`);
+  }
   await writeFile(new URL(`all-layers-${suffix}.png`, outputDir), await page.screenshot());
   const baseline = await page.evaluate(() => {
     const planet = NMS._planet(0);
@@ -52,8 +67,8 @@ try {
   await page.evaluate(() => {
     const planet = NMS._planet(0);
     planet.waterLod?.setVisible(true);
-    planet.volCloudMesh.visible = false;
-    planet.cloudMesh.visible = false;
+    if (planet.volCloudMesh) planet.volCloudMesh.visible = false;
+    if (planet.cloudMesh) planet.cloudMesh.visible = false;
     if (planet.cloudMesh2) planet.cloudMesh2.visible = false;
     planet.atmoMesh.visible = false;
   });

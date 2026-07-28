@@ -4,7 +4,11 @@
 
 import * as THREE from 'three';
 import { Planet, TYPES } from '../src/planet.js';
-import { flushChunkQueue, pendingChunks } from '../src/quadtree.js';
+import {
+  crossFaceNeighbourAddress,
+  flushChunkQueue,
+  pendingChunks,
+} from '../src/quadtree.js';
 import { Scatter, capFor, SCATTER_ENABLED } from '../src/scatter.js';
 import { FarFlora, FAR_FLORA_ENABLED } from '../src/farflora.js';
 
@@ -14,6 +18,28 @@ let failures = 0;
 
 function check(cond, msg) {
   if (!cond) { failures++; console.error('  ✗', msg); }
+}
+
+// Every directed cube-face interval must have an exact inverse. A single
+// swapped edge or orientation silently desynchronizes two independent trees
+// and produces the kilometre-long vertical cracks seen during orbital refine.
+for (const level of [0, 1, 4]) {
+  const span = 1 << level;
+  for (let face = 0; face < 6; face++) {
+    for (let edge = 0; edge < 4; edge++) {
+      for (let along = 0; along < span; along++) {
+        const ix = edge < 2 ? along : (edge === 2 ? 0 : span - 1);
+        const iy = edge < 2 ? (edge === 0 ? 0 : span - 1) : along;
+        const peer = crossFaceNeighbourAddress(face, edge, level, ix, iy);
+        const inverse = crossFaceNeighbourAddress(
+          peer.face, peer.edge, level, peer.ix, peer.iy,
+        );
+        check(inverse.face === face && inverse.edge === edge
+          && inverse.ix === ix && inverse.iy === iy,
+        `cube-face topology is not reversible at f${face}/e${edge}/L${level}/${along}`);
+      }
+    }
+  }
 }
 
 for (const type of Object.keys(TYPES)) {

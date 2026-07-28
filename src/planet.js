@@ -261,6 +261,10 @@ export class Planet {
     // visible until its complete child set is ready and by geomorphing the
     // child surface, not by modifying permanent fine-level boundary vertices.
     this.noSkirt = true;
+    // Terrain face boundaries are synchronized by the quadtree itself.
+    // Radial skirts turn the shared edge into a shaded wall and recreate the
+    // black ink line they were meant to conceal.
+    this.faceBoundarySkirts = false;
     // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
@@ -418,23 +422,40 @@ export class Planet {
 
     if (this.canyonAmp > 0) {
       const cv = this.nD.fbm(x, y, z, this.canyonFreq, 4, 0.5, 2.3, maxFreq);
-      // a coarse LOD cannot resolve a sharp gorge: widen the channel and
-      // shallow it in proportion, so the carved volume (and the silhouette)
-      // stays consistent while the slopes stay below the sampling rate
-      const cw = Math.max(this.canyonWidth, 2.5 / maxFreq);
-      const depthScale = this.canyonWidth / cw;
-      const t = 1 - Math.abs(cv) / cw;
-      if (t > 0) {
-        const tt = t * t * (3 - 2 * t) * depthScale;
-        let band;
-        if (this.hasLiquid) {
-          // carve channels from just above the sea up into the lowlands -> rivers/lakes
-          band = smoothstep(this.seaLevel - this.hAmp * 0.45, this.seaLevel + 4, h) *
-                 (1 - smoothstep(this.seaLevel + this.hAmp * 0.30, this.seaLevel + this.hAmp * 0.7, h));
-          h -= tt * (Math.max(0, h - this.seaLevel) + this.hAmp * 0.06) * band;
-        } else {
+      if (this.hasLiquid) {
+        const band = smoothstep(this.seaLevel - this.hAmp * 0.45, this.seaLevel + 4, h)
+          * (1 - smoothstep(this.seaLevel + this.hAmp * 0.30,
+            this.seaLevel + this.hAmp * 0.7, h));
+        // A river is a broad alluvial valley with a much narrower wet
+        // channel. The old single profile drove the entire strip directly to
+        // sea level; from orbit its steep banks became dotted black ink lines.
+        // Both widths expand at coarse LOD so the carved volume remains
+        // resolvable and converges continuously during approach.
+        const valleyWidth = Math.max(this.canyonWidth * 2.5, 4 / maxFreq);
+        const valleyT = 1 - Math.abs(cv) / valleyWidth;
+        if (valleyT > 0) {
+          const valleyShape = valleyT * valleyT * (3 - 2 * valleyT);
+          const valleyDepth = this.hAmp * 0.035
+            + Math.max(0, h - this.seaLevel) * 0.16;
+          h -= valleyShape * valleyDepth * band;
+        }
+        const channelWidth = Math.max(this.canyonWidth * 0.72, 2.5 / maxFreq);
+        const channelT = 1 - Math.abs(cv) / channelWidth;
+        if (channelT > 0) {
+          const channelShape = channelT * channelT * (3 - 2 * channelT);
+          const channelTarget = this.seaLevel - this.hAmp * 0.018;
+          h = lerp(h, Math.min(h, channelTarget), channelShape * band * 0.9);
+        }
+      } else {
+        // Dry slot canyons retain their sharper geology.
+        const cw = Math.max(this.canyonWidth, 2.5 / maxFreq);
+        const depthScale = this.canyonWidth / cw;
+        const t = 1 - Math.abs(cv) / cw;
+        if (t > 0) {
+          const tt = t * t * (3 - 2 * t) * depthScale;
           // dry slot canyons through the midlands
-          band = smoothstep(-this.hAmp * 0.3, 0, h) * (1 - smoothstep(this.hAmp * 0.45, this.hAmp * 0.8, h));
+          const band = smoothstep(-this.hAmp * 0.3, 0, h)
+            * (1 - smoothstep(this.hAmp * 0.45, this.hAmp * 0.8, h));
           h -= tt * this.canyonAmp * band;
         }
       }
@@ -442,14 +463,18 @@ export class Planet {
       // tributaries: a finer branching carve feeding the main channels,
       // so valleys form dendritic drainage networks like real watersheds
       const cv2 = this.nD.fbm(x + 7.7, y - 3.3, z + 1.1, this.canyonFreq * 3.1, 3, 0.5, 2.25, maxFreq);
-      const cw2 = Math.max(this.canyonWidth * 0.55, 2.5 / maxFreq);
+      const cw2 = Math.max(this.canyonWidth * (this.hasLiquid ? 0.82 : 0.55),
+        2.5 / maxFreq);
       const t2 = 1 - Math.abs(cv2) / cw2;
       if (t2 > 0) {
         const tt2 = t2 * t2 * (3 - 2 * t2) * (this.canyonWidth * 0.55 / cw2);
         if (this.hasLiquid) {
           const band2 = smoothstep(this.seaLevel - this.hAmp * 0.35, this.seaLevel + 3, h) *
                         (1 - smoothstep(this.seaLevel + this.hAmp * 0.22, this.seaLevel + this.hAmp * 0.5, h));
-          h -= tt2 * (Math.max(0, h - this.seaLevel) * 0.55 + this.hAmp * 0.02) * band2;
+          const tributaryTarget = this.seaLevel - this.hAmp * 0.008;
+          const floodplain = Math.max(0, h - this.seaLevel) * 0.1 + this.hAmp * 0.012;
+          h -= tt2 * floodplain * band2;
+          h = lerp(h, Math.min(h, tributaryTarget), tt2 * band2 * 0.68);
         } else {
           const band2 = smoothstep(-this.hAmp * 0.25, 0, h) * (1 - smoothstep(this.hAmp * 0.4, this.hAmp * 0.7, h));
           h -= tt2 * this.canyonAmp * 0.4 * band2;
@@ -640,13 +665,13 @@ export class Planet {
         p.land = stops([[0, J('#b3a478')], [0.06, J('#8f9459')], [0.22, J('#5f7a42')], [0.45, J('#4a5f38')],
                         [0.62, J('#6b6a48')], [0.78, J('#77695a')], [1, J('#877e6f')]]);
         p.forest = J('#2e4527'); p.rock = J('#6b6156');
-        p.snow = J('#eef2f6'); p.snowLine = this.hAmp * (0.55 + rand() * 0.2); p.capLat = 0.8;
+        p.snow = J('#dce5ed'); p.snowLine = this.hAmp * (0.68 + rand() * 0.14); p.capLat = 0.86;
         break;
       case 'ocean':
         p.sea = stops([[0, J('#041124')], [0.5, J('#082c52')], [0.82, J('#135273')], [1, J('#3f8f88')]]);
         p.land = stops([[0, J('#c2b183')], [0.12, J('#a29a62')], [0.3, J('#657e49')], [0.6, J('#4c5f3d')], [1, J('#6c6b56')]]);
         p.forest = J('#2f4a2c'); p.rock = J('#6f685c');
-        p.snow = J('#e8eef4'); p.snowLine = this.hAmp * 0.7; p.capLat = 0.74;
+        p.snow = J('#d9e4ed'); p.snowLine = this.hAmp * 0.76; p.capLat = 0.82;
         break;
       case 'desert':
         p.land = stops([[0, J('#d8b069')], [0.2, J('#cf9a52')], [0.42, J('#bd7d40')], [0.6, J('#a26035')],
@@ -762,8 +787,8 @@ export class Planet {
     // logic is now authoritative for flora suitability as well as colour.
     const lat = Math.abs(dir.y) + this.nD.noise(dir.x * 2, dir.y * 2, dir.z * 2) * 0.06;
     const sl = this.pal.snowLine * (1 - 0.65 * smoothstep(0.45, 0.95, lat));
-    return Math.max(smoothstep(sl, sl + Math.max(18, this.hAmp * 0.045), h),
-      smoothstep(this.pal.capLat, this.pal.capLat + 0.07, lat));
+    return Math.max(smoothstep(sl, sl + Math.max(18, this.hAmp * 0.2), h),
+      smoothstep(this.pal.capLat, this.pal.capLat + 0.085, lat));
   }
 
   biomeAt(dir, h) {

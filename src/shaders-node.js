@@ -7,7 +7,7 @@ import {
   abs, acos, atan, attribute, color, cos, cross, dot, exp, float, fract,
   instanceIndex, length, mix, mx_fractal_noise_float,
   normalLocal, normalView, normalViewGeometry, positionGeometry, positionLocal,
-  positionView, positionViewDirection, pow, reflect, select, sign, sin, smoothstep, texture,
+  positionView, positionViewDirection, pow, reference, reflect, select, sign, sin, smoothstep, texture,
   transformNormalToView, uniform, sqrt,
   vec2, vec3, vertexColor,
 } from 'three/tsl';
@@ -207,9 +207,18 @@ function dynamicSurfaceTexture(name) {
 
 export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4) {
   const material = copyMaterialFlags(source, new MeshStandardNodeMaterial({ roughness: 1, metalness: 0 }));
-  const local = attribute('aLocal', 'vec3');
-  const matWeights = attribute('aMat', 'vec3');
-  const extra = attribute('aExtra', 'vec4');
+  // Geometry morphing alone still leaves a rectangular material boundary:
+  // the child occupies its parent's shape while height, snow and biome masks
+  // already use child values. These per-object references share the exact
+  // quadtree morph factor, so position and every semantic field transition as
+  // one surface. All terrain geometries provide zero delta attributes at root.
+  const lodMorph = reference('userData.lodMorph', 'float');
+  const local = attribute('aLocal', 'vec3')
+    .add(attribute('aLocalDelta', 'vec3').mul(lodMorph));
+  const matWeights = attribute('aMat', 'vec3')
+    .add(attribute('aMatDelta', 'vec3').mul(lodMorph));
+  const extra = attribute('aExtra', 'vec4')
+    .add(attribute('aExtraDelta', 'vec4').mul(lodMorph));
   const h = length(local).sub(planet.R);
   const U = planet.palU || {};
   const heightMix = h.sub(U.t0 || 0).div(Math.max(1, U.tSpan || planet.hAmp)).clamp(0, 1);
@@ -337,33 +346,43 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   if (planet.pal?.snow) {
     const latitude = abs(direction.y).add(texture(detailMap, direction.xz.mul(2).add(direction.y)).r.sub(0.5).mul(0.12));
     const snowLine = float(planet.pal.snowLine).mul(float(1).sub(smoothstep(0.45, 0.95, latitude).mul(0.65)));
-    snowWeight = smoothstep(snowLine, snowLine.add(planet.hAmp * 0.1), h)
-      .max(smoothstep(planet.pal.capLat, planet.pal.capLat + 0.07, latitude))
-      .mul(float(1).sub(smoothstep(0.55, 0.8, slope).mul(0.85)));
+    // A broad accumulation interval avoids converting interpolated orbital
+    // height into hard white polygons. Latitude establishes climate, while
+    // wind packing and exposed mineral decide where snow actually remains.
+    snowWeight = smoothstep(snowLine, snowLine.add(planet.hAmp * 0.2), h)
+      .max(smoothstep(planet.pal.capLat, planet.pal.capLat + 0.085, latitude))
+      .mul(float(1).sub(smoothstep(0.42, 0.72, slope).mul(0.92)));
     const windPack = triDetail(local, 1 / 8800, 'g').mul(0.58)
       .add(triDetail(local, 1 / 2600, 'r').mul(0.42));
     const scouredRock = smoothstep(0.56, 0.82, provinceMineral)
       .mul(smoothstep(0.12, 0.5, slope));
     snowWeight = snowWeight
-      .mul(float(0.48).add(smoothstep(0.28, 0.74, windPack).mul(0.52)))
-      .mul(float(1).sub(scouredRock.mul(0.62)));
+      .mul(float(0.18).add(smoothstep(0.25, 0.76, windPack).mul(0.82)))
+      .mul(float(1).sub(scouredRock.mul(0.76)));
     // Snow retains blue-grey self-shadow, wind-packed grain and exposed-rock
     // modulation. A pure white constant clipped under ACES and turned entire
     // mountain ranges into flat unlit polygons at 45–140 km.
     const snowGrain = triDetail(local, 1 / 42, 'g').sub(0.5)
       .add(triDetail(local, 1 / 9, 'r').sub(0.5).mul(0.38));
-    const snowShade = float(0.78).add(snowGrain.mul(0.22))
-      .sub(slope.mul(0.28)).clamp(0.5, 0.94);
+    const snowShade = float(0.72).add(snowGrain.mul(0.2))
+      .sub(slope.mul(0.34)).clamp(0.44, 0.88);
     const snowSurface = uniform(planet.pal.snow)
-      .mul(mix(vec3(0.58, 0.65, 0.76), vec3(0.76, 0.82, 0.9), windPack))
+      .mul(mix(vec3(0.48, 0.56, 0.67), vec3(0.68, 0.75, 0.84), windPack))
       .mul(snowShade);
-    surface = mix(surface, snowSurface, snowWeight.mul(0.86));
+    surface = mix(surface, snowSurface, snowWeight.mul(0.72));
   }
 
   // Real soil, vegetation and snow albedos sit well below one. Keeping the
   // globe inside that energy range preserves relief under ACES instead of
   // clipping broad biomes into flat white/green cut-outs.
-  surface = surface.mul(planet.type === 'lush' || planet.type === 'ocean' ? 0.78 : 0.86);
+  const orbitalSurface = smoothstep(18000, 180000, positionView.z.negate());
+  if (planet.type === 'lush' || planet.type === 'ocean') {
+    const remoteLuma = dot(surface, vec3(0.2126, 0.7152, 0.0722));
+    surface = mix(surface, vec3(remoteLuma), orbitalSurface.mul(0.1))
+      .mul(mix(0.78, 0.68, orbitalSurface));
+  } else {
+    surface = surface.mul(0.86);
+  }
 
   const cloudMap = texture(planet.cloudShadowTex || blankTexture());
   const cloudMatrix = uniform(new THREE.Matrix3());

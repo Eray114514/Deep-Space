@@ -46,6 +46,37 @@ const FACE_FN = [
   (u, v, out) => out.set(-u, v, -1),
 ];
 
+// [neighbour face, neighbour edge, edge-coordinate orientation].
+// Edge ids are v-, v+, u-, u+. Keeping both sides of each cube-face seam at
+// the same displayed level avoids both T-junction cracks and the conspicuous
+// whole-face frequency boundary produced by independently refining six trees.
+const FACE_EDGE_NEIGHBOUR = [
+  [[3, 3, -1], [2, 3, 1], [4, 3, 1], [5, 2, 1]],
+  [[3, 2, 1], [2, 2, -1], [5, 3, 1], [4, 2, 1]],
+  [[4, 1, 1], [5, 1, -1], [1, 1, -1], [0, 1, 1]],
+  [[5, 0, -1], [4, 0, 1], [1, 0, 1], [0, 0, -1]],
+  [[3, 1, 1], [2, 0, 1], [1, 3, 1], [0, 2, 1]],
+  [[3, 0, -1], [2, 1, -1], [0, 3, 1], [1, 2, 1]],
+];
+
+export function crossFaceNeighbourAddress(face, edge, level, ix, iy) {
+  const span = 1 << level;
+  const along = edge < 2 ? ix : iy;
+  const [neighbourFace, neighbourEdge, orientation] = FACE_EDGE_NEIGHBOUR[face][edge];
+  const mapped = orientation > 0 ? along : span - 1 - along;
+  let neighbourIx, neighbourIy;
+  if (neighbourEdge === 0) { neighbourIx = mapped; neighbourIy = 0; }
+  else if (neighbourEdge === 1) { neighbourIx = mapped; neighbourIy = span - 1; }
+  else if (neighbourEdge === 2) { neighbourIx = 0; neighbourIy = mapped; }
+  else { neighbourIx = span - 1; neighbourIy = mapped; }
+  return {
+    face: neighbourFace,
+    edge: neighbourEdge,
+    ix: neighbourIx,
+    iy: neighbourIy,
+  };
+}
+
 const _v = new THREE.Vector3();
 const _d1 = new THREE.Vector3();
 const _d2 = new THREE.Vector3();
@@ -171,6 +202,7 @@ function makeNode(lod, face, level, ix, iy) {
     size: (Math.PI / 2) * lod.planet.R / (1 << level),
     centerDir: new THREE.Vector3(),
     centerPos: new THREE.Vector3(),
+    parent: null, childX: 0, childY: 0,
     children: null, mesh: null, queued: false, dead: false,
     // geomorph state: 1 = parent's shape, 0 = own full detail
     // born settled at the parent's shape; the split path explicitly starts
@@ -191,6 +223,7 @@ export class ChunkedLOD {
     this.visible = true;
     this.camLocal = new THREE.Vector3(1e9, 0, 0);
     this.roots = [];
+    this._frame = 0;
     for (let f = 0; f < 6; f++) {
       const root = makeNode(this, f, 0, 0, 0);
       this.buildNodeMesh(root);           // synchronous: planet visible immediately
@@ -221,6 +254,7 @@ export class ChunkedLOD {
   update(camLocal, dt = 0.016) {
     this.camLocal.copy(camLocal);
     this._dt = dt;
+    this._frame++;
     const radiusRatio = camLocal.length() / Math.max(this.planet.R, 1);
     // A 64×64 terrain chunk already resolves sub-pixel geometry at orbit.
     // Refining beyond the authored orbit cap only rebuilt imperceptible
@@ -273,7 +307,10 @@ export class ChunkedLOD {
 
   setMorph(node, v) {
     node.morph = v;
-    if (node.mesh && node.mesh.morphTargetInfluences) node.mesh.morphTargetInfluences[0] = v;
+    if (node.mesh) {
+      node.mesh.userData.lodMorph = v;
+      if (node.mesh.morphTargetInfluences) node.mesh.morphTargetInfluences[0] = v;
+    }
   }
 
   advanceMorph(node) {
@@ -288,6 +325,7 @@ export class ChunkedLOD {
   }
 
   process(node) {
+    node.processedFrame = this._frame;
     const d = this.nodeDistance(node);
     const px = (node.size / Math.max(d, 1)) * PX_PER_RAD;   // apparent size
     node.pxBoost = Math.min(12, Math.max(1, 24 / Math.max(px, 0.01)));
@@ -298,9 +336,11 @@ export class ChunkedLOD {
     const splitDistance = SPLIT * distanceScale;
     const mergeDistance = MERGE * distanceScale;
     const prefetchDistance = PREFETCH * distanceScale;
-    const wantSplit = node.level < this._levelCap
+    const naturalWantSplit = node.level < this._levelCap
       && (d < node.size * splitDistance || node.level < this._forceLevel)
       && !beyond;
+    const forcedAcrossFace = node.forceSplitUntil >= this._frame && !beyond;
+    const wantSplit = naturalWantSplit || forcedAcrossFace;
     const wantMerge = node.level >= this._levelCap
       || d > node.size * mergeDistance || beyond;
 
@@ -311,7 +351,18 @@ export class ChunkedLOD {
       // farther than this refines the whole visible cap and destroys frame
       // time before the extra geometry is actually resolvable.
       const reach = (this.planet.noMorph ? SPLIT : (this.focused ? 5.8 : PREFETCH)) * distanceScale;
-      if (d < node.size * reach || node.level < this._forceLevel) this.createChildren(node);
+      if (d < node.size * reach || node.level < this._forceLevel || forcedAcrossFace) {
+        this.createChildren(node);
+      }
+    }
+
+    // A cube face is not a parent/child boundary, so normal geomorph ownership
+    // cannot protect it by itself. If a boundary node wants another level,
+    // prebuild and force the exact peer interval on the adjacent face. Both
+    // sides wait until they have been processed in the same frame before
+    // exposing children, then relax from identical parent-edge line segments.
+    if (wantSplit && node.level < this._levelCap) {
+      this.synchronizeFaceBoundarySplit(node);
     }
 
     if (node.children) {
@@ -321,7 +372,8 @@ export class ChunkedLOD {
       // The DISPLAYED level owns the hysteresis: once children are on screen
       // (splitActive) they stay on screen until a true merge — swapping
       // levels anywhere inside the SPLIT..MERGE band is an instant pop.
-      if (ready && (wantSplit || (node.splitActive && !wantMerge))) {
+      const boundaryReady = !wantSplit || this.faceBoundaryPeersReady(node);
+      if (ready && boundaryReady && (wantSplit || (node.splitActive && !wantMerge))) {
         if (node.mergePending) {            // re-approached mid-merge: refine again
           node.mergePending = false;
           for (const c of node.children) c.morphTo = 0;
@@ -416,11 +468,68 @@ export class ChunkedLOD {
     for (let dy = 0; dy < 2; dy++) {
       for (let dx = 0; dx < 2; dx++) {
         const c = makeNode(this, node.face, node.level + 1, node.ix * 2 + dx, node.iy * 2 + dy);
+        c.parent = node;
+        c.childX = dx;
+        c.childY = dy;
         node.children.push(c);
         c.queued = true;
         buildQueue.push(c);
       }
     }
+  }
+
+  boundaryEdges(node) {
+    const span = 1 << node.level;
+    const edges = [];
+    if (node.iy === 0) edges.push(0);
+    if (node.iy === span - 1) edges.push(1);
+    if (node.ix === 0) edges.push(2);
+    if (node.ix === span - 1) edges.push(3);
+    return edges;
+  }
+
+  neighbourAddress(node, edge) {
+    return crossFaceNeighbourAddress(
+      node.face, edge, node.level, node.ix, node.iy,
+    );
+  }
+
+  findNode(face, level, ix, iy, create = false) {
+    let node = this.roots[face];
+    for (let depth = 1; depth <= level; depth++) {
+      if (!node.children) {
+        if (!create || node.level >= this._levelCap) return null;
+        this.createChildren(node);
+      }
+      const bit = level - depth;
+      const childX = (ix >> bit) & 1;
+      const childY = (iy >> bit) & 1;
+      node = node.children[childY * 2 + childX];
+    }
+    return node;
+  }
+
+  synchronizeFaceBoundarySplit(node) {
+    for (const edge of this.boundaryEdges(node)) {
+      const address = this.neighbourAddress(node, edge);
+      const peer = this.findNode(address.face, node.level, address.ix, address.iy, true);
+      if (!peer || this.beyondHorizon(peer)) continue;
+      peer.forceSplitUntil = Math.max(peer.forceSplitUntil || 0, this._frame + 2);
+      if (!peer.children && peer.level < this._levelCap) this.createChildren(peer);
+    }
+  }
+
+  faceBoundaryPeersReady(node) {
+    for (const edge of this.boundaryEdges(node)) {
+      const address = this.neighbourAddress(node, edge);
+      const peer = this.findNode(address.face, node.level, address.ix, address.iy, false);
+      if (!peer || this.beyondHorizon(peer)) continue;
+      if (!peer.children || !peer.children.every((child) => child.mesh)) return false;
+      // If the peer already ran before this force request, wait one frame so
+      // neither side can expose a finer edge on its own.
+      if (peer.processedFrame === this._frame && !peer.splitActive) return false;
+    }
+    return true;
   }
 
   disposeChildren(node) {
@@ -474,6 +583,14 @@ export class ChunkedLOD {
     const hasMorph = node.level > 0 && !p.noMorph;
     const parentFreq = node.level > 0 ? p.freqAtLevel(node.level - 1) : 0;
     const coarseFreq = hasMorph ? parentFreq : 0;
+    const parentLocalAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('aLocal') : null;
+    const parentNormalAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('normal') : null;
+    const parentN = hasMorph && node.parent
+      ? (p.gridCellsAtLevel
+        ? p.gridCellsAtLevel(node.parent.level) : p.gridCells || GRID_CELLS)
+      : 0;
 
     const gridVerts = (N + 1) * (N + 1);
     // A spherical level surface can still crack at mixed quadtree levels:
@@ -483,8 +600,14 @@ export class ChunkedLOD {
     // fitted skirt remains as a conservative seal for arbitrary neighbour
     // level differences while the asynchronous tree refines. Limiting skirts
     // to levels < 3 left the moving fine/coarse frontier visibly unsealed.
-    const hasSkirt = !p.noSkirt;
-    const skirtVerts = hasSkirt ? 4 * (N + 1) : 0;
+    const faceSpan = 1 << node.level;
+    const skirtEdgeIds = [];
+    if (!p.noSkirt || (p.faceBoundarySkirts && node.iy === 0)) skirtEdgeIds.push(0);
+    if (!p.noSkirt || (p.faceBoundarySkirts && node.iy === faceSpan - 1)) skirtEdgeIds.push(1);
+    if (!p.noSkirt || (p.faceBoundarySkirts && node.ix === 0)) skirtEdgeIds.push(2);
+    if (!p.noSkirt || (p.faceBoundarySkirts && node.ix === faceSpan - 1)) skirtEdgeIds.push(3);
+    const hasSkirt = skirtEdgeIds.length > 0;
+    const skirtVerts = skirtEdgeIds.length * (N + 1);
     const total = gridVerts + skirtVerts;
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
@@ -495,10 +618,20 @@ export class ChunkedLOD {
     // low-frequency tint masks (forest/blotch/stripe/extra) — the actual
     // palette is evaluated per-pixel in the fragment shader
     const aExtra = p.extrasAt ? new Float32Array(total * 4) : null;
+    // Terrain material semantics must follow the same parent-triangle morph
+    // as geometry. Root arrays remain zero; child arrays store parent-minus-
+    // child deltas consumed by the shared NodeMaterial.
+    const dLocal = p.pal ? new Float32Array(total * 3) : null;
+    const dMat = aMat ? new Float32Array(total * 3) : null;
+    const dExtra = aExtra ? new Float32Array(total * 4) : null;
     // water depth beneath each sea-surface vertex (Beer–Lambert absorption)
     const aDepth = p.bakeDepth ? new Float32Array(total) : null;
     const dPos = hasMorph ? new Float32Array(total * 3) : null;
     const dNrm = hasMorph ? new Float32Array(total * 3) : null;
+    const parentMatAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('aMat') : null;
+    const parentExtraAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('aExtra') : null;
 
     const faceFn = FACE_FN[node.face];
     let maxMorphHeightDelta = 0;
@@ -533,15 +666,94 @@ export class ChunkedLOD {
         }
 
         if (hasMorph) {
-          // the same vertex as the parent level sees it (coarser cutoff,
-          // parent's sampling eps) — stored relative to the fine vertex
-          sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
+          // Reconstruct the exact point on the parent mesh's two real
+          // triangles. Sampling the parent frequency again at the child's
+          // spherical direction produces a different curved surface, so a
+          // child at morph=1 still cracks against its visible neighbour.
+          // Barycentric interpolation is exact and reuses already-built data,
+          // avoiding one expensive height+normal evaluation per child vertex.
+          if (parentLocalAttribute && parentNormalAttribute && parentN > 0) {
+            const gx = (node.childX + i / N) * parentN * 0.5;
+            const gy = (node.childY + j / N) * parentN * 0.5;
+            const x0 = Math.min(parentN - 1, Math.floor(gx));
+            const y0 = Math.min(parentN - 1, Math.floor(gy));
+            const tx = gx - x0;
+            const ty = gy - y0;
+            const a = y0 * (parentN + 1) + x0;
+            const b = a + 1;
+            const c = a + parentN + 1;
+            const d = c + 1;
+            let i0, i1, i2, w0, w1, w2;
+            if (tx + ty <= 1) {
+              i0 = a; i1 = b; i2 = c;
+              w0 = 1 - tx - ty; w1 = tx; w2 = ty;
+            } else {
+              i0 = b; i1 = d; i2 = c;
+              w0 = 1 - ty; w1 = tx + ty - 1; w2 = 1 - tx;
+            }
+            _cP.set(
+              parentLocalAttribute.getX(i0) * w0
+                + parentLocalAttribute.getX(i1) * w1
+                + parentLocalAttribute.getX(i2) * w2,
+              parentLocalAttribute.getY(i0) * w0
+                + parentLocalAttribute.getY(i1) * w1
+                + parentLocalAttribute.getY(i2) * w2,
+              parentLocalAttribute.getZ(i0) * w0
+                + parentLocalAttribute.getZ(i1) * w1
+                + parentLocalAttribute.getZ(i2) * w2,
+            );
+            _cN.set(
+              parentNormalAttribute.getX(i0) * w0
+                + parentNormalAttribute.getX(i1) * w1
+                + parentNormalAttribute.getX(i2) * w2,
+              parentNormalAttribute.getY(i0) * w0
+                + parentNormalAttribute.getY(i1) * w1
+                + parentNormalAttribute.getY(i2) * w2,
+              parentNormalAttribute.getZ(i0) * w0
+                + parentNormalAttribute.getZ(i1) * w1
+                + parentNormalAttribute.getZ(i2) * w2,
+            ).normalize();
+            if (dMat && parentMatAttribute) {
+              dMat[idx * 3] = parentMatAttribute.getX(i0) * w0
+                + parentMatAttribute.getX(i1) * w1
+                + parentMatAttribute.getX(i2) * w2 - aMat[idx * 3];
+              dMat[idx * 3 + 1] = parentMatAttribute.getY(i0) * w0
+                + parentMatAttribute.getY(i1) * w1
+                + parentMatAttribute.getY(i2) * w2 - aMat[idx * 3 + 1];
+              dMat[idx * 3 + 2] = parentMatAttribute.getZ(i0) * w0
+                + parentMatAttribute.getZ(i1) * w1
+                + parentMatAttribute.getZ(i2) * w2 - aMat[idx * 3 + 2];
+            }
+            if (dExtra && parentExtraAttribute) {
+              dExtra[idx * 4] = parentExtraAttribute.getX(i0) * w0
+                + parentExtraAttribute.getX(i1) * w1
+                + parentExtraAttribute.getX(i2) * w2 - aExtra[idx * 4];
+              dExtra[idx * 4 + 1] = parentExtraAttribute.getY(i0) * w0
+                + parentExtraAttribute.getY(i1) * w1
+                + parentExtraAttribute.getY(i2) * w2 - aExtra[idx * 4 + 1];
+              dExtra[idx * 4 + 2] = parentExtraAttribute.getZ(i0) * w0
+                + parentExtraAttribute.getZ(i1) * w1
+                + parentExtraAttribute.getZ(i2) * w2 - aExtra[idx * 4 + 2];
+              dExtra[idx * 4 + 3] = parentExtraAttribute.getW(i0) * w0
+                + parentExtraAttribute.getW(i1) * w1
+                + parentExtraAttribute.getW(i2) * w2 - aExtra[idx * 4 + 3];
+            }
+          } else {
+            // Root/bootstrap fallback; normal child builds always have a
+            // committed parent mesh because display ownership is top-down.
+            sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
+          }
           dPos[idx * 3] = _cP.x - _p0.x;
           dPos[idx * 3 + 1] = _cP.y - _p0.y;
           dPos[idx * 3 + 2] = _cP.z - _p0.z;
           dNrm[idx * 3] = _cN.x - _n.x;
           dNrm[idx * 3 + 1] = _cN.y - _n.y;
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
+          if (dLocal) {
+            dLocal[idx * 3] = _cP.x - _p0.x;
+            dLocal[idx * 3 + 1] = _cP.y - _p0.y;
+            dLocal[idx * 3 + 2] = _cP.z - _p0.z;
+          }
           maxMorphHeightDelta = Math.max(maxMorphHeightDelta,
             Math.abs(_cP.length() - _p0.length()));
         }
@@ -589,11 +801,11 @@ export class ChunkedLOD {
       ? Math.max(0.05, p.skirtDrop)
       : skirtDropForMorph(maxMorphHeightDelta);
     const edges = [];
-    if (hasSkirt) {
-      for (let i = 0; i <= N; i++) edges.push(i);                      // j = 0
-      for (let i = 0; i <= N; i++) edges.push(N * (N + 1) + i);        // j = N
-      for (let j = 0; j <= N; j++) edges.push(j * (N + 1));            // i = 0
-      for (let j = 0; j <= N; j++) edges.push(j * (N + 1) + N);        // i = N
+    for (const edgeId of skirtEdgeIds) {
+      if (edgeId === 0) for (let i = 0; i <= N; i++) edges.push(i);
+      else if (edgeId === 1) for (let i = 0; i <= N; i++) edges.push(N * (N + 1) + i);
+      else if (edgeId === 2) for (let j = 0; j <= N; j++) edges.push(j * (N + 1));
+      else for (let j = 0; j <= N; j++) edges.push(j * (N + 1) + N);
     }
 
     for (let s = 0; s < edges.length; s++) {
@@ -612,6 +824,22 @@ export class ChunkedLOD {
         aExtra[dst * 4] = aExtra[src * 4]; aExtra[dst * 4 + 1] = aExtra[src * 4 + 1];
         aExtra[dst * 4 + 2] = aExtra[src * 4 + 2]; aExtra[dst * 4 + 3] = aExtra[src * 4 + 3];
       }
+      if (dLocal) {
+        dLocal[dst * 3] = dLocal[src * 3];
+        dLocal[dst * 3 + 1] = dLocal[src * 3 + 1];
+        dLocal[dst * 3 + 2] = dLocal[src * 3 + 2];
+      }
+      if (dMat) {
+        dMat[dst * 3] = dMat[src * 3];
+        dMat[dst * 3 + 1] = dMat[src * 3 + 1];
+        dMat[dst * 3 + 2] = dMat[src * 3 + 2];
+      }
+      if (dExtra) {
+        dExtra[dst * 4] = dExtra[src * 4];
+        dExtra[dst * 4 + 1] = dExtra[src * 4 + 1];
+        dExtra[dst * 4 + 2] = dExtra[src * 4 + 2];
+        dExtra[dst * 4 + 3] = dExtra[src * 4 + 3];
+      }
       if (aDepth) aDepth[dst] = aDepth[src];
       if (hasMorph) {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
@@ -621,7 +849,7 @@ export class ChunkedLOD {
     }
 
     const gridIndexCount = N * N * 6;
-    const skirtIndexCount = hasSkirt ? 4 * N * 12 : 0;
+    const skirtIndexCount = skirtEdgeIds.length * N * 12;
     const indices = new Uint16Array(gridIndexCount + skirtIndexCount);
     let indexCursor = 0;
     // all six FACE_FN have du×dv pointing outward, so CCW (front) is (a,b,c)
@@ -647,11 +875,13 @@ export class ChunkedLOD {
         indices[indexCursor++] = s0; indices[indexCursor++] = s1;
       }
     };
-    if (hasSkirt) {
-      skirtEdge(0, N + 1, (s) => s);
-      skirtEdge(N + 1, N + 1, (s) => N * (N + 1) + s);
-      skirtEdge(2 * (N + 1), N + 1, (s) => s * (N + 1));
-      skirtEdge(3 * (N + 1), N + 1, (s) => s * (N + 1) + N);
+    for (let edgeOffset = 0; edgeOffset < skirtEdgeIds.length; edgeOffset++) {
+      const edgeId = skirtEdgeIds[edgeOffset];
+      const offset = edgeOffset * (N + 1);
+      if (edgeId === 0) skirtEdge(offset, N + 1, (s) => s);
+      else if (edgeId === 1) skirtEdge(offset, N + 1, (s) => N * (N + 1) + s);
+      else if (edgeId === 2) skirtEdge(offset, N + 1, (s) => s * (N + 1));
+      else skirtEdge(offset, N + 1, (s) => s * (N + 1) + N);
     }
 
     // store vertices relative to the chunk's own center: on 100 km planets
@@ -673,6 +903,9 @@ export class ChunkedLOD {
     geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
     if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 3));
     if (aExtra) geo.setAttribute('aExtra', new THREE.BufferAttribute(aExtra, 4));
+    if (dLocal) geo.setAttribute('aLocalDelta', new THREE.BufferAttribute(dLocal, 3));
+    if (dMat) geo.setAttribute('aMatDelta', new THREE.BufferAttribute(dMat, 3));
+    if (dExtra) geo.setAttribute('aExtraDelta', new THREE.BufferAttribute(dExtra, 4));
     if (aDepth) geo.setAttribute('aDepth', new THREE.BufferAttribute(aDepth, 1));
     if (hasMorph) {
       geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
@@ -684,6 +917,7 @@ export class ChunkedLOD {
     if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
+    mesh.userData.lodMorph = node.morph;
     mesh.position.copy(node.centerPos);
     if (p.underlayMaterial) {
       const underlay = new THREE.Mesh(geo, p.underlayMaterial);

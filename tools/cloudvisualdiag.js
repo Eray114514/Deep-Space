@@ -12,6 +12,8 @@ if (!browser) {
 
 const outputDir = new URL('../test-results/cloud-diagnostic/', import.meta.url);
 await mkdir(outputDir, { recursive: true });
+const factor = Number.isFinite(Number(process.argv[2])) ? Number(process.argv[2]) : 0.86;
+const suffix = factor.toFixed(3).replace('.', '-');
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 const errors = [];
 page.on('pageerror', (error) => errors.push(String(error)));
@@ -21,7 +23,7 @@ page.on('console', (message) => {
 
 try {
   await page.goto(`http://127.0.0.1:${port}/?renderer=webgpu&quality=high`
-    + '&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=0.86&time=9.5');
+    + `&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=${factor}&time=9.5`);
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
   await page.evaluate(() => NMS.setAdaptiveQualityLocked(true));
   for (const fixture of ['default', 'cumulus', 'stratus', 'storm', 'clear']) {
@@ -59,7 +61,14 @@ try {
       };
     }, fixture);
     await page.waitForTimeout(1600);
-    await writeFile(new URL(`${fixture}-orbit.png`, outputDir), await page.screenshot());
+    await writeFile(new URL(`${fixture}-orbit-${suffix}.png`, outputDir), await page.screenshot());
+    if (fixture === 'default') {
+      await page.evaluate(() => NMS._planet(0).waterLod?.setVisible(false));
+      await page.waitForTimeout(200);
+      await writeFile(new URL(`default-water-hidden-${suffix}.png`, outputDir),
+        await page.screenshot());
+      await page.evaluate(() => NMS._planet(0).waterLod?.setVisible(true));
+    }
     console.log(fixture, JSON.stringify(state));
   }
   await page.evaluate(() => {
