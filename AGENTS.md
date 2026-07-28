@@ -41,4 +41,11 @@ Use concise Conventional Commit-style subjects, e.g. `feat: add pulse recharge` 
 
 ## 渲染后端
 
-项目使用 WebGL 2 作为唯一渲染后端。WebGPU 迁移曾进行实验但已退役，最后保留 WebGPU 代码的 git 节点为 `b746772`，后续如重启迁移可参考该节点代码。不要在代码或文档中引入 WebGPU/NodeMaterial/TSL 相关描述或实现。
+项目以 WebGPU 作为唯一画质与架构基准，运行时材质、体积效果和后处理使用
+Three.js WebGPU/TSL/NodeMaterial 实现。WebGL 2 仅作启动失败时的兼容兜底，不要求
+与 WebGPU 像素等价，也不得为了迁就兜底路径限制 WebGPU 主线质量。新增视觉实现不得
+回退到 GLSL `ShaderMaterial` 或 `onBeforeCompile` 注入。
+
+`b746772` 只是早期 WebGPU 实验节点，不代表迁移已退役。当前迁移基线与未完成问题以
+`docs/optimization-roadmap.md` 为准；出现深度、遮挡或合成所有权错误时，应删除并重写
+有问题的 WebGPU 子系统，而不是退回 WebGL 或继续在错误的双路径结构上打补丁。
