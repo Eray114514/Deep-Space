@@ -11,6 +11,35 @@ import {
   weatherFixtureNames,
 } from '../src/weather-field.js';
 
+function dot(a, b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function cross(a, b) {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+function normalize(value) {
+  const scale = 1 / Math.hypot(value.x, value.y, value.z);
+  return { x: value.x * scale, y: value.y * scale, z: value.z * scale };
+}
+
+function rotateAroundAxis(value, axis, angle) {
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const projection = dot(axis, value) * (1 - cosine);
+  const perpendicular = cross(axis, value);
+  return {
+    x: value.x * cosine + perpendicular.x * sine + axis.x * projection,
+    y: value.y * cosine + perpendicular.y * sine + axis.y * projection,
+    z: value.z * cosine + perpendicular.z * sine + axis.z * projection,
+  };
+}
+
 const direction = { x: 0.31, y: 0.42, z: -0.71 };
 const hours = 4812.375;
 const first = createWeatherField('NAVEMI-382/body-1');
@@ -130,6 +159,64 @@ assert.ok(clearFraction > 0.08 && overcastFraction > 0.015,
 assert.ok(new Set(ranges.map((sample) => sample.kind)).size >= 2,
   'default weather must contain more than one regional weather class');
 
+for (const sample of ranges) {
+  assert.deepEqual(Object.keys(sample.morphology), [
+    'cycloneEye', 'eyewall', 'spiral', 'front', 'coldFront',
+    'warmFront', 'anvil', 'marineCell', 'cloudStreet',
+  ], 'weather morphology channel contract drifted');
+  for (const value of Object.values(sample.morphology)) {
+    assert.ok(Number.isFinite(value) && value >= 0 && value <= 1,
+      'weather morphology channels must remain finite and normalized');
+  }
+}
+
+const morphologyPeak = (key) => Math.max(...ranges.map((sample) => sample.morphology[key]));
+assert.ok(morphologyPeak('eyewall') > 0.7,
+  'weather map must contain a dense, resolved cyclone eyewall');
+assert.ok(morphologyPeak('front') > 0.85,
+  'weather map must contain a long, resolved synoptic front');
+assert.ok(morphologyPeak('marineCell') > 0.68,
+  'humid boundary layers must contain orbit-readable cellular cloud decks');
+assert.ok(morphologyPeak('cloudStreet') > 0.8,
+  'regional boundary layers must contain wind-aligned cloud streets');
+
+const frontSamples = ranges.filter((sample) => sample.morphology.front > 0.5);
+const nonFrontSamples = ranges.filter((sample) => sample.morphology.front < 0.05);
+const mean = (values, selector) =>
+  values.reduce((sum, value) => sum + selector(value), 0) / values.length;
+assert.ok(frontSamples.length >= 6 && frontSamples.length < ranges.length * 0.08,
+  `fronts must be long regional bands, not global belts; samples=${frontSamples.length}`);
+assert.ok(mean(frontSamples, (sample) => sample.coverage)
+    > mean(nonFrontSamples, (sample) => sample.coverage) + 0.12,
+  'front morphology must visibly raise cloud coverage along its finite band');
+
+// Sample the exact moving cyclone centre and a point on its eyewall. This
+// proves the clear eye survives even when a Fibonacci orbit scan misses its
+// roughly 40 km disk.
+const lowAngle = first.basePhase + hours * first.windRadiansPerHour;
+const movingStorm = rotateAroundAxis(
+  first.stormCenterA,
+  first.windAxis,
+  lowAngle * 0.76,
+);
+const tangent = normalize(cross(
+  Math.abs(movingStorm.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 },
+  movingStorm,
+));
+const ringRadius = 0.076;
+const eyewallDirection = normalize({
+  x: movingStorm.x * Math.cos(ringRadius) + tangent.x * Math.sin(ringRadius),
+  y: movingStorm.y * Math.cos(ringRadius) + tangent.y * Math.sin(ringRadius),
+  z: movingStorm.z * Math.cos(ringRadius) + tangent.z * Math.sin(ringRadius),
+});
+const eyeSample = sampleWeatherField(first, movingStorm, hours);
+const eyewallSample = sampleWeatherField(first, eyewallDirection, hours);
+assert.ok(eyeSample.morphology.cycloneEye > 0.95
+    && eyewallSample.morphology.eyewall > 0.7,
+  'cyclone centre and annular eyewall must remain independently readable');
+assert.ok(eyeSample.coverage + 0.55 < eyewallSample.coverage,
+  `cyclone eye must be visibly clear: ${eyeSample.coverage}/${eyewallSample.coverage}`);
+
 assert.deepEqual(weatherFixtureNames(),
   ['clear', 'cumulus', 'stratus', 'storm', 'snow', 'fog']);
 for (const name of weatherFixtureNames()) {
@@ -143,6 +230,35 @@ const overriddenFixture = createWeatherFixture('storm', { precipitation: 0.51 })
 assert.equal(overriddenFixture.precipitation, 0.51);
 assert.equal(createWeatherFixture('storm').precipitation, 0.94,
   'fixture overrides must not mutate the shared preset');
+
+// A storm fixture forces local rain/lightning state, not a global opaque cloud
+// constant. Its orbit map must retain clear sectors around finite systems.
+const stormFixtureField = createWeatherField('fixture', {
+  fixture: createWeatherFixture('storm'),
+});
+const stormFixtureSamples = [];
+for (let index = 0; index < 2048; index++) {
+  const y = 1 - 2 * (index + 0.5) / 2048;
+  const radius = Math.sqrt(1 - y * y);
+  const angle = index * Math.PI * (3 - Math.sqrt(5));
+  stormFixtureSamples.push(sampleWeatherField(stormFixtureField, {
+    x: Math.cos(angle) * radius,
+    y,
+    z: Math.sin(angle) * radius,
+  }, hours));
+}
+const stormCoverageMean = mean(stormFixtureSamples, (sample) => sample.coverage);
+const stormCoverageRange = Math.max(...stormFixtureSamples.map((sample) => sample.coverage))
+  - Math.min(...stormFixtureSamples.map((sample) => sample.coverage));
+const stormClearFraction = stormFixtureSamples
+  .filter((sample) => sample.coverage < 0.15).length / stormFixtureSamples.length;
+assert.ok(stormCoverageMean < 0.62 && stormCoverageRange > 0.72
+    && stormClearFraction > 0.08,
+  `storm fixture must retain regional systems/open sky, got mean/range/clear `
+    + `${stormCoverageMean}/${stormCoverageRange}/${stormClearFraction}`);
+assert.ok(stormFixtureSamples.every((sample) =>
+  sample.kind === 'storm' && sample.precipitation > 0.7),
+'storm fixture must still force deterministic gameplay precipitation');
 
 const controlA = makeRng('existing-universe-stream');
 const controlB = makeRng('existing-universe-stream');
