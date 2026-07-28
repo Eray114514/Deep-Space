@@ -23,6 +23,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
+const SKY_SUNSET_TINT = new THREE.Color(1.35, 0.22, 0.035);
 
 // Eager preload: start fetching the hero ship GLB the moment this module is
 // imported, so the network/decode overlap with main.js's heavy universe,
@@ -230,8 +231,12 @@ export class SkyDome {
           uHorizon: { value: new THREE.Color(0x88bbff) },
           uZenith: { value: new THREE.Color(0x224488) },
           uSunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
+          uSecondarySunDir: { value: new THREE.Vector3(0, -1, 0) },
+          uSecondarySunTint: { value: new THREE.Color(1.0, 0.92, 0.78) },
+          uSecondarySunEnergy: { value: 0 },
           uAlpha: { value: 0 },
           uHorizonOnly: { value: 0 },
+          uSunset: { value: 0 },
         },
         vertexShader: /* glsl */`
           #include <common>
@@ -246,7 +251,8 @@ export class SkyDome {
           #include <common>
           #include <logdepthbuf_pars_fragment>
           uniform vec3 uUp, uSunDir, uHorizon, uZenith, uSunTint;
-          uniform float uAlpha, uHorizonOnly;
+          uniform vec3 uSecondarySunDir, uSecondarySunTint;
+          uniform float uAlpha, uHorizonOnly, uSecondarySunEnergy, uSunset;
           varying vec3 vDir;
           void main() {
             #include <logdepthbuf_fragment>
@@ -255,7 +261,17 @@ export class SkyDome {
             float t = pow(clamp(1.0 - max(u, 0.0), 0.0, 1.0), 3.2);
             vec3 col = mix(uZenith, uHorizon * 0.92, t);
             float sd = max(dot(dir, uSunDir), 0.0);
+            float duskBand = uSunset * pow(clamp(1.0 - abs(u), 0.0, 1.0), 1.7);
+            float forwardDusk = pow(sd, 2.2);
+            float antiDusk = pow(max(dot(dir, -uSunDir), 0.0), 1.5);
+            vec3 dusk = mix(vec3(0.105, 0.018, 0.075),
+              vec3(1.05, 0.13, 0.012), forwardDusk);
+            dusk += vec3(0.055, 0.014, 0.105) * antiDusk;
+            col = mix(col, dusk, duskBand * 0.68);
             col += uSunTint * (pow(sd, 700.0) * 1.3 + pow(sd, 16.0) * 0.16);
+            float sd2 = max(dot(dir, uSecondarySunDir), 0.0);
+            col += uSecondarySunTint * (pow(sd2, 700.0) * 1.3
+              + pow(sd2, 16.0) * 0.16) * uSecondarySunEnergy;
             float directional = mix(1.0, pow(1.0 - abs(u), 3.0), uHorizonOnly);
             float a = uAlpha * directional * (u < 0.0 ? max(0.0, 1.0 + u * 2.4) : 1.0);
             gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
@@ -278,20 +294,34 @@ export class SkyDome {
       uHorizon: uniform(new THREE.Color(0x88bbff)),
       uZenith: uniform(new THREE.Color(0x224488)),
       uSunTint: uniform(new THREE.Color(1.0, 0.92, 0.78)),
+      uSecondarySunDir: uniform(new THREE.Vector3(0, -1, 0)),
+      uSecondarySunTint: uniform(new THREE.Color(1.0, 0.92, 0.78)),
+      uSecondarySunEnergy: uniform(0),
       uAlpha: uniform(0),
       uHorizonOnly: uniform(0),
+      uSunset: uniform(0),
     };
     const dir = normalize(positionLocal);
     const upDot = dot(dir, nodes.uUp);
     const horizonMix = pow(clamp(float(1).sub(upDot.max(0)), 0, 1), 3.2);
     const sunDot = dot(dir, nodes.uSunDir).max(0);
-    const sky = mix(nodes.uZenith, nodes.uHorizon.mul(0.92), horizonMix)
+    const duskBand = nodes.uSunset.mul(pow(clamp(float(1).sub(abs(upDot)), 0, 1), 1.7));
+    const forwardDusk = pow(sunDot, 2.2);
+    const antiDusk = pow(dot(dir, nodes.uSunDir.negate()).max(0), 1.5);
+    const dusk = mix(vec3(0.105, 0.018, 0.075), vec3(1.05, 0.13, 0.012), forwardDusk)
+      .add(vec3(0.055, 0.014, 0.105).mul(antiDusk));
+    const sky = mix(mix(nodes.uZenith, nodes.uHorizon.mul(0.92), horizonMix),
+      dusk, duskBand.mul(0.68))
       .add(nodes.uSunTint.mul(pow(sunDot, 700).mul(1.3).add(pow(sunDot, 16).mul(0.16))));
+    const secondaryDot = dot(dir, nodes.uSecondarySunDir).max(0);
+    const multiStarSky = sky.add(nodes.uSecondarySunTint
+      .mul(pow(secondaryDot, 700).mul(1.3).add(pow(secondaryDot, 16).mul(0.16)))
+      .mul(nodes.uSecondarySunEnergy));
     const belowFade = mix(float(1), clamp(float(1).add(upDot.mul(2.4)), 0, 1), upDot.lessThan(0));
     this.mat = new MeshBasicNodeMaterial({
       side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: true,
     });
-    this.mat.colorNode = sky;
+    this.mat.colorNode = multiStarSky;
     const directionalAlpha = mix(float(1), pow(float(1).sub(abs(upDot)), 3), nodes.uHorizonOnly);
     this.mat.opacityNode = nodes.uAlpha.mul(directionalAlpha).mul(belowFade);
     this.mat.uniforms = Object.fromEntries(Object.entries(nodes).map(([key, node]) => [key, node]));
@@ -302,7 +332,8 @@ export class SkyDome {
     scene.add(this.mesh);
   }
 
-  update(up, sunDir, horizon, zenith, alpha, sunset = 0, horizonOnly = 0) {
+  update(up, sunDir, horizon, zenith, alpha, sunset = 0, horizonOnly = 0,
+    stellarField = null) {
     const u = this.mat.uniforms;
     u.uUp.value.copy(up);
     u.uSunDir.value.copy(sunDir);
@@ -310,7 +341,20 @@ export class SkyDome {
     u.uZenith.value.copy(zenith);
     u.uAlpha.value = alpha;
     u.uHorizonOnly.value = horizonOnly;
-    u.uSunTint.value.setRGB(1.0, 0.92 - sunset * 0.6, 0.78 - sunset * 0.68);
+    u.uSunset.value = sunset;
+    const primary = stellarField?.sources?.[0];
+    const secondary = stellarField?.sources?.[1];
+    if (primary?.colorValue) {
+      u.uSunTint.value.copy(primary.colorValue).lerp(SKY_SUNSET_TINT, sunset * 0.82);
+    }
+    else u.uSunTint.value.setRGB(1.0, 0.92 - sunset * 0.6, 0.78 - sunset * 0.68);
+    if (secondary) {
+      u.uSecondarySunDir.value.copy(secondary.worldDirection || sunDir);
+      if (secondary.colorValue) u.uSecondarySunTint.value.copy(secondary.colorValue);
+      u.uSecondarySunEnergy.value = secondary.irradianceFraction || 0;
+    } else {
+      u.uSecondarySunEnergy.value = 0;
+    }
     this.mesh.visible = alpha > 0.01;
   }
 }

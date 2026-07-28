@@ -1,7 +1,8 @@
 import * as THREE from 'three/webgpu';
-import { float, max, mix, pass, uniform, vec4 } from 'three/tsl';
+import { float, max, mix, pass, rtt, uniform, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
+import { createSunShaftNode } from './sun-shafts-node.js';
 
 function over(base, overlay) {
   // Render-pass textures store premultiplied RGB.  Multiplying overlay.rgb by
@@ -30,23 +31,8 @@ export class GameNodePipeline {
     this.scenePass.name = 'Main scene';
     this.scenePass.setLayers(new THREE.Layers());
     const sceneColor = this.scenePass.getTextureNode('output');
-    const warp = createWarpDriveNode(sceneColor);
-    this.warp = {
-      enabled: false,
-      uniforms: warp.uniforms,
-    };
-    const rift = createRiftDistortionNode(sceneColor);
-    this.rift = {
-      enabled: false,
-      node: rift.node || rift.outputNode,
-      uniforms: rift.uniforms,
-    };
-
-    // Warp and rift are mutually exclusive travel states. Both need random
-    // access to the original pass texture, so blend their independently
-    // sampled results before layering volume and foreground geometry.
-    const warpActivity = max(max(warp.uniforms.warp, warp.uniforms.pulse), warp.uniforms.arrival);
-    let colorNode = mix(this.rift.node, warp.outputNode || warp.node, warpActivity.clamp(0, 1));
+    this.sceneDepthTexture = this.scenePass.getTexture('depth');
+    let colorNode = sceneColor;
 
     this.volumePass = null;
     if (volume) {
@@ -58,6 +44,30 @@ export class GameNodePipeline {
       this.volumePass.setResolutionScale(volumeScale);
       colorNode = over(colorNode, this.volumePass.getTextureNode('output'));
     }
+
+    // Travel distortion owns the complete world image. Applying it before
+    // atmosphere/cloud compositing left the solid planet warped while its
+    // participating media stayed pinned to the screen.
+    this.worldBase = rtt(colorNode);
+    this.sunShafts = createSunShaftNode(
+      this.worldBase,
+      this.scenePass.getTextureNode('depth'),
+      renderer.reversedDepthBuffer,
+    );
+    this.worldComposite = rtt(this.sunShafts.outputNode);
+    const warp = createWarpDriveNode(this.worldComposite);
+    this.warp = {
+      enabled: false,
+      uniforms: warp.uniforms,
+    };
+    const rift = createRiftDistortionNode(this.worldComposite);
+    this.rift = {
+      enabled: false,
+      node: rift.node || rift.outputNode,
+      uniforms: rift.uniforms,
+    };
+    const warpActivity = max(max(warp.uniforms.warp, warp.uniforms.pulse), warp.uniforms.arrival);
+    colorNode = mix(this.rift.node, warp.outputNode || warp.node, warpActivity.clamp(0, 1));
 
     const foregroundLayers = new THREE.Layers();
     foregroundLayers.set(foregroundLayer);
@@ -94,6 +104,32 @@ export class GameNodePipeline {
     // PassNode and BloomNode follow the renderer drawing-buffer size.
   }
 
+  setVolumeScale(scale) {
+    this.volumePass?.setResolutionScale(THREE.MathUtils.clamp(scale, 0.3, 1));
+  }
+
+  setSunShafts({ x = 0.5, y = 0.5, strength = 0, color = null } = {}) {
+    this.sunShafts.uniforms.uSunUv.value.set(x, y);
+    this.sunShafts.uniforms.uStrength.value = THREE.MathUtils.clamp(strength, 0, 1);
+    if (color) this.sunShafts.uniforms.uTint.value.copy(color);
+  }
+
+  bindVolumeDepth(planet) {
+    if (!planet || !this.volumePass) return false;
+    let bound = false;
+    for (const material of [planet.atmoMesh?.material, planet.volCloudMat]) {
+      const uniforms = material?.uniforms;
+      if (!uniforms?.tSceneDepth || !uniforms?.uDepthReady) continue;
+      uniforms.tSceneDepth.value = this.sceneDepthTexture;
+      uniforms.uDepthReady.value = 1;
+      if (uniforms.uDepthReversed) {
+        uniforms.uDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
+      }
+      bound = true;
+    }
+    return bound;
+  }
+
   render() {
     this.pipeline.render();
   }
@@ -108,6 +144,8 @@ export class GameNodePipeline {
   dispose() {
     this.scenePass.dispose();
     this.volumePass?.dispose();
+    this.worldBase?.dispose();
+    this.worldComposite?.dispose();
     this.foregroundPass.dispose();
     this.bloomNode.dispose();
     this.pipeline.dispose();
