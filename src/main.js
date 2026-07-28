@@ -666,6 +666,8 @@ const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _ex4 = new THREE.Vector4();
 const _v3 = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
+const _v5 = new THREE.Vector3();
 const _up = new THREE.Vector3();
 const flightStepStart = new THREE.Vector3();
 const flightProbeWorld = new THREE.Vector3();
@@ -2329,6 +2331,51 @@ function ambience(dt = 1 / 60) {
     day = totalFlux > 0 ? clamp(litFlux / totalFlux, 0, 1) : 0;
     envEclipse = clearLitFlux > 0 ? clamp(1 - litFlux / clearLitFlux, 0, 1) : 0;
     p.setStellarLights?.(universe.system.stellarLightFieldFrom(p.posUniv, stellarVisibility));
+    // Planet-wide eclipse lighting is evaluated at each surface sample. The
+    // camera scalar above remains useful for exposure, but must never darken
+    // the whole globe or masquerade as a screen-space satellite decal.
+    const eclipseStar = universe.system.dominantStarFrom(p.posUniv);
+    const eclipseStarOffset = _v3.copy(eclipseStar.positionUniv).sub(p.posUniv);
+    const eclipseStarDistance = Math.max(1, eclipseStarOffset.length());
+    const eclipseStarDirection = eclipseStarOffset.multiplyScalar(1 / eclipseStarDistance);
+    const eclipseStarAngle = Math.asin(clamp(
+      eclipseStar.spec.radiusRender / eclipseStarDistance, 0, 0.999999));
+    let eclipseBody = null;
+    let eclipseScore = Infinity;
+    for (const body of universe.system.planets) {
+      if (body === p) continue;
+      const offset = _v2.copy(body.posUniv).sub(p.posUniv);
+      const along = offset.dot(eclipseStarDirection);
+      if (along <= body.R || along >= eclipseStarDistance) continue;
+      const perpendicular = _v.copy(offset)
+        .addScaledVector(eclipseStarDirection, -along).length();
+      const reach = p.R + body.R + along * eclipseStarAngle;
+      if (perpendicular > reach) continue;
+      const score = (perpendicular - body.R - along * eclipseStarAngle) / p.R;
+      if (score < eclipseScore) {
+        eclipseScore = score;
+        eclipseBody = {
+          centerLocal: p.worldOffsetToLocal(offset, _v4),
+          radius: body.R,
+          starAngularRadius: eclipseStarAngle,
+        };
+      }
+    }
+    if (DEV_SERVER && p.devEclipseFixture) {
+      const fixture = p.devEclipseFixture;
+      const tangent = _v.copy(eclipseStarDirection)
+        .cross(Math.abs(eclipseStarDirection.y) < 0.9
+          ? _v5.set(0, 1, 0) : _v5.set(1, 0, 0)).normalize();
+      const centerWorld = _v2.copy(eclipseStarDirection)
+        .multiplyScalar(fixture.distance)
+        .addScaledVector(tangent, fixture.offset || 0);
+      eclipseBody = {
+        centerLocal: p.worldOffsetToLocal(centerWorld, _v4),
+        radius: fixture.radius,
+        starAngularRadius: fixture.starAngularRadius ?? eclipseStarAngle,
+      };
+    }
+    p.setEclipseOccluder?.(eclipseBody);
     const sunElev = _up.dot(sunDir);
 
     const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
@@ -3457,6 +3504,19 @@ window.NMS = {
     if (!planet?.setWeatherFixture) return null;
     planet.setWeatherFixture(name);
     return this.weatherState(i);
+  },
+  setEclipseFixture(i, fixture = null) {
+    if (!DEV_SERVER) return null;
+    const planet = universe.system.planets[i];
+    if (!planet?.setEclipseOccluder) return null;
+    planet.devEclipseFixture = fixture ? {
+      distance: Math.max(planet.R * 1.05, Number(fixture.distance) || planet.R * 3.5),
+      radius: Math.max(1, Number(fixture.radius) || planet.R * 0.18),
+      offset: Number(fixture.offset) || 0,
+      starAngularRadius: Number.isFinite(Number(fixture.starAngularRadius))
+        ? Math.max(0, Number(fixture.starAngularRadius)) : undefined,
+    } : null;
+    return planet.devEclipseFixture;
   },
   weatherState(i = null, direction = null) {
     const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;

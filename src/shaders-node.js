@@ -8,7 +8,7 @@ import {
   instanceIndex, length, mix, mx_fractal_noise_float,
   normalLocal, normalView, normalViewGeometry, positionGeometry, positionLocal,
   positionView, positionViewDirection, pow, reflect, select, sign, sin, smoothstep, texture,
-  transformNormalToView, uniform,
+  transformNormalToView, uniform, sqrt,
   vec2, vec3, vertexColor,
 } from 'three/tsl';
 import { Simplex } from './noise.js';
@@ -33,6 +33,22 @@ export function setWeatherWind(direction = null, strength = 0, gust = 0) {
 let _detailTex = null;
 let _detailData = null;
 const DETAIL_SIZE = 512;
+
+function analyticEclipseVisibility(localPosition, sunDirection, nodes) {
+  const toOccluder = nodes.uEclipseCenter.sub(localPosition);
+  const along = dot(toOccluder, sunDirection.normalize()).max(0);
+  const perpendicular = sqrt(dot(toOccluder, toOccluder)
+    .sub(along.mul(along)).max(0));
+  // The stellar angular radius expands the penumbra with distance from the
+  // occluder. This is a real spherical shadow field evaluated at each surface
+  // sample, not a camera-facing black decal.
+  const penumbra = along.mul(nodes.uEclipseStarAngle).max(0.5);
+  const visibility = smoothstep(nodes.uEclipseRadius.sub(penumbra),
+    nodes.uEclipseRadius.add(penumbra), perpendicular);
+  const inFront = dot(toOccluder, sunDirection.normalize()).greaterThan(0);
+  return mix(float(1), select(inFront, visibility, float(1)),
+    nodes.uEclipseEnabled.clamp(0, 1));
+}
 
 export function sampleDetailCPU(u, v, ch) {
   if (!_detailData) return 0.5;
@@ -219,6 +235,15 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   if ((U.extraMode || 0) > 2.5) landSurface = landSurface.mul(float(1).add(extra.w.sub(0.5).mul(0.2)));
   else if ((U.extraMode || 0) > 0.5) landSurface = mix(landSurface, uniform(U.extraC), extra.w);
   const direction = local.normalize();
+  const eclipseNodes = {
+    uEclipseCenter: uniform(new THREE.Vector3()),
+    uEclipseRadius: uniform(1),
+    uEclipseStarAngle: uniform(0),
+    uEclipseEnabled: uniform(0),
+    uEclipseSunDir: uniform(planet?.sunDirLocal?.clone() || new THREE.Vector3(0, 1, 0)),
+  };
+  const eclipseVisibility = analyticEclipseVisibility(
+    local, eclipseNodes.uEclipseSunDir, eclipseNodes);
   const slope = float(1).sub(dot(normalLocal.normalize(), direction).clamp(0, 1));
   const axis = abs(normalLocal.normalize());
   const surfaceUv = select(axis.x.greaterThan(axis.y).and(axis.x.greaterThan(axis.z)), local.yz,
@@ -267,6 +292,24 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   const macroWeight = macro.mul(1.5).add(0.5).clamp(0, 1).mul(macroK);
   surface = surface.mul(mix(vec3(1), vec3(1.09, 0.99, 0.84), macroWeight));
 
+  // Satellite-scale mineral, moisture and drainage structure. The previous
+  // shader jumped directly from continental height colours to sub-kilometre
+  // grain, leaving 5–40 km regions as smooth pastel polygons. These
+  // triplanar bands remain continuous across chunk and cube-face boundaries
+  // and survive the orbital pixel footprint without becoming a painted map.
+  const provinceMineral = triDetail(local, 1 / 18000, 'r')
+    .mul(0.58).add(triDetail(local, 1 / 7200, 'g').mul(0.42));
+  const drainage = triDetail(local, 1 / 10500, 'g')
+    .sub(triDetail(local, 1 / 3200, 'r').mul(0.34));
+  const exposedMineral = smoothstep(0.54, 0.82, provinceMineral)
+    .mul(float(0.35).add(slope.mul(1.6))).clamp(0, 0.72);
+  const humidLowland = smoothstep(0.62, 0.28, drainage)
+    .mul(float(1).sub(smoothstep(0.22, 0.5, slope))).clamp(0, 0.48);
+  surface = mix(surface, surface.mul(vec3(0.72, 0.78, 0.76)),
+    exposedMineral.mul(0.42));
+  surface = mix(surface, surface.mul(vec3(0.68, 0.86, 0.72)),
+    humidLowland.mul(earthLike));
+
   // mid-scale patchiness (~100–500 m): soil and moisture variation — the
   // octave between micro grain and continental swathes that uniform game
   // terrain lacks. Damp hollows darken and cool slightly.
@@ -297,6 +340,13 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     snowWeight = smoothstep(snowLine, snowLine.add(planet.hAmp * 0.1), h)
       .max(smoothstep(planet.pal.capLat, planet.pal.capLat + 0.07, latitude))
       .mul(float(1).sub(smoothstep(0.55, 0.8, slope).mul(0.85)));
+    const windPack = triDetail(local, 1 / 8800, 'g').mul(0.58)
+      .add(triDetail(local, 1 / 2600, 'r').mul(0.42));
+    const scouredRock = smoothstep(0.56, 0.82, provinceMineral)
+      .mul(smoothstep(0.12, 0.5, slope));
+    snowWeight = snowWeight
+      .mul(float(0.48).add(smoothstep(0.28, 0.74, windPack).mul(0.52)))
+      .mul(float(1).sub(scouredRock.mul(0.62)));
     // Snow retains blue-grey self-shadow, wind-packed grain and exposed-rock
     // modulation. A pure white constant clipped under ACES and turned entire
     // mountain ranges into flat unlit polygons at 45–140 km.
@@ -305,9 +355,15 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     const snowShade = float(0.78).add(snowGrain.mul(0.22))
       .sub(slope.mul(0.28)).clamp(0.5, 0.94);
     const snowSurface = uniform(planet.pal.snow)
-      .mul(vec3(0.78, 0.84, 0.92)).mul(snowShade);
-    surface = mix(surface, snowSurface, snowWeight.mul(0.92));
+      .mul(mix(vec3(0.58, 0.65, 0.76), vec3(0.76, 0.82, 0.9), windPack))
+      .mul(snowShade);
+    surface = mix(surface, snowSurface, snowWeight.mul(0.86));
   }
+
+  // Real soil, vegetation and snow albedos sit well below one. Keeping the
+  // globe inside that energy range preserves relief under ACES instead of
+  // clipping broad biomes into flat white/green cut-outs.
+  surface = surface.mul(planet.type === 'lush' || planet.type === 'ocean' ? 0.78 : 0.86);
 
   const cloudMap = texture(planet.cloudShadowTex || blankTexture());
   const cloudMatrix = uniform(new THREE.Matrix3());
@@ -316,7 +372,10 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   const cloudV = float(1).sub(acos(cloudDirection.y.clamp(-1, 1)).mul(0.31830988));
   const cloudK = uniform(planet.cloudMesh ? 0.42 : 0);
   surface = surface.mul(float(1).sub(cloudMap.sample(vec2(cloudU, cloudV)).r.mul(cloudK)));
-  material.colorNode = surface;
+  // Retain diffuse sky/ground bounce inside totality while removing the
+  // impossible fully lit patch. The local field provides a continuous moving
+  // umbra/penumbra across the spherical terrain.
+  material.colorNode = surface.mul(mix(float(0.38), float(1), eclipseVisibility));
   const pbrRoughness = mix(grassOrmMap.sample(surfaceUv).g,
     rockRoughnessMap.sample(surfaceUv.mul(0.78).add(0.17)).r, pbrRock);
   material.roughnessNode = mix(float(1).sub(snowWeight.mul(0.34)).add(pch.mul(0.12)).clamp(0.38, 1),
@@ -363,7 +422,9 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     material.normalNode = transformNormalToView(nrm.add(bend).normalize());
   }
 
-  material.userData.shader = { uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK } };
+  material.userData.shader = {
+    uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK, ...eclipseNodes },
+  };
   material.userData.cloudShadowTextureNode = cloudMap;
   material.userData.nodeMaterial = 'terrain-layered-pbr-v6-ktx2';
   source.dispose?.();
@@ -401,7 +462,12 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     uCloudK: uniform(0),
     uDay: uniform(1),
     uSunset: uniform(0),
+    uEclipseCenter: uniform(new THREE.Vector3()),
+    uEclipseRadius: uniform(1),
+    uEclipseStarAngle: uniform(0),
+    uEclipseEnabled: uniform(0),
   };
+  const eclipseVisibility = analyticEclipseVisibility(local, nodes.uSunDir, nodes);
   const waterCloudTexture = texture(blankTexture());
   // The authored `pal.sea` ramp already carries this world's art direction for
   // depth: stop 0 is the abyss, the last stop is the shallows. `colorAt` reads
@@ -664,11 +730,13 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     .mul(float(1).sub(orbital));
   const baseWater = bodyWater.mul(float(0.9).add(surfaceVariation.mul(0.09)))
     .add(uniform(shallow).mul(crestScatter));
-  material.colorNode = mix(baseWater, vec3(0.92, 0.97, 1), foam);
+  material.colorNode = mix(baseWater, vec3(0.92, 0.97, 1), foam)
+    .mul(mix(float(0.5), float(1), eclipseVisibility));
   // Reflected radiance is not diffuse albedo: putting it in colorNode caused
   // the lighting pass to darken sunsets a second time. Keep the water body in
   // the physical BRDF and feed live sky/cloud/sun radiance through emissive.
   material.emissiveNode = reflectedSky.min(vec3(1.4)).mul(skyResponse.mul(0.28))
+    .mul(mix(float(0.72), float(1), eclipseVisibility))
     // Foam is bright because it is diffuse aerated water, not a light source.
     // Keeping only a small skylight term avoids the former full-screen white
     // disk when several wake segments overlapped under bloom.

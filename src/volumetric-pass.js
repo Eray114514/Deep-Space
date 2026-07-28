@@ -1,6 +1,6 @@
-// Atmosphere and local clouds volume state controller. The WebGL 2 render
-// pipeline (GameLegacyPipeline) owns the actual scene passes; this object
-// only carries simulation-facing state shared by atmosphere/cloud materials.
+// Atmosphere and local-cloud ownership for the WebGPU render graph. Exactly
+// one nearby body may occupy the local volume layer; inactive bodies return
+// to their depth-tested world representations.
 
 import * as THREE from 'three';
 import { VOLUME_LAYER, WORLD_LAYER } from './render-layers.js';

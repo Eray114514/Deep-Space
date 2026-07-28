@@ -1111,6 +1111,10 @@ export class Planet {
     const secondary = this.stellarLightField.sources[1] || null;
     this.sunDirWorld.copy(primary.worldDirection);
     this.sunDirLocal.copy(primary.localDirection);
+    const terrainEclipse = this.terrainMaterial?.userData?.shader?.uniforms;
+    if (terrainEclipse?.uEclipseSunDir) {
+      terrainEclipse.uEclipseSunDir.value.copy(primary.localDirection);
+    }
     const atmo = this.atmoMesh?.material?.uniforms;
     if (atmo) {
       (atmo.uStellarDirections0 || atmo.sunDir)?.value.copy(primary.localDirection);
@@ -1155,6 +1159,24 @@ export class Planet {
       }
     }
     return this.stellarLightField;
+  }
+
+  setEclipseOccluder(occluder = null) {
+    const targets = [
+      this.terrainMaterial?.userData?.shader?.uniforms,
+      this.liquidMat?.userData?.shader?.uniforms,
+    ];
+    for (const uniforms of targets) {
+      if (!uniforms?.uEclipseEnabled) continue;
+      if (!occluder) {
+        uniforms.uEclipseEnabled.value = 0;
+        continue;
+      }
+      uniforms.uEclipseCenter.value.copy(occluder.centerLocal);
+      uniforms.uEclipseRadius.value = Math.max(1, occluder.radius || 1);
+      uniforms.uEclipseStarAngle.value = Math.max(0, occluder.starAngularRadius || 0);
+      uniforms.uEclipseEnabled.value = 1;
+    }
   }
 
   setStellarField(field) {

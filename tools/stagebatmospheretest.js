@@ -48,6 +48,19 @@ assert.ok(Math.abs(lightField.sources.reduce((sum, source) =>
   'normalized stellar RGB radiance conserves total luminance');
 assert.ok(lightField.sources.every((source) =>
   Math.abs(Math.hypot(...source.direction) - 1) < 1e-12));
+const eclipsedField = buildStellarLightField([
+  {
+    starId: 'eclipsed',
+    temperatureK: 5800,
+    luminositySolar: 1,
+    position: [10, 0, 0],
+    visibility: 0,
+  },
+]);
+assert.equal(eclipsedField.sources[0].irradianceFraction, 0,
+  'a single fully eclipsed star must not renormalize itself to full irradiance');
+assert.ok(eclipsedField.totalClearFlux > eclipsedField.totalFlux,
+  'stellar field preserves its unobscured flux reference through an eclipse');
 
 const rayleigh = rayleighCoefficients();
 assert.ok(rayleigh[0] < rayleigh[1] && rayleigh[1] < rayleigh[2],

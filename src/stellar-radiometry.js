@@ -131,6 +131,8 @@ export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
     ];
     const distance = Math.max(1e-9, Math.hypot(...delta));
     const visibility = clamp(source?.visibility ?? 1, 0, 1);
+    const clearFlux = stellarIrradiance(
+      source?.luminositySolar ?? source?.luminosity ?? 0, distance, 1);
     const flux = stellarIrradiance(source?.luminositySolar ?? source?.luminosity ?? 0,
       distance, visibility);
     const temperatureK = clamp(Number(source?.temperatureK) || 6500, 1000, 50000);
@@ -142,12 +144,14 @@ export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
       distance,
       temperatureK,
       visibility,
+      clearFlux,
       flux,
       color,
     };
   });
 
   const totalFlux = sources.reduce((sum, source) => sum + source.flux, 0);
+  const totalClearFlux = sources.reduce((sum, source) => sum + source.clearFlux, 0);
   let dominantIndex = -1;
   let dominantFlux = -1;
   for (let i = 0; i < sources.length; i++) {
@@ -158,7 +162,11 @@ export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
   }
 
   for (const source of sources) {
-    source.irradianceFraction = totalFlux > 0 ? source.flux / totalFlux : 0;
+    // Normalize against unobscured system flux, not currently visible flux.
+    // Renormalizing by visible total made a lone eclipsed star jump back to
+    // one and kept atmosphere/cloud/water fully sunlit during totality.
+    source.irradianceFraction = totalClearFlux > 0
+      ? source.flux / totalClearFlux : 0;
     const chromaticity = unitLuminance(source.color);
     source.radiance = chromaticity.map((channel) =>
       channel * source.irradianceFraction);
@@ -168,6 +176,7 @@ export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
     count: sources.length,
     sources,
     totalFlux,
+    totalClearFlux,
     dominantIndex: totalFlux > 0 ? dominantIndex : -1,
   };
 }
