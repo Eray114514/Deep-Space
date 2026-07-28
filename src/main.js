@@ -2479,7 +2479,6 @@ let waterSurfaceHeight = Infinity;
 let waterTangentSpeed = 0;
 const waterLocal = new THREE.Vector3();
 const waterVelocity = new THREE.Vector3();
-const waterSide = new THREE.Vector3();
 const waterWakePoint = new THREE.Vector3();
 const waterShipCenter = new THREE.Vector3();
 
@@ -2532,7 +2531,6 @@ function updateWaterInteraction(dt) {
     if (waterContact > 0.03 && waterWakeTimer <= 0) {
       waterWakeTimer = lerp(0.14, 0.045, clamp(tangentSpeed / 450, 0, 1));
       waterVelocity.normalize();
-      waterSide.crossVectors(_up, waterVelocity).normalize();
       // `nav.pos` is the camera/control origin, not the foreground hull. The
       // old 19 m estimate left the thrusters only 11.5 m ahead of the camera;
       // at skimming speed every ring passed behind the view in <0.16 s. Keep
@@ -2541,11 +2539,14 @@ function updateWaterInteraction(dt) {
         .normalize().multiplyScalar(p.seaRadius);
       const center = waterWakePoint.copy(waterShipCenter)
         .addScaledVector(waterVelocity, -7.5);
-      const strength = 0.45 + waterContact * 1.55;
-      waterInteraction.inject(center.clone().addScaledVector(waterSide, 4.2),
-        { strength, speed: 7 + tangentSpeed * 0.012, foam: 0.72 + waterContact * 0.8 });
-      waterInteraction.inject(center.clone().addScaledVector(waterSide, -4.2),
-        { strength, speed: 7 + tangentSpeed * 0.012, foam: 0.72 + waterContact * 0.8 });
+      const strength = 0.22 + waterContact * 0.68;
+      waterInteraction.inject(center, {
+        strength,
+        speed: 7 + tangentSpeed * 0.012,
+        foam: 0.28 + waterContact * 0.34,
+        direction: waterVelocity,
+        kind: 'wake',
+      });
     }
   } else if (state === 'walk' && walkCtl.planet === p) {
     // posLocal is the eye, so subtract the controller's actual eye height.
@@ -4063,15 +4064,17 @@ window.NMS = {
         tangent = direction;
       }
     }
-    const side = new THREE.Vector3().crossVectors(up, tangent).normalize();
     nav.quat.copy(p.frameOrientation).multiply(horizonQuat(up, tangent, new THREE.Quaternion()));
     nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), height > 15 ? -0.22 : -0.48));
     const wakeCenter = up.clone().multiplyScalar(p.seaRadius).addScaledVector(tangent, 47.5);
     waterInteraction.setPlanet(p.bodyId || p.seed);
-    waterInteraction.inject(wakeCenter.clone().addScaledVector(side, 4.2),
-      { strength: 1.4, speed: 8.5, foam: 1.1 });
-    waterInteraction.inject(wakeCenter.clone().addScaledVector(side, -4.2),
-      { strength: 1.4, speed: 8.5, foam: 1.1 });
+    waterInteraction.inject(wakeCenter, {
+      strength: 0.82,
+      speed: 8.5,
+      foam: 0.5,
+      direction: tangent,
+      kind: 'wake',
+    });
     // Give the deterministic capture a small radial lift so the ship remains
     // above the surface long enough to observe the generated wake. Normal
     // gameplay still uses the actual flight controller and gravity.

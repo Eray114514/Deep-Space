@@ -444,7 +444,7 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // implausibly bright floor contribution.
   const depthHaze = smoothstep(0, depthScale * 0.4, depth).mul(0.9);
   const bodyTransmit = transmit.mul(float(1).sub(depthHaze));
-  const wave = mx_fractal_noise_float(
+  const surfaceVariation = mx_fractal_noise_float(
     local.mul(waveScale).add(vec3(clock.mul(0.021), 0, clock.mul(-0.013))), 4);
   const up = local.normalize();
   const tangent = up.cross(vec3(0, 1, 0)).add(vec3(1e-4, 0, 1e-4)).normalize();
@@ -457,73 +457,150 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   const orbital = smoothstep(30000, 250000, viewDist);
   const fresnel = pow(float(1).sub(abs(dot(normalView.normalize(), positionViewDirection))),
     mix(float(5), float(3.2), orbital));
-  // Swell: wavelengths 393 / 233 / 146 m. Amplitudes were 0.26 / 0.14 / 0.07 m
-  // — a peak displacement of 0.47 m on a 286 km planet, i.e. geometrically
-  // flat. Real swell of these wavelengths runs metres high; 2.2 / 1.1 / 0.5 m
-  // gives a max slope of 3.5%, well below the 1/7 breaking limit.
-  const seaState = planet?.waterStyle?.swell || 1;
-  const A1 = 2.2 * seaState, A2 = 1.1 * seaState, A3 = 0.5 * seaState;
-  const phase1 = local.x.add(local.z).mul(0.016).add(clock.mul(0.82));
-  const phase2 = local.z.sub(local.y.mul(0.7)).mul(0.027).sub(clock.mul(1.07));
-  const phase3 = local.x.mul(0.55).add(local.y).mul(0.043).add(clock.mul(1.34));
-  // Analytic gradient of the swell sum, sharing the amplitudes and the
-  // ∂phase/∂local coefficients above so the shading normal can never drift out
-  // of agreement with the displaced geometry.
-  const waveGradient = vec3(
-    cos(phase1).mul(A1 * 0.016).add(cos(phase3).mul(A3 * 0.02365)),
-    cos(phase2).mul(A2 * -0.0189).add(cos(phase3).mul(A3 * 0.043)),
-    cos(phase1).mul(A1 * 0.016).add(cos(phase2).mul(A2 * 0.027)));
-  // The geometry now carries the true slope, so the normal uses the gradient at
-  // unit strength instead of the old 5.2× exaggeration that stood in for a
-  // displacement of almost zero.
+  // ---- directional ocean spectrum ---------------------------------------
+  // The retired shader was three coherent sine bands. From any low flight
+  // angle those bands locked into identical parallel streaks and made the
+  // entire ocean read as a flat animated card. This deterministic spectrum
+  // follows the same cascade split as the local reference implementation:
+  // long swell, gravity/wind sea, then short gravity/capillary detail.
+  //
+  // It is deliberately evaluated as analytic waves rather than a sampled
+  // normal texture: geometry displacement, normals, crest compression and
+  // whitecaps therefore all come from one phase authority. Short bands fade
+  // before they fall below a pixel, integrating their mean-square slope into
+  // roughness instead of aliasing into orbit-scale stripes.
+  const seaState = THREE.MathUtils.clamp(planet?.waterStyle?.swell || 1, 0.35, 2.4);
+  const spectrumRng = makeRng(`${planet?.seed || 'water'}:directional-spectrum:v2`);
+  const baseHeading = spectrumRng() * Math.PI * 2;
+  const wavelengths = [680, 470, 330, 235, 168, 121, 88, 64, 46, 33, 23, 16, 11, 7.5, 4.8, 3.0];
+  const amplitudes = [1.06, 0.82, 0.61, 0.45, 0.33, 0.24, 0.175, 0.126,
+    0.09, 0.064, 0.044, 0.03, 0.019, 0.012, 0.007, 0.004];
+  const spreading = [0, 0.09, -0.13, 0.2, -0.25, 0.31, -0.38, 0.46,
+    -0.55, 0.65, -0.76, 0.88, -1.02, 1.17, -1.31, 1.46];
+  let macroWave = float(0);
+  let choppyOffset = vec3(0);
+  let waveGradient = vec3(0);
+  let crestCompression = float(0);
+  let resolvedSlope = float(0);
+  for (let i = 0; i < wavelengths.length; i++) {
+    const wavelength = wavelengths[i];
+    const k = Math.PI * 2 / wavelength;
+    const omega = Math.sqrt(9.81 * k);
+    const amplitude = amplitudes[i] * seaState;
+    const heading = baseHeading + spreading[i] + (spectrumRng() - 0.5) * 0.055;
+    // A small non-coplanar component prevents a single preferred axis from
+    // collapsing at the sphere's poles; projection below restores tangency.
+    const globalDirection = new THREE.Vector3(
+      Math.cos(heading),
+      (spectrumRng() - 0.5) * 0.52,
+      Math.sin(heading),
+    ).normalize();
+    const direction = vec3(globalDirection.x, globalDirection.y, globalDirection.z);
+    const projectedDirection = direction.sub(up.mul(dot(direction, up)))
+      .add(tangent.mul(0.0001)).normalize();
+    const phaseOffset = spectrumRng() * Math.PI * 2;
+    // Wrap spatial cycles before converting to radians. On 900 km worlds this
+    // preserves metre-scale phase precision in float32 shader arithmetic.
+    const spatialPhase = fract(dot(local, direction).mul(1 / wavelength)
+      .add(phaseOffset / (Math.PI * 2))).mul(Math.PI * 2);
+    const phase = spatialPhase.sub(clock.mul(omega * (i % 3 === 1 ? -1 : 1)));
+    const visibility = float(1).sub(smoothstep(wavelength * 110,
+      wavelength * 1050, viewDist));
+    const shallowSuppression = smoothstep(0.45, Math.min(18, wavelength * 0.12 + 3), depth);
+    const shoaling = float(1).add(float(1).sub(smoothstep(3, 34, depth)).mul(0.24));
+    const response = visibility.mul(shallowSuppression).mul(shoaling);
+    const sinPhase = sin(phase);
+    const cosPhase = cos(phase);
+    const slope = amplitude * k;
+    waveGradient = waveGradient.add(projectedDirection.mul(cosPhase)
+      .mul(slope).mul(response));
+    resolvedSlope = resolvedSlope.add(abs(cosPhase).mul(slope).mul(visibility));
+    crestCompression = crestCompression.add(sinPhase.max(0)
+      .mul(slope * (i < 8 ? 1.15 : 0.72)).mul(response));
+    if (i < 8) {
+      macroWave = macroWave.add(sinPhase.mul(amplitude).mul(response));
+      const chop = i < 3 ? 0.72 : 0.9;
+      choppyOffset = choppyOffset.add(projectedDirection.mul(cosPhase)
+        .mul(amplitude * chop).mul(response));
+    }
+  }
   const waveTangent = dot(waveGradient, tangent);
   const waveBitangent = dot(waveGradient, bitangent);
-  // Capillary and short wind waves live in the shading normal: putting
-  // two-to-ten metre wavelengths in a ~29 m geometry grid would alias, while
-  // omitting them leaves the surface as polished plastic between swells.
-  const windPhase1 = dot(local, tangent).mul(1.7)
-    .add(dot(local, bitangent).mul(0.43)).add(clock.mul(2.7));
-  const windPhase2 = dot(local, tangent).mul(-0.61)
-    .add(dot(local, bitangent).mul(2.35)).sub(clock.mul(3.4));
-  const windTangent = cos(windPhase1).mul(0.052).sub(cos(windPhase2).mul(0.028));
-  const windBitangent = cos(windPhase1).mul(0.013).add(cos(windPhase2).mul(0.067));
   let rippleGradient = vec2(0), wakeFoam = float(0);
   for (let i = 0; i < waterInteraction.capacity; i++) {
     const impulsePosition = uniform(waterInteraction.positions[i]);
     const impulse = uniform(waterInteraction.data[i]);
+    const impulseDirection = uniform(waterInteraction.directions[i]);
     const delta = local.sub(impulsePosition);
     const planar = vec2(dot(delta, tangent), dot(delta, bitangent));
     const distance = length(planar).max(0.05);
     const ring = distance.sub(impulse.x.mul(impulse.y));
-    const envelope = abs(ring).mul(-0.24).sub(impulse.x.mul(0.42)).exp().mul(impulse.z);
-    rippleGradient = rippleGradient.add(planar.div(distance).mul(cos(ring.mul(1.4))).mul(envelope).mul(0.72));
-    const crest = float(0.32).add(sin(ring.mul(1.4)).max(0).mul(0.68));
-    wakeFoam = wakeFoam.add(envelope.mul(impulse.w).mul(crest).mul(1.75));
+    const impactEnvelope = abs(ring).mul(-0.24).sub(impulse.x.mul(0.42))
+      .exp().mul(impulse.z);
+    const impactGradient = planar.div(distance).mul(cos(ring.mul(1.4)))
+      .mul(impactEnvelope).mul(0.72);
+    const impactCrest = float(0.32).add(sin(ring.mul(1.4)).max(0).mul(0.68));
+    const impactFoam = impactEnvelope.mul(impulse.w).mul(impactCrest).mul(1.75);
+
+    // Directional hull wake: two divergent Kelvin arms plus a narrow,
+    // aerated turbulent centre. Repeated impulses form a continuous trail;
+    // they never expand into the fake concentric circles used for footsteps.
+    const wakeAxis = impulseDirection.xyz.sub(up.mul(dot(impulseDirection.xyz, up)))
+      .add(tangent.mul(0.0001)).normalize();
+    const wakeSide = cross(up, wakeAxis).normalize();
+    const along = dot(delta, wakeAxis);
+    const lateral = dot(delta, wakeSide);
+    const aft = float(1).sub(smoothstep(-2, 8, along));
+    const trailDistance = along.negate().max(0);
+    // Each injected segment owns only a short patch of the wake. The moving
+    // source lays those patches along the flight path; allowing every old
+    // segment to grow a full speed×age wedge stacked a dozen giant white
+    // triangles on top of one another.
+    const trailLength = impulse.x.mul(impulse.y).mul(0.55).add(18);
+    const tailEnd = float(1).sub(smoothstep(trailLength, trailLength.add(14), trailDistance));
+    const forwardFade = exp(along.max(0).mul(-0.34));
+    const ageFade = exp(impulse.x.mul(-0.34));
+    const wakeEnvelope = aft.mul(tailEnd).mul(forwardFade).mul(ageFade).mul(impulse.z);
+    const armTarget = trailDistance.min(40).mul(0.16).add(4.2);
+    const armDistance = abs(abs(lateral).sub(armTarget));
+    const armEnvelope = exp(armDistance.mul(-0.72)).mul(wakeEnvelope);
+    const centreEnvelope = exp(abs(lateral).mul(-0.18))
+      .mul(exp(along.max(0).mul(-0.4))).mul(wakeEnvelope);
+    const armOscillation = cos(armDistance.mul(2.1).sub(impulse.x.mul(4.2)));
+    const wakeGradientObject = wakeSide.mul(sign(lateral).mul(armOscillation)
+      .mul(armEnvelope).mul(0.72))
+      .sub(wakeAxis.mul(centreEnvelope.mul(0.08)));
+    const wakeGradient = vec2(dot(wakeGradientObject, tangent),
+      dot(wakeGradientObject, bitangent));
+    const directionalFoam = armEnvelope.add(centreEnvelope.mul(0.42))
+      .mul(impulse.w).mul(0.2);
+    const isWake = smoothstep(0.5, 0.51, impulseDirection.w);
+    rippleGradient = rippleGradient.add(mix(impactGradient, wakeGradient, isWake));
+    wakeFoam = wakeFoam.add(mix(impactFoam, directionalFoam, isWake));
   }
   // The previous derivative-based widening operated on vertex-baked depth.
   // At low grazing angles one triangle could span hundreds of metres, turning
   // its derivative into a screen-sized foam polygon. Pixel depth gives a
   // continuous physical breaking zone without exposing the water mesh.
   const breakingBand = pow(float(1).sub(smoothstep(0.08, 3.8, depth)), 0.72);
-  const shorePulse = sin(depth.mul(1.35).sub(clock.mul(1.8)).add(wave.mul(5)))
+  const shorePulse = sin(depth.mul(1.35).sub(clock.mul(1.8)).add(surfaceVariation.mul(5)))
     .mul(0.5).add(0.5);
   const shoreFoam = breakingBand.mul(float(0.42).add(shorePulse.mul(0.58)))
     .mul(planet?.waterStyle?.foam || 1);
-  const foam = shoreFoam.mul(0.84).add(wakeFoam).clamp(0, 0.96);
-  // Swell is suppressed where it would intersect the beach, and faded out with
-  // distance: the water grid's finest cell is ~146 m, so beyond a few km the
-  // 393 m swell is sampled below Nyquist and its per-vertex normal degenerates
-  // into noise across the whole ocean. 2.2 m subtends well under a pixel at
-  // that range anyway, so fading it costs nothing and removes the aliasing.
-  const swell = smoothstep(0.5, 12, vertexBathymetry)
-    .mul(float(1).sub(smoothstep(3000, 25000, viewDist)));
+  const whitecapNoise = mx_fractal_noise_float(local.mul(0.045)
+    .add(vec3(clock.mul(0.08), 0, clock.mul(-0.05))), 3);
+  const openWaterWhitecap = smoothstep(0.075, 0.24, crestCompression)
+    .mul(smoothstep(5, 32, depth))
+    .mul(smoothstep(0.38, 0.76, whitecapNoise))
+    .mul(planet?.waterStyle?.foam || 1);
+  const foam = shoreFoam.mul(0.84).add(openWaterWhitecap).add(wakeFoam).clamp(0, 0.96);
   // A NodeMaterial custom normal is already in view space.  Feeding it a
   // tangent-space `(x,y,1)` locked the highlight to the camera and made the
   // entire ocean look like a flat blue card.  Build the radial object-space
   // normal, bend it along the local surface basis, then transform it once.
   const normalObject = up
-    .sub(tangent.mul(waveTangent.mul(swell).add(windTangent).add(rippleGradient.x.mul(0.55))))
-    .sub(bitangent.mul(waveBitangent.mul(swell).add(windBitangent).add(rippleGradient.y.mul(0.55))))
+    .sub(tangent.mul(waveTangent.add(rippleGradient.x.mul(0.55))))
+    .sub(bitangent.mul(waveBitangent.add(rippleGradient.y.mul(0.55))))
     .normalize();
   material.normalNode = transformNormalToView(normalObject);
 
@@ -574,13 +651,25 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // refract the seabed; deep water becomes its own radiating body colour.
   const skyResponse = float(0.025).add(fresnel.mul(0.875)).clamp(0, 0.92);
   const bodyWater = mix(uniform(deep), uniform(shallow), bodyTransmit);
-  const baseWater = bodyWater.mul(float(0.93).add(wave.mul(0.1)));
+  // Thin crests transmit forward-scattered skylight while troughs retain
+  // denser body colour. This is subtle in plan view but gives low flight a
+  // readable wave silhouette even under an evenly overcast sky.
+  const crestHeight = smoothstep(0.25, Math.max(1.2, seaState * 2.2), macroWave);
+  const backlit = float(1).sub(dot(up, nodes.uSunDir).abs()).mul(0.18)
+    .add(dot(normalObject, nodes.uSunDir).negate().max(0).mul(0.22));
+  const crestScatter = crestHeight.mul(float(0.16).add(backlit))
+    .mul(float(1).sub(orbital));
+  const baseWater = bodyWater.mul(float(0.9).add(surfaceVariation.mul(0.09)))
+    .add(uniform(shallow).mul(crestScatter));
   material.colorNode = mix(baseWater, vec3(0.92, 0.97, 1), foam);
   // Reflected radiance is not diffuse albedo: putting it in colorNode caused
   // the lighting pass to darken sunsets a second time. Keep the water body in
   // the physical BRDF and feed live sky/cloud/sun radiance through emissive.
   material.emissiveNode = reflectedSky.min(vec3(1.4)).mul(skyResponse.mul(0.28))
-    .add(vec3(0.88, 0.95, 1).mul(foam.mul(1.05)));
+    // Foam is bright because it is diffuse aerated water, not a light source.
+    // Keeping only a small skylight term avoids the former full-screen white
+    // disk when several wake segments overlapped under bloom.
+    .add(vec3(0.88, 0.95, 1).mul(foam.mul(0.05)));
   const opacity = uniform(source.opacity ?? 1);
   const depthOpacity = float(1).sub(exp(depth.mul(-0.055)));
   // The sea is a continuous physical shell. Dry terrain is already outside
@@ -608,10 +697,13 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // collapsed the entire low-angle sea into a white sunset sheet and a hard
   // vertical sun stripe. Keep individual glints, but integrate the unresolved
   // capillary slope distribution into a broader physically plausible lobe.
-  material.roughnessNode = mix(mix(0.16, 0.34, wave), 0.46, foam)
-    .add(orbital.mul(0.12)).clamp(0.14, 0.68);
+  // Bands filtered below pixel resolution survive as mean-square slope. This
+  // widens distant glints without resurrecting their periodic phase pattern.
+  const slopeRoughness = smoothstep(0.035, 0.24, resolvedSlope).mul(0.18);
+  material.roughnessNode = float(0.13).add(slopeRoughness)
+    .add(surfaceVariation.mul(0.08)).add(foam.mul(0.26))
+    .add(orbital.mul(0.11)).clamp(0.12, 0.68);
 
-  const macroWave = sin(phase1).mul(A1).add(sin(phase2).mul(A2)).add(sin(phase3).mul(A3));
   // A sub-metre shore overlap makes the transparent water cover the opaque
   // terrain silhouette's antialias samples. It is depth-tested, so dry land
   // still wins immediately inland; visually this becomes the wet swash/foam
@@ -619,14 +711,23 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // A centimetre-scale bias avoids coplanar flicker at the exact zero contour
   // without lifting water metres through low beaches and inland terrain.
   const shoreOverlap = float(0.12);
-  material.positionNode = positionLocal.add(up.mul(macroWave.mul(swell).add(shoreOverlap)));
+  material.positionNode = positionLocal.add(up.mul(macroWave.add(shoreOverlap)))
+    .add(choppyOffset);
   material.userData.shader = { uniforms: nodes };
   material.userData.waterCloudTexture = waterCloudTexture;
   material.userData.waterProfile = {
     depthScale,
     extinction: [1.8, 1.2, 0.6],
     depthHaze: { distance: depthScale * 0.4, strength: 0.9 },
-    swellMetres: [A1, A2, A3],
+    spectrum: {
+      model: 'directional-jonswap-inspired',
+      wavelengths,
+      amplitudes: amplitudes.map((amplitude) => amplitude * seaState),
+      cascades: ['swell', 'wind-sea', 'short-gravity-capillary'],
+      choppyDisplacement: true,
+      jacobianWhitecaps: true,
+      meanSquareSlopeFiltering: true,
+    },
     transmission: true,
     dynamicSky: true,
     cloudReflection: true,
@@ -634,7 +735,7 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     wetShore: true,
     deterministicBathymetry: true,
   };
-  material.userData.nodeMaterial = 'water-spectral-refraction-v5';
+  material.userData.nodeMaterial = 'water-directional-spectrum-v6';
   material.userData.opacityNodeUniform = opacity;
   source.dispose?.();
   return material;

@@ -60,7 +60,10 @@ page.on('console', (message) => {
 
 try {
   const base = `http://127.0.0.1:${port}/?renderer=webgpu&quality=high`
-    + '&nohero=1&farflora=0&freeze=1&vclouds=1&scene=orbit&planet=0&factor=0.72&time=9.5';
+    // Stage A isolates terrain and water. Volumetric cloud traversal has its
+    // own Stage B capture; letting a low cloud fill the wake frame previously
+    // allowed a completely invisible water interaction to pass.
+    + '&nohero=1&farflora=0&freeze=1&vclouds=0&scene=orbit&planet=0&factor=0.72&time=9.5';
   await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 90000 });
   await page.waitForTimeout(1800);
@@ -112,7 +115,13 @@ try {
   assert.equal(contract.waterMaterialOwned, true);
   assert.equal(contract.waterUnderlay, false,
     'water must not hide transmission behind a coplanar flat-colour underlay');
-  assert.equal(contract.nodeMaterial, 'water-spectral-refraction-v5');
+  assert.equal(contract.nodeMaterial, 'water-directional-spectrum-v6');
+  assert.equal(contract.profile?.spectrum?.model, 'directional-jonswap-inspired');
+  assert.equal(contract.profile?.spectrum?.wavelengths?.length, 16);
+  assert.equal(contract.profile?.spectrum?.amplitudes?.length, 16);
+  assert.equal(contract.profile?.spectrum?.choppyDisplacement, true);
+  assert.equal(contract.profile?.spectrum?.jacobianWhitecaps, true);
+  assert.equal(contract.profile?.spectrum?.meanSquareSlopeFiltering, true);
   assert.deepEqual({
     transmission: contract.profile?.transmission,
     dynamicSky: contract.profile?.dynamicSky,
@@ -144,11 +153,11 @@ try {
   }));
   assert.ok(wakeState.stats.waterInteractions > 0);
   assert.ok(wakeState.stats.waterContact > 0);
-  assert.ok(wakeState.field.length >= 2, 'twin thruster wake impulses are active');
+  assert.ok(wakeState.field.length >= 2, 'directional hull wake segments are active');
   assert.ok(wakeState.field.filter((entry) =>
     Math.abs(entry.screen[0]) <= 1 && Math.abs(entry.screen[1]) <= 1
       && entry.screen[2] >= -1 && entry.screen[2] <= 1).length >= 2,
-    'propagating wake crests remain inside the player view instead of falling behind the camera');
+    'directional wake segments remain inside the player view instead of falling behind the camera');
   const wake = await capture(page, 'water-wake');
 
   const overviewResult = await page.evaluate(() => NMS.setWade(0, { depth: 0.9, overview: true }));
