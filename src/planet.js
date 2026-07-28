@@ -7,11 +7,11 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  dot, exp, float, Fn, Loop, mix, positionLocal, pow, sqrt,
-  smoothstep as nodeSmoothstep, uniform, vec3, vec4,
+  dot, exp, float, Fn, Loop, mix, positionLocal, positionView, pow, screenUV,
+  sqrt, smoothstep as nodeSmoothstep, texture, uniform, vec3, vec4,
 } from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
-import { Simplex, worley3, clamp, lerp, smoothstep } from './noise.js';
+import { Simplex, worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
 import { applyTerrainDetail, applyWaterWaves, applyCloudField, cloudBaseDensityCPU, cloudDensityCPU, detailTexture } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
@@ -20,11 +20,17 @@ import { floraPalette } from './flora.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
+import {
+  advanceWeatherField, createWeatherField, sampleWeatherField,
+  weatherFieldFingerprint,
+} from './weather-field.js';
 
 const rendererParams = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 const rendererSettings = resolveGraphicsSettings({ params: rendererParams });
 const USE_NODE_MATERIALS = resolveRendererPolicy(
   rendererParamsForSettings(rendererSettings, rendererParams)).backend === 'webgpu';
+const DEV_WEATHER_FIXTURE = typeof window !== 'undefined' && window.__NMS_DEV_SERVER__ === true
+  ? rendererParams.get('weather') : null;
 
 // Volumetric clouds are the primary cloud representation in every runtime
 // quality tier. Low quality changes only the ray budget and volume-buffer
@@ -116,7 +122,9 @@ export class Planet {
     // Main planets are hundreds of kilometres in radius. This keeps low flight
     // visually flat while altitude-scaled controls preserve a short approach.
     const baseR = isMoon ? 28000 + rand() * 72000 : 160000 + rand() * 240000;
-    this.R = radius || baseR;
+    this.R = Number.isFinite(this.tuning.radiusMeters)
+      ? Math.max(1000, this.tuning.radiusMeters)
+      : (radius || baseR);
     // Relief grows with the world and can form kilometre-scale mountain belts.
     this.hAmp = Math.min(this.R * this.cfg.relief * (0.85 + rand() * 0.5), 7000 + rand() * 6000);
     this.gravity = 9.81 * clamp(this.R / 250000, 0.55, 1.5);
@@ -131,6 +139,9 @@ export class Planet {
     this.nB = new Simplex(makeRng(seed + ':B'));
     this.nC = new Simplex(makeRng(seed + ':C'));
     this.nD = new Simplex(makeRng(seed + ':D'));
+    this.nOceanBasin = this.tuning.oceanProfile
+      ? new Simplex(makeRng(seed + ':ocean-bathymetry:v1'))
+      : null;
 
     // ---- terrain parameters ----------------------------------------------
     this.contFreq = 1.1 + rand() * 1.5;
@@ -156,6 +167,13 @@ export class Planet {
     // liquids
     this.liquid = this.cfg.liquid;
     this.hasLiquid = this.liquid !== null;
+    this.waterStyle = this.tuning.oceanProfile === 'pelagic-storm'
+      ? { swell: 2.05, clarity: 0.74, foam: 1.35 }
+      : type === 'ocean'
+        ? { swell: 1.65, clarity: 0.82, foam: 1.18 }
+      : type === 'toxic'
+        ? { swell: 0.72, clarity: 0.48, foam: 0.72 }
+        : { swell: 1, clarity: 1, foam: 1 };
     const seaLevelOffset = Number.isFinite(this.tuning.seaLevelOffset) ? this.tuning.seaLevelOffset : 0;
     // Water-level curation must not rewrite the selected terrain. Mountain
     // placement was historically derived from the generated shoreline, so
@@ -212,20 +230,29 @@ export class Planet {
     const canonicalGridCells = GRID_CELLS;
     this.canonicalGridCells = canonicalGridCells;
     const rootCell = (Math.PI / 2) * this.R / canonicalGridCells;
-    this.canonicalMaxLevel = clamp(Math.round(Math.log2(rootCell / 1.5)), 4, 13);
+    // Honour the authored ~1.5 m canonical ground spacing on large worlds.
+    // The old level-13 ceiling left the 900 km home planet at ~7.2 m cells
+    // (5.4 m after wide-chunk grouping), visibly faceting near-ground ridges.
+    this.canonicalMaxLevel = clamp(Math.ceil(Math.log2(rootCell / 1.5)), 4, 16);
     this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
-    // Grouping reduces draw overhead without sacrificing the authored finest
-    // vertex spacing. Keep the near field within one level of canonical so
-    // performance profiles never turn the terrain under the player low-poly.
+    // Grouping reduces draw overhead. The last canonical octave is retained by
+    // collision/noise and the material micro-relief, while geometry stops at
+    // ~2.7 m cells on the 900 km world. Trying to tessellate the final
+    // sub-metre octave queued hundreds of chunks for minutes at 70 m altitude
+    // even though its relief is below a pixel.
     const lowTierGrouping = canonicalGridCells <= 18;
-    const wideGroupFactor = lowTierGrouping ? 4 : (8 / 3);
+    // 32×32 high-tier chunks keep one build job below a frame-sized unit of
+    // work. The former 64×64 jobs had the same total vertex density but could
+    // block the incremental scheduler for tens of seconds, leaving visible
+    // black holes while a near-surface camera waited for one giant chunk.
+    const wideGroupFactor = lowTierGrouping ? 4 : (4 / 3);
     this.gridCells = Math.round(canonicalGridCells * wideGroupFactor);
     this.gridCellsAtLevel = () => this.gridCells;
     // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
-    this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 1));
+    this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2));
     this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 1 : 2);
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
@@ -263,6 +290,28 @@ export class Planet {
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;
+    // The legacy phase draw remains consumed for universe compatibility, but
+    // atlas orientation is already authored into WeatherField at hour zero.
+    this.cloudSpinBase = 0;
+    this.cloudSpin2Base = 0;
+    this.weatherHours = 0;
+    this.weatherProfile ||= {
+      cloudiness: clamp(this.cloudCoverage || 0, 0.04, 0.96),
+      humidity: this.hasLiquid ? 0.72 : this.type === 'ice' ? 0.62 : 0.28,
+      storminess: this.tuning.weatherStyle === 'pelagic-storm'
+        || this.tuning.oceanClass === 'pelagic-storm' ? 0.9
+        : this.type === 'toxic' ? 0.72 : 0.4,
+      highClouds: this.cloudCoverage > 0.45 ? 0.48 : 0.2,
+      fogginess: this.hasLiquid ? 0.34 : 0.16,
+      windSpeed: 8 + (this.waterStyle?.swell || 0.6) * 13,
+      weatherSpeed: 6,
+      temperatureK: this.equilibriumK || 286,
+    };
+    this.weatherField ||= createWeatherField(this.seed, {
+      profile: this.weatherProfile,
+      fixture: DEV_WEATHER_FIXTURE || undefined,
+    });
+    this.weatherState = advanceWeatherField(this.weatherField, 0);
 
     // materials touched by the fade-in
     this._fades = [{ mat: this.terrainMaterial, base: 1 }];
@@ -310,11 +359,14 @@ export class Planet {
     // mountains/detail keep their first octave at every LOD (fractals cut
     // octaves internally) so the mean elevation never jumps between levels.
     // Ranges cluster into the rugged provinces instead of covering the globe.
-    const mMask = smoothstep(this.mountMaskLo, this.mountMaskHi, c) * (0.12 + 0.88 * belt);
-    if (mMask > 0.002) {
-      const m = this.nB.ridged(x, y, z, this.mountFreq, 6, 0.55, 2.1, maxFreq);
-      h += m * this.mountAmp * mMask;
-    }
+    // Mountain provinces used to exclude 61.7% of the globe and vary their
+    // amplitude by 8.3×, producing isolated "mountain islands" separated by
+    // featureless plains. Broaden the continental foothill mask and keep a
+    // meaningful ruggedness floor so ranges form connected regional chains.
+    const foothills = smoothstep(this.mountMaskLo - 0.18, this.mountMaskHi, c);
+    const mMask = foothills * (0.34 + 0.66 * belt);
+    const m = this.nB.ridged(x, y, z, this.mountFreq, 6, 0.55, 2.1, maxFreq);
+    h += m * this.mountAmp * mMask;
 
     {
       // eroded hillsides: rugged crests, smooth carved flanks —
@@ -383,29 +435,54 @@ export class Planet {
       }
     }
 
-    if (this.craterAmp > 0 && this.craterFreq * 2 <= maxFreq) {
-      h += this.craters(x, y, z, this.craterFreq, this.craterAmp, 0);
-      if (this.craterFreq * 8 <= maxFreq) {
-        h += this.craters(x, y, z, this.craterFreq * 4.7, this.craterAmp * 0.3, 1);
+    if (this.craterAmp > 0) {
+      const craterBlend = frequencyBlend(this.craterFreq * 2, maxFreq);
+      if (craterBlend > 0) {
+        h += this.craters(x, y, z, this.craterFreq, this.craterAmp, 0) * craterBlend;
+      }
+      const craterDetailBlend = frequencyBlend(this.craterFreq * 8, maxFreq);
+      if (craterDetailBlend > 0) {
+        h += this.craters(x, y, z, this.craterFreq * 4.7, this.craterAmp * 0.3, 1)
+          * craterDetailBlend;
       }
     }
 
-    if (this.blobAmp > 0 && this.blobFreq <= maxFreq) {
+    const blobBlend = this.blobAmp > 0 ? frequencyBlend(this.blobFreq, maxFreq) : 0;
+    if (blobBlend > 0) {
       const b = this.nD.billow(x + 31, y, z, this.blobFreq, 4, 0.5, 2.1, maxFreq);
-      h += Math.max(0, b) * this.blobAmp;
+      h += Math.max(0, b) * this.blobAmp * blobBlend;
     }
 
-    if (this.duneAmp > 0 && this.duneFreq <= maxFreq * 1.5) {
+    const duneBlend = this.duneAmp > 0 ? frequencyBlend(this.duneFreq / 1.5, maxFreq) : 0;
+    if (duneBlend > 0) {
       const wob = this.nC.noise(x * 9, y * 9, z * 9) * 2.5;
       const tdt = (x * this.duneAxis.x + y * this.duneAxis.y + z * this.duneAxis.z) * this.duneFreq + wob;
       const flat = 1 - smoothstep(this.hAmp * 0.25, this.hAmp * 0.6, Math.abs(h));
-      h += (1 - Math.abs(Math.sin(tdt))) * this.duneAmp * flat;
+      h += (1 - Math.abs(Math.sin(tdt))) * this.duneAmp * flat * duneBlend;
     }
 
-    if (this.spikeAmp > 0 && this.spikeFreq * 3 <= maxFreq) {
+    const spikeBlend = this.spikeAmp > 0 ? frequencyBlend(this.spikeFreq * 3, maxFreq) : 0;
+    if (spikeBlend > 0) {
       const w = worley3(x * this.spikeFreq, y * this.spikeFreq, z * this.spikeFreq, (this.intSeed ^ 0x51ce) | 0);
       const sp = Math.max(0, 1 - w.d * 1.45);
-      if ((w.h & 7) < 3) h += sp * sp * sp * this.spikeAmp * (0.4 + (w.h % 97) / 97 * 0.6);
+      if ((w.h & 7) < 3) {
+        h += sp * sp * sp * this.spikeAmp * (0.4 + (w.h % 97) / 97 * 0.6) * spikeBlend;
+      }
+    }
+
+    if (this.nOceanBasin && this.hasLiquid && h < this.seaLevel) {
+      // The curated pelagic world is water-dominated but deliberately not a
+      // kilometres-deep featureless bowl. An independent namespace lifts broad
+      // continental shelves while leaving rarer basins/trenches, preserving
+      // the exact shoreline and the small island fraction selected above.
+      const basin = this.nOceanBasin.fbm(
+        x + 18.7, y - 41.2, z + 7.9, 1.35, 4, 0.52, 2.08, maxFreq);
+      const basinWeight = smoothstep(-0.28, 0.48, basin);
+      const baseScale = Number.isFinite(this.tuning.bathymetryScale)
+        ? clamp(this.tuning.bathymetryScale, 0.08, 0.7)
+        : 0.24;
+      const depthScale = lerp(baseScale * 0.55, baseScale * 1.55, basinWeight);
+      h = this.seaLevel - (this.seaLevel - h) * depthScale;
     }
 
     return h;
@@ -584,12 +661,17 @@ export class Planet {
         break;
       }
     }
-    // colors authored in sRGB, shaded in linear
-    const lin = (c) => c && c.convertSRGBToLinear();
-    for (const s of p.land) lin(s.c);
-    if (p.sea) for (const s of p.sea) lin(s.c);
-    if (p.stripes) for (const s of p.stripes) lin(s.c);
-    for (const k of ['forest', 'rock', 'snow', 'blotch', 'crevasse', 'ember']) lin(p[k]);
+    // Colors are authored as sRGB hex and shaded in linear — and that
+    // conversion has ALREADY happened. `col()` is `new THREE.Color(hex)`, and
+    // with THREE.ColorManagement enabled (the r155+ default, and this project
+    // never disables it) the hex constructor decodes sRGB into the linear
+    // working space. `setHSL` in the exotic branch likewise writes linear.
+    // An explicit `convertSRGBToLinear()` here used to run the decode a SECOND
+    // time, crushing every authored colour: sand #b3a478 shaded as #7d6a2e,
+    // and deep sea #050f26 as #00010a — black. That is the arithmetic behind
+    // the "one flat cheap blue ocean" report: with the water body colour at
+    // zero, the only thing left on screen was the shader's constant sky wash.
+    // See docs/optimization-roadmap.md 2.3.
     this.pal = p;
 
     // each world's species tint its forests: a planet covered in purple
@@ -638,7 +720,8 @@ export class Planet {
     };
 
     // liquid & atmosphere colors
-    this.atmoColor = col(this.cfg.atmo).convertSRGBToLinear();
+    // `col()` already decoded sRGB → linear; a second decode was crushing it.
+    this.atmoColor = col(this.cfg.atmo);
     this.skyColor = col(this.cfg.sky);
     switch (this.liquid) {
       case 'water': this.liquidColor = col('#15527e'); this.liquidOpacity = 0.66; break;
@@ -706,21 +789,36 @@ export class Planet {
           roughness: 0.13, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
         });
       }
-      this.liquidMat = mat;
       if (this.liquid === 'water' || this.liquid === 'toxic') mat = applyWaterWaves(mat, this);
-      // seas are a second (flat, morph-less) chunked LOD: a uniform sphere
-      // mesh would sag metres between vertices at 100 km radius
-      const waterCanonicalGrid = 12;
+      this.liquidMat = mat;
+      // A former coplanar blue underlay hid clear-colour fringe, but it also
+      // flattened transmission and could reveal chunk triangles through the
+      // physical surface. The swash overlap in the water vertex shader now
+      // closes the coast itself, so there is deliberately no visual backing.
+      this.waterUnderlayMaterial = null;
+      // Seas are a second morph-less chunked LOD: a uniform sphere mesh would
+      // sag metres between vertices, while mixed cube-sphere levels need short
+      // radial skirts to seal their coarse-chord/fine-arc T junctions.
+      // Geometric swell bottoms out at 146 m wavelength. The former
+      // 24-vertex, level-7 near field left ~460 m cells on the 900 km home
+      // world, so those waves could only exist in the normal shader. Keep at
+      // least five samples across the shortest swell in the closest LOD.
+      const waterCanonicalGrid = 16;
       const lowTierGrouping = this.canonicalGridCells <= 18;
       const waterGroupFactor = lowTierGrouping ? 4 : 2;
       const waterGridCells = waterCanonicalGrid * waterGroupFactor;
       const waterGridCellsAtLevel = () => waterGridCells;
-      const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 8);
+      const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 11);
       this.waterLod = new ChunkedLOD({
-        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: true, noShadow: true,
+        // At the finest ~29 m cells the spherical chord sag is sub-millimetre.
+        // A 2.5 m skirt was vastly larger than the gap and exposed dark walls
+        // whenever the water was translucent. Dense adjacent shells therefore
+        // meet directly; the coast overlap handles the independent land edge.
+        R: this.seaRadius, hAmp: 2, noMorph: true, noSkirt: false, skirtDrop: 0.05,
+        noShadow: true,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
-        maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 1)),
+        maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 0)),
         orbitLevelCap: lowTierGrouping ? 1 : 2,
         orbitPrewarmRadiusRatio: 1.75,
         lodDistanceScale: (waterCanonicalGrid / waterGridCells) * (lowTierGrouping ? 0.25 : 1),
@@ -739,10 +837,11 @@ export class Planet {
         // water knows how deep the terrain lies beneath every vertex —
         // the shader turns that into Beer–Lambert absorption
         bakeDepth: (this.liquid === 'water' || this.liquid === 'toxic')
-          ? (dir) => Math.max(0, this.seaLevel - this.height(dir, 128))
+          ? (dir) => Math.max(0, this.seaLevel - this.height(dir, this.fullMaxFreq))
           : null,
         group: this.group,
         terrainMaterial: mat,
+        underlayMaterial: this.waterUnderlayMaterial,
       });
     }
 
@@ -783,9 +882,35 @@ export class Planet {
     if (coverage > 0.05) {
       this.cloudCoverage = coverage;
       const o1 = [rand() * 7, rand() * 7, rand() * 7];
+      this.cloudOffsets = o1;
+      this.weatherProfile = {
+        cloudiness: clamp(coverage, 0.04, 0.96),
+        humidity: this.hasLiquid ? 0.72 : this.type === 'ice' ? 0.62 : 0.28,
+        storminess: this.tuning.weatherStyle === 'pelagic-storm'
+          || this.tuning.oceanClass === 'pelagic-storm' ? 0.9
+          : this.type === 'toxic' ? 0.72 : 0.4,
+        highClouds: coverage > 0.45 ? 0.48 : 0.2,
+        fogginess: this.hasLiquid ? 0.34 : 0.16,
+        windSpeed: 8 + (this.waterStyle?.swell || 0.6) * 13,
+        weatherSpeed: 6,
+        temperatureK: this.type === 'ice' ? 258 : this.type === 'lava' ? 430 : 286,
+      };
+      this.weatherField = createWeatherField(this.seed, {
+        profile: this.weatherProfile,
+        fixture: DEV_WEATHER_FIXTURE || undefined,
+      });
       // This atlas is the single weather field for orbit, cloud shadows and
       // the local volume. It is planet-local and cannot change with the camera.
-      this.cloudShadowTex = makeCloudTexture(this.nD, coverage, o1);
+      this.cloudShadowTex = makeCloudTexture(this.nD, coverage, o1, this.weatherField);
+      const terrainCloudNode = this.terrainMaterial.userData.cloudShadowTextureNode;
+      if (terrainCloudNode) terrainCloudNode.value = this.cloudShadowTex;
+      const terrainShader = this.terrainMaterial.userData.shader;
+      if (terrainShader?.uniforms.uCloudK) terrainShader.uniforms.uCloudK.value = 0.42;
+      if (this.liquidMat?.userData.waterCloudTexture) {
+        this.liquidMat.userData.waterCloudTexture.value = this.cloudShadowTex;
+      }
+      const waterShader = this.liquidMat?.userData.shader;
+      if (waterShader?.uniforms.uCloudK) waterShader.uniforms.uCloudK.value = 0.72;
       // Keep the weather visibly inside the atmosphere. The old mountain×2
       // base put cloud tops on (or beyond) the atmospheric boundary, producing
       // a white crust around the limb instead of separated ground/cloud/air.
@@ -836,7 +961,7 @@ export class Planet {
           this, band, detailTexture(), this.cloudShadowTex,
           volumetricCloudProfile);
         this.volCloudMat.uniforms.uAmbC.value
-          .copy(this.skyColor.clone().convertSRGBToLinear()).multiplyScalar(0.58);
+          .copy(this.skyColor).multiplyScalar(0.58);
         this.volCloudMesh = new THREE.Mesh(
           new THREE.SphereGeometry(band.rOut, 192, 128), this.volCloudMat);
         this.volCloudMesh.renderOrder = 2;
@@ -902,7 +1027,123 @@ export class Planet {
   setSunDir(dirLocal) {
     this.sunDirWorld.copy(dirLocal);
     this.sunDirLocal.copy(dirLocal).applyQuaternion(this._invFrame);
-    if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(this.sunDirLocal);
+    if (this.atmoMesh) {
+      const uniforms = this.atmoMesh.material.uniforms;
+      (uniforms.sunDir || uniforms.uStellarDirections0)?.value.copy(this.sunDirLocal);
+    }
+    const waterShader = this.liquidMat?.userData.shader;
+    if (waterShader?.uniforms.uSunDir) waterShader.uniforms.uSunDir.value.copy(this.sunDirLocal);
+  }
+
+  setStellarLights(field) {
+    if (!field?.sources?.length) return this.setSunDir(this.sunDirWorld);
+    const ordered = [...field.sources];
+    const dominant = Math.max(0, Math.min(ordered.length - 1, field.dominantIndex ?? 0));
+    if (dominant !== 0) [ordered[0], ordered[dominant]] = [ordered[dominant], ordered[0]];
+    this.stellarLightField = {
+      ...field,
+      sources: ordered.map((source) => ({
+        ...source,
+        worldDirection: new THREE.Vector3().fromArray(source.direction).normalize(),
+        localDirection: new THREE.Vector3().fromArray(source.direction)
+          .applyQuaternion(this._invFrame).normalize(),
+        colorValue: new THREE.Color().fromArray(source.color || [1, 1, 1]),
+      })),
+      dominantIndex: 0,
+    };
+    const primary = this.stellarLightField.sources[0];
+    const secondary = this.stellarLightField.sources[1] || null;
+    this.sunDirWorld.copy(primary.worldDirection);
+    this.sunDirLocal.copy(primary.localDirection);
+    const atmo = this.atmoMesh?.material?.uniforms;
+    if (atmo) {
+      (atmo.uStellarDirections0 || atmo.sunDir)?.value.copy(primary.localDirection);
+      atmo.uStellarRadiance0?.value.copy(primary.colorValue);
+      if (atmo.uStarIrradiance0) atmo.uStarIrradiance0.value = primary.irradianceFraction ?? 1;
+      if (secondary) {
+        atmo.uStellarDirections1?.value.copy(secondary.localDirection);
+        atmo.uStellarRadiance1?.value.copy(secondary.colorValue);
+        if (atmo.uStarIrradiance1) {
+          atmo.uStarIrradiance1.value = secondary.irradianceFraction ?? 0;
+        }
+      } else if (atmo.uStarIrradiance1) {
+        atmo.uStarIrradiance1.value = 0;
+      }
+    }
+    const water = this.liquidMat?.userData.shader?.uniforms;
+    if (water?.uSunDir) water.uSunDir.value.copy(primary.localDirection);
+    if (water?.uSecondarySunDir) {
+      water.uSecondarySunDir.value.copy(secondary?.localDirection || primary.localDirection);
+    }
+    if (water?.uSecondarySunColor) {
+      water.uSecondarySunColor.value.copy(secondary?.colorValue || primary.colorValue);
+    }
+    if (water?.uSecondarySunEnergy) {
+      water.uSecondarySunEnergy.value = secondary?.irradianceFraction ?? 0;
+    }
+    const clouds = this.volCloudMat?.uniforms;
+    if (clouds) {
+      clouds.uStellarDirections0?.value.copy(primary.localDirection);
+      clouds.uStellarRadiance0?.value.copy(primary.colorValue);
+      if (clouds.uStarIrradiance0) {
+        clouds.uStarIrradiance0.value = primary.irradianceFraction ?? 1;
+      }
+      if (secondary) {
+        clouds.uStellarDirections1?.value.copy(secondary.localDirection);
+        clouds.uStellarRadiance1?.value.copy(secondary.colorValue);
+        if (clouds.uStarIrradiance1) {
+          clouds.uStarIrradiance1.value = secondary.irradianceFraction ?? 0;
+        }
+      } else if (clouds.uStarIrradiance1) {
+        clouds.uStarIrradiance1.value = 0;
+      }
+    }
+    return this.stellarLightField;
+  }
+
+  setStellarField(field) {
+    return this.setStellarLights(field);
+  }
+
+  setWeatherTime(hours) {
+    if (!Number.isFinite(hours)) return this.weatherState;
+    this.weatherHours = Number(hours);
+    this.weatherState = advanceWeatherField(this.weatherField, this.weatherHours);
+    const uniforms = this.volCloudMat?.uniforms;
+    if (uniforms?.uWeatherTime) uniforms.uWeatherTime.value = this.weatherHours;
+    return this.weatherState;
+  }
+
+  weatherAt(localDirection, hours = this.weatherHours) {
+    return sampleWeatherField(this.weatherField, localDirection, hours);
+  }
+
+  setWeatherFixture(name = null) {
+    this.weatherField = createWeatherField(this.seed, {
+      profile: this.weatherProfile,
+      fixture: name || undefined,
+    });
+    if (this.cloudShadowTex && this.cloudOffsets) {
+      const previous = this.cloudShadowTex;
+      this.cloudShadowTex = makeCloudTexture(
+        this.nD, this.cloudCoverage || 0.5, this.cloudOffsets, this.weatherField);
+      const terrainNode = this.terrainMaterial.userData.cloudShadowTextureNode;
+      if (terrainNode) terrainNode.value = this.cloudShadowTex;
+      if (this.liquidMat?.userData.waterCloudTexture) {
+        this.liquidMat.userData.waterCloudTexture.value = this.cloudShadowTex;
+      }
+      for (const material of [this.cloudMesh?.material, this.volCloudMat]) {
+        const weatherNode = material?.userData.weatherSystemTextureNode;
+        if (weatherNode) weatherNode.value = this.cloudShadowTex;
+        if (material?.userData) material.userData.weatherSystemTexture = this.cloudShadowTex;
+      }
+      previous.dispose();
+    }
+    return this.setWeatherTime(this.weatherHours);
+  }
+
+  weatherFingerprint(samples = 96) {
+    return weatherFieldFingerprint(this.weatherState, this.weatherHours, samples);
   }
 
   setFrame(orientation) {
@@ -911,7 +1152,26 @@ export class Planet {
     this.group.quaternion.copy(orientation);
     // Re-express the live stellar direction in the rotating body frame.
     this.sunDirLocal.copy(this.sunDirWorld).applyQuaternion(this._invFrame);
-    if (this.atmoMesh) this.atmoMesh.material.uniforms.sunDir.value.copy(this.sunDirLocal);
+    if (this.stellarLightField?.sources) {
+      for (const source of this.stellarLightField.sources) {
+        source.localDirection.copy(source.worldDirection).applyQuaternion(this._invFrame);
+      }
+      this.setStellarLights(this.stellarLightField);
+    } else if (this.atmoMesh) {
+      const uniforms = this.atmoMesh.material.uniforms;
+      (uniforms.uStellarDirections0 || uniforms.sunDir)?.value.copy(this.sunDirLocal);
+    }
+    const waterShader = this.liquidMat?.userData.shader;
+    if (waterShader?.uniforms.uSunDir) waterShader.uniforms.uSunDir.value.copy(this.sunDirLocal);
+  }
+
+  setWaterEnvironment(zenith, horizon, day = 1, sunset = 0) {
+    const uniforms = this.liquidMat?.userData.shader?.uniforms;
+    if (!uniforms?.uSkyZenith) return;
+    uniforms.uSkyZenith.value.copy(zenith);
+    uniforms.uSkyHorizon.value.copy(horizon);
+    uniforms.uDay.value = clamp(day, 0, 1);
+    uniforms.uSunset.value = clamp(sunset, 0, 1);
   }
 
   worldOffsetToLocal(worldOffset, out = new THREE.Vector3()) {
@@ -942,7 +1202,11 @@ export class Planet {
       if (prox <= 0) continue;
       _dir.copy(camLocal).multiplyScalar(1 / camR)
         .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
-      const d = cloudDensityCPU(_dir, b.cov0, b.cov1, b.ox, b.oy, b.oz);
+      const liveWeather = this.weatherAt?.(camLocal.clone().normalize());
+      const d = Math.max(
+        cloudDensityCPU(_dir, b.cov0, b.cov1, b.ox, b.oy, b.oz),
+        liveWeather?.coverage || 0,
+      );
       t = Math.max(t, prox * d * b.opacity);
     }
     return t;
@@ -977,6 +1241,10 @@ export class Planet {
     if (this.waterLod) {
       this.waterLod.focused = focused;
       this.waterLod.update(camLocal, dt);
+      const waterShader = this.liquidMat?.userData.shader;
+      if (waterShader?.uniforms.uCameraLocal) {
+        waterShader.uniforms.uCameraLocal.value.copy(camLocal);
+      }
     }
     if (this.atmoMesh) {
       const au = this.atmoMesh.material.uniforms;
@@ -1006,13 +1274,18 @@ export class Planet {
       this.applyAppear();
     }
     if (this.cloudMesh) {
-      this.cloudSpin += animDt * 0.0045;
+      this.cloudSpin = this.cloudSpinBase
+        + this.weatherHours * (this.weatherField?.windRadiansPerHour || 0.05);
       this.cloudMesh.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
       // keep terrain cloud-shadows tracking the drifting deck
       _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
       const sh = this.terrainMaterial.userData.shader;
       if (sh) sh.uniforms.uCloudMat.value.setFromMatrix4(_m4);
+      const waterShader = this.liquidMat?.userData.shader;
+      if (waterShader?.uniforms.uCloudMat) {
+        waterShader.uniforms.uCloudMat.value.setFromMatrix4(_m4);
+      }
       if (this.volCloudMesh) {
         // High quality uses the raymarched shell as the primary cloud image at
         // every viewing distance. The analytic sphere is strictly a distant-
@@ -1030,7 +1303,7 @@ export class Planet {
         u.uCameraLocal.value.copy(camLocal);
         u.uSpin.value.setFromMatrix4(_m4);
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
-        if (this.sunDirLocal) u.uSunDir.value.copy(this.sunDirLocal);
+        if (u.uWeatherTime) u.uWeatherTime.value = this.weatherHours;
         this.volCloudMesh.visible = e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
         if (this.cloudMesh.material.userData.opacityNodeUniform) {
@@ -1040,7 +1313,8 @@ export class Planet {
       }
     }
     if (this.cloudMesh2) {
-      this.cloudSpin2 += animDt * 0.0028;
+      this.cloudSpin2 = this.cloudSpin2Base
+        + this.weatherHours * (this.weatherField?.windRadiansPerHour || 0.05) * 1.47;
       this.cloudMesh2.quaternion.copy(this.axisQuat)
         .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
       if (this.volCloudMesh) {
@@ -1128,6 +1402,8 @@ export class Planet {
   dispose() {
     this.lod.dispose();
     if (this.waterLod) this.waterLod.dispose();
+    this.liquidMat?.dispose();
+    this.waterUnderlayMaterial?.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
     if (this.cloudShadowTex2) this.cloudShadowTex2.dispose();
     if (this.flora) {
@@ -1162,15 +1438,21 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   }
   const nodes = {
     atmoColor: uniform(color), density: uniform(density),
-    sunDir: uniform(new THREE.Vector3(0, 1, 0)),
+    uStellarDirections0: uniform(new THREE.Vector3(0, 1, 0)),
+    uStellarRadiance0: uniform(new THREE.Color(1, 0.98, 0.94)),
+    uStarIrradiance0: uniform(1),
+    uStellarDirections1: uniform(new THREE.Vector3(0, -1, 0)),
+    uStellarRadiance1: uniform(new THREE.Color(1, 0.98, 0.94)),
+    uStarIrradiance1: uniform(0),
     uCameraLocal: uniform(new THREE.Vector3()),
     uGroundR: uniform(groundR), uAtmoR: uniform(atmoR),
-    tSceneDepth: uniform(null, 'texture'), uDepthReady: uniform(0),
-    uCameraFar: uniform(1.2e11), uVolumeSize: uniform(new THREE.Vector2(1, 1)),
+    tSceneDepth: texture(new THREE.Texture()), uDepthReady: uniform(0),
+    uDepthReversed: uniform(0), uCameraFar: uniform(1.2e11),
+    uVolumeSize: uniform(new THREE.Vector2(1, 1)),
   };
-  // Faithful TSL port of the former 14-step GLSL shell integration. The first
-  // migration replaced this participating medium with a Fresnel outline; that
-  // made the limb opaque neon-blue and removed the soft daylight haze.
+  // Meter-scaled TSL participating medium. The gameplay atmosphere keeps its
+  // broad entry envelope, while optical density falls on physical scale
+  // heights so the visible limb does not inflate a 900 km planet.
   const atmosphere = Fn(() => {
     const origin = nodes.uCameraLocal;
     const ray = positionLocal.sub(origin).normalize();
@@ -1185,43 +1467,80 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     const groundNear = bGround.negate().sub(sqrt(discGround.max(0)));
     const clipsGround = discGround.greaterThan(0).and(groundNear.greaterThan(t0));
     t1.assign(clipsGround.select(groundNear.min(t1), t1));
+    const rawDepth = nodes.tSceneDepth.sample(screenUV).r;
+    const sceneDepth = mix(rawDepth, float(1).sub(rawDepth), nodes.uDepthReversed);
+    const hasSceneDepth = nodes.uDepthReady.greaterThan(0.5)
+      .and(sceneDepth.lessThan(0.999999));
+    const forwardDistance = nodes.uCameraFar.add(1).pow(sceneDepth).sub(1);
+    const forwardCos = positionView.normalize().z.negate().max(0.035);
+    t1.assign(hasSceneDepth.select(t1.min(forwardDistance.div(forwardCos).add(2)), t1));
     const span = t1.sub(t0).max(0);
-    const stepLength = span.div(14);
+    const stepLength = span.div(20);
     const t = t0.add(stepLength.mul(0.5)).toVar();
 
-    const mu = dot(ray, nodes.sunDir.normalize());
-    const rayleighPhase = float(0.05968).mul(float(1).add(mu.mul(mu)));
+    const sun1 = nodes.uStellarDirections0.normalize();
+    const sun2 = nodes.uStellarDirections1.normalize();
+    const mu1 = dot(ray, sun1);
+    const mu2 = dot(ray, sun2);
+    const rayleighPhase1 = float(0.05968).mul(float(1).add(mu1.mul(mu1)));
+    const rayleighPhase2 = float(0.05968).mul(float(1).add(mu2.mul(mu2)));
     const g = float(0.76);
-    const miePhase = float(0.07958).mul(float(1).sub(g.mul(g)))
-      .div(float(1).add(g.mul(g)).sub(g.mul(mu).mul(2)).max(0.04).pow(1.5));
-    const rayleighColor = mix(vec3(0.48, 0.68, 1), nodes.atmoColor.max(vec3(0.015)), 0.58);
+    const miePhase1 = float(0.07958).mul(float(1).sub(g.mul(g)))
+      .div(float(1).add(g.mul(g)).sub(g.mul(mu1).mul(2)).max(0.04).pow(1.5));
+    const miePhase2 = float(0.07958).mul(float(1).sub(g.mul(g)))
+      .div(float(1).add(g.mul(g)).sub(g.mul(mu2).mul(2)).max(0.04).pow(1.5));
+    // RGB coefficients are inverse metres (680/550/440 nm), matching the CPU
+    // reference model. The previous normalized colours were accidentally
+    // multiplied by metre-long ray steps as if they were coefficients; even
+    // a clear vertical column then reached alpha≈1 and blacked out the world.
+    const rayleighBeta = vec3(5.78e-6, 13.56e-6, 33.10e-6)
+      .mul(mix(vec3(1), nodes.atmoColor.max(vec3(0.08)), 0.08));
+    const mieScatterBeta = vec3(4.72e-6, 4.00e-6, 3.34e-6);
+    const mieExtinctionBeta = vec3(5.20e-6, 4.40e-6, 3.68e-6);
     const integrated = vec3(0).toVar();
-    const transmission = float(1).toVar();
-    Loop(14, () => {
+    const transmission = vec3(1).toVar();
+    Loop(20, () => {
       const samplePosition = origin.add(ray.mul(t));
       const radius = samplePosition.length();
-      const height = radius.sub(nodes.uGroundR)
-        .div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
-      const rhoR = exp(height.mul(-6.2)).mul(nodes.density);
-      const rhoM = exp(height.mul(-15)).mul(nodes.density).mul(0.22);
+      const altitude = radius.sub(nodes.uGroundR).max(0);
+      const height = altitude.div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
+      const rhoR = exp(altitude.div(-8000)).mul(nodes.density);
+      const rhoM = exp(altitude.div(-1200)).mul(nodes.density).mul(0.85);
       const radial = samplePosition.div(radius.max(1));
-      const sunMu = dot(radial, nodes.sunDir.normalize());
-      const horizon = nodeSmoothstep(-0.13, 0.055, sunMu);
-      const slant = float(1).div(sunMu.add(0.32).max(0.16));
-      const sunTransmission = exp(rhoR.mul(0.32).add(rhoM.mul(1.4)).mul(slant).negate())
-        .mul(horizon);
-      const scatter = rayleighColor.mul(rhoR).mul(rayleighPhase)
-        .add(vec3(1, 0.93, 0.82).mul(rhoM).mul(miePhase))
-        .mul(sunTransmission.add(nodes.density.mul(float(1).sub(height)).mul(0.075)));
-      const extinction = rhoR.mul(0.58).add(rhoM.mul(1.8)).mul(stepLength)
-        .div(nodes.uAtmoR.sub(nodes.uGroundR).max(1));
-      const alphaStep = float(1).sub(exp(extinction.mul(-0.62)));
-      integrated.addAssign(scatter.mul(transmission).mul(alphaStep).mul(11));
-      transmission.mulAssign(float(1).sub(alphaStep));
+      const sunMu1 = dot(radial, sun1);
+      const sunMu2 = dot(radial, sun2);
+      const horizon1 = nodeSmoothstep(-0.11, 0.035, sunMu1);
+      const horizon2 = nodeSmoothstep(-0.11, 0.035, sunMu2);
+      // Near the horizon the optical air mass rises far faster than 1/cos
+      // with the former +0.28 clamp. This bounded Kasten-like approximation
+      // reaches ~18 air masses at zero elevation, naturally removing blue
+      // light and producing the red/orange golden-hour band.
+      const slant1 = float(1).div(sunMu1.add(0.055).max(0.028));
+      const slant2 = float(1).div(sunMu2.add(0.055).max(0.028));
+      const optical = rayleighBeta.mul(rhoR).add(mieExtinctionBeta.mul(rhoM));
+      const sunOptical = rayleighBeta.mul(rhoR).mul(8000)
+        .add(mieExtinctionBeta.mul(rhoM).mul(1200));
+      const sunTransmission1 = exp(sunOptical.mul(slant1).negate()).mul(horizon1);
+      const sunTransmission2 = exp(sunOptical.mul(slant2).negate()).mul(horizon2);
+      const scatter1 = rayleighBeta.mul(rhoR).mul(rayleighPhase1)
+        .add(mieScatterBeta.mul(rhoM).mul(miePhase1))
+        .mul(sunTransmission1).mul(nodes.uStellarRadiance0).mul(nodes.uStarIrradiance0);
+      const scatter2 = rayleighBeta.mul(rhoR).mul(rayleighPhase2)
+        .add(mieScatterBeta.mul(rhoM).mul(miePhase2))
+        .mul(sunTransmission2).mul(nodes.uStellarRadiance1).mul(nodes.uStarIrradiance1);
+      const multiScatter = nodes.uStellarRadiance0.mul(nodes.uStarIrradiance0).mul(horizon1)
+        .add(nodes.uStellarRadiance1.mul(nodes.uStarIrradiance1).mul(horizon2))
+        .mul(rayleighBeta).mul(rhoR).mul(float(1).sub(height)).mul(0.08);
+      const stepOptical = optical.mul(stepLength);
+      const alphaStep = vec3(1).sub(exp(stepOptical.negate()));
+      integrated.addAssign(scatter1.add(scatter2).add(multiScatter)
+        .mul(transmission).mul(stepLength).mul(2.4));
+      transmission.mulAssign(vec3(1).sub(alphaStep));
       t.addAssign(stepLength);
     });
     const valid = discOuter.greaterThan(0).and(t1.greaterThan(t0));
-    const alpha = valid.select(float(1).sub(transmission).clamp(0, 0.985), float(0));
+    const meanTransmission = dot(transmission, vec3(0.333333));
+    const alpha = valid.select(float(1).sub(meanTransmission).clamp(0, 0.985), float(0));
     return vec4(integrated, alpha);
   })();
   const material = new MeshBasicNodeMaterial({
@@ -1239,7 +1558,7 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   return material;
 }
 
-function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0]) {
+function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0], weatherField = null) {
   const W = 1024, H = 512;
   const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
   if (!canvas) return null;
@@ -1261,10 +1580,24 @@ function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0]) {
         0.55 - coverage * 0.24, 0.86 - coverage * 0.14,
         offsets[0], offsets[1], offsets[2]);
       const erosion = simplex.fbm(cx + 5, cy + 5, cz - 5, 7.5, 4, 0.54, 2.2, 38) * 0.5 + 0.5;
-      v = clamp(v * (0.78 + erosion * 0.32), 0, 1);
+      const weather = weatherField ? sampleWeatherField(weatherField, dir, 0) : null;
+      const weatherCoverage = weather?.coverage || 0;
+      v = clamp(weatherField?.fixture
+        ? weatherCoverage * (0.58 + erosion * 0.42)
+        // The legacy field supplies cellular detail, while the new weather
+        // authority decides where enough moisture exists to sustain it.
+        // Taking max() here made both fields additive and covered nearly the
+        // entire globe even when each field was individually sparse.
+        : v * (0.4 + weatherCoverage * 0.5) * (0.66 + erosion * 0.28)
+          + weatherCoverage * (0.18 + erosion * 0.2), 0, 1);
       const k = (j * W + i) * 4;
-      d[k] = d[k + 1] = d[k + 2] = (v * 255) | 0;
-      d[k + 3] = (v * 255) | 0;
+      // Lo/Hi weather atlas packed for every consumer:
+      // R=coverage/density, G=convective cloud type,
+      // B=high-cloud mask, A=multiple-scattering weight.
+      d[k] = (v * 255) | 0;
+      d[k + 1] = ((weather?.cloudType || 0) * 255) | 0;
+      d[k + 2] = ((weather?.highMask || 0) * 255) | 0;
+      d[k + 3] = ((weather?.multipleScatter ?? v) * 255) | 0;
     }
   }
   ctx.putImageData(img, 0, 0);

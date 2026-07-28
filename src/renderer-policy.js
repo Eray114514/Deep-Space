@@ -2,8 +2,8 @@
 // available as a complete compatibility backend and recovery target.
 
 export const RENDER_PIPELINE_VERSION = 2;
-// Fixed-camera validation compares scene structure and bounded appearance,
-// not exact pixels: the backends use different temporal and AA paths.
+// WebGPU is production-ready. This flag is a routing readiness contract, not
+// a demand that the WebGPU-native atmosphere match the WebGL fallback pixels.
 export const WEBGPU_PARITY_READY = true;
 
 export function resolveRendererPolicy(params = new URLSearchParams(), gpu = globalThis.navigator?.gpu) {

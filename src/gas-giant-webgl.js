@@ -59,7 +59,7 @@ export class GasGiant {
     this.appear = fadeIn ? 0 : 1;
     const ice = type === 'iceGiant';
     this.skyColor = new THREE.Color(ice ? 0x59b7df : 0xd7a071);
-    this.skyColorLin = this.skyColor.clone().convertSRGBToLinear();
+    this.skyColorLin = this.skyColor.clone();   // Color(hex) already decoded to linear
     this.pal = { land: [{ c: this.skyColor.clone().multiplyScalar(0.35) }, { c: this.skyColor.clone() }, { c: this.skyColor.clone().multiplyScalar(0.55) }] };
     this.group = new THREE.Group(); this.group.name = `gas-giant:${name}`;
     this.terrainMaterial = new THREE.MeshStandardMaterial({

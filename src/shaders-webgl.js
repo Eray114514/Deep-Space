@@ -14,6 +14,16 @@ import { surfaceMaterialSlots } from './surface-materials.js';
 // one global clock drives water and wind everywhere
 export const TIME = { value: 0 };
 export function tickShaders(dt) { TIME.value += dt; }
+export const WIND = new THREE.Vector4(1, 0, 0.25, 0);
+export function setWeatherWind(direction = null, strength = 0, gust = 0) {
+  const x = Number(direction?.x) || 0;
+  const z = Number(direction?.z) || 0;
+  const inverse = 1 / Math.max(1e-6, Math.hypot(x, z));
+  WIND.x = x * inverse;
+  WIND.y = z * inverse;
+  WIND.z = THREE.MathUtils.clamp(strength, 0, 2);
+  WIND.w = THREE.MathUtils.clamp(gust, 0, 1);
+}
 
 let _detailTex = null;
 let _detailData = null;   // kept for CPU-side sampling (cloud transit fog)
@@ -476,15 +486,19 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   const tex = detailTexture();
   if (!tex) return;
   material.depthWrite = true;
+  material.polygonOffset = true;
+  material.polygonOffsetFactor = -1;
+  material.polygonOffsetUnits = -2;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDetailTex = { value: tex };
     shader.uniforms.uTime = TIME;
     shader.uniforms.uWaveS = { value: waveScale };
+    shader.uniforms.uSwell = { value: planet?.waterStyle?.swell || 1 };
     const deep = planet && planet.pal && planet.pal.sea
       ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor.clone().convertSRGBToLinear(), 0.4)
       : new THREE.Color(0.02, 0.08, 0.15);
     const shallow = planet
-      ? planet.liquidColor.clone().convertSRGBToLinear().lerp(new THREE.Color(1, 1, 1), 0.3)
+      ? planet.liquidColor.clone().convertSRGBToLinear().lerp(new THREE.Color(0.72, 0.96, 1), 0.28)
       : new THREE.Color(0.4, 0.75, 0.8);
     shader.uniforms.uDeepC = { value: deep };
     shader.uniforms.uShallowC = { value: shallow };
@@ -499,6 +513,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
+        uniform float uSwell;
         attribute vec3 aLocal;
         attribute float aDepth;
         varying vec3 vLocalPos;
@@ -511,10 +526,14 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         vec3 waveUp = normalize(aLocal);
         vec3 waveT = normalize(cross(waveUp, abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 waveB = cross(waveUp, waveT);
-        float macroWave = sin((aLocal.x + aLocal.z) * 0.016 + uTime * 0.82) * 0.26
-          + sin((aLocal.z - aLocal.y * 0.7) * 0.027 - uTime * 1.07) * 0.14
-          + sin((aLocal.x * 0.55 + aLocal.y) * 0.043 + uTime * 1.34) * 0.07;
-        transformed += waveUp * macroWave;
+        float macroWave = (
+          sin((aLocal.x + aLocal.z) * 0.016 + uTime * 0.82) * 2.2
+          + sin((aLocal.z - aLocal.y * 0.7) * 0.027 - uTime * 1.07) * 1.1
+          + sin((aLocal.x * 0.55 + aLocal.y) * 0.043 + uTime * 1.34) * 0.5
+        ) * uSwell;
+        float shoal = smoothstep(0.5, 12.0, aDepth);
+        float shoreOverlap = 3.5;
+        transformed += waveUp * (macroWave * shoal + shoreOverlap);
         vWaveT = normalize(normalMatrix * waveT);
         vWaveB = normalize(normalMatrix * waveB);`);
     shader.fragmentShader = shader.fragmentShader
@@ -537,7 +556,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float ab = 1.0 - exp(-dep * 0.05);          // absorption e-fold ~20 m
           diffuseColor.rgb = mix(uShallowC, uDeepC, ab);
           // shorelines fade in instead of cutting a hard waterline
-          diffuseColor.a *= mix(0.22, 1.0, 1.0 - exp(-dep * 0.12));
+          diffuseColor.a *= mix(0.72, 1.0, 1.0 - exp(-dep * 0.12));
           // Fresnel: at grazing angles the surface turns into a sky mirror
           // (abs() so the DoubleSide underside behaves when submerged)
           float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition))), 5.0);
@@ -580,7 +599,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           normal = normalize(normal + (vWaveT * g.x + vWaveB * g.y) * 0.55);
         }`);
   };
-  material.customProgramCacheKey = () => 'water-tangent-wakes-v3';
+  material.customProgramCacheKey = () => 'water-tangent-wakes-v4';
 }
 
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
@@ -702,6 +721,7 @@ export function applyWindSway(material, amount, foliageLighting = false) {
     shader.uniforms.uTime = TIME;
     shader.uniforms.uGrow = GROW;
     shader.uniforms.uSway = { value: amount };
+    shader.uniforms.uWind = { value: WIND };
     shader.uniforms.uBendPos = { value: surfaceInteraction.positions };
     shader.uniforms.uBendData = { value: surfaceInteraction.data };
     shader.vertexShader = shader.vertexShader
@@ -709,6 +729,7 @@ export function applyWindSway(material, amount, foliageLighting = false) {
         uniform float uTime;
         uniform float uGrow;
         uniform float uSway;
+        uniform vec4 uWind;
         uniform vec4 uBendPos[${SURFACE_INTERACTION_CAP}];
         uniform vec4 uBendData[${SURFACE_INTERACTION_CAP}];`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
@@ -717,9 +738,16 @@ export function applyWindSway(material, amount, foliageLighting = false) {
           transformed *= uGrow;
           vec3 ip = instanceMatrix[3].xyz;
           float ph = ip.x * 0.61 + ip.y * 0.53 + ip.z * 0.47;
-          float k = uSway * max(transformed.y, 0.0);
-          transformed.x += (sin(uTime * 1.6 + ph) + 0.4 * sin(uTime * 3.7 + ph * 1.7)) * k;
-          transformed.z += (cos(uTime * 1.3 + ph * 1.3) + 0.4 * sin(uTime * 2.9 + ph)) * k * 0.7;
+          float k = uSway * max(transformed.y, 0.0) * uWind.z;
+          float gustEnvelope = 1.0 + uWind.w
+            * (0.52 + 0.48 * sin(uTime * 0.23 + ph * 0.11));
+          float along = (0.56 * sin(uTime * 0.82 + ph)
+            + 0.29 * sin(uTime * 1.9 + ph * 1.67)
+            ${foliageLighting ? '+ 0.08 * sin(uTime * 7.6 + ph * 2.31)' : ''}) * gustEnvelope
+            + 0.34 * uWind.z;
+          float across = 0.13 * sin(uTime * 3.4 + ph * 0.73) * gustEnvelope;
+          transformed.x += (uWind.x * along - uWind.y * across) * k;
+          transformed.z += (uWind.y * along + uWind.x * across) * k;
           float pressure = 0.0;
           for (int i = 0; i < ${SURFACE_INTERACTION_CAP}; i++) {
             float d = distance(ip, uBendPos[i].xyz);
@@ -749,5 +777,5 @@ export function applyWindSway(material, amount, foliageLighting = false) {
         #endif`);
     }
   };
-  material.customProgramCacheKey = () => 'wind-sway-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
+  material.customProgramCacheKey = () => 'wind-sway-v3-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
 }

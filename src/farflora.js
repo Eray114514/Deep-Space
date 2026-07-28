@@ -18,6 +18,9 @@ import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
 
+// Temporary subsystem contract: Stage C replaces the proxy-tree architecture.
+export const FAR_FLORA_ENABLED = false;
+
 const rendererParams = typeof location !== 'undefined'
   ? new URLSearchParams(location.search) : new URLSearchParams();
 const rendererSettings = resolveGraphicsSettings({ params: rendererParams });

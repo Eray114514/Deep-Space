@@ -8,6 +8,10 @@ import { hash3i, hashFloat } from './rng.js';
 import { applyWindSway, GROW } from './shaders.js';
 import { buildFlora } from './flora.js';
 
+// Temporary subsystem contract: Stage C replaces the instance architecture.
+// Tests use this explicit flag instead of guessing from an empty mesh table.
+export const SCATTER_ENABLED = false;
+
 // wind strength per prop kind (0 = rigid)
 const SWAY = {
   grass: 0.08, grassNear: 0.09, grassMid: 0.075, grassFar: 0.055,

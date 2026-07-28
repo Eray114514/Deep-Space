@@ -11,6 +11,8 @@ const implementation = await import(useNodeMaterials ? './shaders-node.js' : './
 
 export const TIME = implementation.TIME;
 export const GROW = implementation.GROW;
+export const WIND = implementation.WIND;
+export const setWeatherWind = implementation.setWeatherWind;
 export const tickShaders = implementation.tickShaders;
 export const sampleDetailCPU = implementation.sampleDetailCPU;
 export const detailTexture = implementation.detailTexture;
