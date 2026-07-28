@@ -343,9 +343,17 @@ for (const token of ['uWeatherTime', 'uWeatherPhase', 'uAdvectionTime']) {
   if (cloudSource.includes(token)) consumedUniform(cloudSource, token, 'WebGPU cloud shader');
 }
 consumedUniform(cloudSource, 'uMaxSteps', 'WebGPU cloud shader');
+consumedUniform(cloudSource, 'uLightSteps', 'WebGPU cloud light marcher');
 check(/Loop\([^)]*(?:uMaxSteps|stepCount)|(?:stepCount|activeSteps)[\s\S]{0,160}uMaxSteps/.test(cloudSource),
   'WebGPU cloud raymarch loop uses the adaptive step budget',
   `a reported cloudSteps value is not real unless it changes the shader loop`);
+check(/lightDensityAt/.test(cloudSource)
+    && /Loop\(5[\s\S]{0,4200}lightOpticalDepth/.test(cloudSource)
+    && /phiForward/.test(cloudSource)
+    && /0\.05477226/.test(cloudSource)
+    && !/sunWeather(?:Far)?\s*=/.test(cloudSource),
+  'WebGPU clouds march bounded 3D sun optical depth and phi-fwd diffusion',
+  'two displaced weather-map taps cannot light cloud lobes or dense interiors');
 check(/(?:uWeatherLo|uWeatherHi|weatherLo|weatherHi)/.test(cloudSource)
     || (/\.[rgba]\b/.test(cloudSource)
       && new Set(cloudSource.match(/weather[^;\n]*\.[rgba]\b/g) || []).size >= 2),
@@ -444,6 +452,9 @@ check(/fog:\s*false/.test(cloudSource)
 check(/setCloudStepBudget\s*\([^)]*\)[\s\S]{0,500}uMaxSteps/.test(mainSource),
   'main adaptive cloud budget writes the shader uniform',
   `effectiveCloudSteps must not be a stats-only number`);
+check(/setCloudStepBudget\s*\([^)]*\)[\s\S]{0,800}uLightSteps/.test(mainSource),
+  'main adaptive cloud budget also scales cloud light transport',
+  'automatic quality must reduce bounded light transport before disabling volume clouds');
 check(/nodePipeline\.setVolumeScale\?\.\(/.test(mainSource),
   'main adaptive volume scale targets the render pipeline',
   `adaptive volume resolution must call the concrete GameNodePipeline setter`);

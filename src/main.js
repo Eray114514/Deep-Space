@@ -2695,6 +2695,11 @@ function setCloudStepBudget(steps) {
   for (const planet of universe.planets()) {
     const uniformValue = planet.volCloudMat?.uniforms?.uMaxSteps;
     if (uniformValue) uniformValue.value = effectiveCloudSteps;
+    const lightSteps = planet.volCloudMat?.uniforms?.uLightSteps;
+    if (lightSteps) {
+      lightSteps.value = effectiveCloudSteps >= 44 ? 5
+        : effectiveCloudSteps >= 30 ? 3 : 2;
+    }
   }
 }
 

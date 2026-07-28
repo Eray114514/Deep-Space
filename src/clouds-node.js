@@ -110,6 +110,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     uEngage: uniform(0), uFrame: uniform(0), uWeatherTime: uniform(0),
     uDebugShell: uniform(0),
     uMaxSteps: uniform(quality === 'performance' || quality === 'low' ? 24 : 56),
+    uLightSteps: uniform(quality === 'performance' || quality === 'low' ? 2 : 5),
     uQuality: uniform(quality === 'performance' || quality === 'low' ? 0 : 1),
   };
   const weatherUV = (d) => vec2(
@@ -118,6 +119,43 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
   );
   const weatherLoTextureNode = texture(weatherLoMap);
   const weatherHiTextureNode = texture(weatherHiMap);
+  // A deliberately cheaper density evaluation for the sun ray. It preserves
+  // the same weather ownership and vertical families as the view ray while
+  // using one 3D lookup instead of the full erosion cascade. This makes real
+  // self-shadowing affordable at every occupied view-ray sample.
+  const lightDensityAt = (samplePosition) => {
+    const radius = samplePosition.length();
+    const direction = samplePosition.div(radius.max(1));
+    const weatherDirection = nodes.uSpin.mul(direction);
+    const height = radius.sub(nodes.uRin)
+      .div(nodes.uRout.sub(nodes.uRin).max(1)).clamp(0, 1);
+    const lo = weatherLoTextureNode.sample(weatherUV(weatherDirection));
+    const hi = weatherHiTextureNode.sample(weatherUV(weatherDirection));
+    const formationThreshold = mix(0.36, 0.22, lo.g);
+    const coverage = smoothstep(formationThreshold,
+      formationThreshold.add(0.42), lo.r);
+    const lowTop = mix(0.34, 0.78, lo.g).add(hi.b.mul(0.16)).clamp(0.3, 0.94);
+    const lowEnvelope = smoothstep(0.018, 0.075, height)
+      .mul(smoothstep(lowTop, lowTop.sub(0.2), height))
+      .max(smoothstep(0.012, 0.052, height)
+        .mul(smoothstep(0.47, 0.32, height)).mul(lo.b));
+    const highEnvelope = smoothstep(0.28, 0.4, height)
+      .mul(smoothstep(0.99, 0.82, height)).mul(hi.r)
+      .mul(float(0.34).add(hi.g.mul(0.34)).add(hi.b.mul(0.32)));
+    const advectedPosition = nodes.uSpin.mul(samplePosition)
+      .mul(1 / 42000)
+      .add(vec3(
+        nodes.uWeatherTime.mul(0.011),
+        nodes.uWeatherTime.mul(-0.0036),
+        nodes.uWeatherTime.mul(0.0074),
+      ))
+      .add(vec3(height.mul(0.37), height.mul(1.4), height.mul(0.23)));
+    const body = texture3D(cloudNoiseTexture(), advectedPosition).r;
+    return coverage.mul(lowEnvelope.max(highEnvelope))
+      .mul(float(0.24).add(body.mul(0.94)))
+      .mul(float(0.74).add(lo.a.mul(0.3)))
+      .clamp(0, 1);
+  };
   const volume = Fn(() => {
     const origin = nodes.uCameraLocal;
     const ray = positionLocal.sub(origin).normalize();
@@ -289,13 +327,56 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
           .clamp(0, 1), 1.18);
         const primaryDir = nodes.uStellarDirections0.normalize();
         const secondaryDir = nodes.uStellarDirections1.normalize();
-        const sunWeather = weatherLoTextureNode.sample(weatherUV(
-          weatherDirection.add(primaryDir.mul(0.012)).normalize())).r;
-        const sunWeatherFar = weatherLoTextureNode.sample(weatherUV(
-          weatherDirection.add(primaryDir.mul(0.035)).normalize())).r;
-        const opticalDepth = sunWeather.add(sunWeatherFar.mul(0.62))
-          .mul(float(0.7).add(density.mul(1.45)));
-        const selfShadow = exp(opticalDepth.mul(-1.42)).clamp(0.08, 1);
+        // HPVolumeCloud-inspired cone light march. Five geometrically growing
+        // segments cover the useful cloud-internal light path. Direct light
+        // uses Beer extinction; the additive phi_fwd term uses the much slower
+        // diffusion attenuation sqrt(3 * (1 - omega0)), omega0 = 0.999.
+        // Consequently thin edges retain directional silver lining while an
+        // optically thick core receives soft, isotropic internal illumination.
+        const lightB = dot(samplePosition, primaryDir);
+        const lightDisc = lightB.mul(lightB).sub(dot(samplePosition, samplePosition))
+          .add(nodes.uRout.mul(nodes.uRout));
+        const lightExit = lightB.negate().add(sqrt(lightDisc.max(0))).max(0);
+        const lightCover = lightExit.min(thickness.mul(0.9)).min(12000);
+        const lightDenom = pow(2, nodes.uLightSteps).sub(1).max(1);
+        const lightOpticalDepth = float(0).toVar();
+        const lightKappaDepth = float(0).toVar();
+        const sourceSurvival = float(1).toVar();
+        const phiForward = float(0).toVar();
+        Loop(5, ({ i: lightIndex }) => {
+          If(lightIndex.lessThan(nodes.uLightSteps), () => {
+            const ratioPower = pow(2, float(lightIndex));
+            const lightStep = lightCover.mul(ratioPower).div(lightDenom);
+            const lightStart = lightCover.mul(ratioPower.sub(1)).div(lightDenom);
+            const lightDistance = lightStart.add(lightStep.mul(0.5));
+            const lightPosition = samplePosition.add(primaryDir.mul(lightDistance));
+            const lightDensity = lightDensityAt(lightPosition);
+            const localOpticalDepth = lightDensity.mul(lightStep).div(thickness)
+              .mul(float(3.4).add(convective.mul(1.8))
+                .add(stratusMask.mul(humidity).mul(0.65)));
+            const centerOpticalDepth = lightOpticalDepth
+              .add(localOpticalDepth.mul(0.5));
+            const kappaStep = localOpticalDepth.mul(0.05477226);
+            const kappaToCenter = lightKappaDepth.add(kappaStep.mul(0.5));
+            const multipleScatterBuild = float(1)
+              .sub(exp(centerOpticalDepth.mul(-1.35)));
+            const inverseRadiusWeight = lightStep
+              .div(lightDistance.add(lightStep.mul(0.5)).max(1));
+            phiForward.addAssign(sourceSurvival
+              .mul(localOpticalDepth).mul(lightDensity)
+              .mul(multipleScatterBuild)
+              .mul(exp(kappaToCenter.negate()))
+              .mul(inverseRadiusWeight));
+            lightOpticalDepth.addAssign(localOpticalDepth);
+            lightKappaDepth.addAssign(kappaStep);
+            // Only true absorption removes energy from the diffuse field.
+            sourceSurvival.mulAssign(exp(localOpticalDepth.mul(-0.001)));
+          });
+        });
+        const selfShadow = exp(lightOpticalDepth.mul(-1.08)).clamp(0.025, 1);
+        const diffuseField = float(1).sub(exp(phiForward.mul(-5.6)))
+          .mul(multipleScatter)
+          .mul(smoothstep(0.045, 0.32, density));
         const day0 = smoothstep(-0.16, 0.24, dot(direction, primaryDir));
         const day1 = smoothstep(-0.16, 0.24, dot(direction, secondaryDir));
         // Dual-lobe Henyey-Greenstein plus Beer-powder lighting preserves the
@@ -321,8 +402,11 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
           .add(nodes.uStellarRadiance1.mul(direct1))
           .div(direct0.add(direct1).max(0.001));
         const internalLight = nodes.uAmbC.mul(float(0.64)
-          .add(multipleScatter.mul(0.48)).add(powder.mul(0.18)));
+          .add(multipleScatter.mul(0.28)).add(powder.mul(0.14)));
+        const diffuseSun = nodes.uStellarRadiance0
+          .mul(diffuseField).mul(day0).mul(0.92);
         const cloudColor = internalLight.add(stellarColor.mul(directLight))
+          .add(diffuseSun)
           .mul(nodes.uTint).mul(heightLight);
         const extinctionStrength = float(3.4).add(convective.mul(1.8))
           .add(stratusMask.mul(humidity).mul(0.65));
