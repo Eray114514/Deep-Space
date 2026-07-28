@@ -2,7 +2,7 @@ import { clamp, smoothstep } from './noise.js';
 
 export function createEnvironmentState() {
   return {
-    atmosphere: 0, cameraHeight: Infinity, solarElevation: 1,
+    atmosphere: 0, gameplayAtmosphere: 0, cameraHeight: Infinity, solarElevation: 1,
     directTransmittance: 1, skyIrradiance: 0, opticalDepth: 0,
     aerialPerspective: 0, cloudDensity: 0, underwater: false,
     day: 1, eclipse: 0, sunset: 0, exposure: 1.05,
@@ -15,7 +15,17 @@ export function updateEnvironmentState(state, {
 } = {}) {
   const heightK = atmosphereHeight > 0
     ? clamp(cameraHeight / atmosphereHeight, 0, 1.5) : 1.5;
-  const atmosphere = (1 - smoothstep(0.02, 1.08, heightK)) * atmosphereDensity;
+  // Flight handling may deliberately begin across the broad authored shell,
+  // but visible sky radiance follows the physical gas column above the
+  // camera. Tying both to atmoHeight made a 90–120 km gameplay envelope paint
+  // the entire background blue while the camera was still far above clouds.
+  const gameplayAtmosphere = (1 - smoothstep(0.02, 1.08, heightK))
+    * atmosphereDensity;
+  const altitude = Math.max(0, cameraHeight);
+  const rayleighColumn = Math.exp(-altitude / 8000);
+  const mieColumn = Math.exp(-altitude / 1200);
+  const atmosphere = clamp((rayleighColumn * 0.84 + mieColumn * 0.16)
+    * atmosphereDensity, 0, 1.5);
   const tangentBoost = 1 + 3.5 * (1 - Math.abs(clamp(solarElevation, -1, 1)));
   const opticalDepth = atmosphere * tangentBoost;
   const directTransmittance = Math.exp(-opticalDepth * 0.34) * (1 - eclipse * 0.92);
@@ -27,7 +37,7 @@ export function updateEnvironmentState(state, {
   const adapt = 1 - Math.exp(-Math.max(0, dt) * (targetExposure > state.exposure ? 0.8 : 0.45));
 
   Object.assign(state, {
-    atmosphere, cameraHeight, solarElevation, directTransmittance,
+    atmosphere, gameplayAtmosphere, cameraHeight, solarElevation, directTransmittance,
     skyIrradiance, opticalDepth, aerialPerspective: 1 - Math.exp(-opticalDepth * 0.22),
     cloudDensity, underwater, day, eclipse, sunset,
     exposure: state.exposure + (targetExposure - state.exposure) * adapt,

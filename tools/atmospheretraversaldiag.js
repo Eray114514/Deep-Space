@@ -54,6 +54,7 @@ try {
       console.log(fixture, altitudeKm, JSON.stringify({
         actualAltitude: state.stats.alt,
         atmosphere: state.stats.environment.atmosphere,
+        gameplayAtmosphere: state.stats.environment.gameplayAtmosphere,
         cloudDensity: state.stats.environment.cloudDensity,
         depthReady: state.volume.depthReady,
         depthReversed: state.volume.depthReversed,
