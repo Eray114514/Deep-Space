@@ -13,11 +13,14 @@ assert.equal(galaxy.id, ACTIVE_GALAXY_ID);
 assert.equal(galaxy.seed, 'MILKY-038', 'release Milky Way must use the visually reviewed finite seed');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
-}), {}, 'the new finite universe must not inherit NAVEMI-382 body tuning');
+}), { radiusMeters: 900000 }, 'the curated home radius is an explicit authored tuning');
+assert.deepEqual(resolveBodyTuning({
+  galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0-moon-0',
+}), { orbitRadiusMeters: 3200000 }, 'the home moon remains outside the enlarged planet');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
   worldLabParams: new URLSearchParams('system=0,0,0&body=planet-0&sea=-610&clouds=0.58'),
-}), { seaLevelOffset: -610, cloudCoverage: 0.58 });
+}), { radiusMeters: 900000, seaLevelOffset: -610, cloudCoverage: 0.58 });
 
 const catalog = new GalaxyCatalog(galaxy.seed);
 const homeRecord = catalog.getSystem(HOME_SYSTEM_ID);

@@ -5,8 +5,8 @@
 import * as THREE from 'three';
 import { Planet, TYPES } from '../src/planet.js';
 import { flushChunkQueue, pendingChunks } from '../src/quadtree.js';
-import { Scatter, capFor } from '../src/scatter.js';
-import { FarFlora } from '../src/farflora.js';
+import { Scatter, capFor, SCATTER_ENABLED } from '../src/scatter.js';
+import { FarFlora, FAR_FLORA_ENABLED } from '../src/farflora.js';
 
 const dir = new THREE.Vector3();
 const col = new THREE.Color();
@@ -76,6 +76,12 @@ for (const type of Object.keys(TYPES)) {
 
   // exercise the subdivision + build queue around a surface point
   // (the tree deepens one level per update, so iterate past convergence)
+  // This is a topology/morph smoke test, not a benchmark of every authored
+  // near-ground octave. Capping the isolated Node-side fixture avoids building
+  // hundreds of 64×64 chunks for all eight planet types; browser Stage A owns
+  // the real 1.35 m surface path.
+  p.lod.planet.maxLevel = Math.min(p.lod.planet.maxLevel, 3);
+  if (p.waterLod) p.waterLod.planet.maxLevel = Math.min(p.waterLod.planet.maxLevel, 3);
   const cam = p.scenicDir().multiplyScalar(p.R + 50);
   const t1 = performance.now();
   let maxInfSeen = 0;
@@ -93,7 +99,7 @@ for (const type of Object.keys(TYPES)) {
   // converge-or-timeout: LOD prefetch builds ~40% more chunks near the
   // surface, so heavy worlds need more passes — but exit as soon as the
   // queue drains and every morph has relaxed
-  for (let it = 0; it < 240; it++) {
+  for (let it = 0; it < 100; it++) {
     p.lod.update(cam, 0.05);
     if (p.waterLod) p.waterLod.update(cam, 0.05);
     flushChunkQueue(400);
@@ -130,7 +136,7 @@ for (const type of Object.keys(TYPES)) {
   // props must be planet-fixed: WALK the camera through dense vegetation
   // across many rebuilds — every prop in the shared interior must persist
   // bit-identically at every single rebuild (this has been broken twice)
-  if (type === 'lush') {
+  if (type === 'lush' && SCATTER_ENABLED && FAR_FLORA_ENABLED) {
     const scatter = new Scatter({ streamBudgetMs: Infinity });
     const m4 = new THREE.Matrix4();
     const grab = () => {
@@ -227,6 +233,8 @@ for (const type of Object.keys(TYPES)) {
     check(fa.counts[0] === fb.counts[0] && fa.counts[1] === fb.counts[1] && fa.sig === fb.sig,
       `${type}: far flora not deterministic (${fa.counts} vs ${fb.counts})`);
     console.log(`         far flora: ${fa.counts[0]}+${fa.counts[1]} proxy trees in reach`);
+  } else if (type === 'lush') {
+    console.log('         flora: intentionally disabled until Stage C rebuild');
   }
   let leafTris = 0;
   for (const r of p.lod.roots) {

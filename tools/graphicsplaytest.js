@@ -87,13 +87,15 @@ try {
     const wade = await page.evaluate((index) => NMS.setWade(index, { depth: 0.9 }), waterPlanet);
     assert.ok(wade && wade.actualDepth > 0.35 && wade.actualDepth < 2.3,
       'fixed shallow-water fixture reaches a walkable depth');
-    await page.keyboard.down('KeyW');
+    // setWade faces the beach for the visual fixture; step backward to remain
+    // in the solved shallows instead of immediately walking onto dry land.
+    await page.keyboard.down('KeyS');
     await page.waitForTimeout(650);
-    await page.keyboard.up('KeyW');
+    await page.keyboard.up('KeyS');
     await page.waitForTimeout(150);
     const wading = await page.evaluate(() => NMS.stats());
     assert.ok(wading.waterInteractions > 0 && wading.waterContact > 0,
-      'wading footsteps inject water ripples');
+      `wading footsteps inject water ripples: ${JSON.stringify(wading)}`);
     await page.screenshot({ path: `${out}/water-wading.png` });
   }
 
@@ -108,7 +110,6 @@ try {
   assert.equal(await page.locator('#graphics-settings-panel').evaluate((element) => element.classList.contains('hidden')), false);
   await page.evaluate(() => {
     document.querySelector('input[name="graphics-quality"][value="balanced"]').checked = true;
-    document.querySelector('input[name="graphics-renderer"][value="webgl"]').checked = true;
   });
   const applied = await page.evaluate(() => {
     document.querySelector('#graphics-settings-apply').click();
@@ -118,7 +119,7 @@ try {
     };
   });
   const saved = applied.saved;
-  assert.deepEqual(saved, { version: 1, quality: 'balanced', renderer: 'webgl' });
+  assert.deepEqual(saved, { version: 1, quality: 'balanced', renderer: 'auto' });
   assert.equal(applied.maskVisible, true);
 
   assert.deepEqual(errors, [], errors.join('\n'));
