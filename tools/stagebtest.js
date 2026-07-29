@@ -381,7 +381,8 @@ check(/stratocumulusProfile/.test(cloudSource)
   'WebGPU cloud volume renders the extended low/mid/high genus set',
   'cloud family names are insufficient unless each family owns a distinct density profile');
 check(/rayJitter/.test(cloudSource) && /uVolumeSize/.test(cloudSource)
-    && /weatherPosition\.mul\(1\s*\/\s*42000\)/.test(cloudSource),
+    && /weatherPosition\.mul\(1\s*\/\s*18000\)/.test(cloudSource)
+    && /weatherPosition\.mul\(1\s*\/\s*5200\)/.test(cloudSource),
   'cloud traversal uses metre-scaled detail and interleaved ray jitter',
   'unit-sphere noise and fixed midpoint samples create kilometre-wide lobes and white brush bands');
 check(/phaseForward/.test(cloudSource) && /phaseBack/.test(cloudSource)
