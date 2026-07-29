@@ -410,6 +410,10 @@ let effectiveVolumeScale = VOLUME_SCALE;
 const PROFILE_CLOUD_STEPS = BOOT_USE_WEBGPU
   ? QUALITY_PROFILE.cloudStepsWebGPU : QUALITY_PROFILE.cloudSteps;
 let effectiveCloudSteps = PROFILE_CLOUD_STEPS;
+let effectiveCloudLightSteps = PROFILE_CLOUD_STEPS >= 44 ? 5
+  : PROFILE_CLOUD_STEPS >= 30 ? 3 : 2;
+let effectiveAtmosphereSteps = 20;
+let localVolumeBudgetKey = '';
 let effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz;
 let effectiveShadowDistance = QUALITY_PROFILE.shadowDistance;
 setVolumetricCloudsEnabled(VOLUME_ENABLED, {
@@ -2718,31 +2722,111 @@ function setShadowDistance(distance) {
   sunShadow.shadow.camera.updateProjectionMatrix();
 }
 
-function setCloudStepBudget(steps) {
+function setCloudStepBudget(steps, requestedLightSteps = null) {
   effectiveCloudSteps = Math.max(BOOT_USE_WEBGPU ? 8 : 24, Math.round(steps));
+  effectiveCloudLightSteps = requestedLightSteps == null
+    ? (effectiveCloudSteps >= 44 ? 5 : effectiveCloudSteps >= 30 ? 3 : 2)
+    : clamp(Math.round(requestedLightSteps), 0, 5);
   for (const planet of universe.planets()) {
     const uniformValue = planet.volCloudMat?.uniforms?.uMaxSteps;
     if (uniformValue) uniformValue.value = effectiveCloudSteps;
     const lightSteps = planet.volCloudMat?.uniforms?.uLightSteps;
-    if (lightSteps) {
-      lightSteps.value = effectiveCloudSteps >= 44 ? 5
-        : effectiveCloudSteps >= 30 ? 3 : 2;
-    }
+    if (lightSteps) lightSteps.value = effectiveCloudLightSteps;
   }
+}
+
+function setAtmosphereStepBudget(steps) {
+  effectiveAtmosphereSteps = clamp(Math.round(steps), 8, 20);
+  for (const planet of universe.planets()) {
+    const uniformValue = planet.atmoMesh?.material?.uniforms?.uMaxSteps;
+    if (uniformValue) uniformValue.value = effectiveAtmosphereSteps;
+  }
+}
+
+function applyLocalVolumeBudget(force = false) {
+  if (!BOOT_USE_WEBGPU || !nearest || !Number.isFinite(nearestAlt)) return;
+  const cloudBand = nearest.volCloudMat?.userData?.band;
+  const cloudBase = cloudBand ? cloudBand.rIn - nearest.R : 1200;
+  const cloudTop = cloudBand ? cloudBand.rOut - nearest.R : 15000;
+  const distanceToCloud = nearestAlt < cloudBase
+    ? cloudBase - nearestAlt
+    : nearestAlt > cloudTop ? nearestAlt - cloudTop : 0;
+  let tier;
+  if (nearestAlt > Math.max(60000, nearest.atmoHeight * 0.52)) tier = 'orbit';
+  else if (distanceToCloud > 22000) tier = 'approach';
+  else tier = 'cloud';
+
+  const qualityRatio = clamp(PROFILE_CLOUD_STEPS / 56, 0.5, 1);
+  const drawingPixels = Math.max(1,
+    window.innerWidth * renderDpr * window.innerHeight * renderDpr);
+  // Budget actual volume pixels, not just a dimensionless scale. Ultra on a
+  // 2K panel renders the opaque world at 3200x1800; blindly applying the same
+  // scale as 1080p more than doubles atmosphere/cloud fragments.
+  const scaleForPixels = (pixelBudget) => Math.sqrt(pixelBudget / drawingPixels);
+  const budget = tier === 'orbit'
+    ? {
+      scale: Math.min(VOLUME_SCALE, 0.46, scaleForPixels(1150000)),
+      // The physical cloud mesh is not rendered in orbit. Keep a valid
+      // compile-time floor in the uniform, but spend no light samples.
+      cloudSteps: 16,
+      lightSteps: 0,
+      atmosphereSteps: 8,
+    }
+    : tier === 'approach'
+      ? {
+        scale: Math.min(VOLUME_SCALE, 0.52, scaleForPixels(1450000)),
+        cloudSteps: Math.max(18, Math.round(22 * qualityRatio)),
+        lightSteps: 0,
+        atmosphereSteps: 11,
+      }
+      : {
+        scale: Math.min(VOLUME_SCALE, 0.56, scaleForPixels(1800000)),
+        cloudSteps: Math.max(24, Math.round(30 * qualityRatio)),
+        lightSteps: 1,
+        atmosphereSteps: 14,
+      };
+  const adaptiveScale = tier === 'orbit'
+    ? adaptiveStage >= 2 ? 0.68 : adaptiveStage >= 1 ? 0.82 : 1
+    : adaptiveStage >= 1 ? 0.78 : 1;
+  const adaptiveSteps = tier === 'orbit'
+    ? 1
+    : adaptiveStage >= 2 ? 0.78 : 1;
+  const targetScale = budget.scale * adaptiveScale;
+  const targetCloudSteps = Math.max(16, Math.round(budget.cloudSteps * adaptiveSteps));
+  const key = [
+    tier,
+    targetScale.toFixed(3),
+    targetCloudSteps,
+    budget.lightSteps,
+    budget.atmosphereSteps,
+  ].join(':');
+  if (!force && key === localVolumeBudgetKey) return;
+  localVolumeBudgetKey = key;
+  effectiveVolumeScale = targetScale;
+  nodePipeline.setVolumeScale?.(effectiveVolumeScale);
+  sizePost();
+  setCloudStepBudget(targetCloudSteps, budget.lightSteps);
+  setAtmosphereStepBudget(budget.atmosphereSteps);
 }
 
 function applyAdaptiveStage(stage) {
   adaptiveStage = clamp(Math.round(stage), 0, 7);
-  effectiveVolumeScale = VOLUME_SCALE * (adaptiveStage >= 1 ? 0.78 : 1);
-  nodePipeline.setVolumeScale?.(effectiveVolumeScale);
-  sizePost();
-  setCloudStepBudget(PROFILE_CLOUD_STEPS * (adaptiveStage >= 2 ? 0.72 : 1));
+  applyLocalVolumeBudget(true);
   effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz
     * (adaptiveStage >= 3 ? 0.5 : 1);
   scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * (adaptiveStage >= 4 ? 0.72 : 1));
   setShadowDistance(QUALITY_PROFILE.shadowDistance * (adaptiveStage >= 5 ? 0.65 : 1));
   farFlora.setDisplayDensity(adaptiveStage >= 6 ? 0.68 : 1);
-  if (adaptiveStage < 7) setRenderDpr(Math.max(renderDpr, QUALITY_PROFILE.dprTarget));
+  const volumeTier = localVolumeBudgetKey.split(':')[0];
+  if (volumeTier === 'orbit' && adaptiveStage >= 3) {
+    // Orbit has no grass/far-flora/cloud raymarch to shed. Move directly to
+    // its real cost owner (full-resolution pixels) instead of burning four
+    // ineffective adaptation intervals.
+    setRenderDpr(QUALITY_PROFILE.dprTarget
+      - Math.min(0.14, 0.07 + (adaptiveStage - 3) * 0.035));
+  } else if (adaptiveStage < 7) {
+    setRenderDpr(Math.max(renderDpr, QUALITY_PROFILE.dprTarget));
+  }
 }
 
 function frame() {
@@ -3332,6 +3416,10 @@ function frame() {
     }
   }
   if (volumePass) {
+    // Allocate samples from projected cloud detail before rendering the frame.
+    // Orbit never pays close-flight cone-march cost, while entering the cloud
+    // layer raises spatial and light-transport fidelity deterministically.
+    applyLocalVolumeBudget();
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     const previousVolumePlanet = volumePass.activePlanet;
     volumePass.setActivePlanet(nearest?.isGasGiant || nearest?.type === 'artificialHabitat' ? null : nearest, nav.pos, motion);
@@ -3356,9 +3444,17 @@ function frame() {
   if (statAcc > 0.5) {
     statAcc = 0;
     const info = { calls: latestRenderCalls, triangles: latestRenderTriangles };
-    let chunks = 0;
-    for (const p of universe.planets()) chunks += p.lod.countChunks();
-    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${chunks} chunks · ${pendingChunks()} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
+    let terrainChunks = 0, waterChunks = 0;
+    let terrainPending = 0, waterPending = 0;
+    for (const p of universe.planets()) {
+      terrainChunks += p.lod.countChunks();
+      terrainPending += pendingChunks(p.lod);
+      if (p.waterLod) {
+        waterChunks += p.waterLod.countChunks();
+        waterPending += pendingChunks(p.waterLod);
+      }
+    }
+    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${terrainChunks}/${waterChunks} terrain/water · ${terrainPending}/${waterPending} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
   }
 
   // Slow adaptation avoids reallocating render targets during momentary LOD
@@ -3368,7 +3464,10 @@ function frame() {
   dprAcc += dt;
   const targetFrameMs = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.2;
   const adaptInterval = perfEmaMs > targetFrameMs * 1.35 ? 1.2 : 3.5;
-  const adaptiveReady = loadingCleared && pendingChunks() === 0
+  const terrainVisualReady = !nearest
+    || ((nearest.lod?.debugStats?.().activeMorphs || 0) === 0
+      && (nearest.waterLod?.debugStats?.().activeMorphs || 0) === 0);
+  const adaptiveReady = loadingCleared && terrainVisualReady
     && (!FARFLORA || farFlora.pending() === 0);
   if (!adaptiveReady) adaptiveStableSince = performance.now();
   if (dprAcc > adaptInterval && !FREEZE && !adaptiveQualityLocked && adaptiveReady
@@ -3638,10 +3737,20 @@ window.NMS = {
       && frameNo - lastBuildFrame > 8;
   },
   stats() {
-    let chunks = 0;
-    for (const p of universe.planets()) chunks += p.lod.countChunks();
+    let terrainChunks = 0, waterChunks = 0;
+    let terrainPending = 0, waterPending = 0;
+    for (const p of universe.planets()) {
+      terrainChunks += p.lod.countChunks();
+      terrainPending += pendingChunks(p.lod);
+      if (p.waterLod) {
+        waterChunks += p.waterLod.countChunks();
+        waterPending += pendingChunks(p.waterLod);
+      }
+    }
     return {
-      frame: frameNo, calls: latestRenderCalls, tris: latestRenderTriangles, chunks,
+      frame: frameNo, calls: latestRenderCalls, tris: latestRenderTriangles,
+      chunks: terrainChunks + waterChunks,
+      terrainChunks, waterChunks, terrainPending, waterPending,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
@@ -3661,6 +3770,9 @@ window.NMS = {
       qualityAutomatic: QUALITY_PROFILE.automatic,
       volumeScale: effectiveVolumeScale,
       cloudSteps: effectiveCloudSteps,
+      cloudLightSteps: effectiveCloudLightSteps,
+      atmosphereSteps: effectiveAtmosphereSteps,
+      localVolumeBudget: localVolumeBudgetKey,
       shadowMap: SHADOW_MAP,
       shadowDistance: effectiveShadowDistance,
       waterInteractionSize: QUALITY_PROFILE.waterInteractionSize,
