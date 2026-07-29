@@ -123,6 +123,29 @@ function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
   _ss.slope = Math.max(0, 1 - outNrm.dot(dir));
 }
 
+function setInterleavedAttributes(geometry, count, definitions) {
+  const active = definitions.filter((definition) => definition.array);
+  const stride = active.reduce((sum, definition) => sum + definition.itemSize, 0);
+  const packed = new Float32Array(count * stride);
+  for (let vertex = 0; vertex < count; vertex++) {
+    let targetOffset = vertex * stride;
+    for (const definition of active) {
+      const sourceOffset = vertex * definition.itemSize;
+      for (let component = 0; component < definition.itemSize; component++) {
+        packed[targetOffset++] = definition.array[sourceOffset + component];
+      }
+    }
+  }
+  const interleaved = new THREE.InterleavedBuffer(packed, stride);
+  let attributeOffset = 0;
+  for (const definition of active) {
+    geometry.setAttribute(definition.name, new THREE.InterleavedBufferAttribute(
+      interleaved, definition.itemSize, attributeOffset, false,
+    ));
+    attributeOffset += definition.itemSize;
+  }
+}
+
 // ---- global build scheduler -------------------------------------------------
 const buildQueue = [];
 let activeBuildJob = null;
@@ -262,9 +285,14 @@ export class ChunkedLOD {
     // Refining beyond the authored orbit cap only rebuilt imperceptible
     // frequencies while the player watched the whole globe change shape.
     // Hysteresis prevents cap churn at the atmosphere/space boundary.
-    if (this._orbitCapped == null) this._orbitCapped = radiusRatio > 1.12;
-    else if (this._orbitCapped && radiusRatio < 1.08) this._orbitCapped = false;
-    else if (!this._orbitCapped && radiusRatio > 1.16) this._orbitCapped = true;
+    // Keep the bounded approach ladder active until the camera is genuinely
+    // close to the surface. Releasing the cap at 72 km on the 900 km homeworld
+    // made the quadtree request every near-ground level at once, so descent
+    // spent minutes refining square patches and produced the reported long
+    // frames. The final ~18 km still receives the unrestricted ground ladder.
+    if (this._orbitCapped == null) this._orbitCapped = radiusRatio > 1.022;
+    else if (this._orbitCapped && radiusRatio < 1.018) this._orbitCapped = false;
+    else if (!this._orbitCapped && radiusRatio > 1.026) this._orbitCapped = true;
     if (this._orbitCapped && Number.isFinite(this.planet.orbitLevelCap)) {
       // "Orbit" spans a full-disk view and a planet-filling 120 km approach;
       // one fixed cap cannot serve both. The old level-4 cap left ~2.7 km
@@ -274,7 +302,7 @@ export class ChunkedLOD {
       // full-disk cap at long range.
       let approachLevels = 0;
       const thresholds = this.planet.orbitApproachLevelThresholds
-        || [1.32, 1.20, 1.12];
+        || [1.20, 1.08, 1.03];
       for (const threshold of thresholds) {
         if (radiusRatio < threshold) approachLevels++;
       }
@@ -313,7 +341,6 @@ export class ChunkedLOD {
     node.morph = v;
     if (node.mesh) {
       node.mesh.userData.lodMorph = v;
-      if (node.mesh.morphTargetInfluences) node.mesh.morphTargetInfluences[0] = v;
     }
   }
 
@@ -582,9 +609,10 @@ export class ChunkedLOD {
     const cellAngle = (Math.PI / 2) / (N * (1 << node.level));
     const maxFreq = p.freqAtLevel(node.level);
     const eps = cellAngle * 0.5;
-    // non-root chunks carry their parent's shape as a morph target, so LOD
-    // transitions can relax between levels instead of popping
-    const hasMorph = node.level > 0 && !p.noMorph;
+    // Non-root chunks carry parent-minus-child deltas in fixed vertex
+    // attributes, so LOD transitions can relax without native morph targets.
+    const supportsMorph = !p.noMorph;
+    const hasMorph = node.level > 0 && supportsMorph;
     const parentFreq = node.level > 0 ? p.freqAtLevel(node.level - 1) : 0;
     const coarseFreq = hasMorph ? parentFreq : 0;
     const parentLocalAttribute = hasMorph
@@ -625,14 +653,17 @@ export class ChunkedLOD {
     // Terrain material semantics must follow the same parent-triangle morph
     // as geometry. Root arrays remain zero; child arrays store parent-minus-
     // child deltas consumed by the shared NodeMaterial.
-    const dLocal = p.pal ? new Float32Array(total * 3) : null;
     const dMat = aMat ? new Float32Array(total * 3) : null;
     const dExtra = aExtra ? new Float32Array(total * 4) : null;
     // water depth beneath each sea-surface vertex (Beer–Lambert absorption)
     const aDepth = p.bakeDepth ? new Float32Array(total) : null;
     const dDepth = aDepth ? new Float32Array(total) : null;
-    const dPos = hasMorph ? new Float32Array(total * 3) : null;
-    const dNrm = hasMorph ? new Float32Array(total * 3) : null;
+    // Keep every chunk sharing this material on one vertex layout. Three's
+    // native morph path uploads per-chunk position/normal targets as WebGPU
+    // storage textures; custom attributes remain ordinary vertex buffers.
+    // Root chunks carry zero deltas, so refinement never changes topology.
+    const dPos = supportsMorph ? new Float32Array(total * 3) : null;
+    const dNrm = supportsMorph ? new Float32Array(total * 3) : null;
     const parentMatAttribute = hasMorph
       ? node.parent?.mesh?.geometry?.getAttribute('aMat') : null;
     const parentExtraAttribute = hasMorph
@@ -766,11 +797,6 @@ export class ChunkedLOD {
           dNrm[idx * 3] = _cN.x - _n.x;
           dNrm[idx * 3 + 1] = _cN.y - _n.y;
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
-          if (dLocal) {
-            dLocal[idx * 3] = _cP.x - _p0.x;
-            dLocal[idx * 3 + 1] = _cP.y - _p0.y;
-            dLocal[idx * 3 + 2] = _cP.z - _p0.z;
-          }
           maxMorphHeightDelta = Math.max(maxMorphHeightDelta,
             Math.abs(_cP.length() - _p0.length()));
         }
@@ -841,11 +867,6 @@ export class ChunkedLOD {
         aExtra[dst * 4] = aExtra[src * 4]; aExtra[dst * 4 + 1] = aExtra[src * 4 + 1];
         aExtra[dst * 4 + 2] = aExtra[src * 4 + 2]; aExtra[dst * 4 + 3] = aExtra[src * 4 + 3];
       }
-      if (dLocal) {
-        dLocal[dst * 3] = dLocal[src * 3];
-        dLocal[dst * 3 + 1] = dLocal[src * 3 + 1];
-        dLocal[dst * 3 + 2] = dLocal[src * 3 + 2];
-      }
       if (dMat) {
         dMat[dst * 3] = dMat[src * 3];
         dMat[dst * 3 + 1] = dMat[src * 3 + 1];
@@ -859,7 +880,7 @@ export class ChunkedLOD {
       }
       if (aDepth) aDepth[dst] = aDepth[src];
       if (dDepth) dDepth[dst] = dDepth[src];
-      if (hasMorph) {
+      if (supportsMorph) {
         dPos[dst * 3] = dPos[src * 3]; dPos[dst * 3 + 1] = dPos[src * 3 + 1]; dPos[dst * 3 + 2] = dPos[src * 3 + 2];
         dNrm[dst * 3] = dNrm[src * 3]; dNrm[dst * 3 + 1] = dNrm[src * 3 + 1]; dNrm[dst * 3 + 2] = dNrm[src * 3 + 2];
       }
@@ -918,19 +939,21 @@ export class ChunkedLOD {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    geo.setAttribute('aLocal', new THREE.BufferAttribute(aLocal, 3));
-    if (aMat) geo.setAttribute('aMat', new THREE.BufferAttribute(aMat, 3));
-    if (aExtra) geo.setAttribute('aExtra', new THREE.BufferAttribute(aExtra, 4));
-    if (dLocal) geo.setAttribute('aLocalDelta', new THREE.BufferAttribute(dLocal, 3));
-    if (dMat) geo.setAttribute('aMatDelta', new THREE.BufferAttribute(dMat, 3));
-    if (dExtra) geo.setAttribute('aExtraDelta', new THREE.BufferAttribute(dExtra, 4));
-    if (aDepth) geo.setAttribute('aDepth', new THREE.BufferAttribute(aDepth, 1));
-    if (dDepth) geo.setAttribute('aDepthDelta', new THREE.BufferAttribute(dDepth, 1));
-    if (hasMorph) {
-      geo.morphAttributes.position = [new THREE.BufferAttribute(dPos, 3)];
-      geo.morphAttributes.normal = [new THREE.BufferAttribute(dNrm, 3)];
-      geo.morphTargetsRelative = true;
-    }
+    // WebGPU exposes at least eight vertex-buffer slots. Terrain needs seven
+    // semantic fields in addition to position/normal, but they are all static
+    // and share a vertex rate. One interleaved buffer keeps the binding layout
+    // at three buffers and lets every chunk reuse the same pipeline.
+    setInterleavedAttributes(geo, total, [
+      { name: 'aLocal', array: aLocal, itemSize: 3 },
+      { name: 'aMat', array: aMat, itemSize: 3 },
+      { name: 'aExtra', array: aExtra, itemSize: 4 },
+      { name: 'aPositionDelta', array: dPos, itemSize: 3 },
+      { name: 'aNormalDelta', array: dNrm, itemSize: 3 },
+      { name: 'aMatDelta', array: dMat, itemSize: 3 },
+      { name: 'aExtraDelta', array: dExtra, itemSize: 4 },
+      { name: 'aDepth', array: aDepth, itemSize: 1 },
+      { name: 'aDepthDelta', array: dDepth, itemSize: 1 },
+    ]);
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeBoundingSphere();
     if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
@@ -945,7 +968,6 @@ export class ChunkedLOD {
       underlay.receiveShadow = false;
       mesh.add(underlay);
     }
-    if (hasMorph && mesh.morphTargetInfluences) mesh.morphTargetInfluences[0] = node.morph;
     mesh.castShadow = !p.noShadow;
     mesh.receiveShadow = true;
     mesh.visible = false;

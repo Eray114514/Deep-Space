@@ -114,8 +114,8 @@ for (const type of Object.keys(TYPES)) {
   const scanInfluence = () => {
     let m = 0;
     const walk = (n) => {
-      if (n.mesh && n.mesh.visible && n.mesh.morphTargetInfluences) {
-        m = Math.max(m, n.mesh.morphTargetInfluences[0]);
+      if (n.level > 0 && n.mesh?.visible) {
+        m = Math.max(m, n.mesh.userData.lodMorph || 0);
       }
       if (n.children) n.children.forEach(walk);
     };
@@ -142,17 +142,26 @@ for (const type of Object.keys(TYPES)) {
     let morphed = 0, maxDelta = 0;
     const walk = (n) => {
       if (n.mesh && n.level > 0) {
-        const ma = n.mesh.geometry.morphAttributes;
-        if (ma && ma.position && ma.position[0]) {
+        const positionDelta = n.mesh.geometry.getAttribute('aPositionDelta');
+        const normalDelta = n.mesh.geometry.getAttribute('aNormalDelta');
+        if (positionDelta && normalDelta) {
           morphed++;
-          const a = ma.position[0].array;
-          for (let i = 0; i < a.length; i += 37 * 3) maxDelta = Math.max(maxDelta, Math.abs(a[i]));
+          for (let i = 0; i < positionDelta.count; i += 37) {
+            maxDelta = Math.max(maxDelta,
+              Math.abs(positionDelta.getX(i)),
+              Math.abs(positionDelta.getY(i)),
+              Math.abs(positionDelta.getZ(i)));
+          }
+          check(!n.mesh.geometry.morphAttributes.position?.length,
+            `${type}: native position morph texture returned`);
+          check(!n.mesh.geometry.morphAttributes.normal?.length,
+            `${type}: native normal morph texture returned`);
         }
       }
       if (n.children) n.children.forEach(walk);
     };
     for (const r of p.lod.roots) walk(r);
-    check(morphed > 10, `${type}: chunks missing morph targets (${morphed})`);
+    check(morphed > 10, `${type}: chunks missing custom morph deltas (${morphed})`);
     check(maxDelta < p.hAmp * 2.5, `${type}: morph deltas out of range (${maxDelta.toFixed(1)} m)`);
   }
   check(pendingChunks() === 0, `${type}: build queue never drained`);

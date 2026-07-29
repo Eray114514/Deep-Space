@@ -213,8 +213,12 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   // quadtree morph factor, so position and every semantic field transition as
   // one surface. All terrain geometries provide zero delta attributes at root.
   const lodMorph = reference('userData.lodMorph', 'float');
+  const morphedPosition = positionLocal
+    .add(attribute('aPositionDelta', 'vec3').mul(lodMorph));
+  const surfaceNormal = normalLocal
+    .add(attribute('aNormalDelta', 'vec3').mul(lodMorph)).normalize();
   const local = attribute('aLocal', 'vec3')
-    .add(attribute('aLocalDelta', 'vec3').mul(lodMorph));
+    .add(attribute('aPositionDelta', 'vec3').mul(lodMorph));
   const matWeights = attribute('aMat', 'vec3')
     .add(attribute('aMatDelta', 'vec3').mul(lodMorph));
   const extra = attribute('aExtra', 'vec4')
@@ -253,8 +257,8 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   };
   const eclipseVisibility = analyticEclipseVisibility(
     local, eclipseNodes.uEclipseSunDir, eclipseNodes);
-  const slope = float(1).sub(dot(normalLocal.normalize(), direction).clamp(0, 1));
-  const axis = abs(normalLocal.normalize());
+  const slope = float(1).sub(dot(surfaceNormal, direction).clamp(0, 1));
+  const axis = abs(surfaceNormal);
   const surfaceUv = select(axis.x.greaterThan(axis.y).and(axis.x.greaterThan(axis.z)), local.yz,
     select(axis.y.greaterThan(axis.z), local.zx, local.xy)).mul(0.085);
   const grassColorMap = dynamicSurfaceTexture('grassColor');
@@ -274,7 +278,7 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   let surface = U.hasSea ? mix(seaSurface, landSurface, coastMaterial) : landSurface;
 
   const detailMap = detailTexture();
-  const weights0 = pow(abs(normalLocal.normalize()), vec3(4));
+  const weights0 = pow(abs(surfaceNormal), vec3(4));
   const weights = weights0.div(weights0.x.add(weights0.y).add(weights0.z).max(1e-5));
   const triDetail = (p, scale, channel = 'r') => {
     const a = texture(detailMap, p.yz.mul(scale));
@@ -423,7 +427,7 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   // view-space normal slot. The earlier tangent-space (gx, gy, 1) shortcut
   // made the ground black when looking up (N·L→0 at oblique angles).
   {
-    const nrm = normalLocal.normalize();
+    const nrm = surfaceNormal;
     const tang = nrm.cross(vec3(0, 1, 0)).add(vec3(1e-4, 1e-4, 1e-4)).normalize();
     const bitn = nrm.cross(tang);
     const dx = vec3(0.35, 0, 0), dy = vec3(0, 0.35, 0);
@@ -441,6 +445,10 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     material.normalNode = transformNormalToView(nrm.add(bend).normalize());
   }
 
+  // Geometry follows the same per-object morph authority as its height,
+  // biome and snow fields. Custom attributes avoid WebGPU's per-chunk native
+  // morph-target textures while retaining the exact parent triangle.
+  material.positionNode = morphedPosition;
   material.userData.shader = {
     uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK, ...eclipseNodes },
   };
@@ -463,8 +471,11 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // camera with polygon offset defeats terrain occlusion at grazing angles
   // and reveals the bathymetry triangles as a black coastline.
   material.polygonOffset = false;
-  const local = attribute('aLocal', 'vec3');
   const lodMorph = reference('userData.lodMorph', 'float');
+  const morphedPosition = positionLocal
+    .add(attribute('aPositionDelta', 'vec3').mul(lodMorph));
+  const local = attribute('aLocal', 'vec3')
+    .add(attribute('aPositionDelta', 'vec3').mul(lodMorph));
   const vertexBathymetry = attribute('aDepth', 'float')
     .add(attribute('aDepthDelta', 'float').mul(lodMorph)).max(0);
   // Bathymetry follows the exact parent triangle while a child relaxes into
@@ -832,7 +843,7 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   // A centimetre-scale bias avoids coplanar flicker at the exact zero contour
   // without lifting water metres through low beaches and inland terrain.
   const shoreOverlap = float(0.12);
-  material.positionNode = positionLocal.add(up.mul(
+  material.positionNode = morphedPosition.add(up.mul(
     macroWave.add(interactionHeight).add(shoreOverlap),
   ))
     .add(choppyOffset);
@@ -866,9 +877,9 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   return material;
 }
 
-export function applyCloudField(source, coverage, offX, offY, offZ, relief = 0, weatherMap = null) {
+export function applyCloudField(source, coverage, offX, offY, offZ,
+  relief = 0, weatherMap = null, family = 'low') {
   const material = copyMaterialFlags(source, new MeshBasicNodeMaterial());
-  const detailMap = detailTexture();
   // The analytic distant deck and close volume consume the same authored
   // equirectangular Lo/Hi weather atlas. A procedural fallback remains only
   // for standalone material tests that do not construct a Planet.
@@ -885,41 +896,117 @@ export function applyCloudField(source, coverage, offX, offY, offZ, relief = 0, 
   // on every renderer. The previous triplanar field changed frequency with
   // camera radius, so clouds visibly rearranged while the player orbited.
   const weatherUV = (d) => vec2(
-    float(0.5).add(atan(d.z, d.x.negate()).mul(0.15915494)),
-    float(1).sub(acos(d.y.clamp(-1, 1)).mul(0.31830988)),
+    float(0.5).add(atan(d.z.negate(), d.x.negate()).mul(0.15915494)),
+    acos(d.y.clamp(-1, 1)).mul(0.31830988),
   );
-  const cloudAmount = (d) => {
-    const direction = d.normalize();
-    const scale = mix(1, 5.4, nodes.uSurfaceView);
-    const fine = texture(detailMap, direction.xy.mul(scale.mul(0.55)).add(nodes.uCOff.xy)).g.mul(0.5)
-      .add(texture(detailMap, direction.yz.mul(scale.mul(1.15)).add(nodes.uCOff.yz)).r.mul(0.25))
-      .add(texture(detailMap, direction.zx.mul(scale.mul(2.35)).add(nodes.uCOff.zx)).g.mul(0.125))
-      .add(texture(detailMap, direction.xy.mul(scale.mul(4.8)).sub(nodes.uCOff.xz)).r.mul(0.0625))
-      .div(0.9375);
-    const base = smoothstep(nodes.uCov0.sub(nodes.uSurfaceView.mul(0.02)),
-      nodes.uCov1.sub(nodes.uSurfaceView.mul(0.10)), fine);
-    const system = smoothstep(0.24, 0.76,
-      weatherTextureNode.sample(weatherUV(direction)).r)
-      .mul(smoothstep(0.32, 0.72, fine)).mul(0.78);
-    return base.max(system);
+  const cloudSample = (d) => {
+    const sampleDirection = d.normalize();
+    const uv = weatherUV(sampleDirection);
+    const weather = weatherTextureNode.sample(uv);
+    // The 1024x512 CPU atlas already contains deterministic four-octave
+    // erosion. Sampling another periodic detail field in the fragment shader
+    // duplicated work, painted latitude stripes and let noise create clouds
+    // where the weather authority was clear. Orbit now costs one atlas lookup
+    // for shape plus one displaced lookup for directional self-shadow.
+    const density = weather.r;
+    const cloudType = weather.g;
+    const stratus = family === 'high' ? float(0) : weather.b;
+    const convective = family === 'high' ? weather.b : cloudType;
+    const scatter = weather.a;
+    const macro = family === 'high'
+      ? smoothstep(0.075, 0.36, density)
+      : smoothstep(
+        mix(0.31, 0.14, stratus).sub(cloudType.mul(0.025)),
+        mix(0.6, 0.5, stratus).sub(cloudType.mul(0.018)),
+        density,
+      );
+    const cellular = pow(macro, mix(1.48, 0.96, cloudType));
+    const sheet = smoothstep(0.11, 0.57, density);
+    const amount = family === 'high'
+      ? cellular.mul(mix(0.68, 1, convective)).clamp(0, 1)
+      : mix(cellular, sheet, stratus.mul(0.84)).clamp(0, 1);
+    return {
+      density,
+      amount,
+      macro,
+      cloudType,
+      stratus,
+      convective,
+      scatter,
+    };
   };
-  const amount = cloudAmount(direction);
-  const sunAmount = cloudAmount(direction.add(nodes.uCSun.normalize().mul(0.05)).normalize());
-  const selfShadow = float(1).sub(sunAmount.sub(amount).mul(2.4)).clamp(0.36, 1.16);
+  const cloud = cloudSample(direction);
+  const amount = cloud.amount;
+  // Reconstruct a cloud-top normal from the same occupied weather field that
+  // displaces the shell. A radial sphere normal makes even a 14 km relief map
+  // shade like a painted film; two neighbouring atlas samples recover the
+  // kilometre-scale slopes visible in oblique orbital photography.
+  const tangentEast = vec3(direction.z.negate(), 0.0001, direction.x).normalize();
+  const tangentNorth = cross(direction, tangentEast).normalize();
+  const gradientStep = mix(0.0048, 0.0028, nodes.uSurfaceView);
+  const eastCloud = cloudSample(
+    direction.add(tangentEast.mul(gradientStep)).normalize());
+  const northCloud = cloudSample(
+    direction.add(tangentNorth.mul(gradientStep)).normalize());
+  const reliefSlope = mix(1.15, 2.45, cloud.cloudType)
+    .mul(mix(1, 0.52, cloud.stratus));
+  const cloudTopNormal = direction
+    .sub(tangentEast.mul(eastCloud.amount.sub(amount)).mul(reliefSlope))
+    .sub(tangentNorth.mul(northCloud.amount.sub(amount)).mul(reliefSlope))
+    .normalize();
+  const sunCloud = cloudSample(
+    direction.add(nodes.uCSun.normalize().mul(mix(0.026, 0.012, nodes.uSurfaceView)))
+      .normalize(),
+  );
+  const selfShadow = float(1)
+    // Preserve the atlas density gradient instead of comparing two saturated
+    // coverage masks. This exposes the sunward cauliflower relief inside a
+    // storm shield, not just along its outer silhouette.
+    .sub(sunCloud.density.sub(cloud.density).max(0).mul(2.8))
+    .sub(smoothstep(0.28, 0.82, cloud.density).mul(0.24))
+    .add(cloud.scatter.mul(0.12))
+    .clamp(0.32, 1.04);
   const day = smoothstep(-0.18, 0.24, dot(direction, nodes.uCSun.normalize()));
-  const edge = smoothstep(0.03, 0.28, amount).mul(float(1).sub(smoothstep(0.62, 0.96, amount)));
+  const topLight = smoothstep(-0.2, 0.72,
+    dot(cloudTopNormal, nodes.uCSun.normalize()))
+    .mul(day);
+  const edge = smoothstep(0.025, 0.24, amount)
+    .mul(float(1).sub(smoothstep(0.52, 0.94, amount)));
+  const denseCore = smoothstep(0.3, 0.84, cloud.density)
+    .mul(smoothstep(0.28, 0.9, amount));
   const baseColor = source.color?.clone() || new THREE.Color(0xffffff);
   material.colorNode = uniform(baseColor)
-    .mul(mix(0.42, 1.03, day)).mul(selfShadow).mul(float(1).sub(amount.mul(0.22)))
-    .add(vec3(0.18, 0.24, 0.34).mul(edge).mul(day));
-  material.opacityNode = pow(amount, mix(0.95, 0.72, nodes.uSurfaceView))
+    .mul(mix(0.2, mix(0.46, 1.18, topLight), day)).mul(selfShadow)
+    .mul(mix(1, 0.7, denseCore))
+    .add(vec3(0.15, 0.19, 0.27).mul(cloud.scatter)
+      .mul(day).mul(mix(0.32, 0.16, denseCore)))
+    .add(vec3(0.32, 0.39, 0.5).mul(edge).mul(day).mul(0.34))
+    .add(vec3(0.025, 0.04, 0.075).mul(denseCore)
+      .mul(float(1).sub(day)).mul(0.8));
+  // Water clouds become optically opaque after only a short occupied column.
+  // Coverage is now calibrated spatially, so opacity can describe real column
+  // depth without being abused to hide an overcast white shell.
+  const opticalDepth = amount.mul(family === 'high'
+    ? mix(0.34, 0.88, cloud.convective)
+    : mix(0.82, 2.45, cloud.cloudType))
+    .mul(mix(1, 0.64, cloud.stratus));
+  material.opacityNode = float(1).sub(exp(opticalDepth.negate()))
+    .mul(mix(family === 'high' ? 0.24 : 0.56, 1, cloud.macro))
     .mul(nodes.uCamProx).mul(nodes.uOpacity);
-  material.positionNode = positionLocal.add(direction.mul(nodes.uCloudRelief).mul(pow(amount, 1.15)));
+  const verticalShape = pow(amount, mix(1.42, 0.92, cloud.cloudType))
+    .mul(mix(0.42, 1, cloud.cloudType))
+    .mul(mix(1, 0.16, cloud.stratus));
+  material.positionNode = positionLocal.add(
+    direction.mul(nodes.uCloudRelief).mul(verticalShape),
+  );
   material.uniforms = nodes;
   material.userData.weatherSystemTexture = stableWeatherMap;
   material.userData.weatherSystemTextureNode = weatherTextureNode;
   material.userData.shader = { uniforms: nodes };
-  material.userData.nodeMaterial = 'cloud-deck-v2-faithful';
+  material.userData.nodeMaterial = family === 'high'
+    ? 'cloud-deck-v3-high-weather-relief'
+    : 'cloud-deck-v3-low-weather-relief';
+  material.userData.cloudFamily = family;
   material.userData.opacityNodeUniform = nodes.uOpacity;
   source.dispose?.();
   return material;
