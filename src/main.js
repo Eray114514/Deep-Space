@@ -2407,7 +2407,6 @@ function startHeroPullBack(onDone) {
   }, () => {
     ship.introOffset.set(0, 0, 0);
     heroTransitionActive = false;
-    pipelineResizePending = true;
     onDone?.();
   }, { realTime: true });
 }
@@ -2852,11 +2851,11 @@ function setAtmosphereStepBudget(steps) {
 function applyLocalVolumeBudget(force = false) {
   if (!BOOT_USE_WEBGPU || !nearest || !Number.isFinite(nearestAlt)) return;
   // Render-target resize and async pipeline compilation may not share the
-  // same WebGPU synchronization scope. Defer the budget atomically; the next
-  // settled frame recomputes it from the then-current camera altitude.
+  // same WebGPU synchronization scope. Keep the last stable budget while
+  // resources are busy; clearing its key used to schedule an unconditional
+  // same-size PassNode rebuild at the end of the hero tween, invalidating all
+  // pipelines that had just been warmed behind the loading veil.
   if (pipelineResourcesBusy()) {
-    localVolumeBudgetKey = '';
-    pipelineResizePending = true;
     return;
   }
   const cloudBand = nearest.volCloudMat?.userData?.band;

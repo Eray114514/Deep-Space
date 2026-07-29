@@ -227,6 +227,19 @@ try {
             visible: object.visible,
             position: object.position.toArray(),
           }));
+        const bodyLods = internals.universe.planets().map((body) => ({
+          id: body.bodyId,
+          appear: body.appear,
+          groupVisible: body.group.visible,
+          terrain: body.lod?.debugStats?.() || null,
+          water: body.waterLod?.debugStats?.() || null,
+          terrainMaterial: body.terrainMaterial ? {
+            id: body.terrainMaterial.id,
+            version: body.terrainMaterial.version,
+            transparent: body.terrainMaterial.transparent,
+            opacity: body.terrainMaterial.opacity,
+          } : null,
+        }));
         trace.frames.push({
           time: now,
           elapsed: now - trace.traceStart,
@@ -275,6 +288,7 @@ try {
             temporalHistory: 'absent-on-GameNodePipeline',
           },
           foregroundRoots,
+          bodyLods,
         });
         previous = now;
         if (now - trace.traceStart < captureDuration) requestAnimationFrame(sample);
@@ -393,6 +407,40 @@ try {
       !frame.bodyClasses.split(/\s+/).includes('hero-active'));
     const cameraInputStart = trace.marks.find((mark) => mark.name === 'camera-input-start');
     const cameraInputEnd = trace.marks.find((mark) => mark.name === 'camera-input-end');
+    const materialCatalog = await page.evaluate(() => {
+      const entries = new Map();
+      NMS._internals.scene.traverse((object) => {
+        if (!object.material) return;
+        const materials = Array.isArray(object.material)
+          ? object.material : [object.material];
+        for (const material of materials) {
+          if (!material || entries.has(material.id)) continue;
+          const attributes = object.geometry?.attributes
+            ? Object.entries(object.geometry.attributes).map(([name, value]) => ({
+              name,
+              itemSize: value.itemSize,
+              stride: value.isInterleavedBufferAttribute ? value.data.stride : value.itemSize,
+            }))
+            : [];
+          entries.set(material.id, {
+            id: material.id,
+            name: material.name || '',
+            type: material.type,
+            nodeMaterial: material.userData?.nodeMaterial || '',
+            object: object.name || object.type,
+            parent: object.parent?.name || object.parent?.type || '',
+            geometry: object.geometry?.type || '',
+            attributes,
+            layerMask: object.layers.mask,
+            visible: object.visible,
+            castShadow: object.castShadow,
+            receiveShadow: object.receiveShadow,
+            renderOrder: object.renderOrder,
+          });
+        }
+      });
+      return [...entries.values()];
+    });
     const summary = {
       url,
       cssViewport: [cssWidth, cssHeight],
@@ -420,6 +468,7 @@ try {
       textureGroups: textureGroups.slice(0, 20),
       shipPipelineEvents: pipelineEvents.filter((event) =>
         /WINGS|BASE/i.test(event.label || '')),
+      materialCatalog,
       pageErrors,
     };
     trace.frames = frames;
