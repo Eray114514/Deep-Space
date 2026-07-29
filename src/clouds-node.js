@@ -13,6 +13,20 @@ import { sceneRayLimit } from './volume-depth-node.js';
 
 let _noiseTex = null;
 
+function analyticEclipseVisibility(localPosition, sunDirection, nodes) {
+  const normalizedSun = sunDirection.normalize();
+  const toOccluder = nodes.uEclipseCenter.sub(localPosition);
+  const along = dot(toOccluder, normalizedSun).max(0);
+  const perpendicular = sqrt(dot(toOccluder, toOccluder)
+    .sub(along.mul(along)).max(0));
+  const penumbra = along.mul(nodes.uEclipseStarAngle).max(0.5);
+  const visibility = smoothstep(nodes.uEclipseRadius.sub(penumbra),
+    nodes.uEclipseRadius.add(penumbra), perpendicular);
+  const inFront = dot(toOccluder, normalizedSun).greaterThan(0);
+  return mix(float(1), inFront.select(visibility, float(1)),
+    nodes.uEclipseEnabled.clamp(0, 1));
+}
+
 function valueNoise3(x, y, z, N, seed) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const fx = x - xi, fy = y - yi, fz = z - zi;
@@ -99,6 +113,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     uStellarRadiance0: uniform(new THREE.Color(1, 0.98, 0.94)),
     uStellarRadiance1: uniform(new THREE.Color(1, 0.98, 0.94)),
     uStarIrradiance0: uniform(1), uStarIrradiance1: uniform(0),
+    uEclipseCenter: uniform(new THREE.Vector3()),
+    uEclipseRadius: uniform(1),
+    uEclipseStarAngle: uniform(0),
+    uEclipseEnabled: uniform(0),
     uRin: uniform(band.rIn), uRout: uniform(band.rOut),
     uGroundR: uniform(planet.hasLiquid ? planet.seaRadius : planet.R),
     tSceneDepth: texture(new THREE.Texture()), uDepthReady: uniform(0),
@@ -114,8 +132,14 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     uQuality: uniform(quality === 'performance' || quality === 'low' ? 0 : 1),
   };
   const weatherUV = (d) => vec2(
-    float(0.5).add(atan(d.z, d.x.negate()).mul(0.15915494)),
-    float(1).sub(acos(d.y.clamp(-1, 1)).mul(0.31830988)),
+    // Atlas construction walks +Z as longitude increases. WebGPU atan2 uses
+    // the opposite screen-handed convention here, so both axes must be
+    // reflected; reflecting only X mirrored every rendered system away from
+    // its CPU weather/shadow location.
+    float(0.5).add(atan(d.z.negate(), d.x.negate()).mul(0.15915494)),
+    // CanvasTexture is uploaded with flipY=true; map north to the source
+    // canvas row that WebGPU exposes at low V.
+    acos(d.y.clamp(-1, 1)).mul(0.31830988),
   );
   const weatherLoTextureNode = texture(weatherLoMap);
   const weatherHiTextureNode = texture(weatherHiMap);
@@ -131,9 +155,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
       .div(nodes.uRout.sub(nodes.uRin).max(1)).clamp(0, 1);
     const lo = weatherLoTextureNode.sample(weatherUV(weatherDirection));
     const hi = weatherHiTextureNode.sample(weatherUV(weatherDirection));
-    const formationThreshold = mix(0.36, 0.22, lo.g);
+    const formationThreshold = mix(0.28, 0.15, lo.g);
     const coverage = smoothstep(formationThreshold,
-      formationThreshold.add(0.42), lo.r);
+      formationThreshold.add(0.34), lo.r);
     const lowTop = mix(0.34, 0.78, lo.g).add(hi.b.mul(0.16)).clamp(0.3, 0.94);
     const lowEnvelope = smoothstep(0.018, 0.075, height)
       .mul(smoothstep(lowTop, lowTop.sub(0.2), height))
@@ -143,7 +167,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
       .mul(smoothstep(0.99, 0.82, height)).mul(hi.r)
       .mul(float(0.34).add(hi.g.mul(0.34)).add(hi.b.mul(0.32)));
     const advectedPosition = nodes.uSpin.mul(samplePosition)
-      .mul(1 / 42000)
+      .mul(1 / 18000)
       .add(vec3(
         nodes.uWeatherTime.mul(0.011),
         nodes.uWeatherTime.mul(-0.0036),
@@ -206,7 +230,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     const integrated = vec3(0).toVar();
     const transmission = float(1).toVar();
     Loop(64, ({ i }) => {
-      If(i.lessThan(stepCount), () => {
+      // Once an optically thick core has reduced transmission below one
+      // percent, later samples cannot materially affect the pixel. Keeping
+      // their five density lookups and nested light march was pure GPU waste.
+      If(i.lessThan(stepCount).and(transmission.greaterThan(0.012)), () => {
         const samplePosition = origin.add(ray.mul(t));
         const radius = samplePosition.length();
         const direction = samplePosition.div(radius.max(1));
@@ -232,9 +259,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         // 20–30% coverage into a planet-wide grey extinction curtain. A
         // type-aware formation threshold preserves coherent fronts while
         // leaving genuinely clear air between cells.
-        const formationThreshold = mix(0.36, 0.22, cloudType);
+        const formationThreshold = mix(0.28, 0.15, cloudType);
         const weather = smoothstep(formationThreshold,
-          formationThreshold.add(0.42), weatherRaw);
+          formationThreshold.add(0.34), weatherRaw);
         const stratusProfile = smoothstep(0.015, 0.055, height)
           .mul(smoothstep(0.25, 0.13, height))
           .mul(stratusMask);
@@ -267,21 +294,29 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         // Detail is metre-scaled, not unit-sphere-scaled. Multiplying only the
         // direction by 18.5 created cloud lobes hundreds of kilometres wide;
         // from inside, each ray then sampled almost the same column and exposed
-        // marching bands. 42 km weather cells with an 11.5 km erosion cascade
+        // marching bands. 18 km weather cells with a 5.2 km erosion cascade
         // preserve orbital systems while resolving cauliflower structure in
         // low flight.
         const weatherPosition = nodes.uSpin.mul(samplePosition);
-        const volumeUV = weatherPosition.mul(1 / 42000).add(vec3(0.5)).add(slowWind)
+        const volumeUV = weatherPosition.mul(1 / 18000).add(vec3(0.5)).add(slowWind)
           .add(vec3(height.mul(0.37), height.mul(1.4), height.mul(0.23)));
         const detail = texture3D(cloudNoiseTexture(), volumeUV).r;
         const upperDetail = texture3D(cloudNoiseTexture(),
-          weatherPosition.mul(1 / 11500).add(volumeUV.mul(0.19)).add(detailWind)
+          weatherPosition.mul(1 / 5200).add(volumeUV.mul(0.19)).add(detailWind)
           .add(vec3(0.37, 0.61, 0.19))).g;
         const erosion = texture(detailTex,
           uv.mul(vec2(54, 27)).add(nodes.uCOff.xy.mul(0.09))
             .add(nodes.uWeatherTime.mul(vec2(0.0007, -0.00031)))).g;
-        const billowShape = float(0.34).add(detail.mul(0.92))
-          .sub(float(1).sub(upperDetail).mul(mix(0.16, 0.42, height)));
+        // Turn the Perlin-Worley field into occupied vapour, rather than
+        // treating every non-zero noise sample as cloud.  The former linear
+        // ramp filled the whole shell with pale smoke and erased both storm
+        // eyes and cauliflower negative space.  Height-dependent erosion
+        // bites harder into tower sides while preserving broad, darker cores.
+        const billowRaw = float(0.18).add(detail.mul(0.96))
+          .sub(float(1).sub(upperDetail).mul(mix(0.24, 0.54, height)));
+        const billowShape = smoothstep(0.28, 0.72, billowRaw);
+        const wispyShape = smoothstep(0.4, 0.72,
+          erosion.mul(0.58).add(upperDetail.mul(0.42)));
         // Secondary genera share the same meteorological Lo/Hi channels but
         // occupy distinct vertical shapes. This is more than naming metadata:
         // each term changes the actual density sampled by the ray marcher.
@@ -309,24 +344,43 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
           .mul(smoothstep(0.86, 0.68, height))
           .mul(convective).mul(cloudType)
           .mul(float(0.28).add(detail.mul(1.02)));
-        const lowShape = stratusProfile.mul(float(0.82).add(erosion.mul(0.22)))
+        const lowShape = stratusProfile.mul(float(0.68).add(wispyShape.mul(0.28)))
           .max(cumulusProfile.mul(billowShape));
         const lowFamilies = lowShape.max(stratocumulusProfile)
           .max(nimbostratusProfile).max(towerProfile);
-        const thinShape = altoProfile.mul(float(0.44).add(detail.mul(0.42)))
-          .max(cirrusProfile.mul(float(0.25).add(erosion.mul(0.5))))
-          .max(anvilProfile.mul(float(0.48).add(detail.mul(0.54))))
+        const thinShape = altoProfile.mul(float(0.34).add(billowShape.mul(0.5)))
+          .max(cirrusProfile.mul(float(0.12).add(wispyShape.mul(0.64))))
+          .max(anvilProfile.mul(float(0.36).add(billowShape.mul(0.58))))
           .max(altocumulusProfile).max(lenticularProfile)
           .max(cirrocumulusProfile);
         const lowDensity = weather.mul(lowFamilies)
           .mul(float(0.72).add(humidity.mul(0.34)));
         const highDensity = highMask.mul(thinShape)
           .mul(float(0.44).add(highType.mul(0.38)));
-        const density = pow(lowDensity.max(highDensity)
-          .sub(float(1).sub(upperDetail).mul(0.11))
-          .clamp(0, 1), 1.18);
+        // Cloud type owns vertical extent. The previous shared 0.62–0.96 top
+        // range lifted even stratus into a smooth 9–14 km ceiling, which read
+        // as a warped film from above. Stratiform decks now remain low while
+        // convective coverage stretches existing Perlin-Worley lobes into
+        // genuine towers and anvils. This is the HPVolumeCloud cover/height
+        // separation: coverage decides occupancy; type and 3D detail decide
+        // cloud-top altitude.
+        const convectiveTop = mix(0.2, 0.56, cloudType)
+          .add(convective.mul(0.22))
+          .add(upperDetail.mul(mix(0.12, 0.26, cloudType)))
+          .clamp(0.18, 0.985);
+        const lowTopErosion = smoothstep(
+          convectiveTop.add(0.055), convectiveTop.sub(0.04), height);
+        const shapedLowDensity = lowDensity.mul(lowTopErosion)
+          .sub(float(1).sub(upperDetail).mul(mix(0.065, 0.14, height)))
+          .clamp(0, 1);
+        // High clouds occupy their own band and must not inherit the low-deck
+        // top clamp. Their lower optical density remains in highDensity.
+        const density = pow(shapedLowDensity.max(highDensity)
+          .clamp(0, 1), 1.2);
         const primaryDir = nodes.uStellarDirections0.normalize();
         const secondaryDir = nodes.uStellarDirections1.normalize();
+        const eclipseVisibility = analyticEclipseVisibility(
+          samplePosition, primaryDir, nodes);
         // HPVolumeCloud-inspired cone light march. Five geometrically growing
         // segments cover the useful cloud-internal light path. Direct light
         // uses Beer extinction; the additive phi_fwd term uses the much slower
@@ -352,8 +406,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
             const lightPosition = samplePosition.add(primaryDir.mul(lightDistance));
             const lightDensity = lightDensityAt(lightPosition);
             const localOpticalDepth = lightDensity.mul(lightStep).div(thickness)
-              .mul(float(3.4).add(convective.mul(1.8))
-                .add(stratusMask.mul(humidity).mul(0.65)));
+              .mul(float(10).add(convective.mul(12))
+                .add(stratusMask.mul(humidity).mul(4)));
             const centerOpticalDepth = lightOpticalDepth
               .add(localOpticalDepth.mul(0.5));
             const kappaStep = localOpticalDepth.mul(0.05477226);
@@ -373,10 +427,22 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
             sourceSurvival.mulAssign(exp(localOpticalDepth.mul(-0.001)));
           });
         });
-        const selfShadow = exp(lightOpticalDepth.mul(-1.08)).clamp(0.025, 1);
-        const diffuseField = float(1).sub(exp(phiForward.mul(-5.6)))
+        // From orbit a nested sun march at every view sample spends most of
+        // the frame resolving sub-pixel cloud detail. The weather atlas,
+        // vertical profile and local density provide a stable analytic optical
+        // depth there; close flight progressively enables the true cone march.
+        // The no-nested-march orbital tier estimates only the remaining
+        // sunward column from this sample. Treating every sample as a complete
+        // 3x optical column crushed lit cloud tops into dirty gray sheets.
+        const analyticLightDepth = density
+          .mul(float(1.05).add(convective.mul(0.9)))
+          .mul(mix(0.85, 0.16, height));
+        const resolvedLightDepth = nodes.uLightSteps.lessThan(0.5)
+          .select(analyticLightDepth, lightOpticalDepth);
+        const selfShadow = exp(resolvedLightDepth.mul(-1.16)).clamp(0.006, 1);
+        const diffuseField = float(1).sub(exp(phiForward.mul(-4.2)))
           .mul(multipleScatter)
-          .mul(smoothstep(0.045, 0.32, density));
+          .mul(smoothstep(0.08, 0.42, density));
         const day0 = smoothstep(-0.16, 0.24, dot(direction, primaryDir));
         const day1 = smoothstep(-0.16, 0.24, dot(direction, secondaryDir));
         // Dual-lobe Henyey-Greenstein plus Beer-powder lighting preserves the
@@ -391,25 +457,39 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
           .div(pow(float(1).add(gBack.mul(gBack))
             .sub(gBack.mul(viewToLight).mul(2)), 1.5).mul(12.56637));
         const phase = phaseForward.mul(0.82).add(phaseBack.mul(0.18))
-          .mul(7.5).clamp(0.18, 2.4);
+          .mul(6.8).clamp(0.14, 2);
         const powder = float(1).sub(exp(density.mul(-5.2)));
-        const direct0 = day0.mul(selfShadow).mul(nodes.uStarIrradiance0);
+        const direct0 = day0.mul(selfShadow).mul(eclipseVisibility)
+          .mul(nodes.uStarIrradiance0);
         const direct1 = day1.mul(nodes.uStarIrradiance1);
         const directLight = direct0.add(direct1)
-          .mul(mix(0.22, 1, height)).mul(phase);
-        const heightLight = mix(0.62, 1.1, height);
+          .mul(mix(0.22, 1, height))
+          .mul(phase.mul(0.72).add(0.28));
+        // Sunlit tops must separate from cool bases in an orbital oblique.
+        // A narrow 0.62–1.24 range survived numerically but collapsed against
+        // bright terrain into one beige film; the wider physical skylight
+        // gradient restores cauliflower relief without changing density.
+        const heightLight = mix(0.44, 1.52, smoothstep(0.03, 0.88, height));
         const stellarColor = nodes.uStellarRadiance0.mul(direct0)
           .add(nodes.uStellarRadiance1.mul(direct1))
           .div(direct0.add(direct1).max(0.001));
-        const internalLight = nodes.uAmbC.mul(float(0.64)
-          .add(multipleScatter.mul(0.28)).add(powder.mul(0.14)));
+        // Ambient light should reveal a cloud interior, not bleach it.  Dense
+        // cores now remain cool and shaded while multiple scattering rebuilds
+        // only a bounded fraction of lost sunlight.
+        const internalLight = nodes.uAmbC.mul(float(0.42)
+          .add(multipleScatter.mul(0.24)).add(powder.mul(0.12)));
         const diffuseSun = nodes.uStellarRadiance0
-          .mul(diffuseField).mul(day0).mul(0.92);
+          .mul(diffuseField).mul(day0).mul(eclipseVisibility).mul(0.62);
         const cloudColor = internalLight.add(stellarColor.mul(directLight))
           .add(diffuseSun)
           .mul(nodes.uTint).mul(heightLight);
-        const extinctionStrength = float(3.4).add(convective.mul(1.8))
-          .add(stratusMask.mul(humidity).mul(0.65));
+        // Liquid-water clouds are optically thick over kilometres, not a weak
+        // atmospheric haze. A base optical depth near ten makes a 2–4 km
+        // occupied stratus/cumulus column visible from orbit, while the
+        // spatial weather field still leaves genuinely clear air between
+        // systems. Convective cores reach storm-scale optical depths.
+        const extinctionStrength = float(10).add(convective.mul(12))
+          .add(stratusMask.mul(humidity).mul(4));
         const alphaStep = float(1).sub(exp(
           density.mul(stepLength).div(thickness).mul(extinctionStrength).negate()));
         integrated.addAssign(cloudColor.mul(transmission).mul(alphaStep));

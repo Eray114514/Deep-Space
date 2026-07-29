@@ -4,6 +4,7 @@
 
 import { startServer } from './server.js';
 import { launchWebGPUHardwareBrowser } from './browser.js';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 const width = Number(process.env.PERF_WIDTH) || 2560;
 const height = Number(process.env.PERF_HEIGHT) || 1440;
@@ -101,11 +102,17 @@ async function settle(page, label) {
         return {
           terrain: planet?.lod?.debugStats?.() || null,
           water: planet?.waterLod?.debugStats?.() || null,
+          terrainCap: planet?.lod?._levelCap ?? null,
+          waterCap: planet?.waterLod?._levelCap ?? null,
         };
       });
+      const terrainTarget = Math.min(minimumLevels.terrain,
+        Number.isFinite(state.terrainCap) ? state.terrainCap : minimumLevels.terrain);
+      const waterTarget = Math.min(minimumLevels.water,
+        Number.isFinite(state.waterCap) ? state.waterCap : minimumLevels.water);
       const levelReady = (!state.terrain
-        || state.terrain.visibleMaxLevel >= minimumLevels.terrain)
-        && (!state.water || state.water.visibleMaxLevel >= minimumLevels.water);
+        || state.terrain.visibleMaxLevel >= terrainTarget)
+        && (!state.water || state.water.visibleMaxLevel >= waterTarget);
       const morphReady = (!state.terrain || state.terrain.activeMorphs === 0)
         && (!state.water || state.water.activeMorphs === 0);
       const signature = JSON.stringify([
@@ -170,8 +177,15 @@ try {
       volumeClouds: false,
     });
     results.push(deckOnly);
+    const orbitAnalytic = await measure(page, {
+      name: 'orbit-atmosphere-analytic-clouds',
+      atmosphere: true,
+      analyticClouds: true,
+      volumeClouds: false,
+    });
+    results.push(orbitAnalytic);
     const orbit = await measure(page, {
-      name: 'orbit-atmosphere-and-deck',
+      name: 'orbit-physical-cloud-volume',
       atmosphere: true,
       analyticClouds: true,
       volumeClouds: true,
@@ -180,6 +194,7 @@ try {
 
     let approachAnalytic = null;
     let approach = null;
+    let inCloudAnalytic = null;
     let inCloud = null;
     if (!orbitOnly) {
       await page.evaluate(() => NMS.teleport(0, 0.06));
@@ -201,6 +216,13 @@ try {
 
       await page.evaluate(() => NMS.teleport(0, 0.022));
       await settle(page, 'in-cloud');
+      inCloudAnalytic = await measure(page, {
+        name: 'in-cloud-no-volume',
+        atmosphere: true,
+        analyticClouds: true,
+        volumeClouds: false,
+      });
+      results.push(inCloudAnalytic);
       inCloud = await measure(page, {
         name: 'in-cloud-physical-volume',
         atmosphere: true,
@@ -218,30 +240,34 @@ try {
         renderer: stats.rendererBackend,
       };
     });
-    console.log(JSON.stringify({
+    const report = {
       viewport: `${width}x${height}`,
       factor,
       runtime,
       results,
       errors,
       note: 'Headless requestAnimationFrame cadence is environment-dependent; compare same-page deltas.',
-    }, null, 2));
+    };
+    console.log(JSON.stringify(report, null, 2));
+    await mkdir('test-results/volume-performance', { recursive: true });
+    await writeFile('test-results/volume-performance/report.json',
+      `${JSON.stringify(report, null, 2)}\n`);
     if (errors.length) throw new Error(errors.join('\n'));
-    if (orbit.volumeMeshVisible || orbit.engage > 0.001) {
-      throw new Error(`Orbit rendered physical cloud volume: ${JSON.stringify(orbit)}`);
+    if (!(orbit.volumeMeshVisible && orbit.engage > 0.95)) {
+      throw new Error(`Orbit did not retain physical cloud volume: ${JSON.stringify(orbit)}`);
     }
     if (!String(orbit.localVolumeBudget).startsWith('orbit:')) {
       throw new Error(`Orbit budget tier mismatch: ${orbit.localVolumeBudget}`);
     }
-    if (approach && !(approach.engage > 0.05 && approach.engage < 0.95)) {
-      throw new Error(`Approach did not exercise cloud crossfade: ${approach.engage}`);
+    if (approach && !(approach.engage > 0.95 && approach.volumeMeshVisible)) {
+      throw new Error(`Approach volume was not fully engaged: ${approach.engage}`);
     }
     if (inCloud && !(inCloud.engage > 0.95 && inCloud.volumeMeshVisible)) {
       throw new Error(`In-cloud volume was not fully engaged: ${JSON.stringify(inCloud)}`);
     }
-    if (orbit.medianMs - deckOnly.medianMs > 8) {
-      throw new Error(`Orbit atmosphere overhead exceeded 8 ms: ${JSON.stringify({
-        deckOnly: deckOnly.medianMs,
+    if (orbit.medianMs - orbitAnalytic.medianMs > 12) {
+      throw new Error(`Orbit physical cloud overhead exceeded 12 ms: ${JSON.stringify({
+        analytic: orbitAnalytic.medianMs,
         orbit: orbit.medianMs,
       })}`);
     }
@@ -249,6 +275,12 @@ try {
       throw new Error(`Approach volume overhead exceeded 12 ms: ${JSON.stringify({
         analytic: approachAnalytic.medianMs,
         volume: approach.medianMs,
+      })}`);
+    }
+    if (inCloud && inCloud.medianMs - inCloudAnalytic.medianMs > 12) {
+      throw new Error(`In-cloud volume overhead exceeded 12 ms: ${JSON.stringify({
+        baseline: inCloudAnalytic.medianMs,
+        volume: inCloud.medianMs,
       })}`);
     }
     await page.close();

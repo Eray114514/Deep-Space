@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  dot, exp, float, Fn, Loop, mix, positionLocal, positionView, pow,
+  dot, exp, float, Fn, If, Loop, mix, positionLocal, positionView, pow,
   sqrt, smoothstep as nodeSmoothstep, texture, uniform, vec3, vec4,
 } from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
@@ -247,13 +247,16 @@ export class Planet {
     // sub-metre octave queued hundreds of chunks for minutes at 70 m altitude
     // even though its relief is below a pixel.
     const lowTierGrouping = canonicalGridCells <= 18;
-    // 32×32 high-tier chunks keep one build job below a frame-sized unit of
-    // work. The former 64×64 jobs had the same total vertex density but could
-    // block the incremental scheduler for tens of seconds, leaving visible
-    // black holes while a near-surface camera waited for one giant chunk.
-    const wideGroupFactor = lowTierGrouping ? 4 : (4 / 3);
-    this.gridCells = Math.round(canonicalGridCells * wideGroupFactor);
-    this.gridCellsAtLevel = () => this.gridCells;
+    // Keep cheap 32×32 roots, then switch high-tier terrain to 64×64 at level
+    // three. One wide level replaces the next 2×2 set of narrow chunks at the
+    // same final vertex spacing, cutting stable draw submissions by roughly
+    // four without making planet construction synchronously build six huge
+    // roots. Parent interpolation already supports different grid widths.
+    const baseGroupFactor = lowTierGrouping ? 4 : (4 / 3);
+    this.gridCells = Math.round(canonicalGridCells * baseGroupFactor);
+    this.gridCellsAtLevel = (level) => (!lowTierGrouping && level >= 3
+      ? this.gridCells * 2
+      : this.gridCells);
     // Terrain chunk boundaries stay on the continuous planet surface. Forcing
     // every child edge down to the parent chord created a low-frequency trench
     // around every square; radial skirts then rendered those trenches as dark
@@ -268,12 +271,12 @@ export class Planet {
     // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
-    this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2));
+    this.maxLevel = Math.max(3, this.canonicalMaxLevel - 3);
     // A cap of level 1/2 left 7–14 km triangles on the 900 km home world,
     // visibly polygonal at 52–140 km and even in a full-disk 2K view. Keep
     // enough orbital geometry for the actual display Nyquist rate; noise
     // frequency still follows each level, so this is not fake micro-detail.
-    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 3 : 4);
+    this.orbitLevelCap = Math.min(this.maxLevel, 3);
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
@@ -870,6 +873,10 @@ export class Planet {
         maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 0)),
         orbitLevelCap: lowTierGrouping ? 3 : 4,
         orbitPrewarmRadiusRatio: 1.75,
+        // A smooth water sphere does not need terrain's two extra 136 km
+        // approach levels. Add curvature detail only as its kilometre-scale
+        // cells become resolvable, while spectral waves remain shader-driven.
+        orbitApproachLevelThresholds: [1.12, 1.06, 1.025],
         lodDistanceScale: (waterCanonicalGrid / waterGridCells) * (lowTierGrouping ? 0.25 : 1),
         lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))
           * (lowTierGrouping ? 0.25 : 1),
@@ -956,10 +963,11 @@ export class Planet {
       // used by the volume shader. Keeping cloud type and stratus in Lo and
       // high-deck type/multiple scattering in Hi avoids throwing away entire
       // cloud families merely to fit one RGBA atlas.
-      this.cloudShadowTex = makeCloudTexture(
-        this.nD, coverage, o1, this.weatherField, 'low');
-      this.cloudWeatherHiTex = makeCloudTexture(
-        this.nD, coverage, o1, this.weatherField, 'high');
+      const weatherAtlases = makeCloudTextures(
+        this.nD, coverage, o1, this.weatherField);
+      this.cloudShadowTex = weatherAtlases.low;
+      this.cloudWeatherHiTex = weatherAtlases.high;
+      this.cloudCoverageStats = weatherAtlases.stats;
       const terrainCloudNode = this.terrainMaterial.userData.cloudShadowTextureNode;
       if (terrainCloudNode) terrainCloudNode.value = this.cloudShadowTex;
       const terrainShader = this.terrainMaterial.userData.shader;
@@ -992,7 +1000,7 @@ export class Planet {
       });
       cmat.forceSinglePass = true;
       const cloudMat = applyCloudField(cmat, coverage, o1[0], o1[1], o1[2],
-        thick * 0.72, this.cloudShadowTex);
+        thick * 0.96, this.cloudShadowTex);
       this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cloudMat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
@@ -1041,10 +1049,8 @@ export class Planet {
           side: THREE.DoubleSide,
         });
         cmat2.forceSinglePass = true;
-        this.cloudShadowTex2 = makeCloudTexture(
-          new Simplex(makeRng(`${this.seed}:cloud-upper:v1`)), coverage * 0.42, o2);
         const upperCloudMat = applyCloudField(cmat2, coverage * 0.42,
-          o2[0], o2[1], o2[2], thick * 0.24, this.cloudShadowTex2);
+          o2[0], o2[1], o2[2], thick * 0.32, this.cloudWeatherHiTex, 'high');
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
           new THREE.SphereGeometry(upperR, 192, 128), upperCloudMat);
@@ -1192,6 +1198,8 @@ export class Planet {
     const targets = [
       this.terrainMaterial?.userData?.shader?.uniforms,
       this.liquidMat?.userData?.shader?.uniforms,
+      this.atmoMesh?.material?.uniforms,
+      this.volCloudMat?.uniforms,
     ];
     for (const uniforms of targets) {
       if (!uniforms?.uEclipseEnabled) continue;
@@ -1231,21 +1239,24 @@ export class Planet {
     if (this.cloudShadowTex && this.cloudOffsets) {
       const previous = this.cloudShadowTex;
       const previousHi = this.cloudWeatherHiTex;
-      this.cloudShadowTex = makeCloudTexture(
+      const weatherAtlases = makeCloudTextures(
         this.nD, this.cloudCoverage || 0.5, this.cloudOffsets,
-        this.weatherField, 'low');
-      this.cloudWeatherHiTex = makeCloudTexture(
-        this.nD, this.cloudCoverage || 0.5, this.cloudOffsets,
-        this.weatherField, 'high');
+        this.weatherField);
+      this.cloudShadowTex = weatherAtlases.low;
+      this.cloudWeatherHiTex = weatherAtlases.high;
+      this.cloudCoverageStats = weatherAtlases.stats;
       const terrainNode = this.terrainMaterial.userData.cloudShadowTextureNode;
       if (terrainNode) terrainNode.value = this.cloudShadowTex;
       if (this.liquidMat?.userData.waterCloudTexture) {
         this.liquidMat.userData.waterCloudTexture.value = this.cloudShadowTex;
       }
-      for (const material of [this.cloudMesh?.material]) {
+      for (const [material, textureValue] of [
+        [this.cloudMesh?.material, this.cloudShadowTex],
+        [this.cloudMesh2?.material, this.cloudWeatherHiTex],
+      ]) {
         const weatherNode = material?.userData.weatherSystemTextureNode;
-        if (weatherNode) weatherNode.value = this.cloudShadowTex;
-        if (material?.userData) material.userData.weatherSystemTexture = this.cloudShadowTex;
+        if (weatherNode) weatherNode.value = textureValue;
+        if (material?.userData) material.userData.weatherSystemTexture = textureValue;
       }
       const volumeLoNode = this.volCloudMat?.userData.weatherLoTextureNode;
       const volumeHiNode = this.volCloudMat?.userData.weatherHiTextureNode;
@@ -1381,6 +1392,7 @@ export class Planet {
   // to zero so static frames are pixel-comparable — LOD morphs keep dt.
   update(camLocal, dt, focused, animDt = dt) {
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
+    const camR = camLocal.length();
     this.lod.focused = focused;
     this.lod.update(camLocal, dt);
     if (this.waterLod) {
@@ -1398,7 +1410,6 @@ export class Planet {
     // shells vanish near their own altitude so you fly through, not pop through;
     // each deck also gets the sun direction in its own rotating frame
     if (this.cloudBands.length) {
-      const camR = camLocal.length();
       const surfaceView = smoothstep(1.8, 1.08, camR / this.R);
       for (const b of this.cloudBands) {
         const sh = b.mesh.material.userData.shader;
@@ -1421,8 +1432,11 @@ export class Planet {
     if (this.cloudMesh) {
       this.cloudSpin = this.cloudSpinBase
         + this.weatherHours * (this.weatherField?.windRadiansPerHour || 0.05);
-      this.cloudMesh.quaternion.copy(this.axisQuat)
-        .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin));
+      // Planet local Y is already the physical rotation axis. Applying the
+      // decorative ring tilt a second time rotated visible clouds away from
+      // CPU weather, rain and the shadow atlas. Cloud decks therefore advect
+      // only around the body-frame axis.
+      this.cloudMesh.quaternion.setFromAxisAngle(_yAxis, this.cloudSpin);
       // keep terrain cloud-shadows tracking the drifting deck
       _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
       const sh = this.terrainMaterial.userData.shader;
@@ -1432,11 +1446,19 @@ export class Planet {
         waterShader.uniforms.uCloudMat.value.setFromMatrix4(_m4);
       }
       if (this.volCloudMesh) {
-        // High quality uses the raymarched shell as the primary cloud image at
-        // every viewing distance. The analytic sphere is strictly a distant-
-        // body LOD; leaving it over the active volume made high quality look
-        // exactly like the low-quality texture deck.
-        const target = focused && this.volumeActive ? 1 : 0;
+        // The focused planet keeps the physical shell through normal orbit.
+        // The former 24–56 km switch rendered every space view as a displaced
+        // alpha sphere — exactly the painted-film failure visible in player
+        // captures. At orbital distance the volume pass is already pixel
+        // budgeted and uses the low step tier, so genuine thickness, internal
+        // extinction and limb parallax remain cheaper than a second opaque
+        // world pass while preserving the visual contract.
+        const band = this.volCloudMat.userData.band;
+        const distanceToShell = camR < band.rIn
+          ? band.rIn - camR
+          : camR > band.rOut ? camR - band.rOut : 0;
+        const volumeProximity = 1 - smoothstep(720000, 1050000, distanceToShell);
+        const target = focused && this.volumeActive ? volumeProximity : 0;
         // Initialize directly in the correct ownership state. Fading from the
         // analytic deck after the first controllable frame exposed a visible
         // flat-to-volume cloud replacement during startup.
@@ -1460,8 +1482,7 @@ export class Planet {
     if (this.cloudMesh2) {
       this.cloudSpin2 = this.cloudSpin2Base
         + this.weatherHours * (this.weatherField?.windRadiansPerHour || 0.05) * 1.47;
-      this.cloudMesh2.quaternion.copy(this.axisQuat)
-        .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin2));
+      this.cloudMesh2.quaternion.setFromAxisAngle(_yAxis, this.cloudSpin2);
       if (this.volCloudMesh) {
         const e = clamp(this.volumeBlend || 0, 0, 1);
         this.cloudMesh2.material.opacity = 0.28 * (1 - e);
@@ -1477,8 +1498,8 @@ export class Planet {
       }
     }
     if (this.cloudMeshNoctilucent) {
-      this.cloudMeshNoctilucent.quaternion.copy(this.axisQuat)
-        .multiply(_q.setFromAxisAngle(_yAxis, this.cloudSpin * 1.18));
+      this.cloudMeshNoctilucent.quaternion.setFromAxisAngle(
+        _yAxis, this.cloudSpin * 1.18);
       const noctilucentShader = this.cloudMeshNoctilucent.material.userData.shader;
       if (noctilucentShader?.uniforms.uSunDir) {
         noctilucentShader.uniforms.uSunDir.value.copy(this.sunDirLocal)
@@ -1587,6 +1608,20 @@ const _msp = new THREE.Vector3();
 const _msd = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
+function analyticMediaEclipseVisibility(localPosition, sunDirection, nodes) {
+  const normalizedSun = sunDirection.normalize();
+  const toOccluder = nodes.uEclipseCenter.sub(localPosition);
+  const along = dot(toOccluder, normalizedSun).max(0);
+  const perpendicular = sqrt(dot(toOccluder, toOccluder)
+    .sub(along.mul(along)).max(0));
+  const penumbra = along.mul(nodes.uEclipseStarAngle).max(0.5);
+  const visibility = nodeSmoothstep(nodes.uEclipseRadius.sub(penumbra),
+    nodes.uEclipseRadius.add(penumbra), perpendicular);
+  const inFront = dot(toOccluder, normalizedSun).greaterThan(0);
+  return mix(float(1), inFront.select(visibility, float(1)),
+    nodes.uEclipseEnabled.clamp(0, 1));
+}
+
 function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   if (!USE_NODE_MATERIALS) {
     return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
@@ -1599,8 +1634,13 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     uStellarDirections1: uniform(new THREE.Vector3(0, -1, 0)),
     uStellarRadiance1: uniform(new THREE.Color(1, 0.98, 0.94)),
     uStarIrradiance1: uniform(0),
+    uEclipseCenter: uniform(new THREE.Vector3()),
+    uEclipseRadius: uniform(1),
+    uEclipseStarAngle: uniform(0),
+    uEclipseEnabled: uniform(0),
     uCameraLocal: uniform(new THREE.Vector3()),
     uGroundR: uniform(groundR), uAtmoR: uniform(atmoR),
+    uMaxSteps: uniform(20),
     tSceneDepth: texture(new THREE.Texture()), uDepthReady: uniform(0),
     uDepthReversed: uniform(0), uCameraNear: uniform(0.12), uCameraFar: uniform(1.2e11),
     uVolumeSize: uniform(new THREE.Vector2(1, 1)),
@@ -1626,7 +1666,8 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     const sceneDepth = sceneRayLimit(nodes, forwardCos, 0.35);
     t1.assign(sceneDepth.hasOpaqueDepth.select(t1.min(sceneDepth.rayDistance), t1));
     const span = t1.sub(t0).max(0);
-    const stepLength = span.div(20);
+    const stepCount = nodes.uMaxSteps.clamp(8, 20).toVar();
+    const stepLength = span.div(stepCount);
     const t = t0.add(stepLength.mul(0.5)).toVar();
 
     const sun1 = nodes.uStellarDirections0.normalize();
@@ -1650,44 +1691,50 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     const mieExtinctionBeta = vec3(5.20e-6, 4.40e-6, 3.68e-6);
     const integrated = vec3(0).toVar();
     const transmission = vec3(1).toVar();
-    Loop(20, () => {
-      const samplePosition = origin.add(ray.mul(t));
-      const radius = samplePosition.length();
-      const altitude = radius.sub(nodes.uGroundR).max(0);
-      const height = altitude.div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
-      const rhoR = exp(altitude.div(-8000)).mul(nodes.density);
-      const rhoM = exp(altitude.div(-1200)).mul(nodes.density).mul(0.85);
-      const radial = samplePosition.div(radius.max(1));
-      const sunMu1 = dot(radial, sun1);
-      const sunMu2 = dot(radial, sun2);
-      const horizon1 = nodeSmoothstep(-0.11, 0.035, sunMu1);
-      const horizon2 = nodeSmoothstep(-0.11, 0.035, sunMu2);
-      // Near the horizon the optical air mass rises far faster than 1/cos
-      // with the former +0.28 clamp. This bounded Kasten-like approximation
-      // reaches ~18 air masses at zero elevation, naturally removing blue
-      // light and producing the red/orange golden-hour band.
-      const slant1 = float(1).div(sunMu1.add(0.055).max(0.028));
-      const slant2 = float(1).div(sunMu2.add(0.055).max(0.028));
-      const optical = rayleighBeta.mul(rhoR).add(mieExtinctionBeta.mul(rhoM));
-      const sunOptical = rayleighBeta.mul(rhoR).mul(8000)
-        .add(mieExtinctionBeta.mul(rhoM).mul(1200));
-      const sunTransmission1 = exp(sunOptical.mul(slant1).negate()).mul(horizon1);
-      const sunTransmission2 = exp(sunOptical.mul(slant2).negate()).mul(horizon2);
-      const scatter1 = rayleighBeta.mul(rhoR).mul(rayleighPhase1)
-        .add(mieScatterBeta.mul(rhoM).mul(miePhase1))
-        .mul(sunTransmission1).mul(nodes.uStellarRadiance0).mul(nodes.uStarIrradiance0);
-      const scatter2 = rayleighBeta.mul(rhoR).mul(rayleighPhase2)
-        .add(mieScatterBeta.mul(rhoM).mul(miePhase2))
-        .mul(sunTransmission2).mul(nodes.uStellarRadiance1).mul(nodes.uStarIrradiance1);
-      const multiScatter = nodes.uStellarRadiance0.mul(nodes.uStarIrradiance0).mul(horizon1)
-        .add(nodes.uStellarRadiance1.mul(nodes.uStarIrradiance1).mul(horizon2))
-        .mul(rayleighBeta).mul(rhoR).mul(float(1).sub(height)).mul(0.08);
-      const stepOptical = optical.mul(stepLength);
-      const alphaStep = vec3(1).sub(exp(stepOptical.negate()));
-      integrated.addAssign(scatter1.add(scatter2).add(multiScatter)
-        .mul(transmission).mul(stepLength).mul(2.4));
-      transmission.mulAssign(vec3(1).sub(alphaStep));
-      t.addAssign(stepLength);
+    Loop(20, ({ i }) => {
+      If(i.lessThan(stepCount), () => {
+        const samplePosition = origin.add(ray.mul(t));
+        const radius = samplePosition.length();
+        const altitude = radius.sub(nodes.uGroundR).max(0);
+        const height = altitude.div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
+        const rhoR = exp(altitude.div(-8000)).mul(nodes.density);
+        const rhoM = exp(altitude.div(-1200)).mul(nodes.density).mul(0.85);
+        const radial = samplePosition.div(radius.max(1));
+        const sunMu1 = dot(radial, sun1);
+        const sunMu2 = dot(radial, sun2);
+        const horizon1 = nodeSmoothstep(-0.11, 0.035, sunMu1);
+        const horizon2 = nodeSmoothstep(-0.11, 0.035, sunMu2);
+        const eclipseVisibility = analyticMediaEclipseVisibility(
+          samplePosition, sun1, nodes);
+        // Near the horizon the optical air mass rises far faster than 1/cos
+        // with the former +0.28 clamp. This bounded Kasten-like approximation
+        // reaches ~18 air masses at zero elevation, naturally removing blue
+        // light and producing the red/orange golden-hour band.
+        const slant1 = float(1).div(sunMu1.add(0.055).max(0.028));
+        const slant2 = float(1).div(sunMu2.add(0.055).max(0.028));
+        const optical = rayleighBeta.mul(rhoR).add(mieExtinctionBeta.mul(rhoM));
+        const sunOptical = rayleighBeta.mul(rhoR).mul(8000)
+          .add(mieExtinctionBeta.mul(rhoM).mul(1200));
+        const sunTransmission1 = exp(sunOptical.mul(slant1).negate()).mul(horizon1);
+        const sunTransmission2 = exp(sunOptical.mul(slant2).negate()).mul(horizon2);
+        const scatter1 = rayleighBeta.mul(rhoR).mul(rayleighPhase1)
+          .add(mieScatterBeta.mul(rhoM).mul(miePhase1))
+          .mul(sunTransmission1).mul(nodes.uStellarRadiance0)
+          .mul(nodes.uStarIrradiance0).mul(eclipseVisibility);
+        const scatter2 = rayleighBeta.mul(rhoR).mul(rayleighPhase2)
+          .add(mieScatterBeta.mul(rhoM).mul(miePhase2))
+          .mul(sunTransmission2).mul(nodes.uStellarRadiance1).mul(nodes.uStarIrradiance1);
+        const multiScatter = nodes.uStellarRadiance0.mul(nodes.uStarIrradiance0)
+          .mul(horizon1).mul(eclipseVisibility)
+          .add(nodes.uStellarRadiance1.mul(nodes.uStarIrradiance1).mul(horizon2))
+          .mul(rayleighBeta).mul(rhoR).mul(float(1).sub(height)).mul(0.08);
+        const stepOptical = optical.mul(stepLength);
+        const alphaStep = vec3(1).sub(exp(stepOptical.negate()));
+        integrated.addAssign(scatter1.add(scatter2).add(multiScatter)
+          .mul(transmission).mul(stepLength).mul(2.4));
+        transmission.mulAssign(vec3(1).sub(alphaStep));
+        t.addAssign(stepLength);
+      });
     });
     const valid = discOuter.greaterThan(0).and(t1.greaterThan(t0));
     const meanTransmission = dot(transmission, vec3(0.333333));
@@ -1709,15 +1756,47 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   return material;
 }
 
-function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0],
-  weatherField = null, layer = 'low') {
+function coverageCutoff(values, targetCoverage) {
+  const bins = new Uint32Array(512);
+  for (let index = 0; index < values.length; index++) {
+    const bin = Math.min(bins.length - 1,
+      Math.max(0, Math.floor(values[index] * (bins.length - 1))));
+    bins[bin]++;
+  }
+  const targetCount = Math.round(values.length * clamp(targetCoverage, 0, 1));
+  let accumulated = 0;
+  for (let bin = bins.length - 1; bin >= 0; bin--) {
+    accumulated += bins[bin];
+    if (accumulated >= targetCount) return bin / (bins.length - 1);
+  }
+  return 1;
+}
+
+function cloudAtlasTexture(canvas) {
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.colorSpace = THREE.NoColorSpace;
+  return tex;
+}
+
+function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
+  weatherField = null) {
   const W = 1024, H = 512;
-  const canvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
-  if (!canvas) return null;
-  canvas.width = W; canvas.height = H;
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(W, H);
-  const d = img.data;
+  const lowCanvas = (typeof document !== 'undefined')
+    ? document.createElement('canvas') : null;
+  if (!lowCanvas) return { low: null, high: null, stats: null };
+  const highCanvas = document.createElement('canvas');
+  lowCanvas.width = highCanvas.width = W;
+  lowCanvas.height = highCanvas.height = H;
+  const lowContext = lowCanvas.getContext('2d');
+  const highContext = highCanvas.getContext('2d');
+  const lowImage = lowContext.createImageData(W, H);
+  const highImage = highContext.createImageData(W, H);
+  const lowData = lowImage.data;
+  const highData = highImage.data;
+  const lowRaw = new Float32Array(W * H);
+  const highRaw = new Float32Array(W * H);
   for (let j = 0; j < H; j++) {
     const phi = (j / H - 0.5) * Math.PI;
     const cy = Math.sin(phi), cr = Math.cos(phi);
@@ -1728,49 +1807,120 @@ function makeCloudTexture(simplex, coverage, offsets = [0, 0, 0],
       // and GPU rendering. Fine seeded noise only erodes the shared density;
       // it never creates an independent camera-facing cloud pattern.
       const dir = { x: cx, y: cy, z: cz };
-      let v = cloudDensityCPU(dir,
+      const legacyDensity = cloudDensityCPU(dir,
         0.55 - coverage * 0.24, 0.86 - coverage * 0.14,
         offsets[0], offsets[1], offsets[2]);
-      const erosion = simplex.fbm(cx + 5, cy + 5, cz - 5, 7.5, 4, 0.54, 2.2, 38) * 0.5 + 0.5;
+      const macroErosion = simplex.fbm(
+        cx + 5, cy + 5, cz - 5, 11, 4, 0.54, 2.2, 38,
+      ) * 0.5 + 0.5;
+      const cloudletErosion = simplex.fbm(
+        cx - 13, cy + 19, cz + 7, 118, 4, 0.5, 2.13, 17,
+      ) * 0.5 + 0.5;
+      // Two seeded bands resolve roughly 20–60 km cloudlets inside
+      // hundred-kilometre systems. They are baked once for both Lo and Hi,
+      // avoiding the former duplicate million-sample weather evaluation at
+      // startup.
+      const erosion = macroErosion * 0.38 + cloudletErosion * 0.62;
       const weather = weatherField ? sampleWeatherField(weatherField, dir, 0) : null;
       const weatherCoverage = weather?.coverage || 0;
-      v = clamp(weatherField?.fixture
-        ? weatherCoverage * (0.58 + erosion * 0.42)
-        // The legacy field supplies cellular detail, while the new weather
-        // authority decides where enough moisture exists to sustain it.
-        // Taking max() here made both fields additive and covered nearly the
-        // entire globe even when each field was individually sparse.
-        : v * (0.4 + weatherCoverage * 0.5) * (0.66 + erosion * 0.28)
-          + weatherCoverage * (0.18 + erosion * 0.2), 0, 1);
-      const k = (j * W + i) * 4;
-      if (layer === 'high') {
-        // Hi: cirrus coverage/type, precipitation/convective energy and the
-        // multiple-scattering field used to keep thick cloud interiors alive.
-        d[k] = ((weather?.highMask || 0) * 255) | 0;
-        d[k + 1] = ((weather?.highType || 0) * 255) | 0;
-        d[k + 2] = ((weather?.convective || weather?.precipitation || 0) * 255) | 0;
-        d[k + 3] = ((weather?.multipleScatter ?? v) * 255) | 0;
-      } else {
-        // Lo: actual deck density, vertical cloud family, stratus compression
-        // and humidity. This texture is also the ground/ocean shadow atlas.
-        d[k] = (v * 255) | 0;
-        d[k + 1] = ((weather?.cloudType || 0) * 255) | 0;
-        d[k + 2] = ((weather?.stratusMask || 0) * 255) | 0;
-        d[k + 3] = ((weather?.humidity ?? v) * 255) | 0;
-      }
+      const stratusMask = weather?.stratusMask || 0;
+      const brokenForm = 0.04 + smoothstep(0.24, 0.76, erosion) * 0.96;
+      const sheetForm = 0.28 + macroErosion * 0.5 + cloudletErosion * 0.22;
+      const weatherForm = brokenForm
+        + (sheetForm - brokenForm) * stratusMask * 0.82;
+      const index = j * W + i;
+      const lowDensity = weatherField
+        ? weatherCoverage * weatherForm
+          * (0.86 + (weather?.cloudType || 0) * 0.14)
+        : legacyDensity;
+      lowRaw[index] = clamp(lowDensity, 0, 1);
+      const cirrusErosion = simplex.fbm(
+        cx * 3.4 + 17, cy * 0.7 - 11, cz * 3.4 + 3,
+        5.1, 3, 0.56, 2.1, 29,
+      ) * 0.5 + 0.5;
+      highRaw[index] = clamp((weather?.highMask || 0)
+        * (0.08 + cirrusErosion * 0.82)
+        * (0.7 + (weather?.highType || 0) * 0.3), 0, 1);
+      const k = index * 4;
+      lowData[k + 1] = ((weather?.cloudType || 0) * 255) | 0;
+      lowData[k + 2] = ((weather?.stratusMask || 0) * 255) | 0;
+      lowData[k + 3] = ((weather?.humidity ?? lowDensity) * 255) | 0;
+      highData[k + 1] = ((weather?.highType || 0) * 255) | 0;
+      highData[k + 2] = ((weather?.convective || weather?.precipitation || 0) * 255) | 0;
+      highData[k + 3] = ((weather?.multipleScatter ?? lowDensity) * 255) | 0;
     }
   }
-  ctx.putImageData(img, 0, 0);
-  // soften: thresholded noise leaves near-binary texels that read as hard
-  // squares from orbit; a subpixel blur turns them back into vapour
-  ctx.filter = 'blur(2.0px)';
-  ctx.drawImage(canvas, 0, 0);
-  ctx.filter = 'none';
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.colorSpace = THREE.NoColorSpace;
-  return tex;
+  // The astronomy dossier's coverage is an areal contract. Calibrate the
+  // occupancy threshold to that contract instead of multiplying coverage by
+  // erosion and then thresholding it a second time in the shader. The latter
+  // made the 42% home-world deck render as scattered sub-10% white stains.
+  const fixtureCoverage = Number(weatherField?.fixture?.coverage);
+  const requestedCoverage = Number.isFinite(fixtureCoverage)
+    ? fixtureCoverage : coverage;
+  const lowTarget = clamp(requestedCoverage * 0.9, 0.015, 0.84);
+  const highTarget = clamp(requestedCoverage * 0.34, 0.008, 0.36);
+  const lowCutoff = coverageCutoff(lowRaw, lowTarget);
+  const highCutoff = coverageCutoff(highRaw, highTarget);
+  let lowOccupied = 0;
+  let highOccupied = 0;
+  let lowMean = 0;
+  let highMean = 0;
+  for (let index = 0; index < lowRaw.length; index++) {
+    const lowFloor = Math.max(0, lowCutoff - 0.075);
+    const highFloor = Math.max(0, highCutoff - 0.055);
+    // Coverage and condensate depth are separate quantities. A broad
+    // smoothstep made most occupied systems saturate at 1, turning fronts
+    // into featureless white shields. The support mask still honors the
+    // authored areal coverage, while relief retains the unsaturated density
+    // range required for cloud-top lighting and self-shadow.
+    const lowSupport = smoothstep(
+      lowFloor, Math.min(1, lowCutoff + 0.018), lowRaw[index]);
+    const lowRelief = clamp(
+      (lowRaw[index] - lowFloor) / Math.max(1e-5, 1 - lowFloor), 0, 1);
+    const lowValue = lowSupport
+      * (0.2 + 0.8 * Math.pow(lowRelief, 0.72));
+    const highSupport = smoothstep(
+      highFloor, Math.min(1, highCutoff + 0.012), highRaw[index]);
+    const highRelief = clamp(
+      (highRaw[index] - highFloor) / Math.max(1e-5, 1 - highFloor), 0, 1);
+    const highValue = highSupport
+      * (0.12 + 0.88 * Math.pow(highRelief, 0.82));
+    lowData[index * 4] = Math.round(lowValue * 255);
+    highData[index * 4] = Math.round(highValue * 255);
+    lowMean += lowValue;
+    highMean += highValue;
+    if (lowValue >= 0.125) lowOccupied++;
+    if (highValue >= 0.08) highOccupied++;
+  }
+  lowContext.putImageData(lowImage, 0, 0);
+  highContext.putImageData(highImage, 0, 0);
+  // A sub-pixel blur only removes atlas stair-steps. It must not erase the
+  // 20–60 km cloudlets that establish scale in orbital photography.
+  for (const [context, canvas] of [
+    [lowContext, lowCanvas], [highContext, highCanvas],
+  ]) {
+    context.filter = 'blur(0.45px)';
+    context.drawImage(canvas, 0, 0);
+    context.filter = 'none';
+  }
+  const count = lowRaw.length;
+  const stats = Object.freeze({
+    requested: coverage,
+    fixtureRequested: Number.isFinite(fixtureCoverage) ? fixtureCoverage : null,
+    lowTarget,
+    highTarget,
+    lowOccupied: lowOccupied / count,
+    highOccupied: highOccupied / count,
+    lowMean: lowMean / count,
+    highMean: highMean / count,
+    lowCutoff,
+    highCutoff,
+  });
+  const low = cloudAtlasTexture(lowCanvas);
+  const high = cloudAtlasTexture(highCanvas);
+  low.userData.coverageStats = stats;
+  high.userData.coverageStats = stats;
+  return { low, high, stats };
 }
 
 function makeRingTexture(rand, tint) {

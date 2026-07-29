@@ -423,13 +423,16 @@ function applyFixture(sample, fixture) {
     // Non-storm fixtures preserve their requested family while retaining
     // enough spatial variation to remain a weather map rather than a flat
     // debug colour.
-    const regional = clamp(0.28 + sample.coverage * 0.72);
+    const regional = fixture.name === 'stratus'
+      ? smoothstep(0.06, 0.66, sample.coverage)
+      : smoothstep(0.16, 0.78, sample.coverage);
+    const floor = fixture.name === 'stratus' ? 0.08 : 0.025;
     for (const key of FIXTURE_VISUAL_KEYS) {
       if (!Number.isFinite(fixture[key])) continue;
       const target = Number(fixture[key]);
       sample[key] = fixture.name === 'clear'
         ? target
-        : clamp(target * (0.42 + regional * 0.58));
+        : clamp(target * (floor + regional * (1 - floor)));
     }
   }
   if (Number.isFinite(fixture.windSpeed)) {
@@ -533,8 +536,20 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
     + stormSystems * 0.42 + eyewall * 1.02
     + Math.max(0, detail) * 0.13 - stratusMask * 0.2;
   const convective = smoothstep(0.42, 1.18, convectiveSource);
-  const cloudType = clamp(convective * 0.86 + eyewall * 0.38
-    + cycloneCloud * 0.14 + marine.streets * 0.08);
+  // Vertical cloud family is not synonymous with severe convection. Moist,
+  // broken boundary layers produce ordinary cumulus towers even on calm
+  // days; omitting that branch left almost every natural cloud as stratus and
+  // made the planet read as a painted sheet. Storm energy still owns the tall
+  // cumulonimbus/anvil end of the range.
+  const fairWeatherCumulus = coverage
+    * (1 - stratusMask * 0.72)
+    * smoothstep(0.4, 0.79, humidity + Math.max(0, detail) * 0.24)
+    * (0.38 + marine.cellular * 0.18 + marine.streets * 0.34);
+  const cloudType = clamp(Math.max(
+    convective * 0.86 + eyewall * 0.38
+      + cycloneCloud * 0.14 + marine.streets * 0.18,
+    fairWeatherCumulus,
+  ));
   const highMask = clamp(smoothstep(-0.08, 0.48, highPattern
     + profile.highClouds * 0.72 + convective * 0.22
     + anvilOutflow * 0.34 + frontalCloud * 0.12 - 0.34)
