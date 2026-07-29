@@ -242,7 +242,11 @@ export class GameNodePipeline {
       if (uniforms.uCameraFar) uniforms.uCameraFar.value = this.camera.far;
       if (uniforms.uVolumeSize?.value) {
         this.renderer.getDrawingBufferSize(uniforms.uVolumeSize.value);
-        uniforms.uVolumeSize.value.multiplyScalar(this.volumeScale);
+        // PassNode rounds its physical render target to integer texels. Keep
+        // shader reconstruction on that exact grid; fractional sizes shift
+        // depth-guided taps by a sub-texel while the camera moves.
+        uniforms.uVolumeSize.value.multiplyScalar(this.volumeScale).floor();
+        uniforms.uVolumeSize.value.max(new THREE.Vector2(1, 1));
       }
       if (uniforms.uDepthReversed) {
         uniforms.uDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
