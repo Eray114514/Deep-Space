@@ -238,7 +238,9 @@ export class ChunkedLOD {
   beyondHorizon(node) {
     const p = this.planet;
     const liveCamR = this.camLocal.length();
-    const camR = this._orbitCapped && this.planet.orbitPrewarmRadiusRatio
+    const camR = this._orbitCapped && this.startupPriority
+      && node.level < (this.planet.orbitLevelCap ?? 0)
+      && this.planet.orbitPrewarmRadiusRatio
       ? Math.max(liveCamR, p.R * this.planet.orbitPrewarmRadiusRatio)
       : liveCamR;
     const R0 = p.R * 0.94;
@@ -271,9 +273,11 @@ export class ChunkedLOD {
       // detail continuously through the approach while retaining the cheap
       // full-disk cap at long range.
       let approachLevels = 0;
-      if (radiusRatio < 1.32) approachLevels++;
-      if (radiusRatio < 1.20) approachLevels++;
-      if (radiusRatio < 1.12) approachLevels++;
+      const thresholds = this.planet.orbitApproachLevelThresholds
+        || [1.32, 1.20, 1.12];
+      for (const threshold of thresholds) {
+        if (radiusRatio < threshold) approachLevels++;
+      }
       this._levelCap = Math.min(this.planet.maxLevel,
         this.planet.orbitLevelCap + approachLevels);
     } else {
@@ -638,6 +642,11 @@ export class ChunkedLOD {
 
     const faceFn = FACE_FN[node.face];
     let maxMorphHeightDelta = 0;
+    // Terrain noise is much more expensive than flat water. Four-vertex
+    // interactive batches keep the 3.2 ms scheduler budget honest even for
+    // 64×64 high-tier chunks; startup and liquid jobs retain the
+    // cache-friendly sixteen-vertex batch.
+    const batchMask = p.hAmp > 10 && !this.startupPriority ? 3 : 15;
 
     for (let j = 0; j <= N; j++) {
       const v = node.v0 + (node.v1 - node.v0) * (j / N);
@@ -768,7 +777,7 @@ export class ChunkedLOD {
         // Yield in small cache-friendly batches. Yielding every vertex creates
         // millions of short-lived IteratorResult objects during a descent and
         // eventually hands the render loop a large garbage-collection pause.
-        if ((i & 15) === 15 || i === N) yield;
+        if ((i & batchMask) === batchMask || i === N) yield;
       }
     }
 
@@ -970,11 +979,15 @@ export class ChunkedLOD {
   debugStats() {
     let chunks = 0, visible = 0, activeMorphs = 0;
     let visibleMinLevel = Infinity, visibleMaxLevel = -1;
+    const levels = {};
+    const visibleLevels = {};
     const walk = (node) => {
       if (node.mesh) {
         chunks++;
+        levels[node.level] = (levels[node.level] || 0) + 1;
         if (node.mesh.visible) {
           visible++;
+          visibleLevels[node.level] = (visibleLevels[node.level] || 0) + 1;
           visibleMinLevel = Math.min(visibleMinLevel, node.level);
           visibleMaxLevel = Math.max(visibleMaxLevel, node.level);
           if (Math.abs(node.morph - node.morphTo) > 1e-4) activeMorphs++;
@@ -991,6 +1004,8 @@ export class ChunkedLOD {
       maxLevel: this.planet.maxLevel,
       activeMorphs,
       pending: pendingChunks(this),
+      levels,
+      visibleLevels,
     };
   }
 }
