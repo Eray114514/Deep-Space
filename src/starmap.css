@@ -179,9 +179,9 @@
 .detailSurvey { height: 58px; flex: 0 0 58px; padding: 7px 14px; background: rgba(191, 201, 202, .075); border-bottom: 1px solid rgba(205, 218, 218, .12); }
 .detailSurveyTop { display: flex; justify-content: space-between; align-items: center; color: #bac2c3; font-size: 16px; font-weight: 900; }
 .detailSurvey .bar { margin-top: 7px; }
-.detailRows { flex: 1; min-height: 0; padding: 8px 14px 10px; display: grid; grid-template-rows: repeat(8, minmax(0, 1fr)); }
+.detailRows { flex: 1; min-height: 0; padding: 8px 14px 10px; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(8, minmax(0, 1fr)); }
 .detailRow {
-  min-height: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 7px;
+  min-height: 0; min-width: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 7px;
   background: rgba(183, 194, 196, .055); border-top: 1px solid rgba(222, 231, 231, .055); border-bottom: 1px solid rgba(0, 0, 0, .20);
   font-size: 15px; font-weight: 850; color: #b9c1c2;
 }
