@@ -201,6 +201,8 @@ const surfaceBootstrapMeshes = [];
 let surfaceBootstrapPending = false;
 const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
+let shipPipelineWarmPending = false;
+let heroTransitionActive = false;
 const startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
 // Shader compilation may consume most of the general warm-up deadline on a
@@ -320,20 +322,32 @@ function prewarmSurfacePipelines(planet) {
   warmedSurfacePlanet = planet;
   surfacePipelinesReady = false;
 
-  const terrainSource = planet.group.children.find((object) => object.isMesh
-    && object.geometry?.getAttribute?.('aLocal'));
-  if (terrainSource) {
-    const geometry = terrainSource.geometry.clone();
-    if (!geometry.morphAttributes.position?.length) {
-      const count = geometry.getAttribute('position').count;
-      geometry.morphAttributes.position = [new THREE.BufferAttribute(new Float32Array(count * 3), 3)];
-      geometry.morphAttributes.normal = [new THREE.BufferAttribute(new Float32Array(count * 3), 3)];
-      geometry.morphTargetsRelative = true;
+  const surfaceSources = new Map();
+  planet.group.traverse((object) => {
+    if (!object.isMesh || !object.geometry?.getAttribute?.('aLocal')
+      || !object.material) return;
+    const attributes = Object.entries(object.geometry.attributes)
+      .map(([name, value]) => {
+        const stride = value.isInterleavedBufferAttribute ? value.data.stride : value.itemSize;
+        return `${name}:${value.itemSize}:${stride}`;
+      })
+      .sort()
+      .join('|');
+    const materials = Array.isArray(object.material)
+      ? object.material : [object.material];
+    for (const material of materials) {
+      const key = `${material.uuid}|${attributes}|${object.castShadow ? 1 : 0}`;
+      if (!surfaceSources.has(key)) surfaceSources.set(key, { object, material });
     }
-    const mesh = new THREE.Mesh(geometry, planet.terrainMaterial);
+  });
+  for (const { object: source, material } of surfaceSources.values()) {
+    const geometry = source.geometry.clone();
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData.lodMorph = 0;
     mesh.position.set(0, 0, 0);
     mesh.frustumCulled = false;
-    mesh.castShadow = true;
+    mesh.castShadow = source.castShadow;
+    mesh.receiveShadow = source.receiveShadow;
     mesh.visible = false;
     scene.add(mesh);
     surfaceBootstrapMeshes.push(mesh);
@@ -377,36 +391,107 @@ function prewarmSurfacePipelines(planet) {
 }
 
 function prewarmLoadedShipPipelines() {
-  if (startupPrewarmExpired) {
+  if (QUALITY_LOW || ship.heroLoadFailed) {
     shipPipelinesWarmed = true;
     return;
   }
-  if (QUALITY_LOW) {
-    shipPipelinesWarmed = true;
-    return;
-  }
-  if (!ship.heroLoaded || shipPipelinesWarmed || !surfacePipelinesReady
-    || typeof renderer.compileAsync !== 'function') return;
-  shipPipelinesWarmed = true;
+  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending
+    || !surfacePipelinesReady
+    || typeof foregroundPass?.compileAsync !== 'function') return;
+  shipPipelineWarmPending = true;
   surfacePipelinesReady = false;
-  const lightWasVisible = sunShadow.visible;
-  const lightIntensity = sunShadow.intensity;
-  sunShadow.visible = true;
-  sunShadow.intensity = 1e-7;
-  renderer.compileAsync(scene, camera).then(() => {
-    if (!startupPrewarmExpired) surfaceBootstrapPending = true;
+  const meshState = [];
+  const textures = new Set();
+  ship.group.traverse((object) => {
+    if (!object.isMesh) return;
+    meshState.push({
+      object,
+      visible: object.visible,
+      frustumCulled: object.frustumCulled,
+    });
+    // compileAsync still respects object visibility/frustum state. Temporarily
+    // include wings, landing gear and ramp so later flight/landing frames do
+    // not discover an uncompiled foreground variant.
+    object.visible = true;
+    object.frustumCulled = false;
+    const materials = Array.isArray(object.material)
+      ? object.material : [object.material];
+    for (const material of materials) {
+      if (!material) continue;
+      for (const slot of [
+        'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+      ]) {
+        if (material[slot]) textures.add(material[slot]);
+      }
+    }
+  });
+  const cameraLayerMask = camera.layers.mask;
+  // PassNode.compileAsync currently delegates to renderer.compileAsync(scene,
+  // camera) without applying PassNode.setLayers(). Select the real foreground
+  // layer explicitly or the call silently recompiles layer 0 and misses WINGS.
+  camera.layers.set(SHIP_FOREGROUND_LAYER);
+  // WebGPU pipeline compilation does not force image upload. Initializing the
+  // unique GLB textures here keeps eight 4K transfers behind the loading veil
+  // instead of clustering them at 2.4 s in the pull-back shot.
+  const restoreMeshState = () => {
+    camera.layers.mask = cameraLayerMask;
+    for (const { object, visible, frustumCulled } of meshState) {
+      object.visible = visible;
+      object.frustumCulled = frustumCulled;
+    }
+  };
+  try {
+    if (typeof renderer.initTexture === 'function') {
+      for (const textureValue of textures) renderer.initTexture(textureValue);
+    }
+  } catch (error) {
+    restoreMeshState();
+    shipPipelineWarmPending = false;
+    surfacePipelinesReady = true;
+    console.warn('ship texture prewarm failed', error);
+    return;
+  }
+  // The hero hull exists exclusively on the foreground layer. Compiling the
+  // ordinary scene camera never visited those GLB materials, so the first
+  // visible pull-back frame synchronously built every hull pipeline. Compile
+  // the exact pass that owns the ship while the loading/hero veil is active.
+  let compileTask;
+  try {
+    compileTask = foregroundPass.compileAsync(renderer);
+  } catch (error) {
+    restoreMeshState();
+    shipPipelineWarmPending = false;
+    surfacePipelinesReady = true;
+    console.warn('ship pipeline prewarm failed', error);
+    return;
+  }
+  compileTask.then(() => {
+    restoreMeshState();
+    shipPipelinesWarmed = true;
+    shipPipelineWarmPending = false;
+    surfacePipelinesReady = true;
   }).catch((error) => {
+    restoreMeshState();
+    shipPipelineWarmPending = false;
     surfacePipelinesReady = true;
     console.warn('ship pipeline prewarm failed', error);
   });
-  sunShadow.visible = lightWasVisible;
-  sunShadow.intensity = lightIntensity;
 }
 
 // ---- renderer-specific post chain -------------------------------------------
 const VOLUME_ENABLED = qs.get('vclouds') !== '0';
 const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
-let effectiveVolumeScale = VOLUME_SCALE;
+// Start at the actual orbital pixel budget. Constructing the pipeline at the
+// generic 0.75 Ultra scale and shrinking it on the first live frame allocated
+// two complete volume target sets during the cold-start shader storm.
+const initialVolumePixels = Math.max(1,
+  window.innerWidth * renderDpr * window.innerHeight * renderDpr);
+const INITIAL_VOLUME_SCALE = Math.min(
+  VOLUME_SCALE,
+  0.46,
+  Math.sqrt(1150000 / initialVolumePixels),
+);
+let effectiveVolumeScale = INITIAL_VOLUME_SCALE;
 const PROFILE_CLOUD_STEPS = BOOT_USE_WEBGPU
   ? QUALITY_PROFILE.cloudStepsWebGPU : QUALITY_PROFILE.cloudSteps;
 let effectiveCloudSteps = PROFILE_CLOUD_STEPS;
@@ -426,7 +511,7 @@ const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
 const Pipeline = BOOT_USE_WEBGPU ? GameNodePipeline : GameLegacyPipeline;
 const nodePipeline = new Pipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
-  volumeScale: VOLUME_SCALE,
+  volumeScale: effectiveVolumeScale,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
   bloomStrength: IS_TOUCH ? 0.35 : 0.5,
   bloomRadius: 0.4,
@@ -444,10 +529,20 @@ const riftDistortionPass = nodePipeline.rift;
 const bloomPass = nodePipeline.bloom;
 let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 let spatialRift = null;
-function sizePost() {
-  nodePipeline.setSize(window.innerWidth, window.innerHeight, renderDpr);
+let pipelineResizePending = false;
+function pipelineResourcesBusy() {
+  return shipPipelineWarmPending || heroTransitionActive || !surfacePipelinesReady;
 }
-sizePost();
+function sizePost(force = false) {
+  if (!force && pipelineResourcesBusy()) {
+    pipelineResizePending = true;
+    return false;
+  }
+  nodePipeline.setSize(window.innerWidth, window.innerHeight, renderDpr);
+  pipelineResizePending = false;
+  return true;
+}
+sizePost(true);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -762,13 +857,21 @@ function horizonQuat(up, fwdHint, out) {
 
 // ---- tweens -----------------------------------------------------------------
 const tweens = [];
-function addTween(dur, fn, onDone) {
-  tweens.push({ t: 0, dur, fn, onDone });
+function addTween(dur, fn, onDone, { realTime = false } = {}) {
+  tweens.push({
+    t: 0,
+    dur,
+    fn,
+    onDone,
+    realTime,
+    startedAt: realTime ? performance.now() : 0,
+  });
 }
 function stepTweens(dt) {
+  const now = performance.now();
   for (let i = tweens.length - 1; i >= 0; i--) {
     const tw = tweens[i];
-    tw.t += dt;
+    tw.t = tw.realTime ? (now - tw.startedAt) / 1000 : tw.t + dt;
     const k = clamp(tw.t / tw.dur, 0, 1);
     tw.fn(k);
     if (k >= 1) {
@@ -2281,6 +2384,7 @@ function spawn(hero = false) {
 // the ship slides into formation. Runs inside the click gesture's call chain
 // so pointer lock requested in onDone still counts as user-activated.
 function startHeroPullBack(onDone) {
+  heroTransitionActive = true;
   const planet = universe.system.planets[0];
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
@@ -2302,8 +2406,10 @@ function startHeroPullBack(onDone) {
     ship.introOffset.set(160 * (1 - sk), -110 * (1 - sk), 60 * (1 - sk));
   }, () => {
     ship.introOffset.set(0, 0, 0);
+    heroTransitionActive = false;
+    pipelineResizePending = true;
     onDone?.();
-  });
+  }, { realTime: true });
 }
 
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
@@ -2745,6 +2851,14 @@ function setAtmosphereStepBudget(steps) {
 
 function applyLocalVolumeBudget(force = false) {
   if (!BOOT_USE_WEBGPU || !nearest || !Number.isFinite(nearestAlt)) return;
+  // Render-target resize and async pipeline compilation may not share the
+  // same WebGPU synchronization scope. Defer the budget atomically; the next
+  // settled frame recomputes it from the then-current camera altitude.
+  if (pipelineResourcesBusy()) {
+    localVolumeBudgetKey = '';
+    pipelineResizePending = true;
+    return;
+  }
   const cloudBand = nearest.volCloudMat?.userData?.band;
   const cloudBase = cloudBand ? cloudBand.rIn - nearest.R : 1200;
   const cloudTop = cloudBand ? cloudBand.rOut - nearest.R : 15000;
@@ -2766,22 +2880,23 @@ function applyLocalVolumeBudget(force = false) {
   const budget = tier === 'orbit'
     ? {
       scale: Math.min(VOLUME_SCALE, 0.46, scaleForPixels(1150000)),
-      // The physical cloud mesh is not rendered in orbit. Keep a valid
-      // compile-time floor in the uniform, but spend no light samples.
-      cloudSteps: 16,
-      lightSteps: 0,
+      // The focused planet now retains the physical cloud shell in orbit.
+      // Twenty view samples plus one sunward density probe are the minimum
+      // that preserve kilometre-scale tops and directional self-shadow at 2K.
+      cloudSteps: 20,
+      lightSteps: 2,
       atmosphereSteps: 8,
-    }
+      }
     : tier === 'approach'
       ? {
-        scale: Math.min(VOLUME_SCALE, 0.52, scaleForPixels(1450000)),
-        cloudSteps: Math.max(18, Math.round(22 * qualityRatio)),
+        scale: Math.min(VOLUME_SCALE, 0.5, scaleForPixels(1300000)),
+        cloudSteps: Math.max(18, Math.round(20 * qualityRatio)),
         lightSteps: 0,
         atmosphereSteps: 11,
       }
       : {
-        scale: Math.min(VOLUME_SCALE, 0.56, scaleForPixels(1800000)),
-        cloudSteps: Math.max(24, Math.round(30 * qualityRatio)),
+        scale: Math.min(VOLUME_SCALE, 0.53, scaleForPixels(1550000)),
+        cloudSteps: Math.max(24, Math.round(28 * qualityRatio)),
         lightSteps: 1,
         atmosphereSteps: 14,
       };
@@ -2802,9 +2917,11 @@ function applyLocalVolumeBudget(force = false) {
   ].join(':');
   if (!force && key === localVolumeBudgetKey) return;
   localVolumeBudgetKey = key;
-  effectiveVolumeScale = targetScale;
-  nodePipeline.setVolumeScale?.(effectiveVolumeScale);
-  sizePost();
+  if (Math.abs(targetScale - effectiveVolumeScale) > 0.005) {
+    effectiveVolumeScale = targetScale;
+    nodePipeline.setVolumeScale?.(effectiveVolumeScale);
+    sizePost();
+  }
   setCloudStepBudget(targetCloudSteps, budget.lightSteps);
   setAtmosphereStepBudget(budget.atmosphereSteps);
 }
@@ -3068,7 +3185,9 @@ function frame() {
     walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
   }
-  // While paused, stepTweens(dt=0) is a no-op and the camera/world stay put.
+  // Gameplay/collision tweens use the bounded simulation delta. The title
+  // pull-back is explicitly wall-clock driven, so a temporary shader/LOD long
+  // frame cannot stretch a 2.8 s shot into a 13 s apparent freeze.
   stepTweens(dt);
   updateRiftRoute(dt);
   updateDestinationMarker();
@@ -3468,7 +3587,10 @@ function frame() {
     || ((nearest.lod?.debugStats?.().activeMorphs || 0) === 0
       && (nearest.waterLod?.debugStats?.().activeMorphs || 0) === 0);
   const adaptiveReady = loadingCleared && terrainVisualReady
-    && (!FARFLORA || farFlora.pending() === 0);
+    && pendingChunks() === 0
+    && (!FARFLORA || farFlora.pending() === 0)
+    && surfacePipelinesReady && !shipPipelineWarmPending
+    && !heroTransitionActive;
   if (!adaptiveReady) adaptiveStableSince = performance.now();
   if (dprAcc > adaptInterval && !FREEZE && !adaptiveQualityLocked && adaptiveReady
     && performance.now() - adaptiveStableSince > 5000) {
@@ -3487,17 +3609,24 @@ function frame() {
   renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
   surfaceWeapons.renderScopeView(renderer);
-  if (!surfacePipelinesReady
+  if (QUALITY_LOW && !surfacePipelinesReady
     && performance.now() - startupWarmStartedAt >= STARTUP_WARM_BUDGET_MS) {
-    releaseStartupPrewarm('deadline exceeded; continuing in background');
+    releaseStartupPrewarm('low-tier startup deadline exceeded');
   }
   finishSurfaceBootstrap();
+  if (pipelineResizePending && !pipelineResourcesBusy()) {
+    // Flush once after compilation/handoff. Keeping this outside the render
+    // call ensures no target is rebound for sampling and attachment use in the
+    // same WebGPU command scope.
+    applyLocalVolumeBudget(true);
+    if (pipelineResizePending) sizePost();
+  }
   renderer.info.reset();
   // Skip the actual GPU work while the WebGL context is lost — Three.js
   // no-ops render() anyway, but skipping avoids noise from the post chain
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
-  if (!contextLost) {
+  if (!contextLost && surfacePipelinesReady && !shipPipelineWarmPending) {
     // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
     // only zeros optional effect uniforms; it never swaps renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
@@ -3517,11 +3646,18 @@ function frame() {
     }
   }
   prevNavPos.copy(nav.pos);
-  const startupAssetsReady = shipPipelinesWarmed || startupPrewarmExpired
-    || performance.now() - startupWarmStartedAt > 6000;
+  const startupAssetsReady = ship.heroLoadSettled
+    && (shipPipelinesWarmed || ship.heroLoadFailed || QUALITY_LOW);
   const startupTerrainTimedOut = performance.now() - startupWarmStartedAt
     >= STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS;
-  const terrainReady = startupTerrainReady() || startupTerrainTimedOut;
+  const startupSystemReady = Boolean(universe.system?.built)
+    && pendingChunks() === 0;
+  // High/Ultra never hands control over with an active opening-planet build
+  // queue. The old timeout merely hid the loading screen while hundreds of
+  // GPU uploads moved into the hero shot. Performance tier keeps a bounded
+  // escape hatch for adapters where quality is explicitly secondary.
+  const terrainReady = (startupTerrainReady() && startupSystemReady)
+    || (QUALITY_LOW && startupTerrainTimedOut);
   if (!loadingCleared) {
     // Stage-weighted target — only moves forward. Each milestone contributes
     // a fixed slice so the bar reflects real pipeline readiness instead of an

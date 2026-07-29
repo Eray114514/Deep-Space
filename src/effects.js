@@ -394,6 +394,9 @@ export class Ship {
     this.loadedGear = [];
     this.loadedRamp = [];
     this.anisotropy = anisotropy;
+    this.heroLoaded = false;
+    this.heroLoadSettled = false;
+    this.heroLoadFailed = false;
     this.loadHeroShip();
 
     // when you land, the ship sets down on a pad beside you and waits
@@ -412,7 +415,11 @@ export class Ship {
     // promise resolves to null and the ship stays invisible — the error was
     // already logged by the preload's catch handler.
     heroShipPromise.then((gltf) => {
-      if (!gltf) return;
+      if (!gltf) {
+        this.heroLoadFailed = true;
+        this.heroLoadSettled = true;
+        return;
+      }
       const hero = gltf.scene;
       this.loadedEmissives = [];
       this.loadedGear = [];
@@ -451,6 +458,14 @@ export class Ship {
       for (const part of this.loadedGear) part.visible = false;
       for (const part of this.loadedRamp) part.visible = false;
       this.heroLoaded = true;
+      this.heroLoadSettled = true;
+    }).catch((error) => {
+      // The module-level promise normally resolves null on failure. Keep this
+      // final guard so startup readiness can never wait forever if later asset
+      // processing itself throws.
+      this.heroLoadFailed = true;
+      this.heroLoadSettled = true;
+      console.error('ASTERION S-9 GLB processing failed', error);
     });
   }
 
