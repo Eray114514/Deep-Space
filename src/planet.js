@@ -42,6 +42,7 @@ const DEV_WEATHER_FIXTURE = typeof window !== 'undefined' && window.__NMS_DEV_SE
 // resolution; it never swaps to a different flat weather rendering.
 let volumetricCloudsEnabled = typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('vclouds') !== '0';
+let sharedLocalAtmosphereMaterial = null;
 let volumetricCloudProfile = typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('quality') === 'low'
   ? { quality: 'performance', steps: 48 } : { quality: 'ultra', steps: 124 };
@@ -348,7 +349,8 @@ export class Planet {
       });
     }
     if (this.ringMesh) this._fades.push({ mat: this.ringMesh.material, base: this.ringMesh.material.opacity });
-    this._atmoBaseDensity = this.atmoMesh ? this.atmoMesh.material.uniforms.density.value : 0;
+    this._atmoBaseDensity = this.atmoMesh
+      ? (this.atmoUniforms || this.atmoMesh.material.uniforms).density.value : 0;
     if (this.appear < 1) this.applyAppear();
   }
 
@@ -359,7 +361,10 @@ export class Planet {
       if (f.mat.userData.opacityNodeUniform) f.mat.userData.opacityNodeUniform.value = f.base * a;
       f.mat.transparent = a < 1 || f.base < 1;
     }
-    if (this.atmoMesh) this.atmoMesh.material.uniforms.density.value = this._atmoBaseDensity * a;
+    if (this.atmoMesh) {
+      (this.atmoUniforms || this.atmoMesh.material.uniforms).density.value
+        = this._atmoBaseDensity * a;
+    }
   }
 
   // ======================================================================
@@ -905,7 +910,7 @@ export class Planet {
       const atmoR = R + Math.max(this.hAmp * 3.2, R * this.atmoFraction);
       this.atmoMesh = new THREE.Mesh(
         new THREE.SphereGeometry(atmoR, 96, 64),
-        makeAtmosphereMaterial(this.atmoColor, this.atmoDensity, R, atmoR),
+        makeAtmosphereMaterial(this, this.atmoColor, this.atmoDensity, R, atmoR),
       );
       // Atmosphere is the first participating-medium layer; clouds composite
       // over it in the shared half-resolution volume pass.
@@ -1029,7 +1034,12 @@ export class Planet {
           this, band, detailTexture(), this.cloudShadowTex,
           this.cloudWeatherHiTex,
           volumetricCloudProfile);
-        this.volCloudMat.uniforms.uAmbC.value
+        // WebGPU cloud shells share one live NodeMaterial; the per-planet state
+        // remains independent here. The WebGL compatibility implementation
+        // still exposes ordinary material uniforms and enters the same API.
+        this.volCloudUniforms ||= this.volCloudMat.uniforms;
+        this.volCloudBand ||= band;
+        this.volCloudUniforms.uAmbC.value
           .copy(this.skyColor).multiplyScalar(0.58);
         this.volCloudMesh = new THREE.Mesh(
           new THREE.SphereGeometry(band.rOut, 192, 128), this.volCloudMat);
@@ -1117,7 +1127,7 @@ export class Planet {
     this.sunDirWorld.copy(dirLocal);
     this.sunDirLocal.copy(dirLocal).applyQuaternion(this._invFrame);
     if (this.atmoMesh) {
-      const uniforms = this.atmoMesh.material.uniforms;
+      const uniforms = this.atmoUniforms || this.atmoMesh.material.uniforms;
       (uniforms.sunDir || uniforms.uStellarDirections0)?.value.copy(this.sunDirLocal);
     }
     const waterShader = this.liquidMat?.userData.shader;
@@ -1148,7 +1158,7 @@ export class Planet {
     if (terrainEclipse?.uEclipseSunDir) {
       terrainEclipse.uEclipseSunDir.value.copy(primary.localDirection);
     }
-    const atmo = this.atmoMesh?.material?.uniforms;
+    const atmo = this.atmoUniforms || this.atmoMesh?.material?.uniforms;
     if (atmo) {
       (atmo.uStellarDirections0 || atmo.sunDir)?.value.copy(primary.localDirection);
       atmo.uStellarRadiance0?.value.copy(primary.colorValue);
@@ -1174,7 +1184,7 @@ export class Planet {
     if (water?.uSecondarySunEnergy) {
       water.uSecondarySunEnergy.value = secondary?.irradianceFraction ?? 0;
     }
-    const clouds = this.volCloudMat?.uniforms;
+    const clouds = this.volCloudUniforms || this.volCloudMat?.uniforms;
     if (clouds) {
       clouds.uStellarDirections0?.value.copy(primary.localDirection);
       clouds.uStellarRadiance0?.value.copy(primary.colorValue);
@@ -1198,8 +1208,8 @@ export class Planet {
     const targets = [
       this.terrainMaterial?.userData?.shader?.uniforms,
       this.liquidMat?.userData?.shader?.uniforms,
-      this.atmoMesh?.material?.uniforms,
-      this.volCloudMat?.uniforms,
+      this.atmoUniforms || this.atmoMesh?.material?.uniforms,
+      this.volCloudUniforms || this.volCloudMat?.uniforms,
     ];
     for (const uniforms of targets) {
       if (!uniforms?.uEclipseEnabled) continue;
@@ -1222,7 +1232,7 @@ export class Planet {
     if (!Number.isFinite(hours)) return this.weatherState;
     this.weatherHours = Number(hours);
     this.weatherState = advanceWeatherField(this.weatherField, this.weatherHours);
-    const uniforms = this.volCloudMat?.uniforms;
+    const uniforms = this.volCloudUniforms || this.volCloudMat?.uniforms;
     if (uniforms?.uWeatherTime) uniforms.uWeatherTime.value = this.weatherHours;
     return this.weatherState;
   }
@@ -1258,11 +1268,17 @@ export class Planet {
         if (weatherNode) weatherNode.value = textureValue;
         if (material?.userData) material.userData.weatherSystemTexture = textureValue;
       }
-      const volumeLoNode = this.volCloudMat?.userData.weatherLoTextureNode;
-      const volumeHiNode = this.volCloudMat?.userData.weatherHiTextureNode;
+      const volumeState = this.volCloudState;
+      const volumeLoNode = volumeState?.weatherLoTextureNode
+        || this.volCloudMat?.userData.weatherLoTextureNode;
+      const volumeHiNode = volumeState?.weatherHiTextureNode
+        || this.volCloudMat?.userData.weatherHiTextureNode;
       if (volumeLoNode) volumeLoNode.value = this.cloudShadowTex;
       if (volumeHiNode) volumeHiNode.value = this.cloudWeatherHiTex;
-      if (this.volCloudMat?.userData) {
+      if (volumeState) {
+        volumeState.weatherLoMap = this.cloudShadowTex;
+        volumeState.weatherHiMap = this.cloudWeatherHiTex;
+      } else if (this.volCloudMat?.userData) {
         this.volCloudMat.userData.weatherLoTexture = this.cloudShadowTex;
         this.volCloudMat.userData.weatherHiTexture = this.cloudWeatherHiTex;
       }
@@ -1288,7 +1304,7 @@ export class Planet {
       }
       this.setStellarLights(this.stellarLightField);
     } else if (this.atmoMesh) {
-      const uniforms = this.atmoMesh.material.uniforms;
+      const uniforms = this.atmoUniforms || this.atmoMesh.material.uniforms;
       (uniforms.uStellarDirections0 || uniforms.sunDir)?.value.copy(this.sunDirLocal);
     }
     const waterShader = this.liquidMat?.userData.shader;
@@ -1404,7 +1420,7 @@ export class Planet {
       }
     }
     if (this.atmoMesh) {
-      const au = this.atmoMesh.material.uniforms;
+      const au = this.atmoUniforms || this.atmoMesh.material.uniforms;
       if (au.uCameraLocal) au.uCameraLocal.value.copy(camLocal);
     }
     // shells vanish near their own altitude so you fly through, not pop through;
@@ -1453,7 +1469,7 @@ export class Planet {
         // budgeted and uses the low step tier, so genuine thickness, internal
         // extinction and limb parallax remain cheaper than a second opaque
         // world pass while preserving the visual contract.
-        const band = this.volCloudMat.userData.band;
+        const band = this.volCloudBand || this.volCloudMat.userData.band;
         const distanceToShell = camR < band.rIn
           ? band.rIn - camR
           : camR > band.rOut ? camR - band.rOut : 0;
@@ -1465,7 +1481,7 @@ export class Planet {
         if (this.volumeBlend === undefined) this.volumeBlend = target;
         else this.volumeBlend += (target - this.volumeBlend) * (1 - Math.exp(-dt * 5));
         const e = clamp(this.volumeBlend, 0, 1);
-        const u = this.volCloudMat.uniforms;
+        const u = this.volCloudUniforms || this.volCloudMat.uniforms;
         u.uEngage.value = e;
         u.uCameraLocal.value.copy(camLocal);
         u.uSpin.value.setFromMatrix4(_m4);
@@ -1592,7 +1608,10 @@ export class Planet {
         if (o.material.map) o.material.map.dispose();
         if (o.material.alphaMap) o.material.alphaMap.dispose();
         if (o.material.userData.weatherSystemTexture) o.material.userData.weatherSystemTexture.dispose();
-        o.material.dispose();
+        // The WebGPU local cloud shell is a process-wide material shared by all
+        // planets. Disposing one cancelled preview must not invalidate the live
+        // system's warmed RenderObject/pipeline.
+        if (!o.material.userData.sharedLocalVolume) o.material.dispose();
       }
     });
     this.terrainMaterial.dispose();
@@ -1622,7 +1641,7 @@ function analyticMediaEclipseVisibility(localPosition, sunDirection, nodes) {
     nodes.uEclipseEnabled.clamp(0, 1));
 }
 
-function makeAtmosphereMaterial(color, density, groundR, atmoR) {
+function makeAtmosphereMaterial(planet, color, density, groundR, atmoR) {
   if (!USE_NODE_MATERIALS) {
     return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
   }
@@ -1645,6 +1664,18 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
     uDepthReversed: uniform(0), uCameraNear: uniform(0.12), uCameraFar: uniform(1.2e11),
     uVolumeSize: uniform(new THREE.Vector2(1, 1)),
   };
+  planet.atmoUniforms = nodes;
+  if (sharedLocalAtmosphereMaterial) {
+    planet.syncAtmoMaterial = () => {
+      const shared = sharedLocalAtmosphereMaterial.uniforms;
+      for (const [name, sourceNode] of Object.entries(nodes)) {
+        if (shared[name] && sourceNode && 'value' in sourceNode) {
+          shared[name].value = sourceNode.value;
+        }
+      }
+    };
+    return sharedLocalAtmosphereMaterial;
+  }
   // Meter-scaled TSL participating medium. The gameplay atmosphere keeps its
   // broad entry envelope, while optical density falls on physical scale
   // heights so the visible limb does not inflate a 900 km planet.
@@ -1753,6 +1784,9 @@ function makeAtmosphereMaterial(color, density, groundR, atmoR) {
   material.colorNode = atmosphere.rgb.div(atmosphere.a.max(0.0001));
   material.opacityNode = atmosphere.a;
   material.uniforms = nodes;
+  material.userData.sharedLocalVolume = true;
+  sharedLocalAtmosphereMaterial = material;
+  planet.syncAtmoMaterial = () => {};
   return material;
 }
 
@@ -1782,7 +1816,11 @@ function cloudAtlasTexture(canvas) {
 
 function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
   weatherField = null) {
-  const W = 1024, H = 512;
+  // 512×256 preserves the authored 20–60 km weather structures while cutting
+  // the synchronous route-time atlas bake to one quarter of the samples. The
+  // volume shader adds its own fine 3D erosion; a 1024-wide CPU atlas spent
+  // millions of noise evaluations on detail that was sub-pixel from orbit.
+  const W = 512, H = 256;
   const lowCanvas = (typeof document !== 'undefined')
     ? document.createElement('canvas') : null;
   if (!lowCanvas) return { low: null, high: null, stats: null };

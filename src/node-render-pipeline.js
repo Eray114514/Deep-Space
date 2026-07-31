@@ -105,9 +105,36 @@ export class GameNodePipeline {
     this.pipeline = new THREE.RenderPipeline(renderer);
     this.scenePass = pass(scene, camera, { samples: 4 });
     this.scenePass.name = 'Main scene';
-    this.scenePass.setLayers(new THREE.Layers());
+    const worldLayers = new THREE.Layers();
+    this.scenePass.setLayers(worldLayers);
     const sceneColor = this.scenePass.getTextureNode('output');
-    this.sceneDepthTexture = this.scenePass.getTexture('depth');
+    // WebGPU cannot sample the multisampled depth attachment, nor let volume
+    // materials read the same depth resource while Main scene writes it. A
+    // separate single-sample pass gives all depth consumers unambiguous read
+    // ownership while the visible world keeps 4x MSAA color quality.
+    this.depthPass = pass(scene, camera, { samples: 0 });
+    this.depthPass.name = 'Opaque world depth';
+    this.depthPass.setLayers(worldLayers);
+    // Transparent atmosphere, cloud and ring materials are not depth owners.
+    // Excluding them also prevents a dormant volume material from sampling the
+    // depth attachment while this pass is writing it.
+    this.depthPass.transparent = false;
+    const depthAttachmentNode = this.depthPass.getTextureNode('depth');
+    // A DepthTexture cannot be bound to the regular float texture uniforms used
+    // by the volume materials. Copy raw depth into a filterable color RTT first;
+    // all later consumers then read this texture in a separate render scope.
+    // RTTNode defaults to HalfFloatType. That is not enough for logarithmic
+    // world depth: half-float quantises a planet disk into large radial steps,
+    // which the atmosphere/cloud ray limits then reveal as moving contour
+    // rings over oceans and clouds. Preserve the raw depth in 32-bit float and
+    // never interpolate encoded depth values across neighbouring surfaces.
+    this.readableDepth = rtt(depthAttachmentNode, null, null, { type: THREE.FloatType });
+    this.readableDepth.name = 'Readable world depth';
+    this.sceneDepthTexture = this.readableDepth.value;
+    this.sceneDepthTexture.minFilter = THREE.NearestFilter;
+    this.sceneDepthTexture.magFilter = THREE.NearestFilter;
+    this.sceneDepthTexture.generateMipmaps = false;
+    const sceneDepthNode = this.readableDepth;
     const skyLayers = new THREE.Layers();
     skyLayers.set(SKY_BACKDROP_LAYER);
     this.skyPass = pass(scene, camera, { depthBuffer: false, samples: 0 });
@@ -128,7 +155,7 @@ export class GameNodePipeline {
       const volumeTexture = this.volumePass.getTextureNode('output');
       const guidedVolume = depthGuidedVolumeUpsample(
         volumeTexture,
-        this.scenePass.getTextureNode('depth'),
+        sceneDepthNode,
         {
           uVolumeResolution: this._volumeResolution,
           uCameraNear: this._volumeNear,
@@ -153,7 +180,7 @@ export class GameNodePipeline {
     this.worldBase = rtt(colorNode);
     this.sunShafts = createSunShaftNode(
       this.worldBase,
-      this.scenePass.getTextureNode('depth'),
+      sceneDepthNode,
       renderer.reversedDepthBuffer,
     );
     this.worldComposite = rtt(this.sunShafts.outputNode);
@@ -233,8 +260,11 @@ export class GameNodePipeline {
     if (!planet || !this.volumePass) return false;
     this._syncVolumeResolution();
     let bound = false;
-    for (const material of [planet.atmoMesh?.material, planet.volCloudMat]) {
-      const uniforms = material?.uniforms;
+    const targets = [
+      planet.atmoUniforms || planet.atmoMesh?.material?.uniforms,
+      planet.volCloudUniforms || planet.volCloudMat?.uniforms,
+    ];
+    for (const uniforms of targets) {
       if (!uniforms?.tSceneDepth || !uniforms?.uDepthReady) continue;
       uniforms.tSceneDepth.value = this.sceneDepthTexture;
       uniforms.uDepthReady.value = 1;
@@ -260,9 +290,42 @@ export class GameNodePipeline {
     this.pipeline.render();
   }
 
+  async compileWorldObjectAsync(object) {
+    if (!object) return;
+    const currentRenderTarget = this.renderer.getRenderTarget();
+    const currentMRT = this.renderer.getMRT();
+    const compilePass = async (renderPass) => {
+      this.renderer.setRenderTarget(renderPass.renderTarget);
+      this.renderer.setMRT(renderPass._mrt);
+      const compilation = this.renderer.compileAsync(
+        object,
+        this.camera,
+        renderPass.scene,
+      );
+      // Renderer.compileAsync captures its render context before its first
+      // await. Restore the live frame target immediately so route-time async
+      // compilation cannot redirect an intervening animation frame.
+      this.renderer.setRenderTarget(currentRenderTarget);
+      this.renderer.setMRT(currentMRT);
+      await compilation;
+    };
+    // A world object participates in two production contexts: visible 4x MSAA
+    // color and single-sample opaque depth. WebGPU keys RenderObjects/pipelines
+    // by render context, so warming only the color pass still leaves hundreds
+    // of destination chunks cold when the depth pass first sees them.
+    // Capture both production contexts before yielding. Route-time callers may
+    // temporarily expose destination lights/materials for this exact topology;
+    // awaiting the color pass first let the live source scene leak back into
+    // the depth compile and left half of the hand-off pipelines cold.
+    const sceneCompilation = compilePass(this.scenePass);
+    const depthCompilation = compilePass(this.depthPass);
+    await Promise.all([sceneCompilation, depthCompilation]);
+  }
+
   async compileAsync() {
     await this.skyPass.compileAsync(this.renderer);
     await this.scenePass.compileAsync(this.renderer);
+    await this.depthPass.compileAsync(this.renderer);
     if (this.volumePass) await this.volumePass.compileAsync(this.renderer);
     await this.foregroundPass.compileAsync(this.renderer);
     this.pipeline.render();
@@ -271,11 +334,163 @@ export class GameNodePipeline {
   dispose() {
     this.skyPass.dispose();
     this.scenePass.dispose();
+    this.depthPass.dispose();
+    this.readableDepth.dispose();
     this.volumePass?.dispose();
     this.worldBase?.dispose();
     this.worldComposite?.dispose();
     this.foregroundPass.dispose();
     this.bloomNode.dispose();
+    this.pipeline.dispose();
+  }
+}
+
+// A rift preview is a second camera into the same physical destination, not a
+// translucent billboard. Keep a compact copy of the production world graph so
+// its opaque depth, sky backdrop and local-volume ownership match the frame
+// rendered immediately after crossing. The optional full-screen travel,
+// foreground and bloom stages are intentionally omitted: the portal surface
+// participates in those stages once, as part of the main camera's frame.
+export class RiftPortalNodePipeline {
+  constructor(renderer, scene, camera, target, {
+    volume = false,
+    volumeScale = 0.67,
+  } = {}) {
+    this.renderer = renderer;
+    this.camera = camera;
+    this.target = target;
+    this.volumeScale = volumeScale;
+    this._baseScale = 1;
+    this._volumeResolution = uniform(new THREE.Vector2(1, 1));
+    this._volumeUpsample = uniform(volumeScale < 0.999 ? 1 : 0);
+    this._volumeNear = uniform(camera.near);
+    this._volumeFar = uniform(camera.far);
+    this._volumeDepthReversed = uniform(renderer.reversedDepthBuffer ? 1 : 0);
+
+    this.pipeline = new THREE.RenderPipeline(renderer);
+    // The target is half-float linear HDR. The main pipeline owns the single
+    // display transform after sampling it through the aperture.
+    this.pipeline.outputColorTransform = false;
+
+    const worldLayers = new THREE.Layers();
+    this.scenePass = pass(scene, camera, { samples: 4 });
+    this.scenePass.name = 'Rift destination world';
+    this.scenePass.setLayers(worldLayers);
+    const sceneColor = this.scenePass.getTextureNode('output');
+
+    this.depthPass = pass(scene, camera, { samples: 0 });
+    this.depthPass.name = 'Rift destination depth';
+    this.depthPass.setLayers(worldLayers);
+    this.depthPass.transparent = false;
+    const depthAttachmentNode = this.depthPass.getTextureNode('depth');
+    this.readableDepth = rtt(depthAttachmentNode, null, null, { type: THREE.FloatType });
+    this.readableDepth.name = 'Rift readable depth';
+    this.sceneDepthTexture = this.readableDepth.value;
+    this.sceneDepthTexture.minFilter = THREE.NearestFilter;
+    this.sceneDepthTexture.magFilter = THREE.NearestFilter;
+    this.sceneDepthTexture.generateMipmaps = false;
+    const sceneDepthNode = this.readableDepth;
+
+    const skyLayers = new THREE.Layers();
+    skyLayers.set(SKY_BACKDROP_LAYER);
+    this.skyPass = pass(scene, camera, { depthBuffer: false, samples: 0 });
+    this.skyPass.name = 'Rift atmosphere backdrop';
+    this.skyPass.setLayers(skyLayers);
+    let colorNode = over(this.skyPass.getTextureNode('output'), sceneColor);
+
+    this.volumePass = null;
+    if (volume) {
+      const volumeLayers = new THREE.Layers();
+      volumeLayers.set(VOLUME_LAYER);
+      this.volumePass = pass(scene, camera, { depthBuffer: false, samples: 0 });
+      this.volumePass.name = 'Rift local volume';
+      this.volumePass.setLayers(volumeLayers);
+      const volumeTexture = this.volumePass.getTextureNode('output');
+      const guidedVolume = depthGuidedVolumeUpsample(
+        volumeTexture,
+        sceneDepthNode,
+        {
+          uVolumeResolution: this._volumeResolution,
+          uCameraNear: this._volumeNear,
+          uCameraFar: this._volumeFar,
+          uDepthReversed: this._volumeDepthReversed,
+        },
+      );
+      const reconstructedVolume = mix(
+        volumeTexture.sample(screenUV),
+        guidedVolume,
+        this._volumeUpsample,
+      );
+      colorNode = over(colorNode, reconstructedVolume);
+    }
+
+    this.pipeline.outputNode = colorNode;
+    this._syncResolution();
+  }
+
+  _syncResolution() {
+    const drawingSize = new THREE.Vector2();
+    this.renderer.getDrawingBufferSize(drawingSize);
+    const targetWidth = Math.max(1, this.target?.width || drawingSize.x);
+    const targetHeight = Math.max(1, this.target?.height || drawingSize.y);
+    this._baseScale = Math.min(
+      targetWidth / Math.max(1, drawingSize.x),
+      targetHeight / Math.max(1, drawingSize.y),
+    );
+    for (const renderPass of [this.scenePass, this.depthPass, this.skyPass]) {
+      renderPass.setResolutionScale(this._baseScale);
+    }
+    this.volumePass?.setResolutionScale(this._baseScale * this.volumeScale);
+    this._volumeResolution.value.set(drawingSize.x, drawingSize.y)
+      .multiplyScalar(this._baseScale * this.volumeScale).floor()
+      .max(new THREE.Vector2(1, 1));
+    this._volumeNear.value = this.camera.near;
+    this._volumeFar.value = this.camera.far;
+    this._volumeDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
+  }
+
+  setVolumeScale(scale) {
+    this.volumeScale = THREE.MathUtils.clamp(scale, 0.3, 1);
+    this._volumeUpsample.value = this.volumeScale < 0.999 ? 1 : 0;
+    this._syncResolution();
+  }
+
+  bindVolumeDepth(planet) {
+    if (!planet || !this.volumePass) return false;
+    this._syncResolution();
+    let bound = false;
+    const targets = [
+      planet.atmoUniforms || planet.atmoMesh?.material?.uniforms,
+      planet.volCloudUniforms || planet.volCloudMat?.uniforms,
+    ];
+    for (const uniforms of targets) {
+      if (!uniforms?.tSceneDepth || !uniforms?.uDepthReady) continue;
+      uniforms.tSceneDepth.value = this.sceneDepthTexture;
+      uniforms.uDepthReady.value = 1;
+      if (uniforms.uCameraNear) uniforms.uCameraNear.value = this.camera.near;
+      if (uniforms.uCameraFar) uniforms.uCameraFar.value = this.camera.far;
+      if (uniforms.uVolumeSize?.value) {
+        uniforms.uVolumeSize.value.copy(this._volumeResolution.value);
+      }
+      if (uniforms.uDepthReversed) {
+        uniforms.uDepthReversed.value = this.renderer.reversedDepthBuffer ? 1 : 0;
+      }
+      bound = true;
+    }
+    return bound;
+  }
+
+  render() {
+    this._syncResolution();
+    this.pipeline.render();
+  }
+
+  dispose() {
+    this.skyPass.dispose();
+    this.scenePass.dispose();
+    this.depthPass.dispose();
+    this.readableDepth.dispose();
+    this.volumePass?.dispose();
     this.pipeline.dispose();
   }
 }

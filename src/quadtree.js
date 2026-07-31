@@ -183,7 +183,10 @@ export function flushChunkQueue(budgetMs = 7) {
         // before drilling into a few central patches. The old depth-first-ish
         // ordering left half the globe coarse while isolated areas sharpened.
         const startupLevel = e.lod.startupPriority ? e.level * 1000 : 0;
-        const prio = startupLevel + (e.lod.nodeDistance(e) / e.size) * focusK;
+        const explicitPriority = Number.isFinite(e.lod.buildPriority)
+          ? e.lod.buildPriority : 0;
+        const prio = explicitPriority + startupLevel
+          + (e.lod.nodeDistance(e) / e.size) * focusK;
         if (prio < bestPriority) {
           bestPriority = prio;
           bestIndex = i;

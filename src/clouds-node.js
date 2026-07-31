@@ -5,13 +5,52 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  acos, atan, dot, exp, float, Fn, fract, If, Loop, mix, positionLocal, positionView,
-  pow, screenUV, sin, sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
+  acos, atan, dot, exp, float, Fn, If, Loop, mix, positionLocal, positionView,
+  pow, sin, sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
 import { sceneRayLimit } from './volume-depth-node.js';
 
 let _noiseTex = null;
+let _volumeTopology = null;
+
+const CLOUD_FAMILIES = [
+  'stratus', 'stratocumulus', 'nimbostratus', 'cumulus',
+  'cumulonimbus', 'altocumulus', 'altostratus',
+  'cirrus', 'cirrocumulus', 'lenticular', 'anvil',
+];
+
+function bindCloudVolumeInstance(planet, nodes, band, weatherLoMap, weatherHiMap,
+  weatherLoTextureNode, weatherHiTextureNode, topology) {
+  const state = {
+    nodes,
+    band,
+    weatherLoMap,
+    weatherHiMap,
+    weatherLoTextureNode,
+    weatherHiTextureNode,
+  };
+  // The live volume layer permits exactly one cloud shell. Keep authored and
+  // dynamic data on the planet, but give every shell the very same material
+  // object so WebGPU never creates a second RenderObject/pipeline at arrival.
+  planet.volCloudState = state;
+  planet.volCloudUniforms = nodes;
+  planet.volCloudBand = band;
+  planet.syncVolCloudMaterial = () => {
+    if (nodes !== topology.nodes) {
+      for (const [name, sourceNode] of Object.entries(nodes)) {
+        if (topology.nodes[name] && sourceNode && 'value' in sourceNode) {
+          topology.nodes[name].value = sourceNode.value;
+        }
+      }
+    }
+    if (weatherLoTextureNode !== topology.weatherLoTextureNode) {
+      topology.weatherLoTextureNode.value = weatherLoTextureNode.value;
+      topology.weatherHiTextureNode.value = weatherHiTextureNode.value;
+    }
+  };
+  return topology.material;
+}
 
 function analyticEclipseVisibility(localPosition, sunDirection, nodes) {
   const normalizedSun = sunDirection.normalize();
@@ -143,6 +182,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
   );
   const weatherLoTextureNode = texture(weatherLoMap);
   const weatherHiTextureNode = texture(weatherHiMap);
+  if (_volumeTopology) {
+    return bindCloudVolumeInstance(planet, nodes, band, weatherLoMap,
+      weatherHiMap, weatherLoTextureNode, weatherHiTextureNode, _volumeTopology);
+  }
   // A deliberately cheaper density evaluation for the sun ray. It preserves
   // the same weather ownership and vertical families as the view ray while
   // using one 3D lookup instead of the full erosion cascade. This makes real
@@ -219,13 +262,16 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     const stepCount = nodes.uMaxSteps.clamp(16, 64).toVar();
     const stepLength = span.div(stepCount);
     const thickness = nodes.uRout.sub(nodes.uRin).max(1);
-    // Interleaved-gradient jitter removes coherent shell slices. A fixed
-    // midpoint made all neighbouring pixels cross the same 56 radial samples,
-    // producing the vertical white brush marks seen during cloud traversal.
-    // Keep the pattern temporally stable: without a history buffer, frame-
-    // varying blue noise would trade those bands for distracting shimmer.
-    const rayJitter = fract(sin(dot(screenUV.mul(nodes.uVolumeSize),
-      vec2(12.9898, 78.233))).mul(43758.5453));
+    // Decorrelate radial samples without tying their phase to the screen. A
+    // screen-pixel hash is stable only while the camera is still: rotating the
+    // view moves the same cloud column to another pixel and abruptly changes
+    // every march sample, which reads as cloud shimmer. Hash the near-shell hit
+    // in planet-local metres instead. The same cloud column now keeps a coherent
+    // phase as the camera turns, while adjacent columns still avoid
+    // coherent shell slices.
+    const jitterAnchor = origin.add(ray.mul(t0)).mul(1 / 2400);
+    const rayJitter = sin(dot(jitterAnchor,
+      vec3(12.9898, 78.233, 37.719))).mul(0.5).add(0.5);
     const t = t0.add(stepLength.mul(float(0.12).add(rayJitter.mul(0.76)))).toVar();
     const integrated = vec3(0).toVar();
     const transmission = float(1).toVar();
@@ -503,27 +549,32 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     return nodes.uDebugShell.greaterThan(0.5)
       .select(vec4(1, 0.05, 0.02, valid.select(0.55, 0)), resolved);
   })();
+  // MeshBasicNodeMaterial applies premultiplication for a material carrying
+  // premultipliedAlpha. The raymarch accumulator is already premultiplied, so
+  // expose straight RGB and let the material perform that conversion once.
   const material = new MeshBasicNodeMaterial({
     transparent: true, premultipliedAlpha: true, depthWrite: false,
     depthTest: true, side: THREE.BackSide, fog: false,
   });
-  // MeshBasicNodeMaterial applies premultiplication for a material carrying
-  // premultipliedAlpha.  The raymarch accumulator is already premultiplied,
-  // so expose straight RGB here and let the material perform that conversion
-  // exactly once before the volume pass stores it.
   material.colorNode = volume.rgb.div(volume.a.max(0.0001));
   material.opacityNode = volume.a;
   material.uniforms = nodes;
-  material.userData.band = band;
   material.userData.volumeOutput = 'straight-alpha';
-  material.userData.weatherLoTexture = weatherLoMap;
-  material.userData.weatherHiTexture = weatherHiMap;
-  material.userData.weatherLoTextureNode = weatherLoTextureNode;
-  material.userData.weatherHiTextureNode = weatherHiTextureNode;
-  material.userData.cloudFamilies = [
-    'stratus', 'stratocumulus', 'nimbostratus', 'cumulus',
-    'cumulonimbus', 'altocumulus', 'altostratus',
-    'cirrus', 'cirrocumulus', 'lenticular', 'anvil',
-  ];
-  return material;
+  material.userData.cloudFamilies = CLOUD_FAMILIES;
+  material.userData.sharedLocalVolume = true;
+  const topology = {
+    material,
+    nodes,
+    weatherLoTextureNode,
+    weatherHiTextureNode,
+  };
+
+  // The 64×5 TSL raymarch is topology-identical for every planet. Rebuilding
+  // it with fresh node IDs makes Three's WebGPU NodeBuilder treat each body as
+  // a new program and can stop a warp frame for nearly a second. All shells
+  // now share this material object as well as its graph; their authored state
+  // is copied into it immediately before the one permitted local-volume draw.
+  _volumeTopology = topology;
+  return bindCloudVolumeInstance(planet, nodes, band, weatherLoMap,
+    weatherHiMap, weatherLoTextureNode, weatherHiTextureNode, topology);
 }

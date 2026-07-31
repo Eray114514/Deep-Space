@@ -23,8 +23,12 @@ export class VolumetricPass {
       previous.volumeActive = false;
       previous.atmoMesh?.layers.set(WORLD_LAYER);
       if (previous.volCloudMesh) previous.volCloudMesh.visible = false;
-      for (const material of [previous.atmoMesh?.material, previous.volCloudMat]) {
-        if (material?.uniforms?.uDepthReady) material.uniforms.uDepthReady.value = 0;
+      const depthTargets = [
+        previous.atmoUniforms || previous.atmoMesh?.material?.uniforms,
+        previous.volCloudUniforms || previous.volCloudMat?.uniforms,
+      ];
+      for (const uniforms of depthTargets) {
+        if (uniforms?.uDepthReady) uniforms.uDepthReady.value = 0;
       }
     }
     if (!planet?.atmoMesh) {

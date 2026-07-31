@@ -6,13 +6,17 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from '../vendor/three.webgpu.js';
 import {
   Fn, If, attribute, cameraPosition, cameraProjectionMatrix, cameraViewMatrix,
-  cos, exp, float, fract, fwidth, length, max, mix, modelWorldMatrix,
+  cos, exp, float, fract, fwidth, length, max, mix,
   mx_atan2, normalize, positionLocal, pow, screenUV, sin, smoothstep as tslSmoothstep,
   texture, uniform, vec2, vec3, vec4,
 } from '../vendor/three.tsl.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 
 const TAU = Math.PI * 2;
+// The visible destination, the physical rear mouth and the traversal test all
+// use this exact inset. Keeping one contract prevents the target view from
+// escaping past the wall or accepting a crossing through solid structure.
+const RIFT_APERTURE_SCALE = 0.92;
 const _center = new THREE.Vector3();
 const _edgeX = new THREE.Vector3();
 const _edgeY = new THREE.Vector3();
@@ -118,10 +122,10 @@ export const DEFAULT_RIFT_PROFILE = Object.freeze({
   tunnelRings: 28,
   renderScale: 1,
   rimLayers: Object.freeze([
-    { scale: 1.000, band: 5, z: 8, alpha: 0.74, phase: 0, brightness: 1.22 },
-    { scale: 1.008, band: 9, z: 2, alpha: 0.22, phase: 1.7, brightness: 0.78 },
-    { scale: 0.994, band: 4, z: 14, alpha: 0.66, phase: 3.2, brightness: 1.32 },
-    { scale: 1.018, band: 14, z: -4, alpha: 0.05, phase: 5.0, brightness: 0.58 },
+    { scale: 1.000, band: 5, z: 8, alpha: 0.56, phase: 0, brightness: 0.96 },
+    { scale: 1.008, band: 9, z: 2, alpha: 0.16, phase: 1.7, brightness: 0.62 },
+    { scale: 0.994, band: 4, z: 14, alpha: 0.44, phase: 3.2, brightness: 1.02 },
+    { scale: 1.018, band: 14, z: -4, alpha: 0.035, phase: 5.0, brightness: 0.50 },
   ]),
 });
 
@@ -177,6 +181,8 @@ export class SpatialRift {
     this.openTimeline = 0;
     this.tension = 0;
     this.burst = 0;
+    this.portalReadiness = 0;
+    this.portalTargetReadiness = 0;
     this.portalVolumeLayerRendered = false;
 
     this.portalCamera = mainCamera.clone();
@@ -188,10 +194,10 @@ export class SpatialRift {
       depthBuffer: true,
       stencilBuffer: false,
     });
-    // The offscreen destination render is stored in the renderer output color
-    // space. Tag it so sampling decodes back to linear before the main node
-    // pipeline applies its single final tone/output transform.
-    this.portalRT.texture.colorSpace = THREE.SRGBColorSpace;
+    // The WebGPU portal compositor stores linear HDR. The main camera samples
+    // it as scene color and owns the single display transform after the opaque
+    // lip has clipped the aperture.
+    this.portalRT.texture.colorSpace = THREE.NoColorSpace;
     this.portalRT.texture.generateMipmaps = false;
     this.textureMatrix = new THREE.Matrix4();
     this.offsetMatrix = new THREE.Matrix4();
@@ -269,12 +275,15 @@ export class SpatialRift {
     const positions = [], angles = [], depths = [], indices = [];
     for (let j = 0; j <= rings; j++) {
       const t = j / rings;
-      const neck = 1 - 0.045 * Math.sin(t * Math.PI) - 0.018 * t;
+      const neck = 1 - (1 - RIFT_APERTURE_SCALE) * t - 0.025 * Math.sin(t * Math.PI);
       for (let i = 0; i <= segments; i++) {
         const angle = i / segments * TAU;
         const twist = 0.035 * Math.sin(t * Math.PI) * Math.sin(angle * 2);
         const a = angle + twist;
-        const radius = this.contour(angle) * neck * (1 + 0.012 * Math.sin(t * 11 + angle * 5));
+        // Lock both ends to the shared contour. Variation is strongest only
+        // inside the wall, never at the portal seam where it would open gaps.
+        const radius = this.contour(angle) * neck
+          * (1 + 0.008 * Math.sin(t * Math.PI) * Math.sin(t * 11 + angle * 5));
         positions.push(Math.cos(a) * this.width * 0.5 * radius, Math.sin(a) * this.height * 0.5 * radius, -this.depth * t);
         angles.push(angle);
         depths.push(t);
@@ -302,9 +311,10 @@ export class SpatialRift {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     const material = new THREE.LineBasicMaterial({
-      color: phase % 2 ? 0x9bcfff : 0xf1f7ff,
+      color: phase % 2 ? 0x6b9eff : 0x82bfff,
       transparent: true,
       opacity,
+      depthTest: false,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       toneMapped: false,
@@ -333,7 +343,10 @@ export class SpatialRift {
           + Math.sin(angle * 19 + time * 2.8 + phase) * (3 + fracture * 9) * open;
       }
       line.geometry.attributes.position.needsUpdate = true;
-      line.material.opacity = opacity * smoothstep(0.02, 0.20, open);
+      // At a pinhole aperture every additive filament projects onto the same
+      // few pixels. Fade them in with aperture area so the birth reads as a
+      // widening seam instead of a single white flash.
+      line.material.opacity = opacity * smoothstep(0.08, 0.65, open) * open * open;
     }
   }
 
@@ -344,9 +357,13 @@ export class SpatialRift {
     };
     const material = new MeshBasicNodeMaterial({
       transparent: true,
+      depthTest: false,
       depthWrite: false,
       side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
+      // The two structural bands carry their own opacity and must not add
+      // together into a white pinhole. Only the faint outer corona remains
+      // additive.
+      blending: alpha >= 0.4 ? THREE.NormalBlending : THREE.AdditiveBlending,
       toneMapped: false,
     });
     material.uniforms = uniforms;
@@ -379,12 +396,16 @@ export class SpatialRift {
     const charge = pow(max(0, sin(angle.mul(41).sub(uniforms.uTime.mul(9)).add(uniforms.uPhase))), 18);
     const tear = exp(across.mul(-22)).mul(max(f1, charge).mul(0.66).add(0.34));
     const stablePulse = sin(uniforms.uTime.mul(3.2).add(angle.mul(3)).add(uniforms.uPhase)).mul(0.18).add(0.92);
+    // Radiated rim energy follows aperture area. This keeps a pinhole tear
+    // dark-blue and lets the full HDR edge emerge continuously as it widens.
+    const apertureEnergy = pow(max(uniforms.uOpen, 0), 3).mul(0.98).add(0.02);
     material.colorNode = mix(vec3(0.08, 0.30, 0.82), spectrum(hue), 0.24)
       .add(vec3(0.72, 0.26, 0.10).mul(f1).mul(0.34))
-      .add(vec3(1.65, 1.90, 2.65).mul(pow(core, 4)).mul(f1.mul(0.7).add(0.25)))
+      .add(vec3(1.10, 1.32, 1.88).mul(pow(core, 4)).mul(f1.mul(0.7).add(0.25)))
       .add(vec3(0.72, 1.05, 1.65).mul(charge.mul(0.95).add(0.16)).mul(uniforms.uTension))
       .add(vec3(1.75, 1.25, 1.85).mul(core.mul(0.25).oneMinus()).mul(uniforms.uBurst).mul(0.82))
-      .add(vec3(3.8, 4.6, 7.2).mul(tear)).mul(uniforms.uBrightness).mul(stablePulse);
+      .add(vec3(2.35, 2.95, 4.70).mul(tear)).mul(uniforms.uBrightness).mul(stablePulse)
+      .mul(apertureEnergy);
     const fracture = max(f1, max(f2.mul(0.72), charge)).mul(0.94).add(0.06);
     material.opacityNode = core.mul(0.96).add(0.04).mul(fracture)
       .mul(flow.mul(0.78).add(0.22)).mul(uniforms.uAlpha)
@@ -403,6 +424,10 @@ export class SpatialRift {
     };
     this.massMat = new MeshBasicNodeMaterial({
       side: THREE.DoubleSide,
+      // The rift is a foreground spatial cut. Source-world terrain must never
+      // win the depth test over its physical lip when the aperture is opened
+      // close to a planetary surface.
+      depthTest: false,
       depthWrite: true,
     });
     this.massMat.uniforms = massUniforms;
@@ -423,7 +448,7 @@ export class SpatialRift {
       .add(vec3(0.08, 0.035, 0.12).mul(massUniforms.uBurst))
       .mul(tslSmoothstep(0.015, 0.12, massUniforms.uOpen));
     this.mass = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 520, 5 * this.profile.edgeThickness, 5, true),
+      new THREE.TubeGeometry(curve, 520, 7 * this.profile.edgeThickness, 6, true),
       this.massMat,
     );
     this.mass.renderOrder = 3;
@@ -433,6 +458,7 @@ export class SpatialRift {
     this.tunnelMat = new MeshBasicNodeMaterial({
       side: THREE.BackSide,
       transparent: true,
+      depthTest: false,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       toneMapped: false,
@@ -440,19 +466,21 @@ export class SpatialRift {
     this.tunnelMat.uniforms = tunnelUniforms;
     const tunnelAngle = attribute('aAngle');
     const tunnelDepth = attribute('aDepth');
-    this.tunnelMat.positionNode = Fn(() => {
+    const tunnelPositionNode = Fn(() => {
       const p = positionLocal.toVar();
-      const living = riftBoundary(tunnelAngle, tunnelUniforms.uOpen, tunnelUniforms.uTime)
-        .sub(riftBoundary(tunnelAngle, float(0), tunnelUniforms.uTime));
-      const scaleNode = float(1).add(living.mul(tunnelUniforms.uOpen).mul(tunnelDepth.mul(0.48).oneMinus()))
+      const baseBoundary = riftBoundary(tunnelAngle, float(0), tunnelUniforms.uTime);
+      const liveBoundary = riftBoundary(tunnelAngle, tunnelUniforms.uOpen, tunnelUniforms.uTime);
+      const endLock = sin(tunnelDepth.mul(Math.PI));
+      const scaleNode = liveBoundary.div(max(baseBoundary, 0.001))
         .mul(sin(tunnelAngle.mul(8).add(tunnelDepth.mul(18)).sub(tunnelUniforms.uTime.mul(1.15)))
-          .mul(0.010).mul(tunnelUniforms.uOpen).add(1))
+          .mul(0.010).mul(tunnelUniforms.uOpen).mul(endLock).add(1))
         .mul(sin(tunnelAngle.mul(29).sub(tunnelDepth.mul(12)).sub(tunnelUniforms.uTime.mul(7)))
-          .mul(0.006).mul(tunnelUniforms.uTension).add(1))
+          .mul(0.006).mul(tunnelUniforms.uTension).mul(endLock).add(1))
         .mul(tunnelUniforms.uBurst.mul(0.016).mul(tunnelDepth.oneMinus()).add(1));
       p.xy.mulAssign(scaleNode);
       return p;
     })();
+    this.tunnelMat.positionNode = tunnelPositionNode;
     const spectral = (hue) => cos(vec3(hue).add(vec3(0, 0.33, 0.67)).mul(TAU)).mul(0.42).add(0.58);
     const l1 = pow(max(0, sin(tunnelAngle.mul(17).sub(tunnelDepth.mul(29)).sub(tunnelUniforms.uTime.mul(2.1)))), 18);
     const l2 = pow(max(0, sin(tunnelAngle.mul(31).add(tunnelDepth.mul(41)).add(tunnelUniforms.uTime.mul(1.3)))), 28);
@@ -469,8 +497,39 @@ export class SpatialRift {
     this.tunnelMat.opacityNode = tunnelFracture.mul(0.08).add(0.002)
       .mul(tunnelDepth.mul(0.84).oneMinus())
       .mul(tslSmoothstep(0.045, 0.20, tunnelUniforms.uOpen)).clamp(0, 0.12);
-    this.tunnel = new THREE.Mesh(this._makeTunnelGeometry(), this.tunnelMat);
-    this.tunnel.renderOrder = 2;
+    // The former tunnel was only a sparse additive effect. It let the source
+    // world show straight through the alleged thickness. This opaque shell is
+    // the actual inner wall; the additive material above is now only its live
+    // electrical detail.
+    this.tunnelWallMat = new MeshBasicNodeMaterial({
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: true,
+      transparent: false,
+      toneMapped: false,
+    });
+    this.tunnelWallMat.uniforms = tunnelUniforms;
+    this.tunnelWallMat.positionNode = tunnelPositionNode;
+    const wallDepth = pow(tunnelDepth, 0.72);
+    const wallPulse = sin(tunnelAngle.mul(9).sub(tunnelUniforms.uTime.mul(0.72)))
+      .mul(0.5).add(0.5);
+    this.tunnelWallMat.colorNode = mix(
+      vec3(0.0004, 0.0014, 0.0045),
+      vec3(0.009, 0.026, 0.072),
+      wallDepth,
+    )
+      .add(vec3(0.012, 0.048, 0.14).mul(ribs).mul(0.34))
+      .add(vec3(0.018, 0.028, 0.078).mul(wallPulse)
+        .mul(tunnelUniforms.uTension).mul(0.20))
+      .mul(tslSmoothstep(0.02, 0.18, tunnelUniforms.uOpen).mul(0.88).add(0.12));
+    const tunnelGeometry = this._makeTunnelGeometry();
+    this.tunnelWall = new THREE.Mesh(tunnelGeometry, this.tunnelWallMat);
+    this.tunnelWall.name = 'spatial-rift-inner-wall';
+    this.tunnelWall.renderOrder = 2;
+    this.visual.add(this.tunnelWall);
+    this.tunnel = new THREE.Mesh(tunnelGeometry, this.tunnelMat);
+    this.tunnel.name = 'spatial-rift-wall-energy';
+    this.tunnel.renderOrder = 3;
     this.visual.add(this.tunnel);
 
     this.rimMaterials = [];
@@ -492,51 +551,65 @@ export class SpatialRift {
     // It also makes the stable passage visibly alive without a full-screen
     // temporal effect or a backend-specific line shader.
     this.livingFilaments = [
-      this._makeLivingFilament(0.994, 0.34, 0),
-      this._makeLivingFilament(1.003, 0.48, 1),
-      this._makeLivingFilament(1.014, 0.26, 2),
+      this._makeLivingFilament(0.994, 0.18, 0),
+      this._makeLivingFilament(1.003, 0.28, 1),
+      this._makeLivingFilament(1.014, 0.14, 2),
     ];
     for (const filament of this.livingFilaments) this.visual.add(filament);
 
     const portalUniforms = {
       uTextureMatrix: uniform(this.textureMatrix),
       uOpen: uniform(0), uTension: uniform(0), uBurst: uniform(0), uTime: uniform(0),
+      uPreviewBlend: uniform(0),
       uHalfSize: uniform(new THREE.Vector2(this.width * 0.5, this.height * 0.5)),
     };
     this.portalMat = new MeshBasicNodeMaterial({
-      // The destination is a real opaque window. Treating this plane as a
-      // blended surface let nearby source-system planets bleed through it and
-      // visually sit on top of the tunnel wall. The irregular silhouette is
-      // still cut out in the fragment shader; only the luminous rim blends.
+      // This must stay in the opaque render list. A transparent portal is
+      // always submitted after the opaque inner wall, regardless of their
+      // renderOrder values, and can therefore paint the destination back over
+      // the wall. Alpha test performs a real cutout while MSAA preserves the
+      // one-pixel analytic contour.
       transparent: false,
       depthWrite: true,
-      depthTest: true,
+      // The destination is an aperture cut into the source view, not another
+      // world-space card. Its own analytic contour and the opaque lip own
+      // occlusion; source terrain cannot punch through the window.
+      depthTest: false,
       side: THREE.DoubleSide,
       toneMapped: false,
     });
     this.portalMat.uniforms = portalUniforms;
-    this.portalMat.alphaTest = 0.45;
+    this.portalMat.alphaTest = 0.5;
+    this.portalMat.alphaToCoverage = true;
     const portalTexture = texture(this.portalRT.texture);
     const portalOutput = Fn(() => {
       const p = positionLocal.xy.div(portalUniforms.uHalfSize);
       const angle = mx_atan2(p.y, p.x);
       const radius = length(p);
-      const boundary = riftBoundary(angle, portalUniforms.uOpen, portalUniforms.uTime).mul(0.965);
+      const boundary = riftBoundary(angle, portalUniforms.uOpen, portalUniforms.uTime)
+        .mul(RIFT_APERTURE_SCALE);
       const aa = max(fwidth(radius).mul(1.6), 0.002);
       const mask = tslSmoothstep(boundary.sub(aa), boundary.add(aa), radius).oneMinus();
-      const projected = portalUniforms.uTextureMatrix.mul(modelWorldMatrix.mul(vec4(positionLocal, 1)));
-      const baseUv = projected.xy.div(max(projected.w, 0.00001));
+      // The portal camera renders the exact transformed main-camera frustum
+      // into an equal-aspect target. Screen pixels therefore already are the
+      // correct projective coordinates. Applying the source-to-target matrix a
+      // second time shrank the destination near the threshold and caused the
+      // unmistakable planet-size jump on handoff.
+      const baseUv = screenUV;
       const edge = tslSmoothstep(boundary.sub(0.055), boundary, radius);
       const wave = sin(angle.mul(19).sub(portalUniforms.uTime.mul(1.8)))
         .add(sin(angle.mul(7).add(portalUniforms.uTime.mul(1.15))));
       const direction = normalize(p.add(vec2(0.00001)));
       const tangent = vec2(direction.y.negate(), direction.x);
-      // The opened membrane never becomes a frozen screenshot: a restrained
-      // whole-window shear plus stronger boundary displacement keeps the live
-      // destination spatially connected to the moving tear.
-      const membraneShear = edge.mul(0.0018).add(0.0002);
-      const warpedUv = baseUv.add(tangent.mul(wave).mul(membraneShear).mul(portalUniforms.uOpen));
-      const split = edge.mul(0.0045).add(0.00055).mul(portalUniforms.uOpen);
+      // Preserve an optically exact centre so the destination camera can pass
+      // through without a texture-to-world snap. Curvature and dispersion rise
+      // only in the final rim band, like a thin gravitational lens.
+      const edgeLens = pow(edge, 2.2).mul(0.0058)
+        .mul(wave.mul(0.08).add(0.92)).mul(portalUniforms.uOpen);
+      const membraneShear = pow(edge, 2.6).mul(0.0017);
+      const warpedUv = baseUv.sub(direction.mul(edgeLens))
+        .add(tangent.mul(wave).mul(membraneShear).mul(portalUniforms.uOpen));
+      const split = pow(edge, 2.4).mul(0.0034).add(0.00003).mul(portalUniforms.uOpen);
       const red = portalTexture.sample(warpedUv.add(direction.mul(split))).r;
       const green = portalTexture.sample(warpedUv).g;
       const blue = portalTexture.sample(warpedUv.sub(direction.mul(split))).b;
@@ -545,14 +618,23 @@ export class SpatialRift {
       // Preserve the destination's linear color/exposure through the window;
       // spectral energy belongs on the animated boundary, not as a tint over
       // the entire world that visibly disappears at the crossing plane.
-      const col = vec3(red, green, blue)
+      const destination = vec3(red, green, blue)
         .add(vec3(0.035, 0.08, 0.18).mul(pow(edge, 5)).mul(0.24))
         .add(vec3(0.10, 0.20, 0.46).mul(pow(edge, 3)).mul(portalUniforms.uTension).mul(0.16))
         .add(vec3(0.42, 0.24, 0.62).mul(pow(edge, 2)).mul(portalUniforms.uBurst).mul(0.22))
         .add(vec3(0.025, 0.05, 0.11).mul(membrane).mul(portalUniforms.uOpen).mul(pow(edge, 3)).mul(0.22))
         .mul(mix(float(1), portalPulse, edge.mul(0.72)));
+      // If an instant confirmation outruns destination construction, show a
+      // coherent dark phase membrane and resolve the already-live view through
+      // it. The player never sees a bare partial planet or a late cloud swap.
+      const readiness = tslSmoothstep(0.02, 0.98, portalUniforms.uPreviewBlend);
+      const phaseVeil = vec3(0.0015, 0.0045, 0.012)
+        .add(vec3(0.012, 0.035, 0.085).mul(pow(edge, 2.8)))
+        .add(vec3(0.006, 0.015, 0.036)
+          .mul(membrane.mul(0.5).add(0.5)).mul(edge.mul(0.7).add(0.08)));
+      const col = mix(phaseVeil, destination, readiness);
       const reveal = tslSmoothstep(0.055, 0.20, portalUniforms.uOpen).add(portalUniforms.uTension.mul(0.045));
-      return vec4(col, mask.mul(reveal.greaterThan(0.035)));
+      return vec4(col, mask.mul(reveal.clamp(0, 1)));
     })();
     // NodeMaterial does not infer the material opacity/alpha-test input from a
     // vec4 colorNode on every backend. Feeding the channels explicitly keeps
@@ -561,6 +643,7 @@ export class SpatialRift {
     this.portalMat.colorNode = portalOutput.rgb;
     this.portalMat.opacityNode = portalOutput.a;
     this.portalSurface = new THREE.Mesh(new THREE.PlaneGeometry(this.width * 1.22, this.height * 1.22), this.portalMat);
+    this.portalSurface.name = 'spatial-rift-portal-cutout';
     this.portalSurface.position.z = -this.depth - 0.5;
     this.portalSurface.renderOrder = 1;
     this.visual.add(this.portalSurface);
@@ -595,6 +678,9 @@ export class SpatialRift {
     this.handoffActive = false;
     this.handoffFade = 0;
     this.handoffElapsed = 0;
+    this.portalReadiness = 0;
+    this.portalTargetReadiness = 0;
+    this.portalMat.uniforms.uPreviewBlend.value = 0;
     this.portalSurface.visible = true;
     this.group.visible = true;
     this.setOpen(1);
@@ -612,6 +698,14 @@ export class SpatialRift {
     this.animDuration = this.animDirection > 0 ? Math.max(0.72, 2.62 * remaining) : Math.max(0.42, 0.88 * remaining);
     this.animating = remaining > 0.001;
     this.group.visible = true;
+  }
+
+  setPortalReadiness(value, immediate = false) {
+    this.portalTargetReadiness = clamp(value, 0, 1);
+    if (immediate) {
+      this.portalReadiness = this.portalTargetReadiness;
+      this.portalMat.uniforms.uPreviewBlend.value = this.portalReadiness;
+    }
   }
 
   markTraversed() {
@@ -640,7 +734,8 @@ export class SpatialRift {
     const hitY = lerp(_localPrev.y, _localCurr.y, t);
     const angle = Math.atan2(hitY / (this.height * 0.5), hitX / (this.width * 0.5));
     const radius = Math.hypot(hitX / (this.width * 0.5), hitY / (this.height * 0.5));
-    return radius <= (this.contour(angle) + edgeMotion(angle, this.time) * this.open) * 0.96;
+    return radius <= (this.contour(angle) + edgeMotion(angle, this.time) * this.open)
+      * RIFT_APERTURE_SCALE;
   }
 
   update(dt, time) {
@@ -669,6 +764,9 @@ export class SpatialRift {
     }
 
     const collapse = smoothstep(0, 1, this.handoffFade);
+    const readinessRate = this.portalTargetReadiness > this.portalReadiness ? 5.5 : 10;
+    this.portalReadiness += (this.portalTargetReadiness - this.portalReadiness)
+      * (1 - Math.exp(-dt * readinessRate));
     const visualOpen = this.open * (1 - collapse);
     const eased = visualOpen < 0.5 ? 2 * visualOpen * visualOpen : 1 - Math.pow(-2 * visualOpen + 2, 3) / 2;
     const progress = this.animDirection > 0 && this.animating ? timeline : 1;
@@ -678,7 +776,11 @@ export class SpatialRift {
       ? smoothstep(0.035, 0.12, progress) * (1 - smoothstep(0.44, 0.72, progress)) : 0;
     this.tension = this.animDirection > 0 && this.animating
       ? smoothstep(0.08, 0.58, progress) * (1 - smoothstep(0.72, 0.90, progress)) : 0;
-    this.burst = this.animDirection > 0 && this.animating ? this._tearImpulse(progress, 0.77, 0.072) : 0;
+    // Keep the release as a local rim pulse. The previous full-strength impulse
+    // hit bloom, FOV and scale together, producing a white flash followed by the
+    // actual passage one frame later on WebGPU.
+    this.burst = this.animDirection > 0 && this.animating
+      ? this._tearImpulse(progress, 0.77, 0.092) * 0.28 : 0;
     if (this.handoffActive) {
       this.tension = Math.max(this.tension, Math.sin(collapse * Math.PI) * 0.72);
       this.burst = Math.max(this.burst, this._tearImpulse(collapse, 0.58, 0.14) * 0.7);
@@ -694,17 +796,23 @@ export class SpatialRift {
     this.visual.rotation.z = 0.035 + Math.sin(time * 0.31) * 0.008 * eased
       + Math.sin(time * 13) * this.tension * 0.006 + Math.sin(time * 27) * this.burst * 0.042;
     this.stability = smoothstep(0.84, 0.995, this.open);
-    for (const material of [this.portalMat, this.tunnelMat, this.massMat, ...this.rimMaterials]) {
+    for (const material of [
+      this.portalMat,
+      this.tunnelWallMat,
+      this.tunnelMat,
+      this.massMat,
+      ...this.rimMaterials,
+    ]) {
       material.uniforms.uOpen.value = visualOpen;
       material.uniforms.uTension.value = this.tension;
       material.uniforms.uBurst.value = this.burst;
       material.uniforms.uTime.value = time;
     }
+    this.portalMat.uniforms.uPreviewBlend.value = this.portalReadiness;
     this._updateLivingFilaments(time, visualOpen);
   }
 
-  renderPortal({ beforeRender, afterRender } = {}) {
-    if (this.open < 0.025 || this.traversed) return;
+  _preparePortalCamera() {
     this.mainCamera.updateMatrixWorld(true);
     this.group.updateMatrixWorld(true);
     const sourceSurface = this.visual.localToWorld(_center.set(0, 0, -this.depth));
@@ -734,20 +842,66 @@ export class SpatialRift {
       .multiply(this.portalCamera.matrixWorldInverse)
       .multiply(this.offsetMatrix);
     this.portalMat.uniforms.uTextureMatrix.value.copy(this.textureMatrix);
+    return oldLayerMask;
+  }
+
+  async compilePortalAsync(object, { beforeCompile, afterCompile } = {}) {
+    if (!object || typeof this.renderer.compileAsync !== 'function') return;
+    const oldLayerMask = this._preparePortalCamera();
+    const wasVisible = this.group.visible;
+    this.group.visible = false;
+    beforeCompile?.(this.portalCamera);
+    const oldTarget = this.renderer.getRenderTarget();
+    const oldMrt = this.renderer.getMRT?.();
+    const oldXr = this.renderer.xr.enabled;
+    let compilation;
+    try {
+      this.renderer.xr.enabled = false;
+      this.renderer.setRenderTarget(this.portalRT);
+      this.renderer.setMRT?.(null);
+      compilation = this.renderer.compileAsync(object, this.portalCamera, this.scene);
+    } finally {
+      // compileAsync captures traversal and render context synchronously.
+      // Restore the live frame before awaiting driver-side pipeline creation.
+      this.renderer.setRenderTarget(oldTarget);
+      this.renderer.setMRT?.(oldMrt);
+      this.renderer.xr.enabled = oldXr;
+      this.portalCamera.layers.mask = oldLayerMask;
+      afterCompile?.();
+      this.group.visible = wasVisible;
+    }
+    await compilation;
+  }
+
+  renderPortal({
+    beforeRender,
+    renderScene = null,
+    afterRender,
+    force = false,
+  } = {}) {
+    if ((!force && this.open < 0.025) || this.traversed) return;
+    const oldLayerMask = this._preparePortalCamera();
     const wasVisible = this.group.visible;
     this.group.visible = false;
     beforeRender?.(this.portalCamera);
     const oldTarget = this.renderer.getRenderTarget();
+    const oldMrt = this.renderer.getMRT?.();
     const oldXr = this.renderer.xr.enabled;
-    this.renderer.xr.enabled = false;
-    this.renderer.setRenderTarget(this.portalRT);
-    this.renderer.clear();
-    this.renderer.render(this.scene, this.portalCamera);
-    this.renderer.setRenderTarget(oldTarget);
-    this.renderer.xr.enabled = oldXr;
-    this.portalCamera.layers.mask = oldLayerMask;
-    afterRender?.();
-    this.group.visible = wasVisible;
+    try {
+      this.renderer.xr.enabled = false;
+      this.renderer.setRenderTarget(this.portalRT);
+      this.renderer.setMRT?.(null);
+      this.renderer.clear();
+      if (renderScene) renderScene(this.portalCamera, this.portalRT);
+      else this.renderer.render(this.scene, this.portalCamera);
+    } finally {
+      this.renderer.setRenderTarget(oldTarget);
+      this.renderer.setMRT?.(oldMrt);
+      this.renderer.xr.enabled = oldXr;
+      this.portalCamera.layers.mask = oldLayerMask;
+      afterRender?.();
+      this.group.visible = wasVisible;
+    }
   }
 
   updateDistortion(pass) {
@@ -775,8 +929,18 @@ export class SpatialRift {
   }
 
   resize(width, height, pixelRatio = 1) {
-    const targetWidth = Math.min(1536, Math.max(768, Math.round(width * pixelRatio * this.portalScale)));
-    const targetHeight = Math.min(1024, Math.max(512, Math.round(height * pixelRatio * this.portalScale)));
+    // Match the largest normal on-screen aperture without rendering a second
+    // full 2K cloud scene. At 1440p this remains at or above the portal's actual
+    // projected footprint while avoiding the former double-world fill cliff.
+    const aspect = Math.max(0.5, width / Math.max(1, height));
+    const requestedWidth = Math.max(768,
+      Math.round(width * pixelRatio * this.portalScale));
+    const requestedHeight = requestedWidth / aspect;
+    const fit = Math.min(1, 1664 / requestedWidth, 1024 / requestedHeight);
+    const targetWidth = Math.max(1, Math.round(requestedWidth * fit));
+    const targetHeight = Math.max(1, Math.round(targetWidth / aspect));
+    // Deriving both dimensions from one fit preserves the camera aspect even
+    // when a 2K/ultrawide display reaches the portal allocation cap.
     this.portalRT.setSize(targetWidth, targetHeight);
   }
 
