@@ -29,17 +29,34 @@ export const WORLD_CONFIG = Object.freeze({
       }),
       bodyTuning: Object.freeze({
         // The selected home terrain has 18.6 km of peak-to-trough relief.
-        // At its generated 286 km radius that read as a Vesta-like lumpy
-        // asteroid (6.5% relief/R). A 900 km authored radius preserves every
-        // deterministic landform while bringing the ratio to a planetary 2.1%.
+        // The former 900 km body fixed the worst asteroid silhouette, but its
+        // horizon still made synoptic cloud systems and the troposphere read
+        // as a miniature model. A 6,000 km authored radius retains the curated
+        // terrain stream while giving surface flight, cloud parallax and the
+        // atmosphere an honestly terrestrial curvature. The 120 km outer
+        // medium is only 2% of the radius; optical density still falls on the
+        // physical 8 km / 1.2 km Rayleigh/Mie scale heights.
         '0,0,0': Object.freeze({
           'planet-0': Object.freeze({
-            radiusMeters: 900000,
+            radiusMeters: 6000000,
+            atmosphereHeightMeters: 120000,
+            cloudCoverage: 0.64,
+            weatherStyle: 'temperate-synoptic',
+            cloudLayer: Object.freeze({
+              minAltitudeMeters: 2000,
+              maxAltitudeMeters: 16000,
+            }),
+            clouds: Object.freeze({
+              coverage: 0.64,
+              probability: 0.9,
+              condensates: Object.freeze(['H₂O液滴', 'H₂O冰晶']),
+              regime: '多层温带锋面与对流云系',
+            }),
           }),
-          // Keep the existing moon outside the enlarged atmosphere and Roche
-          // neighbourhood. StarSystem scales its period with r^(3/2).
+          // Preserve the authored moon's 3.6-parent-radius spacing after the
+          // larger planetary curation. StarSystem scales its period with r^1.5.
           'planet-0-moon-0': Object.freeze({
-            orbitRadiusMeters: 3200000,
+            orbitRadiusMeters: 21600000,
           }),
           // The original prompt explicitly calls for a water-dominated world
           // with violent open seas, shallow shelves and only scattered land.

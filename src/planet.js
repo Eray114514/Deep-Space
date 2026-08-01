@@ -907,7 +907,15 @@ export class Planet {
     }
 
     if (this.atmoDensity > 0.05) {
-      const atmoR = R + Math.max(this.hAmp * 3.2, R * this.atmoFraction);
+      // Authored cinematic worlds may use a larger ground radius without
+      // inflating the atmosphere by the same factor. Keep the participating
+      // medium in physical metres so the home world's 6,000 km curation still
+      // has a 120 km atmosphere rather than a 700+ km blue shell.
+      const authoredAtmoHeight = Number(this.tuning.atmosphereHeightMeters);
+      const atmoHeight = Number.isFinite(authoredAtmoHeight)
+        ? clamp(authoredAtmoHeight, 30000, 500000)
+        : Math.max(this.hAmp * 3.2, R * this.atmoFraction);
+      const atmoR = R + atmoHeight;
       this.atmoMesh = new THREE.Mesh(
         new THREE.SphereGeometry(atmoR, 96, 64),
         makeAtmosphereMaterial(this, this.atmoColor, this.atmoDensity, R, atmoR),
@@ -953,9 +961,12 @@ export class Planet {
         humidity: this.hasLiquid ? 0.72 : this.type === 'ice' ? 0.62 : 0.28,
         storminess: this.tuning.weatherStyle === 'pelagic-storm'
           || this.tuning.oceanClass === 'pelagic-storm' ? 0.9
+          : this.tuning.weatherStyle === 'temperate-synoptic' ? 0.58
           : this.type === 'toxic' ? 0.72 : 0.4,
-        highClouds: coverage > 0.45 ? 0.48 : 0.2,
-        fogginess: this.hasLiquid ? 0.34 : 0.16,
+        highClouds: this.tuning.weatherStyle === 'temperate-synoptic'
+          ? 0.64 : coverage > 0.45 ? 0.48 : 0.2,
+        fogginess: this.tuning.weatherStyle === 'temperate-synoptic'
+          ? 0.22 : this.hasLiquid ? 0.34 : 0.16,
         windSpeed: 8 + (this.waterStyle?.swell || 0.6) * 13,
         weatherSpeed: 6,
         temperatureK: this.type === 'ice' ? 258 : this.type === 'lava' ? 430 : 286,
@@ -986,15 +997,16 @@ export class Planet {
       // profiles inside it place stratus/cumulus low, alto clouds mid-level
       // and cirrus/anvils high. The previous mountain-scaled cloud base could
       // start tens of kilometres above sea level and read as a white crust.
-      const cloudBaseAlt = Math.min(
-        Math.max(650, this.hAmp * 0.045),
-        this.atmoHeight * 0.08,
-      );
+      const authoredCloudLayer = this.tuning.cloudLayer || null;
+      const cloudBaseAlt = Number.isFinite(authoredCloudLayer?.minAltitudeMeters)
+        ? clamp(authoredCloudLayer.minAltitudeMeters, 250, this.atmoHeight * 0.25)
+        : Math.min(Math.max(1000, this.hAmp * 0.055), this.atmoHeight * 0.08);
       const cloudR = R + cloudBaseAlt;
-      const thick = Math.min(
-        Math.max(14000, this.hAmp * 1.15),
-        this.atmoHeight * 0.24,
-      );
+      const authoredCloudTop = Number(authoredCloudLayer?.maxAltitudeMeters);
+      const cloudTopAlt = Number.isFinite(authoredCloudTop)
+        ? clamp(authoredCloudTop, cloudBaseAlt + 4000, this.atmoHeight * 0.42)
+        : Math.min(Math.max(16000, this.hAmp * 1.15), this.atmoHeight * 0.24);
+      const thick = cloudTopAlt - cloudBaseAlt;
       const cmat = new THREE.MeshBasicMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.88,
@@ -1345,6 +1357,7 @@ export class Planet {
     if (!this.cloudBands.length) return 0;
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
     const camR = camLocal.length();
+    const altitude = camR - this.R;
     let t = 0;
     for (const b of this.cloudBands) {
       const thickness = Math.max(1, b.thickness || (b.halfThickness || 1800) * 2);
@@ -1364,19 +1377,22 @@ export class Planet {
         + coverage * (0.18 + base * 0.2), 0, 1);
       const threshold = lerp(0.36, 0.22, cloudType);
       const formed = smoothstep(threshold, threshold + 0.42, weatherRaw);
-      const stratus = smoothstep(0.015, 0.055, height)
-        * smoothstep(0.25, 0.13, height) * stratusMask;
-      const cumulusTop = clamp(lerp(0.34, 0.78, cloudType)
-        + convective * 0.16, 0.3, 0.94);
-      const cumulus = smoothstep(0.025, 0.09, height)
-        * smoothstep(cumulusTop, cumulusTop - 0.18, height)
+      const stratus = smoothstep(1800, 2200, altitude)
+        * smoothstep(4300, 3200, altitude) * stratusMask;
+      const cumulusBase = lerp(2200, 3000, cloudType);
+      const cumulusTop = lerp(5800, 8200, cloudType);
+      const cumulusHeight = (altitude - cumulusBase)
+        / Math.max(1, cumulusTop - cumulusBase);
+      const cumulus = smoothstep(0, 0.065, cumulusHeight)
+        * smoothstep(1.02, 0.58, cumulusHeight)
         * (1 - stratusMask * 0.72);
-      const alto = smoothstep(0.27, 0.39, height)
-        * smoothstep(0.62, 0.49, height) * highMask * (1 - highType);
-      const cirrus = smoothstep(0.62, 0.72, height)
-        * smoothstep(0.99, 0.88, height) * highMask * (0.42 + highType * 0.58);
-      const anvil = smoothstep(0.57, 0.66, height)
-        * smoothstep(0.88, 0.78, height) * convective * cloudType;
+      const alto = smoothstep(5200, 5700, altitude)
+        * smoothstep(8500, 7600, altitude) * highMask * (1 - highType);
+      const cirrus = smoothstep(9000, 9600, altitude)
+        * smoothstep(15800, 14300, altitude) * highMask
+        * (0.42 + highType * 0.58);
+      const anvil = smoothstep(7800, 9000, altitude)
+        * smoothstep(15800, 14000, altitude) * convective * cloudType;
       const density = Math.max(formed * Math.max(stratus, cumulus),
         highMask * Math.max(alto, cirrus, anvil));
       t = Math.max(t, density * b.opacity);
