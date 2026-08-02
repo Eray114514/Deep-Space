@@ -6,8 +6,9 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  Fn, If, abs, atan, clamp, color, cos, dot, exp, float, floor, fract, length,
-  max, mix, normalLocal, normalize, positionLocal, pow, screenUV, sin,
+  Fn, If, abs, atan, cameraProjectionMatrixInverse, cameraWorldMatrix, clamp,
+  color, cos, dot, exp, float, floor, fract, length, max, mix, normalLocal,
+  normalize, positionLocal, pow, screenUV, sin,
   smoothstep, step, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
@@ -100,15 +101,11 @@ export function createWarpDriveNode(inputNode) {
   const rayLayer = Fn(([p, bins, radialScale, speed, seed]) => {
     const radius = length(p);
     const angle = atan(p.y, p.x);
-    // Lock every streak to the vanishing point. Radius-driven angular wobble
-    // reads as a warped overlay rather than straight-line velocity.
     const wedge = angle.div(tau).add(.5).mul(bins);
     const id = floor(wedge);
     const random = hash11(id.add(seed.mul(71.7)));
     const fine = hash11(id.mul(5.31).add(seed.mul(19.1)));
     const across = abs(fract(wedge).sub(.5));
-    // Angular separation becomes screen-space distance so lines keep a near
-    // constant width instead of opening into fat wedges at the screen edge.
     const acrossDistance = across.mul(tau).div(bins).mul(radius);
     const width = mix(.00062, .0019, random.mul(random)).mul(mix(.82, 1.18, fine));
     const core = exp(pow(acrossDistance.div(max(width, .00035)), 2).mul(-2.65));
@@ -134,9 +131,6 @@ export function createWarpDriveNode(inputNode) {
     const base = inputNode.sample(screenUV);
     const result = vec4(base.rgb, 1).toVar();
     const activity = max(strength, controls.arrival);
-    // The render graph is always resident. A real shader branch keeps the
-    // expensive authored tunnel dormant during ordinary flight; the old GLSL
-    // pass achieved the same thing by disabling the pass altogether.
     If(activity.greaterThan(.001), () => {
       const centered = screenUV.sub(0.5);
       const p = vec2(centered.x.mul(controls.aspect), centered.y);
@@ -153,8 +147,6 @@ export function createWarpDriveNode(inputNode) {
         strength.mul(float(.14).add(controls.warp.mul(.12))));
       const rayStrength = strength.mul(mix(.54, .88, strength))
         .mul(smoothstep(.025, .14, radius));
-      // Sparse long foreground streaks establish speed; denser, shorter
-      // layers behind them supply depth without bending the silhouette.
       const layeredRays = rayLayer(p, float(31), float(1.05),
         float(2.15).add(controls.pulse.mul(2.35)), float(.13))
         .add(rayLayer(p.mul(1.03), float(53), float(1.82),
@@ -168,8 +160,6 @@ export function createWarpDriveNode(inputNode) {
         .mul(float(1).add(controls.warp.mul(.18)));
       const tunnel = smoothstep(.08, .92, radius)
         .mul(float(1).sub(smoothstep(.88, 1.14, radius)));
-      // Preserve the flowing haze without the old twelve sine hashes per
-      // pixel; the three authored segmented ray layers remain unchanged.
       const turbulence = sin(dot(p, vec2(18.7, 31.9)).add(controls.time.mul(.17)))
         .mul(.5).add(.5);
       const haze = mix(vec3(.012, .036, .075), vec3(.025, .115, .21), turbulence)
@@ -304,7 +294,15 @@ export class SkyDome {
       uHorizonOnly: uniform(0),
       uSunset: uniform(0),
     };
-    const dir = normalize(positionLocal);
+    // Reconstruct the world-space sky ray per fragment. Normalizing the
+    // interpolated position of a 48×32 sphere made every coarse triangle its
+    // own patch of zenith colour and sun radiance, most obvious through broken
+    // cloud cover. The dome is only a raster envelope; its tessellation must
+    // never define the sky field.
+    const clipRay = vec4(screenUV.mul(2).sub(1), 1, 1);
+    const viewRayPoint = cameraProjectionMatrixInverse.mul(clipRay);
+    const viewRay = viewRayPoint.xyz.div(viewRayPoint.w.max(0.000001));
+    const dir = cameraWorldMatrix.mul(vec4(viewRay, 0)).xyz.normalize();
     const upDot = dot(dir, nodes.uUp);
     const horizonMix = pow(clamp(float(1).sub(upDot.max(0)), 0, 1), 3.2);
     const sunDot = dot(dir, nodes.uSunDir).max(0);

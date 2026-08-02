@@ -30,3 +30,4 @@ tools/transpile-glsl.js
 *.swp
 .DS_Store
 Thumbs.db
+.workbuddy/
