@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial, WebGPURenderer } from 'three/webgpu';
 import { GasGiant } from '../src/gas-giant.js';
 import { BlackHole } from '../src/black-hole.js';
-import { makeCloudVolumeMaterial } from '../src/clouds.js';
 import { applyTerrainDetail, applyWaterWaves } from '../src/shaders.js';
 import { SkyDome } from '../src/effects.js';
 
@@ -32,14 +31,6 @@ try {
     posUniv: new THREE.Vector3(),
   });
   blackHole.group.position.x = 2.5; scene.add(blackHole.group);
-
-  const cloud = makeCloudVolumeMaterial({ R: 1, seaLevel: 0 }, {
-    rIn: 1.01, rOut: 1.08, cov0: 0.38, cov1: 0.66,
-    ox: 1.2, oy: 2.3, oz: 3.4, tint: 0xffffff,
-  }, null);
-  cloud.uniforms.uEngage.value = 1;
-  const cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(1.08, 32, 20), cloud);
-  scene.add(cloudMesh);
 
   const terrainPlanet = {
     R: 1, hAmp: 0.15,

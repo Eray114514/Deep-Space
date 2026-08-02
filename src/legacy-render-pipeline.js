@@ -6,7 +6,6 @@ import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ForegroundPass } from './foreground-pass.js';
-import { VolumetricPass } from './volumetric-pass-webgl.js';
 import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
 
 function aliasUniforms(uniforms, aliases) {
@@ -42,9 +41,6 @@ export class GameLegacyPipeline {
     this.target = target;
     this.composer = new EffectComposer(renderer, target);
     this.composer.addPass(new RenderPass(scene, camera));
-
-    this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale }) : null;
-    if (this.volumePass) this.composer.addPass(this.volumePass);
 
     this.warp = new ShaderPass(WarpDriveShader);
     this.warp.enabled = false;

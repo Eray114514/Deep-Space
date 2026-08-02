@@ -8,7 +8,7 @@ import {
   instanceIndex, length, mix, mx_fractal_noise_float,
   normalLocal, normalView, normalViewGeometry, positionGeometry, positionLocal,
   positionView, positionViewDirection, pow, reference, reflect, select, sign, sin, smoothstep, texture,
-  transformNormalToView, uniform, sqrt,
+  texture3D, transformNormalToView, uniform, sqrt,
   vec2, vec3, vertexColor,
 } from 'three/tsl';
 import { Simplex } from './noise.js';
@@ -89,72 +89,6 @@ export function disposeDetailTexture() {
   _detailData = null;
 }
 
-function smooth01(lo, hi, value) {
-  const t = Math.min(1, Math.max(0, (value - lo) / Math.max(hi - lo, 1e-6)));
-  return t * t * (3 - 2 * t);
-}
-
-function normalized(x, y, z) {
-  const k = 1 / Math.max(Math.hypot(x, y, z), 1e-6);
-  return { x: x * k, y: y * k, z: z * k };
-}
-
-function stormAtCPU(d, center, phase, radius) {
-  const ref = Math.abs(center.y) < 0.88 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
-  const ta = normalized(ref.y * center.z - ref.z * center.y,
-    ref.z * center.x - ref.x * center.z, ref.x * center.y - ref.y * center.x);
-  const tb = normalized(center.y * ta.z - center.z * ta.y,
-    center.z * ta.x - center.x * ta.z, center.x * ta.y - center.y * ta.x);
-  const dc = Math.min(1, Math.max(-1, d.x * center.x + d.y * center.y + d.z * center.z));
-  const x = d.x * ta.x + d.y * ta.y + d.z * ta.z;
-  const y = d.x * tb.x + d.y * tb.y + d.z * tb.z;
-  const inv = 1 / Math.max(x * x + y * y, 1e-5);
-  const r = Math.sqrt(Math.max(0, 2 * (1 - dc))) / radius;
-  const shield = (1 - smooth01(0.08, 0.5, r)) * 0.58;
-  const turn = phase - r * 13;
-  const arms = smooth01(0.66, 0.94,
-    0.5 + 0.5 * (2 * x * y * inv * Math.cos(turn) + (x * x - y * y) * inv * Math.sin(turn)))
-    * smooth01(0.1, 0.24, r) * (1 - smooth01(0.62, 1, r));
-  return Math.max(shield, arms);
-}
-
-function cloudSystemCPU(d, ox, oy, oz) {
-  const c1 = normalized(Math.sin(ox * 1.31 + 0.4), Math.sin(oy * 1.17 - 1.2) * 0.72,
-    Math.cos(oz * 1.43 + 0.7));
-  const ref = Math.abs(c1.y) < 0.8 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
-  const cross = normalized(c1.y * ref.z - c1.z * ref.y,
-    c1.z * ref.x - c1.x * ref.z, c1.x * ref.y - c1.y * ref.x);
-  const c2 = normalized(cross.x + c1.x * 0.16, cross.y + c1.y * 0.16, cross.z + c1.z * 0.16);
-  return Math.max(stormAtCPU(d, c1, oz, 0.92), stormAtCPU(d, c2, ox + oy, 0.68) * 0.72);
-}
-
-function cloudSystemTexture(ox, oy, oz) {
-  const width = 192, height = 192;
-  const data = new Uint8Array(width * height);
-  const d = { x: 0, y: 0, z: 0 };
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let px = ((x + 0.5) / width) * 2 - 1;
-      let pz = ((y + 0.5) / height) * 2 - 1;
-      const py = 1 - Math.abs(px) - Math.abs(pz);
-      if (py < 0) {
-        const oldX = px;
-        px = (1 - Math.abs(pz)) * Math.sign(oldX || 1);
-        pz = (1 - Math.abs(oldX)) * Math.sign(pz || 1);
-      }
-      const inv = 1 / Math.max(Math.hypot(px, py, pz), 1e-6);
-      d.x = px * inv; d.y = py * inv; d.z = pz * inv;
-      data[y * width + x] = Math.round(cloudSystemCPU(d, ox, oy, oz) * 255);
-    }
-  }
-  const map = new THREE.DataTexture(data, width, height, THREE.RedFormat);
-  map.wrapS = map.wrapT = THREE.ClampToEdgeWrapping;
-  map.minFilter = map.magFilter = THREE.LinearFilter;
-  map.colorSpace = THREE.NoColorSpace;
-  map.needsUpdate = true;
-  return map;
-}
-
 let _blankTex = null;
 function blankTexture() {
   if (!_blankTex) {
@@ -162,24 +96,6 @@ function blankTexture() {
     _blankTex.needsUpdate = true;
   }
   return _blankTex;
-}
-
-export function cloudDensityCPU(d, cov0, cov1, ox, oy, oz) {
-  let f = sampleDetailCPU(d.x * 0.55 + ox, d.y * 0.55 + oy, 1) * 0.5;
-  f += sampleDetailCPU(d.y * 1.15 + oy, d.z * 1.15 + oz, 0) * 0.25;
-  f += sampleDetailCPU(d.z * 2.35 + oz, d.x * 2.35 + ox, 1) * 0.125;
-  f += sampleDetailCPU(d.x * 4.8 - ox, d.y * 4.8 - oz, 0) * 0.0625;
-  f /= 0.9375;
-  return Math.max(Math.pow(smooth01(cov0, cov1, f), 1.3),
-    cloudSystemCPU(d, ox, oy, oz) * smooth01(0.24, 0.68, f) * 0.86);
-}
-
-export function cloudBaseDensityCPU(d, cov0, cov1, ox, oy, oz) {
-  let f = sampleDetailCPU(d.x * 0.55 + ox, d.y * 0.55 + oy, 1) * 0.5;
-  f += sampleDetailCPU(d.y * 1.15 + oy, d.z * 1.15 + oz, 0) * 0.25;
-  f += sampleDetailCPU(d.z * 2.35 + oz, d.x * 2.35 + ox, 1) * 0.125;
-  f += sampleDetailCPU(d.x * 4.8 - ox, d.y * 4.8 - oz, 0) * 0.0625;
-  return Math.pow(smooth01(cov0, cov1, f / 0.9375), 1.3);
 }
 
 function copyMaterialFlags(source, target) {
@@ -388,13 +304,6 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
     surface = surface.mul(0.86);
   }
 
-  const cloudMap = texture(planet.cloudShadowTex || blankTexture());
-  const cloudMatrix = uniform(new THREE.Matrix3());
-  const cloudDirection = cloudMatrix.mul(direction);
-  const cloudU = float(0.5).add(atan(cloudDirection.z, cloudDirection.x.negate()).mul(0.15915494));
-  const cloudV = float(1).sub(acos(cloudDirection.y.clamp(-1, 1)).mul(0.31830988));
-  const cloudK = uniform(planet.cloudMesh ? 0.42 : 0);
-  surface = surface.mul(float(1).sub(cloudMap.sample(vec2(cloudU, cloudV)).r.mul(cloudK)));
   // Retain diffuse sky/ground bounce inside totality while removing the
   // impossible fully lit patch. The local field provides a continuous moving
   // umbra/penumbra across the spherical terrain.
@@ -450,9 +359,8 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   // morph-target textures while retaining the exact parent triangle.
   material.positionNode = morphedPosition;
   material.userData.shader = {
-    uniforms: { uCloudMat: cloudMatrix, uCloudK: cloudK, ...eclipseNodes },
+    uniforms: { ...eclipseNodes },
   };
-  material.userData.cloudShadowTextureNode = cloudMap;
   material.userData.nodeMaterial = 'terrain-layered-pbr-v6-ktx2';
   source.dispose?.();
   return material;
@@ -491,8 +399,6 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     uSecondarySunColor: uniform(new THREE.Color(1, 0.98, 0.94)),
     uSecondarySunEnergy: uniform(0),
     uCameraLocal: uniform(new THREE.Vector3(0, 0, (planet?.R || 1000) * 2)),
-    uCloudMat: uniform(new THREE.Matrix3()),
-    uCloudK: uniform(0),
     uDay: uniform(1),
     uSunset: uniform(0),
     uEclipseCenter: uniform(new THREE.Vector3()),
@@ -501,7 +407,6 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     uEclipseEnabled: uniform(0),
   };
   const eclipseVisibility = analyticEclipseVisibility(local, nodes.uSunDir, nodes);
-  const waterCloudTexture = texture(blankTexture());
   // The authored `pal.sea` ramp already carries this world's art direction for
   // depth: stop 0 is the abyss, the last stop is the shallows. `colorAt` reads
   // it the same way for the sea floor, so surface and floor stay in one hue
@@ -739,14 +644,6 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   const skyElevation = dot(reflected, up).clamp(0, 1);
   let reflectedSky = mix(nodes.uSkyHorizon, nodes.uSkyZenith, pow(skyElevation, 0.42))
     .mul(float(0.18).add(nodes.uDay.mul(0.82)));
-  const reflectedCloudDir = up.add(reflected.sub(up.mul(dot(reflected, up))).mul(0.16)).normalize();
-  const cloudDirection = nodes.uCloudMat.mul(reflectedCloudDir);
-  const cloudU = float(0.5).add(atan(cloudDirection.z, cloudDirection.x.negate()).mul(0.15915494));
-  const cloudV = float(1).sub(acos(cloudDirection.y.clamp(-1, 1)).mul(0.31830988));
-  const reflectedCloud = waterCloudTexture.sample(vec2(cloudU, cloudV)).r.mul(nodes.uCloudK);
-  const cloudTint = mix(vec3(0.76, 0.82, 0.9), nodes.uSkyHorizon,
-    nodes.uSunset.mul(0.52));
-  reflectedSky = mix(reflectedSky, cloudTint, reflectedCloud.mul(0.78));
   const horizonReflection = float(1).sub(smoothstep(0.05, 0.58, skyElevation));
   reflectedSky = reflectedSky.add(nodes.uSkyHorizon
     .mul(nodes.uSunset.mul(horizonReflection).mul(0.58)));
@@ -848,7 +745,6 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
   ))
     .add(choppyOffset);
   material.userData.shader = { uniforms: nodes };
-  material.userData.waterCloudTexture = waterCloudTexture;
   material.userData.waterProfile = {
     depthScale,
     extinction: extinctionValues,
@@ -866,197 +762,12 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     interactiveDisplacement: true,
     transmission: true,
     dynamicSky: true,
-    cloudReflection: true,
     radianceReflection: true,
     wetShore: true,
     deterministicBathymetry: true,
   };
   material.userData.nodeMaterial = 'water-cross-sea-spectrum-v7';
   material.userData.opacityNodeUniform = opacity;
-  source.dispose?.();
-  return material;
-}
-
-export function applyCloudField(source, coverage, offX, offY, offZ,
-  relief = 0, weatherMap = null, family = 'low') {
-  const material = copyMaterialFlags(source, new MeshBasicNodeMaterial());
-  // The analytic distant deck and close volume consume the same authored
-  // equirectangular Lo/Hi weather atlas. A procedural fallback remains only
-  // for standalone material tests that do not construct a Planet.
-  const stableWeatherMap = weatherMap || cloudSystemTexture(offX, offY, offZ);
-  const weatherTextureNode = texture(stableWeatherMap);
-  const nodes = {
-    uCov0: uniform(0.55 - coverage * 0.24), uCov1: uniform(0.86 - coverage * 0.14),
-    uCOff: uniform(new THREE.Vector3(offX, offY, offZ)),
-    uCloudRelief: uniform(relief), uCamProx: uniform(1), uSurfaceView: uniform(0),
-    uCSun: uniform(new THREE.Vector3(0, 1, 0)), uOpacity: uniform(source.opacity ?? 1),
-  };
-  const direction = positionLocal.normalize();
-  // One equirectangular weather atlas is authoritative at every distance and
-  // on every renderer. The previous triplanar field changed frequency with
-  // camera radius, so clouds visibly rearranged while the player orbited.
-  const weatherUV = (d) => vec2(
-    float(0.5).add(atan(d.z.negate(), d.x.negate()).mul(0.15915494)),
-    acos(d.y.clamp(-1, 1)).mul(0.31830988),
-  );
-  const cloudSample = (d) => {
-    const sampleDirection = d.normalize();
-    const uv = weatherUV(sampleDirection);
-    const weather = weatherTextureNode.sample(uv);
-    // The 1024x512 CPU atlas already contains deterministic four-octave
-    // erosion. Sampling another periodic detail field in the fragment shader
-    // duplicated work, painted latitude stripes and let noise create clouds
-    // where the weather authority was clear. Orbit now costs one atlas lookup
-    // for shape plus one displaced lookup for directional self-shadow.
-    const density = weather.r;
-    const cloudType = weather.g;
-    const stratus = family === 'high' ? float(0) : weather.b;
-    const convective = family === 'high' ? weather.b : cloudType;
-    const scatter = weather.a;
-    const macro = family === 'high'
-      ? smoothstep(0.075, 0.36, density)
-      : smoothstep(
-        mix(0.31, 0.14, stratus).sub(cloudType.mul(0.025)),
-        mix(0.6, 0.5, stratus).sub(cloudType.mul(0.018)),
-        density,
-      );
-    const cellular = pow(macro, mix(1.48, 0.96, cloudType));
-    const sheet = smoothstep(0.11, 0.57, density);
-    const amount = family === 'high'
-      ? cellular.mul(mix(0.68, 1, convective)).clamp(0, 1)
-      : mix(cellular, sheet, stratus.mul(0.84)).clamp(0, 1);
-    return {
-      density,
-      amount,
-      macro,
-      cloudType,
-      stratus,
-      convective,
-      scatter,
-    };
-  };
-  const cloud = cloudSample(direction);
-  const amount = cloud.amount;
-  // Reconstruct a cloud-top normal from the same occupied weather field that
-  // displaces the shell. A radial sphere normal makes even a 14 km relief map
-  // shade like a painted film; two neighbouring atlas samples recover the
-  // kilometre-scale slopes visible in oblique orbital photography.
-  const tangentEast = vec3(direction.z.negate(), 0.0001, direction.x).normalize();
-  const tangentNorth = cross(direction, tangentEast).normalize();
-  const gradientStep = mix(0.0048, 0.0028, nodes.uSurfaceView);
-  const eastCloud = cloudSample(
-    direction.add(tangentEast.mul(gradientStep)).normalize());
-  const northCloud = cloudSample(
-    direction.add(tangentNorth.mul(gradientStep)).normalize());
-  const reliefSlope = mix(1.15, 2.45, cloud.cloudType)
-    .mul(mix(1, 0.52, cloud.stratus));
-  const cloudTopNormal = direction
-    .sub(tangentEast.mul(eastCloud.amount.sub(amount)).mul(reliefSlope))
-    .sub(tangentNorth.mul(northCloud.amount.sub(amount)).mul(reliefSlope))
-    .normalize();
-  const sunCloud = cloudSample(
-    direction.add(nodes.uCSun.normalize().mul(mix(0.026, 0.012, nodes.uSurfaceView)))
-      .normalize(),
-  );
-  const selfShadow = float(1)
-    // Preserve the atlas density gradient instead of comparing two saturated
-    // coverage masks. This exposes the sunward cauliflower relief inside a
-    // storm shield, not just along its outer silhouette.
-    .sub(sunCloud.density.sub(cloud.density).max(0).mul(2.8))
-    .sub(smoothstep(0.28, 0.82, cloud.density).mul(0.24))
-    .add(cloud.scatter.mul(0.12))
-    .clamp(0.32, 1.04);
-  const day = smoothstep(-0.18, 0.24, dot(direction, nodes.uCSun.normalize()));
-  const topLight = smoothstep(-0.2, 0.72,
-    dot(cloudTopNormal, nodes.uCSun.normalize()))
-    .mul(day);
-  const edge = smoothstep(0.025, 0.24, amount)
-    .mul(float(1).sub(smoothstep(0.52, 0.94, amount)));
-  const denseCore = smoothstep(0.3, 0.84, cloud.density)
-    .mul(smoothstep(0.28, 0.9, amount));
-  const baseColor = source.color?.clone() || new THREE.Color(0xffffff);
-  material.colorNode = uniform(baseColor)
-    .mul(mix(0.2, mix(0.46, 1.18, topLight), day)).mul(selfShadow)
-    .mul(mix(1, 0.7, denseCore))
-    .add(vec3(0.15, 0.19, 0.27).mul(cloud.scatter)
-      .mul(day).mul(mix(0.32, 0.16, denseCore)))
-    .add(vec3(0.32, 0.39, 0.5).mul(edge).mul(day).mul(0.34))
-    .add(vec3(0.025, 0.04, 0.075).mul(denseCore)
-      .mul(float(1).sub(day)).mul(0.8));
-  // Water clouds become optically opaque after only a short occupied column.
-  // Coverage is now calibrated spatially, so opacity can describe real column
-  // depth without being abused to hide an overcast white shell.
-  const opticalDepth = amount.mul(family === 'high'
-    ? mix(0.34, 0.88, cloud.convective)
-    : mix(0.82, 2.45, cloud.cloudType))
-    .mul(mix(1, 0.64, cloud.stratus));
-  material.opacityNode = float(1).sub(exp(opticalDepth.negate()))
-    .mul(mix(family === 'high' ? 0.24 : 0.56, 1, cloud.macro))
-    .mul(nodes.uCamProx).mul(nodes.uOpacity);
-  const verticalShape = pow(amount, mix(1.42, 0.92, cloud.cloudType))
-    .mul(mix(0.42, 1, cloud.cloudType))
-    .mul(mix(1, 0.16, cloud.stratus));
-  material.positionNode = positionLocal.add(
-    direction.mul(nodes.uCloudRelief).mul(verticalShape),
-  );
-  material.uniforms = nodes;
-  material.userData.weatherSystemTexture = stableWeatherMap;
-  material.userData.weatherSystemTextureNode = weatherTextureNode;
-  material.userData.shader = { uniforms: nodes };
-  material.userData.nodeMaterial = family === 'high'
-    ? 'cloud-deck-v3-high-weather-relief'
-    : 'cloud-deck-v3-low-weather-relief';
-  material.userData.cloudFamily = family;
-  material.userData.opacityNodeUniform = nodes.uOpacity;
-  source.dispose?.();
-  return material;
-}
-
-export function applyNoctilucentField(source, coverage, offX, offY, offZ,
-  weatherMap = null) {
-  const material = copyMaterialFlags(source, new MeshBasicNodeMaterial({
-    side: THREE.DoubleSide,
-    transparent: true,
-    depthWrite: false,
-    depthTest: true,
-  }));
-  const detailMap = detailTexture();
-  const highWeather = texture(weatherMap || cloudSystemTexture(offX, offY, offZ));
-  const nodes = {
-    uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
-    uOpacity: uniform(source.opacity ?? 0.12),
-    uOffset: uniform(new THREE.Vector3(offX, offY, offZ)),
-  };
-  const direction = positionLocal.normalize();
-  const uv = vec2(
-    float(0.5).add(atan(direction.z, direction.x.negate()).mul(0.15915494)),
-    float(1).sub(acos(direction.y.clamp(-1, 1)).mul(0.31830988)),
-  );
-  const system = highWeather.sample(uv).r;
-  const filaments = texture(detailMap,
-    uv.mul(vec2(96, 18)).add(nodes.uOffset.xy.mul(0.13))).g.mul(0.62)
-    .add(texture(detailMap,
-      uv.mul(vec2(211, 37)).sub(nodes.uOffset.zx.mul(0.09))).r.mul(0.38));
-  const wisps = smoothstep(0.32, 0.68, system)
-    .mul(smoothstep(0.46, 0.72, filaments))
-    .mul(coverage);
-  const sunElevation = dot(direction, nodes.uSunDir.normalize());
-  // Mesospheric ice remains sunlit after the ground has entered shadow. Limit
-  // it to the terminator belt so it appears as the real silver-blue hairline
-  // seen from orbit, never as another daytime painted cloud shell.
-  const twilight = smoothstep(-0.42, -0.08, sunElevation)
-    .mul(smoothstep(0.14, -0.035, sunElevation));
-  const grazing = pow(float(1).sub(abs(dot(normalView.normalize(),
-    positionViewDirection))), 2.2);
-  material.colorNode = mix(vec3(0.18, 0.42, 0.78), vec3(0.72, 0.9, 1.18),
-    filaments).mul(float(0.48).add(grazing.mul(0.8)));
-  material.opacityNode = wisps.mul(twilight).mul(nodes.uOpacity)
-    .mul(float(0.25).add(grazing.mul(0.95))).clamp(0, 0.22);
-  material.positionNode = positionLocal.add(direction.mul(filaments.sub(0.5).mul(260)));
-  material.uniforms = nodes;
-  material.userData.shader = { uniforms: nodes };
-  material.userData.opacityNodeUniform = nodes.uOpacity;
-  material.userData.nodeMaterial = 'noctilucent-mesosphere-v1';
   source.dispose?.();
   return material;
 }

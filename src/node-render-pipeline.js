@@ -1,10 +1,9 @@
 import * as THREE from 'three/webgpu';
 import {
-  abs, exp, float, floor, fract, logarithmicDepthToViewZ, max, mix, pass, rtt,
-  screenUV, uniform, vec2, vec4,
+  abs, exp, float, floor, fract, logarithmicDepthToViewZ, max, mix, mrt, output,
+  pass, rtt, screenUV, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { VOLUME_LAYER } from './volumetric-pass.js';
 import { SKY_BACKDROP_LAYER } from './render-layers.js';
 import { createSunShaftNode } from './sun-shafts-node.js';
 
@@ -145,33 +144,6 @@ export class GameNodePipeline {
     let colorNode = over(this.skyPass.getTextureNode('output'), sceneColor);
 
     this.volumePass = null;
-    if (volume) {
-      const layers = new THREE.Layers();
-      layers.set(VOLUME_LAYER);
-      this.volumePass = pass(scene, camera, { depthBuffer: false, samples: 0 });
-      this.volumePass.name = 'Local volume layer';
-      this.volumePass.setLayers(layers);
-      this.volumePass.setResolutionScale(volumeScale);
-      const volumeTexture = this.volumePass.getTextureNode('output');
-      const guidedVolume = depthGuidedVolumeUpsample(
-        volumeTexture,
-        sceneDepthNode,
-        {
-          uVolumeResolution: this._volumeResolution,
-          uCameraNear: this._volumeNear,
-          uCameraFar: this._volumeFar,
-          uDepthReversed: this._volumeDepthReversed,
-        },
-      );
-      // Full-resolution volume needs no reconstruction. Keeping the direct
-      // path also makes scale=1 an exact reference for visual diagnostics.
-      const reconstructedVolume = mix(
-        volumeTexture.sample(screenUV),
-        guidedVolume,
-        this._volumeUpsample,
-      );
-      colorNode = over(colorNode, reconstructedVolume);
-    }
     this._syncVolumeResolution();
 
     // Travel distortion owns the complete world image. Applying it before
@@ -262,7 +234,6 @@ export class GameNodePipeline {
     let bound = false;
     const targets = [
       planet.atmoUniforms || planet.atmoMesh?.material?.uniforms,
-      planet.volCloudUniforms || planet.volCloudMat?.uniforms,
     ];
     for (const uniforms of targets) {
       if (!uniforms?.tSceneDepth || !uniforms?.uDepthReady) continue;
@@ -399,30 +370,6 @@ export class RiftPortalNodePipeline {
     let colorNode = over(this.skyPass.getTextureNode('output'), sceneColor);
 
     this.volumePass = null;
-    if (volume) {
-      const volumeLayers = new THREE.Layers();
-      volumeLayers.set(VOLUME_LAYER);
-      this.volumePass = pass(scene, camera, { depthBuffer: false, samples: 0 });
-      this.volumePass.name = 'Rift local volume';
-      this.volumePass.setLayers(volumeLayers);
-      const volumeTexture = this.volumePass.getTextureNode('output');
-      const guidedVolume = depthGuidedVolumeUpsample(
-        volumeTexture,
-        sceneDepthNode,
-        {
-          uVolumeResolution: this._volumeResolution,
-          uCameraNear: this._volumeNear,
-          uCameraFar: this._volumeFar,
-          uDepthReversed: this._volumeDepthReversed,
-        },
-      );
-      const reconstructedVolume = mix(
-        volumeTexture.sample(screenUV),
-        guidedVolume,
-        this._volumeUpsample,
-      );
-      colorNode = over(colorNode, reconstructedVolume);
-    }
 
     this.pipeline.outputNode = colorNode;
     this._syncResolution();
@@ -461,7 +408,6 @@ export class RiftPortalNodePipeline {
     let bound = false;
     const targets = [
       planet.atmoUniforms || planet.atmoMesh?.material?.uniforms,
-      planet.volCloudUniforms || planet.volCloudMat?.uniforms,
     ];
     for (const uniforms of targets) {
       if (!uniforms?.tSceneDepth || !uniforms?.uDepthReady) continue;
