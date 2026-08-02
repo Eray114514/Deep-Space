@@ -23,9 +23,11 @@ import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
+import { VolumetricPass, VOLUME_LAYER } from './volumetric-pass.js';
 import { createRiftDistortionNode, SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
+import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
 import { GameNodePipeline, RiftPortalNodePipeline } from './node-render-pipeline.js';
@@ -104,10 +106,6 @@ const rendererOptions = {
   alpha: true,
   logarithmicDepthBuffer: true,
   powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
-  // Real-hardware performance diagnostics opt into WebGPU timestamp queries.
-  // Production keeps them disabled so query allocation/readback is never part
-  // of an ordinary player's frame.
-  trackTimestamp: DEV_SERVER && qs.get('gputiming') === '1',
 };
 const rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
 if (qs.get('renderer-recovery') === 'device-lost') {
@@ -214,9 +212,17 @@ const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
 // loading screen.
 const STARTUP_TERRAIN_GRACE_MS = QUALITY_LOW ? 650 : 3500;
 let startupPrewarmExpired = false;
-// The cloud volume system was removed ahead of a from-scratch rewrite; the
-// startup volume-warm milestone is retired with it.
-let startupVolumeWarmState = 'complete';
+// The cloud raymarch must reach the real production RenderPipeline once before
+// the loading mask disappears. Building its TSL graph or compiling an isolated
+// PassNode does not create the device pipeline used by the live MRT/depth
+// configuration; the first destination reveal would otherwise pay that cost.
+let startupVolumeWarmState = BOOT_USE_WEBGPU && qs.get('vclouds') !== '0'
+  ? 'waiting' : 'complete';
+let startupVolumeWarmSubmittedFrame = -1;
+// These tiny meshes keep one RenderObject alive for each shared local-volume
+// material. Without them, disposing the departure system drops Three's
+// NodeBuilderState usedTimes to zero and evicts the pipeline before arrival.
+const startupVolumeKeepaliveMeshes = [];
 
 function startupTerrainReady() {
   const planet = universe?.system?.planets?.[0];
@@ -484,6 +490,7 @@ function prewarmLoadedShipPipelines() {
 }
 
 // ---- renderer-specific post chain -------------------------------------------
+const VOLUME_ENABLED = qs.get('vclouds') !== '0';
 const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
 // Start at the actual orbital pixel budget. Constructing the pipeline at the
 // generic 0.75 Ultra scale and shrinking it on the first live frame allocated
@@ -492,10 +499,15 @@ const initialVolumePixels = Math.max(1,
   window.innerWidth * renderDpr * window.innerHeight * renderDpr);
 const INITIAL_VOLUME_SCALE = Math.min(
   VOLUME_SCALE,
-  0.68,
-  Math.sqrt(2400000 / initialVolumePixels),
+  0.46,
+  Math.sqrt(1150000 / initialVolumePixels),
 );
 let effectiveVolumeScale = INITIAL_VOLUME_SCALE;
+const PROFILE_CLOUD_STEPS = BOOT_USE_WEBGPU
+  ? QUALITY_PROFILE.cloudStepsWebGPU : QUALITY_PROFILE.cloudSteps;
+let effectiveCloudSteps = PROFILE_CLOUD_STEPS;
+let effectiveCloudLightSteps = PROFILE_CLOUD_STEPS >= 44 ? 5
+  : PROFILE_CLOUD_STEPS >= 30 ? 3 : 2;
 let effectiveAtmosphereSteps = 20;
 let localVolumeBudgetKey = '';
 // Preserve the larger source/destination allocation across a rift. Rebuilding
@@ -504,8 +516,16 @@ let localVolumeBudgetKey = '';
 let riftVolumeScaleFloor = 0;
 let effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz;
 let effectiveShadowDistance = QUALITY_PROFILE.shadowDistance;
+setVolumetricCloudsEnabled(VOLUME_ENABLED, {
+  quality: QUALITY_PROFILE.id,
+  steps: PROFILE_CLOUD_STEPS,
+});
+const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
+  ? new VolumetricPass()
+  : null;
 const Pipeline = BOOT_USE_WEBGPU ? GameNodePipeline : GameLegacyPipeline;
 const nodePipeline = new Pipeline(renderer, scene, camera, {
+  volume: VOLUME_ENABLED,
   volumeScale: effectiveVolumeScale,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
   bloomStrength: IS_TOUCH ? 0.35 : 0.5,
@@ -515,11 +535,14 @@ const nodePipeline = new Pipeline(renderer, scene, camera, {
   createWarpDriveNode,
   createRiftDistortionNode,
 });
+const volumePass = BOOT_USE_WEBGPU
+  ? nodeVolumePass
+  : nodePipeline.volumePass;
 const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
 const riftDistortionPass = nodePipeline.rift;
 const bloomPass = nodePipeline.bloom;
-let usePost = !QUALITY_LOW && bloomPass.enabled;
+let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 let spatialRift = null;
 let riftPortalPipeline = null;
 let pipelineResizePending = false;
@@ -599,12 +622,6 @@ let loadingCleared = false;
 // pipeline readiness instead of an infinite CSS sweep.
 let loadingProgress = 0;
 let paused = false;
-// Browser diagnostics can freeze physics/navigation while leaving the render
-// graph live. `?freeze=1` intentionally freezes only scenery animation for
-// seam tests, so performance captures need an explicit camera hold instead of
-// slowly falling from their declared 8/90 km altitude during LOD settling.
-let devSimulationFrozen = false;
-let devGpuTimingResolving = false;
 let pointerLockRequest = null;
 let timeWarp = null;
 let photoMode = false;
@@ -760,6 +777,7 @@ if (BOOT_USE_WEBGPU) {
     spatialRift.portalCamera,
     spatialRift.portalRT,
     {
+      volume: VOLUME_ENABLED,
       volumeScale: effectiveVolumeScale,
     },
   );
@@ -1936,6 +1954,8 @@ function takePreparedDestination(route, owner) {
 
 function primePreparedBodyTextures(body) {
   for (const texture of [
+    body?.cloudShadowTex,
+    body?.cloudWeatherHiTex,
     body?.ringMesh?.material?.map,
   ]) {
     if (texture) renderer.initTexture(texture);
@@ -2138,6 +2158,8 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     visible: sunShadow.visible,
     intensity: sunShadow.intensity,
   };
+  const previousVolumePlanet = volumePass?.activePlanet || null;
+  const previousVolumeHistory = volumePass?.historyValid || false;
   const oldTarget = renderer.getRenderTarget();
   const oldMrt = renderer.getMRT?.();
   const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
@@ -2147,7 +2169,9 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     camera.updateMatrixWorld(true);
     sunShadow.visible = false;
     sunShadow.intensity = 0;
+    volumePass?.setActivePlanet(targetBody, route.target.entry, 0);
     targetBody.syncAtmoMaterial?.();
+    targetBody.syncVolCloudMaterial?.();
     nodePipeline.bindVolumeDepth?.(targetBody);
     renderer.setRenderTarget(surfaceBootstrapTarget);
     renderer.setMRT?.(null);
@@ -2158,6 +2182,11 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
   } finally {
     renderer.setRenderTarget(oldTarget);
     renderer.setMRT?.(oldMrt);
+    volumePass?.setActivePlanet(previousVolumePlanet, nav.pos, 0);
+    if (volumePass) volumePass.historyValid = previousVolumeHistory;
+    previousVolumePlanet?.syncAtmoMaterial?.();
+    previousVolumePlanet?.syncVolCloudMaterial?.();
+    nodePipeline.bindVolumeDepth?.(previousVolumePlanet);
     camera.position.copy(cameraState.position);
     camera.quaternion.copy(cameraState.quaternion);
     camera.fov = cameraState.fov;
@@ -2193,6 +2222,7 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
     targetBody.volumeActive = true;
     targetBody.volumeBlend = 1;
     targetBody.update(cameraOffset, 1 / 60, true, 0);
+    if (targetBody.volCloudMesh) targetBody.volCloudMesh.visible = true;
     universe.relativizeSystem(prepared, route.target.entry);
 
     const sourceQuat = nav.quat.clone();
@@ -2650,6 +2680,14 @@ function beginRiftPortalScene(
       ...(previewSystem?.planets || []),
       ...(previewSystem?.compactObjects || []),
     ]) moveToRiftPortalLayer(body.group);
+    for (const planet of previewSystem?.planets || []) {
+      // A direct target has no separate depth-readable volume pass.
+      for (const material of [planet.volCloudMat]) {
+        if (!material || riftPortalDepthState.includes(material)) continue;
+        riftPortalDepthState.push(material, material.depthTest);
+        material.depthTest = false;
+      }
+    }
   }
 }
 
@@ -2701,6 +2739,7 @@ function renderRiftDestinationPortal({
       );
       if (productionPipeline && target) {
         target.syncAtmoMaterial?.();
+        target.syncVolCloudMaterial?.();
         riftPortalPipeline.bindVolumeDepth(target);
       }
     },
@@ -3079,6 +3118,7 @@ function renderRiftPortal() {
       planet.volumeBlend = 1;
     }
     planet.update(_v, 1 / 60, isTarget, 0);
+    if (isTarget && planet.volCloudMesh) planet.volCloudMesh.visible = true;
   }
   for (const object of riftPreviewSystem.compactObjects) object.updateVisual?.(performance.now() * 0.001);
   // Use the exact camera-relative placement, stellar attenuation and sun glow
@@ -3090,16 +3130,23 @@ function renderRiftPortal() {
       || target.lod.roots.every((root) => !!root.mesh);
     riftPreviewReady = terrainReady && riftDestinationPreparationReady();
     spatialRift.setPortalReadiness?.(riftPreviewReady ? 1 : 0);
-    const atmoUniforms = target.atmoUniforms || target.atmoMesh?.material?.uniforms;
-    if (atmoUniforms?.uDepthReady) atmoUniforms.uDepthReady.value = 0;
+    for (const uniforms of [
+      target.atmoUniforms || target.atmoMesh?.material?.uniforms,
+      target.volCloudUniforms || target.volCloudMat?.uniforms,
+    ]) {
+      if (uniforms?.uDepthReady) uniforms.uDepthReady.value = 0;
+    }
     target.syncAtmoMaterial?.();
+    target.syncVolCloudMaterial?.();
   }
   renderRiftDestinationPortal();
-  // Atmosphere materials are deliberately shared on WebGPU. Restore the
+  // Atmosphere/cloud materials are deliberately shared on WebGPU. Restore the
   // live source body's state after the offscreen destination draw so the main
   // scene cannot inherit portal uniforms for one frame.
-  nearest?.syncAtmoMaterial?.();
-  nodePipeline.bindVolumeDepth?.(nearest);
+  const liveVolumePlanet = volumePass?.activePlanet;
+  liveVolumePlanet?.syncAtmoMaterial?.();
+  liveVolumePlanet?.syncVolCloudMaterial?.();
+  nodePipeline.bindVolumeDepth?.(liveVolumePlanet);
 }
 
 // A warp is a flight, not a teleport: align with the target, spool up, then
@@ -3494,6 +3541,15 @@ function ambience(dt = 1 / 60) {
 
     scene.fog.color.copy(_sky);
     scene.fog.density = fogDensity;
+    const cloudUniforms = p.volCloudUniforms || p.volCloudMat?.uniforms;
+    if (cloudUniforms?.uAmbC) {
+      // Cloud skylight follows the same live day/night/weather radiance as
+      // the atmosphere. Keeping the construction-time daytime colour made an
+      // overcast deck glow pale blue at midnight and, through soft depth
+      // edges, wash the night-side terrain toward white.
+      cloudUniforms.uAmbC.value.copy(_sky)
+        .multiplyScalar(0.38 + day * 0.62);
+    }
 
     // valley mist tracks the live fog/sky tint (sunset mist comes free)
     const tsh = p.terrainMaterial.userData.shader;
@@ -3766,22 +3822,121 @@ function setShadowDistance(distance) {
   sunShadow.shadow.camera.updateProjectionMatrix();
 }
 
+function setCloudStepBudget(steps, requestedLightSteps = null) {
+  effectiveCloudSteps = Math.max(BOOT_USE_WEBGPU ? 8 : 24, Math.round(steps));
+  effectiveCloudLightSteps = requestedLightSteps == null
+    ? (effectiveCloudSteps >= 44 ? 5 : effectiveCloudSteps >= 30 ? 3 : 2)
+    : clamp(Math.round(requestedLightSteps), 0, 5);
+  for (const planet of universe.planets()) {
+    const cloudUniforms = planet.volCloudUniforms || planet.volCloudMat?.uniforms;
+    const uniformValue = cloudUniforms?.uMaxSteps;
+    if (uniformValue) uniformValue.value = effectiveCloudSteps;
+    const lightSteps = cloudUniforms?.uLightSteps;
+    if (lightSteps) lightSteps.value = effectiveCloudLightSteps;
+  }
+}
+
 function setAtmosphereStepBudget(steps) {
   effectiveAtmosphereSteps = clamp(Math.round(steps), 8, 20);
   for (const planet of universe.planets()) {
-    const atmoSteps = (planet.atmoUniforms || planet.atmoMesh?.material?.uniforms)?.uMaxSteps;
-    if (atmoSteps) atmoSteps.value = effectiveAtmosphereSteps;
+    const uniformValue = (planet.atmoUniforms || planet.atmoMesh?.material?.uniforms)?.uMaxSteps;
+    if (uniformValue) uniformValue.value = effectiveAtmosphereSteps;
   }
+}
+
+function applyLocalVolumeBudget(force = false) {
+  if (!BOOT_USE_WEBGPU || !nearest || !Number.isFinite(nearestAlt)) return;
+  // Render-target resize and async pipeline compilation may not share the
+  // same WebGPU synchronization scope. Keep the last stable budget while
+  // resources are busy; clearing its key used to schedule an unconditional
+  // same-size PassNode rebuild at the end of the hero tween, invalidating all
+  // pipelines that had just been warmed behind the loading veil.
+  if (pipelineResourcesBusy()) {
+    return;
+  }
+  const cloudBand = nearest.volCloudBand || nearest.volCloudMat?.userData?.band;
+  const cloudBase = cloudBand ? cloudBand.rIn - nearest.R : 1200;
+  const cloudTop = cloudBand ? cloudBand.rOut - nearest.R : 15000;
+  const distanceToCloud = nearestAlt < cloudBase
+    ? cloudBase - nearestAlt
+    : nearestAlt > cloudTop ? nearestAlt - cloudTop : 0;
+  let tier;
+  if (nearestAlt > Math.max(60000, nearest.atmoHeight * 0.52)) tier = 'orbit';
+  else if (distanceToCloud > 22000) tier = 'approach';
+  else tier = 'cloud';
+
+  const qualityRatio = clamp(PROFILE_CLOUD_STEPS / 56, 0.5, 1);
+  const drawingPixels = Math.max(1,
+    window.innerWidth * renderDpr * window.innerHeight * renderDpr);
+  // Budget actual volume pixels, not just a dimensionless scale. Ultra on a
+  // 2K panel renders the opaque world at 3200x1800; blindly applying the same
+  // scale as 1080p more than doubles atmosphere/cloud fragments.
+  const scaleForPixels = (pixelBudget) => Math.sqrt(pixelBudget / drawingPixels);
+  const budget = tier === 'orbit'
+    ? {
+      scale: Math.min(VOLUME_SCALE, 0.46, scaleForPixels(1150000)),
+      // The focused planet now retains the physical cloud shell in orbit.
+      // Twenty view samples plus one sunward density probe are the minimum
+      // that preserve kilometre-scale tops and directional self-shadow at 2K.
+      cloudSteps: 20,
+      lightSteps: 2,
+      atmosphereSteps: 8,
+      }
+    : tier === 'approach'
+      ? {
+        scale: Math.min(VOLUME_SCALE, 0.5, scaleForPixels(1300000)),
+        cloudSteps: Math.max(18, Math.round(20 * qualityRatio)),
+        lightSteps: 0,
+        atmosphereSteps: 11,
+      }
+      : {
+        scale: Math.min(VOLUME_SCALE, 0.53, scaleForPixels(1550000)),
+        cloudSteps: Math.max(24, Math.round(28 * qualityRatio)),
+        lightSteps: 1,
+        atmosphereSteps: 14,
+      };
+  const adaptiveScale = tier === 'orbit'
+    ? adaptiveStage >= 2 ? 0.68 : adaptiveStage >= 1 ? 0.82 : 1
+    : adaptiveStage >= 1 ? 0.78 : 1;
+  const adaptiveSteps = tier === 'orbit'
+    ? 1
+    : adaptiveStage >= 2 ? 0.78 : 1;
+  const targetScale = Math.max(budget.scale * adaptiveScale, riftVolumeScaleFloor);
+  const targetCloudSteps = Math.max(16, Math.round(budget.cloudSteps * adaptiveSteps));
+  const key = [
+    tier,
+    targetScale.toFixed(3),
+    targetCloudSteps,
+    budget.lightSteps,
+    budget.atmosphereSteps,
+  ].join(':');
+  if (!force && key === localVolumeBudgetKey) return;
+  localVolumeBudgetKey = key;
+  if (Math.abs(targetScale - effectiveVolumeScale) > 0.005) {
+    effectiveVolumeScale = targetScale;
+    nodePipeline.setVolumeScale?.(effectiveVolumeScale);
+    sizePost();
+  }
+  setCloudStepBudget(targetCloudSteps, budget.lightSteps);
+  setAtmosphereStepBudget(budget.atmosphereSteps);
 }
 
 function applyAdaptiveStage(stage) {
   adaptiveStage = clamp(Math.round(stage), 0, 7);
+  applyLocalVolumeBudget(true);
   effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz
     * (adaptiveStage >= 3 ? 0.5 : 1);
   scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * (adaptiveStage >= 4 ? 0.72 : 1));
   setShadowDistance(QUALITY_PROFILE.shadowDistance * (adaptiveStage >= 5 ? 0.65 : 1));
   farFlora.setDisplayDensity(adaptiveStage >= 6 ? 0.68 : 1);
-  if (adaptiveStage < 7) {
+  const volumeTier = localVolumeBudgetKey.split(':')[0];
+  if (volumeTier === 'orbit' && adaptiveStage >= 3) {
+    // Orbit has no grass/far-flora/cloud raymarch to shed. Move directly to
+    // its real cost owner (full-resolution pixels) instead of burning four
+    // ineffective adaptation intervals.
+    setRenderDpr(QUALITY_PROFILE.dprTarget
+      - Math.min(0.14, 0.07 + (adaptiveStage - 3) * 0.035));
+  } else if (adaptiveStage < 7) {
     setRenderDpr(Math.max(renderDpr, QUALITY_PROFILE.dprTarget));
   }
 }
@@ -3794,9 +3949,6 @@ function frame() {
   // clouds/bloom/engine glow stay alive behind the blur and nothing diverges
   // (the hand-rolled paused branch drifted lighting state = the black flicker).
   const rawDt = paused ? 0 : realDt;
-  // A deterministic performance camera must not freeze render-side LOD
-  // morphing. Keep the frame delta live and stop only simulation ownership.
-  const simulationDt = paused || devSimulationFrozen ? 0 : realDt;
   // Keep slow-frame input responsive without allowing a tab-resume spike to
   // tunnel through terrain. A 100 ms ceiling still gives stable collision at
   // the browser game's supported low-quality floor.
@@ -3838,7 +3990,7 @@ function frame() {
 
   // Advance the persistent universe clock only during active play. The world
   // is updated before controls so a walker remains attached to the moving body.
-  celestialClock.update(simulationDt, !photoMode);
+  celestialClock.update(rawDt, !photoMode);
   updateTimeWarp();
   const followFrame = state === 'space' && referenceBody
     && nav.pos.distanceTo(referenceBodyPos) < Math.max(referenceBody.R * 10, referenceBody.atmoHeight * 5);
@@ -3902,7 +4054,7 @@ function frame() {
   flightPower = ui.getPowerEffects();
   spaceCtl.gravityPower = flightPower.gravity;
   spaceCtl.navigationPower = flightPower.navigation;
-  if (!paused && !devSimulationFrozen && state === 'space') {
+  if (!paused && state === 'space') {
     const atmosphereFactor = nearest
       ? 1 - smoothstep(0.42, 1.12, nearestAlt / Math.max(nearest.atmoHeight, 1))
       : 0;
@@ -4430,6 +4582,88 @@ function frame() {
         : 0;
     }
   }
+  let startupVolumeWarmDrawRequested = false;
+  if (volumePass) {
+    // Allocate samples from projected cloud detail before rendering the frame.
+    // Orbit never pays close-flight cone-march cost, while entering the cloud
+    // layer raises spatial and light-transport fidelity deterministically.
+    applyLocalVolumeBudget();
+    const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
+    const previousVolumePlanet = volumePass.activePlanet;
+    if (startupVolumeWarmState === 'submitted'
+        && frameNo > startupVolumeWarmSubmittedFrame) {
+      // render() returned after the production graph submitted the previous
+      // frame. Restore ordinary nearest-body ownership before the next draw.
+      startupVolumeWarmState = 'complete';
+    }
+    const startupVolumeCandidates = !loadingCleared && startupVolumeWarmState === 'waiting'
+      ? universe.planets() : [];
+    const startupVolumePlanet = startupVolumeCandidates.find((planet) => planet.volCloudMesh
+      && planet.atmoMesh && !planet.isGasGiant
+      && planet.type !== 'artificialHabitat') || null;
+    if (!loadingCleared && startupVolumeWarmState === 'waiting'
+        && universe.system?.built && !startupVolumePlanet) {
+      // A genuinely cloudless opening system has no cloud pipeline to warm.
+      startupVolumeWarmState = 'complete';
+    }
+    // The first two thirds of stellar warp are fully covered by starflow. Do
+    // not activate a destination volume merely because it is the selected
+    // navigation reference: that cold pipeline used to stop the tunnel for up
+    // to a second while the planet was still invisible. Engage it only in the
+    // authored braking/reveal window. Startup may override this for one masked
+    // production draw; destination water is precompiled separately because it
+    // belongs to the opaque 4x MSAA world pass, not the local-volume pass.
+    const volumePlanet = startupVolumePlanet
+      || (state === 'warp' && !warpRevealActive ? null : nearest);
+    volumePass.setActivePlanet(volumePlanet?.isGasGiant
+      || volumePlanet?.type === 'artificialHabitat' ? null : volumePlanet, nav.pos, motion);
+    nodePipeline.bindVolumeDepth?.(volumePass.activePlanet);
+    if (startupVolumePlanet?.volCloudMesh) {
+      // Planet.update() correctly hides a distant shell whose contribution is
+      // zero, but WebGPU then never sees its material. Visibility is sufficient
+      // to build the live MRT/depth pipeline; uEngage may remain zero, so the
+      // masked warm frame cannot alter the authored scene.
+      startupVolumePlanet.volCloudMesh.visible = true;
+      if (!startupVolumeKeepaliveMeshes.length) {
+        for (const source of [startupVolumePlanet.atmoMesh,
+          startupVolumePlanet.volCloudMesh]) {
+          if (!source?.material) continue;
+          const keepalive = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 4, 2), source.material);
+          keepalive.name = 'Local volume pipeline keepalive';
+          keepalive.layers.set(VOLUME_LAYER);
+          keepalive.frustumCulled = false;
+          keepalive.visible = true;
+          // Keep the RenderObject participating so Three retains the shared
+          // NodeBuilder/pipeline, but never cover a live pixel. A unit BackSide
+          // sphere at the camera origin enclosed the arrival camera and drew
+          // the active atmosphere across the entire screen after every warp.
+          // Reposition a sub-pixel proxy one metre behind whichever camera is
+          // rendering (main or portal); vertex work keeps the pipeline hot
+          // while clipping produces zero fragments.
+          keepalive.scale.setScalar(1e-7);
+          const behindCamera = new THREE.Vector3();
+          keepalive.onBeforeRender = (_renderer, _scene, renderCamera) => {
+            behindCamera.set(0, 0, 1).applyQuaternion(renderCamera.quaternion)
+              .add(renderCamera.position);
+            keepalive.position.copy(behindCamera);
+          };
+          scene.add(keepalive);
+          startupVolumeKeepaliveMeshes.push(keepalive);
+        }
+      }
+      startupVolumeWarmDrawRequested = true;
+    }
+    // Local volume ownership is exclusive, so the active cloud shell can copy
+    // its independent planet state into the immutable shared TSL topology just
+    // before the single volume-layer draw. This preserves per-body weather and
+    // lighting while avoiding a fresh 64×5 NodeBuilder program at warp reveal.
+    volumePass.activePlanet?.syncAtmoMaterial?.();
+    volumePass.activePlanet?.syncVolCloudMaterial?.();
+    nodePipeline.setVolumeMotion?.(motion,
+      previousVolumePlanet === volumePass.activePlanet && volumePass.historyValid);
+    volumePass.historyValid = !!volumePass.activePlanet;
+  }
   // The cockpit hull and the first-person weapon rig share the depth-cleared
   // foreground layer. Walking parks the ship back in world space, but the gun
   // still owns this pass; tying it only to ship.foregroundOnly hid all four
@@ -4501,6 +4735,7 @@ function frame() {
     // Flush once after compilation/handoff. Keeping this outside the render
     // call ensures no target is rebound for sampling and attachment use in the
     // same WebGPU command scope.
+    applyLocalVolumeBudget(true);
     if (pipelineResizePending) sizePost();
   }
   renderer.info.reset();
@@ -4508,12 +4743,15 @@ function frame() {
   // no-ops render() anyway, but skipping avoids noise from the post chain
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
-  if (!contextLost && surfacePipelinesReady && !shipPipelineWarmPending
-    && !devGpuTimingResolving) {
+  if (!contextLost && surfacePipelinesReady && !shipPipelineWarmPending) {
     // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
     // only zeros optional effect uniforms; it never swaps renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
     nodePipeline.render();
+    if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
+      startupVolumeWarmState = 'submitted';
+      startupVolumeWarmSubmittedFrame = frameNo;
+    }
   }
   {
     const info = renderer.info.render;
@@ -4678,24 +4916,6 @@ window.NMS = {
     adaptiveQualityLocked = !!value;
     return adaptiveQualityLocked;
   },
-  setSimulationFrozen(value = true) {
-    if (!DEV_SERVER) return false;
-    devSimulationFrozen = !!value;
-    if (devSimulationFrozen) nav.vel.set(0, 0, 0);
-    return devSimulationFrozen;
-  },
-  async resolveGpuTimestamps() {
-    if (!DEV_SERVER || actualRendererBackend !== 'webgpu'
-      || typeof renderer.resolveTimestampsAsync !== 'function') return null;
-    devGpuTimingResolving = true;
-    try {
-      await renderer.backend?.device?.queue?.onSubmittedWorkDone?.();
-      const duration = await renderer.resolveTimestampsAsync('render');
-      return Number.isFinite(duration) ? duration : null;
-    } finally {
-      devGpuTimingResolving = false;
-    }
-  },
   setHeadlampEnabled(value = true) {
     if (!DEV_SERVER) return null;
     devHeadlampEnabled = !!value;
@@ -4783,14 +5003,18 @@ window.NMS = {
     };
   },
   volumeState() {
-    const planet = nearest || null;
+    const planet = volumePass?.activePlanet || null;
+    const uniforms = planet?.volCloudUniforms || planet?.volCloudMat?.uniforms;
     const size = renderer.getDrawingBufferSize(new THREE.Vector2());
     return {
       activeBodyId: planet?.bodyId || null,
       depthReady: (planet?.atmoUniforms
         || planet?.atmoMesh?.material?.uniforms)?.uDepthReady?.value || 0,
+      cloudDepthReady: uniforms?.uDepthReady?.value || 0,
+      steps: uniforms?.uMaxSteps?.value || 0,
       scale: effectiveVolumeScale,
       drawingBuffer: [size.x, size.y],
+      weatherTime: uniforms?.uWeatherTime?.value || 0,
       sunShaftStrength: nodePipeline.sunShafts?.uniforms?.uStrength?.value || 0,
       sunShaftUv: nodePipeline.sunShafts?.uniforms?.uSunUv?.value?.toArray?.() || null,
       sunShaftDebug: { ...sunShaftDebug },
@@ -4837,7 +5061,10 @@ window.NMS = {
       qualityRequested: graphicsSettings.quality,
       qualityAutomatic: QUALITY_PROFILE.automatic,
       volumeScale: effectiveVolumeScale,
+      cloudSteps: effectiveCloudSteps,
+      cloudLightSteps: effectiveCloudLightSteps,
       atmosphereSteps: effectiveAtmosphereSteps,
+      localVolumeBudget: localVolumeBudgetKey,
       shadowMap: SHADOW_MAP,
       shadowDistance: effectiveShadowDistance,
       waterInteractionSize: QUALITY_PROFILE.waterInteractionSize,
@@ -5646,6 +5873,10 @@ window.NMS = {
     }
     return { samples, snow, violations, treePotential };
   },
+  cloudAudit(i, samples = 4096) {
+    const p = universe.system.planets[i];
+    return p?.cloudAudit ? p.cloudAudit(samples) : null;
+  },
   // park the camera anywhere in universe coords (testing manual flight)
   setPosition(x, y, z, lookX, lookY, lookZ) {
     tweens.length = 0;
@@ -5735,8 +5966,12 @@ window.NMS = {
         portalReadiness: spatialRift.portalReadiness ?? 1,
         radius: target.R || 0,
         atmosphereRadius: target.atmoMesh?.geometry?.parameters?.radius || 0,
+        cloudRadius: target.cloudMesh?.geometry?.parameters?.radius || 0,
+        volumeCloudRadius: target.volCloudMesh?.geometry?.parameters?.radius || 0,
         cloudCoverage: target.cloudCoverage || 0,
         atmosphereVisible: !!target.atmoMesh?.visible,
+        volumeCloudVisible: !!target.volCloudMesh?.visible,
+        analyticCloudVisible: !!target.cloudMesh?.visible,
         portalVolumeLayerRendered: spatialRift.portalVolumeLayerRendered,
       };
     })(),
