@@ -39,6 +39,11 @@ import { waterInteraction } from './water-interaction.js';
 import { surfaceInteraction } from './surface-interaction.js';
 import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
 import { WeatherEffects } from './weather-effects.js';
+import {
+  configureCloudResourceManager, getCloudResourceManager,
+} from './cloud/cloud-resource-manager.js';
+import { runCloudDensityGpuProbe } from './cloud/cloud-gpu-probe.js';
+import { cloudMediumCPU } from './cloud/cloud-density.js';
 
 const qs = new URLSearchParams(location.search);
 const graphicsSettings = resolveGraphicsSettings({ params: qs });
@@ -151,6 +156,7 @@ console.info(`Renderer: ${renderer.constructor.name}/${actualRendererBackend}`, 
 let contextLost = false;
 installDeviceRecovery(renderer, (state, detail) => {
   contextLost = state === 'lost';
+  if (state === 'lost') getCloudResourceManager()?.handleDeviceLost();
   const notice = document.getElementById('performance-notice');
   if (notice && state === 'lost') {
     notice.textContent = actualRendererBackend === 'webgpu'
@@ -510,6 +516,11 @@ let effectiveCloudLightSteps = PROFILE_CLOUD_STEPS >= 44 ? 5
   : PROFILE_CLOUD_STEPS >= 30 ? 3 : 2;
 let effectiveAtmosphereSteps = 20;
 let localVolumeBudgetKey = '';
+let localVolumeTier = '';
+// Discrete volume-resolution rungs. The half-resolution volume pass owns a
+// render target; resizing it is a pipeline event, not a per-frame dial, so the
+// continuous pixel budget is snapped to these before it can trigger a rebuild.
+const VOLUME_SCALE_RUNGS = [0.34, 0.40, 0.46, 0.53, 0.60, 0.67];
 // Preserve the larger source/destination allocation across a rift. Rebuilding
 // the half-float volume graph on the threshold frame can block WebGPU for
 // seconds even though the visual change is only an orbit-tier scale reduction.
@@ -519,6 +530,11 @@ let effectiveShadowDistance = QUALITY_PROFILE.shadowDistance;
 setVolumetricCloudsEnabled(VOLUME_ENABLED, {
   quality: QUALITY_PROFILE.id,
   steps: PROFILE_CLOUD_STEPS,
+});
+const cloudResourceManager = configureCloudResourceManager({
+  renderer,
+  enabled: BOOT_USE_WEBGPU && VOLUME_ENABLED,
+  maxEntries: 2,
 });
 const nodeVolumePass = BOOT_USE_WEBGPU && VOLUME_ENABLED
   ? new VolumetricPass()
@@ -2187,6 +2203,11 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     previousVolumePlanet?.syncAtmoMaterial?.();
     previousVolumePlanet?.syncVolCloudMaterial?.();
     nodePipeline.bindVolumeDepth?.(previousVolumePlanet);
+    // That draw ran the production graph from the destination's arrival pose
+    // into a private target with most of the scene masked out. Its pixels are a
+    // valid warm-up for the GPU pipeline and complete nonsense as temporal
+    // history for the frame the player actually sees next.
+    nodePipeline.invalidateVolumeHistory?.();
     camera.position.copy(cameraState.position);
     camera.quaternion.copy(cameraState.quaternion);
     camera.fov = cameraState.fov;
@@ -3829,8 +3850,18 @@ function setCloudStepBudget(steps, requestedLightSteps = null) {
     : clamp(Math.round(requestedLightSteps), 0, 5);
   for (const planet of universe.planets()) {
     const cloudUniforms = planet.volCloudUniforms || planet.volCloudMat?.uniforms;
-    const uniformValue = cloudUniforms?.uMaxSteps;
-    if (uniformValue) uniformValue.value = effectiveCloudSteps;
+    const samplesPerFeature = cloudUniforms?.uSamplesPerFeature;
+    if (samplesPerFeature) {
+      // Phase-4 march quality is expressed as samples per thinnest local
+      // feature.  uMaxSteps is only a termination guard and must not inherit
+      // the legacy fixed-step budget (normally 30-48), or grazing rays would
+      // truncate before crossing the shell.
+      samplesPerFeature.value = effectiveCloudSteps >= 36 ? 8 : 6;
+      if (cloudUniforms.uMaxSteps) cloudUniforms.uMaxSteps.value = 256;
+    } else {
+      const uniformValue = cloudUniforms?.uMaxSteps;
+      if (uniformValue) uniformValue.value = effectiveCloudSteps;
+    }
     const lightSteps = cloudUniforms?.uLightSteps;
     if (lightSteps) lightSteps.value = effectiveCloudLightSteps;
   }
@@ -3860,10 +3891,17 @@ function applyLocalVolumeBudget(force = false) {
   const distanceToCloud = nearestAlt < cloudBase
     ? cloudBase - nearestAlt
     : nearestAlt > cloudTop ? nearestAlt - cloudTop : 0;
+  // Tier boundaries carry 15% hysteresis. Without it, hovering near a
+  // threshold flipped the tier every few frames, and each flip rebuilt the
+  // volume PassNode's render target mid-flight.
+  const orbitEdge = Math.max(60000, nearest.atmoHeight * 0.52);
+  const wasOrbit = localVolumeTier === 'orbit';
+  const wasCloud = localVolumeTier === 'cloud';
   let tier;
-  if (nearestAlt > Math.max(60000, nearest.atmoHeight * 0.52)) tier = 'orbit';
-  else if (distanceToCloud > 22000) tier = 'approach';
+  if (nearestAlt > orbitEdge * (wasOrbit ? 0.85 : 1)) tier = 'orbit';
+  else if (distanceToCloud > 22000 * (wasCloud ? 1.15 : 1)) tier = 'approach';
   else tier = 'cloud';
+  localVolumeTier = tier;
 
   const qualityRatio = clamp(PROFILE_CLOUD_STEPS / 56, 0.5, 1);
   const drawingPixels = Math.max(1,
@@ -3875,25 +3913,31 @@ function applyLocalVolumeBudget(force = false) {
   const budget = tier === 'orbit'
     ? {
       scale: Math.min(VOLUME_SCALE, 0.46, scaleForPixels(1150000)),
-      // The focused planet now retains the physical cloud shell in orbit.
-      // Twenty view samples plus one sunward density probe are the minimum
-      // that preserve kilometre-scale tops and directional self-shadow at 2K.
-      cloudSteps: 20,
+      // This is now the ceiling of a span-adaptive range, not a flat budget.
+      // The volume ray lowers the count from this cap by world-space stride:
+      // a nadir traversal resolves in ~20 samples while a limb-grazing one
+      // climbs toward 48, so the terminator keeps kilometre-scale tops and
+      // directional self-shadow at 2K. The marcher never exceeds this cap.
+      cloudSteps: 48,
       lightSteps: 2,
-      atmosphereSteps: 8,
+      // Eight uniform samples across a grazing atmosphere chord under-resolve
+      // the 8 km Rayleigh / 1.2 km Mie scale heights and turn integration
+      // error into motion shimmer. Sixteen is an interim single-frame floor;
+      // the phase-5 LUT/adaptive rewrite remains the complete solution.
+      atmosphereSteps: 16,
       }
     : tier === 'approach'
       ? {
         scale: Math.min(VOLUME_SCALE, 0.5, scaleForPixels(1300000)),
         cloudSteps: Math.max(18, Math.round(20 * qualityRatio)),
         lightSteps: 0,
-        atmosphereSteps: 11,
+        atmosphereSteps: 16,
       }
       : {
         scale: Math.min(VOLUME_SCALE, 0.53, scaleForPixels(1550000)),
         cloudSteps: Math.max(24, Math.round(28 * qualityRatio)),
         lightSteps: 1,
-        atmosphereSteps: 14,
+        atmosphereSteps: 16,
       };
   const adaptiveScale = tier === 'orbit'
     ? adaptiveStage >= 2 ? 0.68 : adaptiveStage >= 1 ? 0.82 : 1
@@ -3902,18 +3946,31 @@ function applyLocalVolumeBudget(force = false) {
     ? 1
     : adaptiveStage >= 2 ? 0.78 : 1;
   const targetScale = Math.max(budget.scale * adaptiveScale, riftVolumeScaleFloor);
+  // Snap DOWN to a fixed rung. scaleForPixels() is continuous in altitude and
+  // DPR, so the raw value changed almost every frame; each change rewrote the
+  // budget key and rebuilt the half-resolution volume render target. Rounding
+  // to the nearest rung could exceed the pixel budget the tier just computed,
+  // so take the largest rung at or below it.
+  const quantizedScale = Math.max(
+    VOLUME_SCALE_RUNGS.filter((rung) => rung <= targetScale + 1e-6).pop()
+      ?? VOLUME_SCALE_RUNGS[0],
+    // The rift floor is itself a previously-selected rung, so honouring it
+    // after the snap cannot reintroduce a continuous value.
+    riftVolumeScaleFloor);
   const targetCloudSteps = Math.max(16, Math.round(budget.cloudSteps * adaptiveSteps));
   const key = [
     tier,
-    targetScale.toFixed(3),
+    quantizedScale.toFixed(3),
     targetCloudSteps,
     budget.lightSteps,
     budget.atmosphereSteps,
   ].join(':');
   if (!force && key === localVolumeBudgetKey) return;
   localVolumeBudgetKey = key;
-  if (Math.abs(targetScale - effectiveVolumeScale) > 0.005) {
-    effectiveVolumeScale = targetScale;
+  // Step counts are plain uniform writes. Only a real scale change may resize
+  // the render target; the former 0.005 epsilon fired on nearly every frame.
+  if (Math.abs(quantizedScale - effectiveVolumeScale) > 1e-4) {
+    effectiveVolumeScale = quantizedScale;
     nodePipeline.setVolumeScale?.(effectiveVolumeScale);
     sizePost();
   }
@@ -3943,6 +4000,7 @@ function applyAdaptiveStage(stage) {
 
 function frame() {
   requestAnimationFrame(frame);
+  cloudResourceManager.tickFrame();
   const realDt = clock.getDelta();
   // Paused: the full-page pause surface floats over a LIVE world. Simulation
   // time freezes (dt=0) but the render pipeline runs exactly as in play, so
@@ -4662,6 +4720,15 @@ function frame() {
     volumePass.activePlanet?.syncVolCloudMaterial?.();
     nodePipeline.setVolumeMotion?.(motion,
       previousVolumePlanet === volumePass.activePlanet && volumePass.historyValid);
+    // Temporal accumulation reprojects against the atmosphere shell, so it needs
+    // the shell in camera-relative render space plus the nav origin the frame is
+    // relative to. VolumetricPass already tracks both for the active body.
+    nodePipeline.setVolumeFrame?.({
+      center: volumePass.center,
+      radius: volumePass.radius,
+      nav: volumePass.nav,
+      key: volumePass.activePlanet,
+    });
     volumePass.historyValid = !!volumePass.activePlanet;
   }
   // The cockpit hull and the first-person weapon rig share the depth-cleared
@@ -4872,6 +4939,7 @@ window.NMS = {
   version: VERSION,
   _ff: farFlora,           // debug handle (headless diagnostics)
   _renderer: renderer,
+  _pipeline: nodePipeline,  // debug handle (headless diagnostics)
   _THREE: THREE,
   _planet(i = 0) { return universe.system.planets[i] || null; },
   get booted() {
@@ -5012,6 +5080,7 @@ window.NMS = {
         || planet?.atmoMesh?.material?.uniforms)?.uDepthReady?.value || 0,
       cloudDepthReady: uniforms?.uDepthReady?.value || 0,
       steps: uniforms?.uMaxSteps?.value || 0,
+      samplesPerFeature: uniforms?.uSamplesPerFeature?.value || 0,
       scale: effectiveVolumeScale,
       drawingBuffer: [size.x, size.y],
       weatherTime: uniforms?.uWeatherTime?.value || 0,
@@ -5019,6 +5088,58 @@ window.NMS = {
       sunShaftUv: nodePipeline.sunShafts?.uniforms?.uSunUv?.value?.toArray?.() || null,
       sunShaftDebug: { ...sunShaftDebug },
     };
+  },
+  cloudResourceState(i = 0) {
+    const planet = universe.system.planets[i];
+    const telemetry = cloudResourceManager.telemetry();
+    return {
+      planet: planet ? {
+        key: planet.cloudResource?.key || null,
+        status: planet.cloudResourceStatus || 'idle',
+        error: planet.cloudResourceError || null,
+        cpuBytes: planet.cloudResource?.cpuBytes || 0,
+        gpuBytes: planet.cloudResource?.gpuBytes || 0,
+        shellTopMeters: planet.cloudResource?.fields?.shellTopMeters || null,
+        occupancy: planet.cloudResource ? [
+          planet.cloudResource.occupancy.lonCount,
+          planet.cloudResource.occupancy.latCount,
+          planet.cloudResource.occupancy.altCount,
+        ] : null,
+        timings: planet.cloudResource?.generationTimings || null,
+      } : null,
+      telemetry,
+    };
+  },
+  setCloudSamples(samples = 8) {
+    if (!DEV_SERVER) return null;
+    const value = clamp(Math.round(Number(samples) || 8), 4, 12);
+    for (const planet of universe.planets()) {
+      const node = planet.volCloudUniforms?.uSamplesPerFeature;
+      if (node) node.value = value;
+    }
+    return value;
+  },
+  async cloudGpuProbe(i = 0, rawPoints = []) {
+    if (!DEV_SERVER || !BOOT_USE_WEBGPU) return null;
+    const planet = universe.system.planets[i];
+    const resource = planet?.cloudResource;
+    if (!planet || !resource?.textures) return null;
+    const points = rawPoints.map((point) => ({
+      x: Number(point.x ?? point[0]),
+      y: Number(point.y ?? point[1]),
+      z: Number(point.z ?? point[2]),
+    }));
+    const gpu = await runCloudDensityGpuProbe(renderer, resource, points);
+    const cpu = points.map((point) => cloudMediumCPU(
+      point, null, resource.fields.groundR, {
+        fields: resource.fields,
+        // The GPU evaluates and interpolates fp32. This remains a real
+        // hardware readback gate; fp32 here only gives the CPU reference the
+        // same arithmetic precision instead of counting fp64 round-off as a
+        // renderer error.
+        fp32: true,
+      }));
+    return { gpu, cpu };
   },
   get paused() { return paused; },
   seed: () => SEED,

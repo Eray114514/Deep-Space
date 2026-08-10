@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const SRC = join(ROOT, 'src');
 
-const sourceFiles = (await readdir(SRC, { withFileTypes: true }))
+// Recursive: the cloud/atmosphere rewrite lives in src/cloud/, and a
+// non-recursive scan silently exempted every file in it from the parse gate.
+const sourceFiles = (await readdir(SRC, { withFileTypes: true, recursive: true }))
   .filter((entry) => entry.isFile() && entry.name.endsWith('.js'))
-  .map((entry) => join(SRC, entry.name));
+  .map((entry) => join(entry.parentPath ?? entry.path ?? SRC, entry.name));
 
 for (const file of sourceFiles) {
   const result = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });

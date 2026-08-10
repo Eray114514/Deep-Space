@@ -8,7 +8,8 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
   dot, exp, float, Fn, If, Loop, mix, positionLocal, positionView, pow,
-  sqrt, smoothstep as nodeSmoothstep, texture, uniform, vec3, vec4,
+  sqrt, smoothstep as nodeSmoothstep, texture, uniform, vec2,
+  vec3, vec4,
 } from 'three/tsl';
 import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
@@ -17,7 +18,9 @@ import {
   applyTerrainDetail, applyWaterWaves, applyCloudField, applyNoctilucentField,
   cloudBaseDensityCPU, cloudDensityCPU, detailTexture,
 } from './shaders.js';
-import { makeCloudVolumeMaterial } from './clouds.js';
+import { makeCloudVolumeMaterial as makeLegacyCloudVolumeMaterial } from './clouds.js';
+import { makeCloudVolumeMaterial as makeRewriteCloudVolumeMaterial } from './cloud/cloud-volume-node.js';
+import { getCloudResourceManager } from './cloud/cloud-resource-manager.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { WORLD_LAYER } from './render-layers.js';
 import { floraPalette } from './flora.js';
@@ -25,6 +28,7 @@ import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
 import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import {
+  LCL_MAX_METERS, LCL_MIN_METERS,
   advanceWeatherField, createWeatherField, sampleWeatherField,
   weatherFieldFingerprint,
 } from './weather-field.js';
@@ -993,20 +997,22 @@ export class Planet {
       }
       const waterShader = this.liquidMat?.userData.shader;
       if (waterShader?.uniforms.uCloudK) waterShader.uniforms.uCloudK.value = 0.72;
-      // A single physical volume spans the tropospheric families. Density
-      // profiles inside it place stratus/cumulus low, alto clouds mid-level
-      // and cirrus/anvils high. The previous mountain-scaled cloud base could
-      // start tens of kilometres above sea level and read as a white crust.
+      // A single physical volume spans the tropospheric families. These two
+      // radii are the shell ENVELOPE, not the cloud base: the base is the
+      // per-point lifting condensation level carried in the weather atlas's
+      // Hi.A channel, so the envelope floor only needs to sit below the lowest
+      // possible LCL and its ceiling above cirrus tops. Reading the floor as a
+      // literal cloud base put every deck at one altitude.
       const authoredCloudLayer = this.tuning.cloudLayer || null;
-      const cloudBaseAlt = Number.isFinite(authoredCloudLayer?.minAltitudeMeters)
+      const cloudShellBaseAlt = Number.isFinite(authoredCloudLayer?.minAltitudeMeters)
         ? clamp(authoredCloudLayer.minAltitudeMeters, 250, this.atmoHeight * 0.25)
         : Math.min(Math.max(1000, this.hAmp * 0.055), this.atmoHeight * 0.08);
-      const cloudR = R + cloudBaseAlt;
+      const cloudR = R + cloudShellBaseAlt;
       const authoredCloudTop = Number(authoredCloudLayer?.maxAltitudeMeters);
-      const cloudTopAlt = Number.isFinite(authoredCloudTop)
-        ? clamp(authoredCloudTop, cloudBaseAlt + 4000, this.atmoHeight * 0.42)
+      const cloudShellTopAlt = Number.isFinite(authoredCloudTop)
+        ? clamp(authoredCloudTop, cloudShellBaseAlt + 4000, this.atmoHeight * 0.42)
         : Math.min(Math.max(16000, this.hAmp * 1.15), this.atmoHeight * 0.24);
-      const thick = cloudTopAlt - cloudBaseAlt;
+      const thick = cloudShellTopAlt - cloudShellBaseAlt;
       const cmat = new THREE.MeshBasicMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.88,
@@ -1042,10 +1048,20 @@ export class Planet {
           ox: o1[0], oy: o1[1], oz: o1[2],
           tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         };
-        this.volCloudMat = makeCloudVolumeMaterial(
-          this, band, detailTexture(), this.cloudShadowTex,
-          this.cloudWeatherHiTex,
-          volumetricCloudProfile);
+        this.volCloudMat = USE_NODE_MATERIALS
+          ? makeRewriteCloudVolumeMaterial(this, {
+            ...band,
+            rIn: R,
+            rOut: R + Math.min(this.atmoHeight * 0.95,
+              Math.max(30000, this.hAmp + 20000)),
+          }, {
+            ...volumetricCloudProfile,
+            samplesPerFeature: volumetricCloudProfile.quality === 'performance' ? 6 : 8,
+          })
+          : makeLegacyCloudVolumeMaterial(
+            this, band, detailTexture(), this.cloudShadowTex,
+            this.cloudWeatherHiTex,
+            volumetricCloudProfile);
         // WebGPU cloud shells share one live NodeMaterial; the per-planet state
         // remains independent here. The WebGL compatibility implementation
         // still exposes ordinary material uniforms and enters the same API.
@@ -1249,6 +1265,67 @@ export class Planet {
     return this.weatherState;
   }
 
+  cloudResourceDescriptor() {
+    return {
+      seed: this.seed,
+      weatherOptions: {
+        targetCoverage: this.cloudCoverage || 0.5,
+        radiusMeters: this.R,
+        temperatureK: this.weatherProfile?.temperatureK || 286,
+        windSpeed: this.weatherProfile?.windSpeed || 15,
+        weatherSpeed: this.weatherProfile?.weatherSpeed || 1,
+        rotationPeriodHours: this.rotationPeriodHours || 24,
+        sunDirection: {
+          x: this.sunDirLocal.x,
+          y: this.sunDirLocal.y,
+          z: this.sunDirLocal.z,
+        },
+      },
+      fieldOptions: {
+        hours: 0,
+        groundR: this.R,
+        maxTerrainMeters: Math.max(1000, Math.ceil(this.hAmp * 1.15)),
+      },
+      occupancyOptions: {},
+    };
+  }
+
+  ensureCloudResources() {
+    if (this.volCloudState?.rewrite !== 'phase4-A') return null;
+    if (this.cloudResourceLease) return this.cloudResourceLease.promise;
+    const manager = getCloudResourceManager();
+    if (!manager?.enabled) return null;
+    const key = `${this.seed}:cloud-rewrite-v2`;
+    const lease = manager.acquire(key, this.cloudResourceDescriptor());
+    if (!lease) return null;
+    this.cloudResourceLease = lease;
+    this.cloudResourceStatus = 'generating';
+    this.cloudResourceUnsubscribe = lease.onCommit((resource) => {
+      if (this.cloudResourceLease !== lease || !resource?.textures) return;
+      this.cloudResource = resource;
+      this.cloudResourceStatus = 'ready';
+      const state = this.volCloudState;
+      state.bindResource(resource);
+      const actualOuterRadius = this.R + resource.occupancy.shellTop + 500;
+      state.band.rIn = this.R + resource.occupancy.shellFloor;
+      state.band.rOut = actualOuterRadius;
+      this.volCloudBand = state.band;
+      const currentRadius = this.volCloudMesh?.geometry?.parameters?.radius || 0;
+      if (this.volCloudMesh && Math.abs(currentRadius - actualOuterRadius) > 1) {
+        const previous = this.volCloudMesh.geometry;
+        this.volCloudMesh.geometry = new THREE.SphereGeometry(actualOuterRadius, 192, 128);
+        previous.dispose();
+      }
+      this.syncVolCloudMaterial?.();
+    });
+    lease.promise.catch((error) => {
+      if (this.cloudResourceLease !== lease) return;
+      this.cloudResourceStatus = 'failed';
+      this.cloudResourceError = String(error?.message || error);
+    });
+    return lease.promise;
+  }
+
   weatherAt(localDirection, hours = this.weatherHours) {
     return sampleWeatherField(this.weatherField, localDirection, hours);
   }
@@ -1423,6 +1500,9 @@ export class Planet {
   // animDt drives scenery-in-motion (cloud drift); the seam test freezes it
   // to zero so static frames are pixel-comparable — LOD morphs keep dt.
   update(camLocal, dt, focused, animDt = dt) {
+    if (focused && this.volumeActive && this.volCloudState?.rewrite === 'phase4-A') {
+      this.ensureCloudResources();
+    }
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
     const camR = camLocal.length();
     this.lod.focused = focused;
@@ -1489,8 +1569,18 @@ export class Planet {
         const distanceToShell = camR < band.rIn
           ? band.rIn - camR
           : camR > band.rOut ? camR - band.rOut : 0;
-        const volumeProximity = 1 - smoothstep(720000, 1050000, distanceToShell);
-        const target = focused && this.volumeActive ? volumeProximity : 0;
+        const volumeProximity = this.volCloudState?.rewrite === 'phase4-A'
+          // S4's authored camera is ~2.2R from the centre. The new occupancy
+          // march is the space-view implementation too; falling back to the
+          // legacy analytic deck at that distance would reintroduce a second
+          // cloud authority and break space-to-surface consistency.
+          ? 1 - smoothstep(Math.max(720000, this.R * 1.3),
+            Math.max(1050000, this.R * 1.65), distanceToShell)
+          : 1 - smoothstep(720000, 1050000, distanceToShell);
+        const resourceReady = this.volCloudState?.rewrite !== 'phase4-A'
+          || this.volCloudState.nodes.uResourceReady.value > 0.5;
+        const target = focused && this.volumeActive && resourceReady
+          ? volumeProximity : 0;
         // Initialize directly in the correct ownership state. Fading from the
         // analytic deck after the first controllable frame exposed a visible
         // flat-to-volume cloud replacement during startup.
@@ -1502,8 +1592,13 @@ export class Planet {
         u.uCameraLocal.value.copy(camLocal);
         u.uSpin.value.setFromMatrix4(_m4);
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
+        // Distance-adaptive cloud morphology: 1 while individual billows are
+        // resolvable, 0 once they are sub-pixel. Matches the span-adaptive
+        // step stride in the volume ray so far frames stay cheap without the
+        // limb collapsing to the old locked 20-sample budget.
+        if (u.uCamProx) u.uCamProx.value = 1 - smoothstep(2.0, 5.0, camR / band.rOut);
         if (u.uWeatherTime) u.uWeatherTime.value = this.weatherHours;
-        this.volCloudMesh.visible = this.volumeActive && e > 0.01;
+        this.volCloudMesh.visible = this.volumeActive && resourceReady && e > 0.01;
         this.cloudMesh.material.opacity = 0.88 * (1 - e);
         if (this.cloudMesh.material.userData.opacityNodeUniform) {
           this.cloudMesh.material.userData.opacityNodeUniform.value = this.cloudMesh.material.opacity;
@@ -1607,6 +1702,11 @@ export class Planet {
   }
 
   dispose() {
+    this.cloudResourceUnsubscribe?.();
+    this.cloudResourceLease?.release?.();
+    this.cloudResourceUnsubscribe = null;
+    this.cloudResourceLease = null;
+    this.cloudResource = null;
     this.lod.dispose();
     if (this.waterLod) this.waterLod.dispose();
     this.liquidMat?.dispose();
@@ -1715,8 +1815,13 @@ function makeAtmosphereMaterial(planet, color, density, groundR, atmoR) {
     const span = t1.sub(t0).max(0);
     const stepCount = nodes.uMaxSteps.clamp(8, 20).toVar();
     const stepLength = span.div(stepCount);
-    const t = t0.add(stepLength.mul(0.5)).toVar();
-
+    // Deterministic interim atmosphere (2026-08-09): midpoint rule, NO jitter,
+    // and a 4-substep solar optical-depth integral per view step, extended to
+    // dual stars + eclipse. Removing the old per-frame hash eliminates one
+    // confirmed source of boiling, but it is not the complete motion fix: a
+    // fixed sample count can still under-resolve the 8 km Rayleigh / 1.2 km Mie
+    // scale heights along a grazing chord. Phase 5 replaces this integration
+    // with verified LUT/adaptive sampling; phase 7 alone owns temporal jitter.
     const sun1 = nodes.uStellarDirections0.normalize();
     const sun2 = nodes.uStellarDirections1.normalize();
     const mu1 = dot(ray, sun1);
@@ -1736,14 +1841,40 @@ function makeAtmosphereMaterial(planet, color, density, groundR, atmoR) {
       .mul(mix(vec3(1), nodes.atmoColor.max(vec3(0.08)), 0.08));
     const mieScatterBeta = vec3(4.72e-6, 4.00e-6, 3.34e-6);
     const mieExtinctionBeta = vec3(5.20e-6, 4.40e-6, 3.68e-6);
+
+    // Deterministic four-segment midpoint estimate of sunward optical depth.
+    // This is an interim cost bound, not a limb-accuracy guarantee: long
+    // grazing/terminator paths can still under-resolve the short density scale
+    // heights. Stage 5 replaces it with the LUT/adaptive integration contract.
+    // Returns vec2(rayleighOD, mieOD), density applied.
+    const solarOd = Fn(([point, sunDir]) => {
+      const bSun = dot(point, sunDir);
+      const discSun = bSun.mul(bSun).sub(dot(point, point))
+        .add(nodes.uAtmoR.mul(nodes.uAtmoR));
+      const odR = float(0).toVar();
+      const odM = float(0).toVar();
+      If(discSun.greaterThan(0), () => {
+        const exitT = bSun.negate().add(sqrt(discSun));
+        const subStep = exitT.max(0).div(4);
+        Loop(4, ({ i }) => {
+          const lp = point.add(sunDir.mul(subStep.mul(i.add(0.5))));
+          const lh = lp.length().sub(nodes.uGroundR).max(0);
+          odR.addAssign(exp(lh.div(-8000)).mul(subStep));
+          odM.addAssign(exp(lh.div(-1200)).mul(subStep).mul(0.85));
+        });
+      });
+      return vec2(odR, odM).mul(nodes.density);
+    });
+
     const integrated = vec3(0).toVar();
-    const transmission = vec3(1).toVar();
+    const opR = float(0).toVar(); // view-path optical depth so far
+    const opM = float(0).toVar();
+    const t = t0.add(stepLength.mul(0.5)).toVar();
     Loop(20, ({ i }) => {
       If(i.lessThan(stepCount), () => {
         const samplePosition = origin.add(ray.mul(t));
         const radius = samplePosition.length();
         const altitude = radius.sub(nodes.uGroundR).max(0);
-        const height = altitude.div(nodes.uAtmoR.sub(nodes.uGroundR).max(1)).clamp(0, 1);
         const rhoR = exp(altitude.div(-8000)).mul(nodes.density);
         const rhoM = exp(altitude.div(-1200)).mul(nodes.density).mul(0.85);
         const radial = samplePosition.div(radius.max(1));
@@ -1753,37 +1884,30 @@ function makeAtmosphereMaterial(planet, color, density, groundR, atmoR) {
         const horizon2 = nodeSmoothstep(-0.11, 0.035, sunMu2);
         const eclipseVisibility = analyticMediaEclipseVisibility(
           samplePosition, sun1, nodes);
-        // Near the horizon the optical air mass rises far faster than 1/cos
-        // with the former +0.28 clamp. This bounded Kasten-like approximation
-        // reaches ~18 air masses at zero elevation, naturally removing blue
-        // light and producing the red/orange golden-hour band.
-        const slant1 = float(1).div(sunMu1.add(0.055).max(0.028));
-        const slant2 = float(1).div(sunMu2.add(0.055).max(0.028));
-        const optical = rayleighBeta.mul(rhoR).add(mieExtinctionBeta.mul(rhoM));
-        const sunOptical = rayleighBeta.mul(rhoR).mul(8000)
-          .add(mieExtinctionBeta.mul(rhoM).mul(1200));
-        const sunTransmission1 = exp(sunOptical.mul(slant1).negate()).mul(horizon1);
-        const sunTransmission2 = exp(sunOptical.mul(slant2).negate()).mul(horizon2);
+
+        const od1 = solarOd(samplePosition, sun1);
+        const od2 = solarOd(samplePosition, sun2);
+        const attn1 = exp(rayleighBeta.mul(opR.add(od1.x))
+          .add(mieExtinctionBeta.mul(opM.add(od1.y))).negate());
+        const attn2 = exp(rayleighBeta.mul(opR.add(od2.x))
+          .add(mieExtinctionBeta.mul(opM.add(od2.y))).negate());
         const scatter1 = rayleighBeta.mul(rhoR).mul(rayleighPhase1)
           .add(mieScatterBeta.mul(rhoM).mul(miePhase1))
-          .mul(sunTransmission1).mul(nodes.uStellarRadiance0)
-          .mul(nodes.uStarIrradiance0).mul(eclipseVisibility);
+          .mul(attn1).mul(nodes.uStellarRadiance0)
+          .mul(nodes.uStarIrradiance0).mul(horizon1).mul(eclipseVisibility);
         const scatter2 = rayleighBeta.mul(rhoR).mul(rayleighPhase2)
           .add(mieScatterBeta.mul(rhoM).mul(miePhase2))
-          .mul(sunTransmission2).mul(nodes.uStellarRadiance1).mul(nodes.uStarIrradiance1);
-        const multiScatter = nodes.uStellarRadiance0.mul(nodes.uStarIrradiance0)
-          .mul(horizon1).mul(eclipseVisibility)
-          .add(nodes.uStellarRadiance1.mul(nodes.uStarIrradiance1).mul(horizon2))
-          .mul(rayleighBeta).mul(rhoR).mul(float(1).sub(height)).mul(0.08);
-        const stepOptical = optical.mul(stepLength);
-        const alphaStep = vec3(1).sub(exp(stepOptical.negate()));
-        integrated.addAssign(scatter1.add(scatter2).add(multiScatter)
-          .mul(transmission).mul(stepLength).mul(2.4));
-        transmission.mulAssign(vec3(1).sub(alphaStep));
+          .mul(attn2).mul(nodes.uStellarRadiance1).mul(nodes.uStarIrradiance1)
+          .mul(horizon2);
+        integrated.addAssign(scatter1.add(scatter2).mul(stepLength).mul(2.4));
+        opR.addAssign(rhoR.mul(stepLength));
+        opM.addAssign(rhoM.mul(stepLength));
         t.addAssign(stepLength);
       });
     });
     const valid = discOuter.greaterThan(0).and(t1.greaterThan(t0));
+    const viewTau = rayleighBeta.mul(opR).add(mieExtinctionBeta.mul(opM));
+    const transmission = exp(viewTau.negate());
     const meanTransmission = dot(transmission, vec3(0.333333));
     const alpha = valid.select(float(1).sub(meanTransmission).clamp(0, 0.985), float(0));
     return vec4(integrated, alpha);
@@ -1797,7 +1921,12 @@ function makeAtmosphereMaterial(planet, color, density, groundR, atmoR) {
   // The integration accumulator is premultiplied.  NodeMaterial's
   // premultiplied-alpha output stage performs the actual multiplication, so
   // feed it straight RGB to avoid the WebGPU-only alpha-squared haze loss.
-  material.colorNode = atmosphere.rgb.div(atmosphere.a.max(0.0001));
+  // The reciprocal floor must stay well above zero: at 1e-4 a nearly
+  // transparent limb pixel multiplied its residual RGB by 1e4, so integration
+  // noise that shifts with the camera became visible speckle along the edge of
+  // the disk. 1e-3 keeps the un-premultiply exact wherever alpha is actually
+  // visible and clamps the reconstruction where it is not.
+  material.colorNode = atmosphere.rgb.div(atmosphere.a.max(0.001));
   material.opacityNode = atmosphere.a;
   material.uniforms = nodes;
   material.userData.sharedLocalVolume = true;
@@ -1901,7 +2030,14 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
       lowData[k + 3] = ((weather?.humidity ?? lowDensity) * 255) | 0;
       highData[k + 1] = ((weather?.highType || 0) * 255) | 0;
       highData[k + 2] = ((weather?.convective || weather?.precipitation || 0) * 255) | 0;
-      highData[k + 3] = ((weather?.multipleScatter ?? lowDensity) * 255) | 0;
+      // Hi.A carries the lifting condensation level, normalized over the
+      // authored LCL_RANGE_METERS span. Multiple scattering used to live here,
+      // but the shader can reconstruct that from coverage and highMask, whereas
+      // a per-point cloud base cannot be derived from anything else — and
+      // without it every cloud family shared one global base altitude.
+      highData[k + 3] = Math.round(clamp(
+        ((weather?.cloudBaseMeters ?? LCL_MIN_METERS) - LCL_MIN_METERS)
+        / (LCL_MAX_METERS - LCL_MIN_METERS), 0, 1) * 255);
     }
   }
   // The astronomy dossier's coverage is an areal contract. Calibrate the

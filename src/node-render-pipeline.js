@@ -1,12 +1,14 @@
 import * as THREE from 'three/webgpu';
 import {
-  abs, exp, float, floor, fract, logarithmicDepthToViewZ, max, mix, pass, rtt,
-  screenUV, uniform, vec2, vec4,
+  float, max, mix, pass, rtt, screenUV, uniform, vec4,
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { SKY_BACKDROP_LAYER } from './render-layers.js';
 import { createSunShaftNode } from './sun-shafts-node.js';
+import {
+  INVALIDATION, createTemporalResolve, depthGuidedVolumeUpsample,
+} from './cloud/temporal-resolve.js';
 
 function over(base, overlay) {
   // Render-pass textures store premultiplied RGB.  Multiplying overlay.rgb by
@@ -17,70 +19,6 @@ function over(base, overlay) {
     overlay.a.add(base.a.mul(float(1).sub(overlay.a))));
 }
 
-function depthGuidedVolumeUpsample(volumeTexture, sceneDepthTexture, nodes) {
-  // Reconstruct the four texels that hardware bilinear filtering would blend,
-  // then reject taps across an opaque-depth discontinuity. A half-resolution
-  // cloud texel at the planet limb otherwise contains a long background ray
-  // and gets interpolated across nearby terrain as a blue/white halo.
-  const volumePixel = screenUV.mul(nodes.uVolumeResolution).sub(0.5);
-  const basePixel = floor(volumePixel);
-  const fraction = fract(volumePixel);
-  const invResolution = vec2(1).div(nodes.uVolumeResolution);
-  const uv00 = basePixel.add(vec2(0.5, 0.5)).mul(invResolution).clamp(0, 1);
-  const uv10 = basePixel.add(vec2(1.5, 0.5)).mul(invResolution).clamp(0, 1);
-  const uv01 = basePixel.add(vec2(0.5, 1.5)).mul(invResolution).clamp(0, 1);
-  const uv11 = basePixel.add(vec2(1.5, 1.5)).mul(invResolution).clamp(0, 1);
-  const oneMinusX = float(1).sub(fraction.x);
-  const oneMinusY = float(1).sub(fraction.y);
-
-  const centerRawDepth = sceneDepthTexture.sample(screenUV).r;
-  const centerHasDepth = nodes.uDepthReversed.greaterThan(0.5)
-    .select(centerRawDepth.greaterThan(0.000001),
-      centerRawDepth.lessThan(0.999999));
-  const centerViewDepth = logarithmicDepthToViewZ(
-    centerRawDepth,
-    nodes.uCameraNear,
-    nodes.uCameraFar,
-  ).negate().max(0);
-
-  const guidedTap = (uv, spatialWeight) => {
-    const tapRawDepth = sceneDepthTexture.sample(uv).r;
-    const tapHasDepth = nodes.uDepthReversed.greaterThan(0.5)
-      .select(tapRawDepth.greaterThan(0.000001),
-        tapRawDepth.lessThan(0.999999));
-    const tapViewDepth = logarithmicDepthToViewZ(
-      tapRawDepth,
-      nodes.uCameraNear,
-      nodes.uCameraFar,
-    ).negate().max(0);
-    // Relative view-space depth makes the edge threshold stable from cockpit
-    // metres to a 900 km planet. Two metres keep nearby coplanar geometry from
-    // being rejected by float/log-depth quantisation.
-    const depthScale = max(centerViewDepth, tapViewDepth).mul(0.0125).add(2);
-    const relativeDelta = abs(centerViewDepth.sub(tapViewDepth)).div(depthScale);
-    const sameSurfaceWeight = exp(relativeDelta.mul(relativeDelta).negate());
-    // Background and opaque samples are different ownership classes. Never
-    // borrow a full-atmosphere background ray for an opaque silhouette pixel,
-    // or an opaque-clipped ray for a sky pixel.
-    const depthWeight = centerHasDepth.select(
-      tapHasDepth.select(sameSurfaceWeight, 0),
-      tapHasDepth.select(0, 1),
-    );
-    const weight = spatialWeight.mul(depthWeight);
-    return { color: volumeTexture.sample(uv).mul(weight), weight };
-  };
-
-  const tap00 = guidedTap(uv00, oneMinusX.mul(oneMinusY));
-  const tap10 = guidedTap(uv10, fraction.x.mul(oneMinusY));
-  const tap01 = guidedTap(uv01, oneMinusX.mul(fraction.y));
-  const tap11 = guidedTap(uv11, fraction.x.mul(fraction.y));
-  const weightSum = tap00.weight.add(tap10.weight).add(tap01.weight).add(tap11.weight);
-  // If a sub-pixel opaque feature has no matching low-resolution tap, zero
-  // volume is the conservative result. Dividing by epsilon preserves that
-  // transparent result instead of falling back to the leaking center sample.
-  return tap00.color.add(tap10.color).add(tap01.color).add(tap11.color)
-    .div(weightSum.max(0.00001));
-}
 
 export class GameNodePipeline {
   constructor(renderer, scene, camera, {
@@ -145,6 +83,7 @@ export class GameNodePipeline {
     let colorNode = over(this.skyPass.getTextureNode('output'), sceneColor);
 
     this.volumePass = null;
+    this.temporalResolve = null;
     if (volume) {
       const layers = new THREE.Layers();
       layers.set(VOLUME_LAYER);
@@ -152,7 +91,31 @@ export class GameNodePipeline {
       this.volumePass.name = 'Local volume layer';
       this.volumePass.setLayers(layers);
       this.volumePass.setResolutionScale(volumeScale);
-      const volumeTexture = this.volumePass.getTextureNode('output');
+      // Accumulate at the volume pass's own resolution, before the upsample.
+      // History texels then line up one-to-one with the samples that produced
+      // them; upsampling first would blend neighbours into history and give the
+      // accumulator a different notion of "same surface" than the reconstruction
+      // filter has. With jitter disabled this stage is a provable no-op — see
+      // the header of cloud/temporal-resolve.js.
+      // Temporal accumulation is DISABLED BY DEFAULT (2026-08-06): the
+      // flicker probe (wide continuous yaw sweeps, adaptive quality unlocked)
+      // showed the accumulator turning the whole planet into a noise curtain
+      // under real camera motion — alpha rises to 1/8 and the reprojection
+      // smears mismatched history across the frame. Every phase-2 gate was
+      // static or ±1.8° micro-motion, where the accumulator converges to a
+      // no-op, so the failure passed green. The failed prototype is retained
+      // only for phase 7, where full-screen TAA, motion vectors and volume
+      // history get one owner and continuous wide-angle motion is a hard gate.
+      // Explicit opt-in for that work: globalThis.__ENABLE_TEMPORAL_RESOLVE__.
+      this.temporalResolve = globalThis.__ENABLE_TEMPORAL_RESOLVE__ === true
+        ? createTemporalResolve({
+          volumeTextureNode: this.volumePass.getTextureNode('output'),
+          resolveResolution: (out) => out.copy(this._volumeResolution.value),
+        })
+        : null;
+      const volumeTexture = this.temporalResolve
+        ? this.temporalResolve.textureNode
+        : this.volumePass.getTextureNode('output');
       const guidedVolume = depthGuidedVolumeUpsample(
         volumeTexture,
         sceneDepthNode,
@@ -172,6 +135,11 @@ export class GameNodePipeline {
       );
       colorNode = over(colorNode, reconstructedVolume);
     }
+    // What the accumulator needs to know about the active volume, pushed in by
+    // main.js each frame: the shell it is reprojecting against, and the
+    // camera-relative navigation origin those coordinates are expressed in.
+    this._volumeFrame = { center: null, radius: 0, nav: null, key: null };
+    this._volumeMotion = 0;
     this._syncVolumeResolution();
 
     // Travel distortion owns the complete world image. Applying it before
@@ -241,6 +209,7 @@ export class GameNodePipeline {
   setSize() {
     // PassNode and BloomNode follow the renderer drawing-buffer size.
     this._syncVolumeResolution();
+    this.temporalResolve?.invalidate(INVALIDATION.RESIZE);
   }
 
   setVolumeScale(scale) {
@@ -248,6 +217,31 @@ export class GameNodePipeline {
     this.volumePass?.setResolutionScale(this.volumeScale);
     this._volumeUpsample.value = this.volumeScale < 0.999 ? 1 : 0;
     this._syncVolumeResolution();
+    // The history grid is rebuilt at the new size; its contents no longer
+    // correspond to the samples that produced them.
+    this.temporalResolve?.invalidate(INVALIDATION.RESIZE);
+  }
+
+  // Describe the volume the accumulator is reprojecting against. Called once
+  // per frame from main.js, which owns the active planet and the floating-origin
+  // navigation offset.
+  setVolumeFrame({ center = null, radius = 0, nav = null, key = null } = {}) {
+    this._volumeFrame.center = center;
+    this._volumeFrame.radius = radius;
+    this._volumeFrame.nav = nav;
+    this._volumeFrame.key = key;
+  }
+
+  // `continuous` distinguishes flight — which reprojection handles exactly —
+  // from a discontinuity such as a warp arrival, where history is wrong data
+  // rather than stale data.
+  setVolumeMotion(motion, continuous = true) {
+    this._volumeMotion = motion;
+    if (!continuous) this.temporalResolve?.invalidate(INVALIDATION.EXPLICIT);
+  }
+
+  invalidateVolumeHistory(reason = INVALIDATION.EXPLICIT) {
+    this.temporalResolve?.invalidate(reason);
   }
 
   setSunShafts({ x = 0.5, y = 0.5, strength = 0, color = null } = {}) {
@@ -287,6 +281,20 @@ export class GameNodePipeline {
   }
 
   render() {
+    // Advance the accumulator exactly once per drawn frame, and before the
+    // pipeline runs: the resolve pass reads the pose this call stages, so
+    // updating after render() would have every frame reproject into itself.
+    if (this.temporalResolve) {
+      const frame = this._volumeFrame;
+      this.temporalResolve.update({
+        camera: this.camera,
+        nav: frame.nav,
+        volumeCenter: frame.center,
+        volumeRadius: frame.radius,
+        volumeKey: frame.key,
+        moving: this._volumeMotion > 0.001,
+      });
+    }
     this.pipeline.render();
   }
 
@@ -337,6 +345,7 @@ export class GameNodePipeline {
     this.depthPass.dispose();
     this.readableDepth.dispose();
     this.volumePass?.dispose();
+    this.temporalResolve?.dispose();
     this.worldBase?.dispose();
     this.worldComposite?.dispose();
     this.foregroundPass.dispose();

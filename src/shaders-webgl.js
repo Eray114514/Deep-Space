@@ -427,10 +427,13 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             gSnowW = sw;
           }
 
-          // ---- the cloud deck overhead casts drifting shadows
+          // ---- the cloud deck overhead casts drifting shadows.
+          // UV must match cloudAtlasUV() in shaders-node.js exactly, or the
+          // shadows mirror about the equator relative to the clouds casting
+          // them and leave a visible seam there.
           vec3 cd = uCloudMat * nd;
-          float cu = 0.5 + atan(cd.z, -cd.x) * 0.15915494;
-          float cvv = 1.0 - acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
+          float cu = 0.5 + atan(-cd.z, -cd.x) * 0.15915494;
+          float cvv = acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
           diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>

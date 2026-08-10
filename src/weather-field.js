@@ -10,6 +10,13 @@ import { Simplex } from './noise.js';
 export const WEATHER_FIELD_VERSION = 3;
 export const WEATHER_NAMESPACE_SUFFIX = ':weather:v3';
 
+// Lifting-condensation-level bounds in metres. These define the encoding range
+// for the Hi.A atlas channel, so the CPU bake and every GPU consumer must use
+// this one pair. Chosen to span real terrestrial cloud bases: saturated marine
+// stratus near the low end, arid desert convection near the high end.
+export const LCL_MIN_METERS = 350;
+export const LCL_MAX_METERS = 4200;
+
 const TAU = Math.PI * 2;
 const DEFAULT_PROFILE = Object.freeze({
   cloudiness: 0.56,
@@ -560,6 +567,19 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
 
   const temperatureK = profile.temperatureK - latitude * profile.polarCoolingK
     + humidPattern * 3.5;
+  // Lifting condensation level. Real cloud bases are not a global constant:
+  // they sit where a rising parcel reaches saturation, so a humid ocean deck
+  // forms near 500 m while dry continental interiors do not condense until
+  // 2-3 km and deserts push past 4 km. Espy's approximation LCL ~ 125*(T - Td)
+  // gives that spread directly from the humidity field; the dewpoint
+  // depression stands in for (T - Td).
+  const dewpointDepressionK = (1 - humidity) * 22;
+  // Stratus forms in shallow saturated boundary layers, so it pins the base
+  // low. Deep convection mixes a taller sub-cloud layer and lifts it slightly.
+  const cloudBaseMeters = clamp(
+    125 * dewpointDepressionK * (1 - stratusMask * 0.55) * (1 + convective * 0.22),
+    LCL_MIN_METERS, LCL_MAX_METERS,
+  );
   const precipitation = clamp(smoothstep(0.48, 0.9,
     coverage * humidity * (0.72 + convective * 0.58)));
   const precipitationKind = precipitation > 0.02
@@ -613,6 +633,7 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
     fog,
     gust,
     temperatureK,
+    cloudBaseMeters,
     wind: {
       x: windDirection.x * windSpeed,
       y: windDirection.y * windSpeed,
@@ -635,6 +656,7 @@ export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) 
   sample.visibility = clamp(sample.visibility, 0.04, 1);
   sample.fog = clamp(sample.fog);
   sample.gust = clamp(sample.gust);
+  sample.cloudBaseMeters = clamp(sample.cloudBaseMeters, LCL_MIN_METERS, LCL_MAX_METERS);
   sample.lo = Object.freeze([
     sample.coverage, sample.cloudType, sample.stratusMask, 0,
   ]);

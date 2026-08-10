@@ -1,15 +1,26 @@
+// LEGACY PRODUCTION BASELINE — DO NOT COPY INTO src/cloud/ REWRITE CODE.
+//
+// This material stays live only until cloud/cloud-volume-node.js replaces it.
+// Its fixed global step cap, screen-anchored ray phase, shell-normalized
+// extinction and heuristic lighting are known causes of motion popping and
+// dirty-grey clouds. New work may preserve external uniforms/layer contracts,
+// but must not preserve this marcher or density/light equations.
+//
 // Shared cloud noise and WebGPURenderer-compatible cloud-shell material.
-// The close cloud volume now uses a bounded analytic shell node; the global
+// The close cloud volume currently uses a bounded analytic shell node; the global
 // deck and CPU transit fog still share the same deterministic weather field.
 
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
-  acos, atan, dot, exp, float, Fn, If, Loop, mix, positionLocal, positionView,
-  pow, sin, sqrt, smoothstep, texture, texture3D, uniform, vec2, vec3, vec4,
+  dot, exp, float, Fn, fract, If, Loop, mix, positionLocal,
+  positionView, pow, screenUV, sin, sqrt, smoothstep, texture, texture3D,
+  uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { hash3i, hashFloat } from './rng.js';
+import { cloudAtlasUV } from './shaders-node.js';
 import { sceneRayLimit } from './volume-depth-node.js';
+import { LCL_MAX_METERS, LCL_MIN_METERS } from './weather-field.js';
 
 let _noiseTex = null;
 let _volumeTopology = null;
@@ -169,23 +180,56 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     uMaxSteps: uniform(quality === 'performance' || quality === 'low' ? 24 : 56),
     uLightSteps: uniform(quality === 'performance' || quality === 'low' ? 2 : 5),
     uQuality: uniform(quality === 'performance' || quality === 'low' ? 0 : 1),
+    // Camera proximity in [0,1]: 1 = close enough to resolve billows, 0 = far
+    // enough that lobes are sub-pixel. Drives the distance-adaptive step budget.
+    uCamProx: uniform(0),
   };
-  const weatherUV = (d) => vec2(
-    // Atlas construction walks +Z as longitude increases. WebGPU atan2 uses
-    // the opposite screen-handed convention here, so both axes must be
-    // reflected; reflecting only X mirrored every rendered system away from
-    // its CPU weather/shadow location.
-    float(0.5).add(atan(d.z.negate(), d.x.negate()).mul(0.15915494)),
-    // CanvasTexture is uploaded with flipY=true; map north to the source
-    // canvas row that WebGPU exposes at low V.
-    acos(d.y.clamp(-1, 1)).mul(0.31830988),
-  );
+  const weatherUV = cloudAtlasUV;
   const weatherLoTextureNode = texture(weatherLoMap);
   const weatherHiTextureNode = texture(weatherHiMap);
   if (_volumeTopology) {
     return bindCloudVolumeInstance(planet, nodes, band, weatherLoMap,
       weatherHiMap, weatherLoTextureNode, weatherHiTextureNode, _volumeTopology);
   }
+  // A deliberately cheaper density evaluation for the sun ray. It preserves
+  // Vertical cloud families in ABSOLUTE METRES, keyed off the per-point
+  // lifting condensation level in Hi.A. Normalized shell fractions used to
+  // define these bands, so every family scaled with the envelope thickness and
+  // the whole troposphere collapsed into one layer. Real cloud decks sit at
+  // fixed altitudes regardless of how tall the render shell is:
+  //
+  //   stratus/stratocumulus  LCL           -> LCL + 1500
+  //   cumulus                LCL           -> LCL + 2500..9000 (by convection)
+  //   cumulonimbus/anvil     LCL           -> 13000, anvil spreading above 9000
+  //   altocumulus/altostratus 4000         -> 7500
+  //   cirrus                 8000          -> 13000
+  //
+  // The CPU counterpart (planet.js `cloudOpacityAt`) already worked in metres;
+  // this brings the GPU onto the same contract.
+  const cloudBaseMeters = (hiA) => hiA.mul(LCL_MAX_METERS - LCL_MIN_METERS)
+    .add(LCL_MIN_METERS);
+  const familyEnvelopes = (altitude, lo, hi) => {
+    const base = cloudBaseMeters(hi.a);
+    // A cloud deck fades in over a couple hundred metres at its base and out
+    // over a slightly deeper band at its top, which is how real decks read.
+    const above = (edge) => smoothstep(edge, float(edge).add(220), altitude);
+    const below = (edge) => smoothstep(edge, float(edge).sub(440), altitude);
+    const stratus = above(base).mul(below(base.add(1500))).mul(lo.b);
+    const convectiveDepth = lo.g.mul(hi.b.add(0.35)).clamp(0, 1);
+    const cumulus = above(base)
+      .mul(below(base.add(mix(float(2500), float(9000), convectiveDepth))))
+      .mul(float(1).sub(lo.b.mul(0.72)));
+    const anvil = above(float(9000)).mul(below(float(13000)))
+      .mul(hi.b).mul(lo.g);
+    const alto = above(float(4000)).mul(below(float(7500)))
+      .mul(hi.r).mul(float(1).sub(hi.g));
+    const cirrus = above(float(8000)).mul(below(float(13000)))
+      .mul(hi.r).mul(float(0.42).add(hi.g.mul(0.58)));
+    return {
+      low: stratus.max(cumulus).max(anvil),
+      high: alto.max(cirrus),
+    };
+  };
   // A deliberately cheaper density evaluation for the sun ray. It preserves
   // the same weather ownership and vertical families as the view ray while
   // using one 3D lookup instead of the full erosion cascade. This makes real
@@ -194,6 +238,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     const radius = samplePosition.length();
     const direction = samplePosition.div(radius.max(1));
     const weatherDirection = nodes.uSpin.mul(direction);
+    const altitude = radius.sub(nodes.uGroundR);
     const height = radius.sub(nodes.uRin)
       .div(nodes.uRout.sub(nodes.uRin).max(1)).clamp(0, 1);
     const lo = weatherLoTextureNode.sample(weatherUV(weatherDirection));
@@ -201,14 +246,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     const formationThreshold = mix(0.28, 0.15, lo.g);
     const coverage = smoothstep(formationThreshold,
       formationThreshold.add(0.34), lo.r);
-    const lowTop = mix(0.34, 0.78, lo.g).add(hi.b.mul(0.16)).clamp(0.3, 0.94);
-    const lowEnvelope = smoothstep(0.018, 0.075, height)
-      .mul(smoothstep(lowTop, lowTop.sub(0.2), height))
-      .max(smoothstep(0.012, 0.052, height)
-        .mul(smoothstep(0.47, 0.32, height)).mul(lo.b));
-    const highEnvelope = smoothstep(0.28, 0.4, height)
-      .mul(smoothstep(0.99, 0.82, height)).mul(hi.r)
-      .mul(float(0.34).add(hi.g.mul(0.34)).add(hi.b.mul(0.32)));
+    const envelopes = familyEnvelopes(altitude, lo, hi);
+    const lowEnvelope = envelopes.low;
+    const highEnvelope = envelopes.high;
     const advectedPosition = nodes.uSpin.mul(samplePosition)
       .mul(1 / 18000)
       .add(vec3(
@@ -259,20 +299,32 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
     const sceneDepth = sceneRayLimit(nodes, forwardCos, 0.35);
     t1.assign(sceneDepth.hasOpaqueDepth.select(t1.min(sceneDepth.rayDistance), t1));
     const span = t1.sub(t0).max(0);
-    const stepCount = nodes.uMaxSteps.clamp(16, 64).toVar();
-    const stepLength = span.div(stepCount);
     const thickness = nodes.uRout.sub(nodes.uRin).max(1);
-    // Decorrelate radial samples without tying their phase to the screen. A
-    // screen-pixel hash is stable only while the camera is still: rotating the
-    // view moves the same cloud column to another pixel and abruptly changes
-    // every march sample, which reads as cloud shimmer. Hash the near-shell hit
-    // in planet-local metres instead. The same cloud column now keeps a coherent
-    // phase as the camera turns, while adjacent columns still avoid
-    // coherent shell slices.
-    const jitterAnchor = origin.add(ray.mul(t0)).mul(1 / 2400);
-    const rayJitter = sin(dot(jitterAnchor,
-      vec3(12.9898, 78.233, 37.719))).mul(0.5).add(0.5);
-    const t = t0.add(stepLength.mul(float(0.12).add(rayJitter.mul(0.76)))).toVar();
+    // This is only a REQUESTED metre-scale stride. The global uMaxSteps cap
+    // below wins on long grazing rays, so stepLength can still expand back to
+    // kilometres and sample a thin deck fewer than once. The static screen hash
+    // also gives the same world cloud a different phase as the camera moves.
+    // Together these are the still-open legacy popping mechanism; the rewrite
+    // fixes it with occupied-segment clipping and feature-scale sampling, not by
+    // tuning maxStepMeters or the cap here.
+    const maxStepMeters = mix(float(900), mix(float(900), float(420),
+      nodes.uQuality), nodes.uCamProx);
+    const countFloor = mix(float(8), nodes.uMaxSteps.mul(0.5), nodes.uCamProx)
+      .clamp(8, 48);
+    const stepCount = span.div(maxStepMeters)
+      .clamp(countFloor, nodes.uMaxSteps.clamp(8, 64)).floor().max(1).toVar();
+    const stepLength = span.div(stepCount);
+    // Decorrelate the march phase per PIXEL, statically. A frame-varying phase
+    // produced measurable parked-camera shimmer in the legacy experiments, so
+    // the production temporal prototype remains disabled. This screen-space
+    // phase is deterministic only at a parked pose; as the camera moves, the
+    // same world cloud lands on a new pixel/phase and its integration error
+    // crawls. Do not copy this policy into the rewrite: Stage 4 must converge
+    // in one frame, and Stage 7 alone owns spatial decorrelation plus history.
+    const pixel = screenUV.mul(nodes.uVolumeSize);
+    const rayJitter = fract(
+      sin(dot(pixel, vec2(12.9898, 78.233))).mul(43758.5453));
+    const t = t0.add(stepLength.mul(rayJitter.mul(0.9).add(0.05))).toVar();
     const integrated = vec3(0).toVar();
     const transmission = float(1).toVar();
     Loop(64, ({ i }) => {
@@ -284,12 +336,18 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         const radius = samplePosition.length();
         const direction = samplePosition.div(radius.max(1));
         const weatherDirection = nodes.uSpin.mul(direction);
+        // `height` remains the normalized shell fraction, used only for noise
+        // domain offsets and erosion ramps. Every FAMILY band is keyed off
+        // `altitude` in metres instead, so a deck's altitude no longer moves
+        // when the render envelope's thickness changes.
+        const altitude = radius.sub(nodes.uGroundR);
         const height = radius.sub(nodes.uRin).div(thickness).clamp(0, 1);
         const uv = weatherUV(weatherDirection);
         // Meteorological Lo/Hi maps preserve the HPVolumeCloud-style contract
         // instead of discarding cloud families in one over-packed atlas.
         // Lo = density, cloud type, stratus mask, humidity.
-        // Hi = high mask, high type, convective energy, multi scatter.
+        // Hi = high mask, high type, convective energy, lifting condensation
+        // level (cloud-base altitude, normalized over LCL range).
         const weatherLo = weatherLoTextureNode.sample(uv);
         const weatherHi = weatherHiTextureNode.sample(uv);
         const weatherRaw = weatherLo.r;
@@ -299,7 +357,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         const highMask = weatherHi.r;
         const highType = weatherHi.g;
         const convective = weatherHi.b;
-        const multipleScatter = weatherHi.a;
+        // Hi.A no longer carries multiple-scatter — it holds the per-point
+        // lifting condensation level (`cloudBaseMeters`). Rebuild the
+        // multiple-scatter field with the same weights weather-field uses:
+        // coverage*0.54 + highMask*0.22 + humidity*0.16 + convective*0.2.
         // Coverage is a meteorological probability field, not literal vapour
         // density. Feeding its unshaped value into every ray step turned even
         // 20–30% coverage into a planet-wide grey extinction curtain. A
@@ -308,22 +369,36 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         const formationThreshold = mix(0.28, 0.15, cloudType);
         const weather = smoothstep(formationThreshold,
           formationThreshold.add(0.34), weatherRaw);
-        const stratusProfile = smoothstep(0.015, 0.055, height)
-          .mul(smoothstep(0.25, 0.13, height))
+        const multipleScatter = weather.mul(0.54).add(highMask.mul(0.22))
+          .add(humidity.mul(0.16)).add(convective.mul(0.2)).clamp(0, 1);
+        // Vertical bands in metres, based at the per-point lifting condensation
+        // level (Hi.A). See `familyEnvelopes` above for the altitude table; the
+        // view ray resolves each genus separately so 3D detail can shape them
+        // independently, but the base altitudes are the same contract.
+        const lclBase = cloudBaseMeters(weatherHi.a);
+        const bandAbove = (edge, feather = 220) =>
+          smoothstep(edge, float(edge).add(feather), altitude);
+        const bandBelow = (edge, feather = 440) =>
+          smoothstep(edge, float(edge).sub(feather), altitude);
+        const stratusProfile = bandAbove(lclBase, 120)
+          .mul(bandBelow(lclBase.add(1500)))
           .mul(stratusMask);
-        const cumulusTop = mix(0.34, 0.78, cloudType)
-          .add(convective.mul(0.16)).clamp(0.3, 0.94);
-        const cumulusProfile = smoothstep(0.025, 0.09, height)
-          .mul(smoothstep(cumulusTop, cumulusTop.sub(0.18), height))
+        // Convective energy owns tower depth: fair-weather cumulus tops out
+        // ~2.5 km above its base, a mature cumulonimbus reaches ~9 km.
+        const cumulusTop = lclBase.add(
+          mix(float(2500), float(9000), cloudType.mul(convective.add(0.35)).clamp(0, 1)));
+        const cumulusProfile = bandAbove(lclBase, 150)
+          .mul(bandBelow(cumulusTop, 900))
           .mul(float(1).sub(stratusMask.mul(0.72)));
-        const altoProfile = smoothstep(0.27, 0.39, height)
-          .mul(smoothstep(0.62, 0.49, height))
+        const altoProfile = bandAbove(float(4000), 500)
+          .mul(bandBelow(float(7500), 700))
           .mul(highMask.mul(float(1).sub(highType)));
-        const cirrusProfile = smoothstep(0.62, 0.72, height)
-          .mul(smoothstep(0.99, 0.88, height))
+        const cirrusProfile = bandAbove(float(8000), 700)
+          .mul(bandBelow(float(13000), 1200))
           .mul(highMask).mul(float(0.42).add(highType.mul(0.58)));
-        const anvilProfile = smoothstep(0.57, 0.66, height)
-          .mul(smoothstep(0.88, 0.78, height))
+        // Anvils spread horizontally at the tropopause once a tower reaches it.
+        const anvilProfile = bandAbove(float(9000), 900)
+          .mul(bandBelow(float(13000), 1400))
           .mul(convective).mul(cloudType);
         const slowWind = vec3(
           nodes.uWeatherTime.mul(0.011),
@@ -366,28 +441,30 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
         // Secondary genera share the same meteorological Lo/Hi channels but
         // occupy distinct vertical shapes. This is more than naming metadata:
         // each term changes the actual density sampled by the ray marcher.
-        const stratocumulusProfile = smoothstep(0.055, 0.11, height)
-          .mul(smoothstep(0.34, 0.24, height))
+        const stratocumulusProfile = bandAbove(lclBase.add(400), 200)
+          .mul(bandBelow(lclBase.add(2200), 500))
           .mul(stratusMask).mul(float(1).sub(cloudType.mul(0.68)))
           .mul(float(0.42).add(detail.mul(0.76)));
-        const nimbostratusProfile = smoothstep(0.02, 0.07, height)
-          .mul(smoothstep(0.48, 0.34, height))
+        const nimbostratusProfile = bandAbove(lclBase, 150)
+          .mul(bandBelow(lclBase.add(4500), 900))
           .mul(stratusMask).mul(humidity)
           .mul(float(0.54).add(convective.mul(0.32)));
-        const altocumulusProfile = smoothstep(0.28, 0.37, height)
-          .mul(smoothstep(0.62, 0.49, height))
+        const altocumulusProfile = bandAbove(float(4200), 400)
+          .mul(bandBelow(float(7200), 650))
           .mul(highMask).mul(float(1).sub(highType.mul(0.72)))
           .mul(smoothstep(0.38, 0.68, detail));
-        const lenticularProfile = smoothstep(0.34, 0.39, height)
-          .mul(smoothstep(0.48, 0.43, height))
+        // Lenticular caps are a thin standing-wave sheet, not a deck.
+        const lenticularProfile = bandAbove(float(5000), 250)
+          .mul(bandBelow(float(6200), 350))
           .mul(highMask).mul(float(1).sub(convective))
           .mul(smoothstep(0.68, 0.84, erosion));
-        const cirrocumulusProfile = smoothstep(0.7, 0.76, height)
-          .mul(smoothstep(0.96, 0.88, height))
+        const cirrocumulusProfile = bandAbove(float(9500), 600)
+          .mul(bandBelow(float(12800), 900))
           .mul(highMask).mul(highType)
           .mul(smoothstep(0.46, 0.72, upperDetail));
-        const towerProfile = smoothstep(0.04, 0.12, height)
-          .mul(smoothstep(0.86, 0.68, height))
+        // A cumulonimbus tower spans its whole depth, base to anvil.
+        const towerProfile = bandAbove(lclBase, 200)
+          .mul(bandBelow(float(12000), 1600))
           .mul(convective).mul(cloudType)
           .mul(float(0.28).add(detail.mul(1.02)));
         const lowShape = stratusProfile.mul(float(0.68).add(wispyShape.mul(0.28)))
@@ -429,10 +506,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherLoMap,
           samplePosition, primaryDir, nodes);
         // HPVolumeCloud-inspired cone light march. Five geometrically growing
         // segments cover the useful cloud-internal light path. Direct light
-        // uses Beer extinction; the additive phi_fwd term uses the much slower
-        // diffusion attenuation sqrt(3 * (1 - omega0)), omega0 = 0.999.
-        // Consequently thin edges retain directional silver lining while an
-        // optically thick core receives soft, isotropic internal illumination.
+        // uses Beer extinction; the legacy additive phi_fwd heuristic uses a
+        // slower diffusion-inspired attenuation. This is not an independently
+        // validated energy-conserving solution and must not be copied into the
+        // phase-4 rewrite without the documented reference-integral gates.
         const lightB = dot(samplePosition, primaryDir);
         const lightDisc = lightB.mul(lightB).sub(dot(samplePosition, samplePosition))
           .add(nodes.uRout.mul(nodes.uRout));

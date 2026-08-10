@@ -64,8 +64,14 @@ async function settle(timeout = 240000) {
 }
 
 // ---- phase 1: static shimmer ------------------------------------------------
-const FACTORS = [2.0, 1.2, 0.7, 0.4, 0.22, 0.12, 0.065, 0.035, 0.018, 0.009,
-  0.0045, 0.002, 0.0008, 0.0003, 0.0001];
+// Full ladder by default. FACTORS=2.0,1.2 runs a slice instead: the whole file
+// takes ~15 min, which is too slow to iterate against when only the static
+// shimmer gate is in question.
+const FACTORS = process.env.FACTORS
+  ? process.env.FACTORS.split(',').map(Number).filter((v) => v > 0)
+  : [2.0, 1.2, 0.7, 0.4, 0.22, 0.12, 0.065, 0.035, 0.018, 0.009,
+    0.0045, 0.002, 0.0008, 0.0003, 0.0001];
+const PHASE1_ONLY = process.env.PHASE1_ONLY === '1';
 let failed = 0;
 console.log(`phase 1 — static shimmer at ${FACTORS.length} altitudes (seed=${SEED})`);
 for (const f of FACTORS) {
@@ -85,6 +91,18 @@ for (const f of FACTORS) {
   } else {
     console.log(`✓ ${tag}: static (${n} px, max Δ${max})`);
   }
+}
+
+// PHASE1_ONLY=1 runs just the static-shimmer gate. Phases 2-4 fly a full
+// descent/landing/takeoff and take ~15 min; the parked-camera gate is the one
+// that regressions in the volume path show up in, so it needs to be runnable
+// on its own without waiting for the LOD phases.
+if (PHASE1_ONLY) {
+  console.log(failed ? `SEAM TEST (phase 1): ${failed} FAILURE(S)`
+    : 'SEAM TEST (phase 1): static at every altitude');
+  await browser.close();
+  server.close();
+  process.exit(failed || errors.length ? 1 : 0);
 }
 
 // ---- phase 2: continuous descent, engine counters ---------------------------

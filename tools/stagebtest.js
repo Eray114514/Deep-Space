@@ -302,7 +302,7 @@ const [pipelineSource, planetSource, cloudSource, mainSource,
   loadSource('src/volumetric-pass.js'),
 ]);
 
-check(/scenePass\.getTexture(?:Node)?\(\s*['"]depth['"]\s*\)|scenePass\.getDepthNode\(/.test(pipelineSource),
+check(/(?:scenePass|depthPass)\.getTexture(?:Node)?\(\s*['"]depth['"]\s*\)|(?:scenePass|depthPass)\.getDepthNode\(/.test(pipelineSource),
   'WebGPU pipeline exposes the opaque scene depth',
   `node-render-pipeline.js must obtain the main scene depth for the atmosphere/cloud pass`);
 check(tokenCount(pipelineSource, 'sceneDepth') >= 2

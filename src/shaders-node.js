@@ -19,6 +19,30 @@ import { surfaceMaterialSlots, watchSurfaceTexture } from './surface-materials.j
 
 export const TIME = { value: 0 };
 export function tickShaders(dt) { TIME.value += dt; }
+
+// The single authority for sampling the equirectangular Lo/Hi weather atlas
+// baked by planet.js `makeCloudTextures`.
+//
+// Atlas construction (planet.js) walks canvas row 0 at phi = -PI/2 (south
+// pole) and +Z as longitude increases. `cloudAtlasTexture` uploads through
+// CanvasTexture, whose default flipY=true puts the LAST canvas row — north —
+// at V=0. Hence V = acos(y)/PI, and U reflects both axes to undo the
+// screen-handed atan2 convention.
+//
+// Consumers previously disagreed: the volume shell and the analytic deck used
+// this form while terrain cloud shadows, water reflections, the noctilucent
+// shell and the WebGL path used `1 - acos(y)/PI` with a mirrored U. Shadows
+// were therefore flipped about the equator relative to the clouds casting
+// them, agreeing only at V=0.5 — the visible "mould line" around the equator.
+// Never inline a second convention; import this.
+// The WebGL 2 compatibility path in shaders-webgl.js inlines this same
+// formula in GLSL; keep the two numerically identical.
+export function cloudAtlasUV(d) {
+  return vec2(
+    float(0.5).add(atan(d.z.negate(), d.x.negate()).mul(0.15915494)),
+    acos(d.y.clamp(-1, 1)).mul(0.31830988),
+  );
+}
 export const WIND = new THREE.Vector4(1, 0, 0.25, 0);
 export function setWeatherWind(direction = null, strength = 0, gust = 0) {
   const x = Number(direction?.x) || 0;
@@ -391,10 +415,9 @@ export function applyTerrainDetail(source, planet, strength = 0.2, macroK = 0.4)
   const cloudMap = texture(planet.cloudShadowTex || blankTexture());
   const cloudMatrix = uniform(new THREE.Matrix3());
   const cloudDirection = cloudMatrix.mul(direction);
-  const cloudU = float(0.5).add(atan(cloudDirection.z, cloudDirection.x.negate()).mul(0.15915494));
-  const cloudV = float(1).sub(acos(cloudDirection.y.clamp(-1, 1)).mul(0.31830988));
   const cloudK = uniform(planet.cloudMesh ? 0.42 : 0);
-  surface = surface.mul(float(1).sub(cloudMap.sample(vec2(cloudU, cloudV)).r.mul(cloudK)));
+  surface = surface.mul(float(1)
+    .sub(cloudMap.sample(cloudAtlasUV(cloudDirection)).r.mul(cloudK)));
   // Retain diffuse sky/ground bounce inside totality while removing the
   // impossible fully lit patch. The local field provides a continuous moving
   // umbra/penumbra across the spherical terrain.
@@ -741,9 +764,8 @@ export function applyWaterWaves(source, planet, waveScale = 1 / 14) {
     .mul(float(0.18).add(nodes.uDay.mul(0.82)));
   const reflectedCloudDir = up.add(reflected.sub(up.mul(dot(reflected, up))).mul(0.16)).normalize();
   const cloudDirection = nodes.uCloudMat.mul(reflectedCloudDir);
-  const cloudU = float(0.5).add(atan(cloudDirection.z, cloudDirection.x.negate()).mul(0.15915494));
-  const cloudV = float(1).sub(acos(cloudDirection.y.clamp(-1, 1)).mul(0.31830988));
-  const reflectedCloud = waterCloudTexture.sample(vec2(cloudU, cloudV)).r.mul(nodes.uCloudK);
+  const reflectedCloud = waterCloudTexture
+    .sample(cloudAtlasUV(cloudDirection)).r.mul(nodes.uCloudK);
   const cloudTint = mix(vec3(0.76, 0.82, 0.9), nodes.uSkyHorizon,
     nodes.uSunset.mul(0.52));
   reflectedSky = mix(reflectedSky, cloudTint, reflectedCloud.mul(0.78));
@@ -895,10 +917,7 @@ export function applyCloudField(source, coverage, offX, offY, offZ,
   // One equirectangular weather atlas is authoritative at every distance and
   // on every renderer. The previous triplanar field changed frequency with
   // camera radius, so clouds visibly rearranged while the player orbited.
-  const weatherUV = (d) => vec2(
-    float(0.5).add(atan(d.z.negate(), d.x.negate()).mul(0.15915494)),
-    acos(d.y.clamp(-1, 1)).mul(0.31830988),
-  );
+  const weatherUV = cloudAtlasUV;
   const cloudSample = (d) => {
     const sampleDirection = d.normalize();
     const uv = weatherUV(sampleDirection);
@@ -912,7 +931,12 @@ export function applyCloudField(source, coverage, offX, offY, offZ,
     const cloudType = weather.g;
     const stratus = family === 'high' ? float(0) : weather.b;
     const convective = family === 'high' ? weather.b : cloudType;
-    const scatter = weather.a;
+    // Lo.A carries humidity, but Hi.A now carries the lifting condensation
+    // level, so the high deck cannot read its scatter term from `.a`. Rebuild
+    // it from the deck's own occupancy (Hi.R) and convective energy instead.
+    const scatter = family === 'high'
+      ? density.mul(0.6).add(convective.mul(0.28)).clamp(0, 1)
+      : weather.a;
     const macro = family === 'high'
       ? smoothstep(0.075, 0.36, density)
       : smoothstep(
@@ -1028,10 +1052,7 @@ export function applyNoctilucentField(source, coverage, offX, offY, offZ,
     uOffset: uniform(new THREE.Vector3(offX, offY, offZ)),
   };
   const direction = positionLocal.normalize();
-  const uv = vec2(
-    float(0.5).add(atan(direction.z, direction.x.negate()).mul(0.15915494)),
-    float(1).sub(acos(direction.y.clamp(-1, 1)).mul(0.31830988)),
-  );
+  const uv = cloudAtlasUV(direction);
   const system = highWeather.sample(uv).r;
   const filaments = texture(detailMap,
     uv.mul(vec2(96, 18)).add(nodes.uOffset.xy.mul(0.13))).g.mul(0.62)

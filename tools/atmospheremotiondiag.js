@@ -1,8 +1,9 @@
 // Real-hardware WebGPU diagnostic for atmosphere instability during camera
 // motion. The simulation and adaptive quality are locked, then the camera
 // follows an exact forward/reverse quaternion path at two altitudes. Matching
-// poses should be pixel-identical; differences therefore distinguish genuine
-// temporal instability from ordinary parallax.
+// poses should be pixel-identical, which detects frame-varying state and target
+// churn. It does NOT prove moving-image stability: optical-flow-compensated
+// residuals and silhouette-quality metrics are separate required gates.
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -480,9 +481,11 @@ function diagnose(report) {
     scenario.staticPose.meanAbsRgbP95));
   const edgeRatio = Math.max(...report.scenarios.map((scenario) =>
     scenario.matchedPose.edgeToFlatP95));
+  const adjacentP95 = percentile(report.scenarios.flatMap((scenario) =>
+    scenario.adjacentMotion.map((entry) => entry.difference.meanAbsRgb)), 0.95);
 
-  let owner = 'stable';
-  let confidence = 'high';
+  let owner = 'no-frame-varying-state-detected';
+  let confidence = 'bounded';
   if (gpuErrors > 0 || resizeEvents.length > 0
     || (textureEvents.length > 0 && matchedP95 > 2)) {
     owner = 'resource-invalidation-or-render-target-rebuild';
@@ -505,9 +508,15 @@ function diagnose(report) {
       staticPoseMeanAbsRgbP95: Number(staticP95.toFixed(4)),
       matchedPoseMeanAbsRgbP95: Number(matchedP95.toFixed(4)),
       matchedPoseEdgeToFlatP95: Number(edgeRatio.toFixed(3)),
+      uncompensatedAdjacentMeanAbsRgbP95: Number(adjacentP95.toFixed(4)),
     },
-    interpretation: owner === 'stable'
-      ? 'No camera-dependent atmosphere instability reproduced in the locked 2K fixture.'
+    limitations: [
+      'Matched-pose equality proves determinism, not stability while pixels move.',
+      'Adjacent-frame differences include ordinary parallax because this probe does not reproject by optical flow.',
+      'The probe does not grade sub-resolution silhouette stair-stepping.',
+    ],
+    interpretation: owner === 'no-frame-varying-state-detected'
+      ? 'The locked fixture is deterministic and its render resources stay stable. Motion aliasing and limb stair-stepping remain unclassified.'
       : owner === 'resource-invalidation-or-render-target-rebuild'
         ? 'Pixel discontinuities coincide with WebGPU resource errors or target/budget churn.'
         : owner === 'depth-composite-or-low-resolution-edge-reconstruction'
