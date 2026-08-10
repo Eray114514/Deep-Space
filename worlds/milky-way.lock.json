@@ -34,7 +34,59 @@
         0
       ]
     },
-    "bodyTuning": {}
+    "bodyTuning": {
+      "0,0,0": {
+        "planet-0": {
+          "radiusMeters": 6000000,
+          "atmosphereHeightMeters": 120000,
+          "cloudCoverage": 0.64,
+          "weatherStyle": "temperate-synoptic",
+          "cloudLayer": {
+            "minAltitudeMeters": 400,
+            "maxAltitudeMeters": 14000
+          },
+          "clouds": {
+            "coverage": 0.64,
+            "probability": 0.9,
+            "condensates": [
+              "H₂O液滴",
+              "H₂O冰晶"
+            ],
+            "regime": "多层温带锋面与对流云系"
+          }
+        },
+        "planet-0-moon-0": {
+          "orbitRadiusMeters": 21600000
+        },
+        "planet-1": {
+          "type": "ocean",
+          "radiusMeters": 560000,
+          "seaLevelOffset": 1650,
+          "cloudCoverage": 0.72,
+          "oceanProfile": "pelagic-storm",
+          "bathymetryScale": 0.24,
+          "atmosphere": {
+            "composition": [
+              "N₂",
+              "O₂",
+              "H₂O"
+            ],
+            "pressureBar": 2.7,
+            "greenhouseK": 48,
+            "state": "稳定湿润温室层"
+          },
+          "clouds": {
+            "coverage": 0.72,
+            "probability": 0.94,
+            "condensates": [
+              "H₂O液滴",
+              "H₂O冰晶"
+            ],
+            "regime": "广域风暴云系"
+          }
+        }
+      }
+    }
   },
   "finiteCatalog": {
     "fingerprintSha256": "f2a8d0d6a157dbc488c42254d9ea8b613b85ce10b713ea0205a384d358eb3b15",
@@ -19535,18 +19587,36 @@
   "homeSurfaceSentinels": {
     "systemId": "0,0,0",
     "bodyId": "planet-0",
-    "tuning": {},
+    "tuning": {
+      "radiusMeters": 6000000,
+      "atmosphereHeightMeters": 120000,
+      "cloudCoverage": 0.64,
+      "weatherStyle": "temperate-synoptic",
+      "cloudLayer": {
+        "minAltitudeMeters": 400,
+        "maxAltitudeMeters": 14000
+      },
+      "clouds": {
+        "coverage": 0.64,
+        "probability": 0.9,
+        "condensates": [
+          "H₂O液滴",
+          "H₂O冰晶"
+        ],
+        "regime": "多层温带锋面与对流云系"
+      }
+    },
     "naturalSeaLevel": -57.18962591158956,
     "tunedSeaLevel": -57.18962591158956,
-    "cloudCoverage": 0.4202042925124988,
+    "cloudCoverage": 0.64,
     "hasRing": false,
     "mountMaskLo": 0.03928334163501859,
     "heightSamples": {
-      "positiveX": 3041.1075654811834,
+      "positiveX": 4204.296939657593,
       "positiveY": -1806.3088449214786,
-      "positiveZ": 4607.417497869167,
-      "diagonalXYZ": 2342.3685963550283
+      "positiveZ": 6503.770778493187,
+      "diagonalXYZ": 2348.6210250928566
     }
   },
-  "fingerprintSha256": "8dfbd83a940931ca501dec9f27471635ee776ff0aa3b28ce92ae793d0bcbcb72"
+  "fingerprintSha256": "6aa8d97ed349f405433f0468054a807c28f161f77ef5a0d34de1aa9d7fb83772"
 }

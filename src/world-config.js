@@ -42,9 +42,16 @@ export const WORLD_CONFIG = Object.freeze({
             atmosphereHeightMeters: 120000,
             cloudCoverage: 0.64,
             weatherStyle: 'temperate-synoptic',
+            // The volume shell is an ENVELOPE, not a cloud base. The actual
+            // base is the per-point lifting condensation level baked into the
+            // weather atlas, so the shell only has to span every family: the
+            // lowest possible marine stratus at its floor, cirrus tops at its
+            // ceiling. The former 2000 m floor was read as one global cloud
+            // base, which put the whole deck just overhead on the surface and
+            // left no vertical room for the alto and cirrus decks.
             cloudLayer: Object.freeze({
-              minAltitudeMeters: 2000,
-              maxAltitudeMeters: 16000,
+              minAltitudeMeters: 400,
+              maxAltitudeMeters: 14000,
             }),
             clouds: Object.freeze({
               coverage: 0.64,

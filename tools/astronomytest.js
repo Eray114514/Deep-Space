@@ -18,10 +18,15 @@ assert.equal(homeTuning.radiusMeters, 6000000,
   'the curated home radius is an explicit terrestrial-scale tuning');
 assert.equal(homeTuning.atmosphereHeightMeters, 120000,
   'the physical atmosphere remains thin relative to the curated radius');
+// cloudLayer is the render-shell ENVELOPE, not a cloud base. The actual base
+// is the per-point lifting condensation level baked into the weather atlas, so
+// the shell only has to span every family: lowest marine stratus at the floor,
+// cirrus tops at the ceiling. The former 2000 m floor was consumed as one
+// global cloud base, which is what put the whole deck just overhead.
 assert.deepEqual(homeTuning.cloudLayer, {
-  minAltitudeMeters: 2000,
-  maxAltitudeMeters: 16000,
-}, 'the cloud shell reserves distinct low, middle, high and convective altitude bands');
+  minAltitudeMeters: 400,
+  maxAltitudeMeters: 14000,
+}, 'the cloud shell spans marine stratus bases through cirrus tops');
 assert.equal(homeTuning.cloudCoverage, 0.64,
   'the home world retains synoptic-scale cloud coverage rather than a sparse film');
 assert.deepEqual(resolveBodyTuning({
