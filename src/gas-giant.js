@@ -1,12 +1,4 @@
-import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
-const settings = resolveGraphicsSettings({ params: params || new URLSearchParams() });
-const useNodeMaterials = resolveRendererPolicy(rendererParamsForSettings(settings,
-  params || new URLSearchParams())).backend === 'webgpu';
-const implementation = await import(useNodeMaterials
-  ? './gas-giant-node.js'
-  : './gas-giant-webgl.js');
-
-export const GasGiant = implementation.GasGiant;
+// WebGL 2 baseline: the classic GLSL banded giant is the only deck. The TSL
+// port (gas-giant-node.js) was shelved with the WebGPU line — see git history
+// and docs/optimization-roadmap.md (2026-08-15).
+export { GasGiant } from './gas-giant-webgl.js';

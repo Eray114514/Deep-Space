@@ -1,14 +1,4 @@
-// Renderer-specific cloud facade. WebGL keeps the authored shader/raymarch;
-// the TSL port is isolated behind the explicit WebGPU experiment.
-import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
-
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
-const settings = resolveGraphicsSettings({ params: params || new URLSearchParams() });
-const useNodeMaterials = resolveRendererPolicy(rendererParamsForSettings(settings,
-  params || new URLSearchParams())).backend === 'webgpu';
-const implementation = await import(useNodeMaterials ? './clouds-node.js' : './clouds-webgl.js');
-
-export const cloudNoiseTexture = implementation.cloudNoiseTexture;
-export const disposeCloudNoiseTexture = implementation.disposeCloudNoiseTexture;
-export const makeCloudVolumeMaterial = (...args) => implementation.makeCloudVolumeMaterial(...args);
+// WebGL 2 baseline: the authored cloud shader/raymarch is the only deck.
+// The TSL port (clouds-node.js) was shelved with the WebGPU line — see git
+// history and docs/optimization-roadmap.md (2026-08-15 decision).
+export { cloudNoiseTexture, disposeCloudNoiseTexture, makeCloudVolumeMaterial } from './clouds-webgl.js';

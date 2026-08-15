@@ -29,29 +29,26 @@ export const WORLD_CONFIG = Object.freeze({
       }),
       bodyTuning: Object.freeze({
         // The selected home terrain has 18.6 km of peak-to-trough relief.
-        // The former 900 km body fixed the worst asteroid silhouette, but its
-        // horizon still made synoptic cloud systems and the troposphere read
-        // as a miniature model. A 6,000 km authored radius retains the curated
-        // terrain stream while giving surface flight, cloud parallax and the
-        // atmosphere an honestly terrestrial curvature. The 120 km outer
-        // medium is only 2% of the radius; optical density still falls on the
-        // physical 8 km / 1.2 km Rayleigh/Mie scale heights.
+        // The 6,000 km authored radius keeps the curated terrain stream at a
+        // terrestrial curvature. The atmosphere and cloud shell follow the
+        // pre-rewrite PROPORTIONS (atmo ≈ 10.5% of R, floating cloud deck at
+        // ≈ 3.8–7% of R) that the legacy WebGL chain — now the production
+        // baseline — was tuned against. The rewrite's 120 km / 0.4–14 km
+        // "physical metres" envelope rendered as a shield-thin limb with
+        // clouds glued to the ground and was rejected in player review.
         '0,0,0': Object.freeze({
           'planet-0': Object.freeze({
             radiusMeters: 6000000,
-            atmosphereHeightMeters: 120000,
+            atmosphereHeightMeters: 630000,
             cloudCoverage: 0.64,
             weatherStyle: 'temperate-synoptic',
-            // The volume shell is an ENVELOPE, not a cloud base. The actual
-            // base is the per-point lifting condensation level baked into the
-            // weather atlas, so the shell only has to span every family: the
-            // lowest possible marine stratus at its floor, cirrus tops at its
-            // ceiling. The former 2000 m floor was read as one global cloud
-            // base, which put the whole deck just overhead on the surface and
-            // left no vertical room for the alto and cirrus decks.
+            // Absolute-metre equivalents of the pre-rewrite ratios on the
+            // 6,000 km body: base 230 km (3.83% R, ≈ old 11 km on 286 km),
+            // top 420 km (7.0% R), matching the old floating-deck silhouette
+            // from orbit and from the surface.
             cloudLayer: Object.freeze({
-              minAltitudeMeters: 400,
-              maxAltitudeMeters: 14000,
+              minAltitudeMeters: 230000,
+              maxAltitudeMeters: 420000,
             }),
             clouds: Object.freeze({
               coverage: 0.64,

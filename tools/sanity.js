@@ -172,7 +172,11 @@ for (const type of Object.keys(TYPES)) {
   // across many rebuilds — every prop in the shared interior must persist
   // bit-identically at every single rebuild (this has been broken twice)
   if (type === 'lush' && SCATTER_ENABLED && FAR_FLORA_ENABLED) {
-    const scatter = new Scatter({ streamBudgetMs: Infinity });
+    // Ultra quality profile geometry: grassRadius 70 → range 8 cells → props
+    // are unconditionally placed inside ~63 m of the anchor. The stability
+    // interior below must stay within that radius, otherwise rim fade/edge
+    // dropout reads as churn.
+    const scatter = new Scatter({ streamBudgetMs: Infinity, grassRadius: 70 });
     const m4 = new THREE.Matrix4();
     const grab = () => {
       const map = new Map();
@@ -229,7 +233,7 @@ for (const type of Object.keys(TYPES)) {
         for (const [k, pos] of prev.map) {
           const da = Math.hypot(pos[0] - prevCam.x, pos[1] - prevCam.y, pos[2] - prevCam.z);
           const db = Math.hypot(pos[0] - cam.x, pos[1] - cam.y, pos[2] - cam.z);
-          if (da > 110 || db > 110) continue;     // safely inside both ranges
+          if (da > 45 || db > 45) continue;       // safely inside both ranges
           tot++;
           if (!cur.map.has(k)) miss++;
         }

@@ -1,11 +1,11 @@
 // Cloud density — the single authoritative density function (phase 3, D1).
 //
-// One intended contract, one data path, two consumers:
+// One intended contract, one data path:
 //   cloudDensityCPU(...)  plain JS — transit fog, CPU cloud tests, consistency
 //                         checks, and anything gameplay needs to know about
 //                         cloud occupancy without a GPU readback.
-//   cloudDensityTSL(...)  TSL node graph — the volume march on WebGPU
-//                         (phase 4, when the march exists to execute it).
+// (A TSL node-graph counterpart existed for the shelved WebGPU volume march;
+// it was removed with that line — see git history.)
 //
 // WHY SHARED BAKED DATA REDUCES (BUT DOES NOT DISCHARGE) THE GPU GATE
 // -----------------------------------------------------------------
@@ -33,17 +33,6 @@
 // fly there -> no cloud" (C1) is one data pipeline, not two agreements.
 
 import { hash3i, hashFloat, strHash32 } from '../rng.js';
-// Import TSL only in a document realm. Import maps deliberately do not apply
-// inside module workers, while this file is also the CPU bake used by
-// cloud-field-worker.js. Keeping that worker free of renderer imports is what
-// makes field generation independently cancellable instead of failing on the
-// bare `three/tsl` specifier before it receives its first job.
-let densityTsl = null;
-if (typeof document !== 'undefined') densityTsl = await import('three/tsl');
-const {
-  asin, atan, float, If, mix: nodeMix, pow: nodePow, sin,
-  smoothstep: nodeSmoothstep, vec2, vec3, vec4,
-} = densityTsl || {};
 import {
   BASE_REFERENCE, CLOUD_SHELL_SPECIES, CLOUD_SPECIES,
   CLOUD_TROPOSPHERE_TOP_METERS, MORPHOLOGY, speciesAltitudeBand,
@@ -919,165 +908,4 @@ export function measureCloudFieldCoverage(fields, options = {}) {
     opticalDepthThreshold,
     verticalStepMeters,
   };
-}
-
-// TSL counterpart. The graph samples the SAME baked fields (shape/detail 3D
-// textures + bands atlas) with the same band/shaping arithmetic; it is
-// implemented together with the march in phase 4 (cloud-volume-node.js),
-// where it can be executed and verified on hardware. Until then this stays a
-// documented throw — writing an untestable TSL graph ahead of the march
-// would be exactly the "verify everything at the end" failure mode doc §5
-// constraint 5 forbids. The fp32-emulation test only constrains this CPU
-// reference; the 1% CPU/GPU gate remains open until phase 4 executes the graph.
-export function cloudDensityTSL(position, options = {}) {
-  const {
-    shapeTextureNode,
-    detailTextureNode,
-    jitterTextureNode,
-    bandsTextureNode,
-    speciesMaskNode = null,
-    groundR,
-    shellTopMeters,
-    maxTerrainMeters,
-  } = options;
-  if (!shapeTextureNode || !detailTextureNode || !jitterTextureNode
-      || !bandsTextureNode || !groundR || !shellTopMeters || !maxTerrainMeters) {
-    throw new TypeError('cloudDensityTSL() needs the uploaded cloud texture nodes and dimensions');
-  }
-
-  const radius = position.length().max(1e-6);
-  const direction = position.div(radius);
-  const altitude = radius.sub(groundR);
-  const atlasUv = (() => {
-    const u = atan(direction.z, direction.x).div(TAU).fract();
-    const v = asin(direction.y.clamp(-1, 1)).div(Math.PI).add(0.5).clamp(0, 1);
-    return { u, v };
-  })();
-  const uv = vec2(atlasUv.u, atlasUv.v);
-  const jitter = jitterTextureNode.sample(uv);
-  const terrainMeters = jitter.b.mul(maxTerrainMeters);
-  const shellValid = altitude.greaterThanEqual(0)
-    .and(altitude.lessThanEqual(shellTopMeters.add(2000)))
-    .and(altitude.greaterThanEqual(terrainMeters.sub(1)));
-
-  const bands = CLOUD_SHELL_SPECIES.map((species, layer) => {
-    const value = bandsTextureNode.sample(uv).depth(layer);
-    const enabled = speciesMaskNode
-      ? speciesMaskNode.div(2 ** layer).floor().mod(2).greaterThan(0.5)
-      : float(1).greaterThan(0.5);
-    const present = value.r.greaterThanEqual(SPECIES_WEIGHT_EPSILON * 0.5)
-      .and(enabled);
-    return {
-      species,
-      value,
-      weight: present.select(value.r, float(0)),
-      present,
-    };
-  });
-
-  const familyAmount = (family) => bands
-    .filter((band) => band.species.family === family)
-    .reduce((sum, band) => sum.add(band.weight), float(0));
-  const familyAmounts = {
-    low: familyAmount('low'),
-    mid: familyAmount('mid'),
-    high: familyAmount('high'),
-  };
-
-  const verticalProfile = (morphology, t) => {
-    const above = (edge, feather) => nodeSmoothstep(edge, feather, t);
-    const below = (edge, feather) => float(1).sub(nodeSmoothstep(edge, feather, t));
-    if (morphology === MORPHOLOGY.SHEET) {
-      return above(0, 0.18).mul(below(0.82, 1));
-    }
-    if (morphology === MORPHOLOGY.CELLULAR) {
-      return above(0, 0.22).mul(below(0.75, 1))
-        .mul(float(0.75).add(t.mul(0.25)));
-    }
-    if (morphology === MORPHOLOGY.CAULIFLOWER) {
-      return float(0.35).add(t.mul(0.65))
-        .mul(above(0, 0.15)).mul(below(0.8, 1));
-    }
-    if (morphology === MORPHOLOGY.TOWER) {
-      return float(0.25).add(t.mul(0.75))
-        .mul(above(0, 0.1)).mul(below(0.85, 1));
-    }
-    if (morphology === MORPHOLOGY.WISPY) {
-      return float(0.45).add(above(0, 0.3).mul(below(0.7, 1)).mul(0.4));
-    }
-    if (morphology === MORPHOLOGY.LENS) {
-      return nodePow(sin(t.clamp(0, 1).mul(Math.PI)).max(0), 1.2);
-    }
-    return float(0.55).mul(above(0, 0.12)).mul(below(0.88, 1));
-  };
-
-  const stableCoordinates = (horizontalFeature, verticalStretch) => {
-    const shapedRadius = groundR.add(altitude.mul(verticalStretch));
-    return direction.mul(shapedRadius.div(horizontalFeature * NOISE_TILE_FEATURES));
-  };
-
-  const transmittance = float(1).toVar();
-  const extinctionPerMeter = float(0).toVar();
-  const lowCondensate = float(0).toVar();
-  const upperCondensate = float(0).toVar();
-
-  for (const band of bands) {
-    If(band.present, () => {
-      const { species } = band;
-      const params = MORPHOLOGY_PARAMS[species.morphology];
-      const jitterCoord = stableCoordinates(species.horizontalFeature, 0.31);
-      const fineBase = shapeTextureNode.sample(
-        jitterCoord.add(vec3(0.13, 0, 0))).b
-        .mul(2).sub(1).mul(species.baseJitter * FINE_BASE_JITTER_FRACTION);
-      const fineDepth = shapeTextureNode.sample(
-        jitterCoord.add(vec3(0, 0.57, 0))).a
-        .mul(2).sub(1).mul(species.depthJitter * FINE_DEPTH_JITTER_FRACTION);
-      const base = band.value.g.add(fineBase).max(0);
-      const top = band.value.b.add(fineBase).add(fineDepth)
-        .max(base.add(species.minVerticalFeature * 0.75));
-      const inBand = altitude.greaterThanEqual(base)
-        .and(altitude.lessThanEqual(top));
-      const t = altitude.sub(base).div(top.sub(base).max(1)).clamp(0, 1);
-      const profile = verticalProfile(species.morphology, t);
-
-      const shapeCoord = stableCoordinates(
-        species.horizontalFeature, params.vStretch);
-      const shapeSample = shapeTextureNode.sample(shapeCoord);
-      const worley = shapeTextureNode.sample(
-        shapeCoord.add(vec3(0.31, 0, 0.17))).g;
-      const shapeNoise = nodeMix(shapeSample.r, worley, params.noiseMix);
-      // CPU cloudMediumCPU clamps the summed family condensate before deriving
-      // both formation and the per-species share. Several genera can overlap
-      // in one family, so omitting this clamp changes extinction.
-      const amount = familyAmounts[species.family].clamp(0, 1);
-      const share = band.weight.div(amount.max(1e-6)).clamp(0, 1);
-      const speciesAmount = nodeSmoothstep(
-        FAMILY_CONDENSATE_LOW, FAMILY_CONDENSATE_HIGH, amount).mul(share);
-      const shaped = nodeSmoothstep(
-        SHAPE_FORMATION_LOW, SHAPE_FORMATION_HIGH, shapeNoise).mul(speciesAmount);
-      const detailCoord = stableCoordinates(
-        species.horizontalFeature / 3.7, params.vStretch);
-      const detail = detailTextureNode.sample(
-        detailCoord.add(vec3(0.11, 0, 0))).r;
-      const rawDensity = shaped.mul(profile);
-      const eroded = rawDensity.sub(detail.mul(params.erosion)
-        .mul(float(1).sub(rawDensity)).mul(float(1).sub(profile.mul(0.5))))
-        .clamp(0, 1);
-      const condensate = inBand.and(profile.greaterThan(1e-3))
-        .and(shaped.greaterThan(1e-3)).and(shellValid)
-        .select(eroded.mul(params.peak), float(0));
-      transmittance.mulAssign(float(1).sub(condensate));
-      extinctionPerMeter.addAssign(
-        condensate.mul(species.extinctionPerKm / 1000));
-      if (species.family === 'low') lowCondensate.addAssign(condensate);
-      else upperCondensate.addAssign(condensate);
-    });
-  }
-
-  return vec4(
-    float(1).sub(transmittance).clamp(0, 1),
-    extinctionPerMeter.max(0),
-    lowCondensate.clamp(0, 1),
-    upperCondensate.clamp(0, 1),
-  );
 }

@@ -1,4 +1,4 @@
-// Cloud-field resource ownership for the WebGPU rewrite (phase 4 A0).
+// Cloud-field resource ownership (phase 4 A0).
 //
 // The CPU bake is worker-owned and cancellable. GPU upload is spread across
 // animation frames, resource generations are tokened, and dynamic
@@ -7,7 +7,7 @@
 // and a prepared portal destination without either system owning the other's
 // textures.
 
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 import {
   cloudFieldByteLength, hydrateCloudFields,
 } from './cloud-density.js';

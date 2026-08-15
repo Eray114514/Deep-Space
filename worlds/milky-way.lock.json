@@ -38,12 +38,12 @@
       "0,0,0": {
         "planet-0": {
           "radiusMeters": 6000000,
-          "atmosphereHeightMeters": 120000,
+          "atmosphereHeightMeters": 630000,
           "cloudCoverage": 0.64,
           "weatherStyle": "temperate-synoptic",
           "cloudLayer": {
-            "minAltitudeMeters": 400,
-            "maxAltitudeMeters": 14000
+            "minAltitudeMeters": 230000,
+            "maxAltitudeMeters": 420000
           },
           "clouds": {
             "coverage": 0.64,
@@ -19589,12 +19589,12 @@
     "bodyId": "planet-0",
     "tuning": {
       "radiusMeters": 6000000,
-      "atmosphereHeightMeters": 120000,
+      "atmosphereHeightMeters": 630000,
       "cloudCoverage": 0.64,
       "weatherStyle": "temperate-synoptic",
       "cloudLayer": {
-        "minAltitudeMeters": 400,
-        "maxAltitudeMeters": 14000
+        "minAltitudeMeters": 230000,
+        "maxAltitudeMeters": 420000
       },
       "clouds": {
         "coverage": 0.64,
@@ -19618,5 +19618,5 @@
       "diagonalXYZ": 2348.6210250928566
     }
   },
-  "fingerprintSha256": "6aa8d97ed349f405433f0468054a807c28f161f77ef5a0d34de1aa9d7fb83772"
+  "fingerprintSha256": "1a50259f54357eacf0b1e492c4c231812a9d1f7ebc3b2db0361308e2d98ccae4"
 }

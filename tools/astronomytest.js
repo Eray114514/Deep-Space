@@ -16,17 +16,15 @@ const homeTuning = resolveBodyTuning({
 });
 assert.equal(homeTuning.radiusMeters, 6000000,
   'the curated home radius is an explicit terrestrial-scale tuning');
-assert.equal(homeTuning.atmosphereHeightMeters, 120000,
-  'the physical atmosphere remains thin relative to the curated radius');
-// cloudLayer is the render-shell ENVELOPE, not a cloud base. The actual base
-// is the per-point lifting condensation level baked into the weather atlas, so
-// the shell only has to span every family: lowest marine stratus at the floor,
-// cirrus tops at the ceiling. The former 2000 m floor was consumed as one
-// global cloud base, which is what put the whole deck just overhead.
+assert.equal(homeTuning.atmosphereHeightMeters, 630000,
+  'the home atmosphere restores the pre-rewrite limb proportion (~10.5% of R)');
+// cloudLayer pins the floating-deck shell at the pre-rewrite proportions on
+// the 6,000 km body (base ≈ 3.8% R, top ≈ 7% R), matching the legacy WebGL
+// chain the project is aligned against.
 assert.deepEqual(homeTuning.cloudLayer, {
-  minAltitudeMeters: 400,
-  maxAltitudeMeters: 14000,
-}, 'the cloud shell spans marine stratus bases through cirrus tops');
+  minAltitudeMeters: 230000,
+  maxAltitudeMeters: 420000,
+}, 'the cloud shell floats clear of the surface like the pre-rewrite deck');
 assert.equal(homeTuning.cloudCoverage, 0.64,
   'the home world retains synoptic-scale cloud coverage rather than a sparse film');
 assert.deepEqual(resolveBodyTuning({
@@ -37,7 +35,7 @@ const labTuning = resolveBodyTuning({
   worldLabParams: new URLSearchParams('system=0,0,0&body=planet-0&sea=-610&clouds=0.58'),
 });
 assert.equal(labTuning.radiusMeters, 6000000);
-assert.equal(labTuning.atmosphereHeightMeters, 120000);
+assert.equal(labTuning.atmosphereHeightMeters, 630000);
 assert.equal(labTuning.seaLevelOffset, -610);
 assert.equal(labTuning.cloudCoverage, 0.58);
 

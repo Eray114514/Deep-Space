@@ -1,31 +1,32 @@
-// Renderer-specific natural material facade. The authored WebGL shaders stay
-// intact while the WebGPU/TSL port is validated in its explicit experiment.
-import { rendererParamsForSettings, resolveGraphicsSettings } from './graphics-settings.js';
-import { resolveRendererPolicy } from './renderer-policy.js';
+// WebGL 2 baseline: the authored natural-material shader deck in
+// shaders-webgl.js is the only implementation. The TSL port (shaders-node.js)
+// was shelved with the WebGPU line — see git history and
+// docs/optimization-roadmap.md (2026-08-15 decision).
+//
+// The apply* wrappers below are load-bearing: the WebGL appliers mutate the
+// material in place and may return undefined, so the facade guarantees the
+// caller always gets a material back.
+import {
+  TIME, GROW, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
+  detailTexture, disposeDetailTexture, cloudDensityCPU, cloudBaseDensityCPU,
+  applyTerrainDetail as applyTerrainDetailImpl,
+  applyWaterWaves as applyWaterWavesImpl,
+  applyCloudField as applyCloudFieldImpl,
+  applyWindSway as applyWindSwayImpl,
+} from './shaders-webgl.js';
 
-const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
-const settings = resolveGraphicsSettings({ params: params || new URLSearchParams() });
-const useNodeMaterials = resolveRendererPolicy(rendererParamsForSettings(settings,
-  params || new URLSearchParams())).backend === 'webgpu';
-const implementation = await import(useNodeMaterials ? './shaders-node.js' : './shaders-webgl.js');
-
-export const TIME = implementation.TIME;
-export const GROW = implementation.GROW;
-export const WIND = implementation.WIND;
-export const setWeatherWind = implementation.setWeatherWind;
-export const tickShaders = implementation.tickShaders;
-export const sampleDetailCPU = implementation.sampleDetailCPU;
-export const detailTexture = implementation.detailTexture;
-export const disposeDetailTexture = implementation.disposeDetailTexture;
-export const cloudDensityCPU = implementation.cloudDensityCPU;
-export const cloudBaseDensityCPU = implementation.cloudBaseDensityCPU;
+export {
+  TIME, GROW, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
+  detailTexture, disposeDetailTexture, cloudDensityCPU, cloudBaseDensityCPU,
+};
 export const applyTerrainDetail = (material, ...args) =>
-  implementation.applyTerrainDetail(material, ...args) || material;
+  applyTerrainDetailImpl(material, ...args) || material;
 export const applyWaterWaves = (material, ...args) =>
-  implementation.applyWaterWaves(material, ...args) || material;
+  applyWaterWavesImpl(material, ...args) || material;
 export const applyCloudField = (material, ...args) =>
-  implementation.applyCloudField(material, ...args) || material;
-export const applyNoctilucentField = (material, ...args) =>
-  implementation.applyNoctilucentField?.(material, ...args) || material;
+  applyCloudFieldImpl(material, ...args) || material;
 export const applyWindSway = (material, ...args) =>
-  implementation.applyWindSway(material, ...args) || material;
+  applyWindSwayImpl(material, ...args) || material;
+// No WebGL noctilucent field: the identity fallback keeps the caller's
+// material untouched, exactly as the old facade did on the WebGL path.
+export const applyNoctilucentField = (material) => material;
