@@ -1,5 +1,7 @@
 # 深空 · Deep Space
 
+**简体中文** | [English](./README.en.md)
+
 <p align="center">
   <a href="https://dp.eray.top"><img src="docs/hero.jpg" alt="深空 · Deep Space"></a>
 </p>
