@@ -1,5 +1,12 @@
 # 阶段 4 — 体积 march 与光照（写实）专项实施文档
 
+> ⛔ **[2026-08-15 停牌] 随云/大气 WebGPU 重写计划整体封存,不再按原文执行**(见 `cloud-atmosphere-rewrite.md` 顶部声明与 `optimization-roadmap.md` 决策日志)。**活跃任务规格以 `optimization-roadmap.md` 批次 B(2.2/2.8)为准**——载体 `clouds-webgl.js`/`atmosphere-webgl.js`/`legacy-render-pipeline.js`,增量演进;本文档降级为体积 march/光照的算法与验收参考档案。
+>
+> **归档使用指引(哪些仍有效/哪些已死):**
+> - ✅ **仍然有效,实施时直接复用**:§1 光照架构与来源复审(双叶 HG/多八度近似/phi_fwd 实验门控)、§1.2 锥形自阴影参数、§1.3 高空薄云独立路径、§2 HP 形态映射表(全部与着色语言无关)、§4 四机位/找茬/盲评/照片盲测协议、§6 验证记录(历史证据)。CPU 侧资产未随 TSL 线删除:`src/cloud/` 的 `cloud-density.js`/`cloud-occupancy.js`/`cloud-species.js`/`cloud-resource-manager.js`/`cloud-field-worker.js`/`weather-system.js` 仍在生产与 `npm test` 中,§0 接口表对应行继续有效。
+> - ❌ **已死,不得执行**:§0 硬约束第 1 条(禁止 GLSL——已反转);§3 标题与正文的 TSL/`cloud-volume-node.js`/`node-render-pipeline.js`/`volume-depth-node.js` 载体;§0 接口表的 `cloudDensityTSL` 与 `temporal-policy.js`/`temporal-resolve.js` 两行(文件已删除);§5 A 组复选框的"完成"仅指已删除的 WebGPU 线,B/C/D 未开工且不得按 TSL 载体开工。
+> - 🔄 **载体转换对照**(若在 GLSL 链重新实施写实 march):`cloudDensityTSL()` → GLSL 采样函数(直接消费同一套烘焙 3D 纹理,WebGL2 原生支持 `sampler3D`);`cloud-volume-node.js` → `clouds-webgl.js` 或新 `cloud-volume-webgl.js` 内的 `ShaderMaterial`;`node-render-pipeline.js` 接线 → `legacy-render-pipeline.js` 体积 pass + `WebGLRenderTarget.depthTexture`;`volume-depth-node.js` 的遮挡截断 → 同一 depth texture 的场景射线限深;WebGPU readback 一致性验证 → WebGL2 `readPixels`;`queue.writeTexture` 分帧上传 → `texSubImage3D`;WebGPU 设备丢失恢复 → `webglcontextlost/restored`。
+
 > **状态（2026-08-10）：A“基建与 march 骨架”已完成；B 光照、C 形态与 D 最终验收未完成。** 本文档是阶段 4 的唯一权威细节来源；阶段 2 的旧“已完成”前提、静态屏幕 hash 和未经验证的 phi_fwd“直落”结论均已撤销。
 > **上下文压缩后读这里就够了**：§0 给了你继续实施所需的全部接口与常数，不需要去读旧云实现，也不需要回头读主文档全文（主文档 §8 的光照推导本节会引用到具体条目，用到再查）。
 
@@ -7,7 +14,7 @@
 
 ## 0. 上下文（开工前必读）
 
-**项目**：Three.js WebGPU 太空游戏，`D:\Eray0\Documents\_GitRES\Game\深空`。阶段 0/1 完成；阶段 2 连续运动失败并入阶段 7；阶段 3 已由 A2 的真实 WebGPU readback 闭环。阶段 4 当前只完成 A，不能据此宣称写实云或完整阶段 4 已完成。
+**项目**：Three.js 太空游戏，`D:\Eray0\Documents\_GitRES\Game\深空`(重写期为 WebGPU/TSL 线,该线已于 2026-08-15 删除;现生产基准 WebGL 2/GLSL)。阶段 0/1 完成；阶段 2 连续运动失败并入阶段 7；阶段 3 已由 A2 的真实 WebGPU readback 闭环。阶段 4 当前只完成 A，不能据此宣称写实云或完整阶段 4 已完成。
 
 **阶段 4 在重写中的位置**：阶段 1 建了天气体系；阶段 3 现在提供 CPU 介质、图集、占用体与采样计划。**阶段 4 先补齐资源所有权和 TSL/GPU 一致性，再把云真正画出来**：GPU 体积 march + 写实光照。失败既可能是数值/所有权错误，也可能是观感错误，因此必须同时经过硬件数值闸门、多条件截图评审和用户实机验收。
 
@@ -16,18 +23,18 @@
 | 接口 | 位置 | 用途 |
 |---|---|---|
 | `createCloudFields(system, options)` | cloud-density.js | 烘焙全部随机输入：shape RGBA 3D（fbm/worley/两条精细抖动车道）、detail R 3D、jitter 2D（区域抖动/地形）、bands 图集（14 壳内云种 × RGBA=weight/base/top/1） |
-| `cloudMediumCPU(...)` / `cloudDensityCPU(...)` / `cloudDensityTSL(...)` | cloud-density.js | CPU 介质参考与同一烘焙纹理驱动的 TSL 实现；A2 已用真实 WebGPU 固定切片和随机点 readback 闭环 |
+| `cloudMediumCPU(...)` / `cloudDensityCPU(...)` / ~~`cloudDensityTSL(...)`~~ | cloud-density.js | CPU 介质参考与同一烘焙纹理驱动的 GPU 采样(~~TSL 实现已随 WebGPU 线删除~~;GLSL 链实施时按顶部载体转换对照重写采样函数)；A2 曾用真实 WebGPU 固定切片和随机点 readback 闭环 |
 | `measureCloudFieldCoverage()` / `cloudFieldByteLength()` | cloud-density.js | 验收最终光学覆盖率与资源字节数，不能再只看天气代理或估算 |
 | `buildOccupancyVolume(fields, options)` | cloud-occupancy.js | 占用体（128×64×32 生产规格） |
 | `clipRayToOccupancy(occupancy, origin, dir)` | cloud-occupancy.js | 精确球面 DDA，返回占用段序列（tEnter/tExit/segments），null = 晴空射线零采样 |
 | `planRayMarch(clip, origin, dir)` | cloud-occupancy.js | 逐段步长计划。GPU march 照它走：段内固定步长、段间跳过 |
-| `createTemporalPolicy()` / `createTemporalResolve()` | temporal-policy.js / temporal-resolve.js | 失败原型，生产默认禁用；本阶段不得打开，阶段 7 统一 TAA/history 时再评估可复用部分 |
+| ~~`createTemporalPolicy()` / `createTemporalResolve()`~~ | ~~temporal-policy.js / temporal-resolve.js~~(两文件已随 TSL 线删除) | 失败原型，生产默认禁用；结论仍然有效:无光流补偿的局部累积在连续运动下不可用,TAA/history 统一归后续批次决策 |
 | `MORPHOLOGY_PARAMS` / `CLOUD_SPECIES` | cloud-density.js / cloud-species.js | 7 种形态参数（noiseMix/vStretch/erosion/peak）+ 16 云种表（extinctionPerKm 等光学参数在这里） |
 
 **关键常数**：壳内最薄特征 400 m → 安全步长 80 m（/5 规则）；云种最坏壳顶 14940 m，实例 fields 再包含地形/细抖动上界；`GRAZING_COS_FLOOR = cos85°`；占用体对图集保守。**4 个样本只是防漏采底线，不是最终画质档。**
 
 **硬约束**：
-- WebGPU 主线只用 TSL/NodeMaterial，禁止 GLSL ShaderMaterial / onBeforeCompile。
+- ~~WebGPU 主线只用 TSL/NodeMaterial，禁止 GLSL ShaderMaterial / onBeforeCompile。~~ **[2026-08-15 已反转:GLSL `ShaderMaterial`/`onBeforeCompile` 是唯一实现路径(AGENTS.md 渲染后端);WebGPU/TSL 线已从工作树删除,本条为存档,不得执行]**
 - **时域累积器当前默认禁用（2026-08-06）**：阶段 2 的局部累积器在真实大幅连续转镜下会把整颗星球变成噪点幕。**本阶段全程关闭。** 阶段 7 的全屏 TAA 是运动稳定性的必做项；体积 history 是否用于采样摊薄则必须由质量/性能实测决定。
 - **大气只是确定性临时版，不是“不闪”基线**：`planet.js makeAtmosphereMaterial` 已移除 frame jitter，每视线步做 4 子步太阳 OD，双星+日食接口保留；三档视线步已临时抬到 16。但固定步数仍可能欠采样掠射光程，大气仍与云共用 0.46× pass，所以阶段 4 的运动验收必须能单独开关大气并做光流补偿对照。阶段 5 负责最终 LUT/自适应积分和全分辨率轮廓。
 - 全 0/全绿的数值指标不等于成功，必须配合多条件截图和用户实机评估。
@@ -37,9 +44,9 @@
 - 云场在 worker 生成，任务带 planet/generation token，可取消；主线程只调度和分帧上传，不能承受当前默认场约 5.8 s 的同步生成。
 - 2026-08-10 当前生产规格三种子实测 CPU 44.53 MiB/行星、GPU 44.50 MiB/行星，worker 冷生成 5.87–5.97 s。常态一个活动行星；门户/跃迁可短暂保留当前+目标两个，handoff 后 2 帧内释放旧 GPU 纹理与 CPU 缓存。
 - shape/detail 在一代云场内不可变；随天气时间更新的 bands/occupancy 使用双缓冲、同一时间戳原子交换，禁止一帧混用新 bands 与旧 occupancy。
-- 冷生成、缓存命中、取消、切星、WebGPU 设备丢失与 dispose 都要有测试/遥测；上传单帧额外预算 ≤ 4 ms，实测不达标就切片上传。
+- 冷生成、缓存命中、取消、切星、设备丢失(GLSL 链为 `webglcontextlost/restored`)与 dispose 都要有测试/遥测；上传单帧额外预算 ≤ 4 ms，实测不达标就切片上传(WebGL2 用 `texSubImage3D` 分片)。
 
-**用户对本阶段的总要求**：画质优先（R1），目标 AAA 写实；性能在保证写实的前提下优化（阶段 7 才正式调性能）。本地 `HPVolumeCloud-main` 是无 `.git` 历史/远端可核验的 MIT 参考包，形态代码可作候选，但不能称为已验证成熟上游；任何光照公式都必须经过来源、量纲、能量和参考图像闸门，绝不是“唯一转换 HLSL→TSL”。
+**用户对本阶段的总要求**：画质优先（R1），目标 AAA 写实；性能在保证写实的前提下优化（阶段 7 才正式调性能）。本地 `HPVolumeCloud-main` 是无 `.git` 历史/远端可核验的 MIT 参考包，形态代码可作候选，但不能称为已验证成熟上游；任何光照公式都必须经过来源、量纲、能量和参考图像闸门，绝不是“唯一转换 HLSL→GLSL”。
 
 ---
 
@@ -91,23 +98,23 @@ B_eff = C_top · C_bottom       # 边界置信度
 | **BottomSmooth**（`_HP_BottomSmoothHeight`/`Pow`） | 云底软化（底部 N 米内密度 pow 渐出） | 所有低云族的 `VERTICAL_PROFILES` 底部段。现在 profile 底部 smoothstep 窗口是拍的，换成 HP 的 height+pow 形式并进形态参数 |
 | **LoCoverTop**（`_HP_LoCoverTop*`） | coverage 高时**云顶压扁**（高度压缩最大倍率 + pow 曲线）——层积云大爆发的真实形态 | 低云族密度求值：band.top 按 coverage 压缩，C4 反同质化 |
 | **分云种侵蚀强度**（`_HP_DetailStrengthCu/Tcu/Cb`） | 淡积云/浓积云/积雨云各自的细节侵蚀 | `MORPHOLOGY_PARAMS.erosion` 已有等价物，按 HP 的相对关系校准 CAULIFLOWER/TOWER 的取值 |
-| **高空云独立光照** | 见 §1.3 | cloud-volume-node.js 分支 |
+| **高空云独立光照** | 见 §1.3 | ~~cloud-volume-node.js~~(已删除)→ `clouds-webgl.js` 高云族分支 |
 
 **不在本轮抄的**：`_HP_WeatherMap*`（它的天气图是美术刷的，我们的天气体系更强）、`_HP_Billowy/WispyLowStr/HighStr` 全局强度旋钮（我们的形态参数已覆盖）。
 
 ---
 
-## 3. 体积 march 结构（TSL）
+## 3. 体积 march 结构（原 TSL 载体,已停牌;GLSL 转换对照见顶部横幅）
 
-新文件 `src/cloud/cloud-volume-node.js`（骨架已在），接线到 `node-render-pipeline.js` 体积 pass：
+原方案为新文件 `src/cloud/cloud-volume-node.js` 接线 `node-render-pipeline.js` 体积 pass——**两者均已随 WebGPU 线删除**。GLSL 链等价落法:在 `clouds-webgl.js`(或新 `cloud-volume-webgl.js`)的 `ShaderMaterial` 中实现 march,接线 `legacy-render-pipeline.js` 体积 pass。以下结构设计本身与后端无关,继续有效:
 
 1. **射线参数化**：相机出发，行星相对坐标（复用 temporal-resolve 的相机相对约定，避免 fp32 大坐标）。
 2. **求交与裁剪**：球壳求交 → `clipRayToOccupancy` 等价物的 GPU 版。占用体作为 3D 纹理上传，GPU 侧 DDA 走格子。注意 CPU 版是精确解析求交，GPU 版可以用固定小步长走格（占用格 ~295km×440m，走格成本可忽略），但必须同样**最近体素查找**（skip 决策不插值，这是 C1 保守方向）。
-3. **段内 march**：按 `planRayMarch` 的逐段步长；密度采样调 `cloudDensityTSL()`。先以 /5 安全档运行，再做 4/6/8/12 samples-per-feature 收敛阶梯；正式质量档必须与下一高档在四场景、多种子运动序列中无实质可见收益，不能因为“≥4”就停止。
+3. **段内 march**：按 `planRayMarch` 的逐段步长；密度采样调 GPU 采样函数(原 `cloudDensityTSL()`,GLSL 链按载体转换对照重写)。先以 /5 安全档运行，再做 4/6/8/12 samples-per-feature 收敛阶梯；正式质量档必须与下一高档在四场景、多种子运动序列中无实质可见收益，不能因为“≥4”就停止。
 4. **光照**：每采样点一次太阳方向 march（§1.1/§1.2 合并路径）+ 三项叠加（§1）。
 5. **合成**：与大气共享深度/辐射度约定与最终合成，但不共享 march 或低分辨率轮廓源缓冲（大气是阶段 5 的事）；输出直通 alpha，不二次预乘。
 6. **时域**：本阶段不打开 history 或帧序 jitter；默认用每占用段的中点/确定性求积。任何空间 hash 都是需要运动 A/B 的候选，不是必选。运动向量、TAA 与体积 history 统一留给阶段 7。
-7. **深度**：`volume-depth-node.js` 的 `sceneRayLimit` 截断不透明遮挡；地形遮挡由它管，占用体的 terrain 列只是 clip 加速器。
+7. **深度**：~~`volume-depth-node.js` 的 `sceneRayLimit`~~(已删除;GLSL 链用 `legacy-render-pipeline.js` 的 depth texture 做同一截断)截断不透明遮挡；地形遮挡由它管，占用体的 terrain 列只是 clip 加速器。
 
 **地球阴影/日食**：太阳方向 march 的光源可见度接入现有日食系统（astronomy.js 的 eclipse 数据在 main.js 已有接线）。
 
@@ -199,10 +206,12 @@ S1 并行跑照片盲测。
 
 ## 5. 实施步骤（复选框，按顺序勾）
 
-**A. 基建与 march 骨架**
+> **[2026-08-15 停牌注]** A 组复选框的"完成"指**已删除的 WebGPU/TSL 线**上的历史完成(证据见 §6 与 git 历史),其载体文件(`cloud-volume-node.js` 等)已不在工作树;B/C/D 从未开工,且不得按 TSL 载体开工——若在 GLSL 链重新实施写实体积云,按顶部载体转换对照重写后,以 `optimization-roadmap.md` 批次 B 的验收标准重新走闸门,不得沿用本表勾选状态。
+
+**A. 基建与 march 骨架**(已完成于已删除的 WebGPU 线,存档)
 - [x] A0 云场 worker/token/cache/upload/dispose 生命周期与每行星 CPU/GPU 字节遥测落地；bands/occupancy 原子双缓冲；切星/取消/设备丢失测试通过
 - [x] A1 重写 `tools/cloudvisualdiag.js`：按 §4.1 四机位、多种子/时刻截图（太阳方位可参数化）
-- [x] A2 `cloudDensityTSL()` 落地；真实 WebGPU 固定切片 + 随机点 readback 与 CPU 介质误差 < 1%，不是只跑 fp32 CPU 仿真
+- [x] A2 ~~`cloudDensityTSL()`~~(TSL 实现已删)落地；真实 WebGPU 固定切片 + 随机点 readback 与 CPU 介质误差 < 1%，不是只跑 fp32 CPU 仿真
 - [x] A3 GPU 占用体 DDA + 段内 march 骨架（单散射、无光照）；4/6/8/12 采样收敛阶梯记录，四机位能认出体积结构
 
 **A 阶段边界（2026-08-10）**：当前是确定性、无 history/frame jitter 的 Beer 消光 + 无方向光占位辐亮度骨架；截图能看到 S1–S4 的占用高度带、壳内厚度与空间分布，但平灰厚云、硬轮廓和近场块感仍明显。它们是 B 光照与 C 形态的开放项，**A 的完成不等于五维画质评审通过，更不等于阶段 4 完成**。近场 S1/S2 的 8→12 档仍有可见差异，最终质量档保持开放；S3/S4 已基本收敛。

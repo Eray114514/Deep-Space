@@ -1,16 +1,30 @@
 # 深空 优化路线图
 
-> ⚠️ 重要说明:本文档记录基于用户痛点整理的全面优化方案。核心原则:**以 WebGPU 为唯一基准全面重构,接受宇宙锁重做**。所有新着色器/材质/后处理一律用 TSL/NodeMaterial 编写,不再写 GLSL。既然母星要单星、半径要放大、noise/height 要改,锁一定会失效,那就放开手按子系统全面优化,最后一次性 re-curation,不被"不破坏锁"束缚。
+> ⚠️ **[2026-08-15 基准翻转] WebGL 2 / GLSL 是唯一画质与架构基准。WebGPU/TSL 线停牌封存并已从工作树删除**（`?renderer=webgpu` 仅作解析到 WebGL2 的兼容别名，不进入 WebGPU）。本文档下方所有"以 WebGPU 为唯一基准""用 TSL/NodeMaterial 编写"的历史表述,一律按新基准理解为:**在 `legacy-render-pipeline.js` + `*-webgl.js` GLSL 链上实现,对齐 51c7c11 老版观感契约**。参考项目(HPVolumeCloud/wlBXWK/fable5 等)中 GLSL 项目可直接借鉴;WebGPU/TSL 项目只借鉴算法层,在 GLSL 重新落地。停牌详情与重启条件见 7.4 决策日志 2026-08-15 条。
+>
+> 原 WebGPU 云/大气重写计划已分离至 `cloud-atmosphere-rewrite.md`,该计划随基准翻转整体停牌,其痛点清单(云谱系、大气质量)后续在 GLSL 链上重新实施。
 
-**最终目标:WebGPU 完美运行,视觉质量全面提升,WebGL2 作为兜底但不追求像素等价。**
+> ⚠️ 重要说明:本文档记录基于用户痛点整理的全面优化方案。核心原则:**全面重构,接受宇宙锁重做**。
+
+**最终目标:WebGL 2/GLSL 链上视觉质量全面提升,恢复并超越老版(51c7c11)观感契约。WebGPU 停牌封存。**
 
 > **2026-07-27 用户补充的执行原则**:本轮已经明确接受宇宙锁失效,因此不能把“只做最小修复”当优点。只要不提前侵入后续批次 B/C/D/E 的所有权,A 内与地形、海面、行星视觉尺度、海洋世界多样性直接相关的高质量扩展都应主动发散并落地;**可验证的自由发挥越多越好**。数值契约和自动截图只负责防回归,不能代替用户对真实玩家画面的验收。
 
 > **2026-07-28 玩家实机验收结论**:撤销 A、B 的“已完成”状态。自动合同、固定夹具和隔离截图只能证明代码路径存在,不能替代连续轨道下降的最终画面。实机在约 136.7 km 与 52.2 km 明确暴露:轨道地形多边形化、方形 LOD 分块边界、海陆黑线/黑区、平面且无深浅的水、重复水纹和假尾流、云片而非真实体积、卫星阴影错误置顶、蓝色天空/大气覆盖不透明地形、尚未到云层便整屏突变为蓝色,以及天气/降水缺乏可信完成度。B 视为未完成并从架构层删除重写;A 保留已确认的尺度和内容合同,但视觉部分重新验收。
 
+> **2026-8-15 补充**:大气与云的重构已经移植到cloud-atmosphere-rewrite.md文档内，分离为单独的分立任务。
+
 ---
 
-## 当前 WebGPU 迁移状态（基线 c4e1f0d）
+## WebGPU 迁移停牌记录（基线 c4e1f0d；2026-08-15 起停牌）
+
+> **[2026-08-15 追加决策] WebGPU/TSL 代码已从工作树删除**：所有 `*-node.js`/TSL 模块
+> （含 `node-render-pipeline.js`、`flora-system.js`、`cloud/` 下的 node/temporal 文件、
+> `cloudDensityTSL`）、`vendor/three.webgpu.js`/`three.tsl.js`、实验页
+> （`renderlab`、`natural-material-lab`）及其测试均已移除；`?renderer=webgpu` 现在
+> 只是解析到 WebGL2 的兼容别名。最后可运行状态留档于本提交之前的 git 历史。
+> 同批恢复：地表/远景植被（`scatter.js`/`farflora.js` 经典 InstancedMesh 链，
+> `SCATTER_ENABLED`/`FAR_FLORA_ENABLED = true`，下表"植物抖动"问题随 TSL 删除而不存在）。
 
 WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是代码覆盖率判断,不能代表视觉完成度。2026-07-28 实机验收证明体积层、深度合成、地形/海面 LOD 仍有架构级错误。以下问题必须以最终连续画面重新验收:
 
@@ -23,10 +37,10 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 | SMAA 抗锯齿缺失 | WebGPU 路径只靠 MSAA | 批次 D:收尾打磨 |
 | parity gate 阈值太松 | mean<35/changed<75% 仅能抓黑屏级故障 | 不再需要——双后端不追求像素等价 |
 | 抬头地面变黑(已修复) | normalNode 用 tangent-space (gx,gy,1) 而非 TBN+transformNormalToView | 已修复 |
-| 植物抖动 + 发光植物缺失(已禁用,待重做) | TSL `positionLocal` 不含 instanceMatrix → 所有实例同步摆动(地震感);`GROW.value`/`uAltK` 每帧变化 → 顶点偏移幅度抖动;`MeshStandardNodeMaterial` 构造未传 `emissive`/`emissiveIntensity`,`vertexColors` 时未设 `emissiveNode` → 发光植物丢失。曾尝试修复(phase 基于 positionLocal、grow 只调幅度、构造传 emissive)但根因是 TSL 节点图无法访问 instanceMatrix,修补无效。**决定:地表植物(树/草/外星植物/远景 proxy tree)全部禁用,批次 C 完全重做。** `src/scatter.js` 和 `src/farflora.js` 的 `setPlanet` 直接 return,代码保留供参考。 |
+| 植物抖动 + 发光植物缺失(**已随 TSL 删除而解决,2026-08-15**) | TSL `positionLocal` 不含 instanceMatrix → 所有实例同步摆动(地震感);`GROW.value`/`uAltK` 每帧变化 → 顶点偏移幅度抖动;`MeshStandardNodeMaterial` 构造未传 `emissive`/`emissiveIntensity`,`vertexColors` 时未设 `emissiveNode` → 发光植物丢失。根因是 TSL 节点图无法访问 instanceMatrix,修补无效。**最终决定:删除 TSL 植物线,恢复 `scatter.js`/`farflora.js` 经典 InstancedMesh 实现(WebGL 基准下 instanceMatrix/GLSL 风动链完整),`SCATTER_ENABLED`/`FAR_FLORA_ENABLED = true`,headless 实测草地满密度恢复。** | 已解决(基准翻转) |
 | ~3300m 掉帧至 1fps | A 的 2K/800m WebGPU 动态低空复测稳定 **39–40 FPS、0 长帧**,未再出现 1 FPS 悬崖;功能隔离显示主预算在地形主通道,不是 A 新水面、阴影、体积云或后处理 | A 已记录证据;C 恢复并重做植物后再复核 farflora |
 
-**策略说明**:既然要重写大气/云/水体/地形,这些迁移遗留会在重构中自然解决,不需要单独修。WebGL2 (`*-webgl.js`) 作为兜底保留,但不再维护视觉等价。
+**策略说明[已翻转]**:下表为停牌时的遗留问题存档,仅当 WebGPU 线将来重启时才需要参考。`*-webgl.js` 是生产实现本体。
 
 ---
 
@@ -42,7 +56,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 > **2026-07-27 实证**:批次 A 的根因验证已完成,**5 条推测中 3 条被数据推翻**(LOD 采样不足 / GRAD 方向性 bias / belt 硬边界),另有 2 个"候选修法"在 A/B 中被证伪(GRAD 扩表、smooth-abs crest)。初版 `ridged` 淡入把半淡入信号写回 weight 反馈链,曾恶化 62.5%;保持反馈链完整、只同步淡入可见贡献与归一化项后反而改善 94.1%。**这正是本节警告的情形,后续批次务必同等对待。** 验证工具与全部数据见 2.1 / 2.3。
 
-**技术基准**:所有着色器/材质用 TSL/NodeMaterial 编写(three/webgpu),目标是 WebGPU 原生运行。不再写 GLSL ShaderMaterial 或 onBeforeCompile 注入。
+> **技术基准[2026-08-15 翻转]**:所有着色器/材质用 GLSL(`ShaderMaterial`/`onBeforeCompile`)在 WebGL 2 链上编写,对齐老版观感。原"用 TSL/NodeMaterial 编写(three/webgpu)"的要求作废;`*-webgl.js` 模块就是实现载体,不再是"兜底"。
 
 ---
 
@@ -149,7 +163,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 ## 二、子系统优化方向
 
-> **技术基准**:所有新着色器/材质用 TSL/NodeMaterial 编写(three/webgpu)。不再写 GLSL ShaderMaterial 或 onBeforeCompile 注入。现有 `*-webgl.js` 模块作为 WebGL2 兜底保留,但重构以 WebGPU/TSL 为主。
+> **技术基准[2026-08-15 翻转]**:所有新着色器/材质用 GLSL 编写,`*-webgl.js` 模块就是实现载体。原"用 TSL/NodeMaterial、`*-webgl.js` 作兜底"的要求作废。
 
 ### 任务批次拆分
 
@@ -158,7 +172,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 | 批次 | 子系统 | 绑定原因 | 依赖 |
 |---|---|---|---|
 | **A** | 2.1 地形 LOD 与噪声 + 2.3 水体(海面 LOD) | LOD 调度共享 quadtree,太空看海洋远看效果假是 LOD 在海面的表现;地形 height() 和海面必须一起改 | 无(基础批次) |
-| **B** | 2.2 光照大气 + 2.8 天气(云) | 大气散射和体积云共享深度纹理/后处理链/光照统一;云的参差形态不足无法应对天气系统,需深度重写;大气也要更 WebGPU 化 | 批次 A(地形/海面提供深度) |
+| **B** | 2.2 光照大气 + 2.8 天气(云) | 大气散射和体积云共享深度纹理/后处理链/光照统一;云的参差形态不足无法应对天气系统,需在 GLSL 链上增强;~~大气也要更 WebGPU 化~~ → 大气/云均以 `atmosphere-webgl.js`/`clouds-webgl.js` GLSL 链为载体增量演进(2026-08-15 重锚) | 批次 A(地形/海面提供深度) |
 | **C** | 2.4 植被与材质 + 2.6 星环 + 2.5 星系 | 植被材质依赖地形;星环材质独立;星系参数(radius/binary)独立但 re-curation 时一起 | 批次 A(地形) |
 | **D** | 2.7 音效 + 后处理打磨(SMAA/parity gate 调优) + re-curation | 音效独立;后处理打磨依赖所有视觉子系统完成;re-curation 最后一次性做 | 批次 A/B/C |
 | **E** | 2.9 人类工程:城市巨构重做 + 飞船仓库与开局流程 | 同属"人类工程"主题:核心城市、浮空城市、开局空间站仓库共享模块化巨构几何与材质体系;开局空间站本身就是一个 orbital station,与城市巨构同源 | 批次 A(地形/海面提供降落点) |
@@ -270,7 +284,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 - 新增至少一个确定的近全海洋世界（少量群岛/大陆架,不是全水球）,定义独立海况、深度与色谱,并让 `sysview` 的真实行星预览一眼可辨。
 - 在不侵入 B/C/D/E 所有权的前提下,允许继续加入有验证证据的 A 级扩展;实现清单不是上限。
 
-**参考项目**:fable5(算法可抄,**TSL/NodeMaterial 重写**,不用 compute shader)
+**参考项目**:fable5(WebGPU/TSL/Compute 项目,算法层借鉴后在 GLSL 链落地;compute 依赖改 CPU 预计算或顶点/片元着色器实现)
 
 #### 验收标准
 
@@ -284,7 +298,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 ### 2.2 光照与大气（深度重写）
 
-**[进行中 2026-07-29] 阶段:删除现有深度/体积合成并重新设计；GPU 资源所有权与连续镜头复验**
+**[重定向 2026-08-15] 阶段:WebGPU 重写停牌,改为 GLSL 链(`atmosphere-webgl.js` + `legacy-render-pipeline.js`)增量演进;第一轮老版契约修复已落地,待玩家实机验收**(下方 2026-07-29 前的阶段记录为已停牌重写线的历史存档)
 
 #### 现状与推测根因(仅供参考,待验证)
 
@@ -312,7 +326,11 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 #### 优化方向(候选,根因验证后由执行者定方案)
 
-> **本批次为深度重写**:大气散射和体积云必须以更 WebGPU 原生的方式重新实现(参考 HPVolumeCloud、wlBXWK 的 TSL 节点方案),不是在现有 GLSL ShaderMaterial 上打补丁。现有 `atmosphere-webgl.js` 的 GLSL 实现保留作为 WebGL2 兜底,WebGPU 路径直接用 TSL 重写。云的参差形态不足、无法应对天气系统,也必须深度重写而非修补。
+> **[基准重锚 2026-08-15] 本批次载体已定:GLSL 链(`atmosphere-webgl.js` + `clouds-webgl.js` + `legacy-render-pipeline.js`),增量演进,不做整体重写。**
+> 原"以 WebGPU 原生方式深度重写(TSL 节点)"的方向随 WebGPU 线停牌作废——参考项目 HPVolumeCloud/wlBXWK 本就是 GLSL/WebGL 项目,现在直接抄 GLSL,无需 TSL 翻译层。原计划把 GLSL 实现当"WebGL2 兜底"的定位反转:GLSL 就是生产本体。
+> 痛点与验收目标不变:下方"可选思路"(物理散射/多次散射/天光反弹/双星贡献)全部有效;`stellar-radiometry.js` 与 `atmosphere-physics.js` 两个共享物理合同模块保留可用。
+> 已停牌的完整重写计划归档于 `cloud-atmosphere-rewrite.md`(其 §0–§2 痛点/场景/契约、§3.3 云种表、§8 光学推导仍有效;TSL 阶段结构与 D9"禁止 GLSL"条款作废)。
+> 2026-08-15 已按老版契约完成第一轮 GLSL 修复(聚焦行星全程体积云 engage、uSunDir 接通、uAmbC 固定环境光、母星大气 630 km/云壳 230–420 km),待玩家实机验收。
 
 **目标**:光照细腻有层次;日落呈现红橙渐变;背阳面可见地表细节(非纯黑)有星光和天光;双星系统可见伴星的光照和散射贡献;近地太阳光保留恒星色温。
 
@@ -328,7 +346,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 - 恒星色温传入 DirectionalLight
 - 母星半径放大(目标 ~700-1000km),大气比例不收窄
 
-**参考项目**:wlBXWK(大气散射,**TSL 重写**)、HPVolumeCloud(多次散射,**TSL 重写**)。**Íñigo Quílez 2013 不可抄**(许可证禁止)。
+**参考项目**:wlBXWK(大气散射,GLSL 直接抄)、HPVolumeCloud(多次散射,GLSL 直接抄)。**Íñigo Quílez 2013 不可抄**(许可证禁止)。
 
 #### 已否决的首轮实施记录（2026-07-28，仅供追溯，不能作为完成证据）
 
@@ -348,7 +366,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 - [ ] 地形、水面、飞船和卫星阴影均遵守同一深度/遮挡关系,体积层不能覆盖前景不透明物
 - [ ] 背阳面可见地表细节(非纯黑),日落和双星贡献在连续穿越中稳定
 - [ ] 低/中/高云和特殊云拥有真实厚度、内部明暗与地表投影,轨道尺度能读出天气系统
-- [ ] 2560×1440 Ultra 开始页到接管无 GPU 资源创建风暴,2.8 s 镜头按墙钟时间完成；接管与连续转镜无 >100 ms 尖峰、WebGPU validation error 或体积 RTT 抖动
+- [ ] 2560×1440 Ultra 开始页到接管无 GPU 资源创建风暴,2.8 s 镜头按墙钟时间完成；接管与连续转镜无 >100 ms 尖峰、WebGL2 shader/GPU 错误或体积 RTT 抖动
 - [ ] B 静态/物理/硬件测试通过且玩家构图逐张人工验收;canonical lock 仍按总计划在 D 统一重做
 
 ---
@@ -371,11 +389,12 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 - **无飞船交互(事实)**:全 src 无 wake/splash/ripple 水交互。
 - **无海洋星球(事实)**:`TYPES.ocean` 存在但无"几乎全是水"或"波涛汹涌"子分类,`applyWaterWaves` 用同一套参数给所有 water 星球。
 - **水+光+大气+云无联动(事实)**:`uSkyC` 与 skyDome 颜色脱节,水材质无云阴影。
-- **太空看海洋远看效果假(新增痛点)**:WebGPU 路径下太空看海洋远看是一片完全一样的劣质蓝色,无波纹/深度变化。~~与 2.1 海面 LOD 联合解决。~~
+- **太空看海洋远看效果假(新增痛点;在 WebGL 基准上仍是活问题)**:太空看海洋远看是一片完全一样的劣质蓝色,无波纹/深度变化。~~与 2.1 海面 LOD 联合解决。~~
   **→ 根因已定量确认(验证 2026-07-27),与 LOD 无关**:
   - 海洋覆盖球面 **54.5%**,水深中位数 **936 m**。
-  - `src/shaders-node.js:applyWaterWaves` 的 `absorption = 1 − exp(−0.05·depth)` 在 **92 m 水深即达 99%**,而 **95.3% 的海洋比 92 m 更深**。
+  - 吸收模型 `absorption = 1 − exp(−0.05·depth)` 在 **92 m 水深即达 99%**,而 **95.3% 的海洋比 92 m 更深**。
   - 在真实深度场上求值:absorption **均值 0.9895 / sd 0.0722** → 深水色↔浅水色的 lerp 因子几乎恒等于 1,**整个大洋被钳在同一个颜色上**。这就是"一片完全一样的劣质蓝色"的算术来源。衰减系数 0.05 /m 比真实海水(清澈海水 ~0.02–0.05 **/m 仅对红光**,蓝光约 0.0002 /m)高了两个数量级。
+  - **[2026-08-15 复核] 该公式当时只在 `shaders-node.js`(已删除)里修过;`src/shaders-webgl.js:559` 仍是 `1.0 - exp(-dep * 0.05)`——修复需在 GLSL 链重新落地,本条在 WebGL 基准上为未解决。**
   - 另确认两条:水球壳 `height()` 在**任何 level 恒为 0**(无起伏);`aDepth` 以 maxFreq = 128 烘焙**不是**贡献因素(中位 947 m vs 全细节 936 m,差 1.2%)。
   - 顶点位移上限:`macroWave` 幅度 0.26 + 0.14 + 0.07 = **±0.47 m**,在 286 km 星球上等于绝对平面。
 
@@ -410,7 +429,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 - 泡沫+湿润沙滩:雅可比行列式+浪峰+地形湿润暗化
 - 飞船-水交互:2D 波动方程 ping-pong 纹理
 - 海洋星球预设:各类型星球定义波涛参数(非 RNG 常量)
-- sunDir 联动:接通现有死代码,水材质响应太阳方向
+- sunDir/天空联动:~~接通现有死代码~~(死代码已随 TSL 线清理)→ 在 GLSL 水材质**新增** sunDir 与运行时天空/日落 uniform(见 2.3 复核块)
 - 水+光+大气+云联动:uSkyC 运行时更新,水材质加云阴影
 
 **实际执行(2026-07-27 根因验证后补充优先级)**:上述思路全部保留,但**顺序被验证数据强制**——`absorption` 饱和(sd 0.0722)必须**第一个**修,否则位移/反射/泡沫全部被同一片恒定蓝色淹没,做了也看不见。落地顺序:
@@ -420,6 +439,10 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 3. 距离相关 Fresnel / sunDir 接通死代码 / 湿润带 + 泡沫 / 云阴影 / 飞船交互 —— 按原候选思路推进。
 
 #### 实施结果（2026-07-27）
+
+> **[2026-08-15 WebGL 基线复核]** 下列 2026-07-27 记录实施于当时的 WebGPU/TSL 线。基准翻转后逐项对照生产 GLSL 链(`shaders-webgl.js` 的 `applyWaterWaves`、`planet.js`、`world-config.js`)复核:
+> - **确认仍在生产链**:三频顶点位移(2.2/1.1/0.5 m × `uSwell`,浅滩门控 + 3.5 m 岸线重叠,峰值 ≈3.8 m)、12 槽尾流(法线 + 泡沫,`test:visual-smoke` 已验)、岸线泡沫带(0.25–3.2 m)与水线 alpha 渐入、掠射角 Fresnel 天空镜面、`pelagic-storm` 海洋世界 tuning(`world-config.js`/`planet.js`,与着色后端无关)。
+> - **仅存在于已删除的 TSL 线,需在 GLSL 链重落地**:分波长 Beer–Lambert 吸收(`shaders-webgl.js` 仍是饱和单标量 `1 − exp(−0.05·dep)`,即"太空看海洋一片同色"的根因)、地形湿润带(1–16 m)、浅水 transmission/IOR 折射海床、`uSkyC`/sunDir 运行时联动(现 `uSkyC` 构造时一次性固定,水色不随日落/云变化)。原 `sunDirUniform` 死代码已随 TSL 清理消失,GLSL 链是**新增** uniform,不是"接通"。
 
 - `src/shaders-node.js` 用 RGB 分波长 Beer–Lambert + 悬浮颗粒深度雾替换单标量吸收。真实海床样本的有效水柱响应 **mean 0.7422 / sd 0.2748**（目标 ≥0.25）,红通道 99% 衰减深度从 92 m 提升到 **2556 m**;浅绿松石到深靛蓝不再被钳成单色。
 - 球壳切空间三组真实顶点位移为 **2.2 / 1.1 / 0.5 m**（峰值 3.8 m,旧值 0.47 m）,法线使用同一解析梯度;`ocean` 类型 sea-state 再放大 **1.65×**,形成独立汹涌海况。
@@ -437,78 +460,70 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 #### 验收标准
 
+> **[2026-08-15 按 WebGL 基线重新校准]** 原 2026-07-27 全勾状态锚定的是已删除的 TSL 实现;下列勾选反映生产 GLSL 链的真实现状(依据见上方复核块),曾在 TSL 线达成又被基准翻转退回的条目保留历史注记。
+
 - [x] 水面有真实可读的多尺度波浪与几何起伏,不是大块平滑色带
-- [x] 深水、浅滩与深湖的视觉深度符合真实地形,不会把深水画成浅水
-- [x] 水面反射天空/云/日落颜色(非固定色)
-- [x] 水下可见折射的海床扭曲
-- [x] 沙滩有湿润带 + 浪花 + 浅滩过渡,水陆共边无黑线
+- [ ] 深水、浅滩与深湖的视觉深度符合真实地形,不会把深水画成浅水 **[重新打开:分波长吸收仅在已删除的 TSL 线实现过,GLSL 链仍是饱和单标量]**
+- [ ] 水面反射天空/云/日落颜色(非固定色) **[重新打开:`uSkyC` 为构造期固定值,无日落/云联动]**
+- [ ] 水下可见折射的海床扭曲 **[重新打开:transmission/IOR 折射仅在已删除的 TSL 线实现过]**
+- [ ] 沙滩有湿润带 + 浪花 + 浅滩过渡,水陆共边无黑线 **[部分达成:浪花带与软水线在 GLSL 链;地形湿润带缺失]**
 - [x] 飞船贴水飞有涟漪/船迹
 - [x] 至少一个确定的“近全海洋但仍有少量陆地”世界,波况/水深区别于母星,并能在星系预览中一眼识别
-- [x] 水颜色随日落变红
+- [ ] 水颜色随日落变红 **[重新打开:依赖 sunDir/天空运行时联动,GLSL 链未接]**
 - [x] A 相关静态/浏览器/玩家视角测试通过;canonical lock 按总计划在 D 统一重做
 
 ---
 
-### 2.4 植被与材质（植物系统完全重做）
+### 2.4 植被与材质（经典链已恢复，剩余为质量升级）
 
-> ⚠️ **重做决定(用户明确指示)**:现有地表植物系统(树、草、外星植物、远景 proxy tree)全部禁用并完全重做,**没有"优化现有实现"的说法了**。
+> ✅ **[2026-08-15 解禁] 经典 InstancedMesh 植被链已恢复并验证**。原"全部禁用并完全重做"的决定基于 TSL `positionLocal` 节点不含 instanceMatrix 的架构限制——该限制只存在于已删除的 WebGPU/TSL 线。经典链在 GLSL 中通过 `instanceMatrix[3].xyz`（远景溶解）与 `iAnchor` 实例属性（风摆相位）天然具备逐实例独立性,下方列出的四条根因(同步摆动/同步位移/幅度抖动/发光丢失)在 GLSL 链上均不存在。
 >
-> **禁用范围**:`src/scatter.js`(近地表:树/草/外星植物/灌木/pod)和 `src/farflora.js`(远景 proxy tree)的 `setPlanet` 直接 return,不创建任何 InstancedMesh。`src/flora-system.js`(V2 风摆/距离溶解)和 `src/shaders-node.js` 的 `applyWindSway` 代码保留供参考,但不再被调用。
+> **恢复范围**:`src/scatter.js`(近地表植被+矿物,`SCATTER_ENABLED = true`)与 `src/farflora.js`(远景 proxy tree,`FAR_FLORA_ENABLED = true`)的 `setPlanet` 恢复经典实现;`src/flora-system.js`(TSL V2)已随 WebGPU 线删除。
+> **验证(2026-08-15)**:headless 漫步 11 次重建道具 100% 逐位稳定;低空草地 72,737 株(grassFar 打满 60k 上限);远景 proxy 森林 24,000 棵;`npm run test:terrain`/`test:vegetation` 通过。
 >
-> **重做原因(根因已确认,非推测)**:TSL/NodeMaterial 的 `positionLocal` 节点**不包含 instanceMatrix 变换**,导致:
-> - 风摆 phase 无法基于实例位置 → 所有植物同步摆动(地震感)
-> - 距离溶解用 `positionLocal.sub(uCamL)` 算距离 → 所有实例同步位移(石头也跟着抖)
-> - `GROW.value`/`uAltK` 每帧变化 → 顶点偏移幅度每帧变化(幅度抖动)
-> - `MeshStandardNodeMaterial` 构造未传 `emissive`/`emissiveIntensity`,`vertexColors` 时未设 `emissiveNode` → 发光植物丢失
->
-> 这是 TSL 节点图的架构性限制,修补无效。必须重做时从架构层面解决:要么用 `instanceMatrix` 节点显式访问实例矩阵(若 TSL 支持),要么改用 CPU 端预计算每个实例的 phase/anchor 并作为 `InstancedBufferAttribute` 传入,shader 只做插值。
->
-> **重做范围**:不止是树,全部植物都要重做——树、草、外星植物(weird/slime biome 的 pod/blob/crystal 草本)、灌木、pod 发光植物。岩石(rock/boulder/crystal 矿物)不在重做范围,但 scatter.js 现已一并禁用,重做植物时一并恢复矿物渲染。
+> **剩余工作 = 质量升级**,在经典链 + GLSL `onBeforeCompile` 上做,不再有"从零重写"的架构约束。
 
-#### 现状与推测根因(仅供参考,待验证)
+#### 现状与痛点(2026-08-15 重估:经典链恢复后哪些还成立)
 
-- **草像稀疏杂草(事实+用户判断)**:现有草几何是"恶劣环境杂草"形态(沙漠/浅雪风格),且密度偏低(约 0.038 簇/m²),**种类和密度都不对**,综合呈现"稀疏杂草"感。需要同时解决:种类(做成真正草地的草)+ 密度(草地区要连片成草坪)。
-- **树低模(事实)**:`src/flora.js:127-183` `buildTree` 150-400 三角形,无 LOD,和发光植物(`buildPodPlant` 0.55 自发光)质量差距大。
-- **无岩石材质(事实)**:`src/shaders-webgl.js:330` 只有"陡坡时把底色 lerp 成 `uRockC` 单色",无独立法线/粗糙度/纹理。岩石模型只存在于 scatter(`src/scatter.js:67` `craggyGeo`)。
-- **雪线固定海拔(事实)**:`src/shaders-webgl.js:367-375` per-fragment 但只按海拔 + 纬度,无温度、无坡度(粗坡度)、无北坡、无凹腔积雪。
+- **草像稀疏杂草(部分已被经典链解决,待目视复核)**:~~密度偏低(约 0.038 簇/m²)~~ → 恢复的经典链含 `MEADOW_DENSITY`(草地 360 簇/9m 格,ultra 档约 30-40 可见叶片/m²),实测低空 72k 株,**密度痛点大概率已解决**;草几何形态("恶劣环境杂草"风格、缺真正草地草型)仍待复核。
+- **树低模(仍成立)**:`src/flora.js` `buildTree` 150-400 三角形,无 LOD,和发光植物(`buildPodPlant` 0.55 自发光)质量差距大。
+- **无岩石材质(仍成立)**:`src/shaders-webgl.js` 只有"陡坡时把底色 lerp 成 `uRockC` 单色",无独立法线/粗糙度/纹理。岩石模型只存在于 scatter(`craggyGeo`)。
+- **雪线固定海拔(仍成立)**:per-fragment 但只按海拔 + 纬度,无温度、无坡度(粗坡度)、无北坡、无凹腔积雪。
 - **沙滩衔接差**:见 2.3。
 
 #### 建议验证方向(非硬性,看代码能确认的不必复现)
 
-- [ ] **草种类+密度**:确认现有草几何(恶劣环境杂草形态)和新草类型的必要性;同时验证密度提升对"连片草坪"感的贡献,两者需同时解决
+- [ ] **草地目视复核**:经典链恢复后草地是否已读作"连片草坪";若仍偏杂草感,剩余问题在草几何形态而非密度
 - [ ] **树质量差距**:确认是几何精度问题还是材质/光照问题(ez-tree 是否真的能解决)
 - [ ] **雪线**:验证固定海拔雪线是否真的是用户痛点(可能用户更在意的是"横线划分"的视觉感,而非温度模型)
 - [ ] 验证结果记录到本文档,更新推测根因
 
-#### 重做要求(强制,非候选方向)
+#### 升级方向(强制目标保留,载体改为经典链 + GLSL)
 
-**目标**:植物系统从零重做,以 WebGPU/TSL 为基准。树有多级 LOD,近看质量提升,与发光植物协调;草地区连片成草坪(新草类型+高密度),恶劣环境保留稀疏杂草;岩石有层理/裂理/凹腔质感非单色;雪线随温度/坡度/北坡变化,雪边有锯齿状有机边界。
+**目标**:树有多级 LOD,近看质量提升,与发光植物协调;草地区连片成草坪,恶劣环境保留稀疏杂草;岩石有层理/裂理/凹腔质感非单色;雪线随温度/坡度/北坡变化,雪边有锯齿状有机边界。**实现载体**:经典 `InstancedMesh` + `MeshStandardMaterial` + GLSL `onBeforeCompile`(`shaders-webgl.js`),不用 TSL/NodeMaterial。
 
-**架构约束(必须解决)**:
-- **实例位置访问**:风摆 phase、距离溶解必须基于每个实例的独立位置,不能所有实例同步运动。可选方案:
-  - 方案 A:用 TSL 的 `instanceMatrix` 节点显式读取实例矩阵的 translation 列(若 TSL 支持 `instanceMatrix[3].xyz`)
-  - 方案 B(推荐):CPU 端预计算每个实例的 phase/anchor 作为 `InstancedBufferAttribute`(`iAnchor` 已有先例),shader 通过 `instanceCoord`/属性采样读取,完全避免 `positionLocal` 的 instanceMatrix 缺失问题
-  - 方案 C:改用 `BatchedMesh` 或自定义 `InstancedMesh` 子类,在 vertex shader 注入实例位置 uniform
-- **发光植物**:`MeshStandardNodeMaterial` 构造必须传 `emissive`/`emissiveIntensity`,`vertexColors` 时必须设 `emissiveNode = uniform(emissive).mul(vertexColor())`;pod 的 0.55 自发光必须保留
-- **幅度稳定性**:`GROW.value`/`uAltK` 等全局 uniform 只能控制整体可见性(visible/scale),不能直接乘进顶点偏移——顶点偏移幅度必须由几何属性或实例属性决定,不能每帧变化
-- **风摆原则**(参考 fable5 Wind):阵风只调 amplitude 绝不调 frequency;层级风 5 级运动(mean lean + sway + branch secondary + leaf flutter + grass bend)
+**实现要点(经典链下原"架构约束"大多天然满足)**:
+- ~~实例位置访问~~:**GLSL 链天然满足**——风摆相位已由 `iAnchor` 实例属性驱动,远景溶解已由 `instanceMatrix[3].xyz` 距离计算驱动,均逐实例独立
+- **发光植物**:经典 `MeshStandardMaterial` 的 `emissive`/`emissiveIntensity` 正常工作,pod 的 0.55 自发光已恢复;无需 `emissiveNode`
+- **幅度稳定性**:`GROW`/`uAltK` 全局 uniform 只控制整体可见性;顶点偏移幅度由几何/实例属性决定的原则保留
+- **风摆原则**(参考 fable5 Wind):阵风只调 amplitude 绝不调 frequency;层级风 5 级运动(mean lean + sway + branch secondary + leaf flutter + grass bend),在 `applyWindSway` GLSL 中扩展
 
 **约束**:全部不破坏锁(植被 namespace 独立,shader 改动不改 colorAt 的 rand())。
 
-**重做范围(全部植物,非优化)**:
-- 树:ez-tree 骨架生长 + 多级 LOD(MIT 可直接抄代码);现有 `buildTree` 几何弃用
-- 草:草地草(billboard clump on quads + InstancedMesh + Chunking + LOD,避免 individual blades);保留现有杂草作为恶劣环境草;clump field 控制草丛分布;现有 `buildGrass` 几何重做
-- 外星植物:weird/slime biome 的 pod/blob/crystal 草本,必须保留并重做(含发光);现有 `buildPodPlant`/`buildBlob` 几何重做
-- 灌木:现有 `buildShrub` 几何重做
-- 远景 proxy tree:farflora 距离溶解逻辑重做,必须解决 instanceMatrix 缺失导致的同步抖动
+**升级范围(几何/材质升级,非架构重写)**:
+- 树:ez-tree 骨架生长 + 多级 LOD(MIT 可直接抄代码,标准材质);现有 `buildTree` 几何替换
+- 草:复核后若需新草型,做草地草(billboard clump,避免 individual blades);保留现有杂草作为恶劣环境草
+- 外星植物:weird/slime biome 的 pod/blob/crystal 草本保留(含发光),几何质量升级
+- 灌木:`buildShrub` 几何质量升级
+- 远景 proxy tree:经典距离溶解已稳定;升级方向是形态(与近景树种的轮廓一致性)
 - 整体景物（用户要求）：抄fable5，达到同等甚至超越效果，而不是只是岩石，整体的整个地形地貌都应该参考优化
 
-**参考项目**:ez-tree(MIT,直接抄)、fable5(岩石 SDF/雪线/clump 算法可抄 TSL/NodeMaterial 重写)、"How to Make The Fluffiest Grass"(billboard clump)
+**参考项目**:ez-tree(MIT,直接抄,标准 Three.js 材质)、fable5(岩石 SDF/雪线/clump 算法借鉴后在 GLSL 落地)、"How to Make The Fluffiest Grass"(billboard clump)
 
 #### 验收标准
 
-- [ ] **无抖动**:植物和石头在风摆/距离溶解下各自独立运动,无同步摆动(地震感)或幅度抖动
-- [ ] **发光植物**:pod 等发光植物在阴影中可见自发光,与 WebGL2 路径视觉等价
+- [x] **无抖动**:植物和石头在风摆/距离溶解下各自独立运动,无同步摆动(地震感)或幅度抖动(2026-08-15 经典链恢复,headless 实测 100% 逐位稳定)
+- [x] **发光植物**:pod 等发光植物在阴影中可见自发光(经典 `MeshStandardMaterial.emissive` 链,已随恢复验证)
 - [ ] 树有 3 级 LOD,近看质量明显提升,与发光植物质量协调
 - [ ] 草地草密集(视觉上连片草坪),恶劣环境草稀疏(保留现有)
 - [ ] 岩石有层理/裂理/凹腔质感,非单色 tint
@@ -654,7 +669,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 ### 2.8 天气系统(新增)（深度重写）
 
-**[进行中 2026-07-29] 阶段:体积云谱系、轨道天气系统与云顶三维结构重新设计**
+**[重定向 2026-08-15] 阶段:载体定为 `clouds-webgl.js`(GLSL raymarch)增量增强;CPU 侧天气/云种/占用体资产(`src/cloud/`)保留可用**(下方 2026-07-29 前的阶段记录为已停牌重写线的历史存档)
 
 #### 现状与推测根因(仅供参考,待验证)
 
@@ -676,7 +691,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 #### 优化方向(候选,根因验证后由执行者定方案)
 
-> **本批次为深度重写**:体积云必须深度重写,不是修补现有 `clouds-node.js`。现有云的参差形态不足、无法应对天气系统(风场/天气图/多次散射),需参考 HPVolumeCloud 以更 WebGPU 原生的方式重新实现。与 2.2 大气共享深度纹理和后处理链,必须一起改(批次 B)。
+> **[基准重锚 2026-08-15] 载体:`clouds-webgl.js`(GLSL raymarch),增量增强。** 原"深度重写 `clouds-node.js`、以更 WebGPU 原生方式重新实现"的方向随 TSL 线停牌作废(`clouds-node.js` 已删除)。天气驱动的云谱系/形态/风场在现有 GLSL 体积云上增量实施——下方可选思路(风场 uniform、天气图双通道、froxel 雾、层级风)全部有效,HPVolumeCloud 是 GLSL 项目可直接抄。与 2.2 大气共享深度纹理和后处理链(`legacy-render-pipeline.js`)的关系不变。
 
 **目标**:云层随时间流动变化;不同区域有不同云类型(积云/层积云/高空云);地表有体积雾/光柱效果;植被有层级风运动(非统一摇摆)。
 
@@ -688,7 +703,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 - 体积雾/光柱:WebGL2 兼容的 froxel 或在现有体积 pass 上加 ground-hug fog + sun shaft;湿度场驱动雾密度(配合 2.1 新增 moisture 字段)
 - 层级风 5 级运动:mean lean + sway + branch secondary + leaf flutter + grass bend(参考 fable5 Wind);**关键原则**:阵风只调 amplitude 绝不调 frequency
 
-**参考项目**:HPVolumeCloud(风场/天气图/多次散射)、fable5(Froxel 体积雾/层级风,算法可抄 TSL/NodeMaterial 重写)
+**参考项目**:HPVolumeCloud(风场/天气图/多次散射,GLSL 直接抄)、fable5(Froxel 体积雾/层级风,WebGPU/TSL 项目,算法借鉴后在 GLSL 落地)
 
 **视觉目标与固定机位**:`docs/visual-targets/orbital-clouds-reference.png` 保存用户给出的太空云层目标图,仅作验证参考而不进入运行时。`docs/visual-targets/README.md` 固定 16:9 斜视 limb、HUD 隐藏、锁定时刻/DPR/自适应画质的对比方法；验收覆盖面积、千公里天气系统、20–60 km 云团、云顶起伏/自阴影、地表间隙和薄大气边缘,不做地理形状的逐像素复制。
 
@@ -755,7 +770,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
   - 浮空城市:8-15 km 主体(巨构群,轨道可见)+ 玩家降落在其中一个甲板区(行走尺度)
 - **巨构几何**:模块化 megastructure kit(塔楼/桥/穹顶/支柱/天线/能量核心等可复用模块),非 BoxGeometry 堆砌。必须"足够帅"——参考 cyberpunk/dune/sci-fi 巨构美学,不是现实现代城市。
 - **极致细节**:近看有纹理/法线/自发光细节;轨道看有城市灯光带(现有 `cityLights` 点云可扩展为巨构灯光);上空飞行有压迫感(尺度真实+细节密度)
-- **取消 glb**:浮空城市现有 glb 弃用,全部用模块化几何重写(TSL/NodeMaterial)
+- **取消 glb**:浮空城市现有 glb 弃用,全部用模块化几何重写(标准材质 + GLSL `onBeforeCompile`)
 - **尺度分离**:巨构主体(不可降落,LOD 远距离)与航天港(可降落,LOD 近距离)必须分两个 InstancedMesh/Group,独立 LOD 调度,避免 30km 城市几何在行走时炸显存
 - **scale 公式重构**:删除 `body.R / 800000` 这个 FPS 反推常量,改为按文明规模推(`civilizationLevel` + 站点类型查表);orbitalStation 保持 90km 不变
 
@@ -776,7 +791,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 **约束**:
 - 城市巨构尺度改动:`artificial-sites.js` 的 `cityCluster`/`floatingCity` 重写,`civilization.js` 的尺度常量调整——需确认是否破坏锁(`civilizationSites` 进锁字段,如改 seed/位置则破坏;只改几何 scale 不破坏)
 - 仓库与开局流程:纯新增场景,不破坏锁
-- 所有新材质用 TSL/NodeMaterial
+- 所有新材质用 GLSL(`ShaderMaterial`/`onBeforeCompile`),与 WebGL 2 基准一致(2026-08-15 重锚;原"TSL/NodeMaterial"要求作废)
 
 #### 建议验证方向(非硬性)
 
@@ -817,7 +832,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 | 项目 | 引擎 | 许可证 | 抄到深空哪个子系统 |
 |---|---|---|---|
-| `fable5-world-demo-main` | **WebGPU + TSL + Compute** | MIT | 2.1 地形(errBoost/ecotone warp)、2.4 植被(岩石 SDF/雪线/clump)、2.8 天气(Froxel/层级风)。**算法可抄,代码用 TSL/NodeMaterial 重写** |
+| `fable5-world-demo-main` | **WebGPU + TSL + Compute** | MIT | 2.1 地形(errBoost/ecotone warp)、2.4 植被(岩石 SDF/雪线/clump)、2.8 天气(Froxel/层级风)。**算法可抄;因基准已翻转为 WebGL 2/GLSL,代码在 GLSL 链重新落地(compute/StorageTexture 依赖改 CPU 预计算或顶点/片元着色器实现)** |
 | `ez-tree-main` | 纯 WebGL + Three.js | MIT | 2.4 植被(3 级 LOD 树)。**可直接抄代码** |
 
 ### 3.3 大气体积云参考
@@ -955,7 +970,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 | 执行顺序 | **A → E → B → C → D** | A 先提供地形/海面基础,E 紧接处理世界观;D 最后统一后处理与 re-curation |
 | 树策略 | 直接集成 ez-tree | MIT 可直接抄代码,3 级 LOD 质量提升大 |
 | 草策略 | 新增草地草类型 + 提升密度 | 现有草是恶劣环境杂草且稀疏,需新做草地草并提升密度成连片草坪 |
-| WebGPU 基准 | 以 WebGPU/TSL 为唯一基准,不写 GLSL | 迁移已完成 90%,剩余问题通过重构顺便解决,不再维护双后端视觉等价 |
+| ~~WebGPU 基准~~ → **[已翻转 2026-08-15] WebGL 2/GLSL 唯一基准** | ~~以 WebGPU/TSL 为唯一基准,不写 GLSL~~ → WebGL 2/GLSL 为唯一基准,WebGPU/TSL 线已删除 | "迁移完成 90%"是代码覆盖率判断而非视觉完成度;实机验收多轮未达标且 bug 增加。详见 7.4 决策日志 |
 | 城市尺度 | 双层结构(不可降落巨构主体 + 可降落航天港) | 既保留玩家行走尺度,又让"核心城市世界"在城市级别而非聚落级别;orbitalStation 90km 已合理,反向拉齐 |
 | 浮空城市 glb | 弃用,自研模块化几何 | 现有 glb 效果差;与城市巨构共享 megastructure kit |
 | 开局流程 | 第一人称仓库 → 电影化离港 → 飞行 | 提升代入感;仓库用 orbitalStation 共享 kit;起飞运镜抄 demo1 |
@@ -965,7 +980,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 ## 六、风险与注意事项
 
-1. **fable5 算法适配**:fable5 大量依赖 compute shader、StorageTexture、StorageBuffer、atomicAdd,WebGPU TSL 路径也不完全支持。算法层借鉴,代码用 TSL/NodeMaterial 重写。最痛的是 Scatter 的 atomic append——必须改成 CPU 端 JS 散布(深空 scatter.js 已是这个模式)。
+1. **fable5 算法适配**:fable5 大量依赖 compute shader、StorageTexture、StorageBuffer、atomicAdd。算法层借鉴,代码在 GLSL 链重新落地(compute/StorageTexture 依赖改为 CPU 预计算或顶点/片元着色器实现)。最痛的是 Scatter 的 atomic append——必须改成 CPU 端 JS 散布(深空 scatter.js 已是这个模式,且已于 2026-08-15 恢复启用)。
 
 2. **cube-sphere 适配**:fable5 的 2D world xz → uv 纹理采样在球面上不工作。深空必须用顶点预计算 varying 或 render-to-texture 球面投影。FFT 水面需切空间坐标适配。
 
@@ -1010,11 +1025,12 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 | 批次 | 子系统 | 状态 | 备注 |
 |---|---|---|---|
-| A | 2.1 地形 LOD + 2.3 水体 + 行星视觉尺度 | **[进行中 2026-07-28] 玩家实机复验失败** | 保留 900/3200 km 与海洋世界内容合同;重做轨道地形轮廓、方块接缝、海陆黑线、水深/波谱/尾流并重新目视验收 |
-| B | 2.2 光照大气 + 2.8 天气 | **[进行中 2026-07-29] 首轮实现否决；资源所有权重构中** | 删除重写现有 WebGPU 深度/体积合成;当前先消除 chunk morph GPU 纹理风暴、compile/resize 并发和错误 coverage 映射,再补齐云谱系、卫星阴影遮挡和连续大气穿越 |
-| C | 2.4 植被 + 2.6 星环 + 2.5 星系 | [部分禁用] 植物系统已禁用待重做(2026-07-26) | 依赖 A |
+| 基准 | 渲染后端 | **[已翻转 2026-08-15] WebGL2/GLSL 为唯一生产基准;同日已删码** | WebGPU/TSL 停牌并已从工作树删除(留档 git 历史;`renderer-policy.js` 一律解析到 webgl2);同日恢复老版云/大气契约(体积云全程 engage、uSunDir 接通、uAmbC 固定环境光、母星大气 630 km/云壳 230–420 km),修复"太空贴图云/死黑/护盾大气"三连症,待玩家实机验收 |
+| A | 2.1 地形 LOD + 2.3 水体 + 行星视觉尺度 | **[进行中 2026-07-28] 玩家实机复验失败** | 保留 900/3200 km 与海洋世界内容合同;重做轨道地形轮廓、方块接缝、海陆黑线、水深/波谱/尾流并重新目视验收。注:母星半径后经 curation 调整为 6000 km(见 world-config)。**2026-08-15 GLSL 基线复核:水体吸收/折射/日落联动/湿润带仅存在于已删除的 TSL 线,2.3 验收已相应重新打开** |
+| B | 2.2 光照大气 + 2.8 天气 | **[停牌重定向 2026-08-15] WebGPU 重写计划整体停牌** | 原 TSL 重写(cloud-atmosphere-rewrite.md)封存;痛点清单(云谱系/大气质量/天气)后续在 GLSL 链上重新实施,参考项目可直接抄 GLSL。本轮先按老版契约修复(见基准行) |
+| C | 2.4 植被 + 2.6 星环 + 2.5 星系 | **[已恢复 2026-08-15] 植被经典链已解禁**(headless 实测草地满密度) | 依赖 A。原禁用根因(TSL 无 instanceMatrix)属已删除的 WebGPU 线;`scatter.js`/`farflora.js` 经典 InstancedMesh 链已恢复并启用。植被调优/观感打磨仍在 C 批次范围内 |
 | D | 2.7 音效 + 后处理打磨 + re-curation | [未开始] | 依赖 A/B/C |
-| E | 2.9 人类工程(城市巨构 + 飞船仓库) | [未开始] | A 已满足前置条件;本轮依用户明确指示先完成 B,E 未被暗中实施 |
+| E | 2.9 人类工程(城市巨构 + 飞船仓库) | [未开始] | A 已满足前置条件 |
 
 ### 7.4 关键决策日志
 
@@ -1022,6 +1038,9 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 
 | 日期 | 决策 | 理由 |
 |---|---|---|
+| 2026-08-15 | 2.3 水体验收按 WebGL 基线重新打开:分波长吸收、湿润带、折射、日落/天空联动仅存在于已删除的 TSL 实现,GLSL 链未落地;位移/尾流/泡沫/海洋世界确认保留。归档文档(cloud-phase4/visual-targets)同步清除"禁止 GLSL"等失效指令 | 文档的"已完成"状态不得锚定已删除代码;验收只认生产链——与 2026-07-28"固定夹具全绿仍被实机否决"同一教训的另一面 |
+| 2026-08-15 | 修复 WebGL 云"死黑"与大气"护盾"观感:①体积云 `uSunDir` 每帧更新在重写期丢失(恒为 (0,1,0),云从错误方向受光→死黑),恢复老版 copy;②删除重写期在 main.js 加的 `uAmbC` 每帧覆盖(轨道/夜侧把环境光压黑),恢复构造时固定 skyColor×0.58;③无头 limb 径向剖面无"窄亮环骤降"护盾特征,判定护盾观感主要是死黑云壳本身,待玩家实机复核 | 两个云回归均为主版存在、当前版丢失的确定性 diff;修复后无头验证 sunDir=sunDirLocal、盘面亮度 125.9/暗像素 4.6% |
+| 2026-08-15 | **WebGL 2 恢复为唯一生产基准，WebGPU/TSL 线停牌封存**（`WEBGPU_PARITY_READY=false`，`?renderer=webgpu` 保留入口）。同日对齐老版观感：恢复"聚焦行星全程体积云"契约（撤掉 720–1050 km engage 门控与 `volumeActive` 依赖，该门控让 6,000 km 母星轨道视角只剩 analytic 贴图壳）；母星大气 120→630 km、云壳 0.4–14→230–420 km，恢复老版比例（大气 ~10.5% R、悬浮云盖 3.8–7% R，GLSL 大气 shader 按壳厚归一化，比例即观感）；夜光云高度改随大气包络缩放。测试断言与宇宙锁快照同步更新 | 用户实机验收 WebGPU 线多轮未达标且 bug 增加；WebGL 兜底链（`clouds-webgl`/`atmosphere-webgl`/`legacy-render-pipeline`）自 51c7c11 以来视觉根基未动，坏的是共享层参数（6000 km 半径 + 重写期 authored 值），参数级修复即可拿回老观感，无需反向工程 |
 | 2026-07-29 | B 的性能验收以同机位 feature toggle + GPU 资源事件为准,不把 20 FPS 直接归因于云 | 5080 实测低帧阶段云未参与渲染,真正尖峰来自逐 chunk morph 纹理、飞船首次编译和体积 RTT 重建；先修资源所有权可避免错误降质 |
 | 2026-07-29 | 云 coverage、柱密度与垂直高度分权；保存用户目标图并固定斜视机位对照 | 单一 smoothstep 既造成档案 42% 只剩白斑,又会在提高阈值后变成白色薄膜；参数合同和视觉证据必须一致 |
 | 2026-07-28 | 撤销 A/B 完成结论,以用户 136.7 km 与 52.2 km 实机画面作为新的硬基线 | 固定夹具和自动合同全绿仍放过多边形地形、方形块缝、海陆黑线、平面水、白色云片、错误置顶阴影和大气蓝幕;证明首轮验收方法失效 |
@@ -1040,7 +1059,7 @@ WebGPU 路径能启动渲染、不黑屏,但“迁移已完成约 90%”只是�
 | 2026-07-27 | 否决“把半淡入信号写回 weight”的初版 `ridged` 淡入 | 该实现会污染后续八度,把最坏 LOD 单步恶化 62.5%;后续改为完整反馈链 + contribution/norm 同步淡入 |
 | 2026-07-27 | 放弃 GRAD 表扩展与 smooth-abs crest 两个候选修法 | 数值 A/B 证明改善可忽略(spread 12.9%→11.6%;中点误差 0.0638→0.0638) |
 | 2026-07-27 | 2.3 强制先修 **分波长吸收**,再做位移/反射/泡沫 | absorption sd 仅 0.0722,大洋恒定单色;不先修则后续所有水面细节不可见 |
-| 2026-07-26 | 植物系统全部禁用并完全重做(非优化) | TSL `positionLocal` 无 instanceMatrix 是架构性限制,修补无效 —— ⚠️ **待复核**:`src/shaders-node.js:applyWindSway` 的注释明确声称 `positionLocal` **携带**实例平移,与本决策依据矛盾,批次 C 开工前必须实测 |
+| 2026-07-26 | 植物系统全部禁用并完全重做(非优化) | TSL `positionLocal` 无 instanceMatrix 是架构性限制,修补无效 —— ~~待复核~~ **[2026-08-15 已闭合:复核对象 `shaders-node.js` 已随 TSL 线删除;经典 GLSL 链(`iAnchor`/`instanceMatrix`)恢复后四条根因均不存在,本决策由"重做"翻转为"解禁"]** |
 | 2026-07-26 | 卡顿高度记录从 3000m 改为 3300m | 实测更准确 |
 | 2026-07-26 | 新增批次 E:人类工程(城市巨构 + 飞船仓库) | 城市尺度世界观崩塌;开局流程缺仓库;两者共享 megastructure kit |
 
@@ -1056,6 +1075,6 @@ re-curation 完成后在此追加:
 
 ## 八、文档版本
 
-- **当前版本**:2026-07-28(A/B 玩家实机验收失败;B 从深度与体积架构开始重做,A 视觉缺陷同步纳入硬门禁)
+- **当前版本**:2026-08-15(基准翻转为 WebGL 2/GLSL 后全面重锚:2.2/2.8 载体定为 GLSL 链增量演进,2.3 水体验收按生产链重新校准,归档文档清除失效的"禁止 GLSL"指令)
 - **维护者**:执行者(实时更新)
 - **更新触发**:任何阶段变化、根因修正、方案偏离、新增痛点、关键决策
