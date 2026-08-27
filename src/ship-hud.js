@@ -47,6 +47,7 @@ export class ShipHUD {
     this.speedValue = document.getElementById('speed-value');
     this.pulseFuel = document.getElementById('pulse-fuel');
     this.pulseLabel = document.getElementById('ship-hud-pulse-label');
+    this.boostLabel = document.querySelector('#ship-hud-boost span:last-child');
     this.gunValue = document.getElementById('gun-value');
     this.hullNumber = document.getElementById('ship-hud-hull-number');
     this.hullBar = document.getElementById('ship-hud-hull-bar');
@@ -69,6 +70,8 @@ export class ShipHUD {
     this.pulseFuelValue = 140;
     this.pulseFuelMax = 140;
     this.boost = 0;
+    this.cockpitView = false;
+    this.rmbHeld = false;
     this.shield = 100;
     this.hull = 100;
     this.gun = 100;
@@ -291,13 +294,20 @@ export class ShipHUD {
     window.addEventListener('keydown', this.onKeyDown, { capture: true });
     window.addEventListener('pointerdown', (event) => {
       if (event.button === 0) document.getElementById('ship-hud-key-lmb')?.classList.add('is-on');
-      if (event.button === 2) document.getElementById('ship-hud-key-rmb')?.classList.add('is-on');
+      if (event.button === 2) {
+        this.rmbHeld = true;
+        document.getElementById('ship-hud-key-rmb')?.classList.add('is-on');
+      }
     }, { capture: true });
     window.addEventListener('pointerup', (event) => {
       if (event.button === 0) document.getElementById('ship-hud-key-lmb')?.classList.remove('is-on');
-      if (event.button === 2) document.getElementById('ship-hud-key-rmb')?.classList.remove('is-on');
+      if (event.button === 2) {
+        this.rmbHeld = false;
+        document.getElementById('ship-hud-key-rmb')?.classList.remove('is-on');
+      }
     }, { capture: true });
     window.addEventListener('blur', () => {
+      this.rmbHeld = false;
       document.getElementById('ship-hud-key-lmb')?.classList.remove('is-on');
       document.getElementById('ship-hud-key-rmb')?.classList.remove('is-on');
     });
@@ -435,8 +445,14 @@ export class ShipHUD {
     const fuelText = `${Math.ceil(this.pulseFuelValue)}/${Math.ceil(this.pulseFuelMax)}`;
     if (this.pulseFuel.textContent !== fuelText) this.pulseFuel.textContent = fuelText;
     this.gunValue.textContent = Math.round(this.gun);
-    document.getElementById('ship-hud-key-rmb')?.classList.toggle('is-on', this.boost > .12);
+    document.getElementById('ship-hud-key-rmb')?.classList.toggle('is-on',
+      this.cockpitView ? this.rmbHeld : this.boost > .12);
     document.getElementById('ship-hud-key-space')?.classList.toggle('is-on', this.pulse > .12);
+  }
+
+  setCockpitView(active) {
+    this.cockpitView = !!active;
+    if (this.boostLabel) this.boostLabel.textContent = active ? '环视' : '助推';
   }
 
   getPowerState() {

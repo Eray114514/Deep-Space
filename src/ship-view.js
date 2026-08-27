@@ -47,6 +47,17 @@ const _q = new THREE.Quaternion();
 const _qi = new THREE.Quaternion();
 const _qt = new THREE.Quaternion();
 const _e = new THREE.Euler();
+const _targetP = new THREE.Vector3();
+const _targetQ = new THREE.Quaternion();
+
+/** cameraWorld = hullWorld * cameraLocal, so hullWorld = cameraWorld * cameraLocal^-1. */
+export function solveHullQuaternion(cameraWorld, cameraLocal, target = new THREE.Quaternion()) {
+  return target.copy(cameraWorld).multiply(_qt.copy(cameraLocal).invert()).normalize();
+}
+
+export function cockpitShakeAmplitude(drive, atmosphere) {
+  return clamp(drive, 0, 1) * (0.00016 + clamp(atmosphere, 0, 1) * 0.00335);
+}
 
 export class ShipView {
   /**
@@ -127,15 +138,16 @@ export class ShipView {
 
   toggleView() {
     if (this.shipwalk) return;
+    // Both directions start from the pose that is actually on screen. The old
+    // path only captured cockpit -> chase, while its blend was unreachable;
+    // chase -> cockpit therefore teleported the 27 m hull around the camera.
+    this.viewBlendFrom.p.copy(this.ship.group.position);
+    this.viewBlendFrom.q.copy(this.ship.group.quaternion);
+    this.viewBlend = 0;
     this.viewMode = this.viewMode === 'cockpit' ? 'chase' : 'cockpit';
     if (this.viewMode === 'cockpit') {
       this.freeYaw = 0;
       this.freePitch = 0;
-    } else {
-      this.viewBlend = 0;
-      // capture the pose we are leaving, so the pull-out blends from it
-      this.viewBlendFrom.p.copy(this.ship.group.position);
-      this.viewBlendFrom.q.copy(this.ship.group.quaternion);
     }
   }
 
@@ -155,15 +167,16 @@ export class ShipView {
   standUp(nav) {
     if (!this.isCockpit()) return false;
     const x = 0.0, z = this.def.dims.seatZ + 1.15;
+    // Capture the hull exactly where it was rendered. This includes the last
+    // cockpit sway frame and avoids reconstructing a subtly different anchor
+    // on the first frame of the stand-up animation.
+    this.anchorPos.copy(nav.pos).add(this.ship.group.position);
+    this.anchorQuat.copy(this.ship.group.quaternion);
+    this.prevQuat.copy(this.anchorQuat);
     this.shipwalk = true;
     this.walkPos.set(x, 0, z);
     this.walkYaw = Math.PI;
     this.walkPitch = -0.05;
-    // anchor is derived from the camera the moment control flips: the camera
-    // is at the eye point, so anchor = nav ∘ seatedPose⁻¹
-    this.anchorQuat.copy(nav.quat);
-    this.anchorPos.copy(nav.pos)
-      .add(_v.set(0, this.def.dims.eyeY, this.def.dims.eyeZ).applyQuaternion(nav.quat).negate());
     this.beginSeatMove(nav, this.walkPose(x, z, Math.PI, -0.05), 'walk');
     return true;
   }
@@ -209,11 +222,12 @@ export class ShipView {
    * the player commits — and only the camera is interpolated.
    */
   beginSeatMove(nav, to, arrived) {
-    // current camera pose in ship-local coordinates: the camera's universe
-    // position is nav.pos and its orientation is nav.quat (dressed with last
-    // frame's cockpit look, at most one frame stale)
-    const inv = _qi.copy(this.anchorQuat).invert();
-    this.seatFrom.p.copy(nav.pos).sub(this.anchorPos).applyQuaternion(inv);
+    // Capture the pose that is actually on screen, not an ideal nav pose.
+    // Camera.position may contain cockpit/atmosphere motion; preserving it in
+    // the source pose removes the visible hitch on the first animation frame.
+    const inv = _qi.copy(this.ship.group.quaternion).invert();
+    this.seatFrom.p.copy(this.camera.position)
+      .sub(this.ship.group.position).applyQuaternion(inv);
     this.seatFrom.q.copy(inv).multiply(this.camera.quaternion);
     this.seatTo = to;
     this.seatArrived = arrived;
@@ -344,7 +358,7 @@ export class ShipView {
    * standing velocity (demo behaviour); a parked hull stays put.
    */
   integrateDrift(dt, nav) {
-    if (this.shipwalk && this.seatT >= 1) {
+    if (this.shipwalk) {
       this.anchorPos.addScaledVector(nav.vel, dt);
     }
   }
@@ -356,11 +370,13 @@ export class ShipView {
    * and rotational sway. Applied after main.js copies nav.quat. `drive` is a
    * 0..1 stand-in for the demo's |throttle| (speed + boost).
    */
-  applyCockpitLook(camera, drive) {
+  applyCockpitLook(camera, drive, atmosphere = 0) {
     if (!this.isCockpit()) return;
-    const shake = (drive > 0.5 ? 0.0035 : 0.0012) * drive;
-    const lookY = this.freeYaw - this.angVel.y * 0.10;
-    const lookX = this.freePitch + this.angVel.x * 0.06;
+    // Vacuum gets only a trace of engine vibration. Atmospheric turbulence
+    // ramps back to the old full-strength shake as density rises.
+    const shake = cockpitShakeAmplitude(drive, atmosphere);
+    const lookY = this.freeYaw - this.angVel.y * 0.055;
+    const lookX = this.freePitch + this.angVel.x * 0.035;
     _e.set(
       lookX + Math.sin(this.t * 27) * shake,
       lookY + Math.sin(this.t * 31) * shake,
@@ -376,47 +392,52 @@ export class ShipView {
    * person owns the view, re-place the hull from nav ∘ localCam⁻¹.
    */
   applyShipPose(dt, nav) {
-    if (!this.ownsCamera()) return;
     const g = this.ship.group;
+    const ownsCamera = this.ownsCamera();
+    const transitioning = this.viewBlend < 1;
+    if (!ownsCamera && !transitioning) return;
 
-    // current camera-local pose (ship frame)
-    if (this.shipwalk) {
-      if (this.seatT < 1) {
-        const t = this.seatT;
-        const e = t * t * t * (t * (t * 6 - 15) + 10);
-        _v.lerpVectors(this.seatFrom.p, this.seatTo.p, e);
-        _v.y += Math.sin(e * Math.PI) * 0.06;
-        _q.slerpQuaternions(this.seatFrom.q, this.seatTo.q, e);
+    if (ownsCamera) {
+      // current camera-local pose (ship frame)
+      if (this.shipwalk) {
+        if (this.seatT < 1) {
+          const t = this.seatT;
+          const e = t * t * t * (t * (t * 6 - 15) + 10);
+          _v.lerpVectors(this.seatFrom.p, this.seatTo.p, e);
+          _v.y += Math.sin(e * Math.PI) * 0.06;
+          _q.slerpQuaternions(this.seatFrom.q, this.seatTo.q, e);
+        } else {
+          const p = this.walkPos;
+          const bobY = Math.sin(this.bob * 2) * 0.028;
+          const bobX = Math.sin(this.bob) * 0.022;
+          _v.set(p.x + bobX * 0.4, 1.68 + bobY, p.z);
+          _q.setFromEuler(_e.set(this.walkPitch, this.walkYaw, bobX * 0.35, 'YXZ'));
+        }
       } else {
-        const p = this.walkPos;
-        const bobY = Math.sin(this.bob * 2) * 0.028;
-        const bobX = Math.sin(this.bob) * 0.022;
-        _v.set(p.x + bobX * 0.4, 1.68 + bobY, p.z);
-        _q.setFromEuler(_e.set(this.walkPitch, this.walkYaw, bobX * 0.35, 'YXZ'));
+        _v.set(0, this.def.dims.eyeY, this.def.dims.eyeZ);
+        _q.identity();
       }
+
+      // The old local^-1 * camera order made the solved hull rotate whenever
+      // a standing player looked around. Keep the hull anchor invariant.
+      solveHullQuaternion(nav.quat, _q, _targetQ);
+      _targetP.copy(_v).applyQuaternion(_targetQ).negate();
     } else {
-      _v.set(0, this.def.dims.eyeY, this.def.dims.eyeZ);
-      _q.identity();
+      // Ship.update has already authored the chase formation target.
+      _targetP.copy(g.position);
+      _targetQ.copy(g.quaternion);
     }
 
-    // anchor = nav ∘ localCam⁻¹
-    _qi.copy(_q).invert();
-    _qi.multiply(nav.quat);                      // anchorQuat
-    const anchorPos = _v.applyQuaternion(_qi).negate().add(nav.pos);
-
-    if (this.shipwalk || this.viewBlend >= 1) {
-      g.quaternion.copy(_qi);
-      g.position.copy(anchorPos).sub(nav.pos);
-    } else {
-      // V pulled back to chase: blend from the cockpit pose to formation.
-      // slerpQuaternions reads its second argument while writing this, so
-      // the fresh formation quaternion needs a scratch copy.
-      this.viewBlend = Math.min(1, this.viewBlend + dt / 0.5);
-      const e = this.viewBlend * this.viewBlend * (3 - 2 * this.viewBlend);
-      _qt.copy(g.quaternion);
-      g.quaternion.slerpQuaternions(this.viewBlendFrom.q, _qt, e);
-      g.position.lerpVectors(this.viewBlendFrom.p, g.position, e);
+    if (transitioning) {
+      this.viewBlend = Math.min(1, this.viewBlend + dt / 0.72);
+      const t = this.viewBlend;
+      const e = t * t * t * (t * (t * 6 - 15) + 10);
+      g.quaternion.slerpQuaternions(this.viewBlendFrom.q, _targetQ, e);
+      g.position.lerpVectors(this.viewBlendFrom.p, _targetP, e);
+      return;
     }
+    g.quaternion.copy(_targetQ);
+    g.position.copy(_targetP);
   }
 
   /** Per-mode FOV offset over 深空's BASE_FOV (demo: cockpit 66, walk 72). */

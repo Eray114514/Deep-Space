@@ -192,6 +192,8 @@ export class UI {
     this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax });
   }
 
+  setCockpitView(active) { this.shipHud.setCockpitView(active); }
+
   beginWarpPower() { this.shipHud.beginWarpPower(); }
 
   endWarpPower(immediate = false) { this.shipHud.endWarpPower(immediate); }

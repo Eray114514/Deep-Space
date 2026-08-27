@@ -22,7 +22,7 @@
     "test:stage-b": "node tools/stagebatmospheretest.js && node tools/weathertest.js",
     "test:gameplay": "node tools/gameplaytest.js",
     "test:performance": "node tools/perftest.js",
-    "test:hero-handoff": "node tools/hero-handoffdiag.js",
+    "test:hero-handoff": "node tools/hero-playtest.js",
     "test:cloud-reference": "node tools/cloudvisualdiag.js",
     "test:atmosphere-motion": "node tools/atmospheremotiondiag.js",
     "test:graphics": "node tools/waterinteractiontest.js && node tools/graphicsplaytest.js",

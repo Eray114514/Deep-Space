@@ -37,9 +37,11 @@ if (!runtimeVersion || pkg.version !== runtimeVersion || lock.version !== runtim
 const THREE = await import('three');
 const { startDevServer, startServer } = await import('./server.js');
 const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon,
-  flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } = await import('../src/controls.js');
+  applyFlightSteering, flightBoostSpeedLimit, pulseBurstDistance,
+  pulseBurstProgress } = await import('../src/controls.js');
 const { Ship, landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress } = await import('../src/effects.js');
+const { cockpitShakeAmplitude, solveHullQuaternion } = await import('../src/ship-view.js');
 const { DEFAULT_POWER, powerEffectsFor } = await import('../src/ship-hud.js');
 
 const defaultPowerEffects = powerEffectsFor(DEFAULT_POWER);
@@ -47,6 +49,13 @@ for (const system of ['weapon', 'navigation', 'thermal', 'gravity', 'shield']) {
   if (defaultPowerEffects[system] !== 1) {
     throw new Error(`Default HUD power changed established ${system} feel`);
   }
+}
+
+const vacuumCockpitShake = cockpitShakeAmplitude(1, 0);
+const atmosphericCockpitShake = cockpitShakeAmplitude(1, 1);
+if (vacuumCockpitShake >= atmosphericCockpitShake * 0.06
+    || atmosphericCockpitShake < 0.0034) {
+  throw new Error('Cockpit shake no longer follows atmospheric density');
 }
 
 // Pulse begins with immediate authority, remains a bounded displacement near
@@ -152,6 +161,49 @@ if (dVelocity.dot(localRight) < 41.99 || aVelocity.dot(localRight) > -41.99
   throw new Error('A/D lateral thrusters are missing, too weak, or asymmetric');
 }
 
+// Mouse steering is a damped flight-stick request, not an immediate camera
+// rotation. It must build finite angular velocity, keep turning briefly after
+// release, then settle without leaving residual input.
+const steerQuat = new THREE.Quaternion();
+const steerVelocity = new THREE.Vector3();
+for (let i = 0; i < 60; i++) {
+  applyFlightSteering(steerQuat, steerVelocity, 0.62, -0.24, 1 / 60);
+}
+if (steerQuat.angleTo(new THREE.Quaternion()) < 0.12
+    || steerVelocity.y > -0.22 || steerVelocity.x < 0.08) {
+  throw new Error('Damped flight steering does not build weighted pitch/yaw response');
+}
+const atRelease = steerQuat.clone();
+for (let i = 0; i < 12; i++) {
+  applyFlightSteering(steerQuat, steerVelocity, 0, 0, 1 / 60);
+}
+if (steerQuat.angleTo(atRelease) < 0.025) {
+  throw new Error('Flight steering stops immediately instead of carrying finite inertia');
+}
+for (let i = 0; i < 240; i++) {
+  applyFlightSteering(steerQuat, steerVelocity, 0, 0, 1 / 60);
+}
+if (steerVelocity.length() > 1e-4) {
+  throw new Error('Flight steering fails to settle after input returns to neutral');
+}
+
+// A walking camera is composed as hull * localCamera. Solving the hull with
+// the operands reversed makes it follow head-look, which was the reported
+// interior-view failure.
+const fixedHullQuat = new THREE.Quaternion().setFromEuler(
+  new THREE.Euler(0.31, -0.72, 0.18, 'YXZ'));
+for (const localEuler of [
+  new THREE.Euler(-0.2, 0.8, 0.03, 'YXZ'),
+  new THREE.Euler(0.4, -1.1, -0.08, 'YXZ'),
+]) {
+  const localCameraQuat = new THREE.Quaternion().setFromEuler(localEuler);
+  const cameraWorldQuat = fixedHullQuat.clone().multiply(localCameraQuat);
+  const solvedHullQuat = solveHullQuaternion(cameraWorldQuat, localCameraQuat);
+  if (solvedHullQuat.angleTo(fixedHullQuat) > 1e-7) {
+    throw new Error('Interior head-look changes the solved hull orientation');
+  }
+}
+
 // A stationary ship attached to a rotating planet frame must stay rigid with
 // no player input, but a zero-speed player turn must still move the hull in
 // cockpit space. This separates intentional mass response from hover shake.
@@ -218,18 +270,27 @@ for (let i = 0; i < 12; i++) {
 const steeredRelative = hoverNav.quat.clone().invert().multiply(hoverShip.group.quaternion);
 const steeredHullPosition = hoverShip.group.position.clone()
   .applyQuaternion(hoverNav.quat.clone().invert());
-if (steeredRelative.angleTo(identityQuat) < 0.035 || Math.abs(hoverShip.roll) < 0.05
-    || Math.abs(hoverShip.lookYaw) < 0.02 || Math.abs(hoverShip.lookPitch) < 0.01
-    || steeredHullPosition.distanceTo(neutralHullPosition) < 0.15) {
+const steeredAngle = steeredRelative.angleTo(identityQuat);
+const steeredOffset = steeredHullPosition.distanceTo(neutralHullPosition);
+if (steeredAngle < 0.008 || Math.abs(hoverShip.roll) < 0.007
+    || Math.abs(hoverShip.lookYaw) < 0.006 || Math.abs(hoverShip.lookPitch) < 0.002
+    || steeredOffset < 0.02) {
   throw new Error('Zero-speed player steering has no visible hull mass response');
+}
+// The HALCYON is a corvette: presentation may lag, but it must not stack a
+// fighter-scale local roll/yaw on top of the actual navigation attitude.
+if (steeredAngle > 0.04 || Math.abs(hoverShip.roll) > 0.03
+    || Math.abs(hoverShip.lookYaw) > 0.025 || Math.abs(hoverShip.lookPitch) > 0.015
+    || steeredOffset > 0.12) {
+  throw new Error('Large-ship steering presentation twists too far around the flight attitude');
 }
 for (let i = 0; i < 120; i++) {
   hoverShip.update(1 / 60, hoverNav, 'space', 0, 0, 0, {
     throttle: 0, strafe: 0, yaw: 0, pitch: 0,
   });
 }
-if (Math.abs(hoverShip.roll) > 1e-5 || Math.abs(hoverShip.lookYaw) > 1e-5
-    || Math.abs(hoverShip.lookPitch) > 1e-5) {
+if (Math.abs(hoverShip.roll) > 1.5e-4 || Math.abs(hoverShip.lookYaw) > 1.5e-4
+    || Math.abs(hoverShip.lookPitch) > 1.5e-4) {
   throw new Error('Player steering mass response does not settle after input stops');
 }
 hoverShip.setForegroundOnly(false);

@@ -454,6 +454,7 @@ export class Ship {
     if (cinematicLanding) this.parkAmt = this.landingPose.progress;
     else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
     const foregroundOnly = !cinematicLanding && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
+      || (state === 'shipwalk' && !this.parkedPosUniv)
       || (state === 'landing' && this.parkAmt < 0.58));
     this.setForegroundOnly(foregroundOnly);
 
@@ -464,18 +465,18 @@ export class Ship {
     const pitchInput = flightInput?.pitch || 0;
     const throttleInput = flightInput?.throttle || 0;
     const strafeInput = flightInput?.strafe || 0;
-    const yawTarget = yawInput * 0.07;
-    const pitchTarget = pitchInput * 0.052 - throttleInput * 0.018;
+    const yawTarget = yawInput * 0.018;
+    const pitchTarget = pitchInput * 0.014 - throttleInput * 0.008;
     this.lookYaw ??= 0;
     this.lookPitch ??= 0;
     const lookActive = Math.abs(yawInput) + Math.abs(pitchInput) > 0.03;
-    const lookResponse = lookActive ? 13 : 6.2;
+    const lookResponse = lookActive ? 5.2 : 3.0;
     this.lookYaw += (yawTarget - this.lookYaw) * (1 - Math.exp(-dt * lookResponse));
     this.lookPitch += (pitchTarget - this.lookPitch) * (1 - Math.exp(-dt * lookResponse));
 
     const rollTarget = THREE.MathUtils.clamp(
-      yawInput * 0.17 - strafeInput * 0.3, -0.55, 0.55);
-    const rollResponse = Math.abs(rollTarget) > Math.abs(this.roll) ? 9 : 7;
+      yawInput * 0.025 - strafeInput * 0.075, -0.12, 0.12);
+    const rollResponse = Math.abs(rollTarget) > Math.abs(this.roll) ? 4.2 : 3.2;
     this.roll += (rollTarget - this.roll) * (1 - Math.exp(-dt * rollResponse));
 
     // smQuat is now the passive frame anchor. All visible lag is a bounded
@@ -494,8 +495,8 @@ export class Ship {
     _sv.copy(_sf).multiplyScalar(30 + this.thrustPose * 3.2)
       .addScaledVector(_su, -6.5 + this.thrustPose * 0.35);   // formation offset
     _sr.set(1, 0, 0).applyQuaternion(nav.quat);
-    _sv.addScaledVector(_sr, -this.lookYaw * 8.5)
-      .addScaledVector(_su, this.lookPitch * 5.5);
+    _sv.addScaledVector(_sr, -this.lookYaw * 3.2)
+      .addScaledVector(_su, this.lookPitch * 2.4);
     // Start cinematic: slide in from off-screen until the offset decays to 0.
     if (this.introOffset) {
       _sv.addScaledVector(_sr, this.introOffset.x)

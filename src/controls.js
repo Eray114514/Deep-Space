@@ -20,6 +20,7 @@ const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _m = new THREE.Matrix4();
+const _e = new THREE.Euler();
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
@@ -112,6 +113,30 @@ export function applyFlightThrusters(velocity, quat, throttle, strafe, speedScal
   return velocity;
 }
 
+// Reference-demo steering contract: mouse input asks for an angular rate;
+// it never writes the flight quaternion directly. The damped rate gives the
+// hull finite mass, and yaw couples into a shallow bank so a turn reads as the
+// ship changing attitude instead of the universe rotating around a reticle.
+export function applyFlightSteering(quat, angularVelocity, steerX, steerY, dt) {
+  const pitchTarget = -steerY * 0.95;
+  const yawTarget = -steerX * 0.70;
+  angularVelocity.x += (pitchTarget - angularVelocity.x) * (1 - Math.exp(-3.4 * dt));
+  angularVelocity.y += (yawTarget - angularVelocity.y) * (1 - Math.exp(-3.0 * dt));
+  angularVelocity.z += (0 - angularVelocity.z) * (1 - Math.exp(-3.8 * dt));
+  // HALCYON is a 27 m corvette, not the reference demo's light fighter.
+  // Keep enough coupled bank to describe the turn, without making every
+  // mouse correction roll the whole vessel like an aerobatic craft.
+  const bankRate = angularVelocity.y * 0.24;
+  _q.setFromEuler(_e.set(
+    angularVelocity.x * dt,
+    angularVelocity.y * dt,
+    (angularVelocity.z + bankRate) * dt,
+    'XYZ',
+  ));
+  quat.multiply(_q).normalize();
+  return quat;
+}
+
 export class SpaceControls {
   constructor(dom, nav, { onClick } = {}) {
     this.dom = dom;
@@ -131,6 +156,12 @@ export class SpaceControls {
     this.throttleInput = 0;
     this.strafeInput = 0;
     this.lookInput = { yaw: 0, pitch: 0 };
+    this.steerInput = { x: 0, y: 0 };
+    this.angularVelocity = new THREE.Vector3();
+    // ShipView replaces these after construction. They keep cockpit RMB
+    // free-look from also steering or boosting the vessel.
+    this.canSteer = () => true;
+    this.canMouseBoost = () => true;
     this.focus = null;               // planet (for RMB orbit / two-finger orbit)
 
     // active pointers (multi-touch aware: 1 finger = look, 2 = pinch-fly + orbit)
@@ -231,19 +262,20 @@ export class SpaceControls {
     if (this._drag && this._drag.id === e.pointerId) {
       this._drag.moved += Math.abs(dx) + Math.abs(dy);
       // drag-look fallback for nolock mode and touch.
-      this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -dx * 0.0026 * this.navigationPower));
-      this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -dy * 0.0026 * this.navigationPower));
-      this.nav.quat.normalize();
-      this.captureLookInput(dx * this.navigationPower, dy * this.navigationPower);
+      if (this.canSteer()) this.captureSteering(dx, dy, 0.0026);
     }
   }
 
   lockedMove(e) {
     if (!this.enabled || document.pointerLockElement !== this.dom) return;
-    this.nav.quat.multiply(_q.setFromAxisAngle(Y_AXIS, -e.movementX * 0.0019 * this.navigationPower));
-    this.nav.quat.multiply(_q.setFromAxisAngle(X_AXIS, -e.movementY * 0.0019 * this.navigationPower));
-    this.nav.quat.normalize();
-    this.captureLookInput(e.movementX * this.navigationPower, e.movementY * this.navigationPower);
+    if (this.canSteer()) this.captureSteering(e.movementX, e.movementY, 0.0022);
+  }
+
+  captureSteering(dx, dy, sensitivity) {
+    const power = this.navigationPower;
+    this.steerInput.x = clamp(this.steerInput.x + dx * sensitivity * power, -1, 1);
+    this.steerInput.y = clamp(this.steerInput.y + dy * sensitivity * power, -1, 1);
+    this.captureLookInput(dx * power, dy * power);
   }
 
   captureLookInput(dx, dy) {
@@ -259,6 +291,9 @@ export class SpaceControls {
     this.strafeInput = 0;
     this.lookInput.yaw = 0;
     this.lookInput.pitch = 0;
+    this.steerInput.x = 0;
+    this.steerInput.y = 0;
+    this.angularVelocity.set(0, 0, 0);
   }
 
   orbit(dx, dy) {
@@ -313,15 +348,29 @@ export class SpaceControls {
       const response = 1 - Math.exp(-dt * (0.8 + this.horizonAssist * 5.2));
       stabilizeHorizon(nav.quat, this.surfaceUp, response * this.horizonAssist);
     }
-    const boosting = this.enabled && (this.boosting || keys.ShiftLeft || keys.ShiftRight);
+    const steering = this.enabled && this.canSteer();
+    if (steering) {
+      applyFlightSteering(nav.quat, this.angularVelocity,
+        this.steerInput.x, this.steerInput.y, dt);
+      // Match the reference demo's self-centring flight stick. The angular
+      // velocity has its own slower damping, so releasing the mouse settles
+      // through inertia rather than stopping on the release frame.
+      const centre = Math.exp(-1.1 * dt);
+      this.steerInput.x *= centre;
+      this.steerInput.y *= centre;
+    } else {
+      this.angularVelocity.multiplyScalar(Math.exp(-dt * 5));
+    }
+    const boosting = this.enabled
+      && ((this.boosting && this.canMouseBoost()) || keys.ShiftLeft || keys.ShiftRight);
     // Boost has its own lower drag curve. Previously the ordinary 2.4/s
     // damping cancelled most of the boost acceleration, so RMB looked active
     // while the ship barely gained speed.
     const drag = boosting
-      ? (0.42 + this.atmosphereFactor * 0.46)
-      // Keep some inertia in open space, while dense air still settles the
-      // ship promptly enough for a precise landing approach.
-      : (1.65 + this.atmosphereFactor * 0.75);
+      ? (0.30 + this.atmosphereFactor * 0.56)
+      // Vacuum flight should coast. Atmosphere retains the stronger settling
+      // curve needed for a precise landing approach.
+      : (1.12 + this.atmosphereFactor * 1.12);
     nav.vel.multiplyScalar(Math.exp(-dt * drag));
     if (this.enabled && this.wheelImpulse !== 0) {
       _f.set(0, 0, -1).applyQuaternion(nav.quat);
