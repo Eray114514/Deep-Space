@@ -1,15 +1,21 @@
-# 云与大气系统 —— 完整重写计划（已停牌，转为痛点/验收参考档案）
+# 云与大气系统 —— 完整重写计划（唯一权威规格 · 载体 WebGL 2/GLSL）
 
-> ⛔ **[2026-08-15 停牌] 本计划整体封存,不再按原文执行。**
-> 用户决策:WebGL 2/GLSL 恢复为唯一生产基准,WebGPU/TSL 线停牌且已从工作树删除(见 `optimization-roadmap.md` 决策日志)。**活跃任务规格以 `optimization-roadmap.md` 批次 B(2.2/2.8)为准**——载体 `clouds-webgl.js`/`atmosphere-webgl.js`/`legacy-render-pipeline.js`,增量演进;本文档降级为该批次的痛点与验收参考档案。
+> 🔄 **[2026-08-16 复活] 本计划继续有效、继续执行;实施载体由 WebGPU/TSL 重锚定为 WebGL 2/GLSL。**
+> **[2026-08-15 停牌范围纠正]** 当天用户停用的只是 WebGPU/TSL 后端线;"本计划整体封存、活跃规格改以 `optimization-roadmap.md` 批次 B 为准"是执行层的过度延伸,2026-08-16 经用户裁决纠正:本文档本就是因批次 B 原描述不全面而专门分立的更完整规格,**继续是云/大气重构的唯一权威来源与进度记录**;roadmap 2.2/2.8 降为批次级入口,细节以本文档为准(其 7.4 决策日志已补记)。
 >
-> **归档使用指引(哪些仍有效/哪些已死):**
-> - ✅ **仍然有效,实施时直接复用**:§0 事件链与误报反思;§1 步进预算量化表;§1.1 症状-根因证据矩阵;§2 的 R0/R1/R3/R4、S1–S4 场景、C1–C5 契约(C5 面积契约是最易做错的一条);§3.1 分层职责;§3.2 D1–D8;§3.3 云种表;§3.4 垂直高度预算;§4 阶段3c 步长策略;§8 光学推导(多重散射近似/phi_fwd 候选/数值陷阱/光照决策表);阶段 4 专项文档 `cloud-phase4-volume-march.md` 的 §1 光照参数、§4 五维评审与盲评协议。
-> - ❌ **已死,不得执行**:§2 R2("发挥原生 WebGPU");§3.2 D9("绝不回退 GLSL");§5 硬约束第 1 条(禁 GLSL);阶段 0 的新建文件清单(全部 `-node.js`/TSL 载体已删除);阶段 2/7 的 GameNodePipeline/history 接线;阶段 7 的星点 billboard 改造(WebGPU 点精灵 1px 限制在 WebGL 不存在,`gl_PointSize` 有效,整套不需要);所有"WebGL 仅作回退、允许降质"的表述(WebGL 2 现在是画质基准)。
-> - 🔄 **载体转换对照**(若在 GLSL 链重新实施):`cloudDensityTSL()` → GLSL `ShaderMaterial` 内实现;WebGPU readback 验证 → WebGL2 `readPixels`;`queue.writeTexture` 分帧上传 → `texSubImage3D`;WebGPU 设备丢失恢复 → `webglcontextlost/restored`;`node-render-pipeline.js` 深度暴露 → `legacy-render-pipeline.js` 的 `WebGLRenderTarget.depthTexture`;worker CPU bake(5.87 s 冷生成/44.5 MiB)与 3D 占用体(128×64×32)本身与后端无关,WebGL2 均支持,但上传/恢复路径需按上表换。
-> - 同日已按老版契约修复 GLSL 云的三处回归(体积云 engage 门控、uSunDir 丢失、uAmbC 每帧压暗),母星大气/云壳恢复老版比例,待玩家实机验收。
+> **质量总纲(用户 2026-08-16 唯一要求:只看效果,方案必须导向效果最好的结果):**
+> - §2 的 R0(绝对写实)/R1(画质优先)/R3(云种要多)/R4(只能多做不能少做)与 S1–S4、C1–C5 是全部技术决策的上位验收标准;载体、性能、进度一律服从,任何"重锚定/过渡/降载"都不得稀释这些目标。
+> - 2026-08-15 的老版契约修复轮(体积云全程 engage、uSunDir、uAmbC、母星大气 630 km/云壳 230–420 km)是**回归地板,不是验收终点**——它只保证不劣于老版;最终画质只以本文档 S1–S4/C1–C5/R3 闸门 + 用户实机验收为准。
+> - **R5 语义(过渡基线与最终系统)**:R5"不沿用原来的云和大气实现代码"约束的是本次新建的系统——天气权威(`weather-system.js`)、密度函数、占用体与新 GLSL march 不得从旧 march 抄结构;现行 `clouds-webgl.js`/`atmosphere-webgl.js` 链在新系统切换前作为**过渡基线**保留(并按老版契约验收),切换后由新系统替换其体积云/大气渲染,而不是在旧 march 上无限修补。
+>
+> **重锚定使用指引(哪些仍有效/哪些已死):**
+> - ✅ **仍然有效,实施时直接复用**:§0 事件链与误报反思;§1 步进预算量化表;§1.1 症状-根因证据矩阵;§2 的 R0/R1/R3/R4、S1–S4 场景、C1–C5 契约(C5 面积契约是最易做错的一条);§3.1 分层职责;§3.2 D1–D8;§3.3 云种表;§3.4 垂直高度预算;§4 阶段3c 步长策略;§8 光学推导(多重散射近似/phi_fwd 候选/数值陷阱/光照决策表);阶段 4 专项文档 `cloud-phase4-volume-march.md` 的 §1 光照参数、§2 形态映射表、§4 五维评审与盲评协议。
+> - ❌ **已死,不得执行**(均仅因绑定旧后端载体而废,与计划本身的质量目标无关):§2 R2("发挥原生 WebGPU");§3.2 D9("绝不回退 GLSL");§5 硬约束第 1 条(禁 GLSL);阶段 0 新建文件清单中的 TSL 载体项(`cloud-volume-node.js`/`atmosphere-node.js`/`temporal-resolve.js`,已删除,等价落点见下表与 §4 注记);阶段 2/7 的 GameNodePipeline/history 接线;阶段 7 的星点 billboard 改造(WebGPU 点精灵 1px 限制在 WebGL 不存在,`gl_PointSize` 有效,整套不需要);所有"WebGL 仅作回退、允许降质"的表述(WebGL 2 现在是画质基准)。
+> - 🔄 **载体转换对照(规范性,实施照此换)**:`cloudDensityTSL()` → GLSL 采样函数(直接消费同一套烘焙 3D 纹理,WebGL2 原生 `sampler3D`);`cloud-volume-node.js` 的 march → 新文件 `cloud-volume-webgl.js` 的 `ShaderMaterial`(R5:新系统不与旧 march 混写);WebGPU readback 验证 → WebGL2 `readPixels`;`queue.writeTexture` 分帧上传 → `texSubImage3D`;WebGPU 设备丢失恢复 → `webglcontextlost/restored`;`node-render-pipeline.js` 深度暴露 → `legacy-render-pipeline.js` 的 `WebGLRenderTarget.depthTexture`;worker CPU bake(5.87 s 冷生成/44.5 MiB)与 3D 占用体(128×64×32)本身与后端无关,WebGL2 均支持,但上传/恢复路径需按上表换。
+> - **验证工具现状(2026-08-16 盘点)**:`npm test` 链中的 `cloudspeciestest`/`weathersystemtest`/`cloudsamplingtest`/`cloudresourcetest`(阶段 0/1/3/4A0 闸门)全部存活,继续是硬门槛;`cloudvisualdiag.js`(阶段 4 A1)存活但按 WebGPU 管线编写,恢复阶段 4 时先重指向 GLSL 链;`seamtest`/`test:atmosphere-motion`/`_flickerprobe.mjs` 存活;`temporalresolvetest.js` 与 `test:volume-perf` 已随 WebGPU 线删除(前者属已判失败并入阶段 7 的阶段 2,后者由 `test:performance` 承担)。
+> - **恢复执行入口**:阶段 4 的 GLSL 重开口(顺序见 §4 阶段 4 注记);过渡基线的玩家实机验收并行进行,不阻塞重写。
 
-> **状态（2026-08-10）：阶段 0/1 完成；阶段 2 原型在真实运动中失败，已并入阶段 7；阶段 3 已由阶段 4 A2 的真实 WebGPU/TSL readback 闭环；阶段 4 仅 A“基建与 march 骨架”完成，B 光照、C 形态与 D 最终验收仍未完成。大气/云的运动问题继续按 §1.1 的证据矩阵跟踪，任何单一原因都不得再冒充全部根因。**
+> **状态（2026-08-16 重锚定后）：阶段 0/1 完成；阶段 2 原型在真实运动中失败，已并入阶段 7；阶段 3 的 CPU 侧完成且 `npm test` 保持绿色，其 GPU/CPU 一致性闭环（原 A2 WebGPU readback）随 TSL 线删除而失效，须按载体转换对照用 WebGL2 `readPixels` 重做后才恢复"闭环"资格；阶段 4 的 A0（CPU 生命周期）保留有效，A1 工具需重指向 GLSL，A2/A3 的 GPU march 须在 GLSL 重落地，B 光照、C 形态与 D 最终验收未开工。大气/云的运动问题继续按 §1.1 的证据矩阵跟踪，任何单一原因都不得再冒充全部根因。**
 > 本文档是这项重构的唯一权威来源，也是进度记录。每完成一个阶段，勾选 §7 进度表里对应的复选框。
 > 如果你在上下文压缩后读到这里：**先读 §0"发生了什么"**，了解我们为什么在这里；不要去读旧的云/大气实现来"理解现状"。旧实现要被替换，读它只会把它的错误假设带进新代码。然后读全文，再读"阶段 0"列出的那几个仍然有效的接口文件。
 > 重构期间不处理宇宙锁，也不为锁漂移花时间；全部视觉/玩法验收完成后，再按用户当前要求单独重筛发布宇宙并有意更新 lock。
@@ -257,6 +263,8 @@ src/cloud/temporal-resolve.js   时域累积 + 重投影 + 深度引导上采样
 src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 ```
 
+> **[2026-08-16 载体注记]** 上表 CPU 侧五个文件均已建成且仍在 `npm test`;三个 TSL 载体(`cloud-volume-node.js`/`atmosphere-node.js`/`temporal-resolve.js`)已随 WebGPU 线删除,职责等价落点:体积 march → 新 `cloud-volume-webgl.js`;大气散射 → `atmosphere-webgl.js` 重写(阶段 5,新实现替换文件内容,旧实现留 git 历史);时域累积 → 阶段 7 在 `legacy-render-pipeline.js` + `volumetric-pass-webgl.js` 统一(见阶段 7 注记)。
+
 **验证：** `npm test` 仍绿（此阶段不改变行为，只建骨架）。
 
 ---
@@ -358,6 +366,8 @@ src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 >
 > **📋 实施细节、接口清单、独立视觉评审协议、复选框进度全部在 [cloud-phase4-volume-march.md](cloud-phase4-volume-march.md)。**
 
+> **[2026-08-16 GLSL 重开口注记]** 顺序:A0(CPU 生命周期)保留有效 → A1 `cloudvisualdiag.js` 重指向 GLSL 管线 → A2 以 WebGL2 `readPixels` 重做 GPU/CPU 一致性闭环 → A3 按专项文档 §3 结构(与后端无关)在新 `cloud-volume-webgl.js` 重写 march 骨架。专项文档 §5 的 A 组勾选是已删 WebGPU 线的历史存证,重落地后按其 D 组闸门重新验收,不得沿用勾选状态。
+
 **光照结构（2026-08-09 来源复审后）：两项生产基线 + 一项实验候选。任何候选都必须先过参考积分与能量闸门，不能因本地示例里有代码就“直接照抄”。**
 
 1. **方向性散射（生产基线）** —— 双叶 Henyey-Greenstein；powder 只作为有明确能量界和 A/B 证据的经验修正。负责银边、太阳方向感和稀薄边缘。
@@ -380,7 +390,7 @@ src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 
 ### 阶段 5 — 大气散射（与云解耦重写）
 
-> **2026-08-09 根因复审：** `planet.js makeAtmosphereMaterial` 只是**确定性临时基线**（无 frame jitter、每视线步 4 子步太阳 OD、双星/日食接口保留），不能再称“不闪”。三档视线步已先提高到 16；固定步数仍可能欠采样长切线光程，大气又仍与云共用 0.46× pass。它不是本节最终大气，也不能作为阶段 4 云运动验收的无污染参考。
+> **2026-08-09 根因复审：** `planet.js makeAtmosphereMaterial` 只是**确定性临时基线**（无 frame jitter、每视线步 4 子步太阳 OD、双星/日食接口保留），不能再称“不闪”。三档视线步已先提高到 16；固定步数仍可能欠采样长切线光程，大气又仍与云共用 0.46× pass。它不是本节最终大气，也不能作为阶段 4 云运动验收的无污染参考。**[2026-08-16 注] 该 TSL 临时版已随 WebGPU 线删除;当前过渡基线是 `atmosphere-webgl.js` 的老版解析壳,本阶段完成条件不变。**
 
 > **完成条件：** [ ] 物理单位的 Rayleigh/Mie/臭氧吸收；[ ] 透射/多重散射/天空视图/航拍透视 LUT（或同等质量模型）；[ ] 贴地至轨道连续；[ ] 双星、日食、地表反照率与云光照一致；[ ] 与云共享深度与合成但不共享 march/低分辨率轮廓；[ ] 直通 alpha 无二次预乘；[ ] 全分辨率连续 silhouette coverage 无可见阶梯；[ ] 光流补偿连续转镜稳定且截图确认大气可见
 
@@ -412,19 +422,15 @@ src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 
 ### 阶段 7 — 性能与自适应 + **运动走样根治（TAA，用户硬性要求）**
 
-> **完成条件：** [ ] 空域跳过收益测量；[ ] 占用体分辨率调优；[ ] 统一 TAA/history 的采样摊薄倍率；[ ] 半分辨率+深度引导上采样平衡；[ ] 云场生成/上传/缓存/释放预算达标；[ ] WebGL 回退不崩；[ ] 三档 p95 记录；[ ] **运动微闪彻底消除（连续大幅转镜逐帧无残留闪烁）**
+> **完成条件：** [ ] 空域跳过收益测量；[ ] 占用体分辨率调优；[ ] 统一 TAA/history 的采样摊薄倍率；[ ] 半分辨率+深度引导上采样平衡；[ ] 云场生成/上传/缓存/释放预算达标；~~[ ] WebGL 回退不崩~~（已废:唯一路径无回退概念）；[ ] 三档 p95 记录；[ ] **运动微闪彻底消除（连续大幅转镜逐帧无残留闪烁）**
 
 **注意 R1：画质优先。** 先达成写实，再优化，不允许为了性能牺牲 §3.3 的云种多样性或阶段 3 的采样闸门。
 
 **运动走样根治（2026-08-06 用户硬性要求，必须完美解决、不留残留）：**
-残余微闪已实锤归因为**无 TAA 的着色走样**（详见 §6）：银河星点走样（WebGPU 点精灵永远 1px 硬方块）+ 地形高频纹理走样。本阶段**必须**落地：
+残余微闪已实锤归因为**无 TAA 的着色走样**（详见 §6）：银河星点走样（~~WebGPU 点精灵永远 1px 硬方块~~ **[2026-08-16 注:该根因随基准翻转消失,WebGL 下 `gl_PointSize` 有效、尺寸 clamp 真实生效;若星带仍有可感知走样,由 TAA 覆盖]**）+ 地形高频纹理走样。本阶段**必须**落地：
 - [ ] **TAA（时域抗走样）**：全屏 TAA，含运动向量、历史拒绝、与体积层累积器的统一历史管理（阶段 2 累积器的重投影修复并入此项——先修重投影，连续大幅运动逐帧验证，再启用）。验收标准：**静止 seamtest 0 px + 连续大幅扫镜逐帧无可见闪烁**，二者缺一不可（静止 0 px 单独不再被接受）。
-- [ ] **星点渲染改 instanced billboard**（方案已设计，2026-08-06）：Points → InstancedMesh quad + 圆形软衰减 + 尺寸下限 + 亮度面积守恒。若 TAA 先行且星点在 TAA 下已稳定，此项可降级为可选，但**星点 1px 硬点在 TAA 历史里会产生拖影/拒绝噪声，标准答案仍是 billboard**。
-  - **根因**：WebGPU 点精灵永远渲染为 1px 硬方块（`PointUVNode` 官方注释确认："In WebGPU, point primitives always have the size of one pixel"——`gl_PointSize`/sizeNode 在 WGSL 下无效），`makeStarPointsMaterial`/`makeBackdropPointsMaterial` 里的尺寸 clamp 全是空话，转镜时 1px 硬点跨像素边界必闪（实测星带区域走样 ×1486）。
-  - **实施（galaxy.js）**：新增 `makeStarQuadsMaterial({ physicalSize })`（TSL `MeshBasicNodeMaterial`）+ `makeStarQuadsGeometry(pos, col, siz, alp)`（`InstancedBufferGeometry`，单位 quad + `aPos/aColor/aSize/aAlpha` instanced attributes，`instanceCount = 星数`），替换 `buildFiniteBackdrop`（银河背景 20000 点，`physicalSize: false`，aSize 直接是像素直径）与 `rebuildNearStars`（真实恒星，`physicalSize: true`，aSize 是物理直径比例 radius/6e6）里的 `THREE.Points`。**WebGL 分支不动**（gl_PointSize 在 WebGL 有效）。
-  - **材质要点**：顶点做世界空间 billboard 展开（`centerWorld = modelWorldMatrix × aPos`；`camRight/camUp` 取 `cameraWorldMatrix` 前两列；`sizeWorld = sizePx × dist / uProj`；positionNode 输出对象空间 = `modelWorldMatrixInverse × worldPos`）；像素直径 clamp 下限 2.2px（原 1.8 硬点）；片元圆形软衰减 `smoothstep(1.0, 0.3, r)`（r 来自 quad uv）；**亮度面积守恒** opacity ×= (1.8/sizePx)²（原 1px 硬点能量摊到 2.2px 光斑要降亮度，否则银河带变亮）；恒星的 `discPx = 1.2e7×aSize×uProj/dist` 真实角尺寸语义保留；`uDim` 接口保留（galaxy.js:569-570 在用）。
-  - **main.js 配套**：`updateStarProj()`（main.js:595）里给 `backdropMaterial.uniforms.uProj` 也更新（现在只更新 starMaterial）。
-  - **验证**：慢扫镜帧序列（0.11°/帧）星带区域 diff 从 ×1486 降到接近视差水平；肉眼连续转镜星带不闪。
+  - **[2026-08-16 载体注记]** 实施位置:`legacy-render-pipeline.js`。GLSL 链已存在一个工作中的局部时域系统——`volumetric-pass-webgl.js` 的半分辨率重投影 history(老版契约,配屏幕像素+帧序 jitter 重建)。统一 TAA 必须**吸收或替换**它,而不是并行另建第二套历史所有权(阶段 2 的教训);整合期间保留静止 seamtest 0 px + 连续大幅扫镜无残留的双闸门。
+- ~~**星点渲染改 instanced billboard**~~ **[2026-08-16 作废:整套方案针对 WebGPU 点精灵恒 1px 的限制(`gl_PointSize`/sizeNode 在 WGSL 下无效);WebGL 下 `gl_PointSize` 有效,该限制不存在,`galaxy.js` 里 Points 路径本就是生产分支。原设计(TSL `MeshBasicNodeMaterial`、InstancedMesh quad、亮度面积守恒)已随 TSL 线失去载体;若 WebGL 实测星带在 TAA 下仍有可感知走样,再按当时的 GLSL 证据重新立项,不预支本条。方案原文留存于 git 历史(本条删除前版本)。]**
 - [ ] 地形纹理走样由 TAA 覆盖；若 TAA 后仍有可感知残留，加地形 shader 的屏幕空间频率衰减（fwidth LOD bias）。
 
 > **TAA 的责任边界：** TAA 处理亚像素几何/着色采样的时间走样；它不能修复当前帧系统性漏采、错误消光、错误重投影或低分辨率 silhouette 的偏差。阶段 4/5 的单帧收敛、全分辨率大气边缘和光流补偿运动闸门必须先独立通过，禁止把“以后有 TAA”当作欠采样许可。
@@ -435,9 +441,9 @@ src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 - 半分辨率 + 深度引导上采样的质量/成本平衡
 - 云场生命周期：worker 生成与取消令牌；正常仅一个活动行星、跃迁/门户期间最多两个；CPU/GPU LRU 与显式 dispose；handoff 后 2 帧内释放旧资源；bands/occupancy 双缓冲更新不撕裂。
 - 预算基线（2026-08-09 实测）：默认 fields 42,467,328 B（40.50 MiB）+ occupancy 4,227,072 B（4.03 MiB）= 44.53 MiB/行星，冷生成 5.73 s + occupancy 56.9 ms。单行星常态 CPU/GPU 各 ≤ 45 MiB，双行星过渡各 ≤ 90 MiB；生成不得阻塞主线程，上传分帧且单帧额外预算 ≤ 4 ms。
-- WebGL 回退路径：允许显著降质，但不允许崩
+- ~~WebGL 回退路径：允许显著降质，但不允许崩~~ **[已废:WebGL 2 是唯一路径与画质基准,无"回退"概念;降质即违反 R1]**
 
-**验证：** `npm run test:volume-perf`、`npm run test:performance`。记录 orbit/approach/surface 三档的 p95 帧时。
+**验证：** `npm run test:performance`（`test:volume-perf` 脚本已随 WebGPU 线删除;体积专项收益测量在 GLSL march 落地后重建设计）。记录 orbit/approach/surface 三档的 p95 帧时。
 
 ---
 
@@ -480,7 +486,7 @@ src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 - [x] 阶段 1 — 天气体系（CPU，行星尺度）
 - [ ] 阶段 2 — 时域累积原型失败；工作项已正式并入阶段 7（不单独重做）
 - [x] 阶段 3 — 唯一介质、占用体与真实 TSL/GPU 一致性已闭环
-- [ ] 阶段 4 — A 基建与 march 骨架已完成；B 光照、C 形态、D 最终验收未完成（详见 [cloud-phase4-volume-march.md](cloud-phase4-volume-march.md)）
+- [ ] 阶段 4 — A 的 CPU 基建(生命周期/工具链)保留有效；A2/A3 的 GPU march 与 readback 闭环须在 GLSL 载体重落地(2026-08-16 重锚定)；B 光照、C 形态、D 最终验收未完成（详见 [cloud-phase4-volume-march.md](cloud-phase4-volume-march.md)）
 - [ ] 阶段 5 — 大气散射（与云解耦重写）
 - [ ] 阶段 6 — 四场景联调与一致性
 - [ ] 阶段 7 — 性能、自适应、统一 TAA/history 与资源生命周期
@@ -506,7 +512,7 @@ src/cloud/cloud-species.js      云种表（3.3 节的数据化）
 | 1 天气体系 | **完成** | v2 覆盖率 0.495/0.500；晴空 80% 面积在 2 块；LCL 394 vs 2641 m；6 regime；16 云种 | 见下方"阶段 1 实测记录" |
 | 2 时域累积 | **失败/并入 7** | 静止与微运动通过；连续 ±27.5° 扫镜污染 history，生产默认禁用 | 保留原型供阶段 7 参考，不在阶段 4 前单独返工 |
 | 3 密度函数+空域跳过 | **完成** | CPU 行为闸门通过；最终光学覆盖 0.521/0.500；真实 WebGPU 固定切片/随机点误差 < 1% | A2 已闭环 |
-| 4 体积 march 与光照 | **进行中（A 完成）** | worker/缓存/上传/释放、TSL 介质、GPU 球面 DDA 与无光 march、四机位矩阵/收敛阶梯通过 | B 光照、C 形态、D 验收未完成 |
+| 4 体积 march 与光照 | **进行中（A:CPU 侧有效,GPU 侧待 GLSL 重落地）** | worker/缓存/上传/释放与四机位矩阵为载体无关成果；TSL 介质、GPU 球面 DDA march、readback 闭环随删码失效,按载体转换对照重写 | B 光照、C 形态、D 验收未完成;A1 工具需重指向 GLSL |
 | 5 大气散射 | 未开始 | — | |
 | 6 四场景联调 | 未开始 | — | |
 | 7 性能/时域/生命周期 | 未开始 | — | 画质优先；含统一 TAA/history、星点、云场资源所有权 |
@@ -757,6 +763,7 @@ PASS: canonical universe lock 6aa8d97...
 - 2026-08-09 **阶段性审查返工**：撤销阶段 2/3 的错误完成状态；修复水平噪声坐标恒零、天气覆盖二次阈值、云种触发抹掉覆盖、对流云顶无响应、地形/绝对云顶与介质消光契约；版本升级为 weather/density v2。默认生产场实测 44.53 MiB、冷生成 5.79 s，生命周期改为阶段 4 前置。修复 `planet.js` TSL 内层 Loop 错误索引后，2K WebGPU atmosphere-motion 证明资源稳定/同姿态确定且截图可见，但不再据此宣称运动稳定。
 - 2026-08-09 **闪烁/锯齿根因复审**：新增 §1.1 证据矩阵；确认旧云步长“420 m 封顶”被全局步数 cap 推翻、静态屏幕 hash 仍会随镜头换世界相位；确认 0.46× 单采样体积缓冲是大气轮廓阶梯来源之一。4× MSAA A/B 收益仅 0.060% 像素/最大 2 灰阶却增加约 3.2 ms p95，已撤销；16 步大气临时基线无可测帧时回退，保留。运动诊断降级为有明确边界的确定性/资源测试。
 - 2026-08-10 **阶段 4 A 完成**：worker/token/cache/分片上传/双缓冲/设备恢复生命周期落地；真实 WebGPU 固定切片与随机点 readback 均 <1%；GPU 球面 occupancy DDA + 无光 march 接入生产；三种子昼暮夜四机位与 4/6/8/12 阶梯完成。阶段 3 随 A2 闭环；阶段 4 仍等待 B/C/D，当前平灰/硬轮廓不得视为写实完成。
+- 2026-08-16 **停牌纠正与计划复活**。用户裁决：2026-08-15 停用的只是 WebGPU/TSL 后端，把本计划整体封存并把权威交回 roadmap 批次 B 属过度延伸，已纠正——本文档重锚定 WebGL 2/GLSL 后**继续作为云/大气重构的唯一权威规格**。同批明确：质量总纲（用户只看效果，R0/R1/R4 与 S1–S4/C1–C5 是上位标准，8-15 修复轮只是回归地板）；R5 语义（现行 GLSL 链为过渡基线，最终由新系统替换，新 march 落 `cloud-volume-webgl.js`）；阶段 3 的 GPU 闭环与阶段 4 A2/A3 须按载体转换对照在 WebGL2 重做（`readPixels`/`texSubImage3D`/`depthTexture`）；阶段 7 星点 billboard 作废（WebGL `gl_PointSize` 有效），统一 TAA 改为在 `legacy-render-pipeline.js` 吸收 `volumetric-pass-webgl.js` 现有 history；验证工具盘点——`npm test` 四云闸门全部存活，`cloudvisualdiag.js` 需重指向 GLSL，`temporalresolvetest.js`/`test:volume-perf` 已删属预期。
 
 ---
 

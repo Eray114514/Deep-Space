@@ -11,6 +11,7 @@ export class UI {
     this.els = {
       system: $('sys-name'), systemCatalog: $('sys-catalog'), cosmicTime: $('cosmic-time'), seed: $('sys-seed'), planetCount: $('sys-planets'),
       hint: $('hint'), land: $('land-btn'), crosshair: $('crosshair'),
+      interactPrompt: $('interact-prompt'),
       fade: $('fade'), stats: $('stats'), devFps: $('dev-fps'),
       loading: $('loading'), loadingText: $('loading-text'),
       altitude: $('flight-telemetry'),
@@ -234,6 +235,17 @@ export class UI {
     this.els.land.textContent = text.startsWith('DIVE') ? '潜入并离开飞船' :
       text.startsWith('LAND') ? '着陆并离开飞船  [L]' : text;
     this.els.land.classList.toggle('hidden', !show);
+  }
+
+  // Contextual F/E prompt inside the ship (sit down / ramp / exit). Empty
+  // string hides it; identical consecutive strings are cheap no-ops.
+  setInteractPrompt(text) {
+    const el = this.els.interactPrompt;
+    if (!el) return;
+    if (this._interactPrompt === text) return;
+    this._interactPrompt = text;
+    el.textContent = text;
+    el.classList.toggle('hidden', !text);
   }
 
   showHero(show = true) {

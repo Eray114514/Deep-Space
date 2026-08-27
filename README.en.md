@@ -31,7 +31,7 @@ Built on native ES modules and Three.js. Runs directly during development and pr
 - **Interstellar travel**: two modes — warp (stellar jump, folding the trip into a direct arrival) and rift (manual boundary traversal); real flight, not teleport. The target star swells from a point of light into a sun, planets materialize frame by frame.
 - **Black hole**: Sagittarius A* exists as a destination under its own versioned RNG namespace (`compact-objects:v1`); the event horizon, photon ring and accretion disc are visible in space, without re-rolling any existing star system.
 - **Galactic chart**: a full 3D navigation mode (`M` key) exposing the local stellar network, routes, filters, target analysis and a deterministic planet-system view.
-- **Ship and HUD**: the Asterion S-9 detailed GLB model flies in the forward camera view, banking on turns with engines glowing by speed; fades out after landing. A designed ship HUD with power allocation, shields, altitude, pulse and other readouts.
+- **Ship and HUD**: the HALCYON VII, a 27 m procedural exploration corvette with a full interior, flies in the forward camera view, banking on turns with engine plumes burning by speed; baked PBR textures and vertex-level cavity shadows. A designed ship HUD with power allocation, shields, altitude, pulse and other readouts.
 - **Surface weapons and combat HUD**: walk-mode weapon slots, ammo, crosshair.
 - **Audio**: 18 scene-scored tracks (see license), lazily loaded per scene and routed through a shared `AudioContext`.
 - **Cross-platform input**: desktop (mouse + keyboard) and touch (drag, pinch, virtual stick, buttons) are both fully playable; mobile auto-loads lighter.

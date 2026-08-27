@@ -1,57 +1,55 @@
-// Extract the top-down outer contour of the shipped Asterion GLB as an SVG
-// path. The HUD deliberately stores the resulting path instead of loading the
-// full 7 MB model a second time just to draw a 110 px status silhouette.
+// Extract the top-down outer contour of the HALCYON VII as an SVG path. The
+// ship is procedural now (src/halcyon/), so the contour is lofted from the
+// same section tables the runtime builds from — no GLB, no DOM. The HUD
+// deliberately stores the resulting path instead of building the full hull a
+// second time just to draw a 110 px status silhouette.
 
-import { NodeIO } from '@gltf-transform/core';
-import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { MeshoptDecoder } from 'meshoptimizer';
+import { buildLoft } from '../src/halcyon/loft.js';
+import { HALCYON } from '../src/halcyon/ship/ships/halcyon.js';
 
-const asset = process.argv[2] || 'assets/asterion-s9-rebuilt-20260716.glb';
 const resolution = 480;
 const padding = 5;
-const io = new NodeIO()
-  .registerExtensions(ALL_EXTENSIONS)
-  .registerDependencies({ 'meshopt.decoder': MeshoptDecoder });
-const document = await io.read(asset);
-const nodes = document.getRoot().listNodes().filter((node) => (
-  node.getMesh() && !/Gear|LANDING|Ramp/i.test(node.getName())
-));
 
 const triangles = [];
 let minX = Infinity;
 let minY = Infinity;
 let maxX = -Infinity;
 let maxY = -Infinity;
-for (const node of nodes) {
-  const matrix = node.getWorldMatrix();
-  for (const primitive of node.getMesh().listPrimitives()) {
-    const position = primitive.getAttribute('POSITION');
-    const indices = primitive.getIndices()?.getArray();
-    const vertices = [];
-    const point = [];
-    for (let index = 0; index < position.getCount(); index++) {
-      position.getElement(index, point);
-      const [x, y, z] = point;
-      const worldX = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
-      const worldZ = matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14];
-      // effects.js rotates the hero 180 degrees around Y. In the HUD the
-      // flight-forward -Z axis points toward the top of the display.
-      const projected = [-worldX, -worldZ];
-      vertices.push(projected);
+
+// Top-down projection: x stays x, z becomes the display axis with the
+// flight-forward -Z nose pointing toward the top of the display.
+const project = (x, y, z) => [x, z];
+
+const addGeometry = (geo, mirror = false) => {
+  const position = geo.getAttribute('position');
+  for (let index = 0; index < position.count; index += 3) {
+    const tri = [];
+    for (let k = 0; k < 3; k++) {
+      const x = position.getX(index + k);
+      const y = position.getY(index + k);
+      const z = position.getZ(index + k);
+      const projected = project(mirror ? -x : x, y, z);
+      tri.push(projected);
       minX = Math.min(minX, projected[0]);
       minY = Math.min(minY, projected[1]);
       maxX = Math.max(maxX, projected[0]);
       maxY = Math.max(maxY, projected[1]);
     }
-    const count = indices ? indices.length : vertices.length;
-    for (let index = 0; index < count; index += 3) {
-      triangles.push([
-        vertices[indices ? indices[index] : index],
-        vertices[indices ? indices[index + 1] : index + 1],
-        vertices[indices ? indices[index + 2] : index + 2],
-      ]);
-    }
+    triangles.push(tri);
   }
+};
+
+const lofts = [
+  [buildLoft(HALCYON.hull, { edge: () => true, capStart: true, capEnd: true }), false],
+  [buildLoft(HALCYON.wing, { axis: 'x', capEnd: true }), true],
+  [buildLoft(HALCYON.strake, { axis: 'x', capEnd: true }), true],
+  [buildLoft(HALCYON.nacelle, { capEnd: true }), true],
+  [buildLoft(HALCYON.fin, { axis: 'y', capEnd: true }), false],
+  [buildLoft(HALCYON.cant, { axis: 'y', capEnd: true }), true],
+];
+for (const [geo, mirror] of lofts) {
+  addGeometry(geo, false);
+  if (mirror) addGeometry(geo, true);
 }
 
 const scale = Math.min(
@@ -192,7 +190,7 @@ const path = `${output.map((point, index) => (
   `${index ? 'L' : 'M'}${point[0].toFixed(1)},${point[1].toFixed(1)}`
 )).join(' ')} Z`;
 
-console.log(`asset: ${asset}`);
-console.log(`meshes: ${nodes.map((node) => node.getName()).join(', ')}`);
+console.log(`asset: HALCYON VII (procedural, src/halcyon)`);
+console.log(`lofts: hull, wing x2, strake x2, nacelle x2, fin, cant x2`);
 console.log(`triangles: ${triangles.length}; contour points: ${output.length}`);
 console.log(path);

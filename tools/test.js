@@ -96,7 +96,7 @@ for (let i = 0; i <= 100; i++) {
   lastDescent = progress;
 }
 if (landingDescentProgress(0) !== 0 || landingDescentProgress(1) !== 1
-    || SHIP_LANDING_PROFILE.bounds.minY > -2
+    || SHIP_LANDING_PROFILE.bounds.minY > 0
     || SHIP_LANDING_PROFILE.footprint.length < 9
     || SHIP_LANDING_PROFILE.colliders.length < 2) {
   throw new Error('Ship landing clearance or compound walk collider contract drifted');

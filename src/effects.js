@@ -6,57 +6,55 @@
 import * as THREE from 'three';
 import { SKY_BACKDROP_LAYER } from './render-layers.js';
 
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { buildMaterials, buildEnvironment } from './halcyon/materials.js';
+import { buildExterior } from './halcyon/ship/exterior.js';
+import { buildInterior } from './halcyon/ship/interior.js';
+import { occupancy, bakeCavity, collectGeometries } from './halcyon/gfx/cavity.js';
+import { SHIPS } from './halcyon/ship/registry.js';
 
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
 const SKY_SUNSET_TINT = new THREE.Color(1.35, 0.22, 0.035);
 
-// Eager preload: start fetching the hero ship GLB the moment this module is
-// imported, so the network/decode overlap with main.js's heavy universe,
-// renderer, and scene setup. The ship itself stays off-screen (via
-// ship.introOffset) during the hero interface — this only front-loads the
-// asset fetch so the pull-back cinematic can begin the instant the user
-// clicks start, instead of stalling on the GLB the constructor used to kick
-// off late. Skipped under Node (test harness) where the URL has no origin.
-const HERO_SHIP_URL = '/assets/asterion-s9-rebuilt-20260716.glb';
-const heroShipLoader = new GLTFLoader();
-heroShipLoader.setMeshoptDecoder(MeshoptDecoder);
-const heroShipPromise = typeof location !== 'undefined'
-  ? heroShipLoader.loadAsync(HERO_SHIP_URL).catch((error) => {
-    console.error('ASTERION S-9 GLB failed to preload', error);
-    return null;
-  })
-  : Promise.resolve(null);
+// Eager preload note: the hero ship is now built procedurally from
+// src/halcyon/ (the 3aaa-spaceship-flight-prototype kernel), so there is no
+// GLB fetch to front-load any more. Construction happens synchronously in the
+// Ship constructor (~geometry loft + cavity bake), which the loading veil
+// already covers.
 
-// One authored size contract drives landing clearance and walk collision. The
-// source GLB bounds are [-14, -4.40003, -12.70865] to
-// [14, 3.17674, 11.87912]; the hero is rotated 180 degrees around Y and shown
-// at this scale. Keep collision deliberately simpler than the render mesh, but
-// never let it disagree about the ship's overall footprint or belly height.
+// One authored size contract drives landing clearance and walk collision.
+// Values follow the HALCYON VII definition (src/halcyon/ship/ships/halcyon.js):
+// 27.0 m long (z -15.6 .. 11.3), 21.4 m span (wing booms at x ±10.68),
+// hull belly at y -1.05, fin antenna tip at y ~7.3. The ship flies at 1:1
+// scale; y = 0 is the interior deck, so the belly sits ~1 m under the deck.
 export const SHIP_LANDING_PROFILE = Object.freeze({
-  scale: 0.48,
+  scale: 1,
   bounds: Object.freeze({
-    minY: -4.40003 * 0.48,
-    maxY: 3.17674 * 0.48,
-    halfX: 12.70865 * 0.48,
-    halfZ: 14 * 0.48,
+    minY: -1.05,
+    maxY: 7.3,
+    halfX: 10.7,
+    halfZ: 15.6,
   }),
-  groundClearance: 0.22,
+  groundClearance: 0.55,
   footprint: Object.freeze([
-    Object.freeze([0, 0]),
-    Object.freeze([-5.7, -5.9]), Object.freeze([0, -6.5]), Object.freeze([5.7, -5.9]),
-    Object.freeze([-5.9, 0]), Object.freeze([5.9, 0]),
-    Object.freeze([-5.7, 5.9]), Object.freeze([0, 6.5]), Object.freeze([5.7, 5.9]),
+    Object.freeze([0, -15.6]),
+    Object.freeze([-2.2, -12.0]), Object.freeze([2.2, -12.0]),
+    Object.freeze([-3.6, -3.0]), Object.freeze([3.6, -3.0]),
+    Object.freeze([-3.4, 6.2]), Object.freeze([3.4, 6.2]),
+    Object.freeze([-10.7, 7.3]), Object.freeze([10.7, 7.3]),
+    Object.freeze([-10.7, 2.0]), Object.freeze([10.7, 2.0]),
+    Object.freeze([0, 11.3]),
   ]),
   colliders: Object.freeze([
-    // Raised central fuselage plus a lower wing/tail volume. Their upper faces
-    // are real walking surfaces, while the volumes stop the player ghosting
-    // through the parked ship.
-    Object.freeze({ center: Object.freeze([0, -0.27, 0]), half: Object.freeze([2.45, 1.78, 5.85]) }),
-    Object.freeze({ center: Object.freeze([0, -0.62, 0.35]), half: Object.freeze([5.95, 0.76, 3.35]) }),
-    Object.freeze({ center: Object.freeze([0, -0.68, 5.05]), half: Object.freeze([4.6, 0.66, 1.45]) }),
+    // Raised central fuselage plus wings and nacelles. Their upper faces are
+    // real walking surfaces, while the volumes stop the player ghosting
+    // through the parked ship. Coordinates are in the ship's own frame
+    // (nose at -Z, deck at y=0).
+    Object.freeze({ center: Object.freeze([0, 1.15, -2.15]), half: Object.freeze([3.7, 2.2, 13.45]) }),
+    Object.freeze({ center: Object.freeze([6.9, 0.45, 6.3]), half: Object.freeze([3.8, 0.75, 4.4]) }),
+    Object.freeze({ center: Object.freeze([-6.9, 0.45, 6.3]), half: Object.freeze([3.8, 0.75, 4.4]) }),
+    Object.freeze({ center: Object.freeze([3.6, 0.7, 5.2]), half: Object.freeze([1.25, 1.25, 6.1]) }),
+    Object.freeze({ center: Object.freeze([-3.6, 0.7, 5.2]), half: Object.freeze([1.25, 1.25, 6.1]) }),
   ]),
 });
 
@@ -197,8 +195,8 @@ export class SkyDome {
 }
 
 // ============================================================================
-// The ship: the Asterion S-9 GLB flies just ahead of the camera whenever
-// you're in flight — banks into turns, engines glow with speed, fades out
+// The ship: the HALCYON VII corvette flies just ahead of the camera whenever
+// you're in flight — banks into turns, engines burn with speed, fades out
 // when you step onto a planet. We are no longer a disembodied camera.
 // ============================================================================
 
@@ -211,7 +209,7 @@ const _sr = new THREE.Vector3();
 export const SHIP_FOREGROUND_LAYER = 3;
 
 export class Ship {
-  constructor(scene, { anisotropy = 1 } = {}) {
+  constructor(scene, { anisotropy = 1, renderer = null } = {}) {
     const g = new THREE.Group();
     g.layers.set(SHIP_FOREGROUND_LAYER);
     this.group = g;
@@ -222,14 +220,20 @@ export class Ship {
     this.roll = 0;
     this.lookYaw = 0;
     this.lookPitch = 0;
-    this.loadedEmissives = [];
-    this.loadedGear = [];
-    this.loadedRamp = [];
     this.anisotropy = anisotropy;
     this.heroLoaded = false;
     this.heroLoadSettled = false;
     this.heroLoadFailed = false;
-    this.loadHeroShip();
+
+    // The flown vessel. HALCYON VII — long range exploration corvette,
+    // lofted from the section tables in src/halcyon/ rather than loaded.
+    this.def = SHIPS[0];
+    this.rampT = 0;
+    this.rampTarget = 0;
+    this.enginePower = 0.1;
+    this.t = 0;
+
+    this.mountShip(scene, renderer);
 
     // when you land, the ship sets down on a pad beside you and waits
     this.parkedPosUniv = null;
@@ -241,64 +245,119 @@ export class Ship {
     this.introOffset = new THREE.Vector3();
   }
 
-  loadHeroShip() {
-    // Consumes the module-level heroShipPromise (started at import time) so
-    // the GLB fetch overlaps with main.js init. If the preload failed, the
-    // promise resolves to null and the ship stays invisible — the error was
-    // already logged by the preload's catch handler.
-    heroShipPromise.then((gltf) => {
-      if (!gltf) {
-        this.heroLoadFailed = true;
-        this.heroLoadSettled = true;
-        return;
+  /**
+   * Build the hull, dress it with the baked-PBR material library, bake the
+   * cavity shadow attribute over the finished assembly, and stand up the
+   * ship-scoped lighting rig.
+   *
+   * Everything (materials included) lives on the foreground layer so the
+   * main scene pass never pays for it and the ship's lights never leak onto
+   * planets or terrain.
+   */
+  mountShip(scene, renderer) {
+    this.mats = buildMaterials(this.anisotropy);
+    if (renderer) {
+      // The demo's deep-space PMREM probe drives all hull specular. It is
+      // assigned per-material rather than as scene.environment so the rest
+      // of this project's universe materials are untouched.
+      this.envMap = buildEnvironment(renderer);
+      for (const v of Object.values(this.mats)) {
+        if (v instanceof THREE.Material) v.envMap = this.envMap;
+        else if (Array.isArray(v)) v.forEach((m) => { if (m instanceof THREE.Material) m.envMap = this.envMap; });
       }
-      const hero = gltf.scene;
-      this.loadedEmissives = [];
-      this.loadedGear = [];
-      this.loadedRamp = [];
-      hero.traverse((object) => {
-        object.layers.set(this.foregroundOnly ? SHIP_FOREGROUND_LAYER : 0);
-        if (/^(LANDING_GEAR_ROOT|Gear_)/.test(object.name)) this.loadedGear.push(object);
-        if (/^(BOARDING_RAMP_ROOT|Ramp_)/.test(object.name)) this.loadedRamp.push(object);
-        if (!object.isMesh) return;
-        object.castShadow = true;
-        object.receiveShadow = true;
-        object.material = Array.isArray(object.material)
-          ? object.material.map((material) => material.clone())
-          : object.material.clone();
-        const materials = Array.isArray(object.material) ? object.material : [object.material];
-        for (const material of materials) {
-          for (const slot of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap']) {
-            const texture = material[slot];
-            if (!texture) continue;
-            texture.anisotropy = Math.max(texture.anisotropy || 1, this.anisotropy);
-            texture.needsUpdate = true;
-          }
-          if (!material.isMeshStandardMaterial) continue;
-          material.color.multiplyScalar(0.72);
-          material.roughness = Math.max(material.roughness, 0.3);
-          if (material.emissiveMap || /Engine|Emission/i.test(material.name)) {
-            material.toneMapped = true;
-            this.loadedEmissives.push(material);
-          }
-        }
-      });
-      hero.rotation.y = Math.PI;
-      hero.scale.setScalar(SHIP_LANDING_PROFILE.scale);
-      this.group.clear();
-      this.group.add(hero);
-      for (const part of this.loadedGear) part.visible = false;
-      for (const part of this.loadedRamp) part.visible = false;
-      this.heroLoaded = true;
-      this.heroLoadSettled = true;
-    }).catch((error) => {
-      // The module-level promise normally resolves null on failure. Keep this
-      // final guard so startup readiness can never wait forever if later asset
-      // processing itself throws.
-      this.heroLoadFailed = true;
-      this.heroLoadSettled = true;
-      console.error('ASTERION S-9 GLB processing failed', error);
+    }
+
+    this.ext = buildExterior(this.mats, this.def);
+    this.int = buildInterior(this.mats, this.def);
+    this.group.add(this.ext.group);
+    this.group.add(this.int.group);
+
+    const geos = collectGeometries(this.group);
+    bakeCavity(geos, occupancy(geos, 0.05));
+
+    this.group.traverse((object) => {
+      object.layers.set(SHIP_FOREGROUND_LAYER);
     });
+
+    // The interior spotlight rigs are rigid relative to the hull they light,
+    // so their shadow maps are frame-invariant: render once and freeze.
+    // This removes two 1024² shadow passes from every frame at zero visual
+    // cost (see the perf note in the halcyon port plan).
+    this.group.traverse((object) => {
+      if (object.isSpotLight && object.castShadow) {
+        object.shadow.autoUpdate = false;
+        object.shadow.needsUpdate = true;
+      }
+    });
+
+    this.buildShipLights(scene);
+    this.buildHardpoints();
+
+    this.heroLoaded = true;
+    this.heroLoadSettled = true;
+  }
+
+  /**
+   * Ship-scoped lighting: a key light with a tight shadow frustum that
+   * follows the hull, a cool fill from the opposite side, and a weak
+   * ambient. 深空's own sun/terrain lights are planet-scale and live on the
+   * default layer, so they can neither shadow nor tint the foreground ship;
+   * these are the demo's exact light recipe (materials.ts review), driven
+   * each frame by the active star instead of a fixed world direction.
+   */
+  buildShipLights(scene) {
+    this.sun = new THREE.DirectionalLight(0xffffff, 1.4);
+    this.sun.userData.shipSun = true;
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.camera.near = 1;
+    this.sun.shadow.camera.far = 140;
+    this.sun.shadow.camera.left = this.sun.shadow.camera.bottom = -34;
+    this.sun.shadow.camera.right = this.sun.shadow.camera.top = 34;
+    this.sun.shadow.bias = -0.0002;
+    this.sun.shadow.normalBias = 0.05;
+    this.sun.layers.set(SHIP_FOREGROUND_LAYER);
+    this.sun.target.layers.set(SHIP_FOREGROUND_LAYER);
+    scene.add(this.sun, this.sun.target);
+
+    /* Ambient and fill are deliberately weak. Neither casts, and a
+       non-shadowing light lights every surface facing it regardless of what
+       is in front of it — so inside the hull they would flood the cabin with
+       unoccluded light no wall could block (see the materials.ts review).
+       They only keep the exterior's shadow side from going to black. */
+    this.ambient = new THREE.AmbientLight(0x4a5f7a, 0.20);
+    this.ambient.layers.set(SHIP_FOREGROUND_LAYER);
+    scene.add(this.ambient);
+    this.fill = new THREE.DirectionalLight(0x5f86c8, 0.40);
+    this.fill.layers.set(SHIP_FOREGROUND_LAYER);
+    this.fill.target.layers.set(SHIP_FOREGROUND_LAYER);
+    scene.add(this.fill, this.fill.target);
+  }
+
+  /** Weapon hardpoints: one per wing, just inboard of the leading edge. */
+  buildHardpoints() {
+    this.hardpoints = [];
+    for (const sx of [-1, 1]) {
+      const hp = new THREE.Object3D();
+      hp.position.set(sx * 5.2, 0.55, 3.1);
+      hp.name = sx > 0 ? 'hardpoint-stbd' : 'hardpoint-port';
+      this.group.add(hp);
+      this.hardpoints.push(hp);
+    }
+  }
+
+  /** Aim the ship-scoped key/fill lights. dir is the unit vector to the star. */
+  updateSun(dir, intensity) {
+    if (!this.sun) return;
+    const origin = this.group.position;
+    this.sun.intensity = 1.4 * intensity;
+    this.sun.position.copy(origin).addScaledVector(dir, 80);
+    this.sun.target.position.copy(origin);
+    // The fill rides a camera-relative azimuth so the shadow side always
+    // keeps its cool rim, wherever the star happens to be.
+    _sv.set(0.62, -0.26, 0.80).normalize();
+    this.fill.position.copy(origin).addScaledVector(_sv, 60);
+    this.fill.target.position.copy(origin);
   }
 
   setParked(posUniv, quat) {
@@ -325,12 +384,73 @@ export class Ship {
   setForegroundOnly(enabled) {
     if (this.foregroundOnly === enabled) return;
     this.foregroundOnly = enabled;
-    this.group.traverse((object) => object.layers.set(enabled ? SHIP_FOREGROUND_LAYER : 0));
+    const layer = enabled ? SHIP_FOREGROUND_LAYER : 0;
+    this.group.traverse((object) => object.layers.set(layer));
+    // the light rig is absent on headless test doubles
+    this.sun?.layers.set(layer);
+    this.sun?.target.layers.set(layer);
+    this.fill?.layers.set(layer);
+    this.fill?.target.layers.set(layer);
+    this.ambient?.layers.set(layer);
   }
 
-  update(dt, nav, state, speed, warp, boost = 0, flightInput = null) {
+  /**
+   * Engine power for the plume / halo / core emissive, mapped from 深空's
+   * flight state onto the demo's 0..1.7 throttle-power scale.
+   */
+  updateEngineFx(dt, speed, warp, boost, cameraPos) {
+    // the FX rig is absent on headless test doubles
+    if (!this.ext) return;
+    const power = THREE.MathUtils.clamp(
+      speed / 7e5 * 0.8 + boost * 1.0 + warp * 1.12, 0.1, 1.7);
+    this.enginePower = power;
+    this.t += dt;
+    const t = this.t;
+
+    /* plumes: time, power, camera-proximity fade — see ship/exterior.js for
+       why the fade exists (a chase camera lerping through a plume cone used
+       to black out the whole frame through bloom). */
+    const camW = cameraPos ?? _camZero;
+    for (const p of this.ext.plumes) {
+      const m = p.material;
+      m.uniforms.uTime.value = t;
+      m.uniforms.uPower.value = power * 0.72;
+      p.scale.set(0.55 + power * 0.6, 0.35 + power * 0.95, 0.55 + power * 0.6);
+      p.updateWorldMatrix(true, false);
+      _sv2.setFromMatrixPosition(p.matrixWorld);
+      const dist = _sv2.distanceTo(camW);
+      if (!p.geometry.boundingSphere) p.geometry.computeBoundingSphere();
+      const reach = p.geometry.boundingSphere.radius * Math.max(p.scale.x, p.scale.y, p.scale.z);
+      m.uniforms.uFade.value = THREE.MathUtils.clamp((dist - reach * 0.55) / (reach * 0.7), 0, 1);
+    }
+    for (const r of this.ext.glowRings) {
+      const rm = r.material;
+      rm.uniforms.uPower.value = 0.25 + power * 0.55;
+      r.updateWorldMatrix(true, false);
+      _sv2.setFromMatrixPosition(r.matrixWorld);
+      rm.uniforms.uFade.value = THREE.MathUtils.clamp(_sv2.distanceTo(camW) / 1.6, 0, 1);
+    }
+    this.mats.engineCore.emissiveIntensity = 1.6 + power * 3.4;
+
+    /* strobes — kept modest so the bloom chain never saturates */
+    const blink = (t % 1.3) < 0.09 ? 3.2 : 0.05;
+    for (const s of this.ext.strobes) s.material.emissiveIntensity = blink;
+
+    /* cargo-ramp containment field ticks even while closed so opening it
+       never starts from a frozen lattice */
+    const bm = this.int.barrier.material;
+    bm.uniforms.uTime.value = t;
+    bm.uniforms.uOpen.value = THREE.MathUtils.clamp((this.rampT - 0.15) / 0.6, 0, 1);
+    this.int.barrier.visible = this.rampT > 0.02;
+
+    /* the holo instruments: sweep rate and plot gain follow live flight */
+    this.int.cockpit.holo.update(t, speed, power);
+  }
+
+  update(dt, nav, state, speed, warp, boost = 0, flightInput = null, camera = null) {
+    this.frameNo = (this.frameNo ?? 0) + 1;
     const cinematicLanding = state === 'landing' && !!this.landingPose;
-    const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding') && !!this.parkedPosUniv;
+    const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding' || state === 'shipwalk') && !!this.parkedPosUniv;
     if (cinematicLanding) this.parkAmt = this.landingPose.progress;
     else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
     const foregroundOnly = !cinematicLanding && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
@@ -368,9 +488,11 @@ export class Ship {
     this.thrustPose += (driveThrust - this.thrustPose) * (1 - Math.exp(-dt * 5.8));
     // During acceleration the ship visibly lunges away from the camera. This
     // gives thrust a foreground reference instead of making only the universe
-    // appear to slide toward a stationary model.
-    _sv.copy(_sf).multiplyScalar(19 + this.thrustPose * 3.2)
-      .addScaledVector(_su, -4.6 + this.thrustPose * 0.35);   // formation offset
+    // appear to slide toward a stationary model. The formation offset is
+    // tuned for the 27 m HALCYON hull so it frames like the old 13 m hero did
+    // at 19 units (a touch closer, so the bigger ship reads as an upgrade).
+    _sv.copy(_sf).multiplyScalar(30 + this.thrustPose * 3.2)
+      .addScaledVector(_su, -6.5 + this.thrustPose * 0.35);   // formation offset
     _sr.set(1, 0, 0).applyQuaternion(nav.quat);
     _sv.addScaledVector(_sr, -this.lookYaw * 8.5)
       .addScaledVector(_su, this.lookPitch * 5.5);
@@ -402,18 +524,31 @@ export class Ship {
       this.group.quaternion.copy(formQuat);
     }
 
-    const burnK = 1 - this.parkAmt;
-    for (const material of this.loadedEmissives) {
-      material.emissiveIntensity = 1.15 + Math.min(3.2, speed / 7e5 + warp * 2.2 + boost * 1.2) * burnK;
+    this.updateEngineFx(dt, speed, warp, boost, camera?.position);
+
+    // Sun-shadow cadence: live while flying; while parked the hull cannot
+    // move under its own power, so the map re-renders only often enough to
+    // track the planet's slow rotation (the parked ship still gets crisp
+    // self-shadowing, software rasterisers get three fewer ship passes).
+    if (this.sun) {
+      // live while the hull can actually move (flight states, the landing
+      // descent, or an interior walk mid-flight); frozen + periodic refresh
+      // once it is parked on a pad
+      const flying = ['space', 'flyto', 'warp', 'takeoff', 'landing'].includes(state)
+        || (state === 'shipwalk' && !this.parkedPosUniv);
+      if (this.sun.shadow.autoUpdate !== flying) {
+        this.sun.shadow.autoUpdate = flying;
+        this.sun.shadow.needsUpdate = true;
+      } else if (!flying && this.frameNo % 90 === 0) {
+        this.sun.shadow.needsUpdate = true;
+      }
     }
-    const gearVisible = this.parkAmt > 0.42;
-    const rampVisible = state === 'walk' && this.parkAmt > 0.88;
-    for (const part of this.loadedGear) part.visible = gearVisible;
-    for (const part of this.loadedRamp) part.visible = rampVisible;
   }
 }
 const _sq2 = new THREE.Quaternion();
 const _sp = new THREE.Vector3();
+const _sv2 = new THREE.Vector3();
+const _camZero = new THREE.Vector3();
 
 // ============================================================================
 // Twin energy cannons. Bolts live in universe coordinates and are packed into
@@ -488,10 +623,27 @@ export class ShipWeapons {
     _weaponUp.set(0, 1, 0).applyQuaternion(shipQuat).normalize();
     _weaponPos.copy(nav.pos);
     if (ship?.group) _weaponPos.add(ship.group.position);
-    else _weaponPos.addScaledVector(_weaponForward, 19).addScaledVector(_weaponUp, -4.6);
-    // The rebuilt Asterion's paired emitters sit just inboard of the wingtips.
-    _weaponPos.addScaledVector(_weaponForward, 1.35).addScaledVector(_weaponUp, -0.15);
     const muzzleSpeed = Math.max(780, speedScale * 10.5) * weaponPower;
+
+    // The HALCYON's named wing hardpoints win when present; the legacy
+    // formation-relative offsets stay as the fallback.
+    const hardpoints = ship?.hardpoints;
+    if (Array.isArray(hardpoints) && hardpoints.length === 2) {
+      for (let i = 0; i < 2; i++) {
+        const bolt = this.bolts[this.cursor];
+        this.cursor = (this.cursor + 1) % this.maxBolts;
+        hardpoints[i].updateWorldMatrix(true, false);
+        bolt.pos.copy(_weaponPos)
+          .add(_weaponDir.setFromMatrixPosition(hardpoints[i].matrixWorld));
+        bolt.vel.copy(nav.vel).addScaledVector(_weaponForward, muzzleSpeed);
+        bolt.life = bolt.maxLife = 1.65 * Math.max(.65, weaponPower);
+        bolt.length = THREE.MathUtils.clamp(muzzleSpeed * 0.0018, 1.0, 2.4);
+      }
+      this.shotsFired++;
+      return;
+    }
+    // The rebuilt hull's paired emitters sit just inboard of the wingtips.
+    _weaponPos.addScaledVector(_weaponForward, 1.35).addScaledVector(_weaponUp, -0.15);
 
     for (const side of [-1, 1]) {
       const bolt = this.bolts[this.cursor];

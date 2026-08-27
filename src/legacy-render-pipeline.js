@@ -8,6 +8,8 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ForegroundPass } from './foreground-pass.js';
 import { VolumetricPass } from './volumetric-pass-webgl.js';
 import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
+import { gradePass } from './halcyon/gfx/grade.js';
+import { hardenBloom } from './halcyon/gfx/sanitize.js';
 
 function aliasUniforms(uniforms, aliases) {
   for (const [alias, original] of Object.entries(aliases)) {
@@ -68,8 +70,17 @@ export class GameLegacyPipeline {
       new THREE.Vector2(1, 1), bloomStrength, bloomRadius, bloomThreshold,
     );
     this.bloom.enabled = bloomEnabled;
+    // Harden the bloom high-pass against NaN/Inf coming from additive surfaces
+    // that can straddle the near plane (engine plumes, canopy glass, the
+    // ramp's force field). Without this one bad pixel blacks out the whole
+    // frame through the bloom downsample chain — see halcyon/gfx/sanitize.js.
+    hardenBloom(this.bloom, 64);
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
+    // grade pass (radial CA / vignette / film grain): display-referred lens
+    // character, so it runs after the tonemap in OutputPass.
+    this.grade = gradePass();
+    this.composer.addPass(this.grade);
     this.smaa = !matchMedia('(pointer: coarse)').matches
       ? new SMAAPass(1, 1)
       : null;

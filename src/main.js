@@ -14,6 +14,7 @@ import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
+import { ShipView } from './ship-view.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
@@ -393,13 +394,12 @@ function prewarmSurfacePipelines(planet) {
 }
 
 function prewarmLoadedShipPipelines() {
-  if (QUALITY_LOW || ship.heroLoadFailed) {
+  if (ship.heroLoadFailed) {
     shipPipelinesWarmed = true;
     return;
   }
   if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending
-    || !surfacePipelinesReady
-    || typeof foregroundPass?.compileAsync !== 'function') return;
+    || !surfacePipelinesReady) return;
   shipPipelineWarmPending = true;
   surfacePipelinesReady = false;
   const meshState = [];
@@ -412,8 +412,8 @@ function prewarmLoadedShipPipelines() {
       frustumCulled: object.frustumCulled,
     });
     // compileAsync still respects object visibility/frustum state. Temporarily
-    // include wings, landing gear and ramp so later flight/landing frames do
-    // not discover an uncompiled foreground variant.
+    // include the whole hull (ramp, interior, canopy) so later flight/landing
+    // frames do not discover an uncompiled variant.
     object.visible = true;
     object.frustumCulled = false;
     const materials = Array.isArray(object.material)
@@ -428,13 +428,13 @@ function prewarmLoadedShipPipelines() {
     }
   });
   const cameraLayerMask = camera.layers.mask;
-  // PassNode.compileAsync currently delegates to renderer.compileAsync(scene,
-  // camera) without applying PassNode.setLayers(). Select the real foreground
-  // layer explicitly or the call silently recompiles layer 0 and misses WINGS.
+  // Compile the hull for the FOREGROUND pass first: the hero exists
+  // exclusively on that layer in flight, so the ordinary scene camera never
+  // visits those materials.
   camera.layers.set(SHIP_FOREGROUND_LAYER);
-  // WebGPU pipeline compilation does not force image upload. Initializing the
-  // unique GLB textures here keeps eight 4K transfers behind the loading veil
-  // instead of clustering them at 2.4 s in the pull-back shot.
+  // Pipeline compilation does not force image upload. Initializing the unique
+  // hull textures here keeps the webp transfers behind the loading veil
+  // instead of clustering them in the pull-back shot.
   const restoreMeshState = () => {
     camera.layers.mask = cameraLayerMask;
     for (const { object, visible, frustumCulled } of meshState) {
@@ -453,21 +453,24 @@ function prewarmLoadedShipPipelines() {
     console.warn('ship texture prewarm failed', error);
     return;
   }
-  // The hero hull exists exclusively on the foreground layer. Compiling the
-  // ordinary scene camera never visited those GLB materials, so the first
-  // visible pull-back frame synchronously built every hull pipeline. Compile
-  // the exact pass that owns the ship while the loading/hero veil is active.
-  let compileTask;
-  try {
-    compileTask = foregroundPass.compileAsync(renderer);
-  } catch (error) {
-    restoreMeshState();
-    shipPipelineWarmPending = false;
-    surfacePipelinesReady = true;
-    console.warn('ship pipeline prewarm failed', error);
-    return;
-  }
-  compileTask.then(() => {
+  renderer.compileAsync(scene, camera).then(async () => {
+    // Second variant: the hull also renders in the MAIN scene pass whenever
+    // it parks on a planet (setForegroundOnly(false)) — and that pass has a
+    // DIFFERENT light set (sunShadow joins near the surface), so every dress
+    // material compiles a second program family. Compiling it here keeps a
+    // multi-second stall off the first landed frame.
+    const savedSunVisible = sunShadow.visible;
+    try {
+      sunShadow.visible = true;
+      ship.setForegroundOnly(false);
+      camera.layers.mask = cameraLayerMask;
+      await renderer.compileAsync(scene, camera);
+    } catch (error) {
+      console.warn('ship main-pass prewarm failed', error);
+    } finally {
+      ship.setForegroundOnly(true);
+      sunShadow.visible = savedSunVisible;
+    }
     restoreMeshState();
     shipPipelinesWarmed = true;
     shipPipelineWarmPending = false;
@@ -525,6 +528,7 @@ const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
 const riftDistortionPass = nodePipeline.rift;
 const bloomPass = nodePipeline.bloom;
+const gradePass_ = nodePipeline.grade;
 let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 let spatialRift = null;
 let pipelineResizePending = false;
@@ -734,7 +738,10 @@ const ship = new Ship(scene, {
   anisotropy: Math.min(16, renderer.getMaxAnisotropy?.()
     ?? renderer.capabilities?.getMaxAnisotropy?.()
     ?? 1),
+  renderer,
 });
+const shipView = new ShipView(ship, camera);
+shipView.onHint = (text) => { if (!paused && !starMap?.isOpen) ui.setHint(text, true); };
 spatialRift = new SpatialRift({
   scene,
   renderer,
@@ -892,7 +899,8 @@ function triggerPulse() {
 
 renderer.domElement.addEventListener('pointerdown', () => {
   unlockAudio();
-  if (state === 'walk' && !document.pointerLockElement && !window.NMS_NOLOCK && pointerLockInput) {
+  if ((state === 'walk' || state === 'shipwalk') && !document.pointerLockElement
+    && !window.NMS_NOLOCK && pointerLockInput) {
     renderer.domElement.requestPointerLock();
   }
 });
@@ -925,7 +933,18 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     triggerPulse();
   }
+  if (!e.repeat && e.code === 'KeyV' && state === 'space' && !paused) shipView.toggleView();
+  if (!e.repeat && e.code === 'KeyF') {
+    if (state === 'space' && shipView.isCockpit() && !paused) {
+      shipView.standUp(nav);
+      setState('shipwalk');
+    } else if (state === 'shipwalk' && !paused) {
+      shipView.interact(nav);
+    }
+  }
+  if (!e.repeat && e.code === 'KeyX' && state === 'space') nav.vel.set(0, 0, 0);
   if (!e.repeat && e.code === 'KeyE' && state === 'walk') boardShip();
+  if (!e.repeat && e.code === 'KeyE' && state === 'shipwalk' && !paused) exitShip();
   if (!e.repeat && e.code === 'KeyT' && state === 'walk') recallShip();
   if (e.code === 'KeyH') {
     photoMode = !photoMode;
@@ -1192,7 +1211,8 @@ async function closeStarMap(restoreInput = true) {
   audio.setPaused(false);
   spaceCtl.enabled = state === 'space';
   ui.setCrosshair(state === 'space' || state === 'walk');
-  if (restoreInput && !window.NMS_NOLOCK && pointerLockInput && (state === 'space' || state === 'walk')) {
+  if (restoreInput && !window.NMS_NOLOCK && pointerLockInput
+    && ['space', 'walk', 'shipwalk'].includes(state)) {
     try { await renderer.domElement.requestPointerLock(); } catch { /* next click can reacquire */ }
   }
 }
@@ -1215,7 +1235,7 @@ function pauseGame() {
 }
 
 function requestGameplayPointerLock() {
-  if (window.NMS_NOLOCK || !pointerLockInput || !['space', 'walk'].includes(state)) return Promise.resolve(true);
+  if (window.NMS_NOLOCK || !pointerLockInput || !['space', 'walk', 'shipwalk'].includes(state)) return Promise.resolve(true);
   if (document.pointerLockElement === renderer.domElement) return Promise.resolve(true);
   if (pointerLockRequest) return pointerLockRequest;
   pausePanel.classList.add('is-acquiring');
@@ -1249,7 +1269,7 @@ function requestGameplayPointerLock() {
 async function resumeGame() {
   if (!paused) return true;
   let locked = await requestGameplayPointerLock();
-  if (locked && !window.NMS_NOLOCK && pointerLockInput && ['space', 'walk'].includes(state)) {
+  if (locked && !window.NMS_NOLOCK && pointerLockInput && ['space', 'walk', 'shipwalk'].includes(state)) {
     // Some Chromium builds briefly report a successful lock and release it in
     // the following rendering task. Keep the game paused until ownership is
     // stable, so cursor-hidden/controller-disabled can never leak to play.
@@ -1332,7 +1352,7 @@ document.addEventListener('pointerlockchange', () => {
   }
   if (!window.NMS_NOLOCK && pointerLockInput && !document.pointerLockElement
       && !paused && !starMap?.isOpen && !pendingRoute && !riftRoute
-      && (state === 'space' || state === 'walk')) {
+      && (state === 'space' || state === 'walk' || state === 'shipwalk')) {
     pauseGame();
   }
 });
@@ -1381,24 +1401,37 @@ function setState(s) {
   ui.showTouchUI(IS_TOUCH && s === 'walk');
   walkDial?.setActive(s === 'walk');
   if (s === 'walk') dialAcc = 1;
+  // cinematics own the camera; the cockpit view never survives them
+  if (['landing', 'warp', 'takeoff', 'flyto', 'boarding'].includes(s)) shipView.forceChase();
+  // Any state that is not shipwalk means the camera is no longer a person
+  // inside the hull — release the interior's ownership of nav so the
+  // flight physics / cinematic tweens can write it freely.
+  if (s !== 'shipwalk' && shipView.shipwalk) {
+    shipView.shipwalk = false;
+    shipView.seatT = 1;
+  }
+  if (s !== 'shipwalk') ui.setInteractPrompt('');
+  const landed = !!ship.parkedPosUniv && ship.parkAmt > 0.98;
   const hints = IS_TOUCH ? {
     space: '<b>单指</b> 转向 · <b>双指缩放</b> 推进 · <b>M</b> 星图',
     flyto: '自动接近中…',
     landing: '正在执行降落程序…',
     walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>空格</b> 跳跃 · 靠近飞船按 <b>E</b>',
+    shipwalk: '<b>摇杆</b> 舱内移动 · <b>F</b> 坐入驾驶座 / 开关尾舱门' + (landed ? ' · <b>E</b> 离船' : ''),
     boarding: '正在登船…',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   } : {
-    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>A/D</b> 侧推 · <b>LMB</b> 射击 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲冲刺 · <b>M/TAB</b> 星图',
+    space: '<b>鼠标</b> 船头 · <b>W/S</b> 推进/制动 · <b>A/D</b> 侧推 · <b>LMB</b> 射击 · <b>RMB/SHIFT</b> 加力 · <b>SPACE</b> 脉冲冲刺 · <b>V</b> 座舱视角 · <b>M/TAB</b> 星图',
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: '正在执行降落程序…',
     walk: '<b>WASD</b> 移动 · <b>R</b> 换弹 · <b>RMB</b> 瞄准 · <b>T</b> 召回飞船 · 靠近飞船按 <b>E</b>',
+    shipwalk: '<b>WASD</b> 舱内移动 · <b>Shift</b> 疾行 · <b>F</b> 坐入驾驶座 / 开关尾舱门' + (landed ? ' · <b>E</b> 离船' : ''),
     boarding: '正在登船…',
     takeoff: '垂直起飞中…',
     warp: '空间折叠中…',
   };
-  ui.setHint(hints[s] || '', !['space', 'walk'].includes(s));
+  ui.setHint(hints[s] || '', !['space', 'walk', 'shipwalk'].includes(s));
 }
 
 // ---- actions ------------------------------------------------------------------
@@ -1580,6 +1613,8 @@ function parkShipNear(planet, landDir) {
 function tryLand() {
   if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false || nearestAlt > 420) return;
   const planet = nearest;
+  // a landing always seals the hull first
+  shipView.closeRamp();
   const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
   const dirLocal = startLocal.clone().normalize();
   const ground = planet.surfaceRadius(dirLocal);
@@ -1641,7 +1676,7 @@ function tryLand() {
   });
 }
 
-const BOARD_DISTANCE = 46;
+const BOARD_DISTANCE = 60;
 
 function parkedShipDistance() {
   return ship.parkedPosUniv ? ship.parkedPosUniv.distanceTo(nav.pos) : Infinity;
@@ -1657,6 +1692,9 @@ function recallShip() {
   return true;
 }
 
+// Walk up the ramp: the boarding tween carries the camera from the surface
+// into the hold, the cargo ramp opens during the move, and the interior walk
+// takes over at the ramp threshold. Take-off is manual — sit down (F), throttle up.
 function boardShip() {
   if (state !== 'walk' || !walkCtl.planet) return false;
   const dist = parkedShipDistance();
@@ -1666,32 +1704,85 @@ function boardShip() {
     return false;
   }
   const planet = walkCtl.planet;
+  // planet-local start pose
   const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
-  const upLocal = ship.parkedLocal.clone().normalize();
-  const targetLocal = ship.parkedLocal.clone().addScaledVector(upLocal, 2.2);
   const startLocalQuat = planet._invFrame.clone().multiply(nav.quat);
+  // target: standing in the hold just forward of the ramp threshold, facing
+  // the cockpit — the same stance enterShipwalk hands over
+  const spawnLocal = new THREE.Vector3(0, 1.68, ship.def.dims.holdEndZ - 1.6);
+  const targetLocal = ship.parkedLocal.clone()
+    .add(spawnLocal.clone().applyQuaternion(ship.parkedLocalQuat));
   const targetLocalQuat = ship.parkedLocalQuat.clone();
   walkCtl.exit();
   nav.vel.set(0, 0, 0);
   setState('boarding');
   audio.cue('board');
-  addTween(0.72, (k) => {
+  shipView.openRamp();
+  addTween(0.9, (k) => {
     const e = easeInOut(k);
+    // planet-local interpolation tracks the planet's rotation
     planet.localPositionToWorld(_v.lerpVectors(startLocal, targetLocal, e), nav.pos);
     nav.quat.copy(planet.frameOrientation)
       .multiply(_q.copy(startLocalQuat).slerp(targetLocalQuat, e));
-  }, () => takeoff(planet,
-    planet.localPositionToWorld(targetLocal, new THREE.Vector3()),
-    planet.localOffsetToWorld(upLocal, new THREE.Vector3())));
+  }, () => {
+    // hand the camera to the interior at the parked anchor
+    const anchorPos = planet.localPositionToWorld(ship.parkedLocal, new THREE.Vector3());
+    const anchorQuat = planet.frameOrientation.clone().multiply(ship.parkedLocalQuat);
+    shipView.enterShipwalk(anchorPos, anchorQuat, { z: spawnLocal.z, yaw: 0 });
+    setState('shipwalk');
+  });
   return true;
 }
 
-function takeoff(planet = walkCtl.planet, launchPos = nav.pos.clone(), launchUp = null) {
+// Leave the ship while parked: tween the camera out through the ramp mouth
+// to the surface beside it, then hand back to the planet walk.
+function exitShip() {
+  if (state !== 'shipwalk' || !ship.parkedPosUniv) return false;
+  const planet = ship.parkedPlanet;
+  if (!planet || ship.parkAmt < 0.98) return false;
+  // only from the ramp area
+  if (shipView.walkPos.z < 3.4) {
+    ui.setHint('请走到尾舱坡道处再离船', true);
+    return false;
+  }
+  // start: current camera pose, planet-local
+  const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
+  const startLocalQuat = planet._invFrame.clone().multiply(nav.quat);
+  // target: ground beside the ramp mouth, facing the hull
+  const exitShipLocal = new THREE.Vector3(0, -SHIP_LANDING_PROFILE.bounds.minY, ship.def.dims.rampTopZ + 2.6);
+  const exitLocal = ship.parkedLocal.clone()
+    .add(exitShipLocal.applyQuaternion(ship.parkedLocalQuat));
+  // settle onto the terrain under the exit point
+  const exitDir = exitLocal.clone().normalize();
+  const groundRadius = planet.surfaceRadius(exitDir);
+  exitLocal.copy(exitDir).multiplyScalar(groundRadius + walkCtl.eyeHeight * 0.9);
+  const exitLocalQuat = ship.parkedLocalQuat.clone();
+  setState('boarding');
+  shipView.shipwalk = false;
+  audio.cue('board');
+  addTween(0.8, (k) => {
+    const e = easeInOut(k);
+    planet.localPositionToWorld(_v.lerpVectors(startLocal, exitLocal, e), nav.pos);
+    nav.quat.copy(planet.frameOrientation)
+      .multiply(_q.copy(startLocalQuat).slerp(exitLocalQuat, e));
+  }, () => {
+    // face the hull on arrival
+    const toShip = _v.copy(ship.parkedLocal).sub(exitLocal)
+      .projectOnPlane(exitDir).normalize();
+    walkCtl.enter(planet, exitLocal.clone(), toShip);
+    planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(planet.frameOrientation).multiply(walkCtl.quat);
+    setState('walk');
+  });
+  return true;
+}
+
+// Debug/capture utility (NMS.takeoff, used by screenshot.js and seamtest.js):
+// launches straight up from the camera's current position. Player-facing
+// departures go through boardShip → sit down → throttle up.
+function takeoff(planet = walkCtl.planet ?? ship.parkedPlanet, launchPos = nav.pos.clone(), launchUp = null) {
   if (!planet) return false;
   if (walkCtl.active) walkCtl.exit();
-  // Keep pointer lock across boarding/takeoff. Re-acquiring it at the end of
-  // an async tween is no longer inside the user's gesture and browsers reject
-  // the request, leaving the ship apparently unable to steer after launch.
   const startLocal = planet.worldPositionToLocal(launchPos, new THREE.Vector3());
   const upLocal = launchUp
     ? planet.worldOffsetToLocal(launchUp, new THREE.Vector3()).normalize()
@@ -3422,7 +3513,13 @@ function ambience(dt = 1 / 60) {
   // hand the sun over to the shadow-casting light near the ground
   shadowBlend = nearest ? 1 - smoothstep(1200, 3500, nearestAlt) : 0;
   if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirWorld);
+  // ship-scoped key light: the HALCYON's own sun rig follows the active
+  // star (direction) and the day/eclipse balance (intensity), so the hull
+  // is lit by the same star that lights the sky behind it.
+  shipSunDir.copy(nearest?.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v));
+  ship.updateSun(shipSunDir, clamp(day + 0.08, 0, 1));
 }
+const shipSunDir = new THREE.Vector3();
 
 let waterWakeTimer = 0;
 let footRippleTimer = 0;
@@ -3870,6 +3967,11 @@ function frame() {
       ui.setHint('压力临界 · 自动驾驶强制拉升', true);
       cancelPulseBurst();
     }
+  } else if (!paused && state === 'shipwalk') {
+    // Interior walk: flight input is locked (spaceCtl disabled); while
+    // airborne the hull keeps drifting on its standing velocity — the demo's
+    // behaviour — and a parked hull stays put with the pad.
+    shipView.integrateDrift(dt, nav);
   } else if (!paused && state === 'walk') {
     cancelPulseBurst();
     walkCtl.update(dt);
@@ -3904,7 +4006,8 @@ function frame() {
   }
   spaceCtl.firePressed = false;
 
-  const boostTarget = state === 'space' && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
+  const boostTarget = state === 'space' && !shipView.rmbLookActive()
+    && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
   boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
   const pulseK = pulseBurst ? clamp(pulseBurst.elapsed / PULSE_DURATION, 0, 1) : 1;
   const pulseTarget = pulseBurst
@@ -3914,10 +4017,10 @@ function frame() {
     ? pulseTarget
     : pulseVisual + (pulseTarget - pulseVisual) * (1 - Math.exp(-dt * 14));
   weaponVisual += ((weaponTrigger ? 1 : 0) - weaponVisual) * (1 - Math.exp(-dt * 16));
-  if (state === 'space' && warpIntensity < 0.01) {
+  if ((state === 'space' || state === 'shipwalk') && warpIntensity < 0.01) {
     const riftFov = riftRoute && !riftRoute.arrived ? spatialRift.burst * 4.0 : 0;
     const fovResponse = pulseTarget > pulseVisual ? 14 : 6.2;
-    camera.fov += ((BASE_FOV + boostVisual * 6.5 + pulseVisual * 19.0 + riftFov) - camera.fov)
+    camera.fov += ((BASE_FOV + shipView.fovOffset() + boostVisual * 6.5 + pulseVisual * 19.0 + riftFov) - camera.fov)
       * (1 - Math.exp(-dt * fovResponse));
     camera.updateProjectionMatrix();
   }
@@ -4095,10 +4198,16 @@ function frame() {
     : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6));
   if (built > 0) lastBuildFrame = frameNo;
 
-  // camera-relative placement
+  // camera-relative placement. shipView.tick runs first: while the interior
+  // owns the camera it exports nav (the walk stance) before anything reads it.
+  shipView.tick(dt, { nav, landed: !!ship.parkedPosUniv && ship.parkAmt > 0.98 });
+  // sitting back down returns the camera to flight (cockpit view, state space)
+  if (state === 'shipwalk' && !shipView.shipwalk && !paused) setState('space');
   universe.updateRelative(nav.pos);
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);
+  // cockpit dressing (free look + throttle shake + rotational sway)
+  shipView.applyCockpitLook(camera, clamp(boostVisual + nav.vel.length() / 7e5, 0, 1));
   // Weapons stay cold while paused; surface weapons keep their pose but get no
   // trigger input because dt=0 and the fire state is disconnected upstream.
   activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
@@ -4169,7 +4278,12 @@ function frame() {
     strafe: spaceCtl.strafeInput,
     yaw: spaceCtl.lookInput.yaw,
     pitch: spaceCtl.lookInput.pitch,
-  });
+  }, camera);
+  // first-person modes re-place the hull around the camera
+  shipView.applyShipPose(dt, nav);
+  // contextual F/E prompt inside the hull
+  ui.setInteractPrompt(state === 'shipwalk' && !paused
+    ? shipView.interactPrompt(!!ship.parkedPosUniv && ship.parkAmt > 0.98) : '');
   updateWaterInteraction(dt);
   prewarmLoadedShipPipelines();
   audio.update({
@@ -4445,6 +4559,11 @@ function frame() {
     // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
     // only zeros optional effect uniforms; it never swaps renderer families.
     bloomPass.enabled = usePost && !QUALITY_LOW;
+    // the grade pass (CA/vignette/grain) shares the post toggle
+    if (gradePass_) {
+      gradePass_.enabled = usePost && !QUALITY_LOW;
+      gradePass_.uniforms.uTime.value = clock.elapsedTime;
+    }
     nodePipeline.render();
     if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
       startupVolumeWarmState = 'submitted';
@@ -4531,7 +4650,10 @@ if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {
   if (FARFLORA) farFlora.setPlanet(bootstrapSurfacePlanet);
   if (farFlora.meshes) for (const mesh of farFlora.meshes) mesh.visible = false;
   if (QUALITY_LOW) {
-    shipPipelinesWarmed = true;
+    // The procedural hero hull compiles ~80 shader programs across two light
+    // sets (foreground pass + landed main pass). Skipping the prewarm on the
+    // low tier used to be free with the old GLB; now it would stall the first
+    // landed frame for seconds, so the warm runs on every tier.
     renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
   } else {
     prewarmSurfacePipelines(bootstrapSurfacePlanet);
@@ -5173,7 +5295,35 @@ window.NMS = {
   },
   flyTo: (i) => { const p = universe.system.planets[i]; if (p) { focusPlanet = p; spaceCtl.focus = p; flyToPlanet(p); } },
   tryLand, takeoff, boardShip, recallShip,
+  board: () => boardShip(),
+  exitShip: () => exitShip(),
   shipDistance: () => parkedShipDistance(),
+  // HALCYON first-person layer: exposed for the playtest harness.
+  shipViewState: () => ({
+    viewMode: shipView.viewMode,
+    shipwalk: shipView.shipwalk,
+    walkPos: shipView.walkPos.toArray(),
+    walkYaw: shipView.walkYaw,
+    rampT: +shipView.rampT.toFixed(3),
+    rampTarget: shipView.rampTarget,
+    seatT: +shipView.seatT.toFixed(3),
+  }),
+  shipViewDebug: {
+    setViewMode(m) { if (state === 'space') { shipView.viewMode = m; } return shipView.viewMode; },
+    teleportNearSeat() {
+      if (shipView.shipwalk) {
+        shipView.walkPos.set(0, 0, ship.def.dims.seatZ + 1.15);
+        shipView.walkYaw = Math.PI;
+      }
+    },
+    teleportNearRamp() {
+      if (shipView.shipwalk) {
+        shipView.walkPos.set(0, 0, ship.def.dims.holdEndZ - 1.4);
+        shipView.walkYaw = Math.PI;
+      }
+    },
+    toggleRamp() { shipView.rampTarget = shipView.rampTarget > 0.5 ? 0 : 1; },
+  },
   nearStars: () => universe.nearStarsList
     .map((s) => ({ id: s.id, dist: Math.round(s.pos.distanceTo(nav.pos)), pos: s.pos.toArray() }))
     .sort((a, b) => a.dist - b.dist).slice(0, 50),
