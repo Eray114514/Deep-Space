@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { makeRng } from './rng.js';
+import { createPbrMaterial, normalizeImportedPbrMaterial } from './pbr-materials.js';
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const heroAssetCache = new Map();
@@ -22,7 +23,8 @@ function attachHeroAsset(group, site) {
       if (!object.isMesh) return;
       object.geometry = object.geometry.clone();
       object.material = Array.isArray(object.material)
-        ? object.material.map((entry) => entry.clone()) : object.material.clone();
+        ? object.material.map((entry) => normalizeImportedPbrMaterial(entry.clone()))
+        : normalizeImportedPbrMaterial(object.material.clone());
       object.castShadow = true; object.receiveShadow = true;
     });
     group.add(asset);
@@ -33,12 +35,8 @@ function attachHeroAsset(group, site) {
   });
 }
 
-function material(color, metalness = 0.72, roughness = 0.34, emissive = 0) {
-  const glow = emissive || (metalness > 0.6 ? color : 0);
-  return new THREE.MeshStandardMaterial({
-    color, metalness, roughness, emissive: glow,
-    emissiveIntensity: emissive ? 2.4 : metalness > 0.6 ? 0.065 : 0,
-  });
+function material(color, profile, options = {}) {
+  return createPbrMaterial(profile, { color, ...options });
 }
 
 function mesh(geometry, mat, parent, position = null) {
@@ -52,12 +50,18 @@ function mesh(geometry, mat, parent, position = null) {
 
 function modulePalette() {
   return {
-    hull: material(0x8d969b, 0.78, 0.3),
-    dark: material(0x1d292e, 0.88, 0.25),
-    ceramic: material(0xc4c8c2, 0.5, 0.42),
-    glass: material(0x17384a, 0.45, 0.16, 0x4fc3ff),
-    amber: material(0x50341b, 0.5, 0.28, 0xff9f40),
-    red: material(0x3b1714, 0.6, 0.3, 0xff4c32),
+    hull: material(0x8d969b, 'paintedDielectric'),
+    dark: material(0x252d31, 'polymer'),
+    ceramic: material(0xc4c8c2, 'ceramic'),
+    glass: material(0x17384a, 'glass', {
+      emissive: 0x183f55, emissiveIntensity: 0.32, opacity: 0.68,
+    }),
+    amber: material(0x50341b, 'polymer', {
+      emissive: 0xff9f40, emissiveIntensity: 2.1,
+    }),
+    red: material(0x3b1714, 'polymer', {
+      emissive: 0xff4c32, emissiveIntensity: 2.2,
+    }),
   };
 }
 
@@ -66,7 +70,7 @@ function addPad(group, mats, radius = 42) {
   const inset = mesh(new THREE.RingGeometry(radius * 0.36, radius * 0.82, 48), mats.amber, group);
   inset.rotation.x = -Math.PI / 2;
   inset.position.y = 1.7;
-  const beacon = new THREE.PointLight(0xff9f40, 12, radius * 3.5, 2);
+  const beacon = new THREE.PointLight(0xff9f40, 65, radius * 3.5, 2);
   beacon.position.y = 7;
   group.add(beacon);
   group.userData.landingPad = pad;

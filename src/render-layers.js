@@ -5,3 +5,7 @@ export const WORLD_LAYER = 0;
 export const VOLUME_LAYER = 2;
 export const FOREGROUND_LAYER = 3;
 export const SKY_BACKDROP_LAYER = 4;
+// Rendered as its own light domain. Combining this with the exterior camera
+// mask in one renderer call would still gather both light lists and recreate
+// the unoccluded exterior fill inside the hull.
+export const SHIP_INTERIOR_LAYER = 6;

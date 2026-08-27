@@ -4,17 +4,20 @@
 // ship pass, so warp and local pulse share one coherent camera-space tunnel.
 
 import * as THREE from 'three';
-import { SKY_BACKDROP_LAYER } from './render-layers.js';
+import { SHIP_INTERIOR_LAYER, SKY_BACKDROP_LAYER } from './render-layers.js';
 
 import { buildMaterials, buildEnvironment } from './halcyon/materials.js';
 import { buildExterior } from './halcyon/ship/exterior.js';
 import { buildInterior } from './halcyon/ship/interior.js';
 import { occupancy, bakeCavity, collectGeometries } from './halcyon/gfx/cavity.js';
+import { applyInteriorIrradiance, bakeInteriorIrradiance } from './halcyon/gfx/interior-irradiance.js';
 import { SHIPS } from './halcyon/ship/registry.js';
+import { setMaterialEnvironmentIntensity } from './pbr-materials.js';
 
 const Y = new THREE.Vector3(0, 1, 0);
 const X = new THREE.Vector3(1, 0, 0);
 const SKY_SUNSET_TINT = new THREE.Color(1.35, 0.22, 0.035);
+const _fallbackSunColor = new THREE.Color(1.0, 0.93, 0.84);
 
 // Eager preload note: the hero ship is now built procedurally from
 // src/halcyon/ (the 3aaa-spaceship-flight-prototype kernel), so there is no
@@ -207,9 +210,10 @@ const _su = new THREE.Vector3();
 const _sr = new THREE.Vector3();
 
 export const SHIP_FOREGROUND_LAYER = 3;
+export { SHIP_INTERIOR_LAYER } from './render-layers.js';
 
 export class Ship {
-  constructor(scene, { anisotropy = 1, renderer = null } = {}) {
+  constructor(scene, { anisotropy = 1, renderer = null, radiance = null } = {}) {
     const g = new THREE.Group();
     g.layers.set(SHIP_FOREGROUND_LAYER);
     this.group = g;
@@ -233,7 +237,7 @@ export class Ship {
     this.enginePower = 0.1;
     this.t = 0;
 
-    this.mountShip(scene, renderer);
+    this.mountShip(scene, renderer, radiance);
 
     // when you land, the ship sets down on a pad beside you and waits
     this.parkedPosUniv = null;
@@ -254,13 +258,14 @@ export class Ship {
    * main scene pass never pays for it and the ship's lights never leak onto
    * planets or terrain.
    */
-  mountShip(scene, renderer) {
+  mountShip(scene, renderer, radiance = null) {
+    this.separateInterior = Boolean(radiance?.enabled);
     this.mats = buildMaterials(this.anisotropy);
-    if (renderer) {
+    if (renderer && !radiance?.enabled) {
       // The demo's deep-space PMREM probe drives all hull specular. It is
       // assigned per-material rather than as scene.environment so the rest
       // of this project's universe materials are untouched.
-      this.envMap = buildEnvironment(renderer);
+      this.envMap = buildEnvironment(renderer, this.def.id || this.def.name);
       for (const v of Object.values(this.mats)) {
         if (v instanceof THREE.Material) v.envMap = this.envMap;
         else if (Array.isArray(v)) v.forEach((m) => { if (m instanceof THREE.Material) m.envMap = this.envMap; });
@@ -271,13 +276,38 @@ export class Ship {
     this.int = buildInterior(this.mats, this.def);
     this.group.add(this.ext.group);
     this.group.add(this.int.group);
+    this.interiorLights = [];
+    this.int.group.traverse((object) => {
+      if (!object.isLight) return;
+      object.userData.radianceBaseIntensity = object.intensity;
+      this.interiorLights.push(object);
+    });
 
     const geos = collectGeometries(this.group);
     bakeCavity(geos, occupancy(geos, 0.05));
 
+    this.zoneMaterials = new Set();
+    this.exteriorMaterials = new Set();
+    this.cabinMaterials = new Set();
+    this.cockpitMaterials = new Set();
+    if (radiance?.enabled) {
+      bakeInteriorIrradiance(this.int.group);
+      this.configureMaterialZones(radiance);
+    } else {
+      this.ext.group.traverse((object) => {
+        const list = Array.isArray(object.material) ? object.material
+          : object.material ? [object.material] : [];
+        for (const material of list) if (material.envMapIntensity !== undefined) {
+          this.exteriorMaterials.add(material);
+        }
+      });
+    }
+
     this.group.traverse((object) => {
       object.layers.set(SHIP_FOREGROUND_LAYER);
     });
+    this.int.group.traverse((object) => object.layers.set(
+      this.separateInterior ? SHIP_INTERIOR_LAYER : SHIP_FOREGROUND_LAYER));
 
     // The interior spotlight rigs are rigid relative to the hull they light,
     // so their shadow maps are frame-invariant: render once and freeze.
@@ -295,6 +325,51 @@ export class Ship {
 
     this.heroLoaded = true;
     this.heroLoadSettled = true;
+  }
+
+  configureMaterialZones(radiance) {
+    const cloneZone = (root, environment, target) => {
+      const clones = new WeakMap();
+      root.traverse((object) => {
+        if (!object.isMesh || !object.material) return;
+        const clone = (source) => {
+          if (!source?.isMeshStandardMaterial && !source?.isMeshPhysicalMaterial) return source;
+          if (!clones.has(source)) {
+            const material = source.clone();
+            material.envMap = environment;
+            material.userData.baseEnvMapIntensity = material.envMapIntensity ?? 1;
+            applyInteriorIrradiance(material);
+            clones.set(source, material);
+            this.zoneMaterials.add(material);
+            target.add(material);
+          }
+          return clones.get(source);
+        };
+        object.material = Array.isArray(object.material)
+          ? object.material.map(clone) : clone(object.material);
+      });
+    };
+
+    this.ext.group.traverse((object) => {
+      const list = Array.isArray(object.material) ? object.material
+        : object.material ? [object.material] : [];
+      for (const material of list) {
+        if (material.envMapIntensity === undefined) continue;
+        material.envMap = radiance.spaceEnvironment;
+        material.userData.baseEnvMapIntensity ??= material.envMapIntensity;
+        this.exteriorMaterials.add(material);
+      }
+    });
+    cloneZone(this.int.group, radiance.cabinProbe?.texture, this.cabinMaterials);
+    cloneZone(this.int.cockpit.group, radiance.cockpitProbe?.texture, this.cockpitMaterials);
+    this.radiance = radiance;
+  }
+
+  setSpaceEnvironment(environment) {
+    for (const material of this.exteriorMaterials) {
+      material.envMap = environment;
+      material.needsUpdate = true;
+    }
   }
 
   /**
@@ -320,6 +395,13 @@ export class Ship {
     this.sun.target.layers.set(SHIP_FOREGROUND_LAYER);
     scene.add(this.sun, this.sun.target);
 
+    this.secondarySun = new THREE.DirectionalLight(0xffffff, 0);
+    this.secondarySun.userData.shipSun = true;
+    this.secondarySun.castShadow = false;
+    this.secondarySun.layers.set(SHIP_FOREGROUND_LAYER);
+    this.secondarySun.target.layers.set(SHIP_FOREGROUND_LAYER);
+    scene.add(this.secondarySun, this.secondarySun.target);
+
     /* Ambient and fill are deliberately weak. Neither casts, and a
        non-shadowing light lights every surface facing it regardless of what
        is in front of it — so inside the hull they would flood the cabin with
@@ -341,23 +423,69 @@ export class Ship {
       const hp = new THREE.Object3D();
       hp.position.set(sx * 5.2, 0.55, 3.1);
       hp.name = sx > 0 ? 'hardpoint-stbd' : 'hardpoint-port';
+      hp.layers.set(SHIP_FOREGROUND_LAYER);
       this.group.add(hp);
       this.hardpoints.push(hp);
     }
   }
 
-  /** Aim the ship-scoped key/fill lights. dir is the unit vector to the star. */
+  /** Backward-compatible single-star adapter for isolated tests. */
   updateSun(dir, intensity) {
     if (!this.sun) return;
     const origin = this.group.position;
+    this.sun.color.copy(_fallbackSunColor);
     this.sun.intensity = 1.4 * intensity;
     this.sun.position.copy(origin).addScaledVector(dir, 80);
     this.sun.target.position.copy(origin);
-    // The fill rides a camera-relative azimuth so the shadow side always
-    // keeps its cool rim, wherever the star happens to be.
+    this.secondarySun.intensity = 0;
+    this.secondarySun.visible = false;
+    this.ambient.intensity = 0.20;
+    this.fill.intensity = 0.40;
     _sv.set(0.62, -0.26, 0.80).normalize();
     this.fill.position.copy(origin).addScaledVector(_sv, 60);
     this.fill.target.position.copy(origin);
+  }
+
+  updateLighting(radiance) {
+    if (!this.sun) return;
+    const origin = this.group.position;
+    const lights = [this.sun, this.secondarySun];
+    for (let i = 0; i < lights.length; i++) {
+      const light = lights[i], source = radiance?.sources?.[i];
+      const intensity = source
+        ? (i === 0 ? 1.62 : 1.25) * source.irradiance * (radiance.directScale ?? 1)
+        : 0;
+      light.intensity = intensity;
+      if (source?.color) light.color.copy(source.color);
+      if (source?.direction) light.position.copy(origin).addScaledVector(source.direction, 80);
+      light.target.position.copy(origin);
+      light.visible = this.foregroundOnly && intensity > 0.001;
+    }
+    this.ambient.intensity = radiance?.exteriorAmbient ?? 0.07;
+    this.fill.intensity = radiance?.exteriorFill ?? 0.16;
+    this.ambient.visible = this.foregroundOnly;
+    this.fill.visible = this.foregroundOnly;
+    _sv.set(0.62, -0.26, 0.80).normalize();
+    this.fill.position.copy(origin).addScaledVector(_sv, 60);
+    this.fill.target.position.copy(origin);
+    const envScale = THREE.MathUtils.clamp(
+      0.78 + (radiance?.environmentIntensity ?? 0.18) * 1.1, 0.72, 1.16,
+    );
+    for (const material of this.exteriorMaterials) {
+      setMaterialEnvironmentIntensity(material,
+        radiance?.components?.reflections === false ? 0 : envScale);
+    }
+    for (const material of [...this.cabinMaterials, ...this.cockpitMaterials]) {
+      setMaterialEnvironmentIntensity(material,
+        radiance?.components?.reflections === false ? 0 : 1);
+      if (material.userData?.interiorIndirectScale) {
+        material.userData.interiorIndirectScale.value = radiance?.components?.indirect === false ? 0 : 1;
+      }
+    }
+    for (const light of this.interiorLights || []) {
+      light.intensity = (light.userData.radianceBaseIntensity ?? light.intensity)
+        * (radiance?.components?.localLights === false ? 0 : 1);
+    }
   }
 
   setParked(posUniv, quat) {
@@ -385,13 +513,24 @@ export class Ship {
     if (this.foregroundOnly === enabled) return;
     this.foregroundOnly = enabled;
     const layer = enabled ? SHIP_FOREGROUND_LAYER : 0;
-    this.group.traverse((object) => object.layers.set(layer));
+    this.group.layers.set(layer);
+    this.ext?.group.traverse((object) => object.layers.set(layer));
+    for (const hardpoint of this.hardpoints || []) hardpoint.layers.set(layer);
+    this.int?.group.traverse((object) => object.layers.set(
+      this.separateInterior ? SHIP_INTERIOR_LAYER : layer));
     // the light rig is absent on headless test doubles
     this.sun?.layers.set(layer);
     this.sun?.target.layers.set(layer);
+    this.secondarySun?.layers.set(layer);
+    this.secondarySun?.target.layers.set(layer);
     this.fill?.layers.set(layer);
     this.fill?.target.layers.set(layer);
     this.ambient?.layers.set(layer);
+    const exteriorRigVisible = enabled;
+    if (this.sun) this.sun.visible = exteriorRigVisible;
+    if (this.secondarySun) this.secondarySun.visible = exteriorRigVisible;
+    if (this.fill) this.fill.visible = exteriorRigVisible;
+    if (this.ambient) this.ambient.visible = exteriorRigVisible;
   }
 
   /**

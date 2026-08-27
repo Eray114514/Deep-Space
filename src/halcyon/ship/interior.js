@@ -576,12 +576,12 @@ export function buildInterior(M, def) {
     group.add(l);
     lights.push(l);
   };
-  mkLight(0, 1.75, -8.5, 0x8fc2ff, 1.7, 6.5);
-  mkLight(0, 2.15, -6.3, 0xaad0ff, 1.9, 7);
-  mkLight(0, 1.86, -3.4, 0xbcd8ff, 1.9, 6.5);
-  mkLight(0, 1.92, 1.2, 0xd8e6ff, 1.9, 7);
-  mkLight(0, 1.92, 4.6, 0xd8e6ff, 1.8, 7);
-  mkLight(0, 1.3, 6.7, 0x66aaff, 2.4, 5);
+  mkLight(0, 1.75, -8.5, 0x8fc2ff, 5.0, 6.5);
+  mkLight(0, 2.15, -6.3, 0xffd8b0, 6.2, 7);
+  mkLight(0, 1.86, -3.4, 0xbcd8ff, 5.5, 6.5);
+  mkLight(0, 1.92, 1.2, 0xffe2bd, 5.8, 7);
+  mkLight(0, 1.92, 4.6, 0xd8e6ff, 5.2, 7);
+  mkLight(0, 1.3, 6.7, 0x66aaff, 7.0, 5);
 
   /* ---- the two fixtures that actually cast ------------------------- *
      Point lights cannot cast cheaply — six cube faces each — so the shadows
@@ -604,8 +604,8 @@ export function buildInterior(M, def) {
     group.add(l.target);
     return l;
   };
-  mkCaster(0, 2.36, -7.30, 0xffe6c8, 2.8, 4.6, 0.95);
-  mkCaster(0, 2.48, 2.60, 0xdfeaff, 3.2, 5.2, 1.02);
+  mkCaster(0, 2.36, -7.30, 0xffe6c8, 11.5, 4.6, 0.95);
+  mkCaster(0, 2.48, 2.60, 0xdfeaff, 13.0, 5.2, 1.02);
 
   B.flush(group, mats);
   return { group, barrier, lights, cockpit };

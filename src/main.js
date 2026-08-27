@@ -13,7 +13,8 @@ import { SpaceControls, WalkControls, guidePlanetApproach, keys,
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
-  warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER } from './effects.js';
+  warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
+  SHIP_INTERIOR_LAYER } from './effects.js';
 import { ShipView } from './ship-view.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
@@ -36,6 +37,7 @@ import { GameLegacyPipeline } from './legacy-render-pipeline.js';
 import { isLowPowerGpu, rendererParamsForSettings, resolveGraphicsSettings,
   resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
 import { createEnvironmentState, updateEnvironmentState } from './environment-state.js';
+import { SceneRadianceState } from './scene-radiance.js';
 import { waterInteraction } from './water-interaction.js';
 import { surfaceInteraction } from './surface-interaction.js';
 import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
@@ -45,6 +47,9 @@ import {
 } from './cloud/cloud-resource-manager.js';
 
 const qs = new URLSearchParams(location.search);
+// The unified look is the production baseline. `renderlook=legacy` remains a
+// deterministic developer A/B path, not a second player-facing renderer.
+const RENDER_LOOK_NEXT = qs.get('renderlook') !== 'legacy';
 const graphicsSettings = resolveGraphicsSettings({ params: qs });
 const rendererPolicy = resolveRendererPolicy(rendererParamsForSettings(graphicsSettings, qs));
 
@@ -79,6 +84,9 @@ function createUniverse(seed) {
       bodyId,
       worldLabParams: WORLD_LAB ? qs : null,
     }),
+    renderer,
+    spaceRadianceResolution: QUALITY_PROFILE.spaceRadianceResolution,
+    renderLook: RENDER_LOOK_NEXT,
   });
 }
 window.NMS_NOLOCK = qs.get('nolock') === '1';
@@ -131,7 +139,7 @@ const MAX_DPR = QUALITY_PROFILE.dprMax;
 const DESKTOP_DPR_FLOOR = QUALITY_PROFILE.dprMin;
 let renderDpr = Math.min(Math.max(window.devicePixelRatio, QUALITY_PROFILE.dprTarget), MAX_DPR);
 renderer.setPixelRatio(renderDpr);
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMapping = RENDER_LOOK_NEXT ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
 // r183 aliases the removed PCFSoft path to PCF on the first shadow render.
@@ -435,11 +443,10 @@ function prewarmLoadedShipPipelines() {
   // Starting the compile before these layers were enabled produced a 13-light
   // variant; the first visible hero frame then needed the real 16-light plus
   // shadowed-sun family synchronously.
-  enableShipForegroundLightingLayers();
+  configureShipForegroundLightingLayers();
   // Compile the hull for the FOREGROUND pass first: the hero exists
   // exclusively on that layer in flight, so the ordinary scene camera never
   // visits those materials.
-  camera.layers.set(SHIP_FOREGROUND_LAYER);
   // Pipeline compilation does not force image upload. Initializing the unique
   // hull textures here keeps the webp transfers behind the loading veil
   // instead of clustering them in the pull-back shot.
@@ -465,10 +472,20 @@ function prewarmLoadedShipPipelines() {
   // live foreground pass draws into the composer's half-float buffer, while
   // compiling against the default framebuffer only warmed an sRGB variant;
   // pressing Start then synchronously discovered the real 19 hull programs.
-  const compileTarget = renderer.getRenderTarget();
-  renderer.setRenderTarget(nodePipeline.composer.readBuffer);
-  const foregroundCompile = renderer.compileAsync(scene, camera);
-  renderer.setRenderTarget(compileTarget);
+  const compileLayer = async (layer, target) => {
+    camera.layers.set(layer);
+    const compileTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(target);
+    const task = renderer.compileAsync(scene, camera);
+    renderer.setRenderTarget(compileTarget);
+    await task;
+  };
+  const foregroundCompile = (async () => {
+    await compileLayer(SHIP_FOREGROUND_LAYER, nodePipeline.composer.readBuffer);
+    if (RENDER_LOOK_NEXT) {
+      await compileLayer(SHIP_INTERIOR_LAYER, nodePipeline.composer.readBuffer);
+    }
+  })();
   foregroundCompile.then(async () => {
     // Second variant: the hull also renders in the MAIN scene pass whenever
     // it parks on a planet (setForegroundOnly(false)) — and that pass has a
@@ -479,12 +496,10 @@ function prewarmLoadedShipPipelines() {
     try {
       sunShadow.visible = true;
       ship.setForegroundOnly(false);
-      camera.layers.mask = cameraLayerMask;
-      const mainCompileTarget = renderer.getRenderTarget();
-      renderer.setRenderTarget(nodePipeline.composer.writeBuffer);
-      const mainCompile = renderer.compileAsync(scene, camera);
-      renderer.setRenderTarget(mainCompileTarget);
-      await mainCompile;
+      await compileLayer(0, nodePipeline.composer.writeBuffer);
+      if (RENDER_LOOK_NEXT) {
+        await compileLayer(SHIP_INTERIOR_LAYER, nodePipeline.composer.writeBuffer);
+      }
     } catch (error) {
       console.warn('ship main-pass prewarm failed', error);
     } finally {
@@ -503,13 +518,36 @@ function prewarmLoadedShipPipelines() {
   });
 }
 
-function enableShipForegroundLightingLayers() {
-  ambient.layers.enable(SHIP_FOREGROUND_LAYER);
-  hemi.layers.enable(SHIP_FOREGROUND_LAYER);
-  headlamp.layers.enable(SHIP_FOREGROUND_LAYER);
-  sunShadow.layers.enable(SHIP_FOREGROUND_LAYER);
-  for (const view of universe.system?.starViews || []) view.light.layers.enable(SHIP_FOREGROUND_LAYER);
-  for (const view of universe.fadingSystem?.starViews || []) view.light.layers.enable(SHIP_FOREGROUND_LAYER);
+function configureShipForegroundLightingLayers() {
+  if (!RENDER_LOOK_NEXT) {
+    for (const light of [ambient, hemi, headlamp, sunShadow]) {
+      light.layers.enable(SHIP_FOREGROUND_LAYER);
+    }
+    for (const view of universe.system?.starViews || []) {
+      view.light.layers.enable(SHIP_FOREGROUND_LAYER);
+    }
+    for (const view of universe.fadingSystem?.starViews || []) {
+      view.light.layers.enable(SHIP_FOREGROUND_LAYER);
+    }
+    return;
+  }
+  // The ship owns a calibrated two-star exterior rig. Keeping world ambient,
+  // terrain shadow lights or star points on its pass double-lights the hull
+  // and, more importantly, makes those shadowless sources flood the cabin.
+  for (const light of [ambient, hemi, headlamp]) {
+    light.layers.enable(SHIP_FOREGROUND_LAYER);
+    light.layers.disable(SHIP_INTERIOR_LAYER);
+  }
+  sunShadow.layers.disable(SHIP_FOREGROUND_LAYER);
+  sunShadow.layers.disable(SHIP_INTERIOR_LAYER);
+  for (const view of universe.system?.starViews || []) {
+    view.light.layers.disable(SHIP_FOREGROUND_LAYER);
+    view.light.layers.disable(SHIP_INTERIOR_LAYER);
+  }
+  for (const view of universe.fadingSystem?.starViews || []) {
+    view.light.layers.disable(SHIP_FOREGROUND_LAYER);
+    view.light.layers.disable(SHIP_INTERIOR_LAYER);
+  }
 }
 
 // ---- renderer-specific post chain -------------------------------------------
@@ -547,14 +585,17 @@ const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
   volumeScale: effectiveVolumeScale,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
-  bloomStrength: IS_TOUCH ? 0.35 : 0.5,
-  bloomRadius: 0.4,
-  bloomThreshold: 1.05,
+  bloomStrength: RENDER_LOOK_NEXT ? (IS_TOUCH ? 0.30 : 0.42) : (IS_TOUCH ? 0.35 : 0.5),
+  bloomRadius: RENDER_LOOK_NEXT ? 0.32 : 0.4,
+  bloomThreshold: RENDER_LOOK_NEXT ? 1.15 : 1.05,
   foregroundLayer: SHIP_FOREGROUND_LAYER,
+  interiorLayer: RENDER_LOOK_NEXT ? SHIP_INTERIOR_LAYER : null,
+  realisticGrade: RENDER_LOOK_NEXT,
 });
 const volumePass = nodePipeline.volumePass;
 const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
+const parkedInteriorPass = nodePipeline.parkedInteriorPass;
 const riftDistortionPass = nodePipeline.rift;
 const bloomPass = nodePipeline.bloom;
 const gradePass_ = nodePipeline.grade;
@@ -750,6 +791,10 @@ let celestialClock = new CelestialClock(SEED, {
 let universe = createUniverse(SEED);
 universe.timeHours = celestialClock.hours;
 universe.system.updateCelestial(celestialClock.hours);
+const sceneRadiance = new SceneRadianceState(renderer, scene, universe, {
+  enabled: RENDER_LOOK_NEXT,
+  probeResolution: QUALITY_PROFILE.reflectionProbeResolution,
+});
 const scatter = new Scatter({
   grassRadius: QUALITY_PROFILE.grassRadius,
   grassDensity: QUALITY_PROFILE.grassDensity,
@@ -768,6 +813,7 @@ const ship = new Ship(scene, {
     ?? renderer.capabilities?.getMaxAnisotropy?.()
     ?? 1),
   renderer,
+  radiance: sceneRadiance,
 });
 const shipView = new ShipView(ship, camera);
 shipView.onHint = (text) => { if (!paused && !starMap?.isOpen) ui.setHint(text, true); };
@@ -3278,6 +3324,8 @@ function newUniverse(seed) {
   universe = createUniverse(SEED);
   universe.timeHours = celestialClock.hours;
   universe.system.updateCelestial(celestialClock.hours);
+  sceneRadiance.setUniverse(universe);
+  ship.setSpaceEnvironment(sceneRadiance.spaceEnvironment);
   wireUniverse(universe);
   focusPlanet = null;
   spaceCtl.focus = null;
@@ -3550,17 +3598,34 @@ function ambience(dt = 1 / 60) {
   const atmosphereRoot = Math.sqrt(Math.max(0, inAtmo));
   ambient.intensity = (0.045 + (1 - day) * 0.035) * (1 - atmosphereRoot)
     + atmosphereRoot * (0.012 + day * 0.153 + envSunset * 0.038);
-  renderer.toneMappingExposure = environmentState.exposure;
   envInAtmo = inAtmo;
   envDay = day;
   // hand the sun over to the shadow-casting light near the ground
   shadowBlend = nearest ? 1 - smoothstep(1200, 3500, nearestAlt) : 0;
   if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirWorld);
-  // ship-scoped key light: the HALCYON's own sun rig follows the active
-  // star (direction) and the day/eclipse balance (intensity), so the hull
-  // is lit by the same star that lights the sky behind it.
-  shipSunDir.copy(nearest?.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v));
-  ship.updateSun(shipSunDir, clamp(day + 0.08, 0, 1));
+  if (RENDER_LOOK_NEXT) {
+    const radianceMode = state === 'shipwalk' || shipView.shipwalk ? 'interior'
+      : shipView.isCockpit() ? 'cockpit'
+        : nearest ? 'planet' : 'space';
+    const stellarField = nearest?.stellarLightField
+      || universe.system.stellarLightFieldFrom(nav.pos);
+    sceneRadiance.update(dt, {
+      environment: environmentState,
+      stellarField,
+      mode: radianceMode,
+    });
+    // IBL now owns the low-frequency fill. Reduce the old unoccluded scene
+    // lights so terrain and engineering assets keep form instead of receiving
+    // the same flat blue pedestal from every direction.
+    ambient.intensity *= 0.72;
+    hemi.intensity *= 0.82;
+    renderer.toneMappingExposure = sceneRadiance.exposure;
+    ship.updateLighting(sceneRadiance);
+  } else {
+    renderer.toneMappingExposure = environmentState.exposure;
+    shipSunDir.copy(nearest?.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v));
+    ship.updateSun(shipSunDir, clamp(day + 0.08, 0, 1));
+  }
 }
 const shipSunDir = new THREE.Vector3();
 
@@ -4528,7 +4593,19 @@ function frame() {
   // still owns this pass; tying it only to ship.foregroundOnly hid all four
   // weapon models after landing.
   foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible;
-  enableShipForegroundLightingLayers();
+  if (RENDER_LOOK_NEXT) {
+    // The cabin is fully occluded by the hull in a settled chase view. Keeping
+    // its independent light layer alive there paid for every cabin material
+    // and fixture without contributing a pixel. Retain it across cockpit,
+    // seat/walk and view-blend frames so camera transitions stay continuous.
+    const needsForegroundInterior = ship.foregroundOnly
+      && (shipView.isCockpit() || shipView.shipwalk || shipView.viewBlend < 1);
+    foregroundPass.setLayers(needsForegroundInterior
+      ? [SHIP_FOREGROUND_LAYER, SHIP_INTERIOR_LAYER]
+      : [SHIP_FOREGROUND_LAYER]);
+  }
+  if (parkedInteriorPass) parkedInteriorPass.enabled = !ship.foregroundOnly;
+  configureShipForegroundLightingLayers();
 
   statAcc += dt;
   if (statAcc > 0.5) {
@@ -4855,6 +4932,24 @@ window.NMS = {
       sunShadow: sunShadow.intensity,
       stars: universe.system.starViews.map((view) => view.light.intensity),
     };
+  },
+  renderLookState() {
+    return {
+      production: RENDER_LOOK_NEXT,
+      toneMapping: renderer.toneMapping,
+      exposure: renderer.toneMappingExposure,
+      grade: gradePass_ ? {
+        aberration: gradePass_.uniforms.uAberration.value,
+        vignette: gradePass_.uniforms.uVignette.value,
+        grain: gradePass_.uniforms.uGrain.value,
+      } : null,
+      cabinBake: ship.int?.group?.userData?.interiorIrradiance || null,
+      ...sceneRadiance.debugState(),
+    };
+  },
+  setRenderLookIsolation(mode = 'all') {
+    if (!DEV_SERVER || !RENDER_LOOK_NEXT) return null;
+    return sceneRadiance.setIsolation(mode);
   },
   volumeState() {
     const planet = volumePass?.activePlanet || null;
@@ -5964,6 +6059,7 @@ window.NMS = {
       camera,
       ship,
       shipView,
+      sceneRadiance,
       spaceCtl,
       starMap,
       riftPreviewSystem,

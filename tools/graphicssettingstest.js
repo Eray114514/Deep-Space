@@ -19,6 +19,9 @@ assert.equal(chooseAutomaticQuality('Intel(R) Arc(TM) Graphics'), 'performance')
 assert.equal(resolveQualityProfile({ quality: 'auto' }, 'NVIDIA RTX 5080 Laptop GPU').id, 'ultra');
 assert.equal(QUALITY_PROFILES.performance.dprMin, 0.85);
 assert.equal(QUALITY_PROFILES.ultra.cloudSteps, 124);
+assert.equal(QUALITY_PROFILES.performance.spaceRadianceResolution, 512);
+assert.equal(QUALITY_PROFILES.balanced.spaceRadianceResolution, 1024);
+assert.equal(QUALITY_PROFILES.ultra.reflectionProbeResolution, 256);
 
 const env = createEnvironmentState();
 let previous = 0;

@@ -62,15 +62,15 @@ export function buildCockpit(M, def) {
     /* two along each cove: one lamp for a 1.2 m strip pools too hard */
     for (const t of [0.3, 0.7]) {
       const p = new THREE.Vector3().lerpVectors(l.a, l.b, t);
-      add(p.x, p.y - 0.06, p.z, 0xffd7b0, 1.5, 3.4);
+      add(p.x, p.y - 0.06, p.z, 0xffd7b0, 4.7, 3.4);
     }
   }
   /* the coaming wash: the light that makes a panel readable */
-  add(0, PANEL_TOP.x + 0.03, PANEL_TOP.y + 0.34, 0xfff0da, 0.75, 2.2);
+  add(0, PANEL_TOP.x + 0.03, PANEL_TOP.y + 0.34, 0xfff0da, 2.6, 2.2);
   /* a cold fill from the overhead lip, so the deck is not one temperature */
-  add(0, COVE_Y - 0.2, (COVE_Z0 + COVE_Z1) / 2 + 0.1, 0xcfe2ff, 0.9, 3.0);
+  add(0, COVE_Y - 0.2, (COVE_Z0 + COVE_Z1) / 2 + 0.1, 0xcfe2ff, 3.4, 3.0);
   /* nose bay, forward and low — reads as light coming up off the glazing */
-  add(0, 0.5, GZ_FWD + 0.5, 0x9fc4ff, 0.7, 2.6);
+  add(0, 0.5, GZ_FWD + 0.5, 0x9fc4ff, 2.8, 2.6);
 
   /* ---- forward nose-bay closure below the windscreen -------------- */
   const closure = new THREE.Mesh(bevelBox(2.2, 0.34, 0.14, 0.02), M.blackMetal);

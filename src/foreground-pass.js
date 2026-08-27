@@ -5,13 +5,20 @@ import { Pass } from '../vendor/jsm/postprocessing/Pass.js';
 // pass restores the cockpit/ship silhouette at full resolution instead of
 // letting distant clouds composite across it like a screen overlay.
 export class ForegroundPass extends Pass {
-  constructor(scene, camera, layer) {
+  constructor(scene, camera, layers, { clearDepth = true } = {}) {
     super();
     this.scene = scene;
     this.camera = camera;
-    this.layer = layer;
+    this.layers = Array.isArray(layers) ? [...layers] : [layers];
+    this.layer = this.layers[0];
+    this.clearDepth = clearDepth;
     this.needsSwap = false;
     this.enabled = false;
+  }
+
+  setLayers(layers) {
+    this.layers = Array.isArray(layers) ? [...layers] : [layers];
+    this.layer = this.layers[0];
   }
 
   render(renderer, writeBuffer, readBuffer) {
@@ -27,12 +34,21 @@ export class ForegroundPass extends Pass {
     const oldMask = this.camera.layers.mask;
     const oldTarget = renderer.getRenderTarget();
     renderer.autoClear = false;
-    this.camera.layers.set(this.layer);
     renderer.setRenderTarget(target);
-    renderer.clearDepth();
-    renderer.render(this.scene, this.camera);
-    this.camera.layers.mask = oldMask;
-    renderer.autoClear = oldAutoClear;
-    renderer.setRenderTarget(oldTarget);
+    try {
+      if (this.clearDepth) renderer.clearDepth();
+      // One render call per semantic layer is intentional. Three gathers
+      // lights against the camera mask, not per receiving object; rendering
+      // exterior and cabin together would therefore let exterior fill lights
+      // illuminate the enclosed room even when their Layers do not overlap.
+      for (const layer of this.layers) {
+        this.camera.layers.set(layer);
+        renderer.render(this.scene, this.camera);
+      }
+    } finally {
+      this.camera.layers.mask = oldMask;
+      renderer.autoClear = oldAutoClear;
+      renderer.setRenderTarget(oldTarget);
+    }
   }
 }

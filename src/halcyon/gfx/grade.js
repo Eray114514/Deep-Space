@@ -24,15 +24,17 @@ import { ShaderPass } from '../../../vendor/jsm/postprocessing/ShaderPass.js';
  *  Runs LAST, after OutputPass, because all three are display-referred
  *  effects: they belong to the camera, not to the scene's radiance.
  * ------------------------------------------------------------------ */
-export function gradePass() {
+export function gradePass({ realistic = false } = {}) {
   return new ShaderPass({
     name: 'GradeShader',
     uniforms: {
       tDiffuse: { value: null },
       uTime: { value: 0 },
-      uAberration: { value: 0.0016 },
-      uVignette: { value: 0.62 },
-      uGrain: { value: 0.025 },
+      // The realistic profile keeps enough lens character to break digital
+      // perfection without visibly bending the HUD or dirtying every shadow.
+      uAberration: { value: realistic ? 0.0007 : 0.0016 },
+      uVignette: { value: realistic ? 0.36 : 0.62 },
+      uGrain: { value: realistic ? 0.012 : 0.025 },
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;

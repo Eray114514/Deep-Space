@@ -3,6 +3,8 @@
 import * as THREE from 'three';
 import { screenTexture, gradientStrip } from './textures.js';
 import { loadBaked, dress } from './baked.js';
+import { makeRng } from '../rng.js';
+import { tagMaterialProfile } from '../pbr-materials.js';
 
 /* ------------------------------------------------------------------ *
  *  TILING SCALE
@@ -299,14 +301,25 @@ export function buildMaterials(maxAniso = 8) {
       }
     },
   };
+  for (const name of ['hull', 'hullAccent', 'hullWhite', 'ceramic', 'liner', 'deck']) {
+    tagMaterialProfile(lib[name], name === 'ceramic' ? 'ceramic' : 'paintedDielectric');
+  }
+  for (const name of ['hullDark', 'trim', 'darkMetal', 'brushed', 'copper', 'nozzle']) {
+    tagMaterialProfile(lib[name], 'bareAlloy');
+  }
+  for (const name of ['blackMetal', 'seat', 'seatTrim']) tagMaterialProfile(lib[name], 'polymer');
+  tagMaterialProfile(lib.rubber, 'rubber');
+  tagMaterialProfile(lib.glass, 'glass');
+  tagMaterialProfile(lib.glassInner, 'glass');
   return lib;
 }
 
 /** Procedural HDRI-ish environment: deep space with a hot key star,
  *  a cool rim fill and a planetary bounce. Drives all metal specular. */
-export function buildEnvironment(renderer) {
+export function buildEnvironment(renderer, seed = 'HALCYON-VII') {
   const pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
+  const rand = makeRng(`${seed}:legacy-ship-environment:v1`);
 
   const size = 512;
   const c = document.createElement('canvas');
@@ -331,12 +344,12 @@ export function buildEnvironment(renderer) {
     g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
   };
   for (let i = 0; i < 26; i++) {
-    const x = Math.random() * size * 2;
-    const y = size * (0.15 + Math.random() * 0.7);
-    blob(x, y, 90 + Math.random() * 240, 'rgba(52,86,150,A)', 0.16);
+    const x = rand() * size * 2;
+    const y = size * (0.15 + rand() * 0.7);
+    blob(x, y, 90 + rand() * 240, 'rgba(52,86,150,A)', 0.16);
   }
   for (let i = 0; i < 14; i++) {
-    blob(Math.random() * size * 2, size * (0.2 + Math.random() * 0.6), 80 + Math.random() * 200,
+    blob(rand() * size * 2, size * (0.2 + rand() * 0.6), 80 + rand() * 200,
       'rgba(150,60,110,A)', 0.10);
   }
 
@@ -359,8 +372,8 @@ export function buildEnvironment(renderer) {
 
   // stars
   for (let i = 0; i < 900; i++) {
-    const x = Math.random() * size * 2, y = Math.random() * size;
-    const a = Math.random() * 0.8;
+    const x = rand() * size * 2, y = rand() * size;
+    const a = rand() * 0.8;
     g.fillStyle = `rgba(255,255,255,${a})`;
     g.fillRect(x, y, 1, 1);
   }

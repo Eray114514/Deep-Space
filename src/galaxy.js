@@ -15,6 +15,7 @@ import { buildCivilizationSites, civilizationSitesForSystem } from './civilizati
 import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
 import { applySystemBodyTuning } from './world-config.js';
 import { blackbodyLinearRgb, buildStellarLightField } from './stellar-radiometry.js';
+import { SpaceRadiance } from './space-radiance.js';
 
 export { CELL } from './galaxy-layout.js';
 
@@ -170,7 +171,10 @@ function cloudTexture(rand, size = 256, band = false) {
 }
 
 export class Universe {
-  constructor(seedStr, scene, { galaxyId = 'milky-way', bodyTuning = null, blackHoleSystem = null } = {}) {
+  constructor(seedStr, scene, {
+    galaxyId = 'milky-way', bodyTuning = null, blackHoleSystem = null,
+    renderer = null, spaceRadianceResolution = 1024, renderLook = true,
+  } = {}) {
     this.seed = seedStr;
     this.galaxyId = galaxyId;
     this.bodyTuning = bodyTuning;
@@ -182,6 +186,11 @@ export class Universe {
 
     this.glowTex = glowTexture();
     this.glowTexTight = glowTexture(128, 0, true);
+    this.spaceRadiance = renderer && renderLook ? new SpaceRadiance(renderer, seedStr, {
+      width: spaceRadianceResolution,
+      visible: renderLook,
+    }) : null;
+    if (this.spaceRadiance) scene.add(this.spaceRadiance.mesh);
     this.buildSkybox();
 
     this.nearStarsMesh = null;
@@ -514,6 +523,7 @@ export class Universe {
     // (nebula/band opacity is applied per-frame in updateRelative)
     if (this.starMaterial) this.starMaterial.uniforms.uDim.value = f;
     if (this.backdropMaterial) this.backdropMaterial.uniforms.uDim.value = f;
+    this.spaceRadiance?.setDimming(f);
     this._starDim = f;
   }
 
@@ -521,7 +531,7 @@ export class Universe {
     if (this.fadingSystem) this.fadingSystem.dispose();
     this.fadingSystem = null;
     if (this.system) this.system.dispose();
-    this.scene.remove(this.group, this.nebulas, this.backdropMesh);
+    this.scene.remove(this.group, this.nebulas, this.backdropMesh, this.spaceRadiance?.mesh);
     if (this.nearStarsMesh) {
       this.scene.remove(this.nearStarsMesh);
       this.nearStarsMesh.geometry.dispose();
@@ -538,6 +548,7 @@ export class Universe {
     }
     this.glowTex.dispose();
     this.glowTexTight.dispose();
+    this.spaceRadiance?.dispose();
   }
 }
 

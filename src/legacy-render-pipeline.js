@@ -29,6 +29,8 @@ export class GameLegacyPipeline {
     bloomRadius = 0.4,
     bloomThreshold = 1.05,
     foregroundLayer = 1,
+    interiorLayer = null,
+    realisticGrade = false,
   } = {}) {
     this.renderer = renderer;
     this.scene = scene;
@@ -45,6 +47,13 @@ export class GameLegacyPipeline {
     this.composer = new EffectComposer(renderer, target);
     this.composer.addPass(new RenderPass(scene, camera));
 
+    // Parked ships participate in the world depth buffer, but their cabin
+    // still needs an isolated light list. Render the cabin after the opaque
+    // world without clearing depth, before participating media consumes it.
+    this.parkedInteriorPass = interiorLayer === null ? null
+      : new ForegroundPass(scene, camera, interiorLayer, { clearDepth: false });
+    if (this.parkedInteriorPass) this.composer.addPass(this.parkedInteriorPass);
+
     this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale }) : null;
     if (this.volumePass) this.composer.addPass(this.volumePass);
 
@@ -55,7 +64,10 @@ export class GameLegacyPipeline {
     });
     this.composer.addPass(this.warp);
 
-    this.foregroundPass = new ForegroundPass(scene, camera, foregroundLayer);
+    this.foregroundPass = new ForegroundPass(
+      scene, camera,
+      interiorLayer === null ? foregroundLayer : [foregroundLayer, interiorLayer],
+    );
     this.composer.addPass(this.foregroundPass);
 
     this.rift = new ShaderPass(RiftDistortionShader);
@@ -79,7 +91,7 @@ export class GameLegacyPipeline {
     this.composer.addPass(new OutputPass());
     // grade pass (radial CA / vignette / film grain): display-referred lens
     // character, so it runs after the tonemap in OutputPass.
-    this.grade = gradePass();
+    this.grade = gradePass({ realistic: realisticGrade });
     this.composer.addPass(this.grade);
     this.smaa = !matchMedia('(pointer: coarse)').matches
       ? new SMAAPass(1, 1)
@@ -109,6 +121,7 @@ export class GameLegacyPipeline {
   dispose() {
     this.composer.dispose();
     this.volumePass?.dispose();
+    this.parkedInteriorPass?.dispose?.();
     this.foregroundPass.dispose?.();
     this.target.dispose();
   }

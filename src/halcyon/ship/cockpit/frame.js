@@ -78,12 +78,12 @@ export function buildShell(M, D) {
     GLAZE.patch(p.z0, p.z1, p.ri0, p.ri1, 0, p.nz ?? 3, p.nr ?? 3, false, true),
   );
   // The source demo exposes the canopy against a dark nebula under AgX 0.95.
-  // 深空 also frames bright planets under ACES, so the same physical layer
-  // needs enough coverage/reflection energy to remain visibly present without
-  // turning the clean centre into a tinted screen.
+  // 深空 now shares that highlight roll-off but also frames bright planets,
+  // so the plate keeps a little more clean-centre coverage: visibly present,
+  // never an opaque cyan screen.
   const glassMat = makeCanopyGlass(LAMPS, {
-    spanU: 2.2, spanV: 2.0, rim: 0.30, envGain: 0.82,
-    lamp: 1.08, cover: 0.19, coverLum: 0.68, sheen: 1.12,
+    spanU: 2.2, spanV: 2.0, rim: 0.30, envGain: 0.92,
+    lamp: 1.15, cover: 0.23, coverLum: 0.76, sheen: 1.12,
   });
   const glass = new THREE.Mesh(mergeGeos(panes), glassMat);
   glass.name = 'canopy-glazing';
