@@ -7,6 +7,7 @@ import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ForegroundPass } from './foreground-pass.js';
 import { VolumetricPass } from './volumetric-pass-webgl.js';
+import { AtmospherePass } from './atmosphere-pass-webgl.js';
 import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
 import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
@@ -45,7 +46,8 @@ export class GameLegacyPipeline {
     target.depthTexture.name = 'scene.depth';
     this.target = target;
     this.composer = new EffectComposer(renderer, target);
-    this.composer.addPass(new RenderPass(scene, camera));
+    this.renderPass = new RenderPass(scene, camera);
+    this.composer.addPass(this.renderPass);
 
     // Parked ships participate in the world depth buffer, but their cabin
     // still needs an isolated light list. Render the cabin after the opaque
@@ -53,6 +55,11 @@ export class GameLegacyPipeline {
     this.parkedInteriorPass = interiorLayer === null ? null
       : new ForegroundPass(scene, camera, interiorLayer, { clearDepth: false });
     if (this.parkedInteriorPass) this.composer.addPass(this.parkedInteriorPass);
+
+    // Full-resolution air transmittance/scattering owns the opaque depth. The
+    // independent half-resolution temporal pass after it remains cloud-only.
+    this.atmospherePass = new AtmospherePass(camera);
+    this.composer.addPass(this.atmospherePass);
 
     this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale }) : null;
     if (this.volumePass) this.composer.addPass(this.volumePass);
@@ -110,6 +117,10 @@ export class GameLegacyPipeline {
     this.volumePass.scale = THREE.MathUtils.clamp(scale, 0.3, 1);
   }
 
+  setActiveAtmosphere(planet, nav) {
+    this.atmospherePass.setActivePlanet(planet, nav);
+  }
+
   render() {
     this.composer.render();
   }
@@ -121,6 +132,7 @@ export class GameLegacyPipeline {
   dispose() {
     this.composer.dispose();
     this.volumePass?.dispose();
+    this.atmospherePass.dispose();
     this.parkedInteriorPass?.dispose?.();
     this.foregroundPass.dispose?.();
     this.target.dispose();

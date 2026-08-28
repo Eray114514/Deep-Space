@@ -13,6 +13,10 @@ import {
   nightSkyIrradiance,
   rayleighCoefficients,
 } from '../src/atmosphere-physics.js';
+import {
+  atmosphereRenderProfile,
+  createAtmosphereOpticalDepthLut,
+} from '../src/atmosphere-pass-webgl.js';
 
 const luminance = (rgb) => rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
 const finiteRgb = (rgb) => rgb.length === 3
@@ -72,6 +76,23 @@ const profile = createAtmosphereProfile({
   groundRadiusMeters: 900000,
   topAltitudeMeters: 120000,
 });
+const runtimeProfile = atmosphereRenderProfile({
+  R: 6000000,
+  hAmp: 12000,
+  atmoHeight: 630000,
+  atmoDensity: 1,
+  type: 'lush',
+  atmosphere: { pressureBar: 1 },
+  weatherProfile: { temperatureK: 286 },
+});
+assert.equal(runtimeProfile.profile.topAltitudeMeters, 100000,
+  'the 630 km authored gameplay envelope must not stretch the optical atmosphere');
+assert.equal(runtimeProfile.profile.rayleighScaleHeightMeters, 8000);
+assert.equal(runtimeProfile.profile.mieScaleHeightMeters, 1200);
+const runtimeLut = createAtmosphereOpticalDepthLut(runtimeProfile.profile, 32, 12, 24);
+assert.equal(runtimeLut.data.length, 32 * 12 * 4);
+assert.ok(runtimeLut.data.every(Number.isFinite),
+  'the production sunlight optical-depth LUT contains only finite values');
 const groundDensity = atmosphereDensityAt(profile, 0);
 const highDensity = atmosphereDensityAt(profile, 40000);
 assert.ok(highDensity.rayleigh < groundDensity.rayleigh

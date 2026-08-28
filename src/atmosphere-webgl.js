@@ -6,6 +6,16 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
       atmoColor: { value: color },
       density: { value: density },
       sunDir: { value: new THREE.Vector3(0, 1, 0) },   // planet-local, set by the system
+      uStellarDirections0: { value: new THREE.Vector3(0, 1, 0) },
+      uStellarRadiance0: { value: new THREE.Color(1, 1, 1) },
+      uStarIrradiance0: { value: 1 },
+      uStellarDirections1: { value: new THREE.Vector3(0, 1, 0) },
+      uStellarRadiance1: { value: new THREE.Color(1, 1, 1) },
+      uStarIrradiance1: { value: 0 },
+      uEclipseEnabled: { value: 0 },
+      uEclipseCenter: { value: new THREE.Vector3() },
+      uEclipseRadius: { value: 1 },
+      uEclipseStarAngle: { value: 0 },
       uCameraLocal: { value: new THREE.Vector3() },
       uGroundR: { value: groundR },
       uAtmoR: { value: atmoR },
@@ -13,12 +23,9 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
       uDepthReady: { value: 0 },
       uCameraFar: { value: 1.2e11 },
       uVolumeSize: { value: new THREE.Vector2(1, 1) },
-      // Camera proximity factor in [0,1]: 1 = close enough that limb/horizon
-      // gradient detail is visible (full 14-step march), 0 = far enough that
-      // the atmosphere reads as a smooth shell colour (8-step march). The
-      // scattering model, density profile and terminator are unchanged; only
-      // the integration sample count is gated, so distant frames stay
-      // visually identical while costing ~40% less per fragment.
+      // Camera proximity is retained for compatibility with planet updates.
+      // The active planet uses atmosphere-pass-webgl; this material is the
+      // physical-scale fallback for distant bodies and portal views.
       uCamProx: { value: 1 },
     },
     vertexShader: /* glsl */`
@@ -39,6 +46,11 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
       uniform float uDepthReady, uCameraFar;
       uniform vec2 uVolumeSize;
       uniform vec3 sunDir, uCameraLocal;
+      uniform vec3 uStellarDirections0, uStellarRadiance0;
+      uniform vec3 uStellarDirections1, uStellarRadiance1;
+      uniform float uStarIrradiance0, uStarIrradiance1;
+      uniform float uEclipseEnabled, uEclipseRadius, uEclipseStarAngle;
+      uniform vec3 uEclipseCenter;
       varying vec3 vDirection;
       varying vec3 vViewDirection;
 
@@ -48,6 +60,42 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
         if (disc < 0.0) return vec2(-1.0);
         float s = sqrt(disc);
         return vec2(-b - s, -b + s);
+      }
+
+      float eclipseVisibility(vec3 samplePosition, vec3 lightDirection) {
+        if (uEclipseEnabled < 0.5) return 1.0;
+        vec3 toOccluder = uEclipseCenter - samplePosition;
+        float distanceToOccluder = length(toOccluder);
+        if (distanceToOccluder <= uEclipseRadius) return 0.0;
+        float angularRadius = asin(clamp(
+          uEclipseRadius / distanceToOccluder, 0.0, 0.9999));
+        float separation = acos(clamp(dot(normalize(toOccluder),
+          normalize(lightDirection)), -1.0, 1.0));
+        float penumbra = max(uEclipseStarAngle, 0.00002);
+        return smoothstep(max(angularRadius - penumbra, 0.0),
+          angularRadius + penumbra, separation);
+      }
+
+      vec3 stellarScatter(vec3 position, vec3 viewDirection, vec3 radial,
+        float rhoR, float rhoM, vec3 lightDirection, vec3 lightColor,
+        float energy) {
+        if (energy <= 0.00001) return vec3(0.0);
+        vec3 lightDir = normalize(lightDirection);
+        float sunMu = dot(radial, lightDir);
+        float horizon = smoothstep(-0.13, 0.055, sunMu);
+        float slant = 1.0 / max(0.16, sunMu + 0.32);
+        float sunTrans = exp(-(rhoR * 0.32 + rhoM * 1.4) * slant) * horizon;
+        float mu = dot(viewDirection, lightDir);
+        float rayleighPhase = 0.05968 * (1.0 + mu * mu);
+        float g = 0.76;
+        float miePhase = 0.07958 * (1.0 - g * g)
+          / pow(max(0.04, 1.0 + g * g - 2.0 * g * mu), 1.5);
+        vec3 rayleighColor = mix(vec3(0.48, 0.68, 1.0),
+          max(atmoColor, vec3(0.015)), 0.58);
+        vec3 scatter = rayleighColor * rhoR * rayleighPhase
+          + vec3(1.0, 0.93, 0.82) * rhoM * miePhase;
+        return scatter * lightColor * energy * sunTrans
+          * eclipseVisibility(position, lightDir);
       }
 
       float sceneRayLimit() {
@@ -62,7 +110,12 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
 
       void main() {
         vec3 dir = normalize(vDirection);
-        vec2 outer = sphereHits(uCameraLocal, uAtmoR, dir);
+        // uAtmoR remains a gameplay/weather envelope. Molecular scattering is
+        // confined to a 26–120 km optical top, matching the full-resolution
+        // pass rather than normalizing density across an authored 630 km shell.
+        float opticalTop = min(uAtmoR,
+          uGroundR + clamp(uGroundR / 60.0, 26000.0, 120000.0));
+        vec2 outer = sphereHits(uCameraLocal, opticalTop, dir);
         if (outer.y <= 0.0) discard;
         vec2 ground = sphereHits(uCameraLocal, uGroundR, dir);
         float t0 = max(outer.x, 0.0);
@@ -71,41 +124,30 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
         t1 = min(t1, sceneRayLimit() + 1.5);
         if (t1 <= t0) discard;
 
-        // Camera-proximity-gated march count: 14 steps up close (limb and
-        // terminator gradients resolve), 8 steps far away (the shell reads as
-        // a smooth colour and per-step detail is sub-pixel). 8 is still above
-        // the Nyquist limit for the smooth density profile, so the integrated
-        // transmittance/colour match the 14-step reference within dithering
-        // noise of the half-resolution temporal pass.
-        int STEPS = int(mix(8.0, 14.0, uCamProx));
+        const int STEPS = 24;
         float dt = (t1 - t0) / float(STEPS);
         float t = t0 + dt * 0.5;
-        float mu = dot(dir, normalize(sunDir));
-        float rayleighPhase = 0.05968 * (1.0 + mu * mu);
-        float g = 0.76;
-        float miePhase = 0.07958 * (1.0 - g * g)
-          / pow(max(0.04, 1.0 + g * g - 2.0 * g * mu), 1.5);
-        vec3 rayleighColor = mix(vec3(0.48, 0.68, 1.0),
-          max(atmoColor, vec3(0.015)), 0.58);
         vec3 col = vec3(0.0);
         float trans = 1.0;
         for (int i = 0; i < STEPS; i++) {
           vec3 p = uCameraLocal + dir * t;
           float r = length(p);
-          float h = clamp((r - uGroundR) / max(uAtmoR - uGroundR, 1.0), 0.0, 1.0);
-          float rhoR = exp(-h * 6.2) * density;
-          float rhoM = exp(-h * 15.0) * density * 0.22;
+          float altitude = max(r - uGroundR, 0.0);
+          float normalizedHeight = altitude / max(opticalTop - uGroundR, 1.0);
+          float rhoR = exp(-altitude / 8000.0) * density;
+          float rhoM = exp(-altitude / 1200.0) * density * 0.22;
           vec3 radial = p / max(r, 1.0);
-          float sunMu = dot(radial, normalize(sunDir));
-          float horizon = smoothstep(-0.13, 0.055, sunMu);
-          float slant = 1.0 / max(0.16, sunMu + 0.32);
-          float sunTrans = exp(-(rhoR * 0.32 + rhoM * 1.4) * slant) * horizon;
-          // Soft multi-scatter approximation keeps the terminator and cloud
-          // shadows from turning unnaturally black while preserving sunset.
-          vec3 scatter = rayleighColor * rhoR * rayleighPhase
-            + vec3(1.0, 0.93, 0.82) * rhoM * miePhase;
-          scatter *= sunTrans + 0.075 * density * (1.0 - h);
-          float extinction = (rhoR * 0.58 + rhoM * 1.8) * dt / max(uAtmoR - uGroundR, 1.0);
+          vec3 scatter = stellarScatter(p, dir, radial, rhoR, rhoM,
+            uStellarDirections0, uStellarRadiance0, uStarIrradiance0);
+          scatter += stellarScatter(p, dir, radial, rhoR, rhoM,
+            uStellarDirections1, uStellarRadiance1, uStarIrradiance1);
+          // Soft multi-scatter approximation keeps the terminator from
+          // turning unnaturally black while preserving sunset.
+          scatter += max(atmoColor, vec3(0.015)) * rhoR * 0.0045
+            * density * (1.0 - normalizedHeight)
+            * (uStarIrradiance0 + uStarIrradiance1);
+          float extinction = (rhoR * 0.58 + rhoM * 1.8) * dt
+            / max(opticalTop - uGroundR, 1.0);
           float a = 1.0 - exp(-extinction * 0.62);
           col += trans * a * scatter * 11.0;
           trans *= 1.0 - a;

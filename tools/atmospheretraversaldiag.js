@@ -1,11 +1,11 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const { server, port } = await startServer(0);
-const browser = await launchWebGPUHardwareBrowser({ headless: true });
+const browser = await launchHardwareBrowser({ headless: true });
 if (!browser) {
-  console.log('Atmosphere traversal diagnostic skipped: no hardware WebGPU browser.');
+  console.log('Atmosphere traversal diagnostic skipped: no hardware WebGL2 browser.');
   await new Promise((resolve) => server.close(resolve));
   process.exit(0);
 }
@@ -20,7 +20,7 @@ page.on('console', (message) => {
 });
 
 try {
-  await page.goto(`http://127.0.0.1:${port}/?renderer=webgpu&quality=high`
+  await page.goto(`http://127.0.0.1:${port}/?renderer=webgl&quality=high`
     + '&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=0.152&time=9.5');
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
   await page.evaluate(() => NMS.setAdaptiveQualityLocked(true));
@@ -47,6 +47,7 @@ try {
       await page.waitForTimeout(900);
       const state = await page.evaluate(() => ({
         stats: NMS.stats(),
+        atmosphere: NMS.atmosphereState(),
         volume: NMS.volumeState(),
       }));
       await writeFile(new URL(`${fixture}-${String(altitudeKm).padStart(3, '0')}km.png`,
@@ -56,8 +57,9 @@ try {
         atmosphere: state.stats.environment.atmosphere,
         gameplayAtmosphere: state.stats.environment.gameplayAtmosphere,
         cloudDensity: state.stats.environment.cloudDensity,
-        depthReady: state.volume.depthReady,
-        depthReversed: state.volume.depthReversed,
+        atmosphereDepthReady: state.atmosphere.depthReady,
+        cloudDepthReady: state.volume.cloudDepthReady,
+        opticalTop: state.atmosphere.opticalTop,
       }));
     }
   }

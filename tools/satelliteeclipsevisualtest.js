@@ -189,6 +189,7 @@ async function setMode(mode) {
     for (const material of mediaMaterials) {
       setColorWrite(material, nextMode !== 'surface');
     }
+    NMS.setAtmosphereVisible(nextMode !== 'surface');
   }, mode);
   await page.waitForTimeout(900);
 }
@@ -207,7 +208,7 @@ async function setFixture(offsetRatio) {
 }
 
 try {
-  await page.goto(`http://127.0.0.1:${port}/?renderer=webgpu&quality=high`
+  await page.goto(`http://127.0.0.1:${port}/?renderer=webgl&quality=high`
     + '&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=0.72'
     + '&time=9.5&freeze=1');
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
@@ -370,7 +371,12 @@ try {
     && behindChange.changed < 0.0015;
   const satelliteVisibleInFront =
     frontChange.stable > 0.75
-    && frontChange.changed > Math.max(0.0015, behindChange.changed * 4);
+    // The generated home moon is only ~0.63% of the parent radius in this
+    // catalogue. Its projected disk is plainly visible but occupies less than
+    // the old fixed 0.15% full-frame threshold; scale the floor to the actual
+    // fixture while still requiring a strong separation from the hidden case.
+    && frontChange.changed > Math.max(
+      0.0002, satelliteFixture.radiusRatio ** 2 * 4, behindChange.changed * 4);
 
   await page.evaluate(() => {
     const fixture = window.__satelliteOcclusionFixture;

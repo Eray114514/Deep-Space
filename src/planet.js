@@ -898,10 +898,9 @@ export class Planet {
     }
 
     if (this.atmoDensity > 0.05) {
-      // Authored worlds may pin the atmosphere height explicitly. The curated
-      // homeworld uses ~10.5% of R to reproduce the pre-rewrite limb look the
-      // legacy WebGL atmosphere shader (ratio-normalized) was tuned against;
-      // formula planets keep R × atmoFraction (9–13.5%) automatically.
+      // Authored atmosphere height remains the gameplay/weather envelope. The
+      // physical atmosphere pass derives an independent optical top and scale
+      // heights, so this value must never stretch molecular density.
       const authoredAtmoHeight = Number(this.tuning.atmosphereHeightMeters);
       const atmoHeight = Number.isFinite(authoredAtmoHeight)
         ? clamp(authoredAtmoHeight, 30000, 1000000)
@@ -911,12 +910,12 @@ export class Planet {
         new THREE.SphereGeometry(atmoR, 96, 64),
         makeAtmosphereMaterial(this, this.atmoColor, this.atmoDensity, R, atmoR),
       );
-      // Atmosphere is the first participating-medium layer; clouds composite
-      // over it in the shared half-resolution volume pass.
+      // This mesh is the thin fallback limb for distant bodies and portal
+      // views. The active planet is hidden by the full-resolution physical
+      // atmosphere pass before clouds composite independently.
       this.atmoMesh.renderOrder = 1;
       // Distant-body atmosphere belongs to the world pass so ordinary depth
-      // naturally occludes it. VolumetricPass moves only the active planet to
-      // VOLUME_LAYER and binds opaque scene depth for local integration.
+      // naturally occludes it.
       this.atmoMesh.layers.set(WORLD_LAYER);
       this.atmoMesh.material.fog = false;
       this.atmoMesh.frustumCulled = false;
@@ -1198,6 +1197,10 @@ export class Planet {
     }
     const clouds = this.volCloudUniforms || this.volCloudMat?.uniforms;
     if (clouds) {
+      clouds.uSunC?.value.copy(primary.colorValue);
+      if (clouds.uSunEnergy) {
+        clouds.uSunEnergy.value = primary.irradianceFraction ?? 1;
+      }
       clouds.uStellarDirections0?.value.copy(primary.localDirection);
       clouds.uStellarRadiance0?.value.copy(primary.colorValue);
       if (clouds.uStarIrradiance0) {
@@ -1217,6 +1220,11 @@ export class Planet {
   }
 
   setEclipseOccluder(occluder = null) {
+    this.eclipseOccluder = occluder ? {
+      centerLocal: occluder.centerLocal.clone(),
+      radius: Math.max(1, occluder.radius || 1),
+      starAngularRadius: Math.max(0, occluder.starAngularRadius || 0),
+    } : null;
     const targets = [
       this.terrainMaterial?.userData?.shader?.uniforms,
       this.liquidMat?.userData?.shader?.uniforms,
@@ -1627,6 +1635,12 @@ export class Planet {
       if (noctilucentShader?.uniforms.uSunDir) {
         noctilucentShader.uniforms.uSunDir.value.copy(this.sunDirLocal)
           .applyQuaternion(_q2.copy(this.cloudMeshNoctilucent.quaternion).invert());
+      }
+    }
+    if (this.cloudVisualEnabled === false) {
+      for (const mesh of [this.cloudMesh, this.cloudMesh2,
+        this.cloudMeshNoctilucent, this.volCloudMesh]) {
+        if (mesh) mesh.visible = false;
       }
     }
   }

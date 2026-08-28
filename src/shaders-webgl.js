@@ -216,6 +216,11 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uCloudTex = { value: cloudTex };
     shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.42 : 0 };
     shader.uniforms.uCloudMat = { value: new THREE.Matrix3() };
+    shader.uniforms.uEclipseEnabled = { value: 0 };
+    shader.uniforms.uEclipseCenter = { value: new THREE.Vector3() };
+    shader.uniforms.uEclipseRadius = { value: 1 };
+    shader.uniforms.uEclipseStarAngle = { value: 0 };
+    shader.uniforms.uEclipseSunDir = { value: new THREE.Vector3(0, 1, 0) };
     const pal = planet.pal;
     shader.uniforms.uSnowK = { value: pal && pal.snow ? 1 : 0 };
     shader.uniforms.uSnowColor = { value: pal && pal.snow ? pal.snow : new THREE.Color(1, 1, 1) };
@@ -285,6 +290,11 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform sampler2D uCloudTex;
         uniform float uCloudK;
         uniform mat3 uCloudMat;
+        uniform float uEclipseEnabled;
+        uniform vec3 uEclipseCenter;
+        uniform float uEclipseRadius;
+        uniform float uEclipseStarAngle;
+        uniform vec3 uEclipseSunDir;
         uniform float uSnowK;
         uniform vec3 uSnowColor;
         uniform float uSnowLine;
@@ -321,6 +331,19 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         float gSnowW = 0.0;
         float gPatch = 0.0;
         float gSurfaceRoughness = 0.82;
+        float eclipseVisibility(vec3 samplePosition) {
+          if (uEclipseEnabled < 0.5) return 1.0;
+          vec3 toOccluder = uEclipseCenter - samplePosition;
+          float distanceToOccluder = length(toOccluder);
+          if (distanceToOccluder <= uEclipseRadius) return 0.0;
+          float angularRadius = asin(clamp(
+            uEclipseRadius / distanceToOccluder, 0.0, 0.9999));
+          float separation = acos(clamp(dot(normalize(toOccluder),
+            normalize(uEclipseSunDir)), -1.0, 1.0));
+          float penumbra = max(uEclipseStarAngle, 0.00002);
+          return smoothstep(max(angularRadius - penumbra, 0.0),
+            angularRadius + penumbra, separation);
+        }
         vec2 surfaceMaterialUv(vec3 p, vec3 n) {
           vec3 an = abs(n);
           if (an.x > an.y && an.x > an.z) return p.yz * 0.085;
@@ -435,6 +458,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           float cu = 0.5 + atan(-cd.z, -cd.x) * 0.15915494;
           float cvv = acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
           diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
+          // Keep some indirect skylight in totality while the direct surface
+          // response tracks the same finite-star penumbra as atmosphere/cloud.
+          diffuseColor.rgb *= mix(0.16, 1.0, eclipseVisibility(vLocalPos));
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         // snow glints, damp hollows go faintly glossy, dry rises stay matte —

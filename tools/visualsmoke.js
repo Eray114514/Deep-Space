@@ -26,7 +26,12 @@ try {
   });
   await page.goto(`http://127.0.0.1:${port}/?renderer=auto&quality=ultra`
     + `&nohero=1&vclouds=${volumeClouds}&farflora=1&post=1&freeze=1`);
-  await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
+  try {
+    await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 60000 });
+  } catch (error) {
+    console.error(JSON.stringify({ bootError: String(error), errors }, null, 2));
+    throw error;
+  }
 
   if (focus === 'all') {
     await page.evaluate(() => NMS.teleport(0, 0.72));

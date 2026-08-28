@@ -25,6 +25,8 @@
     "test:hero-handoff": "node tools/hero-playtest.js",
     "test:cloud-reference": "node tools/cloudvisualdiag.js",
     "test:atmosphere-motion": "node tools/atmospheremotiondiag.js",
+    "test:atmosphere-visual": "node tools/atmospherevisualdiag.js",
+    "test:atmosphere-traversal": "node tools/atmospheretraversaldiag.js",
     "test:graphics": "node tools/waterinteractiontest.js && node tools/graphicsplaytest.js",
     "test:visual-smoke": "node tools/visualsmoke.js",
     "test:render-look": "node tools/renderlooktest.js && node tools/renderlookplaytest.js && node tools/renderlookworldtest.js",

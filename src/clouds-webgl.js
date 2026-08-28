@@ -98,7 +98,7 @@ function stormCenters(offX, offY, offZ) {
 }
 
 export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
-  { quality = 'ultra', steps = 124 } = {}) {
+  _weatherMapHi, { quality = 'ultra', steps = 124 } = {}) {
   const thick = band.rOut - band.rIn;
   const qualityValue = quality === 'performance' || quality === 'low' ? 0
     : quality === 'balanced' ? 0.55 : 1;
@@ -128,6 +128,11 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uCameraFar: { value: 1.2e11 },
       uVolumeSize: { value: new THREE.Vector2(1, 1) },
       uSunC: { value: new THREE.Color(1, 0.98, 0.94) },
+      uSunEnergy: { value: 1 },
+      uEclipseEnabled: { value: 0 },
+      uEclipseCenter: { value: new THREE.Vector3() },
+      uEclipseRadius: { value: 1 },
+      uEclipseStarAngle: { value: 0 },
       uAmbC: { value: new THREE.Color(0.35, 0.42, 0.55) },
       uTint: { value: new THREE.Color(band.tint || 0xffffff) },
       uEngage: { value: 0 },
@@ -155,12 +160,29 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uniform sampler2D uCloudNoise;
       uniform sampler2D tSceneDepth;
       uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uMaxSteps;
+      uniform float uSunEnergy;
+      uniform float uEclipseEnabled, uEclipseRadius, uEclipseStarAngle;
+      uniform vec3 uEclipseCenter;
       uniform float uDepthReady, uCameraFar;
       uniform vec2 uVolumeSize;
       uniform vec3 uCOff, uStormA, uStormB, uCameraLocal, uSunDir, uSunC, uAmbC, uTint;
       uniform mat3 uSpin;
       varying vec3 vDirection;
       varying vec3 vViewDirection;
+
+      float eclipseVisibility(vec3 samplePosition) {
+        if (uEclipseEnabled < 0.5) return 1.0;
+        vec3 toOccluder = uEclipseCenter - samplePosition;
+        float distanceToOccluder = length(toOccluder);
+        if (distanceToOccluder <= uEclipseRadius) return 0.0;
+        float angularRadius = asin(clamp(
+          uEclipseRadius / distanceToOccluder, 0.0, 0.9999));
+        float separation = acos(clamp(dot(
+          normalize(toOccluder), normalize(uSunDir)), -1.0, 1.0));
+        float penumbra = max(uEclipseStarAngle, 0.00002);
+        return smoothstep(max(angularRadius - penumbra, 0.0),
+          angularRadius + penumbra, separation);
+      }
 
       // the SAME coverage fbm the impostor deck, terrain shadows and the CPU
       // transit fog use — one sky, everywhere. Explicit LOD: implicit
@@ -341,7 +363,6 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // 3D billows, erosion and vertical profile still vary at every step.
         vec3 systemDir = uSpin * normalize(uCameraLocal + dir * ((t0 + t1) * 0.5));
         float systemMask = weatherSystem(systemDir);
-
         float sigma = 6.4 / thick;                  // extinction scale
         float mu = dot(dir, uSunDir);
         float hg = (1.0 - 0.28) / (12.566 * pow(1.0 + 0.28 - 1.06 * mu, 1.5));
@@ -355,6 +376,15 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
           vec3 local = uCameraLocal + dir * t;
           float d = densityAt(local, 1.0, systemMask);
           if (d > 0.003) {
+            float sampleRadius = length(local);
+            float sunElevation = dot(local / max(sampleRadius, 1.0), uSunDir);
+            float geometricHorizon = -sqrt(max(0.0,
+              1.0 - uGroundR * uGroundR / (sampleRadius * sampleRadius)));
+            // High clouds may stay sunlit shortly after surface sunset, but
+            // the planet must fully shadow the deck on its night side.
+            float sunVisibility = smoothstep(geometricHorizon - 0.018,
+              geometricHorizon + 0.018, sunElevation) * uSunEnergy
+              * eclipseVisibility(local);
             // short sun march: how buried is this sample?
             float od = 0.0;
             float ls = thick * 0.35;
@@ -373,8 +403,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
             float hFrac = clamp((length(local) - uRin) / thick, 0.0, 1.0);
             float silver = pow(Tsun, 2.4) * pow(max(mu, 0.0), 3.0)
               * (1.0 - smoothstep(0.56, 0.96, d));
-            vec3 s = uSunC * (Tsun * phase * 13.2 + silver * 0.82)
-              + uAmbC * (0.42 + 0.62 * hFrac) * (0.72 + Tsun * 0.28);
+            vec3 s = uSunC * (Tsun * phase * 13.2 + silver * 0.82) * sunVisibility
+              + uAmbC * (0.42 + 0.62 * hFrac) * (0.72 + Tsun * 0.28)
+                * mix(0.045, 1.0, clamp(sunVisibility, 0.0, 1.0));
             float a = 1.0 - exp(-d * sigma * dt);
             col += T * a * s * powder * uTint;
             T *= 1.0 - a;

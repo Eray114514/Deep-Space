@@ -593,6 +593,8 @@ const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   realisticGrade: RENDER_LOOK_NEXT,
 });
 const volumePass = nodePipeline.volumePass;
+const atmospherePass = nodePipeline.atmospherePass;
+atmospherePass.setVisualEnabled(qs.get('atmosphere') !== '0');
 const warpDrivePass = nodePipeline.warp;
 const foregroundPass = nodePipeline.foregroundPass;
 const parkedInteriorPass = nodePipeline.parkedInteriorPass;
@@ -2247,6 +2249,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
   };
   const previousVolumePlanet = volumePass?.activePlanet || null;
   const previousVolumeHistory = volumePass?.historyValid || false;
+  const previousAtmospherePlanet = atmospherePass.activePlanet || null;
   const oldTarget = renderer.getRenderTarget();
   const oldMrt = renderer.getMRT?.();
   const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
@@ -2257,6 +2260,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     sunShadow.visible = false;
     sunShadow.intensity = 0;
     volumePass?.setActivePlanet(targetBody, route.target.entry, 0);
+    nodePipeline.setActiveAtmosphere(targetBody, route.target.entry);
     targetBody.syncAtmoMaterial?.();
     targetBody.syncVolCloudMaterial?.();
     nodePipeline.bindVolumeDepth?.(targetBody);
@@ -2270,6 +2274,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     renderer.setRenderTarget(oldTarget);
     renderer.setMRT?.(oldMrt);
     volumePass?.setActivePlanet(previousVolumePlanet, nav.pos, 0);
+    nodePipeline.setActiveAtmosphere(previousAtmospherePlanet, nav.pos);
     if (volumePass) volumePass.historyValid = previousVolumeHistory;
     previousVolumePlanet?.syncAtmoMaterial?.();
     previousVolumePlanet?.syncVolCloudMaterial?.();
@@ -2324,11 +2329,13 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
       new THREE.Vector3(),
       targetQuat,
     );
-    await spatialRift.compilePortalAsync(targetBody.group, {
-      beforeCompile: (portalCamera) =>
-        beginRiftPortalScene(portalCamera, prepared, route.bodyId),
-      afterCompile: () => endRiftPortalScene(prepared, route.bodyId),
-    });
+    if (typeof spatialRift.compilePortalAsync === 'function') {
+      await spatialRift.compilePortalAsync(targetBody.group, {
+        beforeCompile: (portalCamera) =>
+          beginRiftPortalScene(portalCamera, prepared, route.bodyId),
+        afterCompile: () => endRiftPortalScene(prepared, route.bodyId),
+      });
+    }
     if (!preparedDestinationIsActive(token, route, prepared)) return;
     // compileAsync captures pipelines, but the first direct portal draw still
     // has to allocate attachments and execute the complete target-world pass.
@@ -4502,6 +4509,11 @@ function frame() {
     }
   }
   let startupVolumeWarmDrawRequested = false;
+  const localAtmospherePlanet = state === 'warp' && !warpRevealActive
+    ? null : nearest;
+  nodePipeline.setActiveAtmosphere(localAtmospherePlanet?.isGasGiant
+    || localAtmospherePlanet?.type === 'artificialHabitat'
+    ? null : localAtmospherePlanet, nav.pos);
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
     const previousVolumePlanet = volumePass.activePlanet;
@@ -4534,14 +4546,13 @@ function frame() {
       || volumePlanet?.type === 'artificialHabitat' ? null : volumePlanet, nav.pos, motion);
     nodePipeline.bindVolumeDepth?.(volumePass.activePlanet);
     if (startupVolumePlanet?.volCloudMesh) {
-      // Planet.update() correctly hides a distant shell whose contribution is
-      // zero, but WebGPU then never sees its material. Visibility is sufficient
-      // to build the live MRT/depth pipeline; uEngage may remain zero, so the
-      // masked warm frame cannot alter the authored scene.
+      // Planet.update() correctly hides a distant cloud shell whose
+      // contribution is zero. Visibility is sufficient to compile the live
+      // half-resolution cloud pipeline; uEngage may remain zero, so the masked
+      // warm frame cannot alter the authored scene.
       startupVolumePlanet.volCloudMesh.visible = true;
       if (!startupVolumeKeepaliveMeshes.length) {
-        for (const source of [startupVolumePlanet.atmoMesh,
-          startupVolumePlanet.volCloudMesh]) {
+        for (const source of [startupVolumePlanet.volCloudMesh]) {
           if (!source?.material) continue;
           const keepalive = new THREE.Mesh(
             new THREE.SphereGeometry(1, 4, 2), source.material);
@@ -4569,16 +4580,15 @@ function frame() {
       }
       startupVolumeWarmDrawRequested = true;
     }
-    // Local volume ownership is exclusive, so the active cloud shell can copy
-    // its independent planet state into the immutable shared TSL topology just
-    // before the single volume-layer draw. This preserves per-body weather and
-    // lighting while avoiding a fresh 64×5 NodeBuilder program at warp reveal.
+    // Local cloud ownership is exclusive. Refresh the active planet state just
+    // before the single volume-layer draw so destination weather and lighting
+    // are warm before the warp reveal.
     volumePass.activePlanet?.syncAtmoMaterial?.();
     volumePass.activePlanet?.syncVolCloudMaterial?.();
     nodePipeline.setVolumeMotion?.(motion,
       previousVolumePlanet === volumePass.activePlanet && volumePass.historyValid);
-    // Temporal accumulation reprojects against the atmosphere shell, so it needs
-    // the shell in camera-relative render space plus the nav origin the frame is
+    // Temporal accumulation reprojects against the cloud shell, so it needs the
+    // shell in camera-relative render space plus the nav origin the frame is
     // relative to. VolumetricPass already tracks both for the active body.
     nodePipeline.setVolumeFrame?.({
       center: volumePass.center,
@@ -4904,6 +4914,29 @@ window.NMS = {
       })),
     };
   },
+  atmosphereState() {
+    const profile = atmospherePass.profileState?.profile || null;
+    return {
+      activeBodyId: atmospherePass.activePlanet?.bodyId || null,
+      enabled: atmospherePass.visualEnabled,
+      meshHidden: atmospherePass.activePlanet?.atmoMesh?.visible === false,
+      opticalTop: profile?.topAltitudeMeters || 0,
+      rayleighScaleHeight: profile?.rayleighScaleHeightMeters || 0,
+      mieScaleHeight: profile?.mieScaleHeightMeters || 0,
+      densityScale: atmospherePass.profileState?.densityScale || 0,
+      depthReady: !!atmospherePass.material.uniforms.tSceneDepth.value,
+    };
+  },
+  setAtmosphereVisible(value = true) {
+    atmospherePass.setVisualEnabled(value);
+    return atmospherePass.visualEnabled;
+  },
+  setCloudsVisible(value = true, i = 0) {
+    const planet = universe.system.planets[i];
+    if (!planet) return false;
+    planet.cloudVisualEnabled = !!value;
+    return planet.cloudVisualEnabled;
+  },
   surfaceState(i = null) {
     const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
     if (!planet) return null;
@@ -4957,11 +4990,8 @@ window.NMS = {
     const size = renderer.getDrawingBufferSize(new THREE.Vector2());
     return {
       activeBodyId: planet?.bodyId || null,
-      depthReady: (planet?.atmoUniforms
-        || planet?.atmoMesh?.material?.uniforms)?.uDepthReady?.value || 0,
       cloudDepthReady: uniforms?.uDepthReady?.value || 0,
       steps: uniforms?.uMaxSteps?.value || 0,
-      samplesPerFeature: uniforms?.uSamplesPerFeature?.value || 0,
       scale: effectiveVolumeScale,
       drawingBuffer: [size.x, size.y],
       weatherTime: uniforms?.uWeatherTime?.value || 0,
@@ -4991,13 +5021,15 @@ window.NMS = {
       telemetry,
     };
   },
-  setCloudSamples(samples = 8) {
+  setCloudSamples(samples = PROFILE_CLOUD_STEPS) {
     if (!DEV_SERVER) return null;
-    const value = clamp(Math.round(Number(samples) || 8), 4, 12);
+    const value = clamp(Math.round(Number(samples) || PROFILE_CLOUD_STEPS), 16, 124);
     for (const planet of universe.planets()) {
-      const node = planet.volCloudUniforms?.uSamplesPerFeature;
-      if (node) node.value = value;
+      const uniform = planet.volCloudUniforms?.uMaxSteps
+        || planet.volCloudMat?.uniforms?.uMaxSteps;
+      if (uniform) uniform.value = value;
     }
+    effectiveCloudSteps = value;
     return value;
   },
   get paused() { return paused; },

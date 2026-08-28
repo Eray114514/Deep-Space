@@ -443,4 +443,5 @@ try {
 console.log(failures || errors.length || shaderErrors.length
   ? `DONE: ${failures} check failure(s), ${errors.length} page error(s), ${shaderErrors.length} shader/console error(s)`
   : 'DONE - spatial-rift browser checks passed');
+if (shaderErrors.length) console.error(JSON.stringify({ shaderErrors }, null, 2));
 process.exit(failures || errors.length || shaderErrors.length ? 1 : 0);

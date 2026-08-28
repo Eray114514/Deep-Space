@@ -1,10 +1,9 @@
-// Half-resolution atmosphere/cloud pass with camera reprojection.
+// Half-resolution cloud pass with camera reprojection.
 //
-// Atmospheric scattering and clouds are both expensive participating-media
-// effects. Rendering them into a smaller HDR target, reprojecting the previous
-// frame and then edge-aware upsampling follows the same broad architecture used
-// by modern large-scale planet renderers. Geometry and the ship remain in the
-// full-resolution scene; volume meshes live on VOLUME_LAYER only.
+// Clouds are rendered into a smaller HDR target, reprojected from the previous
+// frame and edge-aware upsampled. Physical atmosphere scattering owns a
+// separate full-resolution depth-aware pass; this pass must not bind or render
+// the legacy atmosphere shell.
 
 import * as THREE from 'three';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
@@ -174,7 +173,7 @@ export class VolumetricPass extends Pass {
   }
 
   setActivePlanet(planet, nav, motion = 0) {
-    if (!planet || !planet.atmoMesh) {
+    if (!planet?.volCloudMesh) {
       this.activePlanet = null;
       this.historyValid = false;
       this.radius = 1;
@@ -191,7 +190,9 @@ export class VolumetricPass extends Pass {
     }
     this.nav.copy(nav);
     this.center.copy(planet.posUniv).sub(nav);
-    this.radius = planet.R + planet.atmoHeight;
+    this.radius = planet.volCloudBand?.rOut
+      || planet.volCloudMesh.geometry?.parameters?.radius
+      || planet.R + planet.atmoHeight;
     this.motion = THREE.MathUtils.clamp(motion, 0, 1);
   }
 
@@ -217,9 +218,9 @@ export class VolumetricPass extends Pass {
     renderer.getClearColor(_savedClear);
 
     // The opaque scene was rendered into readBuffer immediately before this
-    // pass. Feed its logarithmic depth texture into both participating-media
-    // shaders so their ray integration terminates at terrain, flora, props and
-    // the ship instead of compositing as a screen-front layer.
+    // pass. Feed its logarithmic depth texture into the cloud shader so ray
+    // integration terminates at terrain, flora, props and the ship instead of
+    // compositing as a screen-front layer.
     const depthTexture = readBuffer.depthTexture || null;
     const bindSceneDepth = (material) => {
       const uniforms = material?.uniforms;
@@ -229,10 +230,9 @@ export class VolumetricPass extends Pass {
       uniforms.uCameraFar.value = this.camera.far;
       uniforms.uVolumeSize.value.set(this.width, this.height);
     };
-    bindSceneDepth(this.activePlanet?.atmoMesh?.material);
     bindSceneDepth(this.activePlanet?.volCloudMat);
 
-    // Render only atmospheric/cloud volume meshes into a half-resolution HDR
+    // Render only cloud volume meshes into a half-resolution HDR
     // buffer. Clear alpha is important: discarded rays must stay transparent.
     this.camera.layers.set(VOLUME_LAYER);
     renderer.autoClear = true;

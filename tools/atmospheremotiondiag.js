@@ -1,4 +1,4 @@
-// Real-hardware WebGPU diagnostic for atmosphere instability during camera
+// Real-hardware WebGL2 diagnostic for atmosphere instability during camera
 // motion. The simulation and adaptive quality are locked, then the camera
 // follows an exact forward/reverse quaternion path at two altitudes. Matching
 // poses should be pixel-identical, which detects frame-varying state and target
@@ -9,7 +9,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser } from './browser.js';
 
 const cssWidth = Number(process.env.ATMO_DIAG_CSS_WIDTH) || 2048;
 const cssHeight = Number(process.env.ATMO_DIAG_CSS_HEIGHT) || 1152;
@@ -211,7 +211,7 @@ async function settle(page, timeoutMs = 90000) {
 async function snapshotState(page) {
   return page.evaluate(() => {
     const planet = NMS._planet(0);
-    const atmosphere = planet?.atmoMesh?.material?.uniforms;
+    const atmosphere = NMS.atmosphereState();
     const cloud = planet?.volCloudMat?.uniforms;
     const stats = NMS.stats();
     const volume = NMS.volumeState();
@@ -229,11 +229,12 @@ async function snapshotState(page) {
       atmosphereSteps: stats.atmosphereSteps,
       cloudSteps: stats.cloudSteps,
       activeBodyId: volume.activeBodyId,
-      depthReady: atmosphere?.uDepthReady?.value ?? null,
+      depthReady: atmosphere.depthReady,
       cloudDepthReady: cloud?.uDepthReady?.value ?? null,
       depthReversed: atmosphere?.uDepthReversed?.value ?? null,
-      volumeSize: atmosphere?.uVolumeSize?.value?.toArray?.() || null,
-      atmosphereCamera: atmosphere?.uCameraLocal?.value?.toArray?.() || null,
+      opticalTop: atmosphere.opticalTop,
+      rayleighScaleHeight: atmosphere.rayleighScaleHeight,
+      mieScaleHeight: atmosphere.mieScaleHeight,
       cloudCamera: cloud?.uCameraLocal?.value?.toArray?.() || null,
       atmosphereLayer: planet?.atmoMesh?.layers?.mask ?? null,
       atmosphereVisible: planet?.atmoMesh?.visible ?? false,
@@ -309,10 +310,9 @@ async function runContinuousStateTrace(page, baseQuaternion, scenario) {
           volumeScale: stats.volumeScale,
           localVolumeBudget: stats.localVolumeBudget,
           adaptiveStage: stats.adaptiveStage,
-          depthReady: planet?.atmoMesh?.material?.uniforms?.uDepthReady?.value ?? null,
+          depthReady: NMS.atmosphereState().depthReady,
           cloudDepthReady: planet?.volCloudMat?.uniforms?.uDepthReady?.value ?? null,
-          volumeSize: planet?.atmoMesh?.material?.uniforms?.uVolumeSize?.value
-            ?.toArray?.() || null,
+          opticalTop: NMS.atmosphereState().opticalTop,
           activeBodyId: volume.activeBodyId,
         });
         previous = now;
@@ -416,8 +416,8 @@ async function runScenario(page, canvas, scenario) {
         changes.push(`${key}:${previous[key]}->${current[key]}`);
       }
     }
-    if (JSON.stringify(current.volumeSize) !== JSON.stringify(previous.volumeSize)) {
-      changes.push(`volumeSize:${previous.volumeSize}->${current.volumeSize}`);
+    if (current.opticalTop !== previous.opticalTop) {
+      changes.push(`opticalTop:${previous.opticalTop}->${current.opticalTop}`);
     }
     if (changes.length) stateChanges.push({
       index,
@@ -474,7 +474,7 @@ function diagnose(report) {
       event.type === 'GPUDevice.createTexture' || event.type === 'GPUTexture.destroy'));
   const resizeEvents = report.scenarios.flatMap((scenario) =>
     scenario.continuous.stateChanges.filter((event) =>
-      event.changes.some((change) => /volumeScale|volumeSize|localVolumeBudget/.test(change))));
+      event.changes.some((change) => /volumeScale|opticalTop|localVolumeBudget/.test(change))));
   const matchedP95 = Math.max(...report.scenarios.map((scenario) =>
     scenario.matchedPose.meanAbsRgbP95));
   const staticP95 = Math.max(...report.scenarios.map((scenario) =>
@@ -518,7 +518,7 @@ function diagnose(report) {
     interpretation: owner === 'no-frame-varying-state-detected'
       ? 'The locked fixture is deterministic and its render resources stay stable. Motion aliasing and limb stair-stepping remain unclassified.'
       : owner === 'resource-invalidation-or-render-target-rebuild'
-        ? 'Pixel discontinuities coincide with WebGPU resource errors or target/budget churn.'
+      ? 'Pixel discontinuities coincide with resource errors or target/budget churn.'
         : owner === 'depth-composite-or-low-resolution-edge-reconstruction'
           ? 'Repeated-pose differences concentrate at opaque/sky edges while render resources stay stable.'
           : owner === 'temporal-sampling-or-untracked-state'
@@ -531,9 +531,9 @@ try {
   await mkdir(outputDir, { recursive: true });
   const started = await startServer(0);
   server = started.server;
-  browser = await launchWebGPUHardwareBrowser({ headless: true });
+  browser = await launchHardwareBrowser({ headless: true });
   if (!browser) {
-    console.log('Atmosphere motion diagnostic skipped: no hardware WebGPU browser.');
+    console.log('Atmosphere motion diagnostic skipped: no hardware WebGL2 browser.');
     process.exitCode = 0;
   } else {
     context = await browser.newContext({
@@ -601,7 +601,7 @@ try {
     page.on('console', (message) => {
       if (message.type() === 'error') consoleErrors.push(message.text());
     });
-    const url = `http://127.0.0.1:${started.port}/?renderer=webgpu&quality=ultra`
+    const url = `http://127.0.0.1:${started.port}/?renderer=webgl&quality=ultra`
       + '&nohero=1&farflora=0&vclouds=1&scene=orbit&planet=0&factor=0.152'
       + '&time=9.5&freeze=1';
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -610,6 +610,7 @@ try {
     });
     await page.evaluate(() => {
       NMS.setAdaptiveQualityLocked(true);
+      NMS.setCloudsVisible(false, 0);
       const style = document.createElement('style');
       style.id = 'atmosphere-motion-diag-clean-frame';
       style.textContent = `
@@ -641,7 +642,7 @@ try {
         dpr: runtime.stats.dpr,
       },
       fixedConditions: {
-        renderer: 'webgpu',
+        renderer: 'webgl2',
         quality: 'ultra',
         adaptiveQualityLocked: true,
         simulationFrozen: true,
