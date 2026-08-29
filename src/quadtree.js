@@ -406,7 +406,14 @@ export class ChunkedLOD {
       // The DISPLAYED level owns the hysteresis: once children are on screen
       // (splitActive) they stay on screen until a true merge — swapping
       // levels anywhere inside the SPLIT..MERGE band is an instant pop.
-      const boundaryReady = !wantSplit || this.faceBoundaryPeersReady(node);
+      // Cross-face readiness is an activation barrier, not a condition for
+      // retaining children that are already displayed. Rechecking it every
+      // frame let a peer briefly rebuilding on the adjacent cube face force
+      // this node back to its parent for one frame, then forward again. That
+      // was a whole-patch hard cut during continuous descent even though both
+      // directions had valid parent-delta morph geometry.
+      const boundaryReady = node.splitActive || !wantSplit
+        || this.faceBoundaryPeersReady(node);
       if (ready && boundaryReady && (wantSplit || (node.splitActive && !wantMerge))) {
         if (node.mergePending) {            // re-approached mid-merge: refine again
           node.mergePending = false;
@@ -963,6 +970,16 @@ export class ChunkedLOD {
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
     mesh.userData.lodMorph = node.morph;
+    // Terrain and water materials are shared by every chunk, so morph state
+    // cannot live in a material-wide value that is updated once per frame.
+    // Push the owning chunk's value immediately before each draw instead.
+    // The vertex shaders consume parent-minus-child deltas from the geometry;
+    // without this bridge the CPU transition ran while WebGL rendered every
+    // child fully refined, producing visible refinement pops and depth bands.
+    mesh.onBeforeRender = function syncLodMorph(renderer, scene, camera, geometry, material) {
+      const uniform = material?.userData?.shader?.uniforms?.uLodMorph;
+      if (uniform) uniform.value = this.userData.lodMorph ?? 0;
+    };
     mesh.position.copy(node.centerPos);
     if (p.underlayMaterial) {
       const underlay = new THREE.Mesh(geo, p.underlayMaterial);

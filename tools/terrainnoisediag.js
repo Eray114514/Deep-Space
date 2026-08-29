@@ -213,7 +213,8 @@ heading('PROBE 1 — LOD ladder: detail retention and level-to-level height step
   for (let level = 0; level <= home.maxLevel; level++) {
     const freq = home.freqAtLevel(level);
     const h = dirs.map((d) => home.height(d, freq));
-    const cellRad = (Math.PI / 2) / Math.pow(2, level) / home.gridCells;
+    const gridCells = home.gridCellsAtLevel?.(level) || home.gridCells;
+    const cellRad = (Math.PI / 2) / Math.pow(2, level) / gridCells;
     const cellM = cellRad * home.R;
     const previous = ladder[level - 1]?.h;
     const maxMorphDelta = previous
@@ -451,10 +452,10 @@ heading('PROBE 4 — province (belt) mask: boundary sharpness and mountain termi
 }
 
 // ---------------------------------------------------------------------------
-// PROBE 5 — the ocean seen from orbit. Depth-driven absorption saturates; once
-// it does, every deep-water pixel resolves to one constant colour.
+// PROBE 5 — bathymetry and the actual WebGL water geometry budget. Spectral
+// micro-waves are shader-driven; the shell LOD owns silhouette and depth only.
 // ---------------------------------------------------------------------------
-heading('PROBE 5 — ocean: depth absorption saturation and orbital colour spread');
+heading('PROBE 5 — ocean bathymetry and water LOD resolution');
 {
   const dirs = seededDirs(20000, 61);
   const depths = [];
@@ -465,29 +466,20 @@ heading('PROBE 5 — ocean: depth absorption saturation and orbital colour sprea
   const s = stats(depths);
   console.log(`ocean covers ${(depths.length / dirs.length * 100).toFixed(1)}% of the sphere; `
     + `depth median ${s.p50.toFixed(0)} m, p95 ${s.p95.toFixed(0)} m, max ${s.max.toFixed(0)} m`);
-  // shaders-node.js applyWaterWaves: absorption = 1 - exp(-0.05 * depth)
-  const absorption = (depth) => 1 - Math.exp(-0.05 * depth);
-  for (const q of [0.9, 0.99, 0.999]) {
-    const dq = -Math.log(1 - q) / 0.05;
-    console.log(`  absorption reaches ${(q * 100).toFixed(1)}% at depth ${dq.toFixed(1)} m `
-      + `→ ${(depths.filter((d) => d >= dq).length / depths.length * 100).toFixed(1)}% of the ocean is past it`);
-  }
-  const a = depths.map(absorption);
-  console.log(`  absorption over the real depth field: mean ${stats(a).mean.toFixed(4)}, `
-    + `sd ${stats(a).sd.toExponential(2)} → the deep/shallow colour lerp is effectively constant`);
-  // The water LOD samples only sea-floor depth; its own surface is height 0.
-  console.log(`  waterLod canonical grid = ${home.waterLod ? home.waterLod.planet.canonicalGridCells : 'n/a'}, `
-    + `surface height() is the constant 0 shell (planet.js), so the ocean mesh carries no relief at any level`);
-  // bakeDepth caps the sampled frequency at 128 (planet.js) — check what that
-  // does to the depth attribute the shader shades with.
-  const coarse = [];
-  for (const d of dirs.slice(0, 6000)) {
-    const hFull = home.height(d, home.fullMaxFreq);
-    if (hFull >= home.seaLevel) continue;
-    coarse.push(Math.max(0, home.seaLevel - home.height(d, 128)));
-  }
-  console.log(`  aDepth is baked at maxFreq=128: median ${stats(coarse).p50.toFixed(0)} m `
-    + `vs ${s.p50.toFixed(0)} m at full detail`);
+  const waterConfig = home.waterLod?.planet;
+  const waterMaxLevel = waterConfig?.maxLevel ?? 0;
+  const waterGrid = waterConfig?.gridCellsAtLevel?.(waterMaxLevel)
+    || waterConfig?.gridCells || 0;
+  const waterCell = waterGrid > 0
+    ? (Math.PI / 2) * home.R / (waterGrid * (2 ** waterMaxLevel)) : Infinity;
+  const orbitLevel = waterConfig?.orbitLevelCap ?? 0;
+  const orbitGrid = waterConfig?.gridCellsAtLevel?.(orbitLevel)
+    || waterConfig?.gridCells || 0;
+  const orbitCell = orbitGrid > 0
+    ? (Math.PI / 2) * home.R / (orbitGrid * (2 ** orbitLevel)) : Infinity;
+  console.log(`  water geometry: ${waterGrid} cells/chunk, max level ${waterMaxLevel}, `
+    + `finest ${waterCell.toFixed(1)} m; orbital cap ${orbitLevel}, ${orbitCell.toFixed(0)} m cells`);
+  console.log('  aDepth samples full deterministic bathymetry; parent depth deltas follow the same WebGL geomorph as position/normal');
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +511,8 @@ heading('PROBE 6 — crest sharpness: midpoint interpolation error of the mounta
   };
 
   const measure = (field, level) => {
-    const cellAngle = (Math.PI / 2) / Math.pow(2, level) / home.gridCells;
+    const gridCells = home.gridCellsAtLevel?.(level) || home.gridCells;
+    const cellAngle = (Math.PI / 2) / Math.pow(2, level) / gridCells;
     const errors = [], values = [];
     const a = new THREE.Vector3(), b = new THREE.Vector3(), m = new THREE.Vector3();
     const bases = seededDirs(120, 3 + level);
@@ -541,7 +534,8 @@ heading('PROBE 6 — crest sharpness: midpoint interpolation error of the mounta
   console.log(pad('lvl', 5) + pad('cell(m)', 10) + pad('field', 26)
     + pad('mid-err rms/sd', 16) + pad('p99/sd', 10) + 'peak err (m of relief)');
   for (const level of [2, 4, 6, 8]) {
-    const cellAngle = (Math.PI / 2) / Math.pow(2, level) / home.gridCells;
+    const gridCells = home.gridCellsAtLevel?.(level) || home.gridCells;
+    const cellAngle = (Math.PI / 2) / Math.pow(2, level) / gridCells;
     const maxFreq = home.freqAtLevel(level);
     const variants = [
       ['ridged() as shipped', (d) => home.nB.ridged(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, maxFreq)],
@@ -739,13 +733,11 @@ heading('PROBE 9 — land fragmentation: are there continents or archipelagos?')
 }
 
 // ---------------------------------------------------------------------------
-// PROBE 10 — verification of the 2.3 fix. Re-runs PROBE 5's measurement against
-// the per-channel transfer now in shaders-node.js applyWaterWaves, over the
-// same real depth field, and reports the colour actually produced at each depth
-// quantile. The old model's failure was a *spread* failure (sd 0.0722), so the
-// pass criterion is spread, not any particular hue.
+// PROBE 10 — exact daytime, normal-incidence mirror of the production WebGL
+// water column. The shader adds live sky/cloud reflection, star glint, foam and
+// view-angle path length after this base optical response.
 // ---------------------------------------------------------------------------
-heading('PROBE 10 — ocean colour after the per-channel rewrite');
+heading('PROBE 10 — physical WebGL water-column response');
 {
   const dirs = seededDirs(20000, 61);
   const depths = [];
@@ -755,31 +747,26 @@ heading('PROBE 10 — ocean colour after the per-channel rewrite');
   }
   depths.sort((a, b) => a - b);
 
-  // Mirror of shaders-node.js applyWaterWaves, exactly as written.
+  // Mirror of shaders-webgl.js applyWaterWaves at day=1 and viewCos=1.
   const deep = home.pal?.sea?.[0]?.c?.clone()
-    .lerp(home.liquidColor, 0.35) || new THREE.Color(0x061b35);
-  const shallow = home.pal?.sea?.length
-    ? home.pal.sea[home.pal.sea.length - 1].c.clone()
-    : home.liquidColor.clone().lerp(new THREE.Color(1, 1, 1), 0.12);
-  const depthScale = Math.max(60,
-    (home.seaLevel + home.hAmp * 0.6) * (home.waterStyle?.clarity || 1));
-  const k = [1.8, 1.2, 0.6].map((c) => c * 2.3 / (0.9 * depthScale));
+    .lerp(home.liquidColor, 0.4) || new THREE.Color(0x061b35);
+  const shallow = home.liquidColor.clone().lerp(new THREE.Color(0.72, 0.96, 1), 0.28);
+  const clarity = Math.max(0.25, home.waterStyle?.clarity || 1);
+  const k = [0.11, 0.035, 0.012].map((c) => c / clarity);
   const transmit = (depth) => {
-    const clampedDepth = Math.max(0, depth);
-    const hazeT = Math.min(1, clampedDepth / (depthScale * 0.4));
-    const depthHaze = hazeT * hazeT * (3 - 2 * hazeT) * 0.9;
-    return k.map((kc) => Math.exp(-2 * kc * clampedDepth) * (1 - depthHaze));
+    const path = Math.min(Math.max(0, depth) * 2, 360);
+    return k.map((kc) => Math.exp(-kc * path));
   };
   const bodyWater = (depth) => {
     const t = transmit(depth);
     return [
-      deep.r + (shallow.r - deep.r) * t[0],
-      deep.g + (shallow.g - deep.g) * t[1],
-      deep.b + (shallow.b - deep.b) * t[2],
+      shallow.r * t[0] + deep.r * 0.86 * (1 - t[0]),
+      shallow.g * t[1] + deep.g * 0.86 * (1 - t[1]),
+      shallow.b * t[2] + deep.b * 0.86 * (1 - t[2]),
     ];
   };
-  console.log(`depthScale ${depthScale.toFixed(0)} m (measured max depth ${depths[depths.length - 1].toFixed(0)} m); `
-    + `k = [${k.map((c) => c.toExponential(2)).join(', ')}] /m`);
+  console.log(`measured max depth ${depths[depths.length - 1].toFixed(0)} m; `
+    + `extinction = [${k.map((c) => c.toExponential(2)).join(', ')}] /m`);
   console.log(`e-fold depth per channel: R ${(1 / (2 * k[0])).toFixed(1)} m, `
     + `G ${(1 / (2 * k[1])).toFixed(1)} m, B ${(1 / (2 * k[2])).toFixed(0)} m`);
   for (const ch of [0, 1, 2]) {
@@ -791,16 +778,15 @@ heading('PROBE 10 — ocean colour after the per-channel rewrite');
       + `p5 ${st.p5.toFixed(4)}, p95 ${st.p95.toFixed(4)}; 99% absorbed at ${d99.toFixed(0)} m `
       + `→ ${(depths.filter((d) => d >= d99).length / depths.length * 100).toFixed(1)}% of the ocean past it`);
   }
-  // The roadmap target is stated on the single mixing factor the old model had.
-  // Its like-for-like successor is the luminance of the effective water-column
-  // transfer (spectral absorption plus the shader's suspended-particle haze).
+  // The scalar legacy model had almost no useful spread. Preserve a measurable
+  // shallow/deep transition without pretending abyssal floors stay visible.
   const lum = depths.map((d) => {
     const t = transmit(d);
     return 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
   });
   const ls = stats(lum.map((v) => 1 - v));
   console.log(`  combined (1 − luminance of effective transmit), the direct analogue of the old scalar: `
-    + `mean ${ls.mean.toFixed(4)}, sd ${ls.sd.toFixed(4)}  [target sd ≥ 0.25]`);
+    + `mean ${ls.mean.toFixed(4)}, sd ${ls.sd.toFixed(4)}  [target sd ≥ 0.04]`);
   const q = (f) => depths[Math.min(depths.length - 1, Math.floor(f * depths.length))];
   console.log('  colour at depth quantiles (linear RGB, before sky/Fresnel/foam):');
   for (const f of [0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]) {
@@ -808,16 +794,13 @@ heading('PROBE 10 — ocean colour after the per-channel rewrite');
     console.log(`    p${(f * 100).toFixed(0).padStart(3)} = ${d.toFixed(0).padStart(4)} m  `
       + `rgb(${c.map((v) => v.toFixed(3)).join(', ')})`);
   }
-  // Perceptual separation between quantiles: with the old model every pair was
-  // ~0 apart. Report the worst adjacent-quantile gap so a regression shows up.
+  // Real abyssal water converges toward its in-scatter colour. The useful
+  // separation is the shore/shelf ramp, not artificial variation at 4 km.
   const cs = [0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0].map((f) => bodyWater(q(f)));
-  let worst = Infinity;
-  for (let i = 1; i < cs.length; i++) {
-    const dist = Math.hypot(cs[i][0] - cs[i - 1][0], cs[i][1] - cs[i - 1][1], cs[i][2] - cs[i - 1][2]);
-    worst = Math.min(worst, dist);
-  }
-  console.log(`  smallest gap between adjacent quantile colours: ${worst.toFixed(4)} `
-    + `(linear-RGB euclidean; the old model gave ~0 across the whole p25–p100 range)`);
+  const shoreGap = Math.hypot(cs[1][0] - cs[0][0],
+    cs[1][1] - cs[0][1], cs[1][2] - cs[0][2]);
+  console.log(`  p0→p5 shore/shelf colour distance: ${shoreGap.toFixed(4)} linear RGB; `
+    + 'deeper quantiles intentionally converge to the water in-scatter colour');
   // Swell geometry: what the displacement is worth in screen pixels near ground.
   const seaState = home.waterStyle?.swell || 1;
   const A = (2.2 + 1.1 + 0.5) * seaState;

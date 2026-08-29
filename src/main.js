@@ -5551,6 +5551,52 @@ window.NMS = {
       faceSun,
     };
   },
+  setLocalSunAltitude(i, degrees) {
+    if (!DEV_SERVER) return null;
+    const p = universe.system.planets[i];
+    if (!p || p.isGasGiant) return null;
+    // Change the light for a visual A/B without silently choosing a different
+    // beach. Preserve camera position and orientation in the rotating body
+    // frame while searching one local day for the requested solar elevation.
+    const localPosition = p.worldPositionToLocal(nav.pos, new THREE.Vector3());
+    const localOrientation = p.frameOrientation.clone().invert().multiply(nav.quat);
+    const localUp = localPosition.clone().normalize();
+    const target = Math.sin(clamp(Number(degrees) || 0, -89, 89) * Math.PI / 180);
+    const start = celestialClock.hours;
+    const period = Math.max(1, p.spec?.rotationPeriodHours || 24);
+    let bestTime = start, bestError = Infinity, bestElevation = 0;
+    for (let sample = 0; sample <= 720; sample++) {
+      const hours = start + period * sample / 720;
+      celestialClock.set(hours);
+      universe.update(nav.pos, false, hours);
+      const elevation = localUp.dot(p.sunDirLocal);
+      const error = Math.abs(elevation - target);
+      if (error < bestError) {
+        bestError = error;
+        bestTime = hours;
+        bestElevation = elevation;
+      }
+    }
+    celestialClock.set(bestTime);
+    universe.update(nav.pos, false, bestTime);
+    p.localPositionToWorld(localPosition, nav.pos);
+    nav.quat.copy(p.frameOrientation).multiply(localOrientation);
+    nav.vel.set(0, 0, 0);
+    universe.updateRelative(nav.pos);
+    focusPlanet = p;
+    spaceCtl.focus = p;
+    // The next render's moving-frame assist must see this as the new baseline;
+    // otherwise it applies the entire orbital time jump a second time.
+    referenceBody = p;
+    referenceBodyPos.copy(p.posUniv);
+    referenceBodyFramePrev.copy(p.frameOrientation);
+    referenceBodyFrameValid = true;
+    return {
+      hours: bestTime,
+      requestedDegrees: degrees,
+      actualDegrees: Math.asin(clamp(bestElevation, -1, 1)) * 180 / Math.PI,
+    };
+  },
   setAtmosphereAltitude(i, metres, opts = {}) {
     if (!DEV_SERVER) return false;
     const p = universe.system.planets[i];

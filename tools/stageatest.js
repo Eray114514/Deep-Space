@@ -59,15 +59,15 @@ const home = new Planet({
 });
 
 try {
-  assert.equal(home.R, 900000, 'authored home radius must own the rendered scale');
-  assert.equal(homeBody.radius, 900000,
-    'the tuned astronomy dossier must expose the 900 km radius to system preview consumers');
+  assert.equal(home.R, 6000000, 'authored home radius must own the rendered scale');
+  assert.equal(homeBody.radius, 6000000,
+    'the tuned astronomy dossier must expose the 6,000 km radius to system preview consumers');
   assert.equal(resolveBodyTuning({
     galaxyId: galaxy.id,
     seed: galaxy.seed,
     systemId: homeSystem.systemId,
     bodyId: 'planet-0-moon-0',
-  }).orbitRadiusMeters, 3200000);
+  }).orbitRadiusMeters, 21600000);
 
   const directions = fibonacciDirections(6000);
   const heights = directions.map((direction) => home.height(direction, home.fullMaxFreq));
@@ -76,8 +76,16 @@ try {
     `home relief/R ${(relief / home.R * 100).toFixed(2)}% must read as a planet`);
   const canonicalCell = (Math.PI / 2) * home.R
     / (home.canonicalGridCells * (2 ** home.canonicalMaxLevel));
-  assert.ok(canonicalCell <= 1.5,
-    `home finest canonical terrain spacing must be <=1.5 m, got ${canonicalCell.toFixed(2)} m`);
+  assert.ok(canonicalCell <= 6.1,
+    `home finest canonical terrain spacing must be <=6.1 m, got ${canonicalCell.toFixed(2)} m`);
+  const renderedCell = (Math.PI / 2) * home.R
+    / (home.gridCellsAtLevel(home.maxLevel) * (2 ** home.maxLevel));
+  assert.ok(renderedCell <= 9.1,
+    `high-tier rendered terrain spacing must stay <=9.1 m, got ${renderedCell.toFixed(2)} m`);
+  const orbitCell = (Math.PI / 2) * home.R
+    / (home.gridCellsAtLevel(home.orbitLevelCap) * (2 ** home.orbitLevelCap));
+  assert.ok(orbitCell <= 10000,
+    `2K orbital terrain cells must stay below 10 km, got ${orbitCell.toFixed(0)} m`);
 
   // Scan maxFreq continuously. Any remaining conditional feature gates must
   // blend instead of admitting hundreds of metres in one step.
@@ -117,15 +125,11 @@ try {
 
   const depths = heights.filter((height) => height < home.seaLevel)
     .map((height) => home.seaLevel - height);
-  const depthScale = Math.max(60,
-    (home.seaLevel + home.hAmp * 0.6) * home.waterStyle.clarity);
   const extinction = [0.11, 0.035, 0.012]
     .map((value) => value / Math.max(0.45, home.waterStyle.clarity));
   const absorption = depths.map((depth) => {
-    const hazeT = Math.min(1, Math.max(0, depth / (depthScale * 0.4)));
-    const depthHaze = hazeT * hazeT * (3 - 2 * hazeT) * 0.9;
     const transmission = extinction.map((value) =>
-      Math.exp(-2 * value * depth) * (1 - depthHaze));
+      Math.exp(-value * Math.min(2 * depth, 360)));
     return 1 - (0.2126 * transmission[0] + 0.7152 * transmission[1] + 0.0722 * transmission[2]);
   });
   const absorptionStats = stats(absorption);
@@ -197,6 +201,8 @@ try {
   console.log(JSON.stringify({
     radius: home.R,
     canonicalCell,
+    renderedCell,
+    orbitCell,
     reliefRatio: relief / home.R,
     worstRms,
     mountainFree,

@@ -198,7 +198,7 @@ function blankTexture() {
 // shadows via one extra texture sample.
 export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.4, scale1 = 1 / 26, scale2 = 1 / 3.2) {
   const tex = detailTexture();
-  if (!tex) return;
+  if (!tex) return material;
   material.onBeforeCompile = (shader) => {
     // compiled at first render — by then the planet knows if it has clouds
     const cloudTex = planet.cloudShadowTex || blankTexture();
@@ -213,6 +213,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uDetailK = { value: strength };
     shader.uniforms.uMacroK = { value: macroK };
     shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
+    shader.uniforms.uLodMorph = { value: 0 };
     shader.uniforms.uCloudTex = { value: cloudTex };
     shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.42 : 0 };
     shader.uniforms.uCloudMat = { value: new THREE.Matrix3() };
@@ -262,18 +263,26 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
+        uniform float uLodMorph;
         attribute vec3 aLocal;
         attribute vec3 aMat;
         attribute vec4 aExtra;
+        attribute vec3 aPositionDelta;
+        attribute vec3 aNormalDelta;
+        attribute vec3 aMatDelta;
+        attribute vec4 aExtraDelta;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
         varying vec3 vMat;
         varying vec4 vExtra;`)
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+        objectNormal = normalize(objectNormal + aNormalDelta * uLodMorph);`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        vLocalPos = aLocal;
-        vLocalNrm = normal;
-        vMat = aMat;
-        vExtra = aExtra;`);
+        transformed += aPositionDelta * uLodMorph;
+        vLocalPos = aLocal + aPositionDelta * uLodMorph;
+        vLocalNrm = normalize(normal + aNormalDelta * uLodMorph);
+        vMat = aMat + aMatDelta * uLodMorph;
+        vExtra = aExtra + aExtraDelta * uLodMorph;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
@@ -330,6 +339,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         varying vec4 vExtra;
         float gSnowW = 0.0;
         float gPatch = 0.0;
+        float gShoreWet = 0.0;
         float gSurfaceRoughness = 0.82;
         float eclipseVisibility(vec3 samplePosition) {
           if (uEclipseEnabled < 0.5) return 1.0;
@@ -398,6 +408,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // ---- micro grain, biome-styled
           vec3 w = pow(abs(normalize(vLocalNrm)), vec3(4.0));
           w /= (w.x + w.y + w.z);
+          // Recently washed land is not a mathematically thin palette edge.
+          // Give beaches an irregular damp band whose lower roughness and
+          // cooler albedo connect the moving swash to the authored terrain.
+          if (uHasSea > 0.5 && hgt >= uT0) {
+            float shoreDrift = triDetail(vLocalPos, w, 0.0048, 1)
+              + triDetail(vLocalPos, w, 0.0011, 0) - 1.0;
+            float wetReach = 8.0 + shoreDrift * 5.5;
+            gShoreWet = 1.0 - smoothstep(max(1.5, wetReach * 0.18),
+              max(4.0, wetReach), hgt - uT0);
+            diffuseColor.rgb = mix(diffuseColor.rgb,
+              diffuseColor.rgb * vec3(0.54, 0.66, 0.7), gShoreWet * 0.58);
+          }
           float grain = (triDetail(vLocalPos, w, uDetailS.x, 0) - 0.5)
                       + (triDetail(vLocalPos, w, uDetailS.y, 1) - 0.5) * 0.8;
           float strat = texture2D(uDetailTex, vec2(length(vLocalPos) * 0.055, 0.31)).r - 0.5;
@@ -465,7 +487,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         // snow glints, damp hollows go faintly glossy, dry rises stay matte —
         // low-sun specular variation is a big part of ground reading as real
-        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.34 + gPatch * 0.12, 0.38, 1.0);
+        roughnessFactor = clamp(roughnessFactor - gSnowW * 0.34
+          - gShoreWet * 0.38 + gPatch * 0.12, 0.24, 1.0);
         float pbrNearRough = 1.0 - smoothstep(18.0, 92.0, length(vViewPosition));
         roughnessFactor = mix(roughnessFactor, clamp(gSurfaceRoughness, 0.38, 1.0), pbrNearRough * 0.35);`)
       .replace('#include <fog_fragment>', `
@@ -505,7 +528,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           normal = normalize(normal + (tang * gx + bitn * gy) * uDetailK * (1.7 + vMat.x * 1.5));
         }`);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v6-ktx2';
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v7-webgl-morph';
+  return material;
 }
 
 // Living water: scrolling normal perturbation, plus Beer–Lambert depth
@@ -513,86 +537,184 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
 // deeps go dark, shallows glow, and shorelines fade in softly.
 export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   const tex = detailTexture();
-  if (!tex) return;
+  if (!tex) return material;
   material.depthWrite = true;
   material.polygonOffset = true;
   material.polygonOffsetFactor = -1;
   material.polygonOffsetUnits = -2;
   material.onBeforeCompile = (shader) => {
+    const cloudTex = planet.cloudShadowTex || blankTexture();
+    const clarity = Math.max(0.25, planet?.waterStyle?.clarity || 1);
+    const deep = planet?.pal?.sea
+      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor, 0.4)
+      : new THREE.Color(0.02, 0.08, 0.15);
+    const shallow = planet
+      ? planet.liquidColor.clone().lerp(new THREE.Color(0.72, 0.96, 1), 0.28)
+      : new THREE.Color(0.4, 0.75, 0.8);
+    const sky = planet?.skyColor || new THREE.Color(0.25, 0.4, 0.55);
     shader.uniforms.uDetailTex = { value: tex };
     shader.uniforms.uTime = TIME;
     shader.uniforms.uWaveS = { value: waveScale };
     shader.uniforms.uSwell = { value: planet?.waterStyle?.swell || 1 };
-    const deep = planet && planet.pal && planet.pal.sea
-      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor.clone().convertSRGBToLinear(), 0.4)
-      : new THREE.Color(0.02, 0.08, 0.15);
-    const shallow = planet
-      ? planet.liquidColor.clone().convertSRGBToLinear().lerp(new THREE.Color(0.72, 0.96, 1), 0.28)
-      : new THREE.Color(0.4, 0.75, 0.8);
+    shader.uniforms.uFoamK = { value: planet?.waterStyle?.foam || 1 };
+    shader.uniforms.uLodMorph = { value: 0 };
     shader.uniforms.uDeepC = { value: deep };
     shader.uniforms.uShallowC = { value: shallow };
-    // grazing angles mirror the sky instead of showing the deep diffuse —
-    // without this, water toward the horizon reads as a near-black sheet
-    const sky = planet && planet.skyColor
-      ? planet.skyColor.clone().convertSRGBToLinear().multiplyScalar(1.15)
-      : new THREE.Color(0.25, 0.4, 0.55);
-    shader.uniforms.uSkyC = { value: sky };
+    shader.uniforms.uAbsorption = {
+      value: new THREE.Vector3(0.11 / clarity, 0.035 / clarity, 0.012 / clarity),
+    };
+    shader.uniforms.uSkyZenith = {
+      value: sky.clone().multiply(new THREE.Color(0.3, 0.42, 0.78)),
+    };
+    shader.uniforms.uSkyHorizon = { value: sky.clone() };
+    shader.uniforms.uDay = { value: 1 };
+    shader.uniforms.uSunset = { value: 0 };
+    shader.uniforms.uSunDir = {
+      value: planet?.sunDirLocal?.clone() || new THREE.Vector3(0, 1, 0),
+    };
+    shader.uniforms.uSunColor = { value: new THREE.Color(1, 0.94, 0.82) };
+    shader.uniforms.uSunEnergy = { value: 1 };
+    shader.uniforms.uSecondarySunDir = { value: new THREE.Vector3(0, 1, 0) };
+    shader.uniforms.uSecondarySunColor = { value: new THREE.Color(1, 1, 1) };
+    shader.uniforms.uSecondarySunEnergy = { value: 0 };
+    shader.uniforms.uCloudTex = { value: cloudTex };
+    shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.72 : 0 };
+    shader.uniforms.uCloudMat = { value: new THREE.Matrix3() };
+    shader.uniforms.uEclipseEnabled = { value: planet.eclipseOccluder ? 1 : 0 };
+    shader.uniforms.uEclipseCenter = {
+      value: planet.eclipseOccluder?.centerLocal?.clone() || new THREE.Vector3(),
+    };
+    shader.uniforms.uEclipseRadius = { value: planet.eclipseOccluder?.radius || 1 };
+    shader.uniforms.uEclipseStarAngle = {
+      value: planet.eclipseOccluder?.starAngularRadius || 0,
+    };
     shader.uniforms.uRipplePos = { value: waterInteraction.positions };
     shader.uniforms.uRippleData = { value: waterInteraction.data };
+    material.userData.waterCloudTexture = shader.uniforms.uCloudTex;
+    material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
         uniform float uSwell;
+        uniform float uLodMorph;
+        uniform vec3 uSunDir;
+        uniform vec3 uSecondarySunDir;
         attribute vec3 aLocal;
         attribute float aDepth;
+        attribute vec3 aPositionDelta;
+        attribute vec3 aNormalDelta;
+        attribute float aDepthDelta;
         varying vec3 vLocalPos;
+        varying vec3 vWaveUp;
         varying vec3 vWaveT;
         varying vec3 vWaveB;
+        varying vec3 vSunDirView;
+        varying vec3 vSecondarySunDirView;
+        varying vec2 vMacroSlope;
+        varying float vWaveNear;
         varying float vDepth;`)
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+        objectNormal = normalize(objectNormal + aNormalDelta * uLodMorph);`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        vLocalPos = aLocal;
-        vDepth = aDepth;
-        vec3 waveUp = normalize(aLocal);
-        vec3 waveT = normalize(cross(waveUp, abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+        transformed += aPositionDelta * uLodMorph;
+        vLocalPos = aLocal + aPositionDelta * uLodMorph;
+        vDepth = aDepth + aDepthDelta * uLodMorph;
+        vec3 waveUp = normalize(vLocalPos);
+        vec3 waveT = normalize(cross(waveUp,
+          abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 waveB = cross(waveUp, waveT);
-        float macroWave = (
-          sin((aLocal.x + aLocal.z) * 0.016 + uTime * 0.82) * 2.2
-          + sin((aLocal.z - aLocal.y * 0.7) * 0.027 - uTime * 1.07) * 1.1
-          + sin((aLocal.x * 0.55 + aLocal.y) * 0.043 + uTime * 1.34) * 0.5
+        float phaseA = (vLocalPos.x + vLocalPos.z) * 0.016 + uTime * 0.82;
+        float phaseB = (vLocalPos.z - vLocalPos.y * 0.7) * 0.027 - uTime * 1.07;
+        float phaseC = (vLocalPos.x * 0.55 + vLocalPos.y) * 0.043 + uTime * 1.34;
+        float macroWave = (sin(phaseA) * 2.2 + sin(phaseB) * 1.1
+          + sin(phaseC) * 0.5) * uSwell;
+        vec3 waveGradient = (
+          vec3(0.016, 0.0, 0.016) * cos(phaseA) * 2.2
+          + vec3(0.0, -0.0189, 0.027) * cos(phaseB) * 1.1
+          + vec3(0.02365, 0.043, 0.0) * cos(phaseC) * 0.5
         ) * uSwell;
-        float shoal = smoothstep(0.5, 12.0, aDepth);
-        float shoreOverlap = 3.5;
-        transformed += waveUp * (macroWave * shoal + shoreOverlap);
+        float cameraDistance = length((modelViewMatrix * vec4(transformed, 1.0)).xyz);
+        vWaveNear = 1.0 - smoothstep(12000.0, 120000.0, cameraDistance);
+        float shoal = smoothstep(0.5, 12.0, vDepth);
+        transformed += waveUp * (macroWave * shoal * vWaveNear + 3.5);
+        vWaveUp = normalize(normalMatrix * waveUp);
         vWaveT = normalize(normalMatrix * waveT);
-        vWaveB = normalize(normalMatrix * waveB);`);
+        vWaveB = normalize(normalMatrix * waveB);
+        vSunDirView = normalize(normalMatrix * uSunDir);
+        vSecondarySunDirView = normalize(normalMatrix * uSecondarySunDir);
+        vMacroSlope = vec2(dot(waveGradient, waveT),
+          dot(waveGradient, waveB)) * shoal * vWaveNear;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
+        uniform sampler2D uCloudTex;
         uniform float uTime;
         uniform float uWaveS;
+        uniform float uFoamK;
         uniform vec3 uDeepC;
         uniform vec3 uShallowC;
-        uniform vec3 uSkyC;
+        uniform vec3 uAbsorption;
+        uniform vec3 uSkyZenith;
+        uniform vec3 uSkyHorizon;
+        uniform float uDay;
+        uniform float uSunset;
+        uniform vec3 uSunColor;
+        uniform float uSunEnergy;
+        uniform vec3 uSecondarySunColor;
+        uniform float uSecondarySunEnergy;
+        uniform float uCloudK;
+        uniform mat3 uCloudMat;
+        uniform float uEclipseEnabled;
+        uniform vec3 uEclipseCenter;
+        uniform float uEclipseRadius;
+        uniform float uEclipseStarAngle;
         uniform vec3 uRipplePos[${WATER_IMPULSE_CAP}];
         uniform vec4 uRippleData[${WATER_IMPULSE_CAP}];
         varying vec3 vLocalPos;
+        varying vec3 vWaveUp;
         varying vec3 vWaveT;
         varying vec3 vWaveB;
-        varying float vDepth;`)
+        varying vec3 vSunDirView;
+        varying vec3 vSecondarySunDirView;
+        varying vec2 vMacroSlope;
+        varying float vWaveNear;
+        varying float vDepth;
+        float gWaterFoam = 0.0;
+        float gWaterRoughness = 0.16;
+        float waterCloud(vec3 localDirection) {
+          vec3 cd = uCloudMat * normalize(localDirection);
+          float cu = 0.5 + atan(-cd.z, -cd.x) * 0.15915494;
+          float cv = acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
+          return texture2D(uCloudTex, vec2(cu, cv)).g * uCloudK;
+        }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
           float dep = max(vDepth, 0.0);
-          float ab = 1.0 - exp(-dep * 0.05);          // absorption e-fold ~20 m
-          diffuseColor.rgb = mix(uShallowC, uDeepC, ab);
-          // shorelines fade in instead of cutting a hard waterline
-          diffuseColor.a *= mix(0.72, 1.0, 1.0 - exp(-dep * 0.12));
-          // Fresnel: at grazing angles the surface turns into a sky mirror
-          // (abs() so the DoubleSide underside behaves when submerged)
-          float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition))), 5.0);
-          diffuseColor.rgb = mix(diffuseColor.rgb, uSkyC, fres * 0.65);
-          diffuseColor.a = mix(diffuseColor.a, min(1.0, diffuseColor.a * 2.2 + 0.25), fres);
-          float shoreFoam = (1.0 - smoothstep(0.25, 3.2, dep))
-            * (0.55 + 0.45 * sin(dep * 7.0 + uTime * 1.8));
+          float viewCos = clamp(abs(dot(normalize(vWaveUp),
+            normalize(vViewPosition))), 0.16, 1.0);
+          // Seabed light crosses the water column down and back up. Grazing
+          // views extend that path, while the cap avoids denormal work in the
+          // already-opaque abyss.
+          float waterPath = min(2.0 * dep / viewCos, 360.0);
+          vec3 transmission = exp(-uAbsorption * waterPath);
+          vec3 localUp = normalize(vLocalPos);
+          vec3 localT = normalize(cross(localUp,
+            abs(localUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+          vec3 localB = cross(localUp, localT);
+          vec2 surfaceUv = vec2(dot(vLocalPos, localT), dot(vLocalPos, localB));
+          float smallDetail = texture2D(uDetailTex,
+            surfaceUv * uWaveS * 1.8 + vec2(uTime * 0.017, -uTime * 0.011)).r;
+          float caustic = pow(max(0.0, sin(surfaceUv.x * 0.18 + uTime * 1.7)
+            * sin(surfaceUv.y * 0.13 - uTime * 1.25)), 3.0)
+            * exp(-dep * 0.055) * uDay;
+          vec3 seabed = uShallowC * (0.62 + caustic * 0.5);
+          vec3 inScatter = uDeepC * (0.44 + uDay * 0.42);
+          diffuseColor.rgb = seabed * transmission + inScatter * (1.0 - transmission);
+          float waveLine = sin(dep * 1.65 - uTime * 1.75
+            + smallDetail * 4.2 + sin(surfaceUv.x * 0.035) * 1.8);
+          float shoreBand = 1.0 - smoothstep(0.35, 8.5, dep);
+          float shoreFoam = shoreBand * smoothstep(-0.15, 0.72, waveLine)
+            * (0.48 + smallDetail * 0.52) * uFoamK;
           float wakeFoam = 0.0;
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
             vec4 rd = uRippleData[i];
@@ -603,19 +725,33 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             wakeFoam += (0.32 + 0.68 * max(0.0, sin(ring * 1.4)))
               * envelope * rd.w * 1.75;
           }
-          float foam = clamp(shoreFoam * 0.42 + wakeFoam, 0.0, 0.92);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.97, 1.0), foam);
+          gWaterFoam = clamp(shoreFoam * 0.78 + wakeFoam, 0.0, 0.94);
+          diffuseColor.rgb = mix(diffuseColor.rgb,
+            vec3(0.92, 0.97, 1.0), gWaterFoam);
+          float cloud = waterCloud(vLocalPos);
+          diffuseColor.rgb *= 1.0 - cloud * 0.32;
+          // Deep ocean is optically opaque. Multiplying by the authored 0.66
+          // material opacity let bright seabed terrain wash an entire sea to
+          // milk-grey; only the first metres should reveal the floor.
+          diffuseColor.a = mix(0.58, 0.98, 1.0 - exp(-dep * 0.055));
+          gWaterRoughness = clamp(0.075 + (1.0 - smallDetail) * 0.12
+            + gWaterFoam * 0.48 + cloud * 0.08, 0.055, 0.72);
         }`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = gWaterRoughness;`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
           vec3 upL = normalize(vLocalPos);
-          vec3 tanL = normalize(cross(upL, abs(upL.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+          vec3 tanL = normalize(cross(upL,
+            abs(upL.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
           vec3 bitL = cross(upL, tanL);
           vec2 surfaceUv = vec2(dot(vLocalPos, tanL), dot(vLocalPos, bitL));
           vec2 uv1 = surfaceUv * uWaveS + vec2(uTime * 0.021, uTime * -0.013);
           vec2 uv2 = surfaceUv * uWaveS * 3.7 + vec2(uTime * -0.033, uTime * 0.027);
           vec2 g = (texture2D(uDetailTex, uv1).rg - 0.5) * 0.5
-                 + (texture2D(uDetailTex, uv2).rg - 0.5) * 0.3;
+            + (texture2D(uDetailTex, uv2).rg - 0.5) * 0.3;
+          float pixelFootprint = max(fwidth(surfaceUv.x), fwidth(surfaceUv.y));
+          g *= (1.0 - smoothstep(2.5, 14.0, pixelFootprint)) * vWaveNear;
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
             vec4 rd = uRippleData[i];
             vec3 delta = vLocalPos - uRipplePos[i];
@@ -625,10 +761,41 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             float envelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
             g += planar / max(dist, 0.05) * cos(ring * 1.4) * envelope * 0.72;
           }
-          normal = normalize(normal + (vWaveT * g.x + vWaveB * g.y) * 0.55);
+          normal = normalize(normal
+            - vWaveT * (vMacroSlope.x + g.x * 0.48)
+            - vWaveB * (vMacroSlope.y + g.y * 0.48));
+        }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        {
+          vec3 viewDir = normalize(vViewPosition);
+          vec3 reflectionDir = reflect(-viewDir, normal);
+          float ndv = clamp(abs(dot(normal, viewDir)), 0.0, 1.0);
+          float fresnel = 0.0201 + 0.9799 * pow(1.0 - ndv, 5.0);
+          float skyHeight = clamp(dot(reflectionDir,
+            normalize(vWaveUp)), 0.0, 1.0);
+          vec3 reflectedSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
+          float cloud = waterCloud(vLocalPos);
+          reflectedSky = mix(reflectedSky, vec3(0.46, 0.5, 0.56)
+            * (0.22 + uDay * 0.62), cloud * 0.62);
+          float sunDot = max(dot(reflectionDir, normalize(vSunDirView)), 0.0);
+          float glintPower = mix(1500.0, 95.0, gWaterRoughness);
+          float sunGlint = pow(sunDot, glintPower)
+            * mix(12.0, 2.4, gWaterRoughness) * uSunEnergy;
+          float secondDot = max(dot(reflectionDir,
+            normalize(vSecondarySunDirView)), 0.0);
+          float secondGlint = pow(secondDot, glintPower)
+            * mix(9.0, 1.8, gWaterRoughness) * uSecondarySunEnergy;
+          totalEmissiveRadiance += reflectedSky * fresnel
+            * (0.34 + uDay * 0.56) * (1.0 - gWaterFoam * 0.58);
+          totalEmissiveRadiance += (uSunColor * sunGlint
+            + uSecondarySunColor * secondGlint)
+            * (1.0 - cloud * 0.7);
+          totalEmissiveRadiance += vec3(0.36, 0.42, 0.46)
+            * gWaterFoam * 0.18;
         }`);
   };
-  material.customProgramCacheKey = () => 'water-tangent-wakes-v4';
+  material.customProgramCacheKey = () => 'water-column-sky-glint-v2-distance-spectrum-webgl-morph';
+  return material;
 }
 
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
@@ -636,7 +803,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
 // hard squares from orbit; this is smooth at every distance.
 export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0) {
   const tex = detailTexture();
-  if (!tex) return;
+  if (!tex) return material;
   const weatherTex = cloudSystemTexture(offX, offY, offZ);
   material.userData.weatherSystemTexture = weatherTex;
   material.onBeforeCompile = (shader) => {
@@ -738,6 +905,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
         }`);
   };
   material.customProgramCacheKey = () => 'cloud-field-v4-surface-fallback';
+  return material;
 }
 
 // Wind: vegetation bends with a per-instance phase, stronger toward the tip.
@@ -807,4 +975,5 @@ export function applyWindSway(material, amount, foliageLighting = false) {
     }
   };
   material.customProgramCacheKey = () => 'wind-sway-v3-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
+  return material;
 }

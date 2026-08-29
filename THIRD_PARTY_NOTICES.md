@@ -44,3 +44,10 @@ royalty-free / CC0 audio. The game runs normally with the directory removed
 
 Vendored under `vendor/`. Copyright (c) 2010-2026 Three.js Authors. Distributed
 under the MIT License.
+
+## Realistic Three.js Ocean Simulation
+
+The WebGL water-column, Fresnel and stellar-glint response in
+`src/shaders-webgl.js` adapts the physically based optical model from the
+author's separate `realistic-threejs-ocean-simulation` reference project.
+Copyright (c) 2026 Eray114514. Distributed under the MIT License.

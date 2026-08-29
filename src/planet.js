@@ -227,17 +227,16 @@ export class Planet {
     const canonicalGridCells = GRID_CELLS;
     this.canonicalGridCells = canonicalGridCells;
     const rootCell = (Math.PI / 2) * this.R / canonicalGridCells;
-    // Honour the authored ~1.5 m canonical ground spacing on large worlds.
-    // The old level-13 ceiling left the 900 km home planet at ~7.2 m cells
-    // (5.4 m after wide-chunk grouping), visibly faceting near-ground ridges.
+    // Aim at the authored metre-scale canonical ground spacing, with a level
+    // 16 safety ceiling on full-size worlds. The 6,000 km homeworld therefore
+    // retains a ~6 m deterministic content sample instead of pretending that
+    // sub-metre geometry is practical across an entire procedural globe.
     this.canonicalMaxLevel = clamp(Math.ceil(Math.log2(rootCell / 1.5)), 4, 16);
     this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
-    // Grouping reduces draw overhead. The last canonical octave is retained by
-    // collision/noise and the material micro-relief, while geometry stops at
-    // ~2.7 m cells on the 900 km world. Trying to tessellate the final
-    // sub-metre octave queued hundreds of chunks for minutes at 70 m altitude
-    // even though its relief is below a pixel.
+    // Grouping reduces draw overhead. Collision/noise retains the canonical
+    // content cap while geometry stops once its cells are below the reviewed
+    // display footprint; material micro-relief carries the final texture band.
     const lowTierGrouping = canonicalGridCells <= 18;
     // Keep cheap 32×32 roots, then switch high-tier terrain to 64×64 at level
     // three. One wide level replaces the next 2×2 set of narrow chunks at the
@@ -263,12 +262,11 @@ export class Planet {
     // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
     // matches that screen-space resolution (≈3 m cells) instead of spending
     // four times the triangles on sub-pixel relief.
-    this.maxLevel = Math.max(3, this.canonicalMaxLevel - 3);
-    // A cap of level 1/2 left 7–14 km triangles on the 900 km home world,
-    // visibly polygonal at 52–140 km and even in a full-disk 2K view. Keep
-    // enough orbital geometry for the actual display Nyquist rate; noise
-    // frequency still follows each level, so this is not fake micro-detail.
-    this.orbitLevelCap = Math.min(this.maxLevel, 3);
+    this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2));
+    // Full-disk review at 2K resolves roughly 6–12 km per pixel on the curated
+    // homeworld. Level four keeps the coast/limb below that footprint while
+    // lower tiers retain their cheaper grouping through lowTierGrouping.
+    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 3 : 4);
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
@@ -846,13 +844,14 @@ export class Planet {
       // Geometry is nominally spherical, but bathymetry, shore foam and
       // absorption are not: swapping their vertex fields per chunk exposed
       // rectangular depth bands even when the water silhouette looked smooth.
-      // Geometric swell bottoms out at 146 m wavelength. The former
-      // 24-vertex, level-7 near field left ~460 m cells on the 900 km home
-      // world, so those waves could only exist in the normal shader. Keep at
-      // least five samples across the shortest swell in the closest LOD.
+      // Wide 64-cell water chunks replace each former 2x2 32-cell child set at
+      // identical vertex spacing. The near camera used to expose almost 1,900
+      // visible water chunks (and >1,200 draw calls) even though its spectral
+      // micro-waves are shader-driven; grouping restores the same silhouette
+      // and bathymetry sampling at roughly one quarter of the submissions.
       const waterCanonicalGrid = 16;
       const lowTierGrouping = this.canonicalGridCells <= 18;
-      const waterGroupFactor = lowTierGrouping ? 4 : 2;
+      const waterGroupFactor = 4;
       const waterGridCells = waterCanonicalGrid * waterGroupFactor;
       const waterGridCellsAtLevel = () => waterGridCells;
       const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 11);
@@ -866,8 +865,8 @@ export class Planet {
         noShadow: true,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
-        maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 0)),
-        orbitLevelCap: lowTierGrouping ? 3 : 4,
+        maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 1)),
+        orbitLevelCap: 3,
         orbitPrewarmRadiusRatio: 1.75,
         // A smooth water sphere does not need terrain's two extra 136 km
         // approach levels. Add curvature detail only as its kilometre-scale
@@ -993,13 +992,21 @@ export class Planet {
         ? clamp(authoredRenderLayer.minAltitudeMeters, 8000, 30000)
         : naturalCloudBaseAlt;
       const cloudR = R + cloudShellBaseAlt;
-      const naturalCloudDepth = clamp(
-        56000 + this.weatherProfile.storminess * 30000
-          + this.weatherProfile.highClouds * 10000
-          + (this.type === 'toxic' ? 8000 : 0)
-          - (this.type === 'ice' ? 5000 : 0),
-        50000,
-        88000,
+      // Cloud thickness must stay subordinate to the planet. A fixed
+      // 50--88 km shell looked plausible on the 6,000 km homeworld but became
+      // 9--16% of a 560 km pelagic body, making its limb read like a fuzzy toy
+      // globe. Keep storm systems deep, then cap that depth by body scale.
+      const weatherCloudDepth = clamp(
+        26000 + this.weatherProfile.storminess * 18000
+          + this.weatherProfile.highClouds * 8000
+          + (this.type === 'toxic' ? 6000 : 0)
+          - (this.type === 'ice' ? 4000 : 0),
+        22000,
+        56000,
+      );
+      const naturalCloudDepth = Math.min(
+        weatherCloudDepth,
+        Math.max(18000, R * 0.035),
       );
       const authoredCloudTop = Number(authoredRenderLayer?.maxAltitudeMeters);
       const cloudShellTopAlt = Number.isFinite(authoredCloudTop)
@@ -1019,8 +1026,14 @@ export class Planet {
         side: THREE.DoubleSide,
       });
       cmat.forceSinglePass = true;
+      // The analytic deck is a distant/fallback silhouette, not the whole
+      // vertical volume extruded at every vertex. Using ~100% of the layer
+      // depth made an 80 km weather band become 80 km triangular spikes on
+      // smaller ocean worlds. Keep readable towers while bounding their
+      // apparent relief to a planetary-scale cloud fraction.
+      const analyticRelief = Math.min(thick * 0.18, R * 0.006);
       const cloudMat = applyCloudField(cmat, coverage, o1[0], o1[1], o1[2],
-        thick * 0.96, this.cloudShadowTex);
+        analyticRelief, this.cloudShadowTex);
       this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cloudMat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
@@ -1072,7 +1085,8 @@ export class Planet {
         });
         cmat2.forceSinglePass = true;
         const upperCloudMat = applyCloudField(cmat2, coverage * 0.42,
-          o2[0], o2[1], o2[2], thick * 0.32, this.cloudWeatherHiTex, 'high');
+          o2[0], o2[1], o2[2], Math.min(thick * 0.08, R * 0.003),
+          this.cloudWeatherHiTex, 'high');
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
           new THREE.SphereGeometry(upperR, 192, 128), upperCloudMat);
@@ -1172,6 +1186,10 @@ export class Planet {
     }
     const water = this.liquidMat?.userData.shader?.uniforms;
     if (water?.uSunDir) water.uSunDir.value.copy(primary.localDirection);
+    if (water?.uSunColor) water.uSunColor.value.copy(primary.colorValue);
+    if (water?.uSunEnergy) {
+      water.uSunEnergy.value = primary.irradianceFraction ?? 1;
+    }
     if (water?.uSecondarySunDir) {
       water.uSecondarySunDir.value.copy(secondary?.localDirection || primary.localDirection);
     }
