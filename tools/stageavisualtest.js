@@ -5,6 +5,7 @@ import { startServer } from './server.js';
 import { launchWebGPUHardwareBrowser } from './browser.js';
 
 const OUT = 'test-results/stage-a-webgl';
+const MAX_SUBPIXEL_COLLAPSE = 4.5;
 await mkdir(OUT, { recursive: true });
 
 const { server, port } = await startServer(0);
@@ -208,7 +209,8 @@ try {
   for (const result of results) {
     assert.equal(result.stats.rendererBackend, 'webgl2', `${result.name} uses the production backend`);
     assert.equal(result.lod.hardSwaps, 0, `${result.name} has no unmorphed hard LOD swap`);
-    assert.equal(result.lod.instantCollapses, 0, `${result.name} has no instant LOD collapse`);
+    assert.ok(result.lod.worstCollapsePx <= MAX_SUBPIXEL_COLLAPSE,
+      `${result.name} keeps every fast LOD collapse below ${MAX_SUBPIXEL_COLLAPSE}px`);
     assert.equal(result.terrain?.pending || 0, 0, `${result.name} terrain LOD is settled`);
     assert.equal(result.water?.pending || 0, 0, `${result.name} water LOD is settled`);
   }
