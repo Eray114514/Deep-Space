@@ -410,9 +410,11 @@ export class AtmospherePass extends Pass {
             dot(closestRadial, normalize(uSunDirection1))) * uSunEnergy1;
           float exteriorLight = clamp(exteriorDay0 + exteriorDay1, 0.0, 1.0);
           // At full phase the tangent circle is perpendicular to the star and
-          // a uniform exterior signal reads as a shield. Suppress it for a
-          // sunward observer; at quadrature the lit radial half instead forms
-          // a directional arc, which is the useful atmospheric cue.
+          // a strong uniform exterior signal reads as a shield. Keep only a
+          // thin density-shaped residual there; at quadrature the lit radial
+          // half becomes the stronger directional arc. The residual is also
+          // required to balance extinction of the space background -- zeroing
+          // scatter while retaining full extinction creates a black outline.
           float observerSun = dot(normalize(uCameraLocal),
             normalize(uSunDirection0));
           float exteriorPhase = 1.0 - smoothstep(0.28, 0.88, observerSun);
@@ -428,8 +430,8 @@ export class AtmospherePass extends Pass {
           // is intentionally weak; otherwise even a physically thin column
           // resolves as a graphic outline at game-camera scale.
           float discWeight = 0.008 + surfaceLimb * 0.42;
-          float exteriorWeight = altitudeFade * mix(0.002, 3.20, exteriorLight)
-            * exteriorPhase;
+          float exteriorWeight = altitudeFade * mix(0.16, 2.50, exteriorLight)
+            * mix(0.35, 1.0, exteriorPhase);
           float spaceScatterWeight = mix(exteriorWeight, discWeight, hitsSurface);
 
           // The opaque planet already owns its surface colour and lighting.
@@ -437,7 +439,17 @@ export class AtmospherePass extends Pass {
           // disc in orbit; applying the full sky-column attenuation there was
           // the grey film seen across land, ocean and clouds.
           float discExtinctionWeight = 0.018 + surfaceLimb * 0.12;
-          float spaceExtinctionWeight = mix(1.0, discExtinctionWeight, hitsSurface);
+          // Exterior rays look through atmosphere toward space, but the
+          // background must not be attenuated as if it were a bright opaque
+          // surface. Couple this small extinction term to the same tangent
+          // density, illumination and phase gates as exterior scattering.
+          // This preserves a soft lit limb without either a dark stroke or a
+          // second solid sphere around the planet.
+          float exteriorExtinctionWeight = altitudeFade
+            * mix(0.015, 0.22, exteriorLight)
+            * mix(0.30, 1.0, exteriorPhase);
+          float spaceExtinctionWeight = mix(exteriorExtinctionWeight,
+            discExtinctionWeight, hitsSurface);
           vec3 compositeTransmittance = mix(transmittance,
             mix(vec3(1.0), transmittance, spaceExtinctionWeight), spaceView);
           float radianceExposure = uRadianceScale * mix(1.0, 0.45, spaceView);

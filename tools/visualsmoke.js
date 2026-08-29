@@ -1,4 +1,6 @@
+import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { PNG } from 'pngjs';
 import { startServer } from './server.js';
 import { launchWebGPUHardwareBrowser } from './browser.js';
 
@@ -9,14 +11,63 @@ const outDir = new URL('../test-results/visual-smoke/', import.meta.url);
 await mkdir(outDir, { recursive: true });
 const volumeClouds = process.env.NMS_VCLOUDS === '0' ? '0' : '1';
 const focus = process.env.NMS_SMOKE_FOCUS || 'all';
-const layerAb = process.env.NMS_SMOKE_LAYER_AB === '1';
+const layerAb = process.env.NMS_SMOKE_LAYER_AB !== '0';
 const atmosphereAb = process.env.NMS_SMOKE_ATMOSPHERE_AB === '1';
 const atmosphereAltitude = Math.max(0, Number(process.env.NMS_ALTITUDE) || 2000);
 
 async function capture(page, name) {
-  await writeFile(new URL(`${name}.png`, outDir), await page.screenshot());
+  const buffer = await page.screenshot();
+  await writeFile(new URL(`${name}.png`, outDir), buffer);
   const stats = await page.evaluate(() => NMS.stats());
   console.log(JSON.stringify({ name, stats }, null, 2));
+  return { buffer, stats };
+}
+
+function atmosphereLimbStats(enabledBuffer, disabledBuffer, fixture) {
+  const enabled = PNG.sync.read(enabledBuffer);
+  const disabled = PNG.sync.read(disabledBuffer);
+  assert.equal(enabled.width, disabled.width);
+  assert.equal(enabled.height, disabled.height);
+  const cameraRadius = fixture.planetRadius + fixture.cameraAltitude;
+  const focalScale = (enabled.height * 0.5)
+    / Math.tan(fixture.fovDegrees * Math.PI / 360);
+  const projectedRadius = (radius) => focalScale
+    * Math.tan(Math.asin(Math.min(radius / cameraRadius, 0.999999)));
+  const innerRadius = projectedRadius(fixture.planetRadius);
+  const outerRadius = projectedRadius(fixture.planetRadius + fixture.opticalTop);
+  const centerX = enabled.width * 0.5;
+  const centerY = enabled.height * 0.5;
+  let samples = 0;
+  let darkened = 0;
+  let brightened = 0;
+  let luminanceDelta = 0;
+  let blueDelta = 0;
+  for (let y = 0; y < enabled.height; y++) {
+    for (let x = 0; x < enabled.width; x++) {
+      const radius = Math.hypot(x + 0.5 - centerX, y + 0.5 - centerY);
+      if (radius < innerRadius || radius > outerRadius) continue;
+      const offset = (y * enabled.width + x) * 4;
+      const redDelta = enabled.data[offset] - disabled.data[offset];
+      const greenDelta = enabled.data[offset + 1] - disabled.data[offset + 1];
+      const currentBlueDelta = enabled.data[offset + 2] - disabled.data[offset + 2];
+      const currentLuminanceDelta = redDelta * 0.2126
+        + greenDelta * 0.7152 + currentBlueDelta * 0.0722;
+      if (currentLuminanceDelta < -2) darkened++;
+      if (currentLuminanceDelta > 2) brightened++;
+      luminanceDelta += currentLuminanceDelta;
+      blueDelta += currentBlueDelta - (redDelta + greenDelta) * 0.5;
+      samples++;
+    }
+  }
+  return {
+    samples,
+    innerRadius,
+    outerRadius,
+    meanLuminanceDelta: luminanceDelta / Math.max(1, samples),
+    meanBlueDelta: blueDelta / Math.max(1, samples),
+    darkenedFraction: darkened / Math.max(1, samples),
+    brightenedFraction: brightened / Math.max(1, samples),
+  };
 }
 
 async function waitForFocusedPlanetReviewDensity(page) {
@@ -48,11 +99,28 @@ try {
   if (focus === 'all' || focus === 'orbit') {
     await page.evaluate(() => NMS.teleport(0, 0.72));
     await waitForFocusedPlanetReviewDensity(page);
-    await capture(page, '01-orbit-volume');
+    const orbitCapture = await capture(page, '01-orbit-volume');
     if (layerAb) {
       await page.evaluate(() => NMS.setAtmosphereVisible(false));
       await page.waitForTimeout(350);
-      await capture(page, '01a-orbit-no-atmosphere');
+      const noAtmosphereCapture = await capture(page, '01a-orbit-no-atmosphere');
+      const fixture = await page.evaluate(() => ({
+        planetRadius: NMS._planet(0).R,
+        cameraAltitude: NMS.stats().alt,
+        fovDegrees: NMS.stats().fov,
+        opticalTop: NMS.atmosphereState().opticalTop,
+      }));
+      const limb = atmosphereLimbStats(
+        orbitCapture.buffer, noAtmosphereCapture.buffer, fixture,
+      );
+      console.log(JSON.stringify({ atmosphereLimb: limb }, null, 2));
+      assert.ok(limb.samples > 1000, 'atmosphere limb A/B must cover a useful pixel band');
+      assert.ok(limb.meanLuminanceDelta > 0.4,
+        `atmosphere limb must add light rather than a black outline: ${limb.meanLuminanceDelta}`);
+      assert.ok(limb.meanBlueDelta > 0.2,
+        `atmosphere limb must retain a blue scattering cue: ${limb.meanBlueDelta}`);
+      assert.ok(limb.darkenedFraction < 0.03,
+        `atmosphere limb darkened too many pixels: ${limb.darkenedFraction}`);
       await page.evaluate(() => {
         NMS.setAtmosphereVisible(true);
         NMS.setCloudsVisible(false, 0);

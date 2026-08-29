@@ -219,7 +219,7 @@ S1 并行跑照片盲测。
 **A. 前置与基线保护**
 - [x] A0 阶段 5 大气已通过整球/低轨/地面与昼暮夜真实硬件验收，云评审不再受异常蓝壳污染
 - [x] A1 修正 `tools/cloudvisualdiag.js`：使用实际 WebGL 云行星，不依赖已删除的 `volCloudState`/WebGPU launcher；采样档控制真实映射到当前 `uMaxSteps`
-- [x] A1b 正常玩家最终合成闸门：`post=1`、HUD 开启、约 4319 km 下分离 atmosphere/cloud/eclipse。兼容 `cloudLayer=230–420 km` 不再驱动渲染；母星光学云为 12–91.8 km、近地积分深度 45 km、220–1600 km 连续过渡；日食云影保留局部运动但不形成死黑块。首轮严格盲审 FAIL 后继续修正，第二个全新上下文审查者明确 PASS
+- [x] A1b 正常玩家最终合成闸门：`post=1`、HUD 开启、约 4319 km 下分离 atmosphere/cloud/eclipse。兼容 `cloudLayer=230–420 km` 不再驱动渲染；母星光学云为 12–91.8 km、近地积分深度 45 km、220–1600 km 连续过渡；日食云影保留局部运动但不形成死黑块。首轮严格盲审 FAIL 后继续修正，第二个全新上下文审查者明确 PASS；随后用户发现的满相边缘黑描边由 exterior scatter/extinction 失配修复，新增 29,020 像素正常玩家 limb A/B 自动门禁并经第三位全新上下文审查者 PASS
 - [ ] A2 固定当前 WebGL 云 atmosphere-off 与正常合成两套 S1–S4、多种子/昼暮夜截图和帧时，作为不可退化基线
 
 **B. 天气体系与云种（本阶段核心）**
