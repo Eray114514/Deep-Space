@@ -270,7 +270,14 @@ export class Planet {
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
-    const lodScreenScale = lowTierGrouping ? 0.25 : 1;
+    // Keep the metre-scale centre patch, but do not refine an oversized disc
+    // around it. At 800 m the former radius produced ~1,900 visible terrain
+    // chunks / 17 M triangles even though most were outside the 62-degree
+    // view. A narrower error ring retains level 14 directly under and ahead
+    // of the camera while shedding most off-axis work. The 0.45 high-tier
+    // scale still overlaps adjacent levels generously enough for geomorphing;
+    // it only removes detail whose projected footprint is already sub-pixel.
+    const lodScreenScale = lowTierGrouping ? 0.25 : 0.45;
     this.lodDistanceScale = (canonicalGridCells / this.gridCells) * lodScreenScale;
     this.lodDistanceScaleAtLevel = (lvl) => (canonicalGridCells / this.gridCellsAtLevel(lvl)) * lodScreenScale;
     this.lodLevelForCanonical = (canonicalLevel) => {
@@ -855,6 +862,7 @@ export class Planet {
       const waterGridCells = waterCanonicalGrid * waterGroupFactor;
       const waterGridCellsAtLevel = () => waterGridCells;
       const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 11);
+      const waterScreenScale = lowTierGrouping ? 0.25 : 0.35;
       this.waterLod = new ChunkedLOD({
         // At the finest ~29 m cells the spherical chord sag is sub-millimetre.
         // A 2.5 m skirt was vastly larger than the gap and exposed dark walls
@@ -872,9 +880,9 @@ export class Planet {
         // approach levels. Add curvature detail only as its kilometre-scale
         // cells become resolvable, while spectral waves remain shader-driven.
         orbitApproachLevelThresholds: [1.12, 1.06, 1.025],
-        lodDistanceScale: (waterCanonicalGrid / waterGridCells) * (lowTierGrouping ? 0.25 : 1),
+        lodDistanceScale: (waterCanonicalGrid / waterGridCells) * waterScreenScale,
         lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))
-          * (lowTierGrouping ? 0.25 : 1),
+          * waterScreenScale,
         lodLevelForCanonical: (canonicalLevel) => {
           for (let level = 0; level <= waterCanonicalMaxLevel; level++) {
             const effective = level + Math.log2(waterGridCellsAtLevel(level) / waterCanonicalGrid);
