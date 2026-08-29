@@ -23,6 +23,8 @@
     "test:gameplay": "node tools/gameplaytest.js",
     "test:performance": "node tools/perftest.js",
     "test:hero-handoff": "node tools/hero-playtest.js",
+    "test:engine-plume": "node tools/engineplumeplaytest.js",
+    "test:engine-plume:perf": "node tools/engineplumeperftest.js",
     "test:cloud-reference": "node tools/cloudvisualdiag.js",
     "test:atmosphere-motion": "node tools/atmospheremotiondiag.js",
     "test:atmosphere-visual": "node tools/atmospherevisualdiag.js",

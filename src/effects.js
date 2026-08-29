@@ -537,39 +537,35 @@ export class Ship {
    * Engine power for the plume / halo / core emissive, mapped from 深空's
    * flight state onto the demo's 0..1.7 throttle-power scale.
    */
-  updateEngineFx(dt, speed, warp, boost, cameraPos) {
+  updateEngineFx(dt, speed, warp, boost) {
     // the FX rig is absent on headless test doubles
     if (!this.ext) return;
-    const power = THREE.MathUtils.clamp(
+    const targetPower = THREE.MathUtils.clamp(
       speed / 7e5 * 0.8 + boost * 1.0 + warp * 1.12, 0.1, 1.7);
+    // Turbopumps spool up quickly and decay with stored pressure.  Smoothing
+    // the render state removes single-frame flame pops without delaying input
+    // or feeding anything back into the flight simulation.
+    const powerResponse = targetPower > this.enginePower ? 9.5 : 3.2;
+    const power = THREE.MathUtils.lerp(this.enginePower, targetPower,
+      1 - Math.exp(-Math.max(0, dt) * powerResponse));
     this.enginePower = power;
-    this.t += dt;
+    // All plume phase multipliers are integer cycles, so a 2π wrap is visually
+    // seamless and keeps the GPU uniform precise during arbitrarily long runs.
+    this.t = (this.t + Math.max(0, dt)) % (Math.PI * 2);
     const t = this.t;
 
-    /* plumes: time, power, camera-proximity fade — see ship/exterior.js for
-       why the fade exists (a chase camera lerping through a plume cone used
-       to black out the whole frame through bloom). */
-    const camW = cameraPos ?? _camZero;
+    /* Two shared instanced rigs (integrated plume/throat) replace per-engine mesh
+       scaling.  Their nozzle roots never move; length, pressure cells and
+       camera-axis safety are evaluated analytically in the shaders. */
     for (const p of this.ext.plumes) {
       const m = p.material;
       m.uniforms.uTime.value = t;
-      m.uniforms.uPower.value = power * 0.72;
-      p.scale.set(0.55 + power * 0.6, 0.35 + power * 0.95, 0.55 + power * 0.6);
-      p.updateWorldMatrix(true, false);
-      _sv2.setFromMatrixPosition(p.matrixWorld);
-      const dist = _sv2.distanceTo(camW);
-      if (!p.geometry.boundingSphere) p.geometry.computeBoundingSphere();
-      const reach = p.geometry.boundingSphere.radius * Math.max(p.scale.x, p.scale.y, p.scale.z);
-      m.uniforms.uFade.value = THREE.MathUtils.clamp((dist - reach * 0.55) / (reach * 0.7), 0, 1);
+      m.uniforms.uPower.value = power;
     }
     for (const r of this.ext.glowRings) {
-      const rm = r.material;
-      rm.uniforms.uPower.value = 0.25 + power * 0.55;
-      r.updateWorldMatrix(true, false);
-      _sv2.setFromMatrixPosition(r.matrixWorld);
-      rm.uniforms.uFade.value = THREE.MathUtils.clamp(_sv2.distanceTo(camW) / 1.6, 0, 1);
+      r.material.uniforms.uPower.value = power;
     }
-    this.mats.engineCore.emissiveIntensity = 1.6 + power * 3.4;
+    this.mats.engineCore.emissiveIntensity = 1.45 + power * 2.25;
 
     /* strobes — kept modest so the bloom chain never saturates */
     const blink = (t % 1.3) < 0.09 ? 3.2 : 0.05;
@@ -664,7 +660,7 @@ export class Ship {
       this.group.quaternion.copy(formQuat);
     }
 
-    this.updateEngineFx(dt, speed, warp, boost, camera?.position);
+    this.updateEngineFx(dt, speed, warp, boost);
 
     // Sun-shadow cadence: live while flying; while parked the hull cannot
     // move under its own power, so the map re-renders only often enough to
@@ -687,8 +683,6 @@ export class Ship {
 }
 const _sq2 = new THREE.Quaternion();
 const _sp = new THREE.Vector3();
-const _sv2 = new THREE.Vector3();
-const _camZero = new THREE.Vector3();
 
 // ============================================================================
 // Twin energy cannons. Bolts live in universe coordinates and are packed into

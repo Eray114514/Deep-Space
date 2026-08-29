@@ -200,49 +200,52 @@ export function buildExterior(M, def) {
   const mkEngine = (x, y, z, R) => {
     B.addParts(engineBell(R).parts, mat(x, y, z, Math.PI / 2, 0, 0));
     B.add('darkMetal', xf(lathe([[R * 1.02, -0.1], [R * 1.16, -0.04], [R * 1.16, 0.12], [R * 1.0, 0.16]], 30), mat(x, y, z - 0.42, Math.PI / 2, 0, 0)));
-    /* A CONE HAS A STRAIGHT SILHOUETTE, and that is most of what reads as
-       fake: an exhaust is a bulging column that necks down, not a triangle.
-       So the shells are lathes of a curved envelope — same cost, no straight
-       edge anywhere — and both start AT the mouth.
-
-       The old plume was also one cone whose geometry was centred on its own
-       origin, so engine.ts scaling its length by throttle (0.35 to 1.3) moved
-       the wide end more than a metre fore and aft: at cruise the flame was
-       detached from the ship with a gap you could see through, and at full
-       power it started inside the nacelle.  Building the profile from y = 0
-       makes the scale grow it AFT from the lip, which is what a throttle
-       does. */
-    const shell = (rad, len, bulge) => {
-      const pts = [];
-      const N = 14;
-      for (let i = 0; i <= N; i++) {
-        const t = i / N;
-        const r = rad * Math.pow(1 - t, 0.62) * (1 + bulge * Math.sin(Math.PI * Math.pow(t, 0.8)));
-        pts.push([Math.max(0.004, r), t * len]);
-      }
-      return lathe(pts, 30);
-    };
-    const addPlume = (m, geo, order) => {
-      const mesh = new THREE.Mesh(geo, m);
-      mesh.rotation.x = Math.PI / 2;       // local +Y -> world +Z, aft
-      mesh.position.set(x, y, z + 0.34 * R);
-      mesh.renderOrder = order;
-      mesh.frustumCulled = false;
-      group.add(mesh);
-      plumes.push(mesh);
-    };
-    addPlume(plumeMaterial(1), shell(R * 0.44, R * 2.8, 0.10), 4);
-    addPlume(plumeMaterial(0), shell(R * 0.74, R * 9.0, 0.30), 3);
-    /* the halo is a soft ring on the LIP, not a washer over the aperture.
-       At RingGeometry(0.30R, 1.06R) it covered the whole mouth in flat
-       additive blue, which is what turned the nozzle into a pale disc. */
-    const ring = new THREE.Mesh(new THREE.RingGeometry(R * 0.52, R * 1.20, 36), haloMaterial());
-    ring.position.set(x, y, z + 0.44 * R);
-    ring.renderOrder = 5;
-    group.add(ring);
-    glowRings.push(ring);
   };
   for (const e of def.engines) mkEngine(e.x, e.y, e.z, e.r);
+
+  /* The four engines share two instanced draw calls: one integrated potential
+     core / turbulent shear volume and the thin hot throat.  Their transforms
+     are authored from the SAME engine table as the physical bells, so the
+     exhaust origin cannot drift away from a nozzle when the hull changes.
+
+     Geometry begins 0.06R inside the rolled lip (the bell lip is +0.40R), at
+     the 0.22R throat rather than across the whole aperture.  Throttle is a
+     vertex-shader axial stretch from that fixed root; it never scales or
+     translates the root radius. */
+  const plumeRoot = (engine) => new THREE.Vector3(
+    engine.x, engine.y, engine.z + engine.r * 0.34);
+  const plumeRotation = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(1, 0, 0), Math.PI / 2);
+  const instanceMatrix = new THREE.Matrix4();
+  const instanceScale = new THREE.Vector3();
+  const addInstances = (geometry, material, name, order, atLip = false) => {
+    const mesh = new THREE.InstancedMesh(geometry, material, def.engines.length);
+    mesh.name = name;
+    mesh.renderOrder = order;
+    mesh.frustumCulled = false;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    def.engines.forEach((engine, index) => {
+      const root = atLip
+        ? new THREE.Vector3(engine.x, engine.y, engine.z + engine.r * 0.405)
+        : plumeRoot(engine);
+      const rotation = atLip ? new THREE.Quaternion() : plumeRotation;
+      instanceScale.setScalar(engine.r);
+      instanceMatrix.compose(root, rotation, instanceScale);
+      mesh.setMatrixAt(index, instanceMatrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.userData.nozzleRoots = def.engines.map((engine) => plumeRoot(engine).toArray());
+    mesh.userData.engineRadii = def.engines.map((engine) => engine.r);
+    group.add(mesh);
+    return mesh;
+  };
+  const plume = addInstances(
+    plumeGeometry(), plumeMaterial(), 'engine-plume-volume', 3);
+  plumes.push(plume);
+  const lipGlow = addInstances(
+    new THREE.CircleGeometry(1.07, 40), haloMaterial(), 'engine-plume-lip', 5, true);
+  glowRings.push(lipGlow);
 
   /* ============ SHIP-SPECIFIC DRESSING ============ *
      Runs before the ramp so the ramp's own bucket flush is last, and takes
@@ -348,115 +351,257 @@ export function buildExterior(M, def) {
   return { group, rampPivot, plumes, glowRings, strobes };
 }
 
-/* ---- engine plume / halo shaders ----
+/* ---- engine plume / halo shaders ------------------------------------------
  *
- *  NOTE ON THE `clamp(vUv)` GUARD — this used to black out the whole screen.
+ * This is a textureless analytic emissive volume, not a fire image pasted onto
+ * cones.  A camera-facing density integral gives every side view one continuous
+ * soft cross-section instead of exposing intersecting transparency planes.
+ * A compact throat volume preserves axial/chase readability.
+ * The short potential core is integrated into the same density field as the
+ * entrained shear, so small manoeuvring jets cannot leave detached bright
+ * fragments when the hull occludes their roots.  The layer stays coherent,
+ * progressively filamentary, then dissipating before the geometric tip.
  *
- *  The chase camera lerps from the cockpit out to ~23 units behind the ship,
- *  which drives it straight THROUGH these plume cones (they are 7.5 m long,
- *  frustumCulled = false, DoubleSide, depthWrite off).  A triangle that
- *  straddles the near plane interpolates 1/w through zero, so `vUv` arrives
- *  as +/-Inf on those pixels.  `pow(Inf, 0.55)` is +Inf, `mix()` turns that
- *  into a -Inf colour (R/G only — B survives because both endpoints are 1.0
- *  and the compiler folds the delta to zero), and UnrealBloomPass then smears
- *  that -Inf across every pixel of the frame through its downsample chain.
- *  Result: a full black flash, measured at 43% of frames in chase view.
- *
- *  Fixes: clamp the varying before any use, use sqrt() instead of an
- *  unguarded pow(), keep the hash argument bounded so sin() never receives a
- *  huge value after a long session, clamp the output, and fade the plume out
- *  as the camera enters it (uFade, driven from the view controller).
+ * Premultiplied normal blending is deliberate.  Additive blue shells made
+ * every overlap brighter than the source and polluted bloom across the hull;
+ * the new outer layer stays below the bloom knee while only compact core cells
+ * carry HDR radiance.  The camera-to-axis guard retains the old near-plane
+ * safety without making a normal stern view disappear.
  */
-function plumeMaterial(inner) {
+function plumeGeometry() {
+  const segments = 34;
+  const length = 7.6;
+  const profileRadius = (t) => {
+    const shearExpansion = 0.45 + 0.64 * (1 - Math.exp(-t * 7));
+    const dissolution = 1 - t * 0.48;
+    const breathing = 1 + Math.sin(Math.pow(t, 0.9) * Math.PI * 5.5)
+      * 0.04 * (1 - t);
+    return shearExpansion * dissolution * breathing;
+  };
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const addVertex = (point, normal, uv) => {
+    positions.push(point.x, point.y, point.z);
+    normals.push(normal.x, normal.y, normal.z);
+    uvs.push(uv[0], uv[1]);
+  };
+  const addTriangle = (a, b, c, normal, uvA, uvB, uvC) => {
+    addVertex(a, normal, uvA);
+    addVertex(b, normal, uvB);
+    addVertex(c, normal, uvC);
+  };
+  /* The shader rotates this single density ribbon around the plume axis to
+     face the camera.  The authored radius stays broad at the far end: opacity
+     dissipates statistically before the mesh ends, so no geometric needle or
+     triangular point can become visible against a dark sky. */
+  const normal = new THREE.Vector3(0, 0, 1);
+  for (let i = 0; i < segments; i++) {
+    const t0 = i / segments;
+    const t1 = (i + 1) / segments;
+    const r0 = profileRadius(t0);
+    const r1 = profileRadius(t1);
+    const left0 = new THREE.Vector3(-r0, t0 * length, 0);
+    const right0 = new THREE.Vector3(r0, t0 * length, 0);
+    const left1 = new THREE.Vector3(-r1, t1 * length, 0);
+    const right1 = new THREE.Vector3(r1, t1 * length, 0);
+    addTriangle(left0, right0, right1, normal,
+      [0, t0], [1, t0], [1, t1]);
+    addTriangle(left0, right1, left1, normal,
+      [0, t0], [1, t1], [0, t1]);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.name = 'integrated engine plume volume';
+  return geometry;
+}
+
+function plumeMaterial() {
   return new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uPower: { value: 0.3 }, uFade: { value: 1 }, uInner: { value: inner } },
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    uniforms: {
+      uTime: { value: 0 },
+      uPower: { value: 0.1 },
+    },
+    transparent: true,
+    premultipliedAlpha: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.NormalBlending,
+    side: THREE.DoubleSide,
+    toneMapped: true,
     vertexShader: `
       #include <common>
       #include <logdepthbuf_pars_vertex>
+      uniform float uTime; uniform float uPower;
       varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      varying vec3 vRootWorld; varying vec3 vAxisWorld;
+      varying float vEngineRadius; varying float vLengthScale;
       void main(){
-        vUv = uv;
-        vN = normalize(mat3(modelMatrix) * normal);
-        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vUv = clamp(uv, 0.0, 1.0);
+        float drive = smoothstep(0.06, 1.7, uPower);
+        float response = pow(drive, 0.72);
+        float lengthScale = mix(0.38, 1.14, response);
+        vec3 localPosition = position;
+        localPosition.y *= lengthScale;
+
+        /* The spent shear wanders by at most 5.5% of one nozzle radius.  The
+           t² term mathematically locks the integrated core to the throat. */
+        float t = vUv.y;
+        localPosition.x += sin(uTime * 2.0 + t * 7.0)
+          * (0.055 * t * t * (1.0 - drive * 0.35));
+
+        mat4 instance = mat4(1.0);
+        #ifdef USE_INSTANCING
+          instance = instanceMatrix;
+        #endif
+        vec3 rootWorld = (modelMatrix * instance
+          * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        vec3 axisWorld = normalize((modelMatrix * instance
+          * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+        float engineRadius = length((modelMatrix * instance
+          * vec4(1.0, 0.0, 0.0, 0.0)).xyz);
+        vec3 cameraRay = cameraPosition - rootWorld;
+        vec3 widthCandidate = cross(axisWorld, cameraRay);
+        vec3 fallback = abs(axisWorld.y) < 0.94
+          ? cross(axisWorld, vec3(0.0, 1.0, 0.0))
+          : cross(axisWorld, vec3(1.0, 0.0, 0.0));
+        float hasWidth = step(1e-7, dot(widthCandidate, widthCandidate));
+        vec3 widthWorld = normalize(mix(fallback, widthCandidate, hasWidth));
+        vec3 worldPosition = rootWorld
+          + widthWorld * localPosition.x * engineRadius
+          + axisWorld * localPosition.y * engineRadius;
+        vec4 wp = vec4(worldPosition, 1.0);
+        vN = normalize(cross(widthWorld, axisWorld));
         vV = normalize(cameraPosition - wp.xyz);
+        vRootWorld = rootWorld;
+        vAxisWorld = axisWorld;
+        vEngineRadius = engineRadius;
+        vLengthScale = lengthScale;
         gl_Position = projectionMatrix * viewMatrix * wp;
         #include <logdepthbuf_vertex>
       }`,
     fragmentShader: `
       #include <logdepthbuf_pars_fragment>
-      uniform float uTime; uniform float uPower; uniform float uFade; uniform float uInner;
+      uniform float uTime; uniform float uPower;
       varying vec2 vUv; varying vec3 vN; varying vec3 vV;
-      float h(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
+      varying vec3 vRootWorld; varying vec3 vAxisWorld;
+      varying float vEngineRadius; varying float vLengthScale;
+
+      float transportedTurbulence(vec2 p, float phase) {
+        /* Three advected, incommensurate waves give a continuous shear field
+           without a texture fetch or discontinuous cell hash.  Integer phase
+           multipliers make the CPU's 2π wrap exactly periodic. */
+        float a = sin(p.x * 1.13 + p.y * 0.83 - phase * 3.0);
+        float b = sin(p.x * 2.41 - p.y * 0.71 + sin(p.x * 0.53) - phase * 5.0);
+        float c = cos(p.x * 4.07 + p.y * 1.29 - phase * 7.0);
+        return clamp(0.53 + a * 0.24 + b * 0.15 + c * 0.08, 0.0, 1.0);
+      }
       void main(){
         #include <logdepthbuf_fragment>
         vec2 uv = clamp(vUv, 0.0, 1.0);
-        float t = uv.y;                       /* 0 at the mouth, 1 at the tip */
+        float t = uv.y;
+        float drive = smoothstep(0.06, 1.7, uPower);
+        float ndv = clamp(abs(dot(normalize(vN), normalize(vV))), 0.045, 1.0);
+        float radialCoordinate = abs(uv.x * 2.0 - 1.0);
+        float radialDensity = 1.0 - smoothstep(0.18, 1.0, radialCoordinate);
 
-        /* SHELL THICKNESS, not an angular gradient.
-           uv.x on a cone runs AROUND it, so the old smoothstep on
-           abs(uv.x-0.5) darkened one side of the plume and put a bright seam
-           down the other — a lit strip rotating with the camera, which is a
-           large part of why the exhaust read as a painted triangle.  What a
-           thin emissive shell actually does is brighten where you look along
-           it, so the term is 1/|dot(n,v)|: dim through the middle, bright at
-           the silhouette, which integrates to a volume. */
-        float ndv = abs(dot(normalize(vN), normalize(vV)));
-        float shell = clamp(0.16 / max(ndv, 0.055), 0.0, 3.4);
+        /* Distance to the finite plume axis.  If a chase transition crosses
+           it, fade before a near-plane triangle can feed non-finite energy to
+           bloom.  Outside the actual segment the endpoint distance restores
+           full opacity, so a normal stern composition remains intact. */
+        float baseLength = 7.6 * vEngineRadius * vLengthScale;
+        vec3 cameraFromRoot = cameraPosition - vRootWorld;
+        float cameraAlong = clamp(dot(cameraFromRoot, vAxisWorld), 0.0, baseLength);
+        float cameraAxisDistance = length(cameraFromRoot - vAxisWorld * cameraAlong);
+        float cameraFade = smoothstep(vEngineRadius * 0.42,
+          vEngineRadius * 1.85, cameraAxisDistance);
 
-        /* SHOCK DIAMONDS: an over-expanded nozzle repeats its Mach node with
-           a spacing that grows downstream and a strength that decays. */
-        float node = sin(6.28318 * (pow(t, 0.72) * 5.5) - 1.2);
-        float dia = pow(max(node, 0.0), 3.0) * exp(-t * 5.5);
+        vec2 flowUv = vec2(uv.x * 11.0 + t * 2.7, t * 15.0);
+        float turbulence = transportedTurbulence(flowUv, uTime);
 
-        float tick = floor(mod(uTime, 64.0) * 40.0);
-        float flick = 0.86 + 0.14 * sin(mod(uTime, 64.0) * 47.0 + t * 22.0)
-                    + 0.09 * h(vec2(floor(t * 30.0), tick));
-        /* turbulent break-up, stronger the further from the throat */
-        float turb = mix(1.0, 0.55 + 0.75 * h(vec2(floor(t * 26.0), floor(uv.x * 18.0) + tick * 0.5)), t * t);
-
-        if (uInner > 0.5) {
-          /* inner barrel: white hot, short, mostly opaque near the throat */
-          float core = smoothstep(1.0, 0.0, t);
-          float a = (core * core * 0.62 + dia * 0.9) * flick * uPower * uFade * mix(1.0, shell, 0.35);
-          vec3 c = mix(vec3(1.0, 0.99, 0.97), vec3(0.55, 0.85, 1.0), sqrt(t));
-          gl_FragColor = clamp(vec4(c * a * 3.1, a * 0.85), 0.0, 32.0);
-        } else {
-          /* outer envelope: long, translucent, edge-lit, fading to nothing */
-          float body = smoothstep(1.0, 0.02, t) * (0.35 + 0.65 * smoothstep(0.0, 0.10, t));
-          float a = body * shell * turb * flick * uPower * 0.42 * uFade;
-          vec3 c = mix(vec3(0.72, 0.90, 1.0), vec3(0.09, 0.26, 0.86), pow(t, 0.7));
-          gl_FragColor = clamp(vec4(c * a * 2.0, a * 0.7), 0.0, 32.0);
-        }
+        /* One continuous density integral: a narrow potential core lives
+           inside the root of the broad shear layer.  It has no independent
+           transparent surface that could survive hull occlusion as a floating
+           rectangle. */
+        float rootAttach = smoothstep(0.0,
+          0.12 + radialCoordinate * 0.18, t);
+        float coreAttach = smoothstep(0.0,
+          0.035 + radialCoordinate * 0.05, t);
+        float spent = 1.0 - smoothstep(0.50, 0.96, t);
+        float filament = mix(0.88, 0.18 + turbulence * 0.95,
+          smoothstep(0.12, 0.78, t));
+        float breakup = mix(1.0, smoothstep(0.28, 0.76, turbulence),
+          smoothstep(0.48, 0.94, t));
+        float cellBreath = 0.82 + 0.18 * cos(pow(t, 0.9) * 17.278);
+        float coreDensity = 1.0 - smoothstep(0.06, 0.40, radialCoordinate);
+        float coreEnergy = exp(-t * 3.8) * coreDensity * coreAttach;
+        float opticalDepth = (0.17 + drive * 0.20) * rootAttach * spent
+          * filament * breakup * cellBreath * radialDensity;
+        opticalDepth += (0.16 + drive * 0.21) * coreEnergy;
+        opticalDepth *= cameraFade;
+        float viewGain = mix(0.82, 1.08, 1.0 - ndv);
+        float alpha = clamp(1.0 - exp(-opticalDepth * 0.46 * viewGain), 0.0, 0.26);
+        vec3 coldShear = mix(vec3(0.62, 0.82, 1.0), vec3(0.10, 0.26, 0.68),
+          smoothstep(0.10, 0.92, t));
+        vec3 color = mix(coldShear, vec3(1.0, 0.94, 0.80),
+          smoothstep(0.02, 0.48, coreEnergy));
+        float radiance = mix(1.10, 0.36, smoothstep(0.08, 0.96, t))
+          * (0.82 + drive * 0.18)
+          + coreEnergy * (1.30 + drive * 0.90);
+        gl_FragColor = clamp(vec4(color * radiance * alpha, alpha), 0.0, 2.8);
+        if (gl_FragColor.a < 0.002) discard;
       }`,
   });
 }
 function haloMaterial() {
   return new THREE.ShaderMaterial({
-    uniforms: { uPower: { value: 0.3 }, uFade: { value: 1 } },
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    uniforms: { uPower: { value: 0.1 } },
+    transparent: true,
+    premultipliedAlpha: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.NormalBlending,
+    side: THREE.DoubleSide,
+    toneMapped: true,
     vertexShader: `
       #include <common>
       #include <logdepthbuf_pars_vertex>
-      varying vec2 vUv;
+      varying float vRadius; varying vec3 vWorld;
       void main(){
-        vUv=uv;
-        gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);
+        mat4 instance = mat4(1.0);
+        #ifdef USE_INSTANCING
+          instance = instanceMatrix;
+        #endif
+        vec4 wp = modelMatrix * instance * vec4(position, 1.0);
+        vRadius = length(position.xy);
+        vWorld = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
         #include <logdepthbuf_vertex>
       }`,
-    /* RingGeometry's uv.y runs 0 at the inner radius to 1 at the outer, so the
-       halo can peak on the lip and fall away both ways instead of being a flat
-       washer of light across the aperture. */
     fragmentShader: `
       #include <logdepthbuf_pars_fragment>
-      uniform float uPower; uniform float uFade; varying vec2 vUv;
+      uniform float uPower; varying float vRadius; varying vec3 vWorld;
       void main(){
         #include <logdepthbuf_fragment>
-        float r = clamp(vUv.y, 0.0, 1.0);
-        float f = exp(-pow((r - 0.30) / 0.34, 2.0));
-        float a = clamp(uPower, 0.0, 4.0) * 0.55 * f * uFade;
-        vec3 c = mix(vec3(0.80, 0.94, 1.0), vec3(0.16, 0.40, 1.0), r);
-        gl_FragColor = clamp(vec4(c * a * 2.0, a * 0.8), 0.0, 32.0);
+        float drive = smoothstep(0.06, 1.7, uPower);
+        float lip = exp(-pow((vRadius - 0.73) / 0.105, 2.0));
+        float throat = exp(-pow(vRadius / 0.48, 2.2));
+        float cameraFade = smoothstep(0.35, 1.35, distance(cameraPosition, vWorld));
+        float lipAlpha = (0.065 + drive * 0.085) * lip;
+        float throatAlpha = (0.055 + drive * 0.115) * throat;
+        float baseAlpha = lipAlpha + throatAlpha;
+        float alpha = baseAlpha * cameraFade;
+        vec3 lipColor = mix(vec3(1.0, 0.91, 0.72), vec3(0.42, 0.72, 1.0),
+          smoothstep(0.56, 0.94, vRadius));
+        vec3 throatColor = mix(vec3(1.0, 0.95, 0.83), vec3(0.54, 0.78, 1.0),
+          smoothstep(0.0, 0.72, vRadius));
+        vec3 color = (lipColor * lipAlpha + throatColor * throatAlpha)
+          / max(baseAlpha, 0.001);
+        float radiance = 1.20 + drive * 0.92;
+        gl_FragColor = clamp(vec4(color * radiance * alpha, alpha), 0.0, 2.2);
+        if (alpha < 0.002) discard;
       }`,
   });
 }
