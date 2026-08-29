@@ -9,7 +9,7 @@ import { makeRng, strHash32 } from './rng.js';
 import { Simplex, worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
 import {
-  applyTerrainDetail, applyWaterWaves, applyCloudField, applyNoctilucentField,
+  applyTerrainDetail, applyWaterWaves, applyCloudField,
   cloudBaseDensityCPU, cloudDensityCPU, detailTexture,
 } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
@@ -832,7 +832,7 @@ export class Planet {
       } else {
         mat = new THREE.MeshPhysicalMaterial({
           color: this.liquidColor, transparent: true, opacity: this.liquidOpacity,
-          roughness: 0.13, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
+          roughness: 0.21, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
         });
       }
       if (this.liquid === 'water' || this.liquid === 'toxic') mat = applyWaterWaves(mat, this);
@@ -983,29 +983,33 @@ export class Planet {
       }
       const waterShader = this.liquidMat?.userData.shader;
       if (waterShader?.uniforms.uCloudK) waterShader.uniforms.uCloudK.value = 0.72;
-      // Cloud shell geometry follows the pre-rewrite proportions: a floating
-      // deck clearly separated from the surface (base ≈ hAmp above the
-      // peaks, ~4% of R) inside the lower atmosphere. The rewrite's
-      // 0.4–14 km "physical troposphere" envelope glued the deck to the
-      // ground on the 6,000 km curated worlds; these formulas restore the
-      // authored look the legacy WebGL chain was tuned against. Authored
-      // cloudLayer values keep overriding them for curated bodies.
-      const authoredCloudLayer = this.tuning.cloudLayer || null;
-      const cloudShellBaseAlt = Number.isFinite(authoredCloudLayer?.minAltitudeMeters)
-        ? clamp(authoredCloudLayer.minAltitudeMeters, 250, this.atmoHeight * 0.5)
-        : Math.min(
-          Math.max(this.hAmp * 1.12 + 1400, R * this.cloudBaseFraction * 0.68),
-          this.atmoHeight * 0.58,
-        );
+      // cloudLayer is a compatibility/gameplay envelope, not render geometry.
+      // The optical volume keeps the mature weather field but receives its
+      // own layer: high enough to clear relief, deep enough for orbit-scale
+      // towers, and far below the old 230–420 km second-planet shell.
+      const authoredRenderLayer = this.tuning.cloudRenderLayer || null;
+      const naturalCloudBaseAlt = clamp(this.hAmp * 1.12 + 1400, 12000, 22000);
+      const cloudShellBaseAlt = Number.isFinite(authoredRenderLayer?.minAltitudeMeters)
+        ? clamp(authoredRenderLayer.minAltitudeMeters, 8000, 30000)
+        : naturalCloudBaseAlt;
       const cloudR = R + cloudShellBaseAlt;
-      const authoredCloudTop = Number(authoredCloudLayer?.maxAltitudeMeters);
+      const naturalCloudDepth = clamp(
+        56000 + this.weatherProfile.storminess * 30000
+          + this.weatherProfile.highClouds * 10000
+          + (this.type === 'toxic' ? 8000 : 0)
+          - (this.type === 'ice' ? 5000 : 0),
+        50000,
+        88000,
+      );
+      const authoredCloudTop = Number(authoredRenderLayer?.maxAltitudeMeters);
       const cloudShellTopAlt = Number.isFinite(authoredCloudTop)
-        ? clamp(authoredCloudTop, cloudShellBaseAlt + 4000, this.atmoHeight * 0.75)
-        : cloudShellBaseAlt + Math.min(
-          Math.max(this.hAmp * 0.86, R * this.cloudThicknessFraction * 0.72, 4200),
-          this.atmoHeight * 0.38,
-        );
+        ? clamp(authoredCloudTop, cloudShellBaseAlt + 45000, 105000)
+        : cloudShellBaseAlt + naturalCloudDepth;
       const thick = cloudShellTopAlt - cloudShellBaseAlt;
+      this.cloudRenderLayer = {
+        minAltitudeMeters: cloudShellBaseAlt,
+        maxAltitudeMeters: cloudShellTopAlt,
+      };
       const cmat = new THREE.MeshBasicMaterial({
         color: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
         transparent: true, depthWrite: false, opacity: 0.88,
@@ -1022,7 +1026,7 @@ export class Planet {
       this.group.add(this.cloudMesh);
       this.cloudBands.push({
         r: cloudR, mesh: this.cloudMesh, opacity: 0.88,
-        halfThickness: Math.max(this.hAmp * 0.8, R * this.cloudThicknessFraction * 0.5, 1800),
+        halfThickness: thick * 0.5,
         thickness: thick,
         cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
         ox: o1[0], oy: o1[1], oz: o1[2],
@@ -1077,36 +1081,18 @@ export class Planet {
         this.cloudSpin2 = o2[3];
         this.cloudBands.push({
           r: upperR, mesh: this.cloudMesh2, opacity: 0.28,
-          halfThickness: Math.max(this.hAmp * 0.65, R * this.cloudThicknessFraction * 0.42, 1400),
+          halfThickness: Math.max(1400, thick * 0.18),
+          thickness: thick * 0.32,
           cov0: 0.55 - coverage * 0.42 * 0.24, cov1: 0.86 - coverage * 0.42 * 0.14,
           ox: o2[0], oy: o2[1], oz: o2[2],
         });
       }
-      // Noctilucent ice belongs near the mesopause, not in the tropospheric
-      // volume. A very thin, terminator-only shell gives orbit the authentic
-      // silver-blue hairline without contaminating daytime surface views.
-      // Scale with the atmosphere envelope (0.86×) instead of the old fixed
-      // 82 km cap: on the curated 6,000 km worlds the cap put this deck
-      // BELOW the restored floating cloud shell.
-      if (this.atmoHeight > 30000 && coverage > 0.18) {
-        const noctilucentAltitude = this.atmoHeight * 0.86;
-        const noctilucentSource = new THREE.MeshBasicMaterial({
-          color: 0xaadfff,
-          transparent: true,
-          depthWrite: false,
-          opacity: 0.12,
-          side: THREE.DoubleSide,
-        });
-        const noctilucentMat = applyNoctilucentField(noctilucentSource,
-          clamp(coverage * 0.62, 0.08, 0.5), o1[0], o1[1], o1[2],
-          this.cloudWeatherHiTex);
-        this.cloudMeshNoctilucent = new THREE.Mesh(
-          new THREE.SphereGeometry(R + noctilucentAltitude, 192, 128),
-          noctilucentMat);
-        this.cloudMeshNoctilucent.renderOrder = 2;
-        this.cloudMeshNoctilucent.frustumCulled = false;
-        this.group.add(this.cloudMeshNoctilucent);
-      }
+      // WebGL currently has no noctilucent density-field shader. The previous
+      // identity fallback rendered the source material unchanged, turning this
+      // feature into a complete translucent blue DoubleSide sphere: literally
+      // the shield shell seen around every cloudy planet. Keep the mesospheric
+      // species in weather data, but do not instantiate render geometry until
+      // it has a sparse, sun/terminator-gated WebGL implementation.
     }
 
     const ringSystem = this.ringSystem;

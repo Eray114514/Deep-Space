@@ -5,7 +5,7 @@ import { createAtmosphereProfile } from './atmosphere-physics.js';
 const LUT_WIDTH = 256;
 const LUT_HEIGHT = 96;
 const LUT_STEPS = 48;
-const VIEW_STEPS = 12;
+const VIEW_STEPS = 20;
 
 const _cameraOffset = new THREE.Vector3();
 const _localCamera = new THREE.Vector3();
@@ -253,7 +253,23 @@ export class AtmospherePass extends Pass {
 
         vec4 sunlightOpticalDepth(float altitude, float radialCosine) {
           vec2 uv = vec2(radialCosine * 0.5 + 0.5, altitude / uTopAltitude);
-          return texture2D(tOpticalDepth, clamp(uv, vec2(0.001), vec2(0.999)));
+          // The portable LUT uses nearest texture filtering. Reconstruct the
+          // four neighboring texels explicitly so solar-horizon visibility
+          // changes continuously instead of exposing angular bands at the
+          // limb. Fixed dimensions match the generated optical-depth LUT.
+          vec2 size = vec2(256.0, 96.0);
+          vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * size - 0.5;
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          vec2 p00 = (clamp(i, vec2(0.0), size - 1.0) + 0.5) / size;
+          vec2 p10 = (clamp(i + vec2(1.0, 0.0), vec2(0.0), size - 1.0) + 0.5) / size;
+          vec2 p01 = (clamp(i + vec2(0.0, 1.0), vec2(0.0), size - 1.0) + 0.5) / size;
+          vec2 p11 = (clamp(i + vec2(1.0), vec2(0.0), size - 1.0) + 0.5) / size;
+          vec4 a = mix(texture2D(tOpticalDepth, p00),
+            texture2D(tOpticalDepth, p10), f.x);
+          vec4 b = mix(texture2D(tOpticalDepth, p01),
+            texture2D(tOpticalDepth, p11), f.x);
+          return mix(a, b, f.y);
         }
 
         float eclipseVisibility(vec3 samplePosition, vec3 sunDirection) {
@@ -321,6 +337,7 @@ export class AtmospherePass extends Pass {
           float t0 = max(outer.x, 0.0);
           float t1 = outer.y;
           vec2 ground = sphereHits(uCameraLocal, uGroundR, direction);
+          float hitsSurface = ground.x > t0 && ground.x < outer.y ? 1.0 : 0.0;
           if (ground.x > t0) t1 = min(t1, ground.x);
           if (sceneDepth < 0.999999) {
             float forwardDistance = pow(uCameraFar + 1.0, sceneDepth) - 1.0;
@@ -333,6 +350,8 @@ export class AtmospherePass extends Pass {
           }
 
           float stepLength = (t1 - t0) / float(VIEW_STEPS);
+          float observerAltitude = max(length(uCameraLocal) - uGroundR, 0.0);
+          float spaceView = smoothstep(12000.0, 180000.0, observerAltitude);
           vec3 viewDepth = vec3(0.0);
           vec3 radiance = vec3(0.0);
           for (int i = 0; i < VIEW_STEPS; i++) {
@@ -357,16 +376,74 @@ export class AtmospherePass extends Pass {
               * uSunEnergy1;
             vec3 indirectTint = uScatterTint * 0.72
               + uGroundAlbedo * (groundLight0 + groundLight1) * 0.28;
+            // Multiple scattering illuminates a surface sky from every
+            // direction, but it must not draw an equally bright ring around
+            // the night side when viewed from space. Retain only a small,
+            // sun-facing residual for an exterior observer.
+            float indirectDay = clamp(groundLight0 + groundLight1, 0.0, 1.0);
+            float indirectVisibility = mix(1.0,
+              0.04 + 0.18 * smoothstep(0.0, 0.45, indirectDay), spaceView);
             source += uBetaRayleigh * rayleighDensity * 0.006
-              * (uSunEnergy0 + uSunEnergy1) * indirectTint;
+              * (uSunEnergy0 + uSunEnergy1) * indirectTint * indirectVisibility;
             radiance += source * stepLength;
             viewDepth += segmentDepth;
           }
           vec3 extinction = uBetaRayleigh * viewDepth.x
             + uBetaMieExtinction * viewDepth.y + uBetaOzone * viewDepth.z;
           vec3 transmittance = exp(-min(extinction, vec3(50.0)));
-          radiance *= uScatterTint * uRadianceScale;
-          gl_FragColor = vec4(radiance + base.rgb * transmittance, base.a);
+
+          // A real atmosphere has no visible geometric outer surface. For a
+          // space observer, shape the already integrated signal by tangent
+          // altitude and local illumination so its energy dissolves into
+          // space instead of revealing uTopR as a uniform blue/purple ring.
+          float closestT = max(-dot(uCameraLocal, direction), 0.0);
+          vec3 closestPosition = uCameraLocal + direction * closestT;
+          float tangentAltitude = max(length(closestPosition) - uGroundR, 0.0);
+          float altitudeFade = exp(-tangentAltitude
+            / max(uRayleighScaleHeight * 1.65, 1.0));
+          altitudeFade *= 1.0 - smoothstep(0.62, 0.98,
+            tangentAltitude / max(uTopAltitude, 1.0));
+          vec3 closestRadial = normalize(closestPosition);
+          float exteriorDay0 = smoothstep(-0.04, 0.20,
+            dot(closestRadial, normalize(uSunDirection0))) * uSunEnergy0;
+          float exteriorDay1 = smoothstep(-0.04, 0.20,
+            dot(closestRadial, normalize(uSunDirection1))) * uSunEnergy1;
+          float exteriorLight = clamp(exteriorDay0 + exteriorDay1, 0.0, 1.0);
+          // At full phase the tangent circle is perpendicular to the star and
+          // a uniform exterior signal reads as a shield. Suppress it for a
+          // sunward observer; at quadrature the lit radial half instead forms
+          // a directional arc, which is the useful atmospheric cue.
+          float observerSun = dot(normalize(uCameraLocal),
+            normalize(uSunDirection0));
+          float exteriorPhase = 1.0 - smoothstep(0.28, 0.88, observerSun);
+
+          float surfaceCosine = 1.0;
+          if (hitsSurface > 0.5) {
+            vec3 surfacePosition = uCameraLocal + direction * max(ground.x, 0.0);
+            surfaceCosine = clamp(dot(normalize(surfacePosition), -direction), 0.0, 1.0);
+          }
+          float surfaceLimb = pow(1.0 - surfaceCosine, 2.2);
+          // In a sun-behind-camera/full-phase shot the atmosphere is read
+          // mostly through haze inside the geographical limb. Exterior glow
+          // is intentionally weak; otherwise even a physically thin column
+          // resolves as a graphic outline at game-camera scale.
+          float discWeight = 0.008 + surfaceLimb * 0.42;
+          float exteriorWeight = altitudeFade * mix(0.002, 3.20, exteriorLight)
+            * exteriorPhase;
+          float spaceScatterWeight = mix(exteriorWeight, discWeight, hitsSurface);
+
+          // The opaque planet already owns its surface colour and lighting.
+          // Only a grazing fraction of atmospheric extinction belongs on the
+          // disc in orbit; applying the full sky-column attenuation there was
+          // the grey film seen across land, ocean and clouds.
+          float discExtinctionWeight = 0.018 + surfaceLimb * 0.12;
+          float spaceExtinctionWeight = mix(1.0, discExtinctionWeight, hitsSurface);
+          vec3 compositeTransmittance = mix(transmittance,
+            mix(vec3(1.0), transmittance, spaceExtinctionWeight), spaceView);
+          float radianceExposure = uRadianceScale * mix(1.0, 0.45, spaceView);
+          float radianceWeight = mix(1.0, spaceScatterWeight, spaceView);
+          radiance *= uScatterTint * radianceExposure * radianceWeight;
+          gl_FragColor = vec4(radiance + base.rgb * compositeTransmittance, base.a);
         }`,
     });
     this.quad = new FullScreenQuad(this.material);
@@ -446,8 +523,14 @@ export class AtmospherePass extends Pass {
 
   render(renderer, writeBuffer, readBuffer) {
     const uniforms = this.material.uniforms;
+    // Composer ping-pongs colour between passes, but a fullscreen atmosphere
+    // composite does not carry the RenderPass depth attachment into its output
+    // target. Preserve the actual opaque-scene depth explicitly for the cloud
+    // pass that follows; sampling readBuffer.depthTexture there would sample
+    // the atmosphere target and let clouds leak over terrain and vegetation.
+    this.sceneDepthTexture = readBuffer.depthTexture || null;
     uniforms.tBase.value = readBuffer.texture;
-    uniforms.tSceneDepth.value = readBuffer.depthTexture;
+    uniforms.tSceneDepth.value = this.sceneDepthTexture;
     uniforms.uCameraFar.value = this.camera.far;
     this.camera.updateMatrixWorld(true);
     uniforms.uInvProjection.value.copy(this.camera.projectionMatrixInverse);

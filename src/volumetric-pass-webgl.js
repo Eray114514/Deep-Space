@@ -221,7 +221,8 @@ export class VolumetricPass extends Pass {
     // pass. Feed its logarithmic depth texture into the cloud shader so ray
     // integration terminates at terrain, flora, props and the ship instead of
     // compositing as a screen-front layer.
-    const depthTexture = readBuffer.depthTexture || null;
+    const depthTexture = this.sceneDepthSource?.sceneDepthTexture
+      || readBuffer.depthTexture || null;
     const bindSceneDepth = (material) => {
       const uniforms = material?.uniforms;
       if (!uniforms?.tSceneDepth) return;

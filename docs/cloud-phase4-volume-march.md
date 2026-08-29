@@ -219,6 +219,7 @@ S1 并行跑照片盲测。
 **A. 前置与基线保护**
 - [x] A0 阶段 5 大气已通过整球/低轨/地面与昼暮夜真实硬件验收，云评审不再受异常蓝壳污染
 - [x] A1 修正 `tools/cloudvisualdiag.js`：使用实际 WebGL 云行星，不依赖已删除的 `volCloudState`/WebGPU launcher；采样档控制真实映射到当前 `uMaxSteps`
+- [x] A1b 正常玩家最终合成闸门：`post=1`、HUD 开启、约 4319 km 下分离 atmosphere/cloud/eclipse。兼容 `cloudLayer=230–420 km` 不再驱动渲染；母星光学云为 12–91.8 km、近地积分深度 45 km、220–1600 km 连续过渡；日食云影保留局部运动但不形成死黑块。首轮严格盲审 FAIL 后继续修正，第二个全新上下文审查者明确 PASS
 - [ ] A2 固定当前 WebGL 云 atmosphere-off 与正常合成两套 S1–S4、多种子/昼暮夜截图和帧时，作为不可退化基线
 
 **B. 天气体系与云种（本阶段核心）**
@@ -253,6 +254,7 @@ S1 并行跑照片盲测。
 | 2026-08-10 | A0 | `cloudresourcetest` + 三种子真实上传 | 生命周期、取消、设备丢失、原子交换和两帧释放通过；CPU 44.53 MiB / GPU 44.50 MiB；50 个上传切片，最慢 0.60 ms，0 次超过 4 ms |
 | 2026-08-10 | A2 | NVIDIA Blackwell WebGPU 固定切片 1024 点 + 随机 512 点 | 固定切片密度最大误差 0.442%、消光 0.912%；随机点 0.292% / 0.437%，均 < 1% |
 | 2026-08-10 | A1/A3 | `CLOUD-PHASE4-A/B/C` × 9.5/17.75/23.5 h × S1–S4；另跑 4/6/8/12 | 52 张截图、12 组相邻档 diff；无浏览器错误/设备丢失。8→12 mean RGB：S1 1.011、S2 2.588、S3 0.033、S4 0.219（/255）；近场质量档未定 |
-| 2026-08-27 | 新 A0/A1 | WebGL2 当前生产云 + 新物理大气，整球/临边/地表昼暮夜；云/大气独立开关；80 步控制；性能档配置链 | `test-results/cloud-webgl-reference/`：真实 Intel WebGL2 2000×1125，`volCloudState=false`、cloud depth=1、80→`uMaxSteps=80`，浏览器零错误。修正高分辨率天气图新增后 profile 实参错位，`test:gameplay` 确认 performance 档 `uQuality=0` 且仍渲染同一体积云；不改变 ultra 云形。大气贡献 0.0216、云贡献 0.0615 mean RGB；当前宽云侧切面明确留给 B3/B4，不在前置阶段改形态 |
+| 2026-08-27 | 新 A0/A1 | WebGL2 当前生产云 + 新物理大气，整球/临边/地表昼暮夜；云/大气独立开关；80 步控制；性能档配置链 | `test-results/cloud-webgl-reference/`：真实 Intel WebGL2 2000×1125，`volCloudState=false`、cloud depth=1、80→`uMaxSteps=80`，浏览器零错误。修正高分辨率天气图新增后 profile 实参错位，`test:gameplay` 确认 performance 档 `uQuality=0` 且仍渲染同一体积云；不改变 ultra 云形。大气贡献 0.0216、云贡献 0.0615 mean RGB。该轮错误地把 230–420 km 宽壳留给 B3/B4，已由 2026-08-29 玩家最终合成复核纠正 |
+| 2026-08-29 | A1b 玩家最终合成纠错（PASS） | 正常启动、HUD/post=1、4319.97 km；atmosphere/cloud/eclipse 三路 A/B；整球/侧光/地面昼暮夜；光学云包络、opaque depth 与卫星遮挡回归 | 第一次 1.836–16.006 km 修正被用户否决为薄贴图；最终母星为 12–91.8 km、近地 45 km、220–1600 km 连续 LOD、临边 3.2×。撤除无 WebGL 场 shader 的完整夜光云球；大气改为满相盘内/侧光方向弧，最终 A/B 大气/云 mean RGB 贡献 0.00712/0.03351，变化面积 9.12%/17.35%。显式向云传递 opaque depth，HDR 云不再触发整圈 bloom。首轮新审查者 FAIL 后继续修正，第二位全新上下文审查者按 AAA 基础质量门禁明确 PASS |
 
 完整机器可读记录：`test-results/cloud-gpu/report.json` 与 `test-results/cloud-phase4/manifest.json`。这些是实现证据，不替代 D2 五维目标图评审和用户实机验收。

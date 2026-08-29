@@ -158,10 +158,15 @@ try {
     volume: NMS.volumeState(),
     hasLegacyRewriteState: Boolean(NMS._planet(index)?.volCloudState),
     cloudBand: { ...NMS._planet(index)?.volCloudBand },
+    cloudRenderLayer: { ...NMS._planet(index)?.cloudRenderLayer },
   }), planetIndex);
   assert.equal(runtime.stats.rendererBackend, 'webgl2');
   assert.ok(runtime.volume.activeBodyId, 'a live WebGL cloud planet must own the pass');
   assert.equal(runtime.volume.cloudDepthReady, 1, 'cloud pass must consume opaque depth');
+  assert.ok(runtime.cloudRenderLayer.minAltitudeMeters >= 8000,
+    'the optical cloud base must clear the highest authored relief');
+  assert.ok(runtime.cloudRenderLayer.maxAltitudeMeters <= 105000,
+    'the optical cloud top must not recreate the legacy planetary shell');
   assert.deepEqual(errors, [], 'cloud reference emitted browser errors');
 
   const report = {
@@ -175,6 +180,7 @@ try {
       dependsOnLegacyVolCloudState: false,
       observedLegacyVolCloudState: runtime.hasLegacyRewriteState,
       cloudBand: runtime.cloudBand,
+      cloudRenderLayer: runtime.cloudRenderLayer,
       depthReady: runtime.volume.cloudDepthReady,
     },
     results,

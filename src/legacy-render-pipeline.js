@@ -62,7 +62,10 @@ export class GameLegacyPipeline {
     this.composer.addPass(this.atmospherePass);
 
     this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale }) : null;
-    if (this.volumePass) this.composer.addPass(this.volumePass);
+    if (this.volumePass) {
+      this.volumePass.sceneDepthSource = this.atmospherePass;
+      this.composer.addPass(this.volumePass);
+    }
 
     this.warp = new ShaderPass(WarpDriveShader);
     this.warp.enabled = false;
