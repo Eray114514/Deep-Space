@@ -126,6 +126,8 @@ try {
     return {
       terrainMaterial: planet?.terrainMaterial?.type,
       waterMaterial: planet?.liquidMat?.type,
+      waterTransmission: planet?.liquidMat?.transmission,
+      waterIor: planet?.liquidMat?.ior,
       terrainUniforms: Object.keys(terrainShader?.uniforms || {}),
       waterUniforms: Object.keys(waterShader?.uniforms || {}),
       terrainMorphAttributes: terrainMesh
@@ -141,6 +143,10 @@ try {
   console.log(JSON.stringify({ shaderContract }, null, 2));
   assert.equal(shaderContract.terrainMaterial, 'MeshStandardMaterial');
   assert.equal(shaderContract.waterMaterial, 'MeshPhysicalMaterial');
+  assert.ok(shaderContract.waterTransmission >= 0.8,
+    'water enables the opaque-scene transmission path');
+  assert.ok(Math.abs(shaderContract.waterIor - 1.333) < 1e-6,
+    'water uses the physical liquid IOR');
   for (const name of ['uLodMorph']) {
     assert.ok(shaderContract.terrainUniforms.includes(name), `terrain owns ${name}`);
   }

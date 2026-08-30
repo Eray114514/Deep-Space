@@ -838,6 +838,12 @@ export class Planet {
         mat = new THREE.MeshPhysicalMaterial({
           color: this.liquidColor, transparent: true, opacity: this.liquidOpacity,
           roughness: 0.21, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
+          // Three's WebGL transmission buffer supplies the real terrain image
+          // beneath the water. The shader gates it to the first metres of the
+          // water column, where wave-normal refraction is actually visible.
+          transmission: 0.86, ior: 1.333, thickness: 1.0,
+          attenuationDistance: 7.0,
+          attenuationColor: this.liquidColor.clone().lerp(new THREE.Color(1, 1, 1), 0.62),
         });
       }
       if (this.liquid === 'water' || this.liquid === 'toxic') mat = applyWaterWaves(mat, this);

@@ -792,9 +792,35 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             * (1.0 - cloud * 0.7);
           totalEmissiveRadiance += vec3(0.36, 0.42, 0.46)
             * gWaterFoam * 0.18;
-        }`);
+        }`)
+      .replace('#include <transmission_fragment>', `
+        #ifdef USE_TRANSMISSION
+          // Refract the already-rendered opaque terrain through the same wave
+          // normal used by reflection. Only optically shallow water exposes
+          // the floor; Beer-Lambert in-scatter owns the deeper column.
+          float shallowTransmission = (1.0 - smoothstep(1.25, 14.0, vDepth))
+            * (1.0 - gWaterFoam);
+          material.transmission = transmission * shallowTransmission;
+          material.transmissionAlpha = 1.0;
+          material.thickness = clamp(vDepth * 0.11, 0.12, 1.7);
+          material.attenuationDistance = attenuationDistance;
+          material.attenuationColor = attenuationColor;
+          vec3 transmissionPosition = vWorldPosition;
+          vec3 transmissionView = normalize(cameraPosition - transmissionPosition);
+          vec3 transmissionNormal = transformNormalByInverseViewMatrix(normal, viewMatrix);
+          vec4 transmitted = getIBLVolumeRefraction(
+            transmissionNormal, transmissionView, material.roughness,
+            material.diffuseContribution, material.specularColorBlended,
+            material.specularF90, transmissionPosition, modelMatrix, viewMatrix,
+            projectionMatrix, material.dispersion, material.ior,
+            material.thickness, material.attenuationColor,
+            material.attenuationDistance);
+          material.transmissionAlpha = mix(material.transmissionAlpha,
+            transmitted.a, material.transmission);
+          totalDiffuse = mix(totalDiffuse, transmitted.rgb, material.transmission);
+        #endif`);
   };
-  material.customProgramCacheKey = () => 'water-column-sky-glint-v2-distance-spectrum-webgl-morph';
+  material.customProgramCacheKey = () => 'water-column-sky-glint-v3-shallow-refraction-webgl-morph';
   return material;
 }
 

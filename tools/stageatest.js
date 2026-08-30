@@ -147,6 +147,13 @@ try {
     && channelTransmissionAt55m[1] < 0.08
     && channelTransmissionAt55m[2] > channelTransmissionAt55m[1] * 4,
   '55 m water must read blue/deep rather than reveal a pale sea floor');
+  assert.equal(home.liquidMat.transmission, 0.86,
+    'production water keeps real WebGL screen transmission enabled');
+  assert.ok(Math.abs(home.liquidMat.ior - 1.333) < 1e-6,
+    'water refraction must retain the physical liquid IOR');
+  assert.ok(home.liquidMat.attenuationDistance >= 5
+    && home.liquidMat.attenuationDistance <= 10,
+  'screen-refracted shallow terrain must be attenuated over a metre-scale water column');
 
   assert.equal(skirtDropForMorph(0), 0.08);
   assert.ok(Math.abs(skirtDropForMorph(100) - 112.04) < 1e-9);
