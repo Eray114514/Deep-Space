@@ -258,7 +258,9 @@ export function buildMaterials(maxAniso = 8) {
 
   const engineCore = new THREE.MeshStandardMaterial({
     color: 0x000000, emissive: 0x59b7ff, emissiveIntensity: 3.2,
-    metalness: 0, roughness: 1, toneMapped: false,
+    /* A multi-metre combustion throat is scene-referred light, not an LED.
+       AgX must roll it off or the blue emitter clips into a flat white plate. */
+    metalness: 0, roughness: 1, toneMapped: true,
   });
   /* heat-stained refractory: the nozzle is soot and oxide, not polished steel */
   const nozzle = alloy(0x3a332d, 0.40, 0.62, 0.45, panel, 3.0,

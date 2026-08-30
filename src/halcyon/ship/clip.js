@@ -116,6 +116,12 @@ export function clipExteriorToCabin(group, def) {
   for (const child of group.children) {
     const m = child;
     if (!m.isMesh) continue;
+    /* Instanced meshes store authored transforms outside the shared geometry.
+       Feeding their local template into a ship-space cabin predicate corrupts
+       every instance identically — engine throat circles were literally cut
+       in half at local y=0.  This clipper has no instance-transform contract,
+       so instanced exterior systems must remain owned by their builders. */
+    if (m.isInstancedMesh) continue;
     total += dropTrisInside(m, inside);
   }
   return total;

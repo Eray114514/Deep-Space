@@ -564,8 +564,9 @@ export class Ship {
     }
     for (const r of this.ext.glowRings) {
       r.material.uniforms.uPower.value = power;
+      r.material.uniforms.uTime.value = t;
     }
-    this.mats.engineCore.emissiveIntensity = 1.45 + power * 2.25;
+    this.mats.engineCore.emissiveIntensity = 0.72 + power * 0.88;
 
     /* strobes — kept modest so the bloom chain never saturates */
     const blink = (t % 1.3) < 0.09 ? 3.2 : 0.05;

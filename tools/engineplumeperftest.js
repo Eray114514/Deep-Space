@@ -118,7 +118,17 @@ try {
     document.body.classList.add('hide-hud');
     NMS.setAdaptiveQualityLocked(true);
     if (NMS._pipeline.grade) NMS._pipeline.grade.enabled = false;
-    const { ship } = NMS._internals;
+    const { scene, ship } = NMS._internals;
+    /* Terrain/water construction continues asynchronously after boot and used
+       to contaminate the A/B with unrelated draw and GPU work.  Measure the
+       foreground contract in a fixed dark-field scene: same camera, lights and
+       ship, with only the two plume rigs toggled by the harness. */
+    for (const child of scene.children) {
+      if (child === ship.group || child.isLight) continue;
+      child.visible = false;
+    }
+    for (const strobe of ship.ext.strobes) strobe.visible = false;
+    scene.background = new NMS._THREE.Color(0x02050a);
     const originalFx = ship.updateEngineFx.bind(ship);
     ship.updateEngineFx = (dt) => originalFx(dt, 1.34e6, 0, 0);
     const originalUpdate = ship.update.bind(ship);
@@ -132,19 +142,45 @@ try {
   });
   await page.waitForTimeout(1800);
 
-  // Run the control first, then the full effect after shaders and post passes
-  // have already warmed.  A final screenshot proves the measured state.
-  const control = await measure('plume-off', false);
-  const plume = await measure('plume-on', true);
+  /* ABBAAB order cancels most thermal/driver drift and stops one unusually
+     slow frame window from becoming the claimed effect cost.  Each entry still
+     owns 42 independent GPU timer queries and its own rAF distribution. */
+  const sequence = [false, true, true, false, false, true];
+  const samples = [];
+  for (let index = 0; index < sequence.length; index++) {
+    const visible = sequence[index];
+    samples.push(await measure(`${visible ? 'plume-on' : 'plume-off'}-${index + 1}`, visible));
+  }
   await page.screenshot({ path: path.join(output, '06-high-power-2k-hardware.png') });
 
-  const gpuUsable = control.gpuSamples >= 24 && plume.gpuSamples >= 24;
+  const controls = samples.filter((sample) => !sample.visible);
+  const plumes = samples.filter((sample) => sample.visible);
+  const median = (values) => {
+    const ordered = values.slice().sort((a, b) => a - b);
+    return ordered[Math.floor(ordered.length / 2)];
+  };
+  const aggregate = (entries) => ({
+    frameMedianMs: median(entries.map((entry) => entry.frameMedianMs)),
+    frameP95Ms: median(entries.map((entry) => entry.frameP95Ms)),
+    draws: median(entries.map((entry) => entry.draws)),
+    triangles: median(entries.map((entry) => entry.triangles)),
+    gpuSamples: entries.reduce((sum, entry) => sum + entry.gpuSamples, 0),
+    gpuMedianMs: entries.every((entry) => entry.gpuMedianMs != null)
+      ? median(entries.map((entry) => entry.gpuMedianMs)) : null,
+    gpuP95Ms: entries.every((entry) => entry.gpuP95Ms != null)
+      ? median(entries.map((entry) => entry.gpuP95Ms)) : null,
+  });
+  const control = aggregate(controls);
+  const plume = aggregate(plumes);
+  const gpuUsable = controls.every((sample) => sample.gpuSamples >= 24)
+    && plumes.every((sample) => sample.gpuSamples >= 24);
   const gpuDeltaMs = gpuUsable ? plume.gpuMedianMs - control.gpuMedianMs : null;
   const frameDeltaMs = plume.frameMedianMs - control.frameMedianMs;
   const result = {
     viewport: '2560x1440',
     control,
     plume,
+    samples,
     drawDelta: plume.draws - control.draws,
     gpuDeltaMs,
     frameDeltaMs,
