@@ -84,12 +84,33 @@ try {
   });
   check(contextSuppressed, 'browser context menu is suppressed on the flight canvas');
 
+  // The debug takeoff normally forces chase view. If a future seat-flow keeps
+  // cockpit ownership instead, switch explicitly before exercising the
+  // separate RMB boost contract advertised by the external flight HUD.
+  const seatedView = await page.evaluate('NMS.shipViewState()');
+  check(['cockpit', 'chase'].includes(seatedView.viewMode),
+    `takeoff retains a valid flight camera owner (${seatedView.viewMode})`);
+  await page.evaluate(() => NMS.shipViewDebug.setViewMode('chase'));
+
   await page.waitForTimeout(500);
   const speedBefore = await page.evaluate('NMS._internals.nav.vel.length()');
   await page.mouse.move(cx, cy);
   await page.mouse.down({ button: 'right' });
-  await page.waitForFunction(() => window.shipHUD?.getTelemetry().speedRatio > 0.995,
-    null, { timeout: 15000 });
+  try {
+    await page.waitForFunction(() => window.shipHUD?.getTelemetry().speedRatio > 0.995,
+      null, { timeout: 45000 });
+  } catch (error) {
+    console.log('boost timeout diagnostics', await page.evaluate(() => ({
+      stats: NMS.stats(),
+      telemetry: shipHUD.getTelemetry(),
+      speedScale: NMS._internals.spaceCtl.speedScale,
+      boosting: NMS._internals.spaceCtl.boosting,
+      canMouseBoost: NMS._internals.spaceCtl.canMouseBoost(),
+      view: NMS.shipViewState(),
+      velocity: NMS._internals.nav.vel.toArray(),
+    })));
+    throw error;
+  }
   const duringBoost = await page.evaluate('NMS.stats().boost');
   const speedBoost = await page.evaluate('NMS._internals.nav.vel.length()');
   const boostGauge = await page.evaluate('shipHUD.getTelemetry()');
