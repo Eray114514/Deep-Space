@@ -449,15 +449,16 @@ export class SpatialRift {
       new THREE.TubeGeometry(curve, 520, 5 * this.profile.edgeThickness, 5, true),
       this.massMat,
     );
-    this.mass.name = 'spatial-rift-inner-wall';
+    this.mass.name = 'spatial-rift-rim-core';
     this.mass.renderOrder = 3;
     this.visual.add(this.mass);
 
     this.tunnelMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      // This is the passage's physical thickness, not a luminous overlay.
+      // It must occlude the source world between the entrance and exit.
+      transparent: false,
+      depthWrite: true,
       toneMapped: false,
       uniforms: { uTime: { value: 0 }, uOpen: { value: 0 }, uTension: { value: 0 }, uBurst: { value: 0 } },
       vertexShader: /* glsl */`
@@ -499,13 +500,14 @@ export class SpatialRift {
           c += spectral(fract(vAngle / 6.28318 + uTime * .08)) * uTension * (l1 * .55 + .08);
           c += vec3(.72, .48, 1.08) * uBurst * (.12 + .88 * fracture) * (1.0 - vDepth);
           c *= smoothstep(.045, .20, uOpen) + uTension * .10;
-          float alpha = (.002 + fracture * .08) * (1.0 - vDepth * .84)
-            * smoothstep(.045, .20, uOpen);
-          gl_FragColor = vec4(c, min(alpha, .12));
+          vec3 wall = mix(vec3(.002, .008, .025), vec3(.0005, .002, .007), vDepth);
+          wall += c * (.07 + .11 * fracture) * (1.0 - vDepth * .65);
+          gl_FragColor = vec4(wall, 1.0);
         }
       `,
     });
     this.tunnel = new THREE.Mesh(this._makeTunnelGeometry(), this.tunnelMat);
+    this.tunnel.name = 'spatial-rift-inner-wall';
     this.tunnel.renderOrder = 2;
     this.visual.add(this.tunnel);
 
@@ -572,20 +574,26 @@ export class SpatialRift {
         uniform float uTime; uniform vec2 uHalfSize;
         varying vec4 vProj; varying vec2 vLocal;
         float boundary(float a) {
-          return 1.0 + .100 * sin(a * 3.0 + .72) + .052 * sin(a * 5.0 - 1.18)
+          float contour = 1.0 + .100 * sin(a * 3.0 + .72) + .052 * sin(a * 5.0 - 1.18)
             + .030 * sin(a * 11.0 + 2.16) + .020 * sin(a * 17.0 - .45)
-            + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0)
-            + uOpen * (
+            + .030 * pow(max(0.0, sin(a * 7.0 + 1.7)), 8.0);
+          float livingEdge =
               .030 * sin(a * 4.0 - uTime * .72 + .8)
               + .018 * sin(a * 9.0 + uTime * 1.18 - 1.6)
               + .010 * sin(a * 23.0 - uTime * 2.05)
-              + .006 * sin(a * 47.0 + uTime * 3.4)
-            );
+              + .006 * sin(a * 47.0 + uTime * 3.4);
+          // Match the tunnel's last ring (aDepth = 1), including its live
+          // displacement. An independently shrunken aperture leaves a slit
+          // through which the source world is visible behind the solid wall.
+          return contour * .982 * (1.0 + .012 * sin(11.0 + a * 5.0))
+            * (1.0 + livingEdge * uOpen * .52)
+            * (1.0 + sin(a * 8.0 + 18.0 - uTime * 1.15) * .010 * uOpen)
+            * (1.0 + sin(a * 29.0 - 12.0 - uTime * 7.0) * .006 * uTension);
         }
         void main() {
           #include <logdepthbuf_fragment>
           vec2 p = vLocal / uHalfSize;
-          float a = atan(p.y, p.x), r = length(p), b = boundary(a) * .965;
+          float a = atan(p.y, p.x), r = length(p), b = boundary(a) * 1.003;
           float aa = max(fwidth(r) * 1.6, .002);
           float mask = 1.0 - smoothstep(b - aa, b + aa, r);
           if (mask < .45 || uOpen < .035) discard;

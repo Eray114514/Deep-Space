@@ -150,6 +150,7 @@ try {
     const targetBodyId = NMS.riftState().previewVolume?.bodyId;
     const targetBody = riftPreviewSystem?.bodyById.get(targetBodyId);
     const wall = scene.getObjectByName('spatial-rift-inner-wall');
+    const wallDepth = wall?.geometry.getAttribute('aDepth');
     const portal = scene.getObjectByName('spatial-rift-portal-cutout');
     const previewBodies = [
       ...(riftPreviewSystem?.planets || []),
@@ -157,6 +158,8 @@ try {
     ];
     return {
       wallOpaque: !!wall && !wall.material.transparent && wall.material.depthWrite,
+      wallSpansPassage: !!wallDepth && wallDepth.getX(0) === 0
+        && wallDepth.getX(wallDepth.count - 1) === 1,
       portalOpaqueCutout: !!portal
         && !portal.material.transparent
         && portal.material.depthWrite
@@ -174,6 +177,8 @@ try {
   });
   check(portalContract.wallOpaque,
     'rift thickness is an opaque depth-writing inner wall');
+  check(portalContract.wallSpansPassage,
+    'inner-wall checks target the full tunnel geometry, not the entrance rim');
   check(portalContract.portalOpaqueCutout,
     'destination portal is an opaque cutout rendered before the inner wall');
   check(portalContract.previewSceneHidden,
@@ -192,27 +197,113 @@ try {
       && stable.previewVolume?.portalVolumeLayerRendered,
   `portal renders the selected planet's atmosphere and volume clouds (${stable.previewVolume?.cloudCoverage?.toFixed(2) || 'missing'} coverage)`);
 
+  const wallOcclusion = await page.evaluate(() => {
+    const THREE = NMS._THREE;
+    const renderer = NMS._renderer;
+    const source = NMS._internals.scene.getObjectByName('spatial-rift-inner-wall');
+    const material = source.material.clone();
+    const wall = new THREE.Mesh(source.geometry, material);
+    wall.renderOrder = 2;
+    const scene = new THREE.Scene();
+    scene.add(wall);
+    // Draw a bright source-world surface AFTER the wall. This catches both
+    // alpha blending and missing depth writes using actual GPU output.
+    const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(10000, 10000),
+      new THREE.MeshBasicMaterial());
+    backdrop.position.z = -500;
+    backdrop.renderOrder = 3;
+    scene.add(backdrop);
+    const camera = new THREE.PerspectiveCamera(60, 512 / 288, 1, 10000);
+    const target = new THREE.WebGLRenderTarget(512, 288);
+    const maskMaterial = material.clone();
+    maskMaterial.transparent = false;
+    maskMaterial.depthWrite = true;
+    maskMaterial.blending = THREE.NoBlending;
+    maskMaterial.fragmentShader = `
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
+      void main() {
+        #include <logdepthbuf_fragment>
+        gl_FragColor = vec4(1.0);
+      }
+    `;
+    const previous = {
+      target: renderer.getRenderTarget(),
+      autoClear: renderer.autoClear,
+      toneMapping: renderer.toneMapping,
+    };
+    const draw = (color) => {
+      scene.background = new THREE.Color(color);
+      backdrop.material.color.set(color);
+      renderer.setRenderTarget(target);
+      renderer.render(scene, camera);
+      const pixels = new Uint8Array(512 * 288 * 4);
+      renderer.readRenderTargetPixels(target, 0, 0, 512, 288, pixels);
+      return pixels;
+    };
+    const samples = [];
+    try {
+      renderer.autoClear = true;
+      renderer.toneMapping = THREE.NoToneMapping;
+      for (const position of [[0, 0, 800], [110, 65, 260], [0, 0, -48]]) {
+        camera.position.set(...position);
+        if (position[2] < 0) camera.lookAt(410, 0, -48);
+        else camera.lookAt(0, 0, -96);
+        for (const time of [0, 0.7, 2.3]) {
+          material.uniforms.uTime.value = maskMaterial.uniforms.uTime.value = time;
+          wall.material = maskMaterial;
+          backdrop.visible = false;
+          const mask = draw(0x000000);
+          wall.material = material;
+          backdrop.visible = true;
+          const a = draw(0xff00ff);
+          const b = draw(0x00ff00);
+          let covered = 0;
+          let leaked = 0;
+          let backgroundChanged = 0;
+          for (let y = 1; y < 287; y++) {
+            for (let x = 1; x < 511; x++) {
+              const i = (y * 512 + x) * 4;
+              const inside = [-513, -512, -511, -1, 0, 1, 511, 512, 513]
+                .every((offset) => mask[i + offset * 4] > 250);
+              const delta = Math.max(...[0, 1, 2].map((c) => Math.abs(a[i + c] - b[i + c])));
+              if (inside) { covered++; if (delta > 1) leaked++; }
+              else if (mask[i] === 0 && delta > 100) backgroundChanged++;
+            }
+          }
+          samples.push({ position, time, covered, leaked, backgroundChanged });
+        }
+      }
+    } finally {
+      renderer.setRenderTarget(previous.target);
+      renderer.autoClear = previous.autoClear;
+      renderer.toneMapping = previous.toneMapping;
+      target.dispose();
+      backdrop.geometry.dispose();
+      backdrop.material.dispose();
+      material.dispose();
+      maskMaterial.dispose();
+    }
+    return samples;
+  });
+  const wallOccludes = wallOcclusion.every((sample) => sample.covered > 1000
+    && sample.leaked === 0 && sample.backgroundChanged > 1000);
+  check(wallOccludes,
+    `rift wall blocks source-world pixels in ${wallOcclusion.length} viewpoints/animation phases`);
+  if (!wallOccludes) console.error(JSON.stringify({ wallOcclusion }, null, 2));
+
   await page.screenshot({ path: frameA });
   await page.waitForTimeout(420);
   await page.screenshot({ path: frameB });
   const [a, b] = await Promise.all([readFile(frameA), readFile(frameB)])
     .then((buffers) => buffers.map((buffer) => PNG.sync.read(buffer)));
   let changed = 0;
-  let opaqueWallPixels = 0;
   for (let i = 0; i < a.data.length; i += 4) {
     const delta = Math.abs(a.data[i] - b.data[i])
       + Math.abs(a.data[i + 1] - b.data[i + 1])
       + Math.abs(a.data[i + 2] - b.data[i + 2]);
     if (delta > 24) changed++;
-    const red = a.data[i];
-    const green = a.data[i + 1];
-    const blue = a.data[i + 2];
-    if (red < 24 && green < 62 && blue > 18 && blue > green * 1.15) {
-      opaqueWallPixels++;
-    }
   }
-  check(opaqueWallPixels > 30000,
-    `stable passage visibly contains an opaque inner wall (${opaqueWallPixels} pixels)`);
   check(changed > 1200, `stable passage edge remains visibly alive (${changed} changed pixels)`);
 
   check(await page.evaluate('NMS.approachRift(38)'), 'test pilot can stage immediately before the threshold');
