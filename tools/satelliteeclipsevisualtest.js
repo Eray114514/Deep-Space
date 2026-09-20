@@ -1,4 +1,4 @@
-// WebGPU hardware acceptance for satellite occlusion and eclipse composition.
+// WebGL2 hardware checks for satellite occlusion and eclipse composition.
 //
 // The test deliberately separates the opaque surface from participating media:
 // a local eclipse must move across both with the same projected centroid, while
@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
 import { startServer } from './server.js';
-import { launchWebGPUHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 
 const outputDir = new URL('../test-results/satellite-eclipse/', import.meta.url);
 
@@ -148,13 +148,9 @@ function changedFraction(referenceBuffer, controlBuffer, candidateBuffer,
 }
 
 const { server, port } = await startServer(0);
-const browser = await launchWebGPUHardwareBrowser({ headless: true });
-if (!browser) {
-  console.log('Satellite eclipse visual test skipped: no hardware WebGPU browser.');
-  await new Promise((resolve) => server.close(resolve));
-  process.exit(0);
-}
-
+const browser = await launchHardwareBrowser({
+  executablePath: resolveSystemChromePath() || undefined, headless: true,
+});
 await mkdir(outputDir, { recursive: true });
 const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
 const errors = [];

@@ -1308,9 +1308,15 @@ export class Planet {
     }
     const clouds = this.volCloudUniforms || this.volCloudMat?.uniforms;
     if (clouds) {
+      clouds.uSunDir?.value.copy(primary.localDirection);
       clouds.uSunC?.value.copy(primary.colorValue);
       if (clouds.uSunEnergy) {
         clouds.uSunEnergy.value = primary.irradianceFraction ?? 1;
+      }
+      clouds.uSecondarySunDir?.value.copy(secondary?.localDirection || primary.localDirection);
+      clouds.uSecondarySunC?.value.copy(secondary?.colorValue || primary.colorValue);
+      if (clouds.uSecondarySunEnergy) {
+        clouds.uSecondarySunEnergy.value = secondary?.irradianceFraction ?? 0;
       }
       clouds.uStellarDirections0?.value.copy(primary.localDirection);
       clouds.uStellarRadiance0?.value.copy(primary.colorValue);

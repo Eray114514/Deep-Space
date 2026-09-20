@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 import { createAtmosphereProfile } from './atmosphere-physics.js';
+import {
+  ATMOSPHERE_VIEW_STEPS, ATMOSPHERE_LUT_STEPS,
+  atmosphereSampleBoundary, atmosphereQuadratureGLSL,
+} from './atmosphere-quadrature.js';
 
 const LUT_WIDTH = 256;
 const LUT_HEIGHT = 96;
-const LUT_STEPS = 48;
-const VIEW_STEPS = 20;
+const LUT_STEPS = ATMOSPHERE_LUT_STEPS;
+const VIEW_STEPS = ATMOSPHERE_VIEW_STEPS;
+const LUT_CACHE_LIMIT = 4;
 
 const _cameraOffset = new THREE.Vector3();
 const _localCamera = new THREE.Vector3();
@@ -79,10 +84,11 @@ export function createAtmosphereOpticalDepthLut(profile,
   width = LUT_WIDTH, height = LUT_HEIGHT, steps = LUT_STEPS) {
   const data = new Float32Array(width * height * 4);
   for (let y = 0; y < height; y++) {
-    const altitude = profile.topAltitudeMeters * y / Math.max(1, height - 1);
+    const altitude = profile.topAltitudeMeters * (y / Math.max(1, height - 1)) ** 2;
     const radius = profile.groundRadiusMeters + altitude;
     for (let x = 0; x < width; x++) {
-      const mu = -1 + 2 * x / Math.max(1, width - 1);
+      const angularCoordinate = -1 + 2 * x / Math.max(1, width - 1);
+      const mu = angularCoordinate * Math.abs(angularCoordinate);
       const offset = (y * width + x) * 4;
       const blocked = pathHitsGround(radius, mu, profile.groundRadiusMeters);
       // Retain a valid limiting optical depth on the shadow side. Zero RGB
@@ -96,12 +102,15 @@ export function createAtmosphereOpticalDepthLut(profile,
         data[offset + 3] = 1;
         continue;
       }
-      const stepLength = distance / steps;
       let rayleigh = 0;
       let mie = 0;
       let ozone = 0;
+      let previous = 0;
       for (let i = 0; i < steps; i++) {
-        const t = (i + 0.5) * stepLength;
+        const next = atmosphereSampleBoundary(0, distance, -radius * opticalMu, (i + 1) / steps);
+        const stepLength = next - previous;
+        const t = (previous + next) * 0.5;
+        previous = next;
         const sampleRadius = Math.sqrt(radius * radius + t * t + 2 * radius * t * opticalMu);
         const sampleAltitude = Math.max(0, sampleRadius - profile.groundRadiusMeters);
         rayleigh += Math.exp(-sampleAltitude / profile.rayleighScaleHeightMeters) * stepLength;
@@ -167,12 +176,14 @@ export class AtmospherePass extends Pass {
     this.activePlanet = null;
     this.profileState = null;
     this.lutTexture = null;
-    this.profileCache = new WeakMap();
-    this.lutTextures = new Set();
+    // Bounded profile LRU: keys must not retain entire inactive planet graphs.
+    // WeakMap planet keys alone did not release the former Set-held textures.
+    // Four 256x96 RGBA32F LUTs occupy at most 1.5 MiB before driver overhead.
+    this.profileCache = new Map();
     this.visualEnabled = true;
     this.needsSwap = true;
     this.material = new THREE.ShaderMaterial({
-      name: 'Physical atmosphere composite',
+      name: 'Atmosphere composite (hybrid)',
       depthTest: false,
       depthWrite: true,
       blending: THREE.NoBlending,
@@ -241,6 +252,7 @@ export class AtmospherePass extends Pass {
         varying vec2 vUv;
 
         const float PI = 3.141592653589793;
+        ${atmosphereQuadratureGLSL}
 
         vec2 sphereHits(vec3 origin, float radius, vec3 direction) {
           float b = dot(origin, direction);
@@ -255,7 +267,10 @@ export class AtmospherePass extends Pass {
         }
 
         vec4 sunlightOpticalDepth(float altitude, float radialCosine) {
-          vec2 uv = vec2(radialCosine * 0.5 + 0.5, altitude / uTopAltitude);
+          // Quadratic altitude and signed-quadratic cosine grids resolve
+          // the aerosol layer and solar horizon without enlarging the LUT.
+          vec2 uv = vec2(sign(radialCosine) * sqrt(abs(radialCosine)) * 0.5 + 0.5,
+            sqrt(max(altitude / uTopAltitude, 0.0)));
           // The portable LUT uses nearest texture filtering. Reconstruct the
           // four neighboring texels explicitly so solar-horizon visibility
           // changes continuously instead of exposing angular bands at the
@@ -364,13 +379,18 @@ export class AtmospherePass extends Pass {
             return;
           }
 
-          float stepLength = (t1 - t0) / float(VIEW_STEPS);
+          float closest = -dot(uCameraLocal, direction);
+          float previous = t0;
           float observerAltitude = max(length(uCameraLocal) - uGroundR, 0.0);
           float spaceView = smoothstep(12000.0, 180000.0, observerAltitude);
           vec3 viewDepth = vec3(0.0);
           vec3 radiance = vec3(0.0);
           for (int i = 0; i < VIEW_STEPS; i++) {
-            float t = t0 + (float(i) + 0.5) * stepLength;
+            float next = atmosphereSampleBoundary(t0, t1, closest,
+              float(i + 1) / float(VIEW_STEPS));
+            float stepLength = next - previous;
+            float t = (previous + next) * 0.5;
+            previous = next;
             vec3 position = uCameraLocal + direction * t;
             float altitude = clamp(length(position) - uGroundR, 0.0, uTopAltitude);
             float rayleighDensity = exp(-altitude / uRayleighScaleHeight) * uDensityScale;
@@ -459,10 +479,9 @@ export class AtmospherePass extends Pass {
             * mix(0.35, 1.0, exteriorPhase);
           float spaceScatterWeight = mix(exteriorWeight, discWeight, hitsSurface);
 
-          // The opaque planet already owns its surface colour and lighting.
-          // Only a grazing fraction of atmospheric extinction belongs on the
-          // disc in orbit; applying the full sky-column attenuation there was
-          // the grey film seen across land, ocean and clouds.
+          // Legacy artistic attenuation, not a physical ownership rule.
+          // B5 must replace these independent scatter/extinction weights and
+          // prove final RGB convergence before calling this a physical model.
           float discExtinctionWeight = 0.018 + surfaceLimb * 0.12;
           // Exterior rays look through atmosphere toward space, but the
           // background must not be attenuated as if it were a bright opaque
@@ -497,14 +516,19 @@ export class AtmospherePass extends Pass {
       = this.activePlanet && this.visualEnabled ? 1 : 0;
     if (!this.activePlanet) return;
     this.activePlanet.atmoMesh.visible = false;
-    let cached = this.profileCache.get(this.activePlanet);
+    this.profileState = atmosphereRenderProfile(this.activePlanet);
+    const cacheKey = JSON.stringify(this.profileState.profile);
+    let cached = this.profileCache.get(cacheKey);
     if (!cached) {
-      const profileState = atmosphereRenderProfile(this.activePlanet);
-      cached = { profileState, texture: makeLutTexture(profileState.profile) };
-      this.profileCache.set(this.activePlanet, cached);
-      this.lutTextures.add(cached.texture);
+      cached = { texture: makeLutTexture(this.profileState.profile) };
     }
-    this.profileState = cached.profileState;
+    this.profileCache.delete(cacheKey);
+    this.profileCache.set(cacheKey, cached);
+    if (this.profileCache.size > LUT_CACHE_LIMIT) {
+      const oldest = this.profileCache.keys().next().value;
+      this.profileCache.get(oldest).texture.dispose();
+      this.profileCache.delete(oldest);
+    }
     this.lutTexture = cached.texture;
     this.material.uniforms.tOpticalDepth.value = this.lutTexture;
     const { profile, densityScale } = this.profileState;
@@ -579,8 +603,12 @@ export class AtmospherePass extends Pass {
 
   dispose() {
     if (this.activePlanet?.atmoMesh) this.activePlanet.atmoMesh.visible = true;
-    for (const texture of this.lutTextures) texture.dispose();
-    this.lutTextures.clear();
+    for (const cached of this.profileCache.values()) cached.texture.dispose();
+    this.profileCache.clear();
+    this.lutTexture = null;
+    this.profileState = null;
+    this.activePlanet = null;
+    this.material.uniforms.tOpticalDepth.value = null;
     this.material.dispose();
     this.quad.dispose();
   }

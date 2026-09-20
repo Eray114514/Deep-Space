@@ -321,14 +321,15 @@ try {
           caveat: 'Cloud temporal jitter and unrelated particles may still evolve; numerical sky attribution, not pixel-exact full-scene acceptance.' };
       }, fixture.index);
       try {
-        for (const mode of ['sky-identity', 'sky-clouds-off-atmo20', 'sky-clouds-off-atmo80', 'sky-atmo-off-clouds-on',
+        for (const mode of ['sky-identity', 'sky-clouds-off-atmo-production', 'sky-clouds-off-atmo-reference4x', 'sky-atmo-off-clouds-on',
           'sky-clouds-thin', 'sky-clouds-isotropic', 'sky-clouds-thin-isotropic']) {
           await page.evaluate((mode) => {
             const held = window.__oceanSkyDiagnostic, pipeline = NMS._pipeline;
             const atmosphere = pipeline.atmospherePass.material;
-            if (!/#define VIEW_STEPS\s+20\b/.test(held.shader)) throw new Error('Sky diagnostic expects production VIEW_STEPS=20; review fixture.');
-            atmosphere.fragmentShader = mode === 'sky-clouds-off-atmo80'
-              ? held.shader.replace(/#define VIEW_STEPS\s+20\b/, '#define VIEW_STEPS 80') : held.shader;
+            const productionSteps = Number(held.shader.match(/#define VIEW_STEPS\s+(\d+)/)?.[1]);
+            if (!(productionSteps > 0)) throw new Error('Sky diagnostic cannot find production VIEW_STEPS.');
+            atmosphere.fragmentShader = mode === 'sky-clouds-off-atmo-reference4x'
+              ? held.shader.replace(/#define VIEW_STEPS\s+\d+\b/, `#define VIEW_STEPS ${productionSteps * 4}`) : held.shader;
             atmosphere.needsUpdate = true;
             for (const entry of held.cloudMaterials) {
               entry.material.fragmentShader = entry.shader;

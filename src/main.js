@@ -3556,20 +3556,21 @@ function ambience(dt = 1 / 60) {
       .filter((body) => body !== p)
       .map((body) => ({ position: body.posUniv, radius: body.R }));
     let totalFlux = 0, litFlux = 0, clearLitFlux = 0;
-    const stellarVisibility = [];
     for (const view of universe.system.starViews) {
       const delta = _v2.copy(view.positionUniv).sub(nav.pos);
       const flux = view.spec.luminositySolar / Math.max(1, delta.lengthSq());
       const directDay = smoothstep(-0.22, 0.28, _up.dot(delta.normalize()));
       const visibility = eclipseFraction(nav.pos, view.positionUniv, view.spec.radiusRender, blockers);
-      stellarVisibility.push(visibility);
       totalFlux += flux;
       clearLitFlux += flux * directDay;
       litFlux += flux * directDay * (0.08 + visibility * 0.92);
     }
     day = totalFlux > 0 ? clamp(litFlux / totalFlux, 0, 1) : 0;
     envEclipse = clearLitFlux > 0 ? clamp(1 - litFlux / clearLitFlux, 0, 1) : 0;
-    p.setStellarLights?.(universe.system.stellarLightFieldFrom(p.posUniv, stellarVisibility));
+    // Camera visibility drives exposure only. Passing it into the planet's
+    // light field darkens every world point when the camera enters an umbra,
+    // and applies eclipse extinction twice in shaders with local occlusion.
+    p.setStellarLights?.(universe.system.stellarLightFieldFrom(p.posUniv));
     // Planet-wide eclipse lighting is evaluated at each surface sample. The
     // camera scalar above remains useful for exposure, but must never darken
     // the whole globe or masquerade as a screen-space satellite decal.

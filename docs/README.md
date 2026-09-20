@@ -1,0 +1,13 @@
+# 文档入口
+
+| 文档 | 负责内容 |
+|---|---|
+| [优化路线图](optimization-roadmap.md) | 全局目标、批次依赖、A 验收基线和 C/D/E/R 后续 |
+| [云与大气计划](cloud-atmosphere-rewrite.md) | B 唯一规格、进度和返工顺序 |
+| [阶段 4 云演进](cloud-phase4-volume-march.md) | B 的天气接线、云种/形态、采样实施清单 |
+| [视觉验收协议](visual-targets/README.md) | S1–S4 机位、五维评审、动态/性能和记录格式 |
+| [2026-09-20 B 审查](reviews/cloud-atmosphere-2026-09-20.md) | 本轮代码核对、实测、证据边界和返工理由 |
+| [B 基础修复与交接](reviews/cloud-atmosphere-foundation-2026-09-20.md) | 已落地修复、复现命令与继续施工的边界 |
+| [发布宇宙与重筛](world-curation.md) | 内容身份、锁与重构结束后的筛选流程 |
+
+过期方案和过程日志保存在 Git，精简前版本为 `294c204`。`curation/` 图片是历史候选资料，`visual-targets/` 是目标参考，均不能替代当前源码的生产画面。全量重构期间宇宙锁延期，按用户要求在重构验收后重筛。

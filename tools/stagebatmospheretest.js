@@ -116,11 +116,8 @@ assert.ok(tangent.every((channel, index) => channel < vertical[index]),
   'a tangent ray crosses more atmosphere than a zenith ray');
 assert.ok(vertical[2] < vertical[0],
   'short wavelengths lose more direct energy to Rayleigh scattering');
-for (let channel = 0; channel < 3; channel++) {
-  const absorbed = 1 - vertical[channel];
-  assert.ok(Math.abs(vertical[channel] + absorbed - 1) < 1e-12,
-    'direct transmission plus removed energy is conserved');
-}
+// Numerical convergence of the production march and LUT is exercised by
+// atmospherequadraturetest.js. T + (1 - T) is not an energy-conservation test.
 
 const night = nightSkyIrradiance();
 assert.ok(finiteRgb(night) && luminance(night) > 0 && luminance(night) < 0.001,

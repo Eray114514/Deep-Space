@@ -467,11 +467,13 @@ async function runScenario(page, canvas, scenario) {
 function diagnose(report) {
   const gpuErrors = report.gpu.errors.length
     + report.consoleErrors.filter((message) =>
-      /ValidationError|WebGPU|GPUDevice|command buffer|TextureBinding|RenderAttachment/i
+      /WebGL|GL_INVALID|Shader Error|context lost|GL_OUT_OF_MEMORY/i
         .test(message)).length;
   const textureEvents = report.scenarios.flatMap((scenario) =>
     scenario.gpuEvents.filter((event) =>
-      event.type === 'GPUDevice.createTexture' || event.type === 'GPUTexture.destroy'));
+      event.type === 'WebGL2.createTexture' || event.type === 'WebGL2.deleteTexture'));
+  const uploadEvents = report.scenarios.flatMap((scenario) =>
+    scenario.gpuEvents.filter((event) => /^WebGL2\.tex/.test(event.type)));
   const resizeEvents = report.scenarios.flatMap((scenario) =>
     scenario.continuous.stateChanges.filter((event) =>
       event.changes.some((change) => /volumeScale|opticalTop|localVolumeBudget/.test(change))));
@@ -504,6 +506,7 @@ function diagnose(report) {
     evidence: {
       gpuErrors,
       textureLifecycleEventsDuringMotion: textureEvents.length,
+      textureUploadOrStorageCallsDuringMotion: uploadEvents.length,
       renderTargetOrBudgetChangesDuringMotion: resizeEvents.length,
       staticPoseMeanAbsRgbP95: Number(staticP95.toFixed(4)),
       matchedPoseMeanAbsRgbP95: Number(matchedP95.toFixed(4)),
@@ -514,6 +517,7 @@ function diagnose(report) {
       'Matched-pose equality proves determinism, not stability while pixels move.',
       'Adjacent-frame differences include ordinary parallax because this probe does not reproject by optical flow.',
       'The probe does not grade sub-resolution silhouette stair-stepping.',
+      'WebGL call durations measure CPU submission, not asynchronous GPU upload cost.',
     ],
     interpretation: owner === 'no-frame-varying-state-detected'
       ? 'The locked fixture is deterministic and its render resources stay stable. Motion aliasing and limb stair-stepping remain unclassified.'
@@ -545,54 +549,23 @@ try {
       globalThis.__atmosphereMotionGpuTrace = trace;
       const record = (type, detail = {}) =>
         trace.events.push({ time: performance.now(), type, ...detail });
-      const normalizeSize = (size) => {
-        if (Array.isArray(size)) return [...size];
-        if (size && typeof size === 'object') {
-          return [
-            Number(size.width ?? 1),
-            Number(size.height ?? 1),
-            Number(size.depthOrArrayLayers ?? 1),
-          ];
-        }
-        return [Number(size) || 1, 1, 1];
-      };
-      const devicePrototype = globalThis.GPUDevice?.prototype;
-      const createTexture = devicePrototype?.createTexture;
-      if (typeof createTexture === 'function') {
-        devicePrototype.createTexture = function tracedCreateTexture(descriptor = {}) {
-          record('GPUDevice.createTexture', {
-            label: descriptor.label || '',
-            size: normalizeSize(descriptor.size),
-            format: descriptor.format || '',
-            usage: descriptor.usage || 0,
-            samples: descriptor.sampleCount || 1,
-          });
-          const texture = createTexture.call(this, descriptor);
-          const destroy = texture.destroy;
-          if (typeof destroy === 'function') {
-            texture.destroy = function tracedDestroy() {
-              record('GPUTexture.destroy', {
-                label: descriptor.label || '',
-                size: normalizeSize(descriptor.size),
-              });
-              return destroy.call(this);
-            };
-          }
-          return texture;
+      // WebGL is the production backend. Trace native allocations, uploads
+      // and releases; WebGPU device hooks never observed this renderer.
+      const prototype = globalThis.WebGL2RenderingContext?.prototype;
+      for (const name of ['createTexture', 'deleteTexture', 'texImage2D',
+        'texImage3D', 'texSubImage2D', 'texSubImage3D', 'texStorage2D', 'texStorage3D']) {
+        const original = prototype?.[name];
+        if (typeof original !== 'function') continue;
+        prototype[name] = function tracedWebGLCall(...args) {
+          const start = performance.now();
+          const result = original.apply(this, args);
+          record('WebGL2.' + name, { cpuMs: performance.now() - start });
+          return result;
         };
       }
-      const adapterPrototype = globalThis.GPUAdapter?.prototype;
-      const requestDevice = adapterPrototype?.requestDevice;
-      if (typeof requestDevice === 'function') {
-        adapterPrototype.requestDevice = async function tracedRequestDevice(...args) {
-          const device = await requestDevice.apply(this, args);
-          device.addEventListener('uncapturederror', (event) => {
-            const message = event.error?.message || String(event.error || event);
-            trace.errors.push({ time: performance.now(), message });
-          });
-          return device;
-        };
-      }
+      document.addEventListener('webglcontextlost', () => {
+        trace.errors.push({ time: performance.now(), message: 'WebGL context lost' });
+      }, true);
     });
 
     const page = await context.newPage();

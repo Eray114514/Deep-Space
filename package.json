@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/worldlocktest.js",
+    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
     "test:cloud-species": "node tools/cloudspeciestest.js",
     "test:weather-system": "node tools/weathersystemtest.js",
     "test:cloud-sampling": "node tools/cloudsamplingtest.js",
@@ -38,7 +38,7 @@
     "test:ocean-waves": "node tools/oceanwavefieldtest.js",
     "test:ocean-climate": "node tools/oceanclimatetest.js",
     "test:stage-a:continuous": "node tools/stageacontinuoustest.js",
-    "test:stage-b": "node tools/stagebatmospheretest.js && node tools/weathertest.js",
+    "test:stage-b": "node tools/stagebatmospheretest.js && node tools/atmospherequadraturetest.js && node tools/weathertest.js",
     "test:gameplay": "node tools/gameplaytest.js",
     "test:performance": "node tools/perftest.js",
     "test:hero-handoff": "node tools/hero-playtest.js",
@@ -68,7 +68,9 @@
     "explore": "node tools/explore.js",
     "seamtest": "node tools/seamtest.js",
     "touchtest": "node tools/touchtest.js",
-    "test:terrain-continuity": "node tools/terrainlatticetest.js && node tools/terrainridgetest.js && node tools/terraincratertest.js"
+    "test:terrain-continuity": "node tools/terrainlatticetest.js && node tools/terrainridgetest.js && node tools/terraincratertest.js",
+    "test:stage-b:gpu": "node tools/stagebfoundationtest.js",
+    "test:stage-b:player": "node tools/stagebplaytest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

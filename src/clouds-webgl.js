@@ -1,6 +1,6 @@
-// True volumetric clouds: a raymarched shell between two radii around the
-// planet. Coverage reuses the SAME field as the impostor deck, the terrain's
-// cast shadows and the CPU transit fog — one cloudscape, four consumers.
+// Volumetric cloud baseline: a raymarched shell around the planet.
+// The analytic coverage input is shared with the old deck; storms and 3D
+// density are still volume-only. New CPU weather is not yet connected here.
 // Shape and erosion come from a small tileable 3D noise texture; lighting is
 // a short sun march with Beer extinction, a powder term and an HG phase.
 // Everything is driven by the planet's cloud spin (frozen under ?freeze=1),
@@ -129,6 +129,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uVolumeSize: { value: new THREE.Vector2(1, 1) },
       uSunC: { value: new THREE.Color(1, 0.98, 0.94) },
       uSunEnergy: { value: 1 },
+      uSecondarySunDir: { value: new THREE.Vector3(0, 1, 0) },
+      uSecondarySunC: { value: new THREE.Color(1, 1, 1) },
+      uSecondarySunEnergy: { value: 0 },
       uEclipseEnabled: { value: 0 },
       uEclipseCenter: { value: new THREE.Vector3() },
       uEclipseRadius: { value: 1 },
@@ -160,7 +163,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uniform sampler2D uCloudNoise;
       uniform sampler2D tSceneDepth;
       uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uMaxSteps;
-      uniform float uSunEnergy;
+      uniform float uSunEnergy, uSecondarySunEnergy;
+      uniform vec3 uSecondarySunDir, uSecondarySunC;
       uniform float uEclipseEnabled, uEclipseRadius, uEclipseStarAngle;
       uniform vec3 uEclipseCenter;
       uniform float uDepthReady, uCameraFar;
@@ -170,7 +174,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       varying vec3 vDirection;
       varying vec3 vViewDirection;
 
-      float eclipseVisibility(vec3 samplePosition) {
+      float eclipseVisibility(vec3 samplePosition, vec3 sunDirection) {
         if (uEclipseEnabled < 0.5) return 1.0;
         vec3 toOccluder = uEclipseCenter - samplePosition;
         float distanceToOccluder = length(toOccluder);
@@ -178,7 +182,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         float angularRadius = asin(clamp(
           uEclipseRadius / distanceToOccluder, 0.0, 0.9999));
         float separation = acos(clamp(dot(
-          normalize(toOccluder), normalize(uSunDir)), -1.0, 1.0));
+          normalize(toOccluder), sunDirection), -1.0, 1.0));
         float penumbra = max(uEclipseStarAngle, 0.00002);
         return smoothstep(max(angularRadius - penumbra, 0.0),
           angularRadius + penumbra, separation);
@@ -226,16 +230,6 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         return vec2(-b - s, -b + s);
       }
 
-      float renderOuterRadius() {
-        // Near the surface, a 150 km render layer becomes an implausible wall.
-        // Preserve a 45 km local weather volume, then reveal the authored
-        // orbit-scale depth continuously only after leaving the weather layer.
-        float cameraAltitude = max(length(uCameraLocal) - uGroundR, 0.0);
-        float orbitReadability = smoothstep(220000.0, 1600000.0, cameraAltitude);
-        float localOuter = min(uRout, uRin + 45000.0);
-        return mix(localOuter, uRout, orbitReadability);
-      }
-
       float sceneRayLimit() {
         if (uDepthReady < 0.5) return 1e20;
         vec2 uv = gl_FragCoord.xy / max(uVolumeSize, vec2(1.0));
@@ -247,10 +241,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         return forwardDistance / forwardCos;
       }
 
-      float densityAt(vec3 local, float covScale, float systemMask) {
+      float densityAt(vec3 local) {
         float r = length(local);
-        float renderRout = renderOuterRadius();
-        float h = clamp((r - uRin) / (renderRout - uRin), 0.0, 1.0);
+        if (r <= uRin || r >= uRout) return 0.0;
+        float h = (r - uRin) / (uRout - uRin);
         vec3 radial = local / r;
         vec3 tangentA = normalize(cross(radial,
           abs(radial.y) < 0.88 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
@@ -264,12 +258,15 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
           + tangentB * (bend * bend - 0.08) * 0.015);
         vec3 sd = uSpin * coverageDir;
         float fine = cloudFbm(sd);
+        // Both view and light rays sample the same world-point property.
+        // A ray-midpoint mask changed density with viewing direction.
+        float systemMask = weatherSystem(uSpin * radial);
         // Preserve the complete analytic weather footprint. Earlier the
         // volume raised this mask to 1.42 and then gated it again with Worley,
         // deleting most clouds that were visible in the orbit deck.
         float baseWeather = pow(smoothstep(uCov0, uCov1, fine), 1.34);
         float largeSystem = systemMask * smoothstep(0.30, 0.72, fine) * 0.72;
-        float cov = max(baseWeather, largeSystem) * covScale;
+        float cov = max(baseWeather, largeSystem);
         if (cov < 0.01) return 0.0;
         vec3 warp = vec3(
           textureLod(uCloudNoise, sd.yz * 3.1 + uCOff.xy, 0.0).r,
@@ -330,10 +327,61 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         return fract((p3.x + p3.y) * p3.z);
       }
 
+      vec3 cloudSource(vec3 local, vec3 dir, float d, float thick, float sigma,
+        vec3 sunDirection, vec3 sunColor, float sunEnergy) {
+        if (sunEnergy <= 0.0) return vec3(0.0);
+        float mu = dot(dir, sunDirection);
+        float hg = (1.0 - 0.28) / (12.566 * pow(1.0 + 0.28 - 1.06 * mu, 1.5));
+        float back = (1.0 - 0.16) / (12.566 * pow(1.0 + 0.16 + 0.8 * mu, 1.5));
+        float phase = mix(0.0796, hg * 3.35 + back * 0.5, 0.76);
+        float sampleRadius = length(local);
+        float sunElevation = dot(local / max(sampleRadius, 1.0), sunDirection);
+        float geometricHorizon = -sqrt(max(0.0,
+          1.0 - uGroundR * uGroundR / (sampleRadius * sampleRadius)));
+        // High clouds may stay sunlit shortly after surface sunset, but
+        // the planet must fully shadow the deck on its night side.
+        float horizonVisibility = smoothstep(geometricHorizon - 0.018,
+          geometricHorizon + 0.018, sunElevation);
+        float eclipseLight = eclipseVisibility(local, sunDirection);
+        // Totality removes direct light. Indirect sky below remains an
+        // explicitly artistic approximation, not a direct-light floor.
+        float directVisibility = horizonVisibility * eclipseLight;
+        // short sun march: how buried is this sample?
+        float od = 0.0;
+        float ls = thick * 0.35;
+        od += densityAt(local + sunDirection * ls * 0.6) * ls * 0.6;
+        od += densityAt(local + sunDirection * ls * 1.5) * ls * 0.9;
+        if (uQuality > 0.5) {
+          od += densityAt(local + sunDirection * ls * 2.8) * ls * 1.3;
+        } else {
+          // Preserve approximately the same optical depth with one fewer
+          // lookup on the low tier, so the silhouette and coverage stay
+          // stable while only fine self-shadow detail is reduced.
+          od *= 1.18;
+        }
+        float Tsun = exp(-od * sigma * 1.48);
+        float hFrac = clamp((length(local) - uRin) / thick, 0.0, 1.0);
+        float heightLight = mix(0.48, 1.30,
+          smoothstep(0.10, 0.84, hFrac));
+        float silver = pow(Tsun, 2.4) * pow(max(mu, 0.0), 3.0)
+          * (1.0 - smoothstep(0.56, 0.96, d));
+        // The resolved beam is strongly reduced in umbra, while unresolved
+        // sky and multiple-scattered light remain. Coupling that ambient
+        // term to direct visibility produced a coal-black moving blotch
+        // whenever the home moon crossed the stellar disc.
+        float ambientVisibility = mix(0.08, 1.0, horizonVisibility)
+          * mix(0.72, 1.0, eclipseLight);
+        vec3 source = sunColor * (Tsun * phase * 18.0 + silver * 0.92)
+            * directVisibility * heightLight
+          + uAmbC * (0.22 + 0.46 * hFrac) * (0.52 + Tsun * 0.48)
+            * ambientVisibility;
+        return source * sunEnergy;
+      }
+
       void main() {
         if (uEngage < 0.01) discard;
         vec3 dir = normalize(vDirection);
-        float renderRout = renderOuterRadius();
+        float renderRout = uRout;
         vec2 outer = sphereHits(uCameraLocal, renderRout, dir);
         if (outer.y <= 0.0) discard;
         vec2 inner = sphereHits(uCameraLocal, uRin, dir);
@@ -375,80 +423,24 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         float jitter = hash12(gl_FragCoord.xy
           + vec2(framePhase * 19.19, framePhase * 7.73));
         float t = t0 + dt * jitter;
-        // A weather system spans hundreds of kilometres while this shell is
-        // only kilometres thick. Evaluate its footprint once per pixel; the
-        // 3D billows, erosion and vertical profile still vary at every step.
-        vec3 systemDir = uSpin * normalize(uCameraLocal + dir * ((t0 + t1) * 0.5));
-        float systemMask = weatherSystem(systemDir);
-        // Water content owns optical depth; geometry thickness only owns
-        // shape. The lower coefficient prevents every broad footprint from
-        // saturating into one opaque grey card in a top-down orbit view.
-        // Keep broad systems volumetric without letting a top-down traversal
-        // through the full 45 km weather shell wash the whole planetary disc
-        // into one blue-grey card. Distinct billows retain opacity locally;
-        // the lower bulk coefficient restores terrain/ocean colour through
-        // the translucent shoulders and makes altitude changes legible.
+        // Legacy artistic column optical depth, now camera-independent.
+        // B4 still must replace shell-normalized extinction with a calibrated
+        // medium and bound the error of the long-path cutoff above.
         float sigma = 3.80 / thick;
-        float mu = dot(dir, uSunDir);
-        float hg = (1.0 - 0.28) / (12.566 * pow(1.0 + 0.28 - 1.06 * mu, 1.5));
-        float back = (1.0 - 0.16) / (12.566 * pow(1.0 + 0.16 + 0.8 * mu, 1.5));
-        float phase = mix(0.0796, hg * 3.35 + back * 0.5, 0.76);
 
         vec3 col = vec3(0.0);
         float T = 1.0;
         for (int i = 0; i < 124; i++) {
           if (i >= STEPS || T < 0.02) break;
           vec3 local = uCameraLocal + dir * t;
-          float d = densityAt(local, 1.0, systemMask);
+          float d = densityAt(local);
           if (d > 0.003) {
-            float sampleRadius = length(local);
-            float sunElevation = dot(local / max(sampleRadius, 1.0), uSunDir);
-            float geometricHorizon = -sqrt(max(0.0,
-              1.0 - uGroundR * uGroundR / (sampleRadius * sampleRadius)));
-            // High clouds may stay sunlit shortly after surface sunset, but
-            // the planet must fully shadow the deck on its night side.
-            float horizonVisibility = smoothstep(geometricHorizon - 0.018,
-              geometricHorizon + 0.018, sunElevation);
-            float eclipseLight = eclipseVisibility(local);
-            // The opaque surface owns full totality. Clouds are a bright,
-            // multiply-scattered medium, so retain a soft direct-light floor
-            // instead of drawing the hard zero-radiance umbra as black ink.
-            float cloudEclipseLight = mix(0.35, 1.0, eclipseLight);
-            float directVisibility = horizonVisibility * uSunEnergy * cloudEclipseLight;
-            // short sun march: how buried is this sample?
-            float od = 0.0;
-            float ls = thick * 0.35;
-            od += densityAt(local + uSunDir * ls * 0.6, 1.0, systemMask) * ls * 0.6;
-            od += densityAt(local + uSunDir * ls * 1.5, 1.0, systemMask) * ls * 0.9;
-            if (uQuality > 0.5) {
-              od += densityAt(local + uSunDir * ls * 2.8, 1.0, systemMask) * ls * 1.3;
-            } else {
-              // Preserve approximately the same optical depth with one fewer
-              // lookup on the low tier, so the silhouette and coverage stay
-              // stable while only fine self-shadow detail is reduced.
-              od *= 1.18;
-            }
-            float Tsun = exp(-od * sigma * 1.48);
-            // Powder brightening is a local density response, not a second
-            // Beer-Lambert alpha. Multiplying scattering by another dt-based
-            // opacity made RGB far smaller than alpha, so clouds composited as
-            // a grey translucent film. Keep it step-size independent.
+            vec3 s = cloudSource(local, dir, d, thick, sigma,
+              normalize(uSunDir), uSunC, uSunEnergy);
+            s += cloudSource(local, dir, d, thick, sigma,
+              normalize(uSecondarySunDir), uSecondarySunC, uSecondarySunEnergy);
+            // Artistic density response, separate from Beer opacity/step size.
             float powder = mix(0.44, 0.68, 1.0 - exp(-d * 2.2));
-            float hFrac = clamp((length(local) - uRin) / thick, 0.0, 1.0);
-            float heightLight = mix(0.48, 1.30,
-              smoothstep(0.10, 0.84, hFrac));
-            float silver = pow(Tsun, 2.4) * pow(max(mu, 0.0), 3.0)
-              * (1.0 - smoothstep(0.56, 0.96, d));
-            // The resolved beam is strongly reduced in umbra, while unresolved
-            // sky and multiple-scattered light remain. Coupling that ambient
-            // term to direct visibility produced a coal-black moving blotch
-            // whenever the home moon crossed the stellar disc.
-            float ambientVisibility = mix(0.08, 1.0, horizonVisibility)
-              * mix(0.72, 1.0, eclipseLight);
-            vec3 s = uSunC * (Tsun * phase * 18.0 + silver * 0.92)
-                * directVisibility * heightLight
-              + uAmbC * (0.22 + 0.46 * hFrac) * (0.52 + Tsun * 0.48)
-                * ambientVisibility;
             float a = 1.0 - exp(-d * sigma * dt);
             col += T * a * s * powder * uTint;
             T *= 1.0 - a;
