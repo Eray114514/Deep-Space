@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sampleOceanWakePacket } from './ocean-wake-packet.js';
 
 export const WATER_IMPULSE_CAP = 12;
 
@@ -62,6 +63,11 @@ export class WaterInteractionField {
     return this.data.reduce((count, value) => count + (value.z > 0.001 ? 1 : 0), 0);
   }
 
+  // Interaction diagnostic probe, NOT the displaced ocean surface. `height`
+  // is a legacy oscillating signal retained for callers, not vertex motion.
+  // Wake support/age/energy share the CPU+GLSL packet, but this probe sums all
+  // sources and omits GPU history selection, breakup, lighting and compositing.
+  // Use Planet.sampleWaterSurface() for actual sea clearance/contact.
   sample(localPosition) {
     let height = 0, foam = 0;
     for (let i = 0; i < this.capacity; i++) {
@@ -77,16 +83,11 @@ export class WaterInteractionField {
         const delta = localPosition.clone().sub(this.positions[i]);
         const along = delta.dot(axis);
         const lateral = delta.dot(side);
-        const aft = 1 - Math.min(1, Math.max(0, (along + 2) / 10));
-        const trailLength = Math.max(12, value.x * value.y * 2.4 + 20);
-        const trail = Math.exp(-Math.max(0, -along - trailLength) * 0.12
-          - Math.max(0, along) * 0.34 - value.x * 0.34);
-        const arm = Math.abs(Math.abs(lateral) - (4.2 + Math.max(0, -along) * 0.29));
-        const armEnvelope = Math.exp(-arm * 0.72) * aft * trail;
-        const turbulent = Math.exp(-Math.abs(lateral) * 0.18
-          - Math.max(0, along) * 0.4) * trail;
-        height += Math.sin(arm * 2.1 - value.x * 4.2) * armEnvelope * value.z * 0.22;
-        foam += (armEnvelope + turbulent * 0.4) * value.w;
+        const packet = sampleOceanWakePacket({ along, lateral,
+          age: value.x, speed: value.y, strength: value.z });
+        height += Math.sin(packet.armDistance * 2.1 - value.x * 4.2)
+          * packet.armEnvelope * 0.22;
+        foam += (packet.armEnvelope + packet.centerEnvelope * 0.4) * value.w;
       } else {
         const distance = localPosition.distanceTo(this.positions[i]);
         const ring = distance - value.x * value.y;

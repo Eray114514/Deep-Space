@@ -956,6 +956,19 @@ body.hero-active #version, body.hero-active #dev-fps { display: none !important;
 /* Touch devices keep the stick; mouse/desktop play should leave this corner clean. */
 #joystick { position: absolute; left: 28px; bottom: calc(min(250px, 24vw, 30vh) + 24px); width: 116px; height: 116px; border: 1px solid rgba(235, 240, 236, .38); border-radius: 50%; background: rgba(3, 12, 17, .25); pointer-events: auto; touch-action: none; }
 #joystick-knob { position: absolute; left: 34px; top: 34px; width: 48px; height: 48px; border: 1px solid var(--ui-cyan); border-radius: 50%; background: rgba(62, 160, 176, .22); }
+.touch-action-btn {
+  position: absolute; right: max(22px, env(safe-area-inset-right));
+  width: 64px; height: 64px; display: grid; place-items: center;
+  color: var(--ui-white); background: rgba(3, 12, 17, .58);
+  border: 1px solid rgba(130, 199, 210, .58); border-radius: 50%;
+  box-shadow: inset 0 0 0 5px rgba(130, 199, 210, .06), 0 0 18px rgba(33, 128, 150, .14);
+  font: 9px/1 var(--ui-mono); letter-spacing: .14em;
+  pointer-events: auto; touch-action: manipulation; user-select: none;
+}
+.touch-action-btn::before { content: ''; position: absolute; inset: 7px; border: 1px solid rgba(235, 240, 236, .18); border-radius: 50%; }
+.touch-action-btn:active { color: #fff; border-color: var(--ui-cyan); background: rgba(34, 106, 122, .58); transform: scale(.96); }
+#btn-jump { bottom: calc(min(250px, 24vw, 30vh) + 26px); }
+#btn-takeoff { bottom: calc(min(250px, 24vw, 30vh) + 104px); }
 @media (pointer: fine) {
   #touch-ui { display: none !important; }
 }
@@ -975,6 +988,8 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #walk-hud { left: max(10px, env(safe-area-inset-left)); bottom: max(10px, env(safe-area-inset-bottom)); width: min(190px, 32vw, 25vh); }
   #surface-weapon { right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); width: min(224px, 34vw); }
   #joystick { bottom: calc(min(210px, 38vw, 30vh) + 20px); }
+  #btn-jump { bottom: calc(min(210px, 38vw, 30vh) + 22px); }
+  #btn-takeoff { bottom: calc(min(210px, 38vw, 30vh) + 100px); }
 }
 
 @media (max-width: 640px) {
@@ -1028,6 +1043,8 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   .surface-weapon-ammo { font-size: 21px; }
   .surface-weapon-slots { gap: 6px; font-size: 7px; }
   #joystick { bottom: calc(min(174px, 42vw, 27vh) + 16px); }
+  #btn-jump { bottom: calc(min(174px, 42vw, 27vh) + 18px); }
+  #btn-takeoff { bottom: calc(min(174px, 42vw, 27vh) + 96px); }
   .hero-frame { inset: 10px; }
   .hero-topline { left: 22px; top: 22px; }
   .hero-bottomline { left: 22px; right: 22px; bottom: 22px; }

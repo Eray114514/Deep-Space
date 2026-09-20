@@ -5,9 +5,14 @@
 // a dot across the system or the ground under your feet.
 
 import * as THREE from 'three';
-import { makeRng, strHash32 } from './rng.js';
-import { Simplex, worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
+import { makeRng, strHash32, hash3i, hashFloat } from './rng.js';
+import { createOceanClimate, sampleOceanClimate, placeOceanTidalEvent } from './ocean-climate.js';
+import { oceanSeconds } from './ocean-clock.js';
+import { createOceanSurface, sampleOceanSurface } from './ocean-surface.js';
+import { worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
+import { TerrainSimplex } from './terrain-noise.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
+import { NearWaterPatch } from './near-water-patch.js';
 import {
   applyTerrainDetail, applyWaterWaves, applyCloudField,
   cloudBaseDensityCPU, cloudDensityCPU, detailTexture,
@@ -132,12 +137,12 @@ export class Planet {
     this.cloudThicknessFraction = (isMoon ? 0.008 : 0.012) + rand() * (isMoon ? 0.008 : 0.016);
 
     // ---- noise fields -----------------------------------------------------
-    this.nA = new Simplex(makeRng(seed + ':A'));
-    this.nB = new Simplex(makeRng(seed + ':B'));
-    this.nC = new Simplex(makeRng(seed + ':C'));
-    this.nD = new Simplex(makeRng(seed + ':D'));
+    this.nA = new TerrainSimplex(makeRng(seed + ':A'));
+    this.nB = new TerrainSimplex(makeRng(seed + ':B'));
+    this.nC = new TerrainSimplex(makeRng(seed + ':C'));
+    this.nD = new TerrainSimplex(makeRng(seed + ':D'));
     this.nOceanBasin = this.tuning.oceanProfile
-      ? new Simplex(makeRng(seed + ':ocean-bathymetry:v1'))
+      ? new TerrainSimplex(makeRng(seed + ':ocean-bathymetry:v1'))
       : null;
 
     // ---- terrain parameters ----------------------------------------------
@@ -164,6 +169,9 @@ export class Planet {
     // liquids
     this.liquid = this.cfg.liquid;
     this.hasLiquid = this.liquid !== null;
+    this.oceanClimate = ['water', 'toxic'].includes(this.liquid)
+      ? createOceanClimate(seed, { type, gravity: this.gravity,
+        oceanClass: this.tuning.oceanClass || this.tuning.oceanProfile }) : null;
     this.waterStyle = this.tuning.oceanProfile === 'pelagic-storm'
       ? { swell: 2.05, clarity: 0.74, foam: 1.35 }
       : type === 'ocean'
@@ -234,6 +242,24 @@ export class Planet {
     this.canonicalMaxLevel = clamp(Math.ceil(Math.log2(rootCell / 1.5)), 4, 16);
     this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
+    // Terrain noise, formation and sea-level inputs are complete before the
+    // optional event reads them; placement never consumes the terrain RNG.
+    if (this.oceanClimate?.event) this.oceanClimate.event = placeOceanTidalEvent(this.oceanClimate.event, {
+      seed, radius: this.seaRadius, gravity: this.gravity,
+      depthAt: (direction) => this.seaLevel - this.height(direction, this.fullMaxFreq),
+    });
+    this.oceanSurface = this.oceanClimate ? createOceanSurface(seed, {
+      radius: this.seaRadius, gravity: this.gravity, period: this.oceanClimate.swellPeriod,
+      event: this.oceanClimate.event,
+      sampleRegion: (direction, hours) => {
+        const depth = this.seaLevel - this.height(direction, this.fullMaxFreq);
+        const climate = sampleOceanClimate(this.oceanClimate, direction, {
+          seconds: hours * 3600, waveSeconds: oceanSeconds(hours), depth: Math.max(0, depth),
+          weather: this.weatherAt(direction, hours),
+        });
+        return { depth, offshoreSignificantHeight: climate.offshoreSignificantHeight };
+      },
+    }) : null;
     // Grouping reduces draw overhead. Collision/noise retains the canonical
     // content cap while geometry stops once its cells are below the reviewed
     // display footprint; material micro-relief carries the final texture band.
@@ -255,6 +281,7 @@ export class Planet {
     // visible until its complete child set is ready and by geomorphing the
     // child surface, not by modifying permanent fine-level boundary vertices.
     this.noSkirt = true;
+    this.maxCellPixels = 3.0;
     // Terrain face boundaries are synchronized by the quadtree itself.
     // Radial skirts turn the shared edge into a shaded wall and recreate the
     // black ink line they were meant to conceal.
@@ -277,9 +304,16 @@ export class Planet {
     // of the camera while shedding most off-axis work. The 0.45 high-tier
     // scale still overlaps adjacent levels generously enough for geomorphing;
     // it only removes detail whose projected footprint is already sub-pixel.
-    const lodScreenScale = lowTierGrouping ? 0.25 : 0.45;
+    // Keep the 9 m centre ladder, but bound the finest off-axis ring to the
+    // actual 62-degree flight view. A 0.45 footprint retained hundreds of
+    // 64×64 chunks behind the chase camera at 800 m; 0.38 preserves overlap
+    // for turns and geomorphs while removing geometry that cannot contribute
+    // a visible pixel in the normal player frame.
+    const lodScreenScale = lowTierGrouping ? 0.25 : 0.38;
+    const midAltitudeScreenScale = lowTierGrouping ? lodScreenScale : 0.62;
     this.lodDistanceScale = (canonicalGridCells / this.gridCells) * lodScreenScale;
-    this.lodDistanceScaleAtLevel = (lvl) => (canonicalGridCells / this.gridCellsAtLevel(lvl)) * lodScreenScale;
+    this.lodDistanceScaleAtLevel = (lvl) => (canonicalGridCells / this.gridCellsAtLevel(lvl))
+      * (lvl <= 10 ? midAltitudeScreenScale : lodScreenScale);
     this.lodLevelForCanonical = (canonicalLevel) => {
       for (let level = 0; level <= this.maxLevel; level++) {
         const effective = level + Math.log2(this.gridCellsAtLevel(level) / canonicalGridCells);
@@ -395,7 +429,7 @@ export class Planet {
     // meaningful ruggedness floor so ranges form connected regional chains.
     const foothills = smoothstep(this.mountMaskLo - 0.18, this.mountMaskHi, c);
     const mMask = foothills * (0.34 + 0.66 * belt);
-    const m = this.nB.ridged(x, y, z, this.mountFreq, 6, 0.55, 2.1, maxFreq);
+    const m = this.nB.ridged(x, y, z, this.mountFreq, 6, 0.55, 2.1, maxFreq, 0.12);
     h += m * this.mountAmp * mMask;
 
     {
@@ -540,13 +574,35 @@ export class Planet {
   }
 
   craters(x, y, z, freq, amp, lane) {
-    const w = worley3(x * freq, y * freq, z * freq, this.intSeed + lane * 7919);
-    const rc = 0.16 + ((w.h >>> 4) % 64) / 64 * 0.26;
-    const cAmp = amp * (0.35 + ((w.h >>> 10) % 64) / 64 * 0.65);
-    const t = w.d / rc;
-    if (t < 1) return (t * t * 1.35 - 1) * cAmp;          // bowl, raised rim at edge
-    if (t < 1.6) return 0.35 * (1 - (t - 1) / 0.6) * cAmp; // rim falloff
-    return 0;
+    x *= freq; y *= freq; z *= freq;
+    const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
+    const seed = this.intSeed + lane * 7919;
+    let sum = 0;
+    // Sum compact features instead of selecting the nearest center. Switching
+    // nearest owners also switched radius/amplitude and cut cliffs across the
+    // Voronoi bisectors. The largest support is < 0.67, so 27 cells suffice.
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const ix = cx + dx, iy = cy + dy, iz = cz + dz;
+          const hash = hash3i(ix, iy, iz, seed);
+          const px = x - ix - hashFloat(hash, 0);
+          const py = y - iy - hashFloat(hash, 1);
+          const pz = z - iz - hashFloat(hash, 2);
+          const radius = 0.16 + ((hash >>> 4) % 64) / 64 * 0.26;
+          const distanceSquared = px * px + py * py + pz * pz;
+          if (distanceSquared >= radius * radius * 2.56) continue;
+          const t = Math.sqrt(distanceSquared) / radius;
+          const amplitude = amp * (0.35 + ((hash >>> 10) % 64) / 64 * 0.65);
+          // Zero slope at the bowl center, raised rim, and outer support keeps
+          // lighting normals continuous as well as the sampled height.
+          sum += amplitude * (t < 1
+            ? -1 + 1.35 * smoothstep(0, 1, t)
+            : 0.35 * (1 - smoothstep(1, 1.6, t)));
+        }
+      }
+    }
+    return sum;
   }
 
   surfaceRadius(dir, maxFreq = this.fullMaxFreq) {
@@ -836,15 +892,22 @@ export class Planet {
         mat = new THREE.MeshStandardMaterial({ color: this.liquidColor, roughness: 0.32, metalness: 0.05 });
       } else {
         mat = new THREE.MeshPhysicalMaterial({
-          color: this.liquidColor, transparent: true, opacity: this.liquidOpacity,
-          roughness: 0.21, metalness: 0.0, side: THREE.DoubleSide, depthWrite: false,
-          // Three's WebGL transmission buffer supplies the real terrain image
-          // beneath the water. The shader gates it to the first metres of the
-          // water column, where wave-normal refraction is actually visible.
-          transmission: 0.86, ior: 1.333, thickness: 1.0,
-          attenuationDistance: 7.0,
-          attenuationColor: this.liquidColor.clone().lerp(new THREE.Color(1, 1, 1), 0.62),
+          color: this.liquidColor, transparent: true, opacity: 1,
+          roughness: 0.21, metalness: 0.0, side: THREE.DoubleSide, depthWrite: true,
+          // The water shader owns colour, reflection and depth-dependent
+          // optical coverage. Engine transmission is deliberately disabled:
+          // Three's extra opaque-scene pass erased the surface and introduced
+          // stable screen-space seams when rendered below viewport scale.
+          transmission: 0, ior: 1.333, thickness: 1.0,
+          attenuationDistance: 18.0,
+          attenuationColor: this.liquidColor.clone().lerp(new THREE.Color(1, 1, 1), 0.42),
         });
+        // Transparent DoubleSide materials default to a front/back two-pass
+        // path. The closed water shell is depth-writing and has an explicit
+        // dry mask, so one double-sided pass is both correct and half the
+        // submissions; it also keeps underwater views available.
+        mat.forceSinglePass = true;
+        mat.polygonOffset = false;
       }
       if (this.liquid === 'water' || this.liquid === 'toxic') mat = applyWaterWaves(mat, this);
       this.liquidMat = mat;
@@ -868,18 +931,34 @@ export class Planet {
       const waterGridCells = waterCanonicalGrid * waterGroupFactor;
       const waterGridCellsAtLevel = () => waterGridCells;
       const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 11);
-      const waterScreenScale = lowTierGrouping ? 0.25 : 0.35;
+      // The near clipmap owns metre-scale wave geometry across the player's
+      // immediate neighbourhood. The closed shell still has to reach roughly
+      // the patch's 88 m edge spacing before hand-off: stopping two rings
+      // earlier exposed the patch as a rectangular bathymetry/normal island.
+      const waterScreenScale = lowTierGrouping ? 0.2 : 0.25;
+      const waterMidAltitudeScreenScale = lowTierGrouping ? waterScreenScale : 0.42;
       this.waterLod = new ChunkedLOD({
         // At the finest ~29 m cells the spherical chord sag is sub-millimetre.
         // A 2.5 m skirt was vastly larger than the gap and exposed dark walls
         // whenever the water was translucent. Dense adjacent shells therefore
         // meet directly; the coast overlap handles the independent land edge.
-        R: this.seaRadius, hAmp: 2, noMorph: false, noSkirt: true,
+        R: this.seaRadius, hAmp: (this.oceanClimate?.event?.height || 0) + 2,
+        noMorph: false, noSkirt: true,
         faceBoundarySkirts: false,
         noShadow: true,
+        // Terrain collision and silhouette detail must reach the player first
+        // after a teleport/landing. The local patch already supplies nearby
+        // water geometry, so far-water shell jobs may safely yield to terrain
+        // whenever both queues contend for the same frame budget.
+        buildPriority: 24,
+        maxCellPixels: 3.35,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
-        maxLevel: Math.max(2, waterCanonicalMaxLevel - (lowTierGrouping ? 3 : 1)),
+        // The closed globe owns only the optical far field. A camera-following
+        // 32 m patch below resolves gravity-wave displacement locally, so
+        // Refinement remains view-dependent, but two additional near rings
+        // make the global shell and graded patch agree before ownership moves.
+        maxLevel: Math.max(2, waterCanonicalMaxLevel - 1),
         orbitLevelCap: 3,
         orbitPrewarmRadiusRatio: 1.75,
         // A smooth water sphere does not need terrain's two extra 136 km
@@ -888,7 +967,7 @@ export class Planet {
         orbitApproachLevelThresholds: [1.12, 1.06, 1.025],
         lodDistanceScale: (waterCanonicalGrid / waterGridCells) * waterScreenScale,
         lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))
-          * waterScreenScale,
+          * (lvl <= 9 ? waterMidAltitudeScreenScale : waterScreenScale),
         lodLevelForCanonical: (canonicalLevel) => {
           for (let level = 0; level <= waterCanonicalMaxLevel; level++) {
             const effective = level + Math.log2(waterGridCellsAtLevel(level) / waterCanonicalGrid);
@@ -902,12 +981,19 @@ export class Planet {
         // water knows how deep the terrain lies beneath every vertex —
         // the shader turns that into Beer–Lambert absorption
         bakeDepth: (this.liquid === 'water' || this.liquid === 'toxic')
-          ? (dir) => Math.max(0, this.seaLevel - this.height(dir, this.fullMaxFreq))
+          // Preserve signed bathymetry. Clamping dry vertices to zero made a
+          // triangle with one wet corner interpolate positive water across
+          // most of the beach; the fragment shader now cuts the exact zero
+          // contour and the opaque terrain owns every inland sample.
+          ? (dir) => this.seaLevel - this.height(dir, this.fullMaxFreq)
           : null,
         group: this.group,
         terrainMaterial: mat,
         underlayMaterial: this.waterUnderlayMaterial,
       });
+      if (this.liquid === 'water' || this.liquid === 'toxic') {
+        this.nearWaterPatch = new NearWaterPatch(this, mat);
+      }
     }
 
     if (this.atmoDensity > 0.05) {
@@ -982,8 +1068,15 @@ export class Planet {
       // used by the volume shader. Keeping cloud type and stratus in Lo and
       // high-deck type/multiple scattering in Hi avoids throwing away entire
       // cloud families merely to fit one RGBA atlas.
+      // Atlas texel density follows physical circumference. A fixed 512-wide
+      // bake over-sampled 200–400 km planets at ~3 km/texel even though the
+      // authored weather structures are 20–60 km wide, stalling route launch
+      // for hundreds of milliseconds. Large worlds retain the full 512 width.
+      this.cloudAtlasWidth = clamp(2 ** Math.ceil(Math.log2(
+        Math.max(1, (Math.PI * 2 * R) / 8000),
+      )), 256, 512);
       const weatherAtlases = makeCloudTextures(
-        this.nD, coverage, o1, this.weatherField);
+        this.nD, coverage, o1, this.weatherField, this.cloudAtlasWidth);
       this.cloudShadowTex = weatherAtlases.low;
       this.cloudWeatherHiTex = weatherAtlases.high;
       this.cloudCoverageStats = weatherAtlases.stats;
@@ -1020,7 +1113,7 @@ export class Planet {
       );
       const naturalCloudDepth = Math.min(
         weatherCloudDepth,
-        Math.max(18000, R * 0.035),
+        Math.max(6000, R * 0.035),
       );
       const authoredCloudTop = Number(authoredRenderLayer?.maxAltitudeMeters);
       const cloudShellTopAlt = Number.isFinite(authoredCloudTop)
@@ -1340,6 +1433,20 @@ export class Planet {
     return sampleWeatherField(this.weatherField, localDirection, hours);
   }
 
+  oceanAt(localDirection, hours = this.weatherHours) {
+    if (!this.oceanClimate) return null;
+    return sampleOceanClimate(this.oceanClimate, localDirection, {
+      seconds: hours * 3600,
+      waveSeconds: oceanSeconds(hours),
+      depth: Math.max(0, this.seaLevel - this.height(localDirection, this.fullMaxFreq)),
+      weather: this.weatherAt(localDirection, hours),
+    });
+  }
+
+  sampleWaterSurface(localPosition, hours = this.weatherHours, options) {
+    return this.oceanSurface ? sampleOceanSurface(this.oceanSurface, localPosition, hours, options) : null;
+  }
+
   setWeatherFixture(name = null) {
     this.weatherField = createWeatherField(this.seed, {
       profile: this.weatherProfile,
@@ -1350,7 +1457,7 @@ export class Planet {
       const previousHi = this.cloudWeatherHiTex;
       const weatherAtlases = makeCloudTextures(
         this.nD, this.cloudCoverage || 0.5, this.cloudOffsets,
-        this.weatherField);
+        this.weatherField, this.cloudAtlasWidth || 512);
       this.cloudShadowTex = weatherAtlases.low;
       this.cloudWeatherHiTex = weatherAtlases.high;
       this.cloudCoverageStats = weatherAtlases.stats;
@@ -1520,6 +1627,7 @@ export class Planet {
     if (this.waterLod) {
       this.waterLod.focused = focused;
       this.waterLod.update(camLocal, dt);
+      this.nearWaterPatch?.update(camLocal, focused, dt);
       const waterShader = this.liquidMat?.userData.shader;
       if (waterShader?.uniforms.uCameraLocal) {
         waterShader.uniforms.uCameraLocal.value.copy(camLocal);
@@ -1737,6 +1845,8 @@ export class Planet {
     this.cloudResource = null;
     this.lod.dispose();
     if (this.waterLod) this.waterLod.dispose();
+    this.nearWaterPatch?.dispose();
+    this.liquidMat?.userData?.waterInteractionTexture?.dispose?.();
     this.liquidMat?.dispose();
     this.waterUnderlayMaterial?.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
@@ -1800,12 +1910,12 @@ function cloudAtlasTexture(canvas) {
 }
 
 function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
-  weatherField = null) {
-  // 512×256 preserves the authored 20–60 km weather structures while cutting
-  // the synchronous route-time atlas bake to one quarter of the samples. The
-  // volume shader adds its own fine 3D erosion; a 1024-wide CPU atlas spent
-  // millions of noise evaluations on detail that was sub-pixel from orbit.
-  const W = 512, H = 256;
+  weatherField = null, width = 512) {
+  // 256–512×half-width preserves the authored 20–60 km structures at each
+  // body's physical scale. The volume shader adds its own fine 3D erosion;
+  // larger fixed atlases spent millions of noise evaluations on sub-pixel
+  // detail during route preparation.
+  const W = clamp(Math.round(width), 256, 512), H = Math.round(W / 2);
   const lowCanvas = (typeof document !== 'undefined')
     ? document.createElement('canvas') : null;
   if (!lowCanvas) return { low: null, high: null, stats: null };

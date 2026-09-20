@@ -25,6 +25,7 @@ export class UI {
       routeWarp: $('route-warp-btn'), routeRift: $('route-rift-btn'), routeCancel: $('route-cancel-btn'),
       brandSystem: $('brand-system'),
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
+      btnJump: $('btn-jump'), btnTakeoff: $('btn-takeoff'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
       heroSettings: $('hero-settings-btn'), graphicsPanel: $('graphics-settings-panel'),
       graphicsClose: $('graphics-settings-close'), graphicsCancel: $('graphics-settings-cancel'),
@@ -100,7 +101,7 @@ export class UI {
   }
 
   setupTouch() {
-    const { joystick, knob } = this.els;
+    const { joystick, knob, btnJump, btnTakeoff } = this.els;
     if (!joystick || !knob) return;
     let pid = null;
     const R = 36;                      // knob travel radius (px)
@@ -130,6 +131,15 @@ export class UI {
     joystick.addEventListener('pointerup', end);
     joystick.addEventListener('pointercancel', end);
 
+    const jump = (down) => this.cb.onJump?.(down);
+    btnJump?.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      jump(true);
+    });
+    btnJump?.addEventListener('pointerup', () => jump(false));
+    btnJump?.addEventListener('pointercancel', () => jump(false));
+    btnTakeoff?.addEventListener('click', () => this.cb.onTakeoff?.());
+
   }
 
   showTouchUI(show) {
@@ -153,7 +163,9 @@ export class UI {
     if (this.els.brandSystem) this.els.brandSystem.textContent = name;
   }
 
-  setAltitude(alt, speed) {
+  setAltitude(alt, speed, reference = '地表高度') {
+    const label = document.getElementById('altitude-reference');
+    if (label) this._setText(label, reference);
     if (alt == null) {
       this._setText(this.els.altitudeValue, '—');
       this._setText(this.els.altitudeUnit, '');

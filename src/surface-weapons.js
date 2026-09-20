@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { createWeaponModel } from './weapon-models.js';
+import { WeaponLighting } from './weapon-lighting.js';
+import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 
 // Directly ported ballistic profiles from futuristic-space-station. The two
 // excluded entries are the VX-4 sidearm and GV-1 gravity projector.
@@ -73,13 +75,14 @@ export class SurfaceWeapons {
     this.scopeTarget.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     this.rig = new THREE.Group();
-    this.rig.layers.set(3);
+    this.rig.layers.set(WEAPON_FOREGROUND_LAYER);
+    this.lighting = new WeaponLighting(scene, camera);
     this.rig.renderOrder = 1000;
     this.models = SURFACE_WEAPONS.map((def) => {
       const group = createWeaponModel(def.id);
       group.visible = false;
       group.traverse((child) => {
-        child.layers.set(3);
+        child.layers.set(WEAPON_FOREGROUND_LAYER);
         if (child.isMesh) { child.castShadow = false; child.receiveShadow = false; }
       });
       const flash = this.makeFlash(def.color, group.userData.muzzle);
@@ -105,6 +108,10 @@ export class SurfaceWeapons {
       };
     });
     this.models[0].group.visible = true;
+    this.lighting.register(this.rig);
+    for (const { group } of this.models) {
+      group.userData.onModelLoaded = (model) => this.lighting.register(model);
+    }
     camera.add(this.rig);
 
     this.onMouseDown = (event) => {
@@ -283,7 +290,8 @@ export class SurfaceWeapons {
       SURFACE_WEAPONS[this.index].longCasing ? this.longCasingGeometry : this.casingGeometry,
       this.casingMaterial,
     );
-    casing.layers.set(3);
+    casing.layers.set(WEAPON_FOREGROUND_LAYER);
+    this.lighting.register(casing);
     casing.position.copy(position);
     casing.rotation.set(Math.random(), Math.random(), Math.random());
     this.camera.add(casing);
@@ -488,8 +496,13 @@ export class SurfaceWeapons {
     this.tracers.push({ mesh: core, life: def.tracerLife, max: def.tracerLife, velocity: velocity.clone(), baseOpacity: 0.82 });
   }
 
+  updateLighting(radiance, environment = {}, worldUp = null) {
+    this.lighting.update(radiance, environment, this.rig.visible, worldUp);
+  }
+
   update(dt, active, beamDistance = 120, motion = {}) {
     this.rig.visible = active;
+    this.lighting.root.visible = active;
     if (!active) {
       this.trigger = false;
       this.justPressed = false;
@@ -675,6 +688,8 @@ export class SurfaceWeapons {
   }
 
   dispose() {
+    this.lighting.dispose();
+    for (const { group } of this.models) delete group.userData.onModelLoaded;
     window.removeEventListener('mousedown', this.onMouseDown);
     window.removeEventListener('mouseup', this.onMouseUp, true);
     window.removeEventListener('keydown', this.onKey);

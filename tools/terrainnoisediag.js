@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { Planet } from '../src/planet.js';
+import { OCEAN_SECONDS_PER_WORLD_HOUR } from '../src/ocean-clock.js';
 import { Simplex } from '../src/noise.js';
 import { makeRng } from '../src/rng.js';
 import { generateSystemSpec } from '../src/astronomy.js';
@@ -538,7 +539,7 @@ heading('PROBE 6 — crest sharpness: midpoint interpolation error of the mounta
     const cellAngle = (Math.PI / 2) / Math.pow(2, level) / gridCells;
     const maxFreq = home.freqAtLevel(level);
     const variants = [
-      ['ridged() as shipped', (d) => home.nB.ridged(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, maxFreq)],
+      ['compact C1 crest as shipped', (d) => home.nB.ridged(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, maxFreq, 0.12)],
       ['smooth-abs soft=0.03', (d) => ridgedSmooth(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, maxFreq, 0.03)],
       ['smooth-abs soft=0.10', (d) => ridgedSmooth(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, maxFreq, 0.10)],
     ];
@@ -609,7 +610,7 @@ heading('PROBE 7 — hard octave gate vs smooth octave fade (candidate fix A/B)'
   console.log('mountain field (ridged, amplitude ' + home.mountAmp.toFixed(0) + ' m):');
   const rHard = sweep((d, f) => ridgedHard(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, f),
     'old hard gate', home.mountAmp);
-  const rSoft = sweep((d, f) => home.nB.ridged(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, f),
+  const rSoft = sweep((d, f) => home.nB.ridged(d.x, d.y, d.z, home.mountFreq, 6, 0.55, 2.1, f, 0.12),
     'fixed intact weight chain + fade', home.mountAmp);
   console.log(`  → ${(100 - rSoft / rHard * 100).toFixed(1)}% reduction in the worst LOD step\n`);
 
@@ -733,79 +734,74 @@ heading('PROBE 9 — land fragmentation: are there continents or archipelagos?')
 }
 
 // ---------------------------------------------------------------------------
-// PROBE 10 — exact daytime, normal-incidence mirror of the production WebGL
-// water column. The shader adds live sky/cloud reflection, star glint, foam and
-// view-angle path length after this base optical response.
-// ---------------------------------------------------------------------------
-heading('PROBE 10 — physical WebGL water-column response');
+// PROBE 10 — current logical ocean and regional absorption diagnostics.
+// This is NOT a production material mirror or a visual acceptance gate: the
+// optical calculation below isolates Beer attenuation for a two-way vertical
+// water path, without haze, sky/Fresnel, terrain, foam, post or LOD filtering.
+heading('PROBE 10 — current ocean owner and simplified vertical attenuation');
 {
-  const dirs = seededDirs(20000, 61);
-  const depths = [];
-  for (const d of dirs) {
-    const h = home.height(d, home.fullMaxFreq);
-    if (h < home.seaLevel) depths.push(home.seaLevel - h);
-  }
-  depths.sort((a, b) => a - b);
-
-  // Mirror of shaders-webgl.js applyWaterWaves at day=1 and viewCos=1.
-  const deep = home.pal?.sea?.[0]?.c?.clone()
-    .lerp(home.liquidColor, 0.4) || new THREE.Color(0x061b35);
-  const shallow = home.liquidColor.clone().lerp(new THREE.Color(0.72, 0.96, 1), 0.28);
-  const clarity = Math.max(0.25, home.waterStyle?.clarity || 1);
-  const k = [0.11, 0.035, 0.012].map((c) => c / clarity);
-  const transmit = (depth) => {
-    const path = Math.min(Math.max(0, depth) * 2, 360);
-    return k.map((kc) => Math.exp(-kc * path));
-  };
-  const bodyWater = (depth) => {
-    const t = transmit(depth);
-    return [
-      shallow.r * t[0] + deep.r * 0.86 * (1 - t[0]),
-      shallow.g * t[1] + deep.g * 0.86 * (1 - t[1]),
-      shallow.b * t[2] + deep.b * 0.86 * (1 - t[2]),
-    ];
-  };
-  console.log(`measured max depth ${depths[depths.length - 1].toFixed(0)} m; `
-    + `extinction = [${k.map((c) => c.toExponential(2)).join(', ')}] /m`);
-  console.log(`e-fold depth per channel: R ${(1 / (2 * k[0])).toFixed(1)} m, `
-    + `G ${(1 / (2 * k[1])).toFixed(1)} m, B ${(1 / (2 * k[2])).toFixed(0)} m`);
-  for (const ch of [0, 1, 2]) {
-    const t = depths.map((d) => transmit(d)[ch]);
-    const st = stats(t);
-    const name = 'RGB'[ch];
-    const d99 = -Math.log(0.01) / (2 * k[ch]);
-    console.log(`  ${name}: transmit mean ${st.mean.toFixed(4)}, sd ${st.sd.toFixed(4)}, `
-      + `p5 ${st.p5.toFixed(4)}, p95 ${st.p95.toFixed(4)}; 99% absorbed at ${d99.toFixed(0)} m `
-      + `→ ${(depths.filter((d) => d >= d99).length / depths.length * 100).toFixed(1)}% of the ocean past it`);
-  }
-  // The scalar legacy model had almost no useful spread. Preserve a measurable
-  // shallow/deep transition without pretending abyssal floors stay visible.
-  const lum = depths.map((d) => {
-    const t = transmit(d);
-    return 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+  const hours = home.weatherHours;
+  const wet = seededDirs(4096, 61).map((direction) => ({
+    direction, depth: home.seaLevel - home.height(direction, home.fullMaxFreq),
+  })).filter(({ depth }) => depth > 0).sort((a, b) => a.depth - b.depth);
+  if (!wet.length || !home.oceanSurface) throw new Error('Home ocean owner or wet samples unavailable.');
+  const rows = wet.map(({ direction, depth }) => {
+    const climate = home.oceanAt(direction, hours);
+    const attenuation = climate.absorption.map((k) => Math.exp(-k * 2 * depth));
+    return { direction, depth, climate, attenuation };
   });
-  const ls = stats(lum.map((v) => 1 - v));
-  console.log(`  combined (1 − luminance of effective transmit), the direct analogue of the old scalar: `
-    + `mean ${ls.mean.toFixed(4)}, sd ${ls.sd.toFixed(4)}  [target sd ≥ 0.04]`);
-  const q = (f) => depths[Math.min(depths.length - 1, Math.floor(f * depths.length))];
-  console.log('  colour at depth quantiles (linear RGB, before sky/Fresnel/foam):');
-  for (const f of [0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]) {
-    const d = q(f), c = bodyWater(d);
-    console.log(`    p${(f * 100).toFixed(0).padStart(3)} = ${d.toFixed(0).padStart(4)} m  `
-      + `rgb(${c.map((v) => v.toFixed(3)).join(', ')})`);
+  console.log(JSON.stringify({
+    systemId: HOME_SYSTEM_ID, bodyId: homeBody.bodyId, seed: home.seed,
+    hours, composition: home.oceanClimate.composition, seaRadius: home.seaRadius,
+    modeCount: home.oceanSurface.waveField.modes.length,
+    normalization: home.oceanSurface.waveField.normalization,
+    tidalEvent: home.oceanClimate.event,
+    sampledWetDirections: rows.length,
+  }, null, 2));
+  console.log('Regional parameters use each real direction, not observer-wide hard-coded extinction.');
+  for (const ch of [0, 1, 2]) {
+    const coefficients = stats(rows.map(({ climate }) => climate.absorption[ch]));
+    const transmittance = stats(rows.map(({ attenuation }) => attenuation[ch]));
+    console.log(`  ${'RGB'[ch]} absorption /m: p5=${coefficients.p5.toExponential(3)}, p50=${coefficients.p50.toExponential(3)}, p95=${coefficients.p95.toExponential(3)}`
+      + `; isolated vertical two-way transmission mean=${transmittance.mean.toFixed(5)}, sd=${transmittance.sd.toFixed(5)}`);
   }
-  // Real abyssal water converges toward its in-scatter colour. The useful
-  // separation is the shore/shelf ramp, not artificial variation at 4 km.
-  const cs = [0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0].map((f) => bodyWater(q(f)));
-  const shoreGap = Math.hypot(cs[1][0] - cs[0][0],
-    cs[1][1] - cs[0][1], cs[1][2] - cs[0][2]);
-  console.log(`  p0→p5 shore/shelf colour distance: ${shoreGap.toFixed(4)} linear RGB; `
-    + 'deeper quantiles intentionally converge to the water in-scatter colour');
-  // Swell geometry: what the displacement is worth in screen pixels near ground.
-  const seaState = home.waterStyle?.swell || 1;
-  const A = (2.2 + 1.1 + 0.5) * seaState;
-  console.log(`\nswell peak displacement ${A.toFixed(1)} m (was 0.47 m); `
-    + `max slope ${(2 * Math.PI * 2.2 * seaState / 393 * 100).toFixed(1)}% for the 393 m component`);
+  console.log('Actual bathymetry quantiles with local climate and owner displacement at the fixed persisted time:');
+  for (const f of [0, 0.05, 0.25, 0.5, 0.75, 0.95, 1]) {
+    const row = rows[Math.min(rows.length - 1, Math.floor(f * rows.length))];
+    const surface = home.sampleWaterSurface(row.direction.clone().multiplyScalar(home.seaRadius),
+      hours, { normal: false });
+    console.log(JSON.stringify({
+      quantile: f, direction: row.direction.toArray(), depth: row.depth,
+      offshoreSignificantHeight: row.climate.offshoreSignificantHeight,
+      depthLimitedClimateHs: row.climate.significantHeight,
+      regionalPeriod: row.climate.period, absorption: row.climate.absorption,
+      scatter: row.climate.scatter, isolatedAttenuation: row.attenuation,
+      ownerWaveHeight: surface.waveHeight, ownerTidalHeight: surface.tidalHeight,
+      ownerHeightWithBias: surface.height, ownerOceanSeconds: surface.seconds,
+    }));
+  }
+  // Sample the owner at fixed world points/times. Observed extrema are NOT a
+  // global peak bound, and filtered local sigma is not the unfiltered offshore Hs.
+  const heights = [], waves = [], tides = [];
+  for (let i = 0; i < 16; i++) {
+    const row = rows[Math.min(rows.length - 1, Math.floor((i + 0.5) / 16 * rows.length))];
+    const position = row.direction.clone().multiplyScalar(home.seaRadius);
+    for (let j = 0; j < 64; j++) {
+      const surface = home.sampleWaterSurface(position,
+        hours + j * 0.5 / OCEAN_SECONDS_PER_WORLD_HOUR, { normal: false });
+      heights.push(surface.height); waves.push(surface.waveHeight); tides.push(surface.tidalHeight);
+    }
+  }
+  const heightStats = stats(heights), waveStats = stats(waves);
+  console.log(JSON.stringify({
+    sampling: '16 fixed wet directions x 64 half-ocean-second samples; owner fixed 4 m footprint',
+    oceanSecondsPerWorldHour: OCEAN_SECONDS_PER_WORLD_HOUR,
+    observedHeightMin: Math.min(...heights), observedHeightMax: heightStats.max,
+    observedWaveSigma: waveStats.sd, observedWaveFourSigma: waveStats.sd * 4,
+    observedTidalMin: Math.min(...tides), observedTidalMax: Math.max(...tides),
+  }, null, 2));
+  console.log('Boundary: this samples current logical sea, not GPU pixels. Regional climate period is not a retuned mode period; fields retain their creation period.');
+  console.log('Shader patch-centre climate, interpolated bathymetry, geometric footprint/fade, optical haze, lighting and temporal post require separate production captures. No historical sd/peak-height threshold is applied.');
 }
 
 home.dispose();

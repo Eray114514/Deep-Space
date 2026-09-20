@@ -84,11 +84,14 @@ export function createAtmosphereOpticalDepthLut(profile,
     for (let x = 0; x < width; x++) {
       const mu = -1 + 2 * x / Math.max(1, width - 1);
       const offset = (y * width + x) * 4;
-      if (pathHitsGround(radius, mu, profile.groundRadiusMeters)) {
-        data[offset + 3] = 0;
-        continue;
-      }
-      const distance = raySphereDistance(radius, mu, profile.topRadiusMeters);
+      const blocked = pathHitsGround(radius, mu, profile.groundRadiusMeters);
+      // Retain a valid limiting optical depth on the shadow side. Zero RGB
+      // texels mixed with lit neighbours falsely remove atmospheric extinction
+      // exactly at sunset. Visibility is integrated separately in the shader.
+      const horizonMu = -Math.sqrt(Math.max(0,
+        1 - (profile.groundRadiusMeters / radius) ** 2));
+      const opticalMu = Math.max(mu, horizonMu + 1e-7);
+      const distance = raySphereDistance(radius, opticalMu, profile.topRadiusMeters);
       if (!Number.isFinite(distance)) {
         data[offset + 3] = 1;
         continue;
@@ -99,7 +102,7 @@ export function createAtmosphereOpticalDepthLut(profile,
       let ozone = 0;
       for (let i = 0; i < steps; i++) {
         const t = (i + 0.5) * stepLength;
-        const sampleRadius = Math.sqrt(radius * radius + t * t + 2 * radius * t * mu);
+        const sampleRadius = Math.sqrt(radius * radius + t * t + 2 * radius * t * opticalMu);
         const sampleAltitude = Math.max(0, sampleRadius - profile.groundRadiusMeters);
         rayleigh += Math.exp(-sampleAltitude / profile.rayleighScaleHeightMeters) * stepLength;
         mie += Math.exp(-sampleAltitude / profile.mieScaleHeightMeters) * stepLength;
@@ -108,7 +111,7 @@ export function createAtmosphereOpticalDepthLut(profile,
       data[offset] = rayleigh / profile.rayleighScaleHeightMeters;
       data[offset + 1] = mie / profile.mieScaleHeightMeters;
       data[offset + 2] = ozone / profile.ozoneHalfWidthMeters;
-      data[offset + 3] = 1;
+      data[offset + 3] = blocked ? 0 : 1;
     }
   }
   return { data, width, height };
@@ -258,7 +261,7 @@ export class AtmospherePass extends Pass {
           // changes continuously instead of exposing angular bands at the
           // limb. Fixed dimensions match the generated optical-depth LUT.
           vec2 size = vec2(256.0, 96.0);
-          vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * size - 0.5;
+          vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * (size - 1.0);
           vec2 i = floor(p);
           vec2 f = fract(p);
           vec2 p00 = (clamp(i, vec2(0.0), size - 1.0) + 0.5) / size;
@@ -284,7 +287,13 @@ export class AtmospherePass extends Pass {
             angularRadius + penumbra, separation);
         }
 
-        vec3 starScatter(vec3 position, vec3 viewDirection, vec3 viewDepth,
+        float solarHorizonClearance(vec3 position, vec3 sunDirection) {
+          float radius = max(length(position), uGroundR);
+          float horizonMu = -sqrt(max(0.0, 1.0 - (uGroundR / radius) * (uGroundR / radius)));
+          return dot(position / radius, sunDirection) - horizonMu;
+        }
+
+        vec3 starScatter(vec3 position, vec3 viewDirection, vec3 viewDepth, float segmentLength,
           float rayleighDensity, float mieDensity, vec3 sunDirection,
           vec3 sunColor, float sunEnergy) {
           if (sunEnergy <= 0.00001) return vec3(0.0);
@@ -292,10 +301,16 @@ export class AtmospherePass extends Pass {
           float altitude = clamp(radius - uGroundR, 0.0, uTopAltitude);
           vec3 radial = position / max(radius, 1.0);
           float sunMu = dot(radial, sunDirection);
-          vec2 groundHit = sphereHits(position, uGroundR, sunDirection);
-          if (groundHit.x > 0.001) return vec3(0.0);
+          // Integrate the lit fraction of this finite view segment instead of
+          // toggling its entire radiance when its midpoint crosses the planet
+          // shadow. This removes twilight march bands without temporal noise.
+          float clearance = solarHorizonClearance(position, sunDirection);
+          vec3 halfSegment = viewDirection * (segmentLength * 0.5);
+          float edge0 = solarHorizonClearance(position - halfSegment, sunDirection);
+          float edge1 = solarHorizonClearance(position + halfSegment, sunDirection);
+          float visibility = clamp(0.5 + clearance / max(abs(edge1 - edge0), 1e-6), 0.0, 1.0);
+          if (visibility <= 0.0) return vec3(0.0);
           vec4 lightDepth = sunlightOpticalDepth(altitude, sunMu);
-          if (lightDepth.a < 0.5) return vec3(0.0);
           vec3 sunDepth = vec3(
             lightDepth.r * uRayleighScaleHeight,
             lightDepth.g * uMieScaleHeight,
@@ -313,7 +328,7 @@ export class AtmospherePass extends Pass {
           vec3 coefficient = uBetaRayleigh * rayleighDensity * rayleighPhase
             + uBetaMieScatter * mieDensity * miePhase;
           return coefficient * transmission * sunColor * sunEnergy
-            * eclipseVisibility(position, sunDirection);
+            * visibility * eclipseVisibility(position, sunDirection);
         }
 
         void main() {
@@ -363,10 +378,10 @@ export class AtmospherePass extends Pass {
             float ozone = ozoneDensity(altitude) * uDensityScale;
             vec3 segmentDepth = vec3(rayleighDensity, mieDensity, ozone) * stepLength;
             vec3 midpointDepth = viewDepth + segmentDepth * 0.5;
-            vec3 source = starScatter(position, direction, midpointDepth,
+            vec3 source = starScatter(position, direction, midpointDepth, stepLength,
               rayleighDensity, mieDensity, normalize(uSunDirection0),
               uSunColor0, uSunEnergy0);
-            source += starScatter(position, direction, midpointDepth,
+            source += starScatter(position, direction, midpointDepth, stepLength,
               rayleighDensity, mieDensity, normalize(uSunDirection1),
               uSunColor1, uSunEnergy1);
             vec3 radial = position / max(length(position), 1.0);
@@ -425,6 +440,16 @@ export class AtmospherePass extends Pass {
             surfaceCosine = clamp(dot(normalize(surfacePosition), -direction), 0.0, 1.0);
           }
           float surfaceLimb = pow(1.0 - surfaceCosine, 2.2);
+          // Nadir-facing surface rays above the lower weather layer contain
+          // roughly one vertical air column, not the long tangent column that
+          // creates the horizon haze. Fade those rays into the restrained disc
+          // composite much earlier than empty-space rays. This preserves a
+          // deep atmospheric horizon while stopping the 8-82 km descent band
+          // from turning terrain and ocean into a uniform blue-grey veil.
+          float clearSurfaceView = hitsSurface
+            * smoothstep(800.0, 6000.0, observerAltitude)
+            * smoothstep(0.08, 0.55, surfaceCosine);
+          float compositeView = max(spaceView, clearSurfaceView);
           // In a sun-behind-camera/full-phase shot the atmosphere is read
           // mostly through haze inside the geographical limb. Exterior glow
           // is intentionally weak; otherwise even a physically thin column
@@ -451,9 +476,9 @@ export class AtmospherePass extends Pass {
           float spaceExtinctionWeight = mix(exteriorExtinctionWeight,
             discExtinctionWeight, hitsSurface);
           vec3 compositeTransmittance = mix(transmittance,
-            mix(vec3(1.0), transmittance, spaceExtinctionWeight), spaceView);
+            mix(vec3(1.0), transmittance, spaceExtinctionWeight), compositeView);
           float radianceExposure = uRadianceScale * mix(1.0, 0.45, spaceView);
-          float radianceWeight = mix(1.0, spaceScatterWeight, spaceView);
+          float radianceWeight = mix(1.0, spaceScatterWeight, compositeView);
           radiance *= uScatterTint * radianceExposure * radianceWeight;
           gl_FragColor = vec4(radiance + base.rgb * compositeTransmittance, base.a);
         }`,

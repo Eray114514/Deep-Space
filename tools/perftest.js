@@ -5,12 +5,16 @@
 
 import { startServer } from './server.js';
 import { launchHardwareBrowser } from './browser.js';
+import { evidenceFingerprint } from './evidence-fingerprint.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 
 const width = Number(process.env.PERF_WIDTH) || 1920;
 const height = Number(process.env.PERF_HEIGHT) || 1080;
 const sampleMs = Number(process.env.PERF_SAMPLE_MS) || 8000;
 const assertPerformance = process.env.PERF_ASSERT === '1';
 const errors = [];
+const fingerprint = await evidenceFingerprint('tools/perftest.js');
 let browser;
 let server;
 
@@ -92,13 +96,19 @@ try {
     function sample(now) {
       frames++;
       const gap = now - previous;
-      if (gap > 25) gaps.push(gap);
+      gaps.push(gap);
       previous = now;
       if (now - start >= duration) {
+        const sorted = [...gaps].sort((a, b) => a - b);
+        const p99 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
         resolve({
           fps: frames * 1000 / (now - start),
-          maxFrameMs: gaps.length ? Math.max(...gaps) : 0,
-          framesOver25Ms: gaps.length,
+          low1Fps: 1000 / Math.max(0.1, p99),
+          maxFrameMs: Math.max(...gaps),
+          framesOver25Ms: gaps.filter((gap) => gap > 25).length,
+          longFrameRatio: gaps.filter((gap) => gap > 50).length / gaps.length,
+          frameCount: frames,
+          sampleMs: now - start,
         });
       } else {
         requestAnimationFrame(sample);
@@ -124,13 +134,29 @@ try {
     || (result.stats.quality === 'ultra' ? 60 : result.stats.quality === 'performance' ? 45 : 50);
   const minLow1Fps = Number(process.env.PERF_MIN_LOW1_FPS)
     || (result.stats.quality === 'ultra' ? 50 : result.stats.quality === 'performance' ? 30 : 38);
+  const finalFingerprint = await evidenceFingerprint('tools/perftest.js');
   const report = {
+    generatedAt: new Date().toISOString(),
+    ...fingerprint,
+    stableSource: fingerprint.sourceDigest === finalFingerprint.sourceDigest,
     viewport: `${width}x${height}`,
+    requestedFeatures: {
+      quality: url.searchParams.get('quality'),
+      post: url.searchParams.get('post') !== '0',
+      volumetricClouds: url.searchParams.get('vclouds') !== '0',
+      farFlora: url.searchParams.get('farflora') !== '0',
+    },
     featureMask,
     bootMs,
     settleMs,
     settled,
     fps: Number(timing.fps.toFixed(1)),
+    // Runtime HUD stats retain only 600 frames. Acceptance uses the entire
+    // measured interval, including its first frames and any >500 ms stalls.
+    low1Fps: Number(timing.low1Fps.toFixed(1)),
+    longFrameRatio: timing.longFrameRatio,
+    frameCount: timing.frameCount,
+    sampleMs: timing.sampleMs,
     maxFrameMs: Number(timing.maxFrameMs.toFixed(1)),
     framesOver25Ms: timing.framesOver25Ms,
     minFps,
@@ -138,17 +164,23 @@ try {
     ...result,
     errors,
   };
+  if (process.env.PERF_REPORT) {
+    await mkdir(dirname(process.env.PERF_REPORT), { recursive: true });
+    await writeFile(process.env.PERF_REPORT, `${JSON.stringify(report, null, 2)}\n`);
+  }
   console.log(JSON.stringify(report, null, 2));
 
   if (errors.length) throw new Error(`${errors.length} page error(s)`);
+  if (assertPerformance && !report.stableSource) throw new Error('Source changed during performance sampling');
+  if (assertPerformance && !settled) throw new Error('Surface did not settle before performance sampling');
   if (assertPerformance && timing.fps < minFps) {
     throw new Error(`surface performance ${timing.fps.toFixed(1)} FPS is below ${minFps} FPS`);
   }
-  if (assertPerformance && result.stats.low1Fps < minLow1Fps) {
-    throw new Error(`surface 1% low ${result.stats.low1Fps.toFixed(1)} FPS is below ${minLow1Fps} FPS`);
+  if (assertPerformance && timing.low1Fps < minLow1Fps) {
+    throw new Error(`surface 1% low ${timing.low1Fps.toFixed(1)} FPS is below ${minLow1Fps} FPS`);
   }
-  if (assertPerformance && result.stats.longFrameRatio >= 0.01) {
-    throw new Error(`surface long-frame ratio ${(result.stats.longFrameRatio * 100).toFixed(2)}% exceeds 1%`);
+  if (assertPerformance && timing.longFrameRatio >= 0.01) {
+    throw new Error(`surface long-frame ratio ${(timing.longFrameRatio * 100).toFixed(2)}% exceeds 1%`);
   }
 } finally {
   if (browser) await browser.close();

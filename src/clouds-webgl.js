@@ -321,7 +321,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // Very low density belongs to clear air, not a planet-wide translucent
         // veil. Preserve soft edges while forcing genuine holes between cloud
         // systems so ocean and terrain keep their native colour.
-        return smoothstep(0.11, 0.60, d);
+        return smoothstep(0.16, 0.62, d);
       }
 
       float hash12(vec2 p) {
@@ -383,7 +383,12 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // Water content owns optical depth; geometry thickness only owns
         // shape. The lower coefficient prevents every broad footprint from
         // saturating into one opaque grey card in a top-down orbit view.
-        float sigma = 5.35 / thick;
+        // Keep broad systems volumetric without letting a top-down traversal
+        // through the full 45 km weather shell wash the whole planetary disc
+        // into one blue-grey card. Distinct billows retain opacity locally;
+        // the lower bulk coefficient restores terrain/ocean colour through
+        // the translucent shoulders and makes altitude changes legible.
+        float sigma = 3.80 / thick;
         float mu = dot(dir, uSunDir);
         float hg = (1.0 - 0.28) / (12.566 * pow(1.0 + 0.28 - 1.06 * mu, 1.5));
         float back = (1.0 - 0.16) / (12.566 * pow(1.0 + 0.16 + 0.8 * mu, 1.5));

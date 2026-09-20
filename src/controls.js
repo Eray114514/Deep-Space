@@ -176,6 +176,13 @@ export class SpaceControls {
       if (e.button === 2 || !(e.buttons & 2)) this.boosting = false;
       if (e.button === 0 || !(e.buttons & 1)) this.firing = false;
     };
+    this._onPointerCancel = (e) => {
+      // Cancellation commonly has button=-1, and may target document after
+      // capture is lost. It ends the gesture without synthesizing a tap.
+      this._onGlobalPointerUp(e);
+      if (this._drag?.id === e.pointerId) this._drag = null;
+      this.pointerUp(e);
+    };
     this._onBlur = () => {
       this.boosting = false;
       this.firing = false;
@@ -187,7 +194,7 @@ export class SpaceControls {
     dom.addEventListener('pointerdown', this._onPointerDown);
     dom.addEventListener('pointermove', this._onPointerMove);
     dom.addEventListener('pointerup', this._onPointerUp);
-    dom.addEventListener('pointercancel', this._onPointerUp);
+    window.addEventListener('pointercancel', this._onPointerCancel, true);
     dom.addEventListener('wheel', this._onWheel, { passive: false });
     document.addEventListener('mousemove', this._onLockedMove);
     window.addEventListener('pointerup', this._onGlobalPointerUp, true);
@@ -421,7 +428,7 @@ export class SpaceControls {
     this.dom.removeEventListener('pointerdown', this._onPointerDown);
     this.dom.removeEventListener('pointermove', this._onPointerMove);
     this.dom.removeEventListener('pointerup', this._onPointerUp);
-    this.dom.removeEventListener('pointercancel', this._onPointerUp);
+    window.removeEventListener('pointercancel', this._onPointerCancel, true);
     this.dom.removeEventListener('wheel', this._onWheel);
     this.dom.removeEventListener('contextmenu', this._onContextMenu);
     document.removeEventListener('mousemove', this._onLockedMove);

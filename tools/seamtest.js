@@ -29,7 +29,11 @@ const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 const errors = [];
 page.on('pageerror', (e) => { errors.push(String(e)); console.error('PAGEERROR:', String(e).split('\n')[0]); });
 
-await page.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=${encodeURIComponent(SEED)}&nolock=1&freeze=1&buildms=120`);
+// This gate owns terrain/water geomorph stability. Disable far-flora so its
+// independent scatter queue cannot hold NMS.idle() open for four minutes at
+// every low-altitude sample even after every tested surface pixel is static.
+await page.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=${encodeURIComponent(SEED)}`
+  + '&nolock=1&freeze=1&buildms=120&farflora=0&nohero=1');
 await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
 // the frame must contain nothing but the world: no HUD, no labels, no ship
 await page.addStyleTag({ content: 'body *:not(canvas){visibility:hidden!important} canvas{visibility:visible!important}' });

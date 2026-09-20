@@ -69,7 +69,7 @@
       <div class="ship-hud-hull-bar" id="ship-hud-hull-bar"></div>
     </section>
 
-    <div id="ship-hud-altitude"><span>高度</span><strong id="altitude-value">—</strong><small id="altitude-unit"></small></div>
+    <div id="ship-hud-altitude"><span id="altitude-reference">地表高度</span><strong id="altitude-value">—</strong><small id="altitude-unit"></small></div>
     <div id="ship-hud-context"><span id="sys-catalog">—</span><span id="cosmic-time">UT 0000:00 · ×60</span><span id="sys-planets">—</span><span id="sys-seed">—</span></div>
   </div>
 
@@ -128,6 +128,12 @@
     <div id="joystick">
       <div id="joystick-knob"></div>
     </div>
+    <button id="btn-jump" class="touch-action-btn" type="button" aria-label="跳跃">
+      <span>跳跃</span>
+    </button>
+    <button id="btn-takeoff" class="touch-action-btn" type="button" aria-label="登上飞船">
+      <span>登舰</span>
+    </button>
   </div>
 
   <div id="loading">

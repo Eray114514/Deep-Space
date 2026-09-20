@@ -123,8 +123,21 @@ export class ShipView {
         this.freePitch = clamp(this.freePitch - e.movementY * 0.003, -1.1, 1.1);
       }
     });
-    document.addEventListener('mousedown', (e) => { if (e.button === 2) this.rmb = true; });
-    document.addEventListener('mouseup', (e) => { if (e.button === 2) this.rmb = false; });
+    // Flight consumes pointerdown (preventDefault suppresses compatibility
+    // mousedown). Capture the same physical event before its flight handler;
+    // otherwise cockpit free-look silently becomes mouse boost.
+    document.addEventListener('pointerdown', (e) => {
+      if (e.button === 2 && e.pointerType !== 'touch'
+        && (e.target === dom || document.pointerLockElement === dom)) this.rmb = true;
+    }, true);
+    document.addEventListener('pointerup', (e) => {
+      if (e.button === 2 || !(e.buttons & 2)) this.rmb = false;
+    }, true);
+    document.addEventListener('pointercancel', () => { this.rmb = false; }, true);
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement !== dom) this.rmb = false;
+    });
+    window.addEventListener('blur', () => { this.rmb = false; });
   }
 
   isCockpit() { return this.viewMode === 'cockpit' && !this.shipwalk; }

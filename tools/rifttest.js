@@ -27,9 +27,21 @@ await context.addInitScript(() => {
 const page = await context.newPage();
 const errors = [];
 const shaderErrors = [];
+const shaderWarnings = [];
 page.on('pageerror', (error) => errors.push(String(error)));
 page.on('console', (message) => {
   const text = message.text();
+  const precisionWarningOnly = text.replaceAll('\0', '').split('\n')
+    .map((line) => line.trim()).filter(Boolean)
+    .every((line) => /^(?:THREE\.WebGLProgram: Program Info Log: )?\(\d+,\d+(?:-\d+)?\): warning X4122: sum of .* cannot be represented accurately in double precision$/.test(line));
+  // NVIDIA's GLSL compiler emits X4122 for constant-folding differences at
+  // ~1e-17. It is a warning (not a shader failure) and is reproducible on the
+  // untouched WebGL baseline. Keep it visible without turning it into an
+  // error; every other program log remains fatal.
+  if (precisionWarningOnly) {
+    shaderWarnings.push(text);
+    return;
+  }
   if (message.type() === 'error' || /WebGLProgram|shader error|GPUValidationError/i.test(text)) {
     shaderErrors.push(text);
   }
@@ -444,4 +456,5 @@ console.log(failures || errors.length || shaderErrors.length
   ? `DONE: ${failures} check failure(s), ${errors.length} page error(s), ${shaderErrors.length} shader/console error(s)`
   : 'DONE - spatial-rift browser checks passed');
 if (shaderErrors.length) console.error(JSON.stringify({ shaderErrors }, null, 2));
+if (shaderWarnings.length) console.warn(`non-fatal GLSL precision warnings: ${shaderWarnings.length}`);
 process.exit(failures || errors.length || shaderErrors.length ? 1 : 0);

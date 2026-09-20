@@ -144,12 +144,19 @@ export class Simplex {
   }
 
   // Ridged multifractal: sharp mountain crests. Output roughly [0, 1].
-  ridged(x, y, z, baseFreq, octaves, gain, lacunarity, maxFreq) {
+  ridged(x, y, z, baseFreq, octaves, gain, lacunarity, maxFreq, crestWidth = 0) {
     let sum = 0, amp = 0.5, norm = 0, f = baseFreq, weight = 1;
     for (let o = 0; o < octaves; o++) {
       const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
       if (blend > 0) {
-        let n = 1 - Math.abs(this.noise(x * f, y * f - o * 13.7, z * f));
+        const ridgeDistance = Math.abs(this.noise(x * f, y * f - o * 13.7, z * f));
+        // A compact C1 crest preserves the flanks exactly. The abs cusp gave
+        // kilometre-scale mountain faces an instantaneous lighting-normal
+        // switch even on a fully refined mesh. Other noise users opt in.
+        const roundedDistance = ridgeDistance < crestWidth
+          ? crestWidth * 0.5 + ridgeDistance * ridgeDistance / (2 * crestWidth)
+          : ridgeDistance;
+        let n = 1 - roundedDistance;
         n *= n;
         n *= weight;
         // The feedback chain is evaluated at full strength. Only the octave's

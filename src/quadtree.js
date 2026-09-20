@@ -123,7 +123,7 @@ function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
   _ss.slope = Math.max(0, 1 - outNrm.dot(dir));
 }
 
-function setInterleavedAttributes(geometry, count, definitions) {
+function* setInterleavedAttributes(geometry, count, definitions) {
   const active = definitions.filter((definition) => definition.array);
   const stride = active.reduce((sum, definition) => sum + definition.itemSize, 0);
   const packed = new Float32Array(count * stride);
@@ -135,6 +135,7 @@ function setInterleavedAttributes(geometry, count, definitions) {
         packed[targetOffset++] = definition.array[sourceOffset + component];
       }
     }
+    if ((vertex & 127) === 127) yield;
   }
   const interleaved = new THREE.InterleavedBuffer(packed, stride);
   let attributeOffset = 0;
@@ -149,6 +150,7 @@ function setInterleavedAttributes(geometry, count, definitions) {
 // ---- global build scheduler -------------------------------------------------
 const buildQueue = [];
 let activeBuildJob = null;
+let preferredBuildParent = null;
 
 export function pendingChunks(lod = null) {
   let n = 0;
@@ -185,8 +187,26 @@ export function flushChunkQueue(budgetMs = 7) {
         const startupLevel = e.lod.startupPriority ? e.level * 1000 : 0;
         const explicitPriority = Number.isFinite(e.lod.buildPriority)
           ? e.lod.buildPriority : 0;
-        const prio = explicitPriority + startupLevel
-          + (e.lod.nodeDistance(e) / e.size) * focusK;
+        // At ground level several coarse cube-sphere nodes have overlapping
+        // bounding circles, so distance/size alone clamps all of them to the
+        // same priority. Bias the focused body's queue toward the camera ray:
+        // the complete four-child activation barrier still preserves seamless
+        // ownership, while the useful centre ladder no longer waits for an
+        // unrelated breadth-first sweep around the entire horizon.
+        const camLength = e.lod.camLocal.length();
+        const focusAngle = e.lod.focused && camLength > 1
+          ? Math.acos(THREE.MathUtils.clamp(
+            e.lod.camLocal.dot(e.centerDir) / camLength, -1, 1,
+          )) * 100
+          : 0;
+        // Children only become displayable as a complete set of four. Once
+        // one wins the spatial priority race, finish its three siblings before
+        // sampling another activation set; otherwise the queue can contain
+        // dozens of isolated, unusable children while the centre stays coarse.
+        const activationSetPriority = e.parent === preferredBuildParent
+          ? -1e6 : 0;
+        const prio = activationSetPriority + explicitPriority + startupLevel
+          + focusAngle + (e.lod.nodeDistance(e) / e.size) * focusK;
         if (prio < bestPriority) {
           bestPriority = prio;
           bestIndex = i;
@@ -206,6 +226,7 @@ export function flushChunkQueue(budgetMs = 7) {
 
     attempted = true;
     if (activeBuildJob.node.lod.stepBuildJob(activeBuildJob, deadline)) {
+      preferredBuildParent = activeBuildJob.node.parent;
       activeBuildJob.node.lod.finishBuildJob(activeBuildJob);
       activeBuildJob = null;
       built++;
@@ -246,6 +267,10 @@ function makeNode(lod, face, level, ix, iy) {
 export class ChunkedLOD {
   constructor(planet) {
     this.planet = planet;
+    this.buildPriority = Number.isFinite(planet.buildPriority)
+      ? planet.buildPriority : 0;
+    this.maxCellPixels = Number.isFinite(planet.maxCellPixels)
+      ? Math.max(1.25, planet.maxCellPixels) : 3.25;
     this.visible = true;
     this.camLocal = new THREE.Vector3(1e9, 0, 0);
     this.roots = [];
@@ -318,7 +343,16 @@ export class ChunkedLOD {
     // force a minimum subdivision depth from its apparent size
     const d = Math.max(camLocal.length() - this.planet.R, 1);
     const ang = this.planet.R / d;
-    const baseForceLevel = ang > 1.2 ? 3 : ang > 0.45 ? 2 : ang > 0.15 ? 1 : 0;
+    // The disk-rounding floor is an orbital rule. At walking altitude R / d
+    // tends to infinity even though only a narrow horizon wedge is visible;
+    // forcing that whole wedge through level three made the useful centre
+    // patch wait behind roughly a hundred unrelated chunks. Natural
+    // screen-space error already refines the ground and horizon here, so let
+    // it drive the surface ladder while retaining the authored full-disk
+    // floor throughout orbit and approach.
+    const baseForceLevel = this._orbitCapped
+      ? (ang > 1.2 ? 3 : ang > 0.45 ? 2 : ang > 0.15 ? 1 : 0)
+      : 0;
     if (this.planet.lodLevelForCanonical) {
       this._forceLevel = Math.min(this._levelCap,
         this.planet.lodLevelForCanonical(baseForceLevel));
@@ -344,6 +378,11 @@ export class ChunkedLOD {
     node.morph = v;
     if (node.mesh) {
       node.mesh.userData.lodMorph = v;
+      const attribute = node.mesh.geometry?.getAttribute('aLodMorph');
+      if (attribute) {
+        attribute.array.fill(v);
+        attribute.needsUpdate = true;
+      }
     }
   }
 
@@ -362,6 +401,10 @@ export class ChunkedLOD {
     node.processedFrame = this._frame;
     const d = this.nodeDistance(node);
     const px = (node.size / Math.max(d, 1)) * PX_PER_RAD;   // apparent size
+    const nodeGridCells = this.planet.gridCellsAtLevel
+      ? this.planet.gridCellsAtLevel(node.level)
+      : this.planet.gridCells || GRID_CELLS;
+    const cellPx = px / Math.max(1, nodeGridCells);
     node.pxBoost = Math.min(12, Math.max(1, 24 / Math.max(px, 0.01)));
     const beyond = this.beyondHorizon(node);
     const distanceScale = this.planet.lodDistanceScaleAtLevel
@@ -370,13 +413,29 @@ export class ChunkedLOD {
     const splitDistance = SPLIT * distanceScale;
     const mergeDistance = MERGE * distanceScale;
     const prefetchDistance = PREFETCH * distanceScale;
+    // Distance-to-centre alone leaves huge off-axis parent triangles visible:
+    // their centre can be far from the camera even while one corner covers
+    // dozens of pixels. The projected cell footprint is the actual rendering
+    // error, so it independently requests refinement anywhere in the view.
+    const cameraAltitude = Math.max(0,
+      this.camLocal.length() - this.planet.R);
+    // This guard targets the orbital/approach failure. Near the surface the
+    // centre-distance ladder already reaches its authored maximum; applying a
+    // full-horizon pixel rule there would refine thousands of behind-camera
+    // cells that cannot appear in a 62-degree chase view.
+    const screenInfluence = THREE.MathUtils.smoothstep(cameraAltitude, 5000, 15000);
+    const screenCellPx = cellPx * screenInfluence;
+    const screenWantSplit = node.level <= 10 && screenCellPx > this.maxCellPixels;
+    const screenRetainSplit = node.level <= 10
+      && screenCellPx > this.maxCellPixels * 0.75;
     const naturalWantSplit = node.level < this._levelCap
-      && (d < node.size * splitDistance || node.level < this._forceLevel)
+      && (d < node.size * splitDistance || screenWantSplit
+        || node.level < this._forceLevel)
       && !beyond;
     const forcedAcrossFace = node.forceSplitUntil >= this._frame && !beyond;
     const wantSplit = naturalWantSplit || forcedAcrossFace;
-    const wantMerge = node.level >= this._levelCap
-      || d > node.size * mergeDistance || beyond;
+    const wantMerge = node.level >= this._levelCap || beyond
+      || (!forcedAcrossFace && d > node.size * mergeDistance && !screenRetainSplit);
 
     if (!node.children && !beyond && node.level < this._levelCap) {
       // prefetch exists to feed morphs; water (noMorph) swaps sub-pixel and
@@ -385,7 +444,8 @@ export class ChunkedLOD {
       // farther than this refines the whole visible cap and destroys frame
       // time before the extra geometry is actually resolvable.
       const reach = (this.planet.noMorph ? SPLIT : (this.focused ? 5.8 : PREFETCH)) * distanceScale;
-      if (d < node.size * reach || node.level < this._forceLevel || forcedAcrossFace) {
+      if (d < node.size * reach || screenWantSplit
+        || node.level < this._forceLevel || forcedAcrossFace) {
         this.createChildren(node);
       }
     }
@@ -553,9 +613,22 @@ export class ChunkedLOD {
   synchronizeFaceBoundarySplit(node) {
     for (const edge of this.boundaryEdges(node)) {
       const address = this.neighbourAddress(node, edge);
+      // Reject an occluded destination before findNode creates its ownership
+      // path. Checking only afterwards queued a hidden branch every frame,
+      // which its normal horizon cleanup immediately destroyed again.
+      const existingPeer = this.findNode(address.face, node.level, address.ix, address.iy, false);
+      const visibilityPeer = existingPeer || makeNode(this, address.face,
+        node.level, address.ix, address.iy);
+      if (this.beyondHorizon(visibilityPeer)) continue;
       const peer = this.findNode(address.face, node.level, address.ix, address.iy, true);
       if (!peer || this.beyondHorizon(peer)) continue;
-      peer.forceSplitUntil = Math.max(peer.forceSplitUntil || 0, this._frame + 2);
+      // The peer is only reachable through its ancestors. Keeping just this
+      // leaf alive allowed a distant ancestor to discard the requested seam
+      // subtree while its children were still queued, then recreate it on the
+      // next request. Retain the complete ownership path through the barrier.
+      for (let owner = peer; owner; owner = owner.parent) {
+        owner.forceSplitUntil = Math.max(owner.forceSplitUntil || 0, this._frame + 2);
+      }
       if (!peer.children && peer.level < this._levelCap) this.createChildren(peer);
     }
   }
@@ -625,8 +698,12 @@ export class ChunkedLOD {
     const hasMorph = node.level > 0 && supportsMorph;
     const parentFreq = node.level > 0 ? p.freqAtLevel(node.level - 1) : 0;
     const coarseFreq = hasMorph ? parentFreq : 0;
-    const parentLocalAttribute = hasMorph
-      ? node.parent?.mesh?.geometry?.getAttribute('aLocal') : null;
+    // The rendered parent is its Float32 relative position plus its double
+    // precision mesh centre. aLocal is a shader-only large-coordinate copy
+    // and has already lost sub-metre precision on terrestrial-size planets.
+    const parentPositionAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('position') : null;
+    const parentCenter = hasMorph ? node.parent?.mesh?.position : null;
     const parentNormalAttribute = hasMorph
       ? node.parent?.mesh?.geometry?.getAttribute('normal') : null;
     const parentN = hasMorph && node.parent
@@ -651,11 +728,17 @@ export class ChunkedLOD {
     const hasSkirt = skirtEdgeIds.length > 0;
     const skirtVerts = skirtEdgeIds.length * (N + 1);
     const total = gridVerts + skirtVerts;
-    const positions = new Float32Array(total * 3);
+    // Retain doubles through sampling, skirts and rebasing. Casting BEFORE
+    // subtracting the centre irreversibly rounds 6 Mm positions to 0.5 m.
+    const positions = new Float64Array(total * 3);
     const normals = new Float32Array(total * 3);
     // per-vertex material weights: x = rockiness, y = vegetation,
     // z = baked ray-marched sun visibility (long mountain shadows)
     const aMat = p.pal ? new Float32Array(total * 3) : null;
+    // Palette height is a scalar content attribute, not the radius of an
+    // interpolated triangle chord. Keep its morph target on the parent's
+    // scalar triangle as well, independent of rendered geometry curvature.
+    const aSurfaceHeight = p.pal ? new Float32Array(total * 2) : null;
     if (aMat) aMat.fill(1);
     // low-frequency tint masks (forest/blotch/stripe/extra) — the actual
     // palette is evaluated per-pixel in the fragment shader
@@ -680,6 +763,8 @@ export class ChunkedLOD {
       ? node.parent?.mesh?.geometry?.getAttribute('aExtra') : null;
     const parentDepthAttribute = hasMorph
       ? node.parent?.mesh?.geometry?.getAttribute('aDepth') : null;
+    const parentSurfaceHeightAttribute = hasMorph
+      ? node.parent?.mesh?.geometry?.getAttribute('aSurfaceHeight') : null;
 
     const faceFn = FACE_FN[node.face];
     let maxMorphHeightDelta = 0;
@@ -699,6 +784,7 @@ export class ChunkedLOD {
         sampleSurface(p, _dirV, maxFreq, eps, _p0, _n);
         const edgeConstrained = false;
         let h = _p0.length() - p.R;
+        if (aSurfaceHeight) aSurfaceHeight[idx * 2] = h;
         let slope = Math.max(0, 1 - _n.dot(_dirV));
 
         positions[idx * 3] = _p0.x;
@@ -716,6 +802,10 @@ export class ChunkedLOD {
           const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
           aMat[idx * 3] = Math.min(1, Math.max(0, sl));
           aMat[idx * 3 + 1] = aExtra ? Math.min(1, _ex.x * 1.4) : 0;
+          // One means fully lit when this world has no static sun-visibility
+          // baker. Leaving the zero-initialized channel untouched applied the
+          // shader's valley-shadow tint to every rotating-world vertex.
+          aMat[idx * 3 + 2] = 1;
         }
 
         if (hasMorph) {
@@ -725,7 +815,7 @@ export class ChunkedLOD {
           // child at morph=1 still cracks against its visible neighbour.
           // Barycentric interpolation is exact and reuses already-built data,
           // avoiding one expensive height+normal evaluation per child vertex.
-          if (parentLocalAttribute && parentNormalAttribute && parentN > 0) {
+          if (parentPositionAttribute && parentCenter && parentNormalAttribute && parentN > 0) {
             const gx = (node.childX + i / N) * parentN * 0.5;
             const gy = (node.childY + j / N) * parentN * 0.5;
             const x0 = Math.min(parentN - 1, Math.floor(gx));
@@ -745,15 +835,15 @@ export class ChunkedLOD {
               w0 = 1 - ty; w1 = tx + ty - 1; w2 = 1 - tx;
             }
             _cP.set(
-              parentLocalAttribute.getX(i0) * w0
-                + parentLocalAttribute.getX(i1) * w1
-                + parentLocalAttribute.getX(i2) * w2,
-              parentLocalAttribute.getY(i0) * w0
-                + parentLocalAttribute.getY(i1) * w1
-                + parentLocalAttribute.getY(i2) * w2,
-              parentLocalAttribute.getZ(i0) * w0
-                + parentLocalAttribute.getZ(i1) * w1
-                + parentLocalAttribute.getZ(i2) * w2,
+              parentPositionAttribute.getX(i0) * w0
+                + parentPositionAttribute.getX(i1) * w1
+                + parentPositionAttribute.getX(i2) * w2 + parentCenter.x,
+              parentPositionAttribute.getY(i0) * w0
+                + parentPositionAttribute.getY(i1) * w1
+                + parentPositionAttribute.getY(i2) * w2 + parentCenter.y,
+              parentPositionAttribute.getZ(i0) * w0
+                + parentPositionAttribute.getZ(i1) * w1
+                + parentPositionAttribute.getZ(i2) * w2 + parentCenter.z,
             );
             _cN.set(
               parentNormalAttribute.getX(i0) * w0
@@ -796,10 +886,20 @@ export class ChunkedLOD {
                 + parentDepthAttribute.getX(i1) * w1
                 + parentDepthAttribute.getX(i2) * w2 - aDepth[idx];
             }
+            if (aSurfaceHeight && parentSurfaceHeightAttribute) {
+              aSurfaceHeight[idx * 2 + 1] = parentSurfaceHeightAttribute.getX(i0) * w0
+                + parentSurfaceHeightAttribute.getX(i1) * w1
+                + parentSurfaceHeightAttribute.getX(i2) * w2 - aSurfaceHeight[idx * 2];
+            } else if (aSurfaceHeight) {
+              // Compatibility fallback for a parent without this attribute;
+              // sample authored height, never infer it from a triangle chord.
+              aSurfaceHeight[idx * 2 + 1] = p.height(_dirV, coarseFreq) - aSurfaceHeight[idx * 2];
+            }
           } else {
             // Root/bootstrap fallback; normal child builds always have a
             // committed parent mesh because display ownership is top-down.
             sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
+            if (aSurfaceHeight) aSurfaceHeight[idx * 2 + 1] = _ss.h - aSurfaceHeight[idx * 2];
           }
           dPos[idx * 3] = _cP.x - _p0.x;
           dPos[idx * 3 + 1] = _cP.y - _p0.y;
@@ -867,6 +967,13 @@ export class ChunkedLOD {
       const len = Math.hypot(px, py, pz);
       const k = (len - skirtDrop) / len;
       positions[dst * 3] = px * k; positions[dst * 3 + 1] = py * k; positions[dst * 3 + 2] = pz * k;
+      if (aSurfaceHeight) {
+        const actualDrop = len - Math.hypot(positions[dst * 3], positions[dst * 3 + 1], positions[dst * 3 + 2]);
+        aSurfaceHeight[dst * 2] = aSurfaceHeight[src * 2] - actualDrop;
+        // The geometric skirt copies its top's morph displacement; its scalar
+        // endpoint likewise remains the parent's top attribute minus this drop.
+        aSurfaceHeight[dst * 2 + 1] = aSurfaceHeight[src * 2 + 1];
+      }
       normals[dst * 3] = normals[src * 3]; normals[dst * 3 + 1] = normals[src * 3 + 1]; normals[dst * 3 + 2] = normals[src * 3 + 2];
       if (aMat) {
         aMat[dst * 3] = aMat[src * 3];
@@ -938,24 +1045,15 @@ export class ChunkedLOD {
     // otherwise lose centimetres and make geometry shimmer near the camera.
     // aLocal keeps the ORIGINAL planet-local position: the detail shaders
     // need coordinates that don't move with camera-relative rebasing.
-    const aLocal = new Float32Array(positions);
-    const ax = node.centerPos.x, ay = node.centerPos.y, az = node.centerPos.z;
-    for (let i = 0; i < total; i++) {
-      positions[i * 3] -= ax;
-      positions[i * 3 + 1] -= ay;
-      positions[i * 3 + 2] -= az;
-    }
-
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    // WebGPU exposes at least eight vertex-buffer slots. Terrain needs seven
-    // semantic fields in addition to position/normal, but they are all static
-    // and share a vertex rate. One interleaved buffer keeps the binding layout
-    // at three buffers and lets every chunk reuse the same pipeline.
-    setInterleavedAttributes(geo, total, [
-      { name: 'aLocal', array: aLocal, itemSize: 3 },
+    // Pack the shader's immutable large-coordinate copy directly from the
+    // double builder. The separate render attribute is cast only after CPU
+    // rebasing below; no Float64 buffers are uploaded or retained by the mesh.
+    // Yield during both passes to keep asynchronous build ownership intact.
+    yield* setInterleavedAttributes(geo, total, [
+      { name: 'aLocal', array: positions, itemSize: 3 },
       { name: 'aMat', array: aMat, itemSize: 3 },
+      { name: 'aSurfaceHeight', array: aSurfaceHeight, itemSize: 2 },
       { name: 'aExtra', array: aExtra, itemSize: 4 },
       { name: 'aPositionDelta', array: dPos, itemSize: 3 },
       { name: 'aNormalDelta', array: dNrm, itemSize: 3 },
@@ -964,22 +1062,33 @@ export class ChunkedLOD {
       { name: 'aDepth', array: aDepth, itemSize: 1 },
       { name: 'aDepthDelta', array: dDepth, itemSize: 1 },
     ]);
+    const ax = node.centerPos.x, ay = node.centerPos.y, az = node.centerPos.z;
+    const relativePositions = new Float32Array(total * 3);
+    for (let i = 0; i < total; i++) {
+      relativePositions[i * 3] = positions[i * 3] - ax;
+      relativePositions[i * 3 + 1] = positions[i * 3 + 1] - ay;
+      relativePositions[i * 3 + 2] = positions[i * 3 + 2] - az;
+      if ((i & 127) === 127) yield;
+    }
+
+    geo.setAttribute('position', new THREE.BufferAttribute(relativePositions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    const lodMorphAttribute = new THREE.BufferAttribute(new Float32Array(total).fill(node.morph), 1);
+    lodMorphAttribute.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aLodMorph', lodMorphAttribute);
+    if (p.bakeDepth) {
+      geo.setAttribute('aNearPatchPass', new THREE.BufferAttribute(new Float32Array(total), 1));
+    }
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeBoundingSphere();
     if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
     mesh.userData.lodMorph = node.morph;
-    // Terrain and water materials are shared by every chunk, so morph state
-    // cannot live in a material-wide value that is updated once per frame.
-    // Push the owning chunk's value immediately before each draw instead.
-    // The vertex shaders consume parent-minus-child deltas from the geometry;
-    // without this bridge the CPU transition ran while WebGL rendered every
-    // child fully refined, producing visible refinement pops and depth bands.
-    mesh.onBeforeRender = function syncLodMorph(renderer, scene, camera, geometry, material) {
-      const uniform = material?.userData?.shader?.uniforms?.uLodMorph;
-      if (uniform) uniform.value = this.userData.lodMorph ?? 0;
-    };
+    // Morph and near-patch selection are vertex attributes, not mutable
+    // MeshPhysicalMaterial uniforms. Three uploads shared material uniforms
+    // only when the material/program changes; adjacent chunks reuse both and
+    // otherwise inherit the first draw's values for the whole frame.
     mesh.position.copy(node.centerPos);
     if (p.underlayMaterial) {
       const underlay = new THREE.Mesh(geo, p.underlayMaterial);

@@ -16,6 +16,7 @@ import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
 import { ShipView } from './ship-view.js';
+import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
@@ -39,6 +40,7 @@ import { isLowPowerGpu, rendererParamsForSettings, resolveGraphicsSettings,
 import { createEnvironmentState, updateEnvironmentState } from './environment-state.js';
 import { SceneRadianceState } from './scene-radiance.js';
 import { waterInteraction } from './water-interaction.js';
+import { oceanSeconds, oceanClockJumped } from './ocean-clock.js';
 import { surfaceInteraction } from './surface-interaction.js';
 import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
 import { WeatherEffects } from './weather-effects.js';
@@ -91,6 +93,7 @@ function createUniverse(seed) {
 }
 window.NMS_NOLOCK = qs.get('nolock') === '1';
 const BUILD_MS = Number(qs.get('buildms')) || 0;
+let debugBuildBudgetMs = BUILD_MS;
 // ?freeze=1: stop scenery-in-motion (waves, sway, cloud drift) so the seam
 // test can pixel-compare static frames — any residual change is LOD activity
 const FREEZE = qs.get('freeze') === '1';
@@ -139,6 +142,11 @@ const MAX_DPR = QUALITY_PROFILE.dprMax;
 const DESKTOP_DPR_FLOOR = QUALITY_PROFILE.dprMin;
 let renderDpr = Math.min(Math.max(window.devicePixelRatio, QUALITY_PROFILE.dprTarget), MAX_DPR);
 renderer.setPixelRatio(renderDpr);
+// Physical water refraction needs the opaque scene buffer, but sampling it at
+// full supersampled DPR would render a second 3200x1800 4x-MSAA scene at
+// 1440p Ultra. The quality-profile scale keeps a 1280x720 source while
+// wave-normal bicubic filtering hides sub-pixel loss in the refracted floor.
+renderer.transmissionResolutionScale = QUALITY_PROFILE.waterTransmissionScale;
 renderer.toneMapping = RENDER_LOOK_NEXT ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
@@ -864,6 +872,7 @@ let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
 let activeWeather = null;
 let envUnderwater = false;
+let underwaterPlanetKey = null;
 let devHeadlampEnabled = true;
 const environmentState = createEnvironmentState();
 const prevNavPos = new THREE.Vector3();
@@ -942,7 +951,51 @@ function stepTweens(dt) {
 const easeInOut = (t) => t * t * (3 - 2 * t);
 
 // ---- controls -----------------------------------------------------------------
-const spaceCtl = new SpaceControls(renderer.domElement, nav);
+const touchPickRaycaster = new THREE.Raycaster();
+const touchPickNdc = new THREE.Vector2();
+const touchPickSphere = new THREE.Sphere();
+
+function touchPickPlanet(clientX, clientY) {
+  if (state !== 'space' || paused || !universe?.system) return false;
+  const rect = renderer.domElement.getBoundingClientRect();
+  touchPickNdc.set(
+    ((clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1,
+    -((clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1,
+  );
+  camera.updateMatrixWorld(true);
+  touchPickRaycaster.setFromCamera(touchPickNdc, camera);
+  let target = null;
+  let nearestHit = Infinity;
+  for (const planet of universe.system.planets) {
+    // Camera-relative rendering keeps each planet group's translation in the
+    // same coordinate space as the camera ray. An analytic sphere avoids
+    // raycasting thousands of procedural LOD triangles on a touch tap.
+    touchPickSphere.center.copy(planet.group.position);
+    touchPickSphere.radius = planet.R + Math.max(planet.hAmp || 0,
+      planet.atmoHeight || 0, planet.cloudAlt || 0);
+    const hit = touchPickRaycaster.ray.intersectSphere(touchPickSphere, _v);
+    if (!hit) continue;
+    const distance = hit.distanceTo(touchPickRaycaster.ray.origin);
+    if (distance < nearestHit) {
+      nearestHit = distance;
+      target = planet;
+    }
+  }
+  window.__lastClick = {
+    x: clientX, y: clientY,
+    bodyId: target?.bodyId || null,
+    distance: Number.isFinite(nearestHit) ? nearestHit : null,
+  };
+  if (!target) return false;
+  focusPlanet = target;
+  spaceCtl.focus = target;
+  flyToPlanet(target);
+  return true;
+}
+
+const spaceCtl = new SpaceControls(renderer.domElement, nav, {
+  onClick: (x, y) => touchPickPlanet(x, y),
+});
 spaceCtl.canSteer = () => !shipView.rmbLookActive();
 spaceCtl.canMouseBoost = () => !shipView.rmbLookActive();
 const walkCtl = new WalkControls(renderer.domElement, {
@@ -1082,6 +1135,8 @@ const ui = new UI({
   onRouteRift: () => beginSelectedRift(),
   onRouteCancel: () => clearPendingRoute(),
   onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
+  onJump: (down) => { walkCtl.touchJump = down; },
+  onTakeoff: () => boardShip(),
   onApplyGraphics: (settings) => {
     writeGraphicsSettings(settings);
     setTimeout(() => location.reload(), 180);
@@ -2296,6 +2351,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
 }
 
 async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
+  if (route?.warpRequested) return;
   if (warpPreparedRiftWarmState === 'compiling'
       || warpPreparedRiftWarmState === 'complete') return;
   if (!targetBody?.group || !route?.target?.entry) {
@@ -2307,9 +2363,9 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
   warpPreparedRiftWarmState = 'compiling';
   try {
     await warpPreparedRiftStructurePromise;
-    if (!preparedDestinationIsActive(token, route, prepared)) return;
+    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     await uploadPreparedLodMeshes(targetBody, prepared);
-    if (!preparedDestinationIsActive(token, route, prepared)) return;
+    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
 
     prepared.updateCelestial(celestialClock.hours);
     const cameraOffset = route.target.entry.clone().sub(targetBody.posUniv);
@@ -2336,7 +2392,7 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
         afterCompile: () => endRiftPortalScene(prepared, route.bodyId),
       });
     }
-    if (!preparedDestinationIsActive(token, route, prepared)) return;
+    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     // compileAsync captures pipelines, but the first direct portal draw still
     // has to allocate attachments and execute the complete target-world pass.
     // Do that once while the passage is hidden so the opening animation never
@@ -2347,9 +2403,9 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
       targetBodyId: route.bodyId,
       previewOrigin: route.target.entry,
     });
-    if (!preparedDestinationIsActive(token, route, prepared)) return;
+    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     await renderPreparedDestinationWarmFrame(targetBody, route, prepared);
-    if (!preparedDestinationIsActive(token, route, prepared)) return;
+    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     warpPreparedRiftWarmState = 'complete';
     warpPreparedRiftWarmError = null;
   } catch (error) {
@@ -2585,12 +2641,48 @@ function prepareWarpDestination(route) {
       warpPreparedLodWarmPlanet = targetBody;
       warpPreparedLodWarmState = 'waiting';
       prewarmPreparedLod(targetBody, token, route, prepared);
-      prewarmPreparedWater(targetBody, token, route, prepared);
+      // Do not put planet construction and WebGL program capture in one event
+      // loop turn. Each is bounded on its own, but together they previously
+      // formed the single half-second route/warp frame seen by the player.
+      setTimeout(() => {
+        if (preparedDestinationIsActive(token, route, prepared)) {
+          void prewarmPreparedWater(targetBody, token, route, prepared);
+        }
+      }, 0);
+      // An immediate Warp click is accepted as a queued launch while the route
+      // screen constructs the selected body. Never move that synchronous
+      // constructor into live starflow: a complex ocean/cloud planet can cost
+      // hundreds of milliseconds even though unrelated bodies stay deferred.
+      if (route.warpRequested) scheduleQueuedWarpLaunch(route, token, prepared);
       return;
     }
     setTimeout(step, 0);
   };
   setTimeout(step, 0);
+}
+
+function scheduleQueuedWarpLaunch(route, token, prepared) {
+  if (route.warpLaunchScheduled) return;
+  route.warpLaunchScheduled = true;
+  const check = () => {
+    if (!preparedDestinationIsActive(token, route, prepared)
+        || pendingRoute !== route || !route.warpRequested || state !== 'space') return;
+    const lodDone = ['complete', 'failed'].includes(warpPreparedLodWarmState);
+    const waterDone = ['complete', 'failed'].includes(warpPreparedWaterWarmState);
+    if (!lodDone || !waterDone) {
+      setTimeout(check, 16);
+      return;
+    }
+    // Present one fully live route frame after the last preparation slice.
+    // Starting warp in the same callback would attribute that completed work
+    // to the first cinematic RAF interval even though starflow had not begun.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (pendingRoute === route && route.warpRequested && state === 'space') {
+        beginSelectedWarp();
+      }
+    }));
+  };
+  setTimeout(check, 0);
 }
 
 function disposeRiftPreview() {
@@ -2761,6 +2853,12 @@ function clearPendingRoute(restoreInput = true, keepPreparedWarp = false) {
 function beginSelectedWarp() {
   if (!pendingRoute || state !== 'space') return;
   const route = pendingRoute;
+  route.warpRequested = true;
+  if (route.bodyId && warpPreparedSystem?.star.id === route.star.id
+      && !warpPreparedSystem.bodyById.has(route.bodyId)) {
+    ui.setHint('正在构建目的地实景 · 跃迁将在就绪后立即开始', true);
+    return;
+  }
   const prepared = takePreparedDestination(route, 'warp');
   requestGameplayPointerLock();
   ui.beginTravel();
@@ -3217,10 +3315,41 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
             view.group.visible = true;
             view.light.visible = true;
           }
+          let revealBodyId = preferBodyId;
+          const selectedSpec = revealBodyId
+            ? preparedSystem._specs.find((spec) => spec.bodyId === revealBodyId)
+            : null;
+          if (selectedSpec?.isMoon) revealBodyId = selectedSpec.parentId;
+          const preparedRevealBody = revealBodyId
+            ? preparedSystem.bodyById.get(revealBodyId) || null
+            : null;
+          deferredSystemWarmQueue.length = 0;
           for (const body of [...preparedSystem.planets, ...preparedSystem.compactObjects]) {
-            body.group.visible = true;
+            const visibleDuringWarp = !preparedRevealBody || body === preparedRevealBody;
+            body.group.visible = visibleDuringWarp;
+            if (!visibleDuringWarp) {
+              deferredSystemWarmQueue.push({ system: preparedSystem, body });
+            }
           }
           destination = universe.adoptSystem(preparedSystem);
+          transferredPreparedDestination = null;
+          // A stellar warp is already millions of kilometres beyond the source
+          // when the destination graph is adopted. Keeping the departure system
+          // as Universe.fadingSystem cannot contribute a visible pixel behind
+          // starflow, but it changes the active light count and forces every
+          // destination PBR program to compile a combined-light variant on the
+          // hand-off frame. Park it exactly like the spatial-rift hand-off and
+          // dispose it under the next route overlay.
+          retiredRiftSystem = universe.fadingSystem;
+          universe.fadingSystem = null;
+          for (const view of retiredRiftSystem?.starViews || []) {
+            view.group.visible = false;
+            view.light.visible = false;
+          }
+          for (const body of [
+            ...(retiredRiftSystem?.planets || []),
+            ...(retiredRiftSystem?.compactObjects || []),
+          ]) body.group.visible = false;
           preparedSystem = null;
         } else {
           destination = universe.setSystem(star, true);
@@ -3406,6 +3535,8 @@ function startHeroPullBack(onDone) {
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
 function ambience(dt = 1 / 60) {
   let inAtmo = 0, day = 1, skyStrength = 0;
+  const wasUnderwater = envUnderwater && underwaterPlanetKey === nearest?.seed;
+  underwaterPlanetKey = nearest?.seed ?? null;
   envEclipse = 0;
   envUnderwater = false;
   activeWeather = null;
@@ -3482,10 +3613,13 @@ function ambience(dt = 1 / 60) {
     const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
     const weatherDirection = p.worldOffsetToLocal?.(_up, _v3).normalize() || _up;
     activeWeather = p.weatherAt?.(weatherDirection) || null;
-    const camR = _v2.copy(nav.pos).sub(p.posUniv).length();
-    envUnderwater = p.hasLiquid && camR < p.seaRadius + 0.4;
+    const eyeWater = p.sampleWaterSurface?.(p.worldPositionToLocal(nav.pos, _v2),
+      p.weatherHours, { normal: false });
+    envUnderwater = !!eyeWater?.wet && eyeWater.clearance < (wasUnderwater ? 0.12 : -0.08);
     updateEnvironmentState(environmentState, {
-      cameraHeight: nearestAlt,
+      // The gas column is referenced to the body's datum, not the seabed.
+      // Ground clearance made sea-level sunset radiance fade over deep ocean.
+      cameraHeight: nav.pos.distanceTo(p.posUniv) - p.R,
       atmosphereHeight: p.atmoHeight,
       atmosphereDensity: p.atmoDensity,
       solarElevation: sunElev,
@@ -3562,10 +3696,10 @@ function ambience(dt = 1 / 60) {
     hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
 
     // the sky dome: horizon glow, deeper zenith, sun halo
-    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.08, 0.13, 0.022),
-      clamp(envSunset * 0.48, 0, 1));
+    _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.08, 0.105, 0.018),
+      clamp(envSunset * 0.82, 0, 1));
     _c2.copy(p.skyColorLin).multiply(_zenithMul)
-      .lerp(_warmA.setRGB(0.12, 0.022, 0.085), envSunset * 0.34);
+      .lerp(_warmA.setRGB(0.12, 0.018, 0.07), envSunset * 0.5);
     if (skyOvercast > 0.01) {
       _horC.lerp(_cloudCol.setRGB(0.24, 0.27, 0.33), skyOvercast * 0.72);
       _c2.lerp(_cloudCol.setRGB(0.09, 0.105, 0.14), skyOvercast * 0.82);
@@ -3576,7 +3710,8 @@ function ambience(dt = 1 / 60) {
     // while this low-frequency term restores a readable zenith below it.
     const altitudeFraction = nearestAlt / Math.max(p.atmoHeight, 1);
     const skyBackdrop = envUnderwater ? 0
-      : Math.min(inAtmo, 1) * (0.08 + 0.92 * day) * 0.42;
+      : clamp(Math.min(inAtmo, 1) * (0.08 + 0.92 * day) * 0.42
+        + envSunset * 0.28, 0, 0.72);
     skyDome.update(_up, sunDir, _horC, _c2, skyBackdrop, envSunset,
       smoothstep(0.28, 0.72, altitudeFraction), p.stellarLightField);
   } else {
@@ -3628,15 +3763,28 @@ function ambience(dt = 1 / 60) {
     hemi.intensity *= 0.82;
     renderer.toneMappingExposure = sceneRadiance.exposure;
     ship.updateLighting(sceneRadiance);
+    surfaceWeapons.updateLighting(sceneRadiance, environmentState,
+      nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null);
   } else {
     renderer.toneMappingExposure = environmentState.exposure;
     shipSunDir.copy(nearest?.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v));
     ship.updateSun(shipSunDir, clamp(day + 0.08, 0, 1));
+    surfaceWeapons.updateLighting({
+      sources: [{ direction: shipSunDir, color: new THREE.Color(1, 0.94, 0.82), irradiance: 1 }],
+      directScale: 1, environmentIntensity: 0,
+    }, environmentState, nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null);
+  }
+  // DEV optical A/B owns only the output exposure while held. The normal
+  // radiance controller continues updating above and resumes on release.
+  if (DEV_SERVER && devWaterWakeFixture?.held
+    && Number.isFinite(devWaterWakeFixture.heldExposure)) {
+    renderer.toneMappingExposure = devWaterWakeFixture.heldExposure;
   }
 }
 const shipSunDir = new THREE.Vector3();
 
 let waterWakeTimer = 0;
+let previousWaterSeconds = null;
 let footRippleTimer = 0;
 let devWaterWakeFixture = null;
 let waterContact = 0;
@@ -3648,19 +3796,20 @@ const waterWakePoint = new THREE.Vector3();
 const waterShipCenter = new THREE.Vector3();
 const waterShipWorld = new THREE.Vector3();
 const waterWakeSide = new THREE.Vector3();
-const waterShipRay = new THREE.Vector3();
 
 function updateDevWaterWakeFixture() {
   if (!DEV_SERVER || !devWaterWakeFixture) return;
   const fixture = devWaterWakeFixture;
   const elapsed = (performance.now() - fixture.startedAt) / 1000;
   if (elapsed > fixture.duration) {
+    if (fixture.clockWasFrozen !== undefined) celestialClock.frozen = fixture.clockWasFrozen;
     devWaterWakeFixture = null;
     return;
   }
   const travelTime = Math.max(0, elapsed - fixture.settleTime);
+  const movementSpeed = fixture.muted || fixture.held ? 0 : fixture.speed;
   fixture.direction.copy(fixture.origin)
-    .addScaledVector(fixture.tangent, travelTime * fixture.speed / fixture.planet.R).normalize();
+    .addScaledVector(fixture.tangent, travelTime * movementSpeed / fixture.planet.R).normalize();
   fixture.motion.copy(fixture.tangent)
     .addScaledVector(fixture.direction, -fixture.tangent.dot(fixture.direction)).normalize();
   fixture.planet.localPositionToWorld(
@@ -3668,14 +3817,24 @@ function updateDevWaterWakeFixture() {
       fixture.planet.seaRadius + fixture.height + (fixture.cameraToKeel || 0),
     ), nav.pos);
   fixture.planet.localOffsetToWorld(fixture.motion.clone()
-    .multiplyScalar(travelTime > 0 ? fixture.speed : 0), nav.vel);
+    .multiplyScalar(travelTime > 0 || fixture.muted ? fixture.speed : 0), nav.vel);
   nav.quat.copy(fixture.planet.frameOrientation)
     .multiply(horizonQuat(fixture.direction, fixture.motion, fixture.rotation));
-  nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), fixture.height > 15 ? -0.22 : -0.48));
+  // Keep enough horizon in the normal chase composition to show that the
+  // pressure field begins at the stern and opens across the surface. The
+  // former near-nadir fixture camera hid that attachment point behind the
+  // foreground hull and turned both shoulders into unrelated white stamps.
+  nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), fixture.height > 15 ? -0.22 : -0.34));
 }
 
 function updateWaterInteraction(dt) {
-  waterInteraction.update(dt);
+  const seconds = oceanSeconds(celestialClock.hours);
+  if (oceanClockJumped(previousWaterSeconds, seconds, dt) || timeWarp) {
+    waterInteraction.clear();
+    waterWakeTimer = 0;
+  }
+  previousWaterSeconds = seconds;
+  if (!devWaterWakeFixture?.held) waterInteraction.update(dt);
   waterContact = 0;
   waterSurfaceHeight = Infinity;
   waterTangentSpeed = 0;
@@ -3684,16 +3843,18 @@ function updateWaterInteraction(dt) {
     waterInteraction.setPlanet(null);
     return;
   }
-  waterInteraction.setPlanet(p.bodyId || p.seed);
+  waterInteraction.setPlanet(p.seed);
+  if (timeWarp) return;
   p.worldPositionToLocal(nav.pos, waterLocal);
   // The visible hull is a real camera-relative transform, not the camera
   // origin. Sample its centre and keel so wake contact agrees with the ship
   // the player sees skimming the surface.
   waterShipWorld.copy(nav.pos).add(ship.group.position);
   p.worldPositionToLocal(waterShipWorld, waterShipCenter);
-  const hullHeight = waterShipCenter.length() - p.seaRadius - 2.4;
+  const hullSurface = p.sampleWaterSurface(waterShipCenter, p.weatherHours, { normal: false });
+  const hullHeight = hullSurface?.wet ? hullSurface.clearance - 2.4 : Infinity;
   const waterHeight = (state === 'space' || state === 'flyto')
-    ? hullHeight : waterLocal.length() - p.seaRadius;
+    ? hullHeight : (p.sampleWaterSurface(waterLocal, p.weatherHours, { normal: false })?.clearance ?? Infinity);
   waterSurfaceHeight = waterHeight;
 
   if ((state === 'space' || state === 'flyto') && waterHeight > -8 && waterHeight < 38) {
@@ -3705,48 +3866,40 @@ function updateWaterInteraction(dt) {
     waterContact = smoothstep(18, 180, tangentSpeed) * (1 - smoothstep(4, 38, waterHeight));
     waterWakeTimer -= dt;
     if (waterContact > 0.03 && waterWakeTimer <= 0
-      && !devWaterWakeFixture?.muted) {
+      && !devWaterWakeFixture?.muted && !devWaterWakeFixture?.held) {
       waterWakeTimer = lerp(0.14, 0.045, clamp(tangentSpeed / 450, 0, 1));
       waterVelocity.normalize();
-      // Foreground ships render after world depth, so radial projection does
-      // not land under their screen-space silhouette. Intersect the camera→
-      // hull ray with the sea sphere; this is the actual visible contact point
-      // and keeps spray/wake attached to the ship at every camera pitch.
-      waterShipRay.copy(waterShipCenter).sub(waterLocal).normalize();
-      const rayB = waterLocal.dot(waterShipRay);
-      const rayDisc = rayB * rayB - waterLocal.lengthSq()
-        + p.seaRadius * p.seaRadius;
-      const rayT = rayDisc >= 0 ? -rayB - Math.sqrt(rayDisc) : -1;
-      if (rayT > 0) {
-        waterShipCenter.copy(waterLocal).addScaledVector(waterShipRay, rayT);
-      } else {
-        waterShipCenter.normalize().multiplyScalar(p.seaRadius);
-      }
+      // Pressure is deposited below the actual wet hull footprint, never at
+      // a camera ray hit hundreds of metres away. Close skimming and the
+      // diminishing low-flight propulsion downwash share this surface field;
+      // clearance above the water is not claimed as physical keel contact.
+      // Store its base-sphere coordinate because GLSL evaluates that same
+      // undisplaced coordinate before applying the visible ocean surface.
+      waterShipCenter.copy(hullSurface.direction).multiplyScalar(p.seaRadius);
       waterWakeSide.crossVectors(_up, waterVelocity).normalize();
-      const strength = 0.22 + waterContact * 0.68;
-      // Two pressure rails follow the real hull shoulders. Their interference
-      // forms a Kelvin-like centre trough and divergent shoulders instead of
-      // one synthetic line emitted from an arbitrary point ahead of camera.
-      for (const lateral of [-4.8, 4.8]) {
-        waterWakePoint.copy(waterShipCenter)
-          .addScaledVector(waterVelocity, 2.5)
-          .addScaledVector(waterWakeSide, lateral)
-          .normalize().multiplyScalar(p.seaRadius);
-        waterInteraction.inject(waterWakePoint, {
-          strength: strength * 0.72,
-          speed: 7 + tangentSpeed * 0.012,
-          foam: 0.2 + waterContact * 0.28,
-          direction: waterVelocity,
-          kind: 'wake',
-        });
-      }
+      const strength = 0.25 + waterContact * 0.75;
+      // One centreline pressure source per age produces the physical Kelvin
+      // pair in the shader. The former two lateral sources each generated a
+      // second mirrored pair, creating four thin luminous rails rather than a
+      // coherent hull-width wake.
+      waterWakePoint.copy(waterShipCenter)
+        .addScaledVector(waterVelocity, 2.5)
+        .normalize().multiplyScalar(p.seaRadius);
+      waterInteraction.inject(waterWakePoint, {
+        strength: strength * 0.82,
+        speed: 7 + tangentSpeed * 0.012,
+        foam: 0.34 + waterContact * 0.48,
+        direction: waterVelocity,
+        kind: 'wake',
+      });
     }
   } else if (state === 'walk' && walkCtl.planet === p) {
     // posLocal is the eye, so subtract the controller's actual eye height.
     // The old hard-coded 1.45 m left the sampled "feet" 25 cm in the air and
     // made a 0.9 m wade report negative depth, suppressing every foot ripple.
     const feetRadius = walkCtl.posLocal.length() - walkCtl.eyeHeight + 0.08;
-    const waterDepth = p.seaRadius - feetRadius;
+    const footSurface = p.sampleWaterSurface(walkCtl.posLocal, p.weatherHours, { normal: false });
+    const waterDepth = footSurface?.wet ? footSurface.surfaceRadius - feetRadius : 0;
     const speed = walkCtl.hSpeed.length();
     const immersion = smoothstep(0.02, 0.3, waterDepth)
       * (1 - smoothstep(2.2, 4.5, waterDepth));
@@ -3839,11 +3992,18 @@ function applyAdaptiveStage(stage) {
   adaptiveStage = clamp(Math.round(stage), 0, 7);
   effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz
     * (adaptiveStage >= 3 ? 0.5 : 1);
-  scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * (adaptiveStage >= 4 ? 0.72 : 1));
+  const adaptiveGrassScale = adaptiveStage >= 7 ? 0.5 : (adaptiveStage >= 4 ? 0.72 : 1);
+  scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * adaptiveGrassScale);
   setShadowDistance(QUALITY_PROFILE.shadowDistance * (adaptiveStage >= 5 ? 0.65 : 1));
-  farFlora.setDisplayDensity(adaptiveStage >= 6 ? 0.68 : 1);
+  farFlora.setDisplayDensity(adaptiveStage >= 7 ? 0.45 : (adaptiveStage >= 6 ? 0.68 : 1));
   if (adaptiveStage < 7) {
     setRenderDpr(Math.max(renderDpr, QUALITY_PROFILE.dprTarget));
+  } else {
+    // DPR is the final adaptive lever, after volume, water cadence, foliage
+    // and shadow distance have all been exhausted. Apply its reviewed floor in
+    // one resize instead of waiting through another five-second stability gate
+    // for each 0.05 step; at 1440p Ultra this still renders above native.
+    setRenderDpr(Math.min(renderDpr, QUALITY_PROFILE.dprMin));
   }
 }
 
@@ -4284,7 +4444,7 @@ function frame() {
   const canLand = state === 'space' && nearest && !nearest.isGasGiant && nearest.landable !== false
     && nearestAlt < 420 && nav.vel.length() < 4000;
   ui.showLand(!!canLand, nearest && nearest.hasLiquid && nearest.liquid !== 'ice' &&
-    _v.copy(nav.pos).sub(nearest.posUniv).length() < nearest.seaRadius + 2
+    waterSurfaceHeight < 2
     ? 'DIVE — walk the seabed' : 'LAND — walk the surface (L)');
 
   if (state === 'walk') {
@@ -4308,7 +4468,7 @@ function frame() {
   // this finishes the same final orbit mesh sooner instead of deferring work
   // into playable frames. Keep the low tier conservative for integrated GPUs.
   const startupBuildMs = QUALITY_LOW ? 5.5 : 42;
-  const built = flushChunkQueue(BUILD_MS || (!loadingCleared
+  const built = flushChunkQueue(debugBuildBudgetMs || (!loadingCleared
     ? startupBuildMs
     : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6));
   if (built > 0) lastBuildFrame = frameNo;
@@ -4397,12 +4557,23 @@ function frame() {
     yaw: spaceCtl.lookInput.yaw,
     pitch: spaceCtl.lookInput.pitch,
   }, camera);
+  if (DEV_SERVER && devWaterWakeFixture?.cameraLead) {
+    devWaterWakeFixture.planet.localOffsetToWorld(devWaterWakeFixture.motion, _v).normalize();
+    ship.group.position.addScaledVector(_v, devWaterWakeFixture.cameraLead);
+  }
   // first-person modes re-place the hull around the camera
   shipView.applyShipPose(dt, nav);
   // contextual F/E prompt inside the hull
   ui.setInteractPrompt(state === 'shipwalk' && !paused
     ? shipView.interactPrompt(!!ship.parkedPosUniv && ship.parkAmt > 0.98) : '');
   updateWaterInteraction(dt);
+  nearest?.liquidMat?.userData?.syncWaterInteractionTexture?.();
+  // DEV optical A/B: hide only the packed render count, never field state.
+  if (DEV_SERVER && devWaterWakeFixture?.opticalHidden) {
+    const count = nearest?.liquidMat?.userData?.waterUniforms?.uRippleCount;
+    if (count) count.value = 0;
+  }
+  nearest?.liquidMat?.userData?.syncOceanField?.();
   prewarmLoadedShipPipelines();
   audio.update({
     state,
@@ -4443,7 +4614,19 @@ function frame() {
     : 0;
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
     : state === 'space' ? Math.max(nav.vel.length(), pulseDisplaySpeed) : _velActual.length();
-  ui.setAltitude(nearest && nearestAlt < 2e7 ? Math.max(0, nearestAlt) : null, spd);
+  const telemetryBody = state === 'space' && focusPlanet ? focusPlanet : nearest;
+  let telemetryAltitude = telemetryBody
+    ? telemetryBody.altitudeAt(_v.copy(nav.pos).sub(telemetryBody.posUniv)) : Infinity;
+  let altitudeReference = '地表高度';
+  if (telemetryBody?.oceanSurface && telemetryAltitude < 100000) {
+    const surface = telemetryBody.sampleWaterSurface(
+      telemetryBody.worldPositionToLocal(nav.pos, _v), telemetryBody.weatherHours, { normal: false });
+    if (surface?.wet) {
+      altitudeReference = surface.clearance < 0 ? '水下深度' : '海面高度';
+      telemetryAltitude = Math.abs(surface.clearance);
+    }
+  }
+  ui.setAltitude(telemetryAltitude < 2e7 ? Math.max(0, telemetryAltitude) : null, spd, altitudeReference);
   ui.setFlightTelemetry({
     speed: spd,
     speedLimit: boostSpeedLimit,
@@ -4610,9 +4793,14 @@ function frame() {
     // seat/walk and view-blend frames so camera transitions stay continuous.
     const needsForegroundInterior = ship.foregroundOnly
       && (shipView.isCockpit() || shipView.shipwalk || shipView.viewBlend < 1);
-    foregroundPass.setLayers(needsForegroundInterior
+    const foregroundLayers = needsForegroundInterior
       ? [SHIP_FOREGROUND_LAYER, SHIP_INTERIOR_LAYER]
-      : [SHIP_FOREGROUND_LAYER]);
+      : [SHIP_FOREGROUND_LAYER];
+    if (surfaceWeapons.rig.visible) foregroundLayers.push(WEAPON_FOREGROUND_LAYER);
+    foregroundPass.setLayers(foregroundLayers);
+  } else {
+    foregroundPass.setLayers(surfaceWeapons.rig.visible
+      ? [SHIP_FOREGROUND_LAYER, WEAPON_FOREGROUND_LAYER] : [SHIP_FOREGROUND_LAYER]);
   }
   if (parkedInteriorPass) parkedInteriorPass.enabled = !ship.foregroundOnly;
   configureShipForegroundLightingLayers();
@@ -4620,18 +4808,23 @@ function frame() {
   statAcc += dt;
   if (statAcc > 0.5) {
     statAcc = 0;
-    const info = { calls: latestRenderCalls, triangles: latestRenderTriangles };
-    let terrainChunks = 0, waterChunks = 0;
-    let terrainPending = 0, waterPending = 0;
-    for (const p of universe.planets()) {
-      terrainChunks += p.lod.countChunks();
-      terrainPending += pendingChunks(p.lod);
-      if (p.waterLod) {
-        waterChunks += p.waterLod.countChunks();
-        waterPending += pendingChunks(p.waterLod);
+    // The detailed counter is hidden outside ?debug=1. Recursing through every
+    // terrain and water node anyway caused a regular 2 Hz CPU spike that was
+    // visible in 1% lows despite contributing no player-facing UI.
+    if (document.body.classList.contains('debug-hud')) {
+      const info = { calls: latestRenderCalls, triangles: latestRenderTriangles };
+      let terrainChunks = 0, waterChunks = 0;
+      let terrainPending = 0, waterPending = 0;
+      for (const p of universe.planets()) {
+        terrainChunks += p.lod.countChunks();
+        terrainPending += pendingChunks(p.lod);
+        if (p.waterLod) {
+          waterChunks += p.waterLod.countChunks();
+          waterPending += pendingChunks(p.waterLod);
+        }
       }
+      ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${terrainChunks}/${waterChunks} terrain/water · ${terrainPending}/${waterPending} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
     }
-    ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${terrainChunks}/${waterChunks} terrain/water · ${terrainPending}/${waterPending} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
   }
 
   // Slow adaptation avoids reallocating render targets during momentary LOD
@@ -4663,7 +4856,7 @@ function frame() {
     }
   }
 
-  if (!FREEZE && !photoMode) tickShaders(dt);
+  if (!FREEZE && !photoMode && !(DEV_SERVER && devWaterWakeFixture?.held)) tickShaders(dt);
   renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
   surfaceWeapons.renderScopeView(renderer);
@@ -4690,7 +4883,8 @@ function frame() {
     // the grade pass (CA/vignette/grain) shares the post toggle
     if (gradePass_) {
       gradePass_.enabled = usePost && !QUALITY_LOW;
-      gradePass_.uniforms.uTime.value = clock.elapsedTime;
+      gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
+        ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
     }
     nodePipeline.render();
     if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
@@ -4937,6 +5131,18 @@ window.NMS = {
     planet.cloudVisualEnabled = !!value;
     return planet.cloudVisualEnabled;
   },
+  waterState(i = 0) {
+    const planet = universe.system.planets[i];
+    if (!planet?.waterLod) return null;
+    const profile = planet.liquidMat?.userData?.waterProfile || null;
+    return {
+      global: planet.waterLod.debugStats(),
+      near: planet.nearWaterPatch?.debugStats?.() || null,
+      profile,
+      ocean: planet.oceanAt(planet.worldPositionToLocal(nav.pos,
+        new THREE.Vector3()).normalize()),
+    };
+  },
   surfaceState(i = null) {
     const planet = Number.isInteger(i) ? universe.system.planets[i] : nearest;
     if (!planet) return null;
@@ -5032,12 +5238,18 @@ window.NMS = {
     effectiveCloudSteps = value;
     return value;
   },
+  setBuildBudget(milliseconds = 0) {
+    if (!DEV_SERVER) return null;
+    debugBuildBudgetMs = clamp(Number(milliseconds) || 0, 0, 1000);
+    return debugBuildBudgetMs;
+  },
   get paused() { return paused; },
   seed: () => SEED,
   galaxy: () => ({ id: GALAXY_ID, name: GALAXY.name }),
   frame: () => frameNo,
   idle() {
     return frameNo > 10 && pendingChunks() === 0 && farFlora.pending() === 0
+      && !nearest?.nearWaterPatch?.debugStats?.().pending
       && frameNo - lastBuildFrame > 8;
   },
   stats() {
@@ -5051,10 +5263,12 @@ window.NMS = {
         waterPending += pendingChunks(p.waterLod);
       }
     }
+    const nearWater = nearest?.nearWaterPatch?.debugStats?.() || null;
     return {
       frame: frameNo, calls: latestRenderCalls, tris: latestRenderTriangles,
       chunks: terrainChunks + waterChunks,
       terrainChunks, waterChunks, terrainPending, waterPending,
+      nearWater,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
@@ -5080,6 +5294,7 @@ window.NMS = {
       shadowMap: SHADOW_MAP,
       shadowDistance: effectiveShadowDistance,
       waterInteractionSize: QUALITY_PROFILE.waterInteractionSize,
+      waterTransmissionScale: renderer.transmissionResolutionScale,
       waterReflectionHz: effectiveWaterReflectionHz,
       adaptiveStage,
       waterInteractions: waterInteraction.activeCount(),
@@ -5403,6 +5618,9 @@ window.NMS = {
     // The deterministic flight-wake fixture temporarily owns nav.pos. A
     // subsequent dive is a new camera fixture and must release that ownership,
     // otherwise the wake updater pulls the walker back above the sea.
+    if (devWaterWakeFixture?.clockWasFrozen !== undefined) {
+      celestialClock.frozen = devWaterWakeFixture.clockWasFrozen;
+    }
     devWaterWakeFixture = null;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
@@ -5501,7 +5719,13 @@ window.NMS = {
     .sort((a, b) => a.dist - b.dist).slice(0, 50),
   starCount: () => universe.nearStarsList.length,
   time: () => celestialClock.snapshot(),
+  setTimeFrozen(value = true) {
+    if (!DEV_SERVER) return false;
+    celestialClock.frozen = !!value;
+    return celestialClock.snapshot();
+  },
   setTime(hours) {
+    waterInteraction.clear();
     celestialClock.set(hours);
     universe.update(nav.pos, false, celestialClock.hours);
     universe.updateRelative(nav.pos);
@@ -5551,7 +5775,11 @@ window.NMS = {
       faceSun,
     };
   },
-  setLocalSunAltitude(i, degrees) {
+  setLocalSunAltitude(i, degrees, {
+    faceSun = false,
+    azimuthHint = null,
+    framingOffsetDegrees = 0,
+  } = {}) {
     if (!DEV_SERVER) return null;
     const p = universe.system.planets[i];
     if (!p || p.isGasGiant) return null;
@@ -5564,7 +5792,11 @@ window.NMS = {
     const target = Math.sin(clamp(Number(degrees) || 0, -89, 89) * Math.PI / 180);
     const start = celestialClock.hours;
     const period = Math.max(1, p.spec?.rotationPeriodHours || 24);
+    const preferredAzimuth = Array.isArray(azimuthHint)
+      ? new THREE.Vector3(...azimuthHint).addScaledVector(localUp,
+        -new THREE.Vector3(...azimuthHint).dot(localUp)).normalize() : null;
     let bestTime = start, bestError = Infinity, bestElevation = 0;
+    let alignedTime = start, alignedError = Infinity, alignedElevation = 0;
     for (let sample = 0; sample <= 720; sample++) {
       const hours = start + period * sample / 720;
       celestialClock.set(hours);
@@ -5576,11 +5808,41 @@ window.NMS = {
         bestTime = hours;
         bestElevation = elevation;
       }
+      if (preferredAzimuth) {
+        const sunHorizon = p.sunDirLocal.clone()
+          .addScaledVector(localUp, -elevation);
+        if (sunHorizon.lengthSq() > 1e-5
+          && sunHorizon.normalize().dot(preferredAzimuth) > 0
+          && error < alignedError) {
+          alignedError = error;
+          alignedTime = hours;
+          alignedElevation = elevation;
+        }
+      }
+    }
+    if (alignedError < Infinity) {
+      bestTime = alignedTime;
+      bestError = alignedError;
+      bestElevation = alignedElevation;
     }
     celestialClock.set(bestTime);
     universe.update(nav.pos, false, bestTime);
     p.localPositionToWorld(localPosition, nav.pos);
     nav.quat.copy(p.frameOrientation).multiply(localOrientation);
+    if (faceSun) {
+      const sunHorizon = p.sunDirLocal.clone()
+        .addScaledVector(localUp, -p.sunDirLocal.dot(localUp));
+      if (sunHorizon.lengthSq() > 1e-4) {
+        sunHorizon.normalize().applyAxisAngle(localUp,
+          clamp(Number(framingOffsetDegrees) || 0, -24, 24) * Math.PI / 180);
+        const targetLocal = localPosition.clone()
+          .addScaledVector(sunHorizon, 18000)
+          .addScaledVector(localUp, -120);
+        const targetWorld = p.localPositionToWorld(targetLocal, new THREE.Vector3());
+        lookQuatAt(nav.pos, targetWorld, nav.quat,
+          p.localOffsetToWorld(localUp, new THREE.Vector3()).normalize());
+      }
+    }
     nav.vel.set(0, 0, 0);
     universe.updateRelative(nav.pos);
     focusPlanet = p;
@@ -5595,6 +5857,8 @@ window.NMS = {
       hours: bestTime,
       requestedDegrees: degrees,
       actualDegrees: Math.asin(clamp(bestElevation, -1, 1)) * 180 / Math.PI,
+      faceSun,
+      azimuthAligned: alignedError < Infinity,
     };
   },
   setAtmosphereAltitude(i, metres, opts = {}) {
@@ -5603,7 +5867,69 @@ window.NMS = {
     return p ? this.teleport(i, Math.max(0, Number(metres) || 0) / p.R,
       { horizon: true, pitch: -0.12, ...opts }) : false;
   },
+  setContinuousAtmosphereAltitude(i, metres, opts = {}) {
+    if (!DEV_SERVER) return null;
+    const p = universe.system.planets[i];
+    if (!p || p.isGasGiant) return null;
+    // A deterministic continuous-flight fixture: unlike teleport(), this does
+    // not clear control state, reset LOD telemetry, or replace the scene. The
+    // browser playtest calls it once per animation frame so the ordinary
+    // render/update/chunk scheduler sees every intermediate altitude with the
+    // normal HUD and post stack still active.
+    const localDir = opts.dir
+      ? new THREE.Vector3(...opts.dir).normalize()
+      : p.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
+    const altitude = Math.max(0, Number(metres) || 0);
+    p.localPositionToWorld(localDir.clone().multiplyScalar(p.R + altitude), nav.pos);
+    nav.vel.set(0, 0, 0);
+    const sunDir = p.sunDirLocal.clone();
+    const forward = opts.forward
+      ? new THREE.Vector3(...opts.forward)
+        .addScaledVector(localDir, -new THREE.Vector3(...opts.forward).dot(localDir))
+      : new THREE.Vector3().crossVectors(localDir, sunDir);
+    if (forward.lengthSq() < 1e-5) {
+      forward.crossVectors(localDir,
+        Math.abs(localDir.y) < 0.9 ? _v2.set(0, 1, 0) : _v2.set(1, 0, 0));
+    }
+    forward.normalize();
+    if (opts.surfaceTargetDirection || opts.surfaceTarget) {
+      // The continuous visual gate needs to follow an actual coast rather than
+      // a signed pitch convention. Aim at a point on the authored surface a
+      // distance ahead that shrinks with altitude: orbital frames still read
+      // as a globe, while the final kilometres retain water, shore and inland
+      // relief together in the ordinary flight camera.
+      let targetDir;
+      if (opts.surfaceTargetDirection) {
+        // Absolute authored target used by the oblique descent gate. The
+        // camera may traverse hundreds of kilometres laterally while every
+        // frame continues to look at the exact same coastal landmark.
+        targetDir = new THREE.Vector3(...opts.surfaceTargetDirection).normalize();
+      } else {
+        const surfaceForward = new THREE.Vector3(...opts.surfaceTarget)
+          .addScaledVector(localDir, -new THREE.Vector3(...opts.surfaceTarget).dot(localDir));
+        if (surfaceForward.lengthSq() < 1e-5) surfaceForward.copy(forward);
+        surfaceForward.normalize();
+        const lookAhead = clamp(Number(opts.surfaceTargetDistance) || 5200, 1800, 52000);
+        targetDir = localDir.clone()
+          .addScaledVector(surfaceForward, lookAhead / p.R).normalize();
+      }
+      const targetLocal = targetDir.clone().multiplyScalar(p.surfaceRadius(targetDir) + 45);
+      const targetWorld = p.localPositionToWorld(targetLocal, new THREE.Vector3());
+      const cameraUpWorld = p.localOffsetToWorld(localDir, new THREE.Vector3()).normalize();
+      lookQuatAt(nav.pos, targetWorld, nav.quat, cameraUpWorld);
+    } else {
+      nav.quat.copy(p.frameOrientation)
+        .multiply(horizonQuat(localDir, forward, new THREE.Quaternion()));
+      nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), opts.pitch ?? -0.18));
+    }
+    focusPlanet = p;
+    spaceCtl.focus = p;
+    return { altitude, dir: localDir.toArray(), forward: forward.toArray() };
+  },
   setWaterWake(i, { height = 8, speed = 180 } = {}) {
+    if (DEV_SERVER && devWaterWakeFixture?.clockWasFrozen !== undefined) {
+      celestialClock.frozen = devWaterWakeFixture.clockWasFrozen;
+    }
     if (!DEV_SERVER || !this.coast(i, height)) return false;
     const p = universe.system.planets[i];
     const local = p.worldPositionToLocal(nav.pos, new THREE.Vector3());
@@ -5658,9 +5984,9 @@ window.NMS = {
       }
     }
     nav.quat.copy(p.frameOrientation).multiply(horizonQuat(up, tangent, new THREE.Quaternion()));
-    nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), height > 15 ? -0.22 : -0.48));
+    nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), height > 15 ? -0.22 : -0.34));
     const wakeCenter = up.clone().multiplyScalar(p.seaRadius).addScaledVector(tangent, 47.5);
-    waterInteraction.setPlanet(p.bodyId || p.seed);
+    waterInteraction.setPlanet(p.seed);
     waterInteraction.inject(wakeCenter, {
       strength: 0.82,
       speed: 8.5,
@@ -5681,34 +6007,105 @@ window.NMS = {
       rotation: new THREE.Quaternion(),
       height,
       cameraToKeel,
+      // Pull the deterministic chase camera farther astern so the Kelvin
+      // shoulders remain between camera and hull instead of crossing behind
+      // the camera within 0.2 s at 150 m/s. Ordinary flight keeps the authored
+      // 30 m formation; this offset exists only while the DEV_SERVER fixture
+      // owns the trajectory.
+      cameraLead: 35,
       speed,
       startedAt: performance.now(),
-      settleTime: 2,
-      duration: 8,
+      // Hold still while the deterministic fixture's terrain and 32 m near
+      // patch finish streaming. The art gate explicitly releases motion;
+      // letting an eight-second timer run during LOD settlement meant the
+      // ship had already stopped and every wake impulse had decayed before
+      // the first evidence frame was captured.
+      settleTime: Infinity,
+      duration: Infinity,
     };
+    return true;
+  },
+  startWaterWake() {
+    if (!DEV_SERVER || !devWaterWakeFixture) return false;
+    if (devWaterWakeFixture.clockWasFrozen !== undefined) {
+      celestialClock.frozen = devWaterWakeFixture.clockWasFrozen;
+      delete devWaterWakeFixture.clockWasFrozen;
+    }
+    devWaterWakeFixture.opticalHidden = false;
+    delete devWaterWakeFixture.heldExposure;
+    devWaterWakeFixture.origin.copy(devWaterWakeFixture.direction);
+    devWaterWakeFixture.startedAt = performance.now();
+    devWaterWakeFixture.settleTime = 0;
+    devWaterWakeFixture.duration = 12;
+    devWaterWakeFixture.muted = false;
+    devWaterWakeFixture.held = false;
+    waterInteraction.clear();
+    waterWakeTimer = 0;
+    return true;
+  },
+  holdWaterWake() {
+    if (!DEV_SERVER || !devWaterWakeFixture) return false;
+    if (!devWaterWakeFixture.held) {
+      devWaterWakeFixture.heldExposure = renderer.toneMappingExposure;
+      devWaterWakeFixture.heldGradeTime = gradePass_?.uniforms.uTime.value ?? clock.elapsedTime;
+    }
+    // Freeze the simulation snapshot before an optical A/B capture. Muting
+    // only after taking the on-frame lets the moving camera see different
+    // water, which overwhelms the wake signal with unrelated surface motion.
+    devWaterWakeFixture.origin.copy(devWaterWakeFixture.direction);
+    devWaterWakeFixture.startedAt = performance.now();
+    devWaterWakeFixture.held = true;
+    devWaterWakeFixture.duration = Infinity;
+    if (devWaterWakeFixture.clockWasFrozen === undefined) {
+      devWaterWakeFixture.clockWasFrozen = celestialClock.frozen;
+    }
+    celestialClock.frozen = true;
     return true;
   },
   muteWaterWake(muted = true) {
     if (!DEV_SERVER || !devWaterWakeFixture) return false;
-    devWaterWakeFixture.muted = !!muted;
-    if (muted) {
-      // Hold the exact same camera/water sample for an A/B render. Resetting
-      // only the interaction field while the 210 m/s fixture kept travelling
-      // compared two different bathymetry patches and falsely "proved" a
-      // visible wake.
-      devWaterWakeFixture.origin.copy(devWaterWakeFixture.direction);
-      devWaterWakeFixture.startedAt = performance.now();
-      devWaterWakeFixture.settleTime = 0;
-      devWaterWakeFixture.speed = 0;
-      waterInteraction.clear();
-    }
-    waterWakeTimer = 0;
+    // Require an explicit held packet; optical toggles cannot alter trajectory,
+    // clock, injection, contents, or age as a side effect.
+    if (!devWaterWakeFixture.held) return false;
+    devWaterWakeFixture.opticalHidden = !!muted;
     return true;
   },
-  setWade(i, { depth = 0.9, overview = false } = {}) {
+  advanceWaterWake(seconds) {
+    if (!DEV_SERVER || !devWaterWakeFixture?.held
+      || !Number.isFinite(seconds) || seconds < 0 || seconds > 8) return false;
+    waterInteraction.update(seconds);
+    return true;
+  },
+  waterWakeDebug() {
+    if (!DEV_SERVER || !devWaterWakeFixture) return null;
+    return {
+      held: !!devWaterWakeFixture.held,
+      opticalHidden: !!devWaterWakeFixture.opticalHidden,
+      hours: celestialClock.hours,
+      oceanSeconds: devWaterWakeFixture.planet.liquidMat?.userData?.waterUniforms?.uOceanTime?.value,
+      position: nav.pos.toArray(), quaternion: nav.quat.toArray(),
+      cameraPosition: camera.position.toArray(), cameraQuaternion: camera.quaternion.toArray(),
+      exposure: renderer.toneMappingExposure,
+      gradeTime: gradePass_?.uniforms.uTime.value,
+      cursor: waterInteraction.cursor,
+      field: waterInteraction.positions.map((position, i) => ({
+        position: position.toArray(), data: waterInteraction.data[i].toArray(),
+        direction: waterInteraction.directions[i].toArray(),
+      })),
+    };
+  },
+  setWade(i, {
+    depth = 0.9,
+    overview = false,
+    overviewHeight = 64,
+    look = 'land',
+  } = {}) {
     if (!DEV_SERVER) return false;
     const p = universe.system.planets[i];
     if (!p || !p.hasLiquid || (p.liquid !== 'water' && p.liquid !== 'toxic')) return false;
+    if (devWaterWakeFixture?.clockWasFrozen !== undefined) {
+      celestialClock.frozen = devWaterWakeFixture.clockWasFrozen;
+    }
     devWaterWakeFixture = null;
     window.NMS_NOLOCK = true;
     tweens.length = 0;
@@ -5718,7 +6115,11 @@ window.NMS = {
     const mid = new THREE.Vector3();
     const axisA = new THREE.Vector3();
     const axisB = new THREE.Vector3();
+    const gradientProbe = new THREE.Vector3();
     let best = null, bestLand = null, bestError = Infinity, bestScore = -Infinity;
+    let bestCurvature = 0;
+    let bestLandHeight = 0, bestSeaDepth = 0;
+    let bestLandRelief = 0, bestHinterlandRelief = 0;
     // A 900 km body leaves tens of kilometres between global Fibonacci
     // samples, so looking for an exact one-metre depth by chance is not a
     // shoreline solver. Find a local segment that brackets the requested
@@ -5758,16 +6159,74 @@ window.NMS = {
         const actualDepth = p.seaLevel - p.height(mid, p.fullMaxFreq);
         const error = Math.abs(actualDepth - targetDepth);
         const sunlight = mid.dot(p.sunDirLocal);
-        const score = sunlight - error * 4;
+        const weather = p.weatherAt?.(mid);
+        // Production clouds remain enabled in every final capture, but the
+        // deterministic coast should not intentionally descend through the
+        // opaque core of a weather cell. Prefer a naturally open interval so
+        // the same bay and hinterland remain readable from orbit to shore.
+        const cloudObscuration = clamp((weather?.coverage || 0) * 0.72
+          + (weather?.lowMask || 0) * 0.18
+          + (weather?.stratusMask || 0) * 0.24, 0, 1);
+        // A valid one-metre contour can still be kilometres of ruler-straight
+        // beach. Sample along its local tangent and prefer a coastline whose
+        // zero contour bends within the overview footprint. This changes only
+        // deterministic QA placement; it does not author a fake test coast.
+        const candidateLandward = landAnchor.clone()
+          .addScaledVector(mid, -landAnchor.dot(mid)).normalize();
+        const candidateTangent = new THREE.Vector3()
+          .crossVectors(mid, candidateLandward).normalize();
+        let curvature = 0;
+        for (const distance of [-900, -450, 450, 900]) {
+          gradientProbe.copy(mid)
+            .addScaledVector(candidateTangent, distance / p.R).normalize();
+          curvature += Math.abs((p.seaLevel
+            - p.height(gradientProbe, p.fullMaxFreq)) - targetDepth);
+        }
+        curvature *= 0.25;
+        gradientProbe.copy(mid)
+          .addScaledVector(candidateLandward, 320 / p.R).normalize();
+        const landHeight = p.height(gradientProbe, p.fullMaxFreq) - p.seaLevel;
+        gradientProbe.copy(mid)
+          .addScaledVector(candidateLandward, -320 / p.R).normalize();
+        const seaDepth = p.seaLevel - p.height(gradientProbe, p.fullMaxFreq);
+        gradientProbe.copy(mid)
+          .addScaledVector(candidateLandward, 1400 / p.R).normalize();
+        const landRelief = p.height(gradientProbe, p.fullMaxFreq) - p.seaLevel;
+        gradientProbe.copy(mid)
+          .addScaledVector(candidateLandward, 3600 / p.R).normalize();
+        const hinterlandRelief = p.height(gradientProbe, p.fullMaxFreq) - p.seaLevel;
+        const shelfRead = smoothstep(1.5, 7.0, Math.min(landHeight, seaDepth))
+          * (1 - smoothstep(28, 65, Math.max(landHeight, seaDepth)));
+        const latitudeFit = 1 - smoothstep(0.48, 0.76, Math.abs(mid.y));
+        const readableRelief = smoothstep(7, 18, landHeight)
+          * (1 - smoothstep(46, 78, landHeight));
+        const scenicRelief = smoothstep(180, 950,
+          Math.max(landRelief, hinterlandRelief));
+        const coastRead = overview
+          ? Math.min(curvature / 14, 1) * 0.9 + shelfRead * 0.65
+            + latitudeFit * 0.42 + readableRelief * 0.38 + scenicRelief * 2.8 : 0;
+        const score = sunlight * (overview ? 0.35 : 1) + coastRead - error * 4
+          - cloudObscuration * (overview ? 2.7 : 0.35)
+          - Math.max(0, landHeight - 68) * 0.018;
         if (score > bestScore) {
           bestScore = score;
           bestError = error;
+          bestCurvature = curvature;
+          bestLandHeight = landHeight;
+          bestSeaDepth = seaDepth;
+          bestLandRelief = landRelief;
+          bestHinterlandRelief = hinterlandRelief;
           best = mid.clone();
           bestLand = landAnchor;
         }
-        if (bestError < 0.015 && sunlight > 0.72) break;
+        if (!overview && bestError < 0.015 && sunlight > 0.55
+          && (!overview || (bestCurvature > 5 && shelfRead > 0.72
+            && Math.abs(mid.y) < 0.62))) break;
       }
-      if (bestError < 0.015 && bestScore > 0.72) break;
+      if (!overview && bestError < 0.015 && bestScore > 0.55
+        && (!overview || (bestCurvature > 5 && Math.abs(best.y) < 0.62
+          && bestLandHeight > 1.5 && bestLandHeight < 42
+          && bestSeaDepth > 1.5 && bestSeaDepth < 42))) break;
     }
     if (!best) return false;
     // Resolve the *local* uphill direction. The 24 km bracket endpoint only
@@ -5777,7 +6236,6 @@ window.NMS = {
       Math.abs(best.y) < 0.9 ? _v2.set(0, 1, 0) : _v2.set(1, 0, 0)).normalize();
     axisB.crossVectors(best, axisA).normalize();
     const gradientStep = 80 / p.R;
-    const gradientProbe = new THREE.Vector3();
     const hAp = p.height(gradientProbe.copy(best).addScaledVector(axisA, gradientStep).normalize(),
       p.fullMaxFreq);
     const hAn = p.height(gradientProbe.copy(best).addScaledVector(axisA, -gradientStep).normalize(),
@@ -5795,22 +6253,23 @@ window.NMS = {
     if (overview) {
       // Visual QA needs a readable patch of both materials. A real wading eye
       // is less than a metre above the water and collapses the entire shore
-      // transition to the horizon, so provide a small stationary drone view
-      // over the exact same solved coastline.
+      // transition to the horizon, so provide a stationary oblique drone view
+      // over the exact same solved coastline. The lateral offset is deliberate:
+      // looking exactly along the beach normal reduced a curved procedural
+      // coast to a horizontal colour strip and hid the wet/swash structure.
       if (walkCtl.active) walkCtl.exit();
       setState('space');
-      const cameraDir = new THREE.Vector3();
-      for (let distance = 40; distance <= 600; distance += 20) {
-        cameraDir.copy(best).addScaledVector(landward, -distance / p.R).normalize();
-        const cameraDepth = p.seaLevel - p.height(cameraDir, p.fullMaxFreq);
-        if (cameraDepth >= 14) break;
-      }
-      const targetDir = new THREE.Vector3();
-      for (let distance = 20; distance <= 600; distance += 20) {
-        targetDir.copy(best).addScaledVector(landward, distance / p.R).normalize();
-        if (p.height(targetDir, p.fullMaxFreq) >= p.seaLevel + 6) break;
-      }
-      const cameraLocal = cameraDir.clone().multiplyScalar(p.seaRadius + 45);
+      const lateral = new THREE.Vector3().crossVectors(best, landward).normalize();
+      const cameraDir = best.clone()
+        .addScaledVector(landward, -260 / p.R)
+        .addScaledVector(lateral, -520 / p.R).normalize();
+      const targetDir = best.clone()
+        .addScaledVector(landward, 360 / p.R)
+        .addScaledVector(lateral, 80 / p.R).normalize();
+      const resolvedOverviewHeight = clamp(Number(overviewHeight) || 64, 24, 120);
+      const cameraLocal = cameraDir.clone().multiplyScalar(
+        p.seaRadius + resolvedOverviewHeight,
+      );
       p.localPositionToWorld(cameraLocal, nav.pos);
       nav.vel.set(0, 0, 0);
       const targetLocal = targetDir.clone().multiplyScalar(p.surfaceRadius(targetDir) + 2);
@@ -5825,18 +6284,32 @@ window.NMS = {
         requestedDepth: targetDepth,
         actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq),
         overview: true,
+        overviewHeight: resolvedOverviewHeight,
+        direction: best.toArray(),
+        landward: landward.toArray(),
+        cameraDepth: p.seaLevel - p.height(cameraDir, p.fullMaxFreq),
+        targetHeight: p.height(targetDir, p.fullMaxFreq) - p.seaLevel,
+        shoreCurvature: bestCurvature,
+        latitude: Math.asin(clamp(best.y, -1, 1)),
+        landHeight320: bestLandHeight,
+        seaDepth320: bestSeaDepth,
+        landHeight1400: bestLandRelief,
+        landHeight3600: bestHinterlandRelief,
       };
     }
     _v2.copy(best).multiplyScalar(p.surfaceRadius(best) + 1.7);
     // Face the resolved coast so the fixture demonstrates the wet band and
     // shore break instead of placing both outside the screenshot.
     _v3.copy(landward);
+    if (look === 'sea') _v3.negate();
     if (_v3.lengthSq() < 0.1) _v3.crossVectors(p.sunDirLocal, best).normalize();
     if (_v3.lengthSq() < 0.1) _v3.set(1, 0, 0);
     walkCtl.enter(p, _v2, _v3);
-    // Look into the near-shore transition rather than flattening its
-    // metre-scale wet/foam bands into a one-pixel horizon line.
-    walkCtl.pitch = -0.38;
+    // The sea-facing fixture deliberately includes the close shelf below the
+    // player's boots as well as the horizon. A purely grazing view is almost
+    // all aerial perspective and cannot demonstrate shallow-water depth,
+    // caustic breakup or the terrain visible through the water column.
+    walkCtl.pitch = look === 'land' ? -0.38 : -0.34;
     walkCtl.update(0.001);
     p.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
@@ -5845,13 +6318,16 @@ window.NMS = {
     setState('walk');
     // Entering the solved shallows displaces water even before the first full
     // stride; this also gives the ripple field a stable initial condition.
-    waterInteraction.setPlanet(p.bodyId || p.seed);
+    waterInteraction.setPlanet(p.seed);
     waterInteraction.inject(best.clone().multiplyScalar(p.seaRadius),
       { strength: 0.38, speed: 4.8, foam: 0.28 });
     return {
       requestedDepth: targetDepth,
       actualDepth: p.seaLevel - p.height(best, p.fullMaxFreq),
       overview: false,
+      direction: best.toArray(),
+      landward: landward.toArray(),
+      look,
     };
   },
   setWalkDirection(direction) {

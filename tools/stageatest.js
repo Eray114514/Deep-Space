@@ -123,37 +123,48 @@ try {
   assert.ok(mountainFree < 0.4,
     `mountain-free surface ${(mountainFree * 100).toFixed(1)}% must not form isolated ranges`);
 
-  const depths = heights.filter((height) => height < home.seaLevel)
-    .map((height) => home.seaLevel - height);
-  const extinction = [0.11, 0.035, 0.012]
-    .map((value) => value / Math.max(0.45, home.waterStyle.clarity));
+  // Composition now uses inverse metres. Sampling only kilometre-deep ocean
+  // columns would (correctly) give opaque water, not a useful optical gate.
+  const depths = [0.05, 0.25, 0.5, 1, 2, 5, 10, 20, 40, 80, 160];
+  const depthScale = Math.max(60,
+    (home.seaLevel + home.hAmp * 0.6) * home.waterStyle.clarity);
+  const extinction = home.oceanClimate.absorption;
   const absorption = depths.map((depth) => {
+    const depthHaze = THREE.MathUtils.smoothstep(depth, 0, depthScale * 0.4) * 0.9;
     const transmission = extinction.map((value) =>
-      Math.exp(-value * Math.min(2 * depth, 360)));
+      Math.exp(-value * 2 * depth) * (1 - depthHaze));
     return 1 - (0.2126 * transmission[0] + 0.7152 * transmission[1] + 0.0722 * transmission[2]);
   });
   const absorptionStats = stats(absorption);
-  assert.ok(absorptionStats.sd >= 0.04,
+  assert.ok(absorptionStats.sd >= 0.25,
     `effective water-column spread ${absorptionStats.sd.toFixed(4)} must remain visible`);
   const attenuation99 = extinction.map((value) => -Math.log(0.01) / (2 * value));
-  assert.ok(attenuation99[0] >= 15 && attenuation99[0] <= 35,
-    'red water-column attenuation must occur over tens of metres');
-  assert.ok(attenuation99[1] >= 45 && attenuation99[1] <= 100,
-    'green water-column attenuation must outlive red without surviving kilometres');
-  assert.ok(attenuation99[2] >= 140 && attenuation99[2] <= 280,
-    'blue water-column attenuation must penetrate deepest');
-  const channelTransmissionAt55m = extinction.map((value) => Math.exp(-2 * value * 55));
-  assert.ok(channelTransmissionAt55m[0] < 0.01
-    && channelTransmissionAt55m[1] < 0.08
-    && channelTransmissionAt55m[2] > channelTransmissionAt55m[1] * 4,
-  '55 m water must read blue/deep rather than reveal a pale sea floor');
-  assert.equal(home.liquidMat.transmission, 0.86,
-    'production water keeps real WebGL screen transmission enabled');
+  assert.ok(attenuation99.every((depth) => depth > 5 && depth < 250),
+    'composition absorption must extinguish the floor over metres, not kilometres');
+  assert.ok(Math.max(...attenuation99) > Math.min(...attenuation99) * 2,
+    'ocean composition must retain meaningful spectral separation');
+  const channelTransmissionAt400m = extinction.map((value) => Math.exp(-2 * value * 400));
+  assert.ok(channelTransmissionAt400m.every((value) => value < 0.001),
+    'deep water must not reveal a seabed hundreds of metres below the surface');
+  assert.equal(home.liquidMat.transmission, 0,
+    'production water avoids the unstable screen-transmission pass');
+  assert.equal(home.liquidMat.transparent, true,
+    'controlled shallow alpha keeps the real shelf readable');
+  assert.equal(home.liquidMat.depthWrite, true,
+    'the optical water surface owns depth and cannot reveal back-shell seams');
   assert.ok(Math.abs(home.liquidMat.ior - 1.333) < 1e-6,
     'water refraction must retain the physical liquid IOR');
-  assert.ok(home.liquidMat.attenuationDistance >= 5
-    && home.liquidMat.attenuationDistance <= 10,
-  'screen-refracted shallow terrain must be attenuated over a metre-scale water column');
+  assert.equal(home.liquidMat.forceSinglePass, true,
+    'double-sided transparent water renders in one pass');
+  assert.equal(home.liquidMat.polygonOffset, false,
+    'water must not pull its dry shell through terrain');
+  assert.ok(home.nearWaterPatch.cellSize <= 32,
+    `near-water patch must resolve gravity waves at <=32 m, got ${home.nearWaterPatch.cellSize}`);
+  const globalWaterCell = (Math.PI / 2) * home.R
+    / (home.waterLod.planet.gridCellsAtLevel(home.waterLod.planet.maxLevel)
+      * (2 ** home.waterLod.planet.maxLevel));
+  assert.ok(globalWaterCell >= 130 && globalWaterCell <= 160,
+    `global ocean must hand off to the 88 m near-patch edge without visible depth facets, got ${globalWaterCell.toFixed(1)} m cells`);
 
   assert.equal(skirtDropForMorph(0), 0.08);
   assert.ok(Math.abs(skirtDropForMorph(100) - 112.04) < 1e-9);
@@ -215,6 +226,9 @@ try {
     mountainFree,
     absorption: absorptionStats,
     attenuation99,
+    depthScale,
+    globalWaterCell,
+    nearWaterCell: home.nearWaterPatch.cellSize,
   }, null, 2));
 } finally {
   home.dispose();

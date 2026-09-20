@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 
 const SHARED_MATERIALS = createMaterials();
 
@@ -650,7 +651,7 @@ function createMiningLaser() {
     model.name = 'HLX3_Model';
     model.scale.setScalar(modelScale);
     model.traverse((child) => {
-      child.layers.set(3);
+      child.layers.set(WEAPON_FOREGROUND_LAYER);
       if (!child.isMesh) return;
       child.castShadow = false;
       child.receiveShadow = false;
@@ -663,11 +664,13 @@ function createMiningLaser() {
       }
     });
     gun.add(model);
+    gun.userData.onModelLoaded?.(model);
     gun.userData.loaded = true;
   }, undefined, (error) => {
     console.error('HLX-3 model failed to load:', error);
     const legacy = createLegacyMiningLaser();
     gun.add(legacy);
+    gun.userData.onModelLoaded?.(legacy);
   });
 
   return gun;

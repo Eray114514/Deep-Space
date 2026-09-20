@@ -10,6 +10,11 @@ import { makeRng } from './rng.js';
 import { WATER_IMPULSE_CAP, waterInteraction } from './water-interaction.js';
 import { SURFACE_INTERACTION_CAP, surfaceInteraction } from './surface-interaction.js';
 import { surfaceMaterialSlots } from './surface-materials.js';
+import { createOceanWaveField, oceanWavePhases, oceanWaveGLSL } from './ocean-wave-field.js';
+import { oceanSeconds } from './ocean-clock.js';
+import { oceanWakePacketGLSL } from './ocean-wake-packet.js';
+import { createOceanDetailFrame, oceanDetailOffsets, oceanDetailGLSL } from './ocean-detail-frame.js';
+import { createOceanTidalEvent, oceanTidalEventUniforms, oceanTidalEventGLSL } from './ocean-tidal-event.js';
 
 // one global clock drives water and wind everywhere
 export const TIME = { value: 0 };
@@ -213,7 +218,6 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uDetailK = { value: strength };
     shader.uniforms.uMacroK = { value: macroK };
     shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
-    shader.uniforms.uLodMorph = { value: 0 };
     shader.uniforms.uCloudTex = { value: cloudTex };
     shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.42 : 0 };
     shader.uniforms.uCloudMat = { value: new THREE.Matrix3() };
@@ -263,26 +267,31 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
-        uniform float uLodMorph;
         attribute vec3 aLocal;
         attribute vec3 aMat;
+        attribute vec2 aSurfaceHeight;
         attribute vec4 aExtra;
         attribute vec3 aPositionDelta;
         attribute vec3 aNormalDelta;
         attribute vec3 aMatDelta;
         attribute vec4 aExtraDelta;
+        attribute float aLodMorph;
+        varying float vSurfaceHeight;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
+        varying vec3 vRadialView;
         varying vec3 vMat;
         varying vec4 vExtra;`)
       .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
-        objectNormal = normalize(objectNormal + aNormalDelta * uLodMorph);`)
+        objectNormal = normalize(objectNormal + aNormalDelta * aLodMorph);`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        transformed += aPositionDelta * uLodMorph;
-        vLocalPos = aLocal + aPositionDelta * uLodMorph;
-        vLocalNrm = normalize(normal + aNormalDelta * uLodMorph);
-        vMat = aMat + aMatDelta * uLodMorph;
-        vExtra = aExtra + aExtraDelta * uLodMorph;`);
+        transformed += aPositionDelta * aLodMorph;
+        vSurfaceHeight = aSurfaceHeight.x + aSurfaceHeight.y * aLodMorph;
+        vLocalPos = aLocal + aPositionDelta * aLodMorph;
+        vLocalNrm = normalize(normal + aNormalDelta * aLodMorph);
+        vRadialView = normalize(normalMatrix * normalize(vLocalPos));
+        vMat = aMat + aMatDelta * aLodMorph;
+        vExtra = aExtra + aExtraDelta * aLodMorph;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
@@ -333,8 +342,10 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uMistK;
         uniform float uMistH;
         uniform vec3 uMistColor;
+        varying float vSurfaceHeight;
         varying vec3 vLocalPos;
         varying vec3 vLocalNrm;
+        varying vec3 vRadialView;
         varying vec3 vMat;
         varying vec4 vExtra;
         float gSnowW = 0.0;
@@ -366,14 +377,44 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           vec2 c = texture2D(uDetailTex, p.xy * s).rg;
           vec2 m = a * w.x + b * w.y + c * w.z;
           return ch == 0 ? m.r : m.g;
+        }
+        float terrainHash(vec3 p) {
+          p = fract(p * 0.1031);
+          p += dot(p, p.yzx + 33.33);
+          return fract((p.x + p.y) * p.z);
+        }
+        float terrainField(vec3 p) {
+          vec3 cell = floor(p);
+          vec3 f = fract(p);
+          vec3 w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+          return mix(mix(mix(terrainHash(cell), terrainHash(cell + vec3(1,0,0)), w.x),
+                         mix(terrainHash(cell + vec3(0,1,0)), terrainHash(cell + vec3(1,1,0)), w.x), w.y),
+                     mix(mix(terrainHash(cell + vec3(0,0,1)), terrainHash(cell + vec3(1,0,1)), w.x),
+                         mix(terrainHash(cell + vec3(0,1,1)), terrainHash(cell + vec3(1,1,1)), w.x), w.y), w.z);
+        }
+        float terrainRegionalField(vec3 p) {
+          // Rotate the second octave and warp its coordinates. Unlike a
+          // repeating triplanar tile this field has no kilometre-sized stamp
+          // for an orbiting camera to resolve as a woven lattice.
+          float broad = terrainField(p * 0.000035);
+          vec3 rotated = vec3(dot(p, vec3(0.36, 0.48, -0.8)),
+            dot(p, vec3(-0.8, 0.60, 0.0)), dot(p, vec3(0.48, 0.64, 0.60)));
+          float regional = terrainField(rotated * 0.00032 + broad * 2.4);
+          float drainage = terrainField(rotated.yzx * 0.0011 + regional * 3.1);
+          float fine = terrainField(rotated.zxy * 0.0037 + drainage * 1.8);
+          return broad * 0.38 + regional * 0.30 + drainage * 0.20 + fine * 0.12;
         }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
           // ---- the palette, per-pixel: exact height & slope, so coasts,
           // depth gradients and rock bands stay crisp at every distance
           vec3 nd = normalize(vLocalPos);
-          float hgt = length(vLocalPos) - uPlanetR;
+          float hgt = vSurfaceHeight;
           float slope = 1.0 - clamp(dot(normalize(vLocalNrm), nd), 0.0, 1.0);
+          // Keep the authored forest, soil and rock provinces visible from
+          // orbit too. The old distance mask removed their identity to hide
+          // discontinuous source fields; those fields are continuous now.
+          float vertexFieldFade = 1.0;
           vec3 base;
           if (uHasSea > 0.5 && hgt < uT0) {
             float t = clamp(1.0 - (uT0 - hgt) / uSeaDepthSpan, 0.0, 1.0);
@@ -383,6 +424,26 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               base = mix(base, uSeaC[i],
                 clamp((t - uSeaT[i - 1]) / max(uSeaT[i] - uSeaT[i - 1], 1e-5), 0.0, 1.0));
             }
+            // Shallow transmission must reveal an actual sea floor rather
+            // than another smooth blue layer. Near the zero contour, expose
+            // pale shelf sediment with metre-scale sediment ridges and scattered
+            // darker grains; deeper terrain returns continuously to the
+            // authored ocean palette.
+            float seabedDepth = uT0 - hgt;
+            float shelf = 1.0 - smoothstep(2.0, 42.0, seabedDepth);
+            vec3 seaW = pow(abs(normalize(vLocalNrm)), vec3(4.0));
+            seaW /= max(seaW.x + seaW.y + seaW.z, 1e-5);
+            float sediment = triDetail(vLocalPos, seaW, 0.035, 0)
+              * 0.58 + triDetail(vLocalPos, seaW, 0.18, 1) * 0.42;
+            // Unfiltered trigonometric bars evaluated at multi-million-metre
+            // coordinates alias differently across triangle derivatives. The
+            // isolated fixed-height floor retained those wedges until the bars
+            // were removed. Mip-filtered sediment has a stable distant mean.
+            float rippleBars = smoothstep(0.28, 0.72,
+              triDetail(vLocalPos, seaW, 0.12, 1));
+            vec3 shelfSand = uLandC[0]
+              * (0.46 + sediment * 0.48 + rippleBars * 0.18);
+            base = mix(base, shelfSand, shelf * 0.88);
           } else {
             float t = clamp((hgt - uT0) / uTSpan, 0.0, 1.0);
             base = uLandC[0];
@@ -391,12 +452,16 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               base = mix(base, uLandC[i],
                 clamp((t - uLandT[i - 1]) / max(uLandT[i] - uLandT[i - 1], 1e-5), 0.0, 1.0));
             }
-            base = mix(base, uForestC, vExtra.x);
-            base = mix(base, uBlotchC, vExtra.y);
-            if (uStripeK > 0.001) base = mix(base, mix(uStripeA, uStripeB, vExtra.z), uStripeK);
-            if (uExtraMode > 2.5) base *= 1.0 + (vExtra.w - 0.5) * 0.2;
-            else if (uExtraMode > 0.5) base = mix(base, uExtraC, vExtra.w);
-            base = mix(base, uRockC, smoothstep(uSlopeLo, uSlopeHi, slope));
+            base = mix(base, uForestC, vExtra.x * vertexFieldFade);
+            base = mix(base, uBlotchC, vExtra.y * vertexFieldFade);
+            if (uStripeK > 0.001) base = mix(base,
+              mix(uStripeA, uStripeB, vExtra.z), uStripeK * vertexFieldFade);
+            if (uExtraMode > 2.5) base *= 1.0
+              + (vExtra.w - 0.5) * 0.2 * vertexFieldFade;
+            else if (uExtraMode > 0.5) base = mix(base, uExtraC,
+              vExtra.w * vertexFieldFade);
+            base = mix(base, uRockC, smoothstep(uSlopeLo, uSlopeHi, slope)
+              * mix(0.18, 1.0, vertexFieldFade));
           }
           diffuseColor.rgb = base;
 
@@ -414,23 +479,28 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           if (uHasSea > 0.5 && hgt >= uT0) {
             float shoreDrift = triDetail(vLocalPos, w, 0.0048, 1)
               + triDetail(vLocalPos, w, 0.0011, 0) - 1.0;
-            float wetReach = 8.0 + shoreDrift * 5.5;
-            gShoreWet = 1.0 - smoothstep(max(1.5, wetReach * 0.18),
-              max(4.0, wetReach), hgt - uT0);
+            float wetReach = 2.4 + shoreDrift * 1.1;
+            gShoreWet = 1.0 - smoothstep(0.2, wetReach, hgt - uT0);
             diffuseColor.rgb = mix(diffuseColor.rgb,
-              diffuseColor.rgb * vec3(0.54, 0.66, 0.7), gShoreWet * 0.58);
+              diffuseColor.rgb * vec3(0.56, 0.65, 0.69), gShoreWet * 0.80);
           }
           float grain = (triDetail(vLocalPos, w, uDetailS.x, 0) - 0.5)
                       + (triDetail(vLocalPos, w, uDetailS.y, 1) - 0.5) * 0.8;
-          float strat = texture2D(uDetailTex, vec2(length(vLocalPos) * 0.055, 0.31)).r - 0.5;
-          float d = mix(grain, grain * 0.5 + strat * 1.15, vMat.x);
-          d += (triDetail(vLocalPos, w, uDetailS.y * 0.32, 0) - 0.5) * vMat.y * 0.75;
+          float strat = texture2D(uDetailTex, vec2(vSurfaceHeight * 0.055, 0.31)).r - 0.5;
+          float d = mix(grain, grain * 0.5 + strat * 1.15,
+            vMat.x * vertexFieldFade);
+          d += (triDetail(vLocalPos, w, uDetailS.y * 0.32, 0) - 0.5)
+            * vMat.y * vertexFieldFade * 0.75;
           diffuseColor.rgb *= 1.0 + d * uDetailK;
 
           // Compressed scanned structure is restricted to the near field.
           // Alien palettes retain their authored hue while still inheriting
           // real soil/stone grain and roughness.
-          float pbrNear = 1.0 - smoothstep(18.0, 92.0, length(vViewPosition));
+          // Scanned structure must survive a normal low-flight/chase-camera
+          // view, not only an on-foot macro shot. The samples are already
+          // paid for by this shader; extending their fade prevents beaches
+          // and plains a few hundred metres away from collapsing to one tint.
+          float pbrNear = 1.0 - smoothstep(70.0, 720.0, length(vViewPosition));
           float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
           vec2 pbrUv = surfaceMaterialUv(vLocalPos, normalize(vLocalNrm));
           vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb;
@@ -444,16 +514,17 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             texture2D(uRockRoughness, pbrUv * 0.78 + 0.17).r, pbrRock);
 
           // ---- continental-scale tint drift: dry-brown swathes
-          float macro = triDetail(vLocalPos, w, 0.0013, 0)
-                      + triDetail(vLocalPos, w, 0.00028, 1) - 1.0;
+          float macro = terrainRegionalField(vLocalPos) * 2.0 - 1.0;
           float mw = clamp(macro * 1.5 + 0.5, 0.0, 1.0) * uMacroK;
           diffuseColor.rgb *= mix(vec3(1.0), vec3(1.09, 0.99, 0.84), mw);
+          diffuseColor.rgb *= 1.0 + macro * 0.55 * uMacroK;
 
           // ---- mid-scale patchiness (~100–500 m): soil and moisture
           // variation seen from a hilltop — the octave between micro grain
           // and continental swathes that uniform game terrain lacks
           float pch = triDetail(vLocalPos, w, 0.0035, 1)
                     + triDetail(vLocalPos, w, 0.0012, 0) - 1.0;
+          pch *= 1.0 - smoothstep(1800.0, 10000.0, length(vViewPosition));
           gPatch = pch;
           diffuseColor.rgb *= 1.0 + pch * (0.30 + 0.20 * vMat.z) * (0.5 + uMacroK);
           // damp hollows darken and cool slightly
@@ -472,6 +543,12 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             gSnowW = sw;
           }
 
+          // Reassert the optical wet band after every dry-land detail layer.
+          // Otherwise grain/PBR/macro multiplication can lift the beach back
+          // to the dry palette and the shoreline reads as a hard colour cut.
+          // The wet albedo was already applied above. A second multiply here
+          // turns a damp beach into a black outline from orbit.
+
           // ---- the cloud deck overhead casts drifting shadows.
           // UV must match cloudAtlasUV() in shaders-node.js exactly, or the
           // shadows mirror about the equator relative to the clouds casting
@@ -489,7 +566,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         // low-sun specular variation is a big part of ground reading as real
         roughnessFactor = clamp(roughnessFactor - gSnowW * 0.34
           - gShoreWet * 0.38 + gPatch * 0.12, 0.24, 1.0);
-        float pbrNearRough = 1.0 - smoothstep(18.0, 92.0, length(vViewPosition));
+        float pbrNearRough = 1.0 - smoothstep(70.0, 720.0, length(vViewPosition));
         roughnessFactor = mix(roughnessFactor, clamp(gSurfaceRoughness, 0.38, 1.0), pbrNearRough * 0.35);`)
       .replace('#include <fog_fragment>', `
         #ifdef USE_FOG
@@ -497,7 +574,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // valley mist: haze pools in the low country and thickens with
           // distance — the depth cue that sells scale from altitude
           float mist = uMistK
-            * smoothstep(uMistH, 0.0, (length(vLocalPos) - uPlanetR) - uT0)
+            * smoothstep(uMistH, 0.0, vSurfaceHeight - uT0)
             * (1.0 - exp(-vFogDepth * 3.2e-4));
           gl_FragColor.rgb = mix(gl_FragColor.rgb, uMistColor, clamp(mist, 0.0, 0.6));
         }
@@ -520,49 +597,238 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
           vec2 rockN = texture2D(uRockNormal, uvPbr * 0.78 + 0.17).xy * 2.0 - 1.0;
           vec2 scanN = mix(grassN, rockN, rockPbr);
-          float scanNear = 1.0 - smoothstep(8.0, 72.0, length(vViewPosition));
+          float scanNear = 1.0 - smoothstep(35.0, 420.0, length(vViewPosition));
           gx += scanN.x * scanNear * 0.34;
           gy += scanN.y * scanNear * 0.34;
           vec3 tang = normalize(cross(normal, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
           vec3 bitn = cross(normal, tang);
-          normal = normalize(normal + (tang * gx + bitn * gy) * uDetailK * (1.7 + vMat.x * 1.5));
+          float normalVertexFieldFade = 1.0 - smoothstep(4500.0, 24000.0,
+            length(vViewPosition));
+          // Terrain support and crest normals are continuous now. Flattening
+          // their resolved relief towards the radial normal hid generation
+          // discontinuities but erased the mountain lighting from orbit.
+          normal = normalize(normal);
+          normal = normalize(normal
+            + (tang * gx + bitn * gy) * uDetailK
+            * normalVertexFieldFade
+            * (1.7 + vMat.x * normalVertexFieldFade * 1.5));
         }`);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v7-webgl-morph';
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v11-filtered-sediment';
   return material;
 }
 
-// Living water: scrolling normal perturbation, plus Beer–Lambert depth
-// absorption — the terrain depth beneath each vertex is baked at build, so
-// deeps go dark, shallows glow, and shorelines fade in softly.
+// Living water combines a deterministic gravity-wave cascade, a camera-local
+// geometry patch, spectral water-column transport and live sky/cloud light.
+// The closed globe remains deliberately coarse; only the optical near field
+// spends vertices on displaced waves.
 export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   const tex = detailTexture();
   if (!tex) return material;
+  const clarity = Math.max(0.25, planet?.waterStyle?.clarity || 1);
+  const depthScale = Math.max(60,
+    ((planet?.seaLevel ?? 0) + (planet?.hAmp ?? 1200) * 0.6) * clarity);
+  const extinctionValues = planet?.oceanClimate?.absorption
+    || [1.8, 1.2, 0.6].map((value) => value * 2.3 / (0.9 * depthScale));
+  const oceanField = planet.oceanSurface?.waveField || createOceanWaveField(planet.seed, {
+    gravity: planet.gravity,
+    period: planet.oceanClimate?.swellPeriod || 10,
+  });
+  const tidalField = planet.oceanSurface?.tidalField || (planet.oceanClimate?.event
+    ? createOceanTidalEvent(planet.oceanClimate.event, { radius: planet.seaRadius, gravity: planet.gravity }) : null);
+  const tidalGLSL = tidalField ? oceanTidalEventGLSL
+    : 'vec4 oceanTidalEvent(vec3 p, float depth) { return vec4(0.0); }';
+  const wavelengths = oceanField.modes.map((mode) => Math.PI * 2 / mode.k);
+  const amplitudes = oceanField.modes.map((mode) => mode.weight * oceanField.normalization * 2);
+
   material.depthWrite = true;
-  material.polygonOffset = true;
-  material.polygonOffsetFactor = -1;
-  material.polygonOffsetUnits = -2;
+  // The water shader owns its optical surface. Shallows reveal the real
+  // terrain through controlled alpha below; the unreliable engine-level
+  // transmission variant remains disabled by the material contract.
+  material.transparent = true;
+  // The custom optical pass below owns solar glints and the reflected sky.
+  // Leaving MeshPhysicalMaterial's white direct lobe at its default strength
+  // reintroduced a clipped pillar and revealed every long-wave crest as a
+  // parallel rail at sunset, independently of the authored chromatic path.
+  material.specularIntensity = 0.0;
+  material.polygonOffset = false;
+  material.forceSinglePass = true;
+  material.opacity = 1;
+  material.userData.waterProfile = {
+    model: 'regional-ocean-wave-field-webgl-v2',
+    depthScale,
+    extinction: extinctionValues,
+    extinctionUnits: 'inverse-metres',
+    depthHaze: { distance: depthScale * 0.4, strength: 0.9 },
+    spectrum: {
+      wavelengths,
+      amplitudes,
+      nearPatchCellMetres: 4,
+    },
+    dryShellDiscard: true,
+    directionalWake: true,
+  };
+  const drawUniforms = {
+    uNearPatchCenter: { value: new THREE.Vector3(1e9, 1e9, 1e9) },
+    uNearPatchRadius: { value: 0 },
+    uRippleCount: { value: 0 },
+  };
+  drawUniforms.uOceanModes = { value: oceanField.modes.map((mode) =>
+    new THREE.Vector4(...mode.axis, mode.k)) };
+  drawUniforms.uOceanPhases = { value: oceanField.modes.map(() => new THREE.Vector2()) };
+  drawUniforms.uOceanNormalization = { value: oceanField.normalization };
+  drawUniforms.uOceanHeight = { value: 2 };
+  drawUniforms.uOceanTime = { value: 0 };
+  // The shared tile contains broad noise features; its extra UV multiplier
+  // previously stretched "short" facets across tens of metres. Resolve the
+  // missing metre-scale band, with CPU phases and mip filtering unchanged.
+  const detailFrame = createOceanDetailFrame(THREE.MathUtils.clamp(waveScale * 0.92, 0.028, 0.066) * 8);
+  drawUniforms.uOceanDetailOffsets = { value: detailFrame.channels.map(() => new THREE.Vector4()) };
+  if (tidalField) {
+    for (const name of ['Axis', 'Side', 'Up', 'Offset']) drawUniforms[`uTidal${name}`] = { value: new THREE.Vector3() };
+    drawUniforms.uTidalShape = { value: new THREE.Vector4() };
+    drawUniforms.uTidalDepthRatio = { value: tidalField.depthRatio };
+  }
+  material.userData.oceanWaveField = oceanField;
+  material.userData.oceanTidalField = tidalField;
+  material.userData.syncOceanField = () => {
+    const center = drawUniforms.uNearPatchRadius.value > 0
+      ? drawUniforms.uNearPatchCenter.value : new THREE.Vector3();
+    const seconds = oceanSeconds(planet.weatherHours || 0);
+    drawUniforms.uOceanTime.value = seconds;
+    oceanDetailOffsets(detailFrame, center).forEach((offset, i) =>
+      drawUniforms.uOceanDetailOffsets.value[i].set(...offset));
+    const phases = oceanWavePhases(oceanField, center, seconds);
+    for (let i = 0; i < phases.length; i++) drawUniforms.uOceanPhases.value[i].set(...phases[i]);
+    if (tidalField) {
+      const state = oceanTidalEventUniforms(tidalField, center, seconds);
+      for (const name of ['Axis', 'Side', 'Up', 'Offset']) {
+        drawUniforms[`uTidal${name}`].value.set(...state[name.toLowerCase()]);
+      }
+      drawUniforms.uTidalShape.value.set(...state.shape);
+    }
+    if (center.lengthSq() > 1) {
+      const state = planet.oceanAt?.(center.clone().normalize());
+      if (state) {
+        drawUniforms.uOceanHeight.value = state.offshoreSignificantHeight;
+        drawUniforms.uAbsorption?.value.set(...state.absorption);
+        drawUniforms.uDeepC?.value.setRGB(...state.scatter);
+        if (drawUniforms.uShallowC) {
+          drawUniforms.uShallowC.value.setRGB(...state.scatter).multiplyScalar(2.2);
+        }
+        if (drawUniforms.uBiologicalActivity) {
+          drawUniforms.uBiologicalActivity.value = state.bioluminescence;
+        }
+        material.userData.oceanState = state;
+        material.userData.waterProfile.spectrum.significantHeight = state.offshoreSignificantHeight;
+        material.userData.waterProfile.spectrum.amplitudes = oceanField.modes.map((mode) =>
+          mode.weight * oceanField.normalization * state.offshoreSignificantHeight);
+      }
+    }
+  };
+  material.userData.syncOceanField();
+  const interactionPixels = new Float32Array(WATER_IMPULSE_CAP * 3 * 4);
+  const interactionTexture = new THREE.DataTexture(
+    interactionPixels, WATER_IMPULSE_CAP, 3, THREE.RGBAFormat, THREE.FloatType,
+  );
+  interactionTexture.name = `water-interactions:${planet?.name || planet?.seed || 'water'}`;
+  interactionTexture.minFilter = THREE.NearestFilter;
+  interactionTexture.magFilter = THREE.NearestFilter;
+  interactionTexture.generateMipmaps = false;
+  interactionTexture.colorSpace = THREE.NoColorSpace;
+  let uploadedRippleCount = -1;
+  const syncWaterInteractionTexture = () => {
+    // Pack only live impulses at the start of the texture. Most frames have no
+    // contact at all; bounding the shader loops avoids dozens of dependent
+    // texture reads per ocean pixel while retaining the complete 12-event
+    // wake/impact budget when the ship actually touches water.
+    const directional = [];
+    const impacts = [];
+    for (let sourceIndex = 0; sourceIndex < WATER_IMPULSE_CAP; sourceIndex++) {
+      const data = waterInteraction.data[sourceIndex];
+      if (data.z <= 0.001 || waterInteraction.planetId !== planet.seed) continue;
+      const direction = waterInteraction.directions[sourceIndex];
+      (direction.w > 0.5 ? directional : impacts).push(sourceIndex);
+    }
+    // Finite packets need the actual deposit spacing. Subsampling a 150 m/s
+    // track down to four sources left 50 m holes between 36 m-wide packets.
+    // Keep the bounded twelve-source history; the shader rejects pixels
+    // outside each packet before doing its noise/foam work.
+    directional.sort((a, b) => waterInteraction.data[a].x
+      - waterInteraction.data[b].x);
+    const sourceIndices = [...impacts, ...directional];
+    let packedIndex = 0;
+    for (const sourceIndex of sourceIndices) {
+      if (packedIndex >= WATER_IMPULSE_CAP) break;
+      const data = waterInteraction.data[sourceIndex];
+      const position = waterInteraction.positions[sourceIndex];
+      const direction = waterInteraction.directions[sourceIndex];
+      let offset = packedIndex * 4;
+      const anchor = drawUniforms.uNearPatchRadius.value > 0
+        ? drawUniforms.uNearPatchCenter.value : { x: 0, y: 0, z: 0 };
+      interactionPixels[offset] = position.x - anchor.x;
+      interactionPixels[offset + 1] = position.y - anchor.y;
+      interactionPixels[offset + 2] = position.z - anchor.z;
+      interactionPixels[offset + 3] = 0;
+      offset = (WATER_IMPULSE_CAP + packedIndex) * 4;
+      interactionPixels[offset] = data.x;
+      interactionPixels[offset + 1] = data.y;
+      interactionPixels[offset + 2] = data.z;
+      interactionPixels[offset + 3] = data.w;
+      offset = (WATER_IMPULSE_CAP * 2 + packedIndex) * 4;
+      interactionPixels[offset] = direction.x;
+      interactionPixels[offset + 1] = direction.y;
+      interactionPixels[offset + 2] = direction.z;
+      interactionPixels[offset + 3] = direction.w;
+      packedIndex++;
+    }
+    drawUniforms.uRippleCount.value = packedIndex;
+    if (packedIndex === 0 && uploadedRippleCount === 0) return;
+    uploadedRippleCount = packedIndex;
+    interactionTexture.needsUpdate = true;
+  };
+  syncWaterInteractionTexture();
+  // onBeforeCompile can run more than once for light/render variants. Every
+  // variant must retain the same mutable draw controls; pointing debug/runtime
+  // code at whichever Shader happened to compile last made A/B gates and the
+  // near-patch selector update a non-rendered uniform set.
+  material.userData.waterUniforms = drawUniforms;
+  material.defaultAttributeValues ||= {};
+  material.defaultAttributeValues.aWaterCell = [144];
+  material.userData.waterInteractionTexture = interactionTexture;
+  material.userData.syncWaterInteractionTexture = syncWaterInteractionTexture;
   material.onBeforeCompile = (shader) => {
     const cloudTex = planet.cloudShadowTex || blankTexture();
-    const clarity = Math.max(0.25, planet?.waterStyle?.clarity || 1);
     const deep = planet?.pal?.sea
-      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor, 0.4)
+      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor, 0.34)
       : new THREE.Color(0.02, 0.08, 0.15);
     const shallow = planet
-      ? planet.liquidColor.clone().lerp(new THREE.Color(0.72, 0.96, 1), 0.28)
-      : new THREE.Color(0.4, 0.75, 0.8);
+      ? planet.liquidColor.clone().lerp(new THREE.Color(0.16, 0.72, 0.62), 0.38)
+      : new THREE.Color(0.12, 0.56, 0.62);
+    if (planet.oceanClimate) {
+      deep.setRGB(...planet.oceanClimate.scatter);
+      shallow.copy(deep).multiplyScalar(2.2).lerp(new THREE.Color(0.16, 0.46, 0.37),
+        planet.type === 'lush' ? 0.48 : 0.08);
+    }
     const sky = planet?.skyColor || new THREE.Color(0.25, 0.4, 0.55);
     shader.uniforms.uDetailTex = { value: tex };
-    shader.uniforms.uTime = TIME;
+    shader.uniforms.uTime = drawUniforms.uOceanTime;
     shader.uniforms.uWaveS = { value: waveScale };
     shader.uniforms.uSwell = { value: planet?.waterStyle?.swell || 1 };
     shader.uniforms.uFoamK = { value: planet?.waterStyle?.foam || 1 };
-    shader.uniforms.uLodMorph = { value: 0 };
     shader.uniforms.uDeepC = { value: deep };
     shader.uniforms.uShallowC = { value: shallow };
-    shader.uniforms.uAbsorption = {
-      value: new THREE.Vector3(0.11 / clarity, 0.035 / clarity, 0.012 / clarity),
-    };
+    shader.uniforms.uAbsorption = { value: new THREE.Vector3(...extinctionValues) };
+    shader.uniforms.uBiologicalActivity = { value: 0 };
+    shader.uniforms.uDepthHazeDistance = { value: depthScale * 0.4 };
+    shader.uniforms.uNearPatchCenter = drawUniforms.uNearPatchCenter;
+    shader.uniforms.uNearPatchRadius = drawUniforms.uNearPatchRadius;
+    for (const name of ['uOceanModes', 'uOceanPhases', 'uOceanNormalization', 'uOceanHeight', 'uOceanDetailOffsets']) {
+      shader.uniforms[name] = drawUniforms[name];
+    }
+    for (const [name, uniform] of Object.entries(drawUniforms)) {
+      if (name.startsWith('uTidal')) shader.uniforms[name] = uniform;
+    }
     shader.uniforms.uSkyZenith = {
       value: sky.clone().multiply(new THREE.Color(0.3, 0.42, 0.78)),
     };
@@ -588,72 +854,116 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     shader.uniforms.uEclipseStarAngle = {
       value: planet.eclipseOccluder?.starAngularRadius || 0,
     };
-    shader.uniforms.uRipplePos = { value: waterInteraction.positions };
-    shader.uniforms.uRippleData = { value: waterInteraction.data };
+    shader.uniforms.uRippleTex = { value: interactionTexture };
+    shader.uniforms.uRippleCount = drawUniforms.uRippleCount;
+    // A material can have several live programs (shadow/light/fog variants).
+    // Environment updates must reach every one, not only the last compilation.
+    for (const [name, uniform] of Object.entries(shader.uniforms)) {
+      if (!name.startsWith('u')) continue;
+      drawUniforms[name] ||= uniform;
+      shader.uniforms[name] = drawUniforms[name];
+    }
     material.userData.waterCloudTexture = shader.uniforms.uCloudTex;
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
         uniform float uSwell;
-        uniform float uLodMorph;
         uniform vec3 uSunDir;
         uniform vec3 uSecondarySunDir;
+        uniform vec3 uNearPatchCenter;
+        uniform float uNearPatchRadius;
         attribute vec3 aLocal;
         attribute float aDepth;
         attribute vec3 aPositionDelta;
         attribute vec3 aNormalDelta;
         attribute float aDepthDelta;
+        attribute float aLodMorph;
+        attribute float aNearPatchPass;
+        attribute float aWaterCell;
         varying vec3 vLocalPos;
+        varying vec3 vOceanRelative;
+        ${oceanWaveGLSL}
+        ${tidalGLSL}
         varying vec3 vWaveUp;
         varying vec3 vWaveT;
         varying vec3 vWaveB;
         varying vec3 vSunDirView;
         varying vec3 vSecondarySunDirView;
         varying vec2 vMacroSlope;
+        varying float vWaveHeight;
         varying float vWaveNear;
-        varying float vDepth;`)
+        varying float vDepth;
+        varying float vNearPatchPass;`)
       .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
-        objectNormal = normalize(objectNormal + aNormalDelta * uLodMorph);`)
+        objectNormal = normalize(objectNormal + aNormalDelta * aLodMorph);`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        transformed += aPositionDelta * uLodMorph;
-        vLocalPos = aLocal + aPositionDelta * uLodMorph;
-        vDepth = aDepth + aDepthDelta * uLodMorph;
+        transformed += aPositionDelta * aLodMorph;
+        vLocalPos = aLocal + aPositionDelta * aLodMorph;
+        vDepth = aDepth + aDepthDelta * aLodMorph;
+        vNearPatchPass = aNearPatchPass;
         vec3 waveUp = normalize(vLocalPos);
         vec3 waveT = normalize(cross(waveUp,
           abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 waveB = cross(waveUp, waveT);
-        float phaseA = (vLocalPos.x + vLocalPos.z) * 0.016 + uTime * 0.82;
-        float phaseB = (vLocalPos.z - vLocalPos.y * 0.7) * 0.027 - uTime * 1.07;
-        float phaseC = (vLocalPos.x * 0.55 + vLocalPos.y) * 0.043 + uTime * 1.34;
-        float macroWave = (sin(phaseA) * 2.2 + sin(phaseB) * 1.1
-          + sin(phaseC) * 0.5) * uSwell;
-        vec3 waveGradient = (
-          vec3(0.016, 0.0, 0.016) * cos(phaseA) * 2.2
-          + vec3(0.0, -0.0189, 0.027) * cos(phaseB) * 1.1
-          + vec3(0.02365, 0.043, 0.0) * cos(phaseC) * 0.5
-        ) * uSwell;
+        float macroWave = 0.0;
+        vec3 waveRelative = uNearPatchRadius > 0.0
+          ? vLocalPos - uNearPatchCenter : vLocalPos;
+        // The patch position is already relative to its double-precision
+        // centre. Keep that small value instead of subtracting two rounded
+        // six-million-metre positions when evaluating short waves.
+        vOceanRelative = aNearPatchPass > 0.5 ? transformed : waveRelative;
+        float localCell = aNearPatchPass > 0.5
+          ? max(4.0, aWaterCell)
+          : 144.0;
+        vec4 waveSample = oceanWaveField(vOceanRelative, localCell);
+        macroWave = waveSample.x;
+        vec3 waveGradient = waveSample.yzw;
         float cameraDistance = length((modelViewMatrix * vec4(transformed, 1.0)).xyz);
-        vWaveNear = 1.0 - smoothstep(12000.0, 120000.0, cameraDistance);
-        float shoal = smoothstep(0.5, 12.0, vDepth);
-        transformed += waveUp * (macroWave * shoal * vWaveNear + 3.5);
+        vWaveNear = 1.0 - smoothstep(18000.0, 220000.0, cameraDistance);
+        // Only the graded camera patch owns geometric displacement. Its last
+        // 1.2 km returns continuously to the base sphere before the coverage
+        // hand-off, so the coarse global shell and the patch meet at exactly
+        // the same position instead of exposing a rectangular step.
+        float patchDistanceVertex = length(vLocalPos - uNearPatchCenter);
+        float patchGeometry = 1.0 - smoothstep(uNearPatchRadius - 1840.0,
+          uNearPatchRadius - 640.0, patchDistanceVertex);
+        float geometryNear = step(0.5, aNearPatchPass) * patchGeometry;
+        // Breakers lose displacement as the available water column collapses.
+        // At the 0.9 m wading fixture the eye stays above a ~0.15 m swash;
+        // metre-scale swell reaches full height only beyond the inner shelf.
+        float shoal = min(1.0, max(0.0, vDepth) * 0.62 / max(uOceanHeight, 0.001));
+        vec4 tidalSample = oceanTidalEvent(vOceanRelative, vDepth);
+        // The bounded giant packet belongs to the world, including the global
+        // shell. Only short ordinary waves fade at the local patch boundary.
+        float displacedWave = macroWave * shoal * geometryNear + tidalSample.x;
+        transformed += waveUp * (displacedWave + 0.18);
         vWaveUp = normalize(normalMatrix * waveUp);
         vWaveT = normalize(normalMatrix * waveT);
         vWaveB = normalize(normalMatrix * waveB);
         vSunDirView = normalize(normalMatrix * uSunDir);
         vSecondarySunDirView = normalize(normalMatrix * uSecondarySunDir);
         vMacroSlope = vec2(dot(waveGradient, waveT),
-          dot(waveGradient, waveB)) * shoal * vWaveNear;`);
+          dot(waveGradient, waveB)) * shoal * geometryNear;
+        vWaveHeight = displacedWave;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
         uniform sampler2D uCloudTex;
         uniform float uTime;
+        varying vec3 vOceanRelative;
+        ${oceanWaveGLSL}
+        ${tidalGLSL}
+        uniform float uSwell;
         uniform float uWaveS;
         uniform float uFoamK;
         uniform vec3 uDeepC;
         uniform vec3 uShallowC;
         uniform vec3 uAbsorption;
+        uniform float uBiologicalActivity;
+        uniform float uDepthHazeDistance;
+        uniform vec3 uNearPatchCenter;
+        uniform float uNearPatchRadius;
         uniform vec3 uSkyZenith;
         uniform vec3 uSkyHorizon;
         uniform float uDay;
@@ -668,8 +978,8 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform vec3 uEclipseCenter;
         uniform float uEclipseRadius;
         uniform float uEclipseStarAngle;
-        uniform vec3 uRipplePos[${WATER_IMPULSE_CAP}];
-        uniform vec4 uRippleData[${WATER_IMPULSE_CAP}];
+        uniform sampler2D uRippleTex;
+        uniform int uRippleCount;
         varying vec3 vLocalPos;
         varying vec3 vWaveUp;
         varying vec3 vWaveT;
@@ -677,10 +987,63 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         varying vec3 vSunDirView;
         varying vec3 vSecondarySunDirView;
         varying vec2 vMacroSlope;
+        varying float vWaveHeight;
         varying float vWaveNear;
         varying float vDepth;
+        varying float vNearPatchPass;
         float gWaterFoam = 0.0;
+        float gWaterWakeFoam = 0.0;
         float gWaterRoughness = 0.16;
+        vec2 gWaterDetail = vec2(0.5);
+        vec2 gWaterMacroSlope = vec2(0.0);
+        float gWaterCloud = 0.0;
+        float gWaterShallow = 0.0;
+        float gWaterFacetLight = 0.5;
+        float waterHash21(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+        float waterNoise2(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(waterHash21(i), waterHash21(i + vec2(1.0, 0.0)), f.x),
+            mix(waterHash21(i + vec2(0.0, 1.0)),
+              waterHash21(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+        float waterFbm2(vec2 p) {
+          // The shared tile already contains four octaves. Hardware mipmaps
+          // integrate unresolved roughness; rotating a second incommensurate
+          // sample hides the tile without evaluating hundreds of hash ALU
+          // operations for every covered near-water pixel.
+          mat2 rotation = mat2(0.8, -0.6, 0.6, 0.8);
+          float a = texture2D(uDetailTex, p * 0.04).r;
+          float b = texture2D(uDetailTex, rotation * p * 0.067 + vec2(0.37, 0.19)).g;
+          return clamp(0.5 + ((a * 0.65 + b * 0.35) - 0.5) * 2.0, 0.0, 1.0);
+        }
+        ${oceanDetailGLSL(detailFrame)}
+        ${oceanWakePacketGLSL}
+        vec2 waterDetail(vec3 p, float scale, vec2 drift) {
+          // Work in a camera-local tangent-sized frame near the patch so the
+          // 6,000 km planet does not quantise metre-scale facets in mediump
+          // arithmetic. Two unrelated world projections feed non-periodic
+          // value-noise fBm; unlike the old tiled normal texture and analytic
+          // sines, this cannot form kilometre-long rails or rectangular cells.
+          return vec2(
+            oceanDetailA(p, drift * 9.0),
+            oceanDetailB(p, drift.yx * vec2(-7.0, 11.0)));
+        }
+        vec3 waterWaveGradient(vec3 p) {
+          vec3 waveLocalUp = normalize(p);
+          vec3 waveLocalT = normalize(cross(waveLocalUp,
+            abs(waveLocalUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+          vec3 waveLocalB = cross(waveLocalUp, waveLocalT);
+          vec3 waveRelative = uNearPatchRadius > 0.0
+            ? p - uNearPatchCenter : p;
+          float footprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
+          return oceanWaveField(vOceanRelative, footprint).yzw;
+        }
         float waterCloud(vec3 localDirection) {
           vec3 cd = uCloudMat * normalize(localDirection);
           float cu = 0.5 + atan(-cd.z, -cd.x) * 0.15915494;
@@ -689,53 +1052,239 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
-          float dep = max(vDepth, 0.0);
-          float viewCos = clamp(abs(dot(normalize(vWaveUp),
-            normalize(vViewPosition))), 0.16, 1.0);
-          // Seabed light crosses the water column down and back up. Grazing
-          // views extend that path, while the cap avoids denormal work in the
-          // already-opaque abyss.
-          float waterPath = min(2.0 * dep / viewCos, 360.0);
-          vec3 transmission = exp(-uAbsorption * waterPath);
+          float patchDistance = length(vLocalPos - uNearPatchCenter);
+          if (uNearPatchRadius > 0.0) {
+            // World-space ownership boundary. Geometric waves have already
+            // reached zero before this radius, so both meshes meet on the
+            // same sphere and a camera pan cannot reveal a screen-locked
+            // checkerboard or rectangular coverage edge.
+            float patchHandoff = uNearPatchRadius - 640.0;
+            if (vNearPatchPass < 0.5 && patchDistance < patchHandoff) discard;
+            if (vNearPatchPass > 0.5 && patchDistance >= patchHandoff) discard;
+          }
           vec3 localUp = normalize(vLocalPos);
           vec3 localT = normalize(cross(localUp,
             abs(localUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
           vec3 localB = cross(localUp, localT);
-          vec2 surfaceUv = vec2(dot(vLocalPos, localT), dot(vLocalPos, localB));
-          float smallDetail = texture2D(uDetailTex,
-            surfaceUv * uWaveS * 1.8 + vec2(uTime * 0.017, -uTime * 0.011)).r;
-          float caustic = pow(max(0.0, sin(surfaceUv.x * 0.18 + uTime * 1.7)
-            * sin(surfaceUv.y * 0.13 - uTime * 1.25)), 3.0)
-            * exp(-dep * 0.055) * uDay;
-          vec3 seabed = uShallowC * (0.62 + caustic * 0.5);
-          vec3 inScatter = uDeepC * (0.44 + uDay * 0.42);
-          diffuseColor.rgb = seabed * transmission + inScatter * (1.0 - transmission);
-          float waveLine = sin(dep * 1.65 - uTime * 1.75
-            + smallDetail * 4.2 + sin(surfaceUv.x * 0.035) * 1.8);
-          float shoreBand = 1.0 - smoothstep(0.35, 8.5, dep);
-          float shoreFoam = shoreBand * smoothstep(-0.15, 0.72, waveLine)
-            * (0.48 + smallDetail * 0.52) * uFoamK;
+          // Sample the displaced surface, not its flat sea-sphere footprint.
+          // Otherwise a 280 m wave face stretches a few metres of texture
+          // into long vertical fabric streaks. The anchor remains unchanged.
+          vec3 detailPosition = vOceanRelative + localUp * vWaveHeight;
+          vec2 detailSample = waterDetail(detailPosition, uWaveS,
+            vec2(uTime * 0.017, -uTime * 0.011));
+          gWaterDetail = detailSample;
+          // A real waterline advances and retreats over the authored contour.
+          // Modulate depth with a broad stochastic swash field and the actual
+          // geometric crest so the coverage, wet band and foam never collapse
+          // to a ruler-straight material boundary.
+          float swashField = (detailSample.r - 0.5) * 2.6
+            + (detailSample.g - 0.5) * 1.2 + vWaveHeight * 0.42;
+          float edgeDepth = vDepth + swashField;
+          if (edgeDepth <= -0.85) discard;
+          float edgeCoverage = smoothstep(-0.85, 0.22, edgeDepth);
+          float dep = max(edgeDepth, 0.0);
+          float opticalFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
+          float farBathymetry = smoothstep(2.0, 22.0, opticalFootprint);
+          // Once a depth sample covers tens of metres, interpolating the raw
+          // shelf at patch vertices exposes triangle planes rather than useful
+          // underwater detail. Preserve exact depth nearby and converge the
+          // unresolved far field to a stable optical column.
+          // Orbital footprints cannot resolve metre-scale shelf triangles,
+          // but their authored depth still identifies shelf, slope or abyss.
+          // Compress that real column instead of mapping every value above
+          // 80 m to one luminous 48 m cyan plate.
+          float unresolvedDepth = mix(14.0, 92.0,
+            smoothstep(0.0, 2800.0, dep));
+          float opticalDepth = mix(dep, unresolvedDepth, farBathymetry);
+          gWaterShallow = 1.0 - smoothstep(0.08, 6.0, dep);
+          float viewCos = clamp(abs(dot(normalize(vWaveUp),
+            normalize(vViewPosition))), 0.015, 1.0);
+          // Sea-floor light makes a down/up trip through the column. The
+          // coefficients scale with the planet's real bathymetry, preserving
+          // a broad shelf-to-abyss response instead of saturating at 20 m.
+          float waterPath = 2.0 * opticalDepth / viewCos;
+          vec3 transmission = exp(-uAbsorption * waterPath);
+          float depthHaze = smoothstep(0.0, uDepthHazeDistance, opticalDepth) * 0.9;
+          vec3 bodyTransmit = transmission * (1.0 - depthHaze);
+          vec3 analyticWaveGradient = waterWaveGradient(vLocalPos);
+          float fragmentShoal = min(1.0, dep * 0.62 / max(uOceanHeight, 0.001));
+          gWaterMacroSlope = vec2(dot(analyticWaveGradient, localT),
+            dot(analyticWaveGradient, localB)) * fragmentShoal * vWaveNear;
+          vec4 tidalFragment = oceanTidalEvent(vOceanRelative, dep);
+          vec3 tidalGradient = tidalFragment.yzw;
+          gWaterMacroSlope += vec2(dot(tidalGradient, localT), dot(tidalGradient, localB)) * vWaveNear;
+          float smallDetail = clamp(detailSample.r * 0.58 + detailSample.g * 0.42,
+            0.0, 1.0);
+          float refractiveWarp = oceanCausticWarp(vOceanRelative,
+            vec2(uTime * 0.035, -uTime * 0.027)) - 0.5;
+          float caustic = pow(smoothstep(0.51, 0.86,
+            oceanCaustic(vOceanRelative, vec2(refractiveWarp * 3.2)
+              + vec2(uTime * 0.19, -uTime * 0.13))), 2.0)
+            * exp(-dep * 0.024) * uDay;
+          vec3 seabed = uShallowC * (0.68 + caustic * 0.72)
+            * (0.92 + refractiveWarp * 0.2);
+          vec3 inScatter = uDeepC * (0.38 + uDay * 0.28);
+          diffuseColor.rgb = seabed * bodyTransmit + inScatter * (1.0 - bodyTransmit);
+          float shelfToAbyss = smoothstep(5.0, 108.0, opticalDepth);
+          vec3 authoredDepthColor = mix(uShallowC * 1.14,
+            uDeepC * (0.43 + uDay * 0.16), shelfToAbyss);
+          diffuseColor.rgb = mix(diffuseColor.rgb, authoredDepthColor,
+            0.28 + shelfToAbyss * 0.46);
+          // Looking down through a clear shelf retains its turquoise water
+          // column; at grazing angles the body darkens before the sky
+          // reflection is added later. This is the missing depth cue that a
+          // constant grey PBR plane could never provide.
+          diffuseColor.rgb *= mix(0.62, 1.08, smoothstep(0.16, 0.78, viewCos));
+          diffuseColor.rgb *= 0.88 + smallDetail * 0.18;
+          // Approximate unresolved facet skylight below the specular lobe.
+          // The normal spectrum is finer than a pixel near the horizon; if
+          // its integrated energy is discarded the entire shelf collapses to
+          // one grey value even though the geometric swell is moving.
+          float facetLight = clamp(0.12 + smallDetail * 0.7
+            + detailSample.g * 0.34
+            + dot(gWaterMacroSlope, vec2(0.71, -0.49)) * 0.16, 0.0, 1.0);
+          // Broad analytic sine bands remain visibly periodic under an oblique
+          // flight camera even when several directions are crossed. The two
+          // rotated triplanar detail octaves above already provide stochastic
+          // facet energy without screen-spanning rails, so retain that field
+          // and let the long Gerstner spectrum own directional swell.
+          gWaterFacetLight = facetLight;
+          diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.77, 0.88, 0.94),
+            diffuseColor.rgb * vec3(1.12, 1.1, 1.03), facetLight);
+          vec2 shoreCoordinates = oceanShorePhase(vOceanRelative, vec2(0.0, uTime * 0.37 / 6.28318530718));
+          float shorePhase = dep * 1.12 - uTime * 1.54
+            + smallDetail * 6.2 + sin(shoreCoordinates.x * 6.28318530718) * 1.7
+            + sin(shoreCoordinates.y * 6.28318530718) * 1.35;
+          float waveLine = sin(shorePhase);
+          float shoreBand = pow(1.0 - smoothstep(0.08, 9.5, dep), 0.68);
+          // Foam belongs to breaking crests, not to the whole shallow-water
+          // column. A permanent 0.42 baseline turned a 0.9 m wade into a
+          // featureless white sheet once the interaction texture bug was
+          // fixed and the real near patch finally rendered.
+          float breakingCrest = smoothstep(0.36, 0.88, waveLine)
+            * smoothstep(0.38, 0.73, smallDetail);
+          // The water/terrain intersection needs a continuous optical bridge:
+          // real beaches retain a thin aerated swash line even between the
+          // larger breaking crests. Noise and phase modulate it so the result
+          // does not become a ruler-straight white border.
+          float alongShoreBreak = oceanShore(vOceanRelative,
+            vec2(uTime * 0.025, -uTime * 0.018));
+          float swashNoise = smoothstep(0.48, 0.78,
+            alongShoreBreak * 0.68
+              + (sin(shorePhase * 0.73 + smallDetail * 3.1) * 0.5 + 0.5) * 0.42);
+          float swashRibbon = (1.0 - smoothstep(0.025, 1.65, dep))
+            * swashNoise * uFoamK * 0.24;
+          float shoreFoam = shoreBand * breakingCrest
+            * (0.34 + alongShoreBreak * 0.66) * uFoamK * 0.76
+            + swashRibbon;
+          // Metre-wide swash cannot resolve in an orbital pixel. Coarse
+          // bathymetry interpolates its zero contour along triangle edges;
+          // rendering that contour as full-strength foam drew detached zigzag
+          // lines kilometres from the visible coast. Keep shore detail in the
+          // near field and let depth/scattering own the distant coastal shelf.
+          shoreFoam *= 1.0 - smoothstep(1200.0, 9000.0, length(vViewPosition));
+          // Aeration belongs on elevated steep crests, not every sloping
+          // trough. Fine pores break up the formerly broad painted white caps.
+          float crestHeight = smoothstep(0.0, 0.12,
+            vWaveHeight / max(uOceanHeight, 0.25));
+          vec2 foamPoreUv = oceanCapillary(vOceanRelative + localUp * vWaveHeight,
+            vec2(uTime * 0.017, -uTime * 0.011));
+          vec2 foamPore = texture2D(uDetailTex, foamPoreUv).rg;
+          float resolvedPores = smoothstep(0.46, 0.61, foamPore.x * 0.6 + foamPore.y * 0.4);
+          float openWhitecap = crestHeight * resolvedPores
+            * smoothstep(0.035, 0.11, length(gWaterMacroSlope))
+            * smoothstep(5.0, 32.0, dep)
+            * smoothstep(0.6, 0.84, smallDetail)
+            * smoothstep(0.45, 0.76, alongShoreBreak) * uFoamK * 0.38;
+          ${tidalField ? `
+          // Aeration concentrates near the advancing crest. Broad face foam
+          // made a giant packet resemble a snowy hill rather than heavy water.
+          float crestFraction = tidalFragment.x / max(1.0, uTidalShape.x);
+          float tidalCrestFoam = smoothstep(0.66, 0.94, crestFraction)
+            * smoothstep(0.4, 0.7, smallDetail * 0.6 + alongShoreBreak * 0.4);
+          openWhitecap += tidalCrestFoam * 0.72;
+          ` : ''}
           float wakeFoam = 0.0;
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
-            vec4 rd = uRippleData[i];
-            vec3 delta = vLocalPos - uRipplePos[i];
-            float dist = length(delta);
+            if (i >= uRippleCount) break;
+            vec3 ripplePosition = texelFetch(uRippleTex, ivec2(i, 0), 0).xyz;
+            vec4 rd = texelFetch(uRippleTex, ivec2(i, 1), 0);
+            if (rd.z <= 0.001) continue;
+            vec4 rdir = texelFetch(uRippleTex, ivec2(i, 2), 0);
+            vec3 delta = vOceanRelative - ripplePosition;
+            vec2 planar = vec2(dot(delta, localT), dot(delta, localB));
+            float dist = max(length(planar), 0.05);
             float ring = dist - rd.x * rd.y;
-            float envelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
-            wakeFoam += (0.32 + 0.68 * max(0.0, sin(ring * 1.4)))
-              * envelope * rd.w * 1.75;
+            float impactEnvelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
+            float impactFoam = (0.32 + 0.68 * max(0.0, sin(ring * 1.4)))
+              * impactEnvelope * rd.w * 1.1;
+            vec3 wakeAxis = normalize(rdir.xyz - localUp * dot(rdir.xyz, localUp)
+              + localT * 0.0001);
+            vec3 wakeSide = normalize(cross(localUp, wakeAxis));
+            float along = dot(delta, wakeAxis);
+            float lateral = dot(delta, wakeSide);
+            if (rdir.w > 0.5 && !oceanWakeAlongSupport(along, rd.x, rd.y)) continue;
+            OceanWakePacket packet = oceanWakePacket(along, lateral, rd.x, rd.y, rd.z);
+            float trailDistance = packet.trailDistance;
+            float armEnvelope = packet.armEnvelope;
+            float armCore = packet.coreEnvelope;
+            float centreEnvelope = packet.centerEnvelope;
+            float shoulderPhase = sin(trailDistance * 0.27 - rd.x * 3.1
+              + abs(lateral) * 0.09 + sign(lateral) * 1.37) * 0.5 + 0.5;
+            // Both divergent pressure shoulders must survive, while their
+            // crests still break into unequal packets instead of two rails.
+            float wakeBreak = waterFbm2(vec2(trailDistance * 0.055,
+              lateral * 0.095) + vec2(rd.x * 0.23, -rd.x * 0.17));
+            float shoulderBreak = smoothstep(0.44, 0.73,
+              shoulderPhase * 0.43 + wakeBreak * 0.57);
+            float sternWash = centreEnvelope;
+            float wedgeHalfWidth = packet.armCenter;
+            float insideWedge = 1.0 - smoothstep(wedgeHalfWidth - 2.0,
+              wedgeHalfWidth + 3.0, abs(lateral));
+            float transverseCrest = pow(max(0.0,
+              sin(trailDistance * 0.31 + abs(lateral) * 0.085 - rd.x * 2.4)), 2.0)
+              * insideWedge * packet.envelope
+              * smoothstep(0.48, 0.76, wakeBreak);
+            // A dim continuous pressure shoulder carries the V from the
+            // stern; stochastic breaking rides on top. Previously almost all
+            // visible energy lived in shoulderBreak, creating detached stamps.
+            float directionalFoam = (armEnvelope * (0.12 + shoulderBreak * 1.8)
+              + armCore * shoulderBreak * 0.6
+              + transverseCrest * 0.55
+              + centreEnvelope * (0.1 + smallDetail * 0.18)
+              + sternWash * 0.2) * rd.w * 0.9;
+            // A hull emits several overlapping pressure samples. Summing all
+            // of them filled the Kelvin wedge into a flat grey slab before
+            // either divergent shoulder could read. The physical surface at
+            // a pixel is owned by the strongest breaking event instead.
+            wakeFoam = max(wakeFoam,
+              mix(impactFoam, directionalFoam, step(0.5, rdir.w)));
           }
-          gWaterFoam = clamp(shoreFoam * 0.78 + wakeFoam, 0.0, 0.94);
+          gWaterWakeFoam = clamp(wakeFoam, 0.0, 0.5);
+          gWaterFoam = clamp(shoreFoam * 0.9 + openWhitecap + wakeFoam, 0.0, 0.95);
           diffuseColor.rgb = mix(diffuseColor.rgb,
-            vec3(0.92, 0.97, 1.0), gWaterFoam);
+            vec3(0.92, 0.97, 0.99), gWaterFoam * 0.9);
           float cloud = waterCloud(vLocalPos);
+          gWaterCloud = cloud;
           diffuseColor.rgb *= 1.0 - cloud * 0.32;
-          // Deep ocean is optically opaque. Multiplying by the authored 0.66
-          // material opacity let bright seabed terrain wash an entire sea to
-          // milk-grey; only the first metres should reveal the floor.
-          diffuseColor.a = mix(0.58, 0.98, 1.0 - exp(-dep * 0.055));
-          gWaterRoughness = clamp(0.075 + (1.0 - smallDetail) * 0.12
-            + gWaterFoam * 0.48 + cloud * 0.08, 0.055, 0.72);
+          // Preserve a coherent water surface while allowing the actual shelf
+          // geometry to read through clear shallows. Deep water is fully
+          // opaque; foam locally restores full coverage.
+          // Hold a nearly constant optical coverage across the shelf. Making
+          // alpha react strongly to every interpolated metre exposed the
+          // planar bathymetry of otherwise continuous grid triangles as large
+          // trapezoids at grazing angles. Spectral colour still carries depth;
+          // alpha closes only in genuinely deep water.
+          // Transmission is a ray property, not a fixed shelf opacity. At
+          // grazing incidence the reflected interface must occlude the floor;
+          // retaining 66% floor visibility made an eye-level ocean look like
+          // dry sand even though the wave normals and geometry were present.
+          float interfaceFresnel = 0.0201 + 0.9799 * pow(1.0 - viewCos, 5.0);
+          float transmittedEnergy = dot(transmission, vec3(0.2126, 0.7152, 0.0722));
+          diffuseColor.a = clamp(1.0 - transmittedEnergy * (1.0 - interfaceFresnel), 0.18, 1.0);
+          diffuseColor.a = mix(diffuseColor.a, 1.0, gWaterFoam) * edgeCoverage;
+          gWaterRoughness = clamp(0.105 + (1.0 - smallDetail) * 0.16
+            + gWaterFoam * 0.42 + cloud * 0.08, 0.09, 0.72);
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         roughnessFactor = gWaterRoughness;`)
@@ -745,25 +1294,53 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 tanL = normalize(cross(upL,
             abs(upL.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
           vec3 bitL = cross(upL, tanL);
-          vec2 surfaceUv = vec2(dot(vLocalPos, tanL), dot(vLocalPos, bitL));
-          vec2 uv1 = surfaceUv * uWaveS + vec2(uTime * 0.021, uTime * -0.013);
-          vec2 uv2 = surfaceUv * uWaveS * 3.7 + vec2(uTime * -0.033, uTime * 0.027);
-          vec2 g = (texture2D(uDetailTex, uv1).rg - 0.5) * 0.5
-            + (texture2D(uDetailTex, uv2).rg - 0.5) * 0.3;
-          float pixelFootprint = max(fwidth(surfaceUv.x), fwidth(surfaceUv.y));
-          g *= (1.0 - smoothstep(2.5, 14.0, pixelFootprint)) * vWaveNear;
+          // The stochastic fBm channels are unrelated slope axes. Keeping the
+          // normal field noise-owned removes the perspective-compressed sine
+          // rails that previously read as a brushed-metal plane.
+          vec2 g = (gWaterDetail - 0.5) * 2.2;
+          vec2 capillaryUv = oceanCapillary(vOceanRelative, vec2(uTime * 0.035, -uTime * 0.028));
+          vec2 capillary = texture2D(uDetailTex,
+            capillaryUv).rg - 0.5;
+          g += capillary * 0.8;
+          float pixelFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
+          g *= (1.0 - smoothstep(2.5, 18.0, pixelFootprint)) * vWaveNear;
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
-            vec4 rd = uRippleData[i];
-            vec3 delta = vLocalPos - uRipplePos[i];
+            if (i >= uRippleCount) break;
+            vec3 ripplePosition = texelFetch(uRippleTex, ivec2(i, 0), 0).xyz;
+            vec4 rd = texelFetch(uRippleTex, ivec2(i, 1), 0);
+            if (rd.z <= 0.001) continue;
+            vec4 rdir = texelFetch(uRippleTex, ivec2(i, 2), 0);
+            vec3 delta = vOceanRelative - ripplePosition;
             vec2 planar = vec2(dot(delta, tanL), dot(delta, bitL));
-            float dist = length(planar);
+            float dist = max(length(planar), 0.05);
             float ring = dist - rd.x * rd.y;
-            float envelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
-            g += planar / max(dist, 0.05) * cos(ring * 1.4) * envelope * 0.72;
+            float impactEnvelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
+            vec2 impactGradient = planar / dist * cos(ring * 1.4) * impactEnvelope * 0.72;
+            vec3 wakeAxis = normalize(rdir.xyz - upL * dot(rdir.xyz, upL)
+              + tanL * 0.0001);
+            vec3 wakeSide = normalize(cross(upL, wakeAxis));
+            float along = dot(delta, wakeAxis);
+            float lateral = dot(delta, wakeSide);
+            if (rdir.w > 0.5 && !oceanWakeAlongSupport(along, rd.x, rd.y)) continue;
+            OceanWakePacket packet = oceanWakePacket(along, lateral, rd.x, rd.y, rd.z);
+            float trailDistance = packet.trailDistance;
+            float armDistance = packet.armDistance;
+            float armEnvelope = packet.armEnvelope;
+            float centreEnvelope = packet.centerEnvelope;
+            float armOscillation = cos(armDistance * 2.1 - rd.x * 4.2);
+            float packetBreak = smoothstep(0.34, 0.72,
+              waterFbm2(vec2(trailDistance * 0.052 + rd.x * 0.19,
+                lateral * 0.087 - rd.x * 0.13)));
+            vec3 wakeGradientObject = wakeSide * sign(lateral) * armOscillation
+              * armEnvelope * mix(0.025, 0.075, packetBreak)
+              - wakeAxis * centreEnvelope * (0.009 + packetBreak * 0.018);
+            vec2 wakeGradient = vec2(dot(wakeGradientObject, tanL),
+              dot(wakeGradientObject, bitL));
+            g += mix(impactGradient, wakeGradient, step(0.5, rdir.w));
           }
           normal = normalize(normal
-            - vWaveT * (vMacroSlope.x + g.x * 0.48)
-            - vWaveB * (vMacroSlope.y + g.y * 0.48));
+            - vWaveT * (gWaterMacroSlope.x + g.x * 0.5)
+            - vWaveB * (gWaterMacroSlope.y + g.y * 0.5));
         }`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         {
@@ -774,53 +1351,68 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float skyHeight = clamp(dot(reflectionDir,
             normalize(vWaveUp)), 0.0, 1.0);
           vec3 reflectedSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
-          float cloud = waterCloud(vLocalPos);
+          float cloud = gWaterCloud;
           reflectedSky = mix(reflectedSky, vec3(0.46, 0.5, 0.56)
             * (0.22 + uDay * 0.62), cloud * 0.62);
           float sunDot = max(dot(reflectionDir, normalize(vSunDirView)), 0.0);
-          float glintPower = mix(1500.0, 95.0, gWaterRoughness);
+          vec3 glintUp = normalize(vLocalPos);
+          vec3 glintT = normalize(cross(glintUp,
+            abs(glintUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+          vec3 glintB = cross(glintUp, glintT);
+          vec3 glintQ = vOceanRelative;
+          vec2 glintUv = vec2(dot(glintQ, glintT), dot(glintQ, glintB));
+          float glitterField = oceanGlitter(vOceanRelative,
+            vec2(uTime * 0.11, -uTime * 0.073));
+          float glitterBreak = 0.12 + 0.88 * smoothstep(0.48, 0.81,
+            glitterField * 0.72 + gWaterFacetLight * 0.28);
+          float glintPower = mix(1400.0, 180.0, gWaterRoughness);
           float sunGlint = pow(sunDot, glintPower)
-            * mix(12.0, 2.4, gWaterRoughness) * uSunEnergy;
+            * mix(0.72, 0.24, gWaterRoughness) * min(uSunEnergy, 1.6)
+            * glitterBreak;
           float secondDot = max(dot(reflectionDir,
             normalize(vSecondarySunDirView)), 0.0);
           float secondGlint = pow(secondDot, glintPower)
-            * mix(9.0, 1.8, gWaterRoughness) * uSecondarySunEnergy;
-          totalEmissiveRadiance += reflectedSky * fresnel
-            * (0.34 + uDay * 0.56) * (1.0 - gWaterFoam * 0.58);
-          totalEmissiveRadiance += (uSunColor * sunGlint
+            * mix(0.52, 0.18, gWaterRoughness) * min(uSecondarySunEnergy, 1.6);
+          totalEmissiveRadiance += reflectedSky
+            * (0.016 + gWaterShallow * 0.035
+              + fresnel * (0.16 + uDay * 0.24))
+            * (1.0 - gWaterFoam * 0.68);
+          totalEmissiveRadiance += mix(uDeepC, uShallowC, gWaterShallow)
+            * (0.012 + gWaterFacetLight * mix(0.08, 0.45, vWaveNear))
+            * (0.36 + uDay * 0.64)
+            * (1.0 - gWaterFoam * 0.75);
+          // The broad low-sun lobe stays chromatic while the much narrower
+          // solar core remains bright. Separating them avoids a clipped white
+          // pillar and preserves the warm path across individual wave facets.
+          float warmPath = (pow(sunDot, mix(18.0, 5.0, gWaterRoughness))
+              * 0.32 * glitterBreak
+            + pow(sunDot, 2.4) * 0.035
+              * smoothstep(0.38, 0.78, glitterField)) * uSunset;
+          vec3 reflectedSunColor = mix(uSunColor, vec3(1.0, 0.12, 0.018),
+            uSunset * 0.9);
+          sunGlint *= mix(1.0, 0.012, uSunset);
+          totalEmissiveRadiance += (reflectedSunColor * (sunGlint + warmPath)
             + uSecondarySunColor * secondGlint)
             * (1.0 - cloud * 0.7);
-          totalEmissiveRadiance += vec3(0.36, 0.42, 0.46)
-            * gWaterFoam * 0.18;
-        }`)
-      .replace('#include <transmission_fragment>', `
-        #ifdef USE_TRANSMISSION
-          // Refract the already-rendered opaque terrain through the same wave
-          // normal used by reflection. Only optically shallow water exposes
-          // the floor; Beer-Lambert in-scatter owns the deeper column.
-          float shallowTransmission = (1.0 - smoothstep(1.25, 14.0, vDepth))
-            * (1.0 - gWaterFoam);
-          material.transmission = transmission * shallowTransmission;
-          material.transmissionAlpha = 1.0;
-          material.thickness = clamp(vDepth * 0.11, 0.12, 1.7);
-          material.attenuationDistance = attenuationDistance;
-          material.attenuationColor = attenuationColor;
-          vec3 transmissionPosition = vWorldPosition;
-          vec3 transmissionView = normalize(cameraPosition - transmissionPosition);
-          vec3 transmissionNormal = transformNormalByInverseViewMatrix(normal, viewMatrix);
-          vec4 transmitted = getIBLVolumeRefraction(
-            transmissionNormal, transmissionView, material.roughness,
-            material.diffuseContribution, material.specularColorBlended,
-            material.specularF90, transmissionPosition, modelMatrix, viewMatrix,
-            projectionMatrix, material.dispersion, material.ior,
-            material.thickness, material.attenuationColor,
-            material.attenuationDistance);
-          material.transmissionAlpha = mix(material.transmissionAlpha,
-            transmitted.a, material.transmission);
-          totalDiffuse = mix(totalDiffuse, transmitted.rgb, material.transmission);
-        #endif`);
+          totalEmissiveRadiance += vec3(0.32, 0.39, 0.44)
+            * gWaterFoam * 0.05;
+          // Aerated wake water remains bright even when it interrupts a dark
+          // reflection. Keeping this separate from generic shore foam makes
+          // the two Kelvin shoulders legible in a normal chase camera.
+          totalEmissiveRadiance += vec3(0.5, 0.58, 0.62)
+            * gWaterWakeFoam * 0.065;
+          // Organisms respond to local agitation, not a uniformly emissive
+          // planet. Daylight overwhelms the faint glow; breaking crests and
+          // vessel disturbance reveal luminous streaks after dusk.
+          float biologicalAgitation = clamp(gWaterFoam * 0.65
+            + gWaterWakeFoam * 2.0
+            + smoothstep(0.06, 0.22, length(gWaterMacroSlope)) * 0.35, 0.0, 1.0);
+          float biologicalNight = 1.0 - smoothstep(0.0, 0.18, uDay);
+          totalEmissiveRadiance += vec3(0.015, 0.62, 0.48)
+            * uBiologicalActivity * biologicalAgitation * biologicalNight * 2.0;
+        }`);
   };
-  material.customProgramCacheKey = () => 'water-column-sky-glint-v3-shallow-refraction-webgl-morph';
+  material.customProgramCacheKey = () => `water-regional-wave-field-v29:${tidalField ? 'tidal' : 'ordinary'}`;
   return material;
 }
 

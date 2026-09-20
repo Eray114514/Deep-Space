@@ -93,6 +93,14 @@ const runtimeLut = createAtmosphereOpticalDepthLut(runtimeProfile.profile, 32, 1
 assert.equal(runtimeLut.data.length, 32 * 12 * 4);
 assert.ok(runtimeLut.data.every(Number.isFinite),
   'the production sunlight optical-depth LUT contains only finite values');
+let shadowTexels = 0;
+for (let i = 0; i < runtimeLut.data.length; i += 4) {
+  if (runtimeLut.data[i + 3] !== 0) continue;
+  shadowTexels++;
+  assert.ok(runtimeLut.data[i] > 0 && runtimeLut.data[i + 1] > 0,
+    'shadow-side LUT neighbours retain limiting optical depth, never zero-extinction bleed');
+}
+assert.ok(shadowTexels > 0, 'the LUT still records physical ground occlusion independently of RGB');
 const groundDensity = atmosphereDensityAt(profile, 0);
 const highDensity = atmosphereDensityAt(profile, 40000);
 assert.ok(highDensity.rayleigh < groundDensity.rayleigh

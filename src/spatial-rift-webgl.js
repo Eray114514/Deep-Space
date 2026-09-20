@@ -449,6 +449,7 @@ export class SpatialRift {
       new THREE.TubeGeometry(curve, 520, 5 * this.profile.edgeThickness, 5, true),
       this.massMat,
     );
+    this.mass.name = 'spatial-rift-inner-wall';
     this.mass.renderOrder = 3;
     this.visual.add(this.mass);
 
@@ -539,6 +540,12 @@ export class SpatialRift {
       depthTest: true,
       side: THREE.DoubleSide,
       toneMapped: false,
+      // The fragment shader owns the irregular signed contour and discards
+      // outside it. Mirror that cutout contract in the material metadata so
+      // render diagnostics and MSAA coverage handling can identify the portal
+      // as an opaque aperture rather than a blended overlay.
+      alphaTest: 0.5,
+      alphaToCoverage: true,
       uniforms: {
         tPortal: { value: this.portalRT.texture },
         uTextureMatrix: { value: this.textureMatrix },
@@ -603,6 +610,7 @@ export class SpatialRift {
       `,
     });
     this.portalSurface = new THREE.Mesh(new THREE.PlaneGeometry(this.width * 1.22, this.height * 1.22), this.portalMat);
+    this.portalSurface.name = 'spatial-rift-portal-cutout';
     this.portalSurface.position.z = -this.depth - 0.5;
     this.portalSurface.renderOrder = 1;
     this.visual.add(this.portalSurface);
