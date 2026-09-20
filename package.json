@@ -70,7 +70,9 @@
     "touchtest": "node tools/touchtest.js",
     "test:terrain-continuity": "node tools/terrainlatticetest.js && node tools/terrainridgetest.js && node tools/terraincratertest.js",
     "test:stage-b:gpu": "node tools/stagebfoundationtest.js",
-    "test:stage-b:player": "node tools/stagebplaytest.js"
+    "test:stage-b:player": "node tools/stagebplaytest.js",
+    "test:b0": "node tools/mediumreferencetest.js && node tools/b0compositiontest.js",
+    "test:b0:baseline": "node tools/b0baselinetest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

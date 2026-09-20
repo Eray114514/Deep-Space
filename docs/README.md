@@ -5,6 +5,8 @@
 | [优化路线图](optimization-roadmap.md) | 全局目标、批次依赖、A 验收基线和 C/D/E/R 后续 |
 | [云与大气计划](cloud-atmosphere-rewrite.md) | B 唯一规格、进度和返工顺序 |
 | [阶段 4 云演进](cloud-phase4-volume-march.md) | B 的天气接线、云种/形态、采样实施清单 |
+| [介质、深度与时域接口](medium-render-contract.md) | B0 冻结的目标语义；约束 B5/B4/B7，不冒称生产 API 已完成 |
+| [B0 基线与交接](baselines/b0-2026-09-20/README.md) | 可复现矩阵、连续帧、传输参考、已知缺陷和 B5 施工边界 |
 | [视觉验收协议](visual-targets/README.md) | S1–S4 机位、五维评审、动态/性能和记录格式 |
 | [2026-09-20 B 审查](reviews/cloud-atmosphere-2026-09-20.md) | 本轮代码核对、实测、证据边界和返工理由 |
 | [B 基础修复与交接](reviews/cloud-atmosphere-foundation-2026-09-20.md) | 已落地修复、复现命令与继续施工的边界 |
