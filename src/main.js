@@ -2417,7 +2417,9 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
 }
 
 function prewarmPreparedLod(targetBody, token, route, prepared) {
-  if (!targetBody?.lod || !route?.target?.entry) {
+  // Gas/ice giants expose a countChunks-only LOD facade for diagnostics, not
+  // a terrain quadtree. They still need their destination portal prewarmed.
+  if (typeof targetBody?.lod?.update !== 'function' || !route?.target?.entry) {
     warpPreparedLodWarmState = 'complete';
     void prewarmPreparedRiftPortal(targetBody, token, route, prepared);
     return;
@@ -2540,6 +2542,10 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
       const message = String(error?.message || error);
       console.error('Destination terrain LOD prewarm failed:', error);
       finish('failed', message);
+      if (preparedDestinationIsActive(token, route, prepared)
+          && warpPreparedRiftWarmState === 'waiting') {
+        void prewarmPreparedRiftPortal(targetBody, token, route, prepared);
+      }
     }
   };
   setTimeout(step, 0);
@@ -2913,7 +2919,6 @@ function beginSelectedRift() {
   arrival.quat = lookQuatAt(arrival.entry, arrival.center, new THREE.Quaternion());
   const prepared = takePreparedDestination(route, 'rift');
   requestGameplayPointerLock();
-  ui.beginTravel();
   clearPendingRoute(false, true);
   spaceCtl.enabled = true;
   ui.setCrosshair(true);
@@ -2968,6 +2973,8 @@ function beginSelectedRift() {
 function startRiftOpening() {
   if (!riftRoute || riftRoute.arrived || riftRoute.openStarted) return;
   riftRoute.openStarted = true;
+  // Keep flight UI and the loading hint visible until the passage can open.
+  ui.beginTravel();
   spatialRift.openPassage();
   enableRiftEffects();
   audio.cue('rift-open');
@@ -3061,7 +3068,7 @@ function updateRiftRoute(dt) {
           && riftRoute.lastHintBand !== 14) {
         riftRoute.lastHintBand = 14;
         ui.setHint('航道结构已展开 · 正在完成目标世界 GPU 接管', true);
-      } else {
+      } else if (riftRoute.openStarted) {
         const band = Math.min(9, Math.floor(spatialRift.open * 10));
         if (band !== riftRoute.lastHintBand) {
           riftRoute.lastHintBand = band;

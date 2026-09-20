@@ -264,6 +264,72 @@ try {
   const closed = await page.evaluate('NMS.riftState()');
   check(!closed.visible && closed.open === 0, 'exit collapses fully after traversal');
 
+  // Giants have a countChunks-only LOD facade. Exercise both types through the
+  // real buttons; the terrain-only route above cannot catch this deadlock.
+  for (const type of ['gasGiant', 'iceGiant']) {
+    await page.waitForFunction(() => !document.body.classList.contains('travel-cinematic'));
+    const giantTarget = await page.evaluate((type) => {
+      const { universe, starMap } = NMS._internals;
+      for (const star of universe.nearStarsList) {
+        if (star.id === universe.system.star.id) continue;
+        const body = starMap.systemPreview(star).bodies.find((body) => body.type === type);
+        if (body) return { starId: star.id, bodyIndex: body.index, bodyId: body.bodyId };
+      }
+      return null;
+    }, type);
+    check(!!giantTarget, `${type} destination is available`);
+    await page.evaluate((id) => {
+      NMS.openStarMap();
+      NMS.selectStarMapTarget(id);
+      // Hold the first (structure) compilation to verify the waiting UI
+      // deterministically, even on a driver with a warm shader cache.
+      const renderer = NMS._renderer;
+      const compile = renderer.compileAsync;
+      const gate = new Promise((resolve) => { window.__releaseRiftWarmup = resolve; });
+      renderer.compileAsync = function (...args) {
+        renderer.compileAsync = compile;
+        return Promise.all([compile.apply(this, args), gate]);
+      };
+    }, giantTarget.starId);
+    await page.locator(`#sm-systemGlyph [data-glyph-index="${giantTarget.bodyIndex}"]`).click({ force: true });
+    await page.locator('#sm-routeAction').click({ force: true });
+    await page.locator('#route-rift-btn').click();
+    await page.waitForTimeout(240);
+    const waiting = await page.evaluate(() => ({
+      rift: NMS.riftState(),
+      cinematic: document.body.classList.contains('travel-cinematic'),
+      hud: getComputedStyle(document.getElementById('ship-hud-stage')).display,
+      hint: document.getElementById('hint').textContent,
+    }));
+    check(waiting.rift.active && !waiting.rift.visible && !waiting.cinematic
+        && waiting.hud !== 'none' && waiting.hint.includes('正在预载'),
+    `${type} keeps the HUD and loading hint visible during preparation`);
+    if (type === 'gasGiant') {
+      await page.screenshot({ path: path.join(os.tmpdir(), 'deep-space-rift-loading.png') });
+    }
+    await page.evaluate(() => window.__releaseRiftWarmup());
+    await page.waitForFunction(() => NMS.riftState().anchorLocked, null, { timeout: 30000 });
+    const preparation = await page.evaluate(() => NMS.warpPreparationState());
+    check(preparation.lodWarmState === 'complete' && preparation.riftWarmState === 'complete'
+        && !preparation.lodWarmError && !preparation.riftWarmError,
+    `${type} completes portal preparation without terrain-quadtree calls`);
+    check(await page.evaluate(() => NMS.riftState().visible && NMS.riftState().open > 0.985),
+      `${type} passage opens and renders`);
+    check(await page.evaluate((bodyId) => {
+      const body = NMS._internals.riftPreviewSystem.bodyById.get(bodyId);
+      return body.appear === 1 && body.terrainMaterial.opacity === 1;
+    }, giantTarget.bodyId), `${type} destination surface is opaque inside the portal`);
+    await page.screenshot({ path: path.join(os.tmpdir(), `deep-space-rift-${type}.png`) });
+    await page.evaluate(() => NMS.approachRift(-10));
+    await page.waitForFunction(() => NMS.riftState().arrived, null, { timeout: 10000 });
+    check(await page.evaluate((target) => NMS._internals.universe.system.star.id === target.starId
+        && NMS._internals.universe.system.bodyById.has(target.bodyId), giantTarget),
+    `${type} passage reaches the selected destination`);
+    await page.waitForFunction(() => !NMS.riftState().active
+      && !document.body.classList.contains('travel-cinematic'), null, { timeout: 10000 });
+    check(await page.locator('#ship-hud-stage').isVisible(), `${type} arrival restores the flight HUD`);
+  }
+
   // Reload and exercise the sibling route through the real star-map choice.
   // Both travel methods share the cinematic state, but this guards against a
   // future route handler forgetting to enter it before starting the tween.

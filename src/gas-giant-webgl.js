@@ -108,10 +108,13 @@ export class GasGiant {
     if (alt > this.atmoHeight || alt < -this.R * 0.32) return 0;
     return Math.max(0, Math.min(1, 1 - alt / this.atmoHeight));
   }
+  applyAppear() {
+    this.terrainMaterial.opacity = this.appear;
+  }
   update(_camWorld, dt, _focused, animDt = dt) {
     this.mesh.rotation.y += animDt * (this.type === 'iceGiant' ? 0.012 : 0.021);
     if (this.ringMesh) this.ringMesh.rotation.z += animDt * 0.0002;
-    if (this.appear < 1) { this.appear = Math.min(1, this.appear + dt / 1.2); this.terrainMaterial.opacity = this.appear; }
+    if (this.appear < 1) { this.appear = Math.min(1, this.appear + dt / 1.2); this.applyAppear(); }
   }
   dispose() {
     this.mesh.geometry.dispose(); this.terrainMaterial.map?.dispose(); this.terrainMaterial.dispose();
