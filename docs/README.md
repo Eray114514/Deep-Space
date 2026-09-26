@@ -3,6 +3,7 @@
 | 文档 | 负责内容 |
 |---|---|
 | [优化路线图](optimization-roadmap.md) | 全局目标、批次依赖、A 验收基线和 C/D/E/R 后续 |
+| [未完成任务难度评估](remaining-work-difficulty.md) | 小阶段拆分、难度、前置条件与 agent 交接建议；进度仍以各原计划为准 |
 | [云与大气计划](cloud-atmosphere-rewrite.md) | B 唯一规格、进度和返工顺序 |
 | [阶段 4 云演进](cloud-phase4-volume-march.md) | B 的天气接线、云种/形态、采样实施清单 |
 | [介质、深度与时域接口](medium-render-contract.md) | B0 冻结的目标语义；约束 B5/B4/B7，不冒称生产 API 已完成 |
