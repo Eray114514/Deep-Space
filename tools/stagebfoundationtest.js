@@ -14,9 +14,9 @@ const planets = [
   { R: 7000000, type: 'desert', weatherProfile: { temperatureK: 410 } },
 ];
 const fixtures = planets.flatMap((planet) => {
-  const { profile } = atmosphereRenderProfile(planet);
+  const { profile, densityScale } = atmosphereRenderProfile(planet);
   return columnFixtures(profile).map((ray) => ({ planet, ray,
-    expected: referenceColumn(profile, ray.radius, ray.mu, ray.distance) }));
+    expected: referenceColumn(profile, ray.radius, ray.mu, ray.distance).map((v) => v * densityScale) }));
 });
 const started = await startServer(0);
 let browser;
@@ -73,16 +73,15 @@ try {
       return Array.from(data);
     }
     const pass = new AtmospherePass(new THREE.PerspectiveCamera());
-    // Use the actual production integration block, not a second GLSL copy.
-    const shader = pass.material.fragmentShader;
-    const block = shader.slice(shader.indexOf('float closest ='), shader.indexOf('vec3 extinction ='));
-    if (!block.includes('viewDepth += segmentDepth')) throw Error('Production integration block moved');
-    const integral = probe(pass.material, `float t0=0.0; float t1=uTestDistance;
-      vec3 direction=uTestDirection; ${block} gl_FragColor=vec4(viewDepth,1.0);`, {
+    // Recover constituent columns from production RGB transmittance, using
+    // orthogonal diagnostic coefficients to keep the three integrals separate.
+    const integral = probe(pass.material, `vec3 L,T;
+      airIntegrate(uCameraLocal,uTestDirection,0.0,uTestDistance,L,T);
+      gl_FragColor=vec4(-log(max(T,vec3(1e-30)))*1e6,1.0);`, {
       uTestDistance: { value: 1 }, uTestDirection: { value: new THREE.Vector3() },
     }, 'uniform float uTestDistance; uniform vec3 uTestDirection;');
     const lutProbe = probe(pass.material, `vec3 od=sunlightOpticalDepth(uTestAltitude,uTestMu).rgb;
-      gl_FragColor=vec4(od*vec3(uRayleighScaleHeight,uMieScaleHeight,uOzoneHalfWidth),1.0);`, {
+      gl_FragColor=vec4(od*vec3(uRayleighScaleHeight,uMieScaleHeight,uOzoneHalfWidth)*uDensityScale,1.0);`, {
       uTestAltitude: { value: 0 }, uTestMu: { value: 1 },
     }, 'uniform float uTestAltitude,uTestMu;');
     const columns = [];
@@ -94,6 +93,9 @@ try {
       pass.setActivePlanet(body, new THREE.Vector3(0, ray.radius, 0));
       integral.uniforms.uTestDirection.value.set(Math.sqrt(1 - ray.mu ** 2), ray.mu, 0);
       integral.uniforms.uTestDistance.value = ray.distance;
+      pass.material.uniforms.uBetaRayleigh.value.set(1e-6,0,0);
+      pass.material.uniforms.uBetaMieExtinction.value.set(0,1e-6,0);
+      pass.material.uniforms.uBetaOzone.value.set(0,0,1e-6);
       columns.push(read(integral).slice(0, 3));
       if (!ray.name.startsWith('orbit-')) {
         lutProbe.uniforms.uTestAltitude.value = ray.radius - planet.R;

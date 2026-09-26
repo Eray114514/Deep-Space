@@ -140,6 +140,7 @@ export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
     return {
       index,
       id: source?.starId ?? source?.id ?? `star-${index}`,
+      radius: Math.max(0, Number(source.radius) || 0),
       direction: delta.map((component) => component / distance),
       distance,
       temperatureK,

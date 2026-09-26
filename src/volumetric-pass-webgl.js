@@ -13,13 +13,14 @@ export const VOLUME_LAYER = 2;
 const _clear = new THREE.Color();
 const _savedClear = new THREE.Color();
 
-function target(w, h, name) {
+function target(w, h, name, depth = false) {
   const rt = new THREE.WebGLRenderTarget(w, h, {
     type: THREE.HalfFloatType,
     format: THREE.RGBAFormat,
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
-    depthBuffer: false,
+    depthBuffer: depth,
+    ...(depth ? { depthTexture: new THREE.DepthTexture(w, h, THREE.UnsignedIntType) } : {}),
     stencilBuffer: false,
   });
   rt.texture.name = name;
@@ -36,8 +37,8 @@ export class VolumetricPass extends Pass {
     this.width = 1;
     this.height = 1;
     this.current = target(1, 1, 'volume.current');
-    this.historyA = target(1, 1, 'volume.historyA');
-    this.historyB = target(1, 1, 'volume.historyB');
+    this.historyA = target(1, 1, 'volume.historyA', true);
+    this.historyB = target(1, 1, 'volume.historyB', true);
     this.historyRead = this.historyA;
     this.historyWrite = this.historyB;
     this.historyValid = false;
@@ -54,12 +55,16 @@ export class VolumetricPass extends Pass {
     this.prevViewProjection = new THREE.Matrix4();
 
     this.resolveMaterial = new THREE.ShaderMaterial({
-      depthTest: false,
-      depthWrite: false,
+      depthTest: true,
+      depthFunc: THREE.AlwaysDepth,
+      depthWrite: true,
       blending: THREE.NoBlending,
       uniforms: {
         tCurrent: { value: this.current.texture },
         tHistory: { value: this.historyRead.texture },
+        tSceneDepth: { value: null },
+        tHistoryDepth: { value: this.historyRead.depthTexture },
+        uCameraFar: { value: camera.far },
         uHistoryValid: { value: 0 },
         uMotion: { value: 1 },
         uCenter: { value: this.center },
@@ -77,7 +82,8 @@ export class VolumetricPass extends Pass {
         }`,
       fragmentShader: /* glsl */`
         precision highp float;
-        uniform sampler2D tCurrent, tHistory;
+        uniform sampler2D tCurrent, tHistory, tSceneDepth, tHistoryDepth;
+        uniform float uCameraFar;
         uniform float uHistoryValid, uMotion, uRadius;
         uniform vec3 uCenter, uNavDelta;
         uniform mat4 uInvProjection, uCameraWorld, uPrevViewProjection;
@@ -93,6 +99,8 @@ export class VolumetricPass extends Pass {
         }
 
         void main() {
+          float currentDepth=texture2D(tSceneDepth,vUv).r;
+          gl_FragDepth=currentDepth;
           vec4 cur = texture2D(tCurrent, vUv);
           vec4 clip = vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
           vec4 view = uInvProjection * clip;
@@ -121,6 +129,14 @@ export class VolumetricPass extends Pass {
             * mix(0.86, 0.18, clamp(uMotion, 0.0, 1.0));
           // Current samples always dominate newly revealed edges.
           historyWeight *= smoothstep(0.0, 0.12, cur.a + hist.a);
+          // Opaque silhouettes and disocclusions must not inherit a cloudy
+          // sky sample. World-surface motion reprojection is a B7 concern;
+          // until then reuse sky-to-sky history or a stationary matching ray.
+          float previousDepth=texture2D(tHistoryDepth,clamp(prevUv,0.0,1.0)).r;
+          float skyMatch=step(0.999999,currentDepth)*step(0.999999,previousDepth);
+          float stillMatch=(1.0-smoothstep(0.000001,0.00001,abs(currentDepth-previousDepth)))
+            *exp(-uvMotion*1000.0)*(1.0-step(0.001,uMotion));
+          historyWeight *= max(skyMatch,stillMatch);
           gl_FragColor = mix(cur, hist, historyWeight);
         }`,
     });
@@ -134,6 +150,9 @@ export class VolumetricPass extends Pass {
         tBase: { value: null },
         tVolume: { value: this.historyWrite.texture },
         uTexel: { value: new THREE.Vector2(1, 1) },
+        tSceneDepth: { value: null },
+        uDepthReady: { value: 0 },
+        uCameraFar: { value: camera.far },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -143,24 +162,43 @@ export class VolumetricPass extends Pass {
         }`,
       fragmentShader: /* glsl */`
         precision highp float;
-        uniform sampler2D tBase, tVolume;
+        uniform sampler2D tBase, tVolume, tSceneDepth;
+        uniform float uDepthReady, uCameraFar;
         uniform vec2 uTexel;
         varying vec2 vUv;
 
+        float depthWeight(vec2 uv,float centerDepth) {
+          if(uDepthReady<0.5) return 1.0;
+          float d=texture2D(tSceneDepth,uv).r;
+          if((d>=0.999999)!=(centerDepth>=0.999999)) return 0.0;
+          float z=pow(uCameraFar+1.0,centerDepth)-1.0;
+          float other=pow(uCameraFar+1.0,d)-1.0;
+          return exp(-abs(z-other)/max(2.0,z*0.005));
+        }
         vec4 volumeSample(vec2 uv) {
-          vec4 c = texture2D(tVolume, uv);
-          vec4 a = texture2D(tVolume, uv + vec2(uTexel.x, 0.0));
-          vec4 b = texture2D(tVolume, uv - vec2(uTexel.x, 0.0));
-          vec4 d = texture2D(tVolume, uv + vec2(0.0, uTexel.y));
-          vec4 e = texture2D(tVolume, uv - vec2(0.0, uTexel.y));
+          // Fetch exact low-resolution texel centres; a bilinear fetch has
+          // already mixed opposite sides of an opaque edge before rejection.
+          vec2 q=(floor(uv/uTexel)+0.5)*uTexel;
+          vec2 qa=q+vec2(uTexel.x,0),qb=q-vec2(uTexel.x,0);
+          vec2 qd=q+vec2(0,uTexel.y),qe=q-vec2(0,uTexel.y);
+          vec4 c = texture2D(tVolume, q);
+          vec4 a = texture2D(tVolume, qa);
+          vec4 b = texture2D(tVolume, qb);
+          vec4 d = texture2D(tVolume, qd);
+          vec4 e = texture2D(tVolume, qe);
           // Alpha similarity preserves cloud silhouettes while filtering the
           // sparse raymarch signal in smooth interiors.
           float wa = exp(-abs(a.a - c.a) * 18.0);
           float wb = exp(-abs(b.a - c.a) * 18.0);
           float wd = exp(-abs(d.a - c.a) * 18.0);
           float we = exp(-abs(e.a - c.a) * 18.0);
-          return (c * 3.0 + a * wa + b * wb + d * wd + e * we)
-            / (3.0 + wa + wb + wd + we);
+          float centerDepth=texture2D(tSceneDepth,uv).r;
+          float wc=3.0*depthWeight(q,centerDepth);
+          wa*=depthWeight(qa,centerDepth); wb*=depthWeight(qb,centerDepth);
+          wd*=depthWeight(qd,centerDepth); we*=depthWeight(qe,centerDepth);
+          // No matching low-resolution support: retain the full-resolution
+          // clear-air surface rather than painting a cloud over a thin object.
+          return (c*wc+a*wa+b*wb+d*wd+e*we)/max(wc+wa+wb+wd+we,1e-8);
         }
 
         void main() {
@@ -232,6 +270,15 @@ export class VolumetricPass extends Pass {
       uniforms.uVolumeSize.value.set(this.width, this.height);
     };
     bindSceneDepth(this.activePlanet?.volCloudMat);
+    const cloudUniforms = this.activePlanet?.volCloudMat?.uniforms;
+    const air = this.sceneDepthSource;
+    if (cloudUniforms) {
+      if (air?.activePlanet === this.activePlanet) {
+        for (const [name, uniform] of Object.entries(air.material.uniforms)) {
+          if (name.startsWith('u') || name === 'tOpticalDepth' || name === 'tMultipleScattering') cloudUniforms['air_' + name] = uniform;
+        }
+      } else cloudUniforms.air_uEnabled = { value: 0 };
+    }
 
     // Render only cloud volume meshes into a half-resolution HDR
     // buffer. Clear alpha is important: discarded rays must stay transparent.
@@ -248,6 +295,9 @@ export class VolumetricPass extends Pass {
 
     this.camera.updateMatrixWorld(true);
     const u = this.resolveMaterial.uniforms;
+    u.tSceneDepth.value = depthTexture;
+    u.tHistoryDepth.value = this.historyRead.depthTexture;
+    u.uCameraFar.value = this.camera.far;
     u.tCurrent.value = this.current.texture;
     u.tHistory.value = this.historyRead.texture;
     u.uHistoryValid.value = this.historyValid ? 1 : 0;
@@ -263,6 +313,9 @@ export class VolumetricPass extends Pass {
 
     this.compositeMaterial.uniforms.tBase.value = readBuffer.texture;
     this.compositeMaterial.uniforms.tVolume.value = this.historyWrite.texture;
+    this.compositeMaterial.uniforms.tSceneDepth.value = depthTexture;
+    this.compositeMaterial.uniforms.uDepthReady.value = depthTexture ? 1 : 0;
+    this.compositeMaterial.uniforms.uCameraFar.value = this.camera.far;
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
     if (this.clear) renderer.clear();
     this.compositeQuad.render(renderer);
@@ -278,10 +331,15 @@ export class VolumetricPass extends Pass {
     renderer.setRenderTarget(oldTarget);
   }
 
-  dispose() {
+  releaseTargets() {
     this.current.dispose();
     this.historyA.dispose();
     this.historyB.dispose();
+    this.historyValid = false;
+  }
+
+  dispose() {
+    this.releaseTargets();
     this.resolveMaterial.dispose();
     this.compositeMaterial.dispose();
     this.resolveQuad.dispose();

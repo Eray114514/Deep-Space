@@ -1,3 +1,4 @@
+import { bindStellarOcclusion } from './stellar-occlusion.js';
 // Planet: a fully procedural world defined by ONE seeded height function and
 // ONE color function over unit-sphere directions. Terrain chunks at every LOD,
 // the walking controller, the landing logic and the scatter system all sample
@@ -1313,6 +1314,7 @@ export class Planet {
       if (clouds.uSunEnergy) {
         clouds.uSunEnergy.value = primary.irradianceFraction ?? 1;
       }
+      if (clouds.uStellarRadianceScale) clouds.uStellarRadianceScale.value = field.radianceScale ?? 3.2;
       clouds.uSecondarySunDir?.value.copy(secondary?.localDirection || primary.localDirection);
       clouds.uSecondarySunC?.value.copy(secondary?.colorValue || primary.colorValue);
       if (clouds.uSecondarySunEnergy) {
@@ -1333,7 +1335,15 @@ export class Planet {
         clouds.uStarIrradiance1.value = 0;
       }
     }
+    for (const uniforms of [this.volCloudMat?.uniforms, this.terrainMaterial?.userData?.shader?.uniforms,
+      this.liquidMat?.userData?.shader?.uniforms]) bindStellarOcclusion(uniforms, this);
     return this.stellarLightField;
+  }
+
+  setStellarOccluders(occluders) {
+    this.stellarOccluders = occluders.map((b) => ({ ...b, centerLocal: b.centerLocal.clone() }));
+    for (const uniforms of [this.volCloudMat?.uniforms, this.terrainMaterial?.userData?.shader?.uniforms,
+      this.liquidMat?.userData?.shader?.uniforms]) bindStellarOcclusion(uniforms, this);
   }
 
   setEclipseOccluder(occluder = null) {

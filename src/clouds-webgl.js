@@ -1,3 +1,6 @@
+import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
+import { stellarOcclusionUniforms, bindStellarOcclusion, stellarOcclusionGLSL } from './stellar-occlusion.js';
+import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 // Volumetric cloud baseline: a raymarched shell around the planet.
 // The analytic coverage input is shared with the old deck; storms and 3D
 // density are still volume-only. New CPU weather is not yet connected here.
@@ -110,6 +113,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
     depthTest: true,
     side: THREE.BackSide,
     uniforms: {
+        ...stellarOcclusionUniforms(),
+      ...namespacedAtmosphereUniforms(),
       uNoise3: { value: cloudNoiseTexture() },
       uCloudNoise: { value: detailTex },
       uCov0: { value: band.cov0 },
@@ -129,6 +134,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uVolumeSize: { value: new THREE.Vector2(1, 1) },
       uSunC: { value: new THREE.Color(1, 0.98, 0.94) },
       uSunEnergy: { value: 1 },
+      uStellarRadianceScale: { value: 3.2 },
       uSecondarySunDir: { value: new THREE.Vector3(0, 1, 0) },
       uSecondarySunC: { value: new THREE.Color(1, 1, 1) },
       uSecondarySunEnergy: { value: 0 },
@@ -163,7 +169,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       uniform sampler2D uCloudNoise;
       uniform sampler2D tSceneDepth;
       uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uMaxSteps;
-      uniform float uSunEnergy, uSecondarySunEnergy;
+      uniform float uSunEnergy, uSecondarySunEnergy, uStellarRadianceScale;
       uniform vec3 uSecondarySunDir, uSecondarySunC;
       uniform float uEclipseEnabled, uEclipseRadius, uEclipseStarAngle;
       uniform vec3 uEclipseCenter;
@@ -174,7 +180,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       varying vec3 vDirection;
       varying vec3 vViewDirection;
 
+      ${stellarOcclusionGLSL}
       float eclipseVisibility(vec3 samplePosition, vec3 sunDirection) {
+        if (uLocalOccluderCount > 0) return localStellarVisibility(samplePosition,sunDirection);
         if (uEclipseEnabled < 0.5) return 1.0;
         vec3 toOccluder = uEclipseCenter - samplePosition;
         float distanceToOccluder = length(toOccluder);
@@ -327,13 +335,16 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         return fract((p3.x + p3.y) * p3.z);
       }
 
+      ${cloudAtmosphereGLSL}
+
       vec3 cloudSource(vec3 local, vec3 dir, float d, float thick, float sigma,
         vec3 sunDirection, vec3 sunColor, float sunEnergy) {
         if (sunEnergy <= 0.0) return vec3(0.0);
         float mu = dot(dir, sunDirection);
         float hg = (1.0 - 0.28) / (12.566 * pow(1.0 + 0.28 - 1.06 * mu, 1.5));
         float back = (1.0 - 0.16) / (12.566 * pow(1.0 + 0.16 + 0.8 * mu, 1.5));
-        float phase = mix(0.0796, hg * 3.35 + back * 0.5, 0.76);
+        // Normalized dual-lobe phase; stellar irradiance supplies brightness.
+        float phase = mix(back, hg, 0.76);
         float sampleRadius = length(local);
         float sunElevation = dot(local / max(sampleRadius, 1.0), sunDirection);
         float geometricHorizon = -sqrt(max(0.0,
@@ -360,21 +371,21 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
           od *= 1.18;
         }
         float Tsun = exp(-od * sigma * 1.48);
-        float hFrac = clamp((length(local) - uRin) / thick, 0.0, 1.0);
-        float heightLight = mix(0.48, 1.30,
-          smoothstep(0.10, 0.84, hFrac));
-        float silver = pow(Tsun, 2.4) * pow(max(mu, 0.0), 3.0)
-          * (1.0 - smoothstep(0.56, 0.96, d));
-        // The resolved beam is strongly reduced in umbra, while unresolved
-        // sky and multiple-scattered light remain. Coupling that ambient
-        // term to direct visibility produced a coal-black moving blotch
-        // whenever the home moon crossed the stellar disc.
-        float ambientVisibility = mix(0.08, 1.0, horizonVisibility)
-          * mix(0.72, 1.0, eclipseLight);
-        vec3 source = sunColor * (Tsun * phase * 18.0 + silver * 0.92)
-            * directVisibility * heightLight
-          + uAmbC * (0.22 + 0.46 * hFrac) * (0.52 + Tsun * 0.48)
-            * ambientVisibility;
+        // Clear-sky indirect radiance is supplied by the same air solution.
+        float ambientVisibility = mix(0.08, 1.0, horizonVisibility);
+        vec3 sunAir = vec3(1.0);
+        if (air_uEnabled > 0.5) {
+          vec4 airDepth = air_sunlightOpticalDepth(max(sampleRadius-air_uGroundR,0.0), sunElevation);
+          sunAir = exp(-air_uDensityScale * (
+            air_uBetaRayleigh * airDepth.r * air_uRayleighScaleHeight
+            + air_uBetaMieExtinction * airDepth.g * air_uMieScaleHeight
+            + air_uBetaOzone * airDepth.b * air_uOzoneHalfWidth));
+        }
+        vec3 skyAmbient = air_uEnabled > 0.5 && air_uMultipleEnabled > 0.5
+          ? air_multipleRadiance(max(sampleRadius-air_uGroundR,0.0),sunElevation)*air_uRadianceScale*sunColor
+          : uAmbC * ambientVisibility;
+        vec3 source = sunColor * sunAir * uStellarRadianceScale * Tsun * phase
+          * directVisibility + skyAmbient;
         return source * sunEnergy;
       }
 
@@ -403,7 +414,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // Stop the ray at the first opaque scene surface. Trees, rocks,
         // terrain and the ship now occlude the volume instead of receiving a
         // half-resolution cloud layer over their silhouettes.
-        t1 = min(t1, sceneRayLimit() + 1.5);
+        t1 = min(t1, sceneRayLimit());
         // Bound the physical neighborhood so separate weather systems retain
         // holes at the limb instead of accumulating into a white ring.
         t1 = min(t1, t0 + (renderRout - uRin) * 3.2);
@@ -428,43 +439,49 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // medium and bound the error of the long-path cutoff above.
         float sigma = 3.80 / thick;
 
-        vec3 col = vec3(0.0);
+        // Air before the cloud interval is restored after attenuation of the
+        // full-resolution clear-air image. Within the cloud interval, sum
+        // extinction/source before integration (not two independent overlays).
+        vec2 airBounds = air_sphereHits(uCameraLocal, air_uTopR, dir);
+        vec3 beforeL, beforeT;
+        airIntegrate(uCameraLocal, dir, max(airBounds.x, 0.0),
+          min(t0, airBounds.y), beforeL, beforeT);
+        vec3 jointL = vec3(0.0), jointT = vec3(1.0);
+        vec3 clearL = vec3(0.0), clearT = vec3(1.0);
         float T = 1.0;
         for (int i = 0; i < 124; i++) {
-          if (i >= STEPS || T < 0.02) break;
+          if (i >= STEPS) break;
           vec3 local = uCameraLocal + dir * t;
           float d = densityAt(local);
+          vec3 cloudLight = vec3(0.0);
           if (d > 0.003) {
-            vec3 s = cloudSource(local, dir, d, thick, sigma,
+            cloudLight = cloudSource(local, dir, d, thick, sigma,
               normalize(uSunDir), uSunC, uSunEnergy);
-            s += cloudSource(local, dir, d, thick, sigma,
+            cloudLight += cloudSource(local, dir, d, thick, sigma,
               normalize(uSecondarySunDir), uSecondarySunC, uSecondarySunEnergy);
-            // Artistic density response, separate from Beer opacity/step size.
             float powder = mix(0.44, 0.68, 1.0 - exp(-d * 2.2));
-            float a = 1.0 - exp(-d * sigma * dt);
-            col += T * a * s * powder * uTint;
-            T *= 1.0 - a;
-          }
+            cloudLight *= powder * uTint;
+          } else d = 0.0;
+          vec3 airExtinction, airSource;
+          // Air uses the cell centre; density jitter samples only cloud detail.
+          airSample(uCameraLocal + dir * (t0 + (float(i)+0.5)*dt), dir, dt,
+            airExtinction, airSource);
+          float cloudExtinction = d * sigma;
+          mediumStep(jointL, jointT, airExtinction + vec3(cloudExtinction),
+            airSource + cloudLight * cloudExtinction, dt);
+          mediumStep(clearL, clearT, airExtinction, airSource, dt);
+          T *= exp(-cloudExtinction * dt);
           t += dt;
         }
         float alpha = (1.0 - T) * uEngage;
         if (alpha < 0.004) discard;
 
-        // RGB is already front-to-back integrated (premultiplied). Ordinary
-        // water clouds are reflective, not emissive: keep the unassociated
-        // colour within display-white so bright limb pixels do not seed the
-        // global bloom pass and join separate systems into a glowing shell.
-        float cameraAltitude = max(length(uCameraLocal) - uGroundR, 0.0);
-        float cloudBaseAltitude = max(uRin - uGroundR, 1.0);
-        // Looking up from below, the observer sees the shaded cloud base, not
-        // the sunlit HDR top. Orbit keeps crisp white tops; surface views cap
-        // the unassociated luminance so forward scattering cannot turn the
-        // entire ceiling into a white exposure sheet.
-        float cloudWhite = mix(0.82, 1.06,
-          smoothstep(cloudBaseAltitude * 0.85,
-            cloudBaseAltitude + 90000.0, cameraAltitude));
-        vec3 premultiplied = min(col * uEngage, vec3(alpha * cloudWhite));
-        gl_FragColor = vec4(premultiplied, alpha);
+        // For clear image B = Lair + Tair*background, output correction C:
+        // C + Tc*B = Ljoint + Tjoint*background. Air behind the cloud cancels;
+        // front air and air within the cloud are retained in the proper order.
+        // No camera-dependent white cap: clipping would break this identity.
+        vec3 correction = beforeL * (1.0-T) + beforeT * (jointL - T*clearL);
+        gl_FragColor = vec4(correction * uEngage, alpha);
       }`,
   });
   mat.userData.band = band;

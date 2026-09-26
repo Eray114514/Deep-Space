@@ -9,10 +9,11 @@ import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
 
 const probe = process.env.B0_PROBE === '1';
+const phase = process.env.STAGE_B_PHASE || 'B0';
 const fingerprint = await evidenceFingerprint('tools/b0baselinetest.js');
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const helperDigest = hash(await readFile('tools/b0-browser.js'));
-const output = `test-results/b0-baseline/${fingerprint.sourceDigest.slice(0, 12)}${probe ? '-probe' : ''}`;
+const output = `test-results/${phase.toLowerCase()}-baseline/${fingerprint.sourceDigest.slice(0, 12)}${probe ? '-probe' : ''}`;
 await mkdir(output, { recursive: true });
 const scenes = ['S1-ground', 'S2-below', 'S2-inside', 'S2-above', 'S2-side', 'S3-oblique', 'S4-globe'];
 const lights = probe ? [['day', 35]] : [['day', 35], ['twilight', -1], ['night', -30]];
@@ -23,8 +24,8 @@ try {
   browser = await launchHardwareBrowser({ executablePath: resolveSystemChromePath() || undefined, headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
   const errors = [];
-  page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  page.on('pageerror', (e) => { errors.push(String(e)); console.error(e.stack || String(e)); });
+  page.on('console', (m) => { if (m.type() === 'error') { errors.push(m.text()); console.error(m.text()); } });
   const url = `http://127.0.0.1:${port}/?renderer=webgl&quality=ultra&freeze=1&time=9.5&nohero=1&vclouds=1&post=1&nolock=1`;
   await page.goto(url);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 150000 });
@@ -33,7 +34,7 @@ try {
     B0.installCaptureHold(); NMS.setAdaptiveQualityLocked(true);
   });
   const records = [], columns = [], traversals = [];
-  const manifest = { phase: 'B0', scope: 'Reproducible baseline, not final visual/performance acceptance',
+  const manifest = { phase, scope: 'Reproducible production captures; visual review and numeric gates required separately',
     probe, url, commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
     fingerprint, helperDigest, browser: browser.version(),
     gpu: await page.evaluate(() => {
@@ -42,10 +43,9 @@ try {
     }), records, columns, traversals, errors };
   async function checkpoint() { await writeFile(`${output}/manifest.json`, JSON.stringify(manifest, null, 2)); }
   async function waitFrames(count) {
-    await page.evaluate((count) => new Promise((resolve) => {
-      const tick = () => { if (--count <= 0) resolve(); else requestAnimationFrame(tick); };
-      requestAnimationFrame(tick);
-    }), count);
+    const start = await page.evaluate(() => __b0RenderedFrames);
+    await page.waitForFunction(({ start, count }) => __b0RenderedFrames >= start + count,
+      { start, count }, { timeout: 150000 });
   }
   async function image(name) {
     const bytes = await page.screenshot({ path: `${output}/${name}.png` });
@@ -79,6 +79,7 @@ try {
           await waitFrames(32);
           const state = await page.evaluate((i) => B0.snapshot(i), index);
           assert.equal(state.stats.rendererBackend, 'webgl2');
+          assert.equal(state.render.webglError, 0, 'no WebGL draw/feedback error');
           assert.equal(state.atmosphere.activeBodyId, state.body.id, 'capture must use intended atmosphere');
           assert.equal(state.volume.activeBodyId, state.body.id, 'capture must use intended cloud field');
           assert.equal(state.atmosphere.depthReady, true);
@@ -97,7 +98,7 @@ try {
         records.push({ index, light, scene, captures });
         await page.evaluate((i) => { NMS.setAtmosphereVisible(true); NMS.setCloudsVisible(true, i); }, index);
         await checkpoint();
-        console.log(`B0 captured p${index} ${light} ${scene}`);
+        console.log(`${phase} captured p${index} ${light} ${scene}`);
       }
     }
   }
@@ -131,6 +132,7 @@ try {
       const frames = [];
       while (!await page.evaluate(() => __b0Motion.done)) {
         const state = await page.evaluate(() => B0.snapshot(0));
+        assert.equal(state.render.webglError, 0, 'continuous path WebGL error');
         frames.push({ state, image: await image(`motion-${direction}-${String(frames.length).padStart(3, '0')}`) });
         await page.waitForTimeout(250);
       }
@@ -151,12 +153,12 @@ try {
   await writeFile(`${output}/gallery.html`, `<!doctype html><html><head><meta charset="utf-8"><style>
     body{margin:12px;background:#111;color:#eee;font:12px sans-serif}main{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
     figure{margin:0}img{width:100%;display:block}figcaption{padding:4px}h1{font-size:18px}</style></head>
-    <body><h1>B0 baseline — known defects preserved, not visual acceptance</h1><main>${tiles}</main></body></html>`);
+    <body><h1>${phase} production matrix — review required, not final batch B acceptance</h1><main>${tiles}</main></body></html>`);
   const gallery = await browser.newPage({ viewport: { width: 1680, height: 900 } });
   await gallery.goto(`http://127.0.0.1:${port}/${output}/gallery.html`);
   await gallery.locator('img').evaluateAll((images) => Promise.all(images.map((i) => i.decode())));
   await gallery.screenshot({ path: `${output}/matrix.png`, fullPage: true });
-  console.log(`B0 baseline complete: ${records.length} poses, ${records.length * 3} images, ${traversals.length} continuous paths. ${output}`);
+  console.log(`${phase} baseline complete: ${records.length} poses, ${records.length * 3} images, ${traversals.length} continuous paths. ${output}`);
 } finally {
   await browser?.close(); await new Promise((resolve) => server.close(resolve));
 }

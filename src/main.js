@@ -1,3 +1,4 @@
+import { selectStellarOccluders } from './stellar-occlusion.js';
 // Entry point: renderer, the state machine (space flight → fly-to → landing →
 // walking → takeoff → warp), camera-relative rendering (the camera never
 // leaves the origin — the universe moves around it, so float precision holds
@@ -146,7 +147,9 @@ renderer.setPixelRatio(renderDpr);
 // full supersampled DPR would render a second 3200x1800 4x-MSAA scene at
 // 1440p Ultra. The quality-profile scale keeps a 1280x720 source while
 // wave-normal bicubic filtering hides sub-pixel loss in the refracted floor.
-renderer.transmissionResolutionScale = QUALITY_PROFILE.waterTransmissionScale;
+// Water can disable its transmission, but cockpit glass still needs a valid
+// shared transmission target. Zero here creates a 0×0 framebuffer for glass.
+renderer.transmissionResolutionScale = QUALITY_PROFILE.waterTransmissionScale || 0.5;
 renderer.toneMapping = RENDER_LOOK_NEXT ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
@@ -3616,6 +3619,8 @@ function ambience(dt = 1 / 60) {
       };
     }
     p.setEclipseOccluder?.(eclipseBody);
+    p.setStellarOccluders?.(DEV_SERVER && p.devEclipseFixture ? [eclipseBody]
+      : selectStellarOccluders(p, universe.system.planets, universe.system.starViews));
     const sunElev = _up.dot(sunDir);
 
     const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
@@ -4503,25 +4508,13 @@ function frame() {
   document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
   // sun → shadow-light crossfade (after updateRelative, which sets intensities)
-  if (nearest && shadowBlend > 0.02) {
-    const localWorldUp = _v2.copy(nav.pos).sub(nearest.posUniv).normalize();
-    for (const view of universe.system.starViews) {
-      const stellarDirection = _v3.copy(view.positionUniv).sub(nav.pos).normalize();
-      // Point lights do not know that the planet blocks a star below the
-      // local horizon. Gate every binary component explicitly before the
-      // dominant source is handed to the shadow-casting directional light.
-      view.light.intensity *= smoothstep(-0.025, 0.035,
-        localWorldUp.dot(stellarDirection));
-    }
-  }
+  // Surface shaders evaluate the solar horizon at each fragment, not at the camera.
   sunShadow.visible = shadowBlend > 0.02;
   if (sunShadow.visible) {
     const dominantView = universe.system.dominantStarFrom(nearest?.posUniv || nav.pos);
     const sysLight = dominantView.light;
-    sunShadow.intensity = sysLight.intensity * shadowBlend
-      * environmentState.directTransmittance * environmentState.day;
-    sunShadow.color.copy(sysLight.color)
-      .lerp(_warmC.setRGB(1, 0.45, 0.2), envSunset * 0.55);
+    sunShadow.intensity = sysLight.intensity * shadowBlend;
+    sunShadow.color.copy(sysLight.color);
     sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
     sunShadow.target.position.set(0, 0, 0);
     sysLight.intensity *= 1 - shadowBlend;

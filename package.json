@@ -72,7 +72,9 @@
     "test:stage-b:gpu": "node tools/stagebfoundationtest.js",
     "test:stage-b:player": "node tools/stagebplaytest.js",
     "test:b0": "node tools/mediumreferencetest.js && node tools/b0compositiontest.js",
-    "test:b0:baseline": "node tools/b0baselinetest.js"
+    "test:b0:baseline": "node tools/b0baselinetest.js",
+    "test:b5": "node tools/mediumreferencetest.js && node tools/b5transporttest.js && node tools/b5radiancetest.js && node tools/b5lightingtest.js && node tools/b5resourcetest.js",
+    "test:b5:player": "node tools/b5playtest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

@@ -1,6 +1,6 @@
 # B 的介质、深度与时域接口
 
-这是 B0 冻结的**目标语义 v1**，用于约束 B5/B4/B7 的实现；不是当前生产链已全部提供的 API，也不要求预先分配所有纹理。状态与关闭条件只在[批次 B](cloud-atmosphere-rewrite.md)维护。
+这是 B0 冻结、B5 落地修订的**目标语义 v1.1**。B5 已提供分段空气与云/空气联合传输；云运动、占用深度和统一 TAA 仍为 B4/B7 目标，不要求预先分配所有纹理。状态与关闭条件只在[批次 B](cloud-atmosphere-rewrite.md)维护。
 
 ## 坐标、时间和单位
 
@@ -17,18 +17,21 @@
 
 | 逻辑信号 | 必须保留的语义 | 当前实现/迁移注意 |
 |---|---|---|
-| `opaqueRayDistance` + `opaqueValid` | 沿当前像素射线到首个不透明面的米制距离；天空单独标记 | 当前 RenderPass 深度是 Three logarithmic depth；解码得到 view-forward 距离后还要除射线前向余弦。大气持有原始深度引用，不能采后处理 ping-pong 的新深度 |
-| `airTransfer(a,b)` | 指定段的 RGB L/T，裁至光学顶/地面/不透明深度 | 当前大气只输出合成后颜色，并有经验权重；B5 必须补分段能力或等价联合积分 |
-| `cloudTransfer(a,b)` | 同一段内云的 L/T；不得丢失云前空气 | 当前 RGBA 是预乘云辐射与标量 alpha；只适用于灰消光的云，不能代表整个 RGB 空气透射 |
+| `opaqueRayDistance` + `opaqueValid` | 沿当前像素射线到首个不透明面的米制距离；天空单独标记 | RenderPass 写 Three logarithmic depth，解码 view-forward 后除射线前向余弦。AtmospherePass 在合成颜色时用 AlwaysDepth/gl_FragDepth 原样复制到输出附件，再交给 VolumePass；不能把采样附件同时绑定为写入目标 |
+| `airTransfer(a,b)` | 指定段的 RGB L/T，裁至光学顶/地面/不透明深度 | `airIntegrate`/`mediumStep` 提供分段 L/T；全分辨率大气输出 `Bair=La+Ta*background`，无经验视角权重 |
+| `cloudTransfer(a,b)` | 同一段内云的 L/T；不得丢失云前空气 | B5 RGBA 为对 Bair 的修正 C 与 `1-Tc`，不是单独的云辐射，也不是完整 RGB 介质透射。仅适用于灰消光云；有色云须扩展表示 |
 | `cloudFirst/LastDistance`、代表距离/方差、valid | 云沿射线的占用范围；代表距离须说明权重，如 `Tprev*(1-Tsegment)` | 当前 history 只重投影到球壳半径。一个代表深度不是厚云分段合成的充分信息，不能因此删掉区间/误差界 |
 | `radianceEncoding` | 未曝光线性 HDR 的 L；T 不受曝光影响 | 若为带预曝光实现，须带当前/上一帧预曝光因子并先还原再混 history；色调映射仅在最终显示链 |
 | `contentEpoch`、`frameState` | 代际/坐标/时间与对应输出一致 | 新天气的纹理、占用体、参数不可跨代混用；异步上传只在同一代完整就绪后交换 |
 
 上述是逻辑输出，B5 可选择 MRT、分层累积表、重算或其他表示，前提是受控场及正常玩家链误差通过。B0 不凭空锁定高显存布局，也不把单深度雾近似当作任意厚云的正确解。
 
+B5 实际表示：设云区间前空气为 `(Lf,Tf)`，区间内联合空气/云为 `(Lj,Tj)`，同一区间纯空气为 `(La,Ta)`，灰云透射为 `Tc`。逐格合并消光和源项，计算 `C=Lf*(1-Tc)+Tf*(Lj-Tc*La)`，最终 `C+Tc*Bair`。云后空气已经在 Bair 中，代数消去后不会重复衰减。C 可以因空气散射被云阻挡而出现负通道，不能先 clamp 为零；它仍是线性 HDR 修正。改变源项/密度可沿用此表示，改变云消光为 RGB 则不能沿用标量 alpha。
+
 ## 场景深度与所有权
 
 - 世界、地形、植被及停泊舱先贡献同一场景不透明深度；天空无命中时仍积分到介质边界。云不能把自身透明深度写回成不透明墙。
+- B5 云 history 的深度附件保存采样位置的不透明深度，不是云深度；上采样先按深度匹配，再过滤云修正。细前景没有匹配的低分辨率样本时保留全分辨率 Bair，禁止借邻近天空云填入。
 - 前景船体/武器使用独立层时，应明确其自身表面距离与接收介质规则；最后画前景只是现状，不证明雾/空气透视正确。
 - 水面/玻璃的反射、折射和透射具有不同路径；不能仅凭主深度给它们重复套整段空气。B5 对前后几何、B6 对跨消费者反射分别提供证据。
 - 门户/远端系统拥有独立世界原点、天气、深度和历史，不能复用活动行星的介质上下文。后处理借用输入，不拥有或提前释放 opaque depth。
@@ -43,6 +46,6 @@
 
 ## 参考入口与升级规则
 
-`tools/medium-reference.js` 给出常源均匀 slab 的解析解；`mediumreferencetest.js` 用独立细步进交叉验证；`b0compositiontest.js` 将同一输入送进当前最终 composite GLSL，明确报告控制项通过和旧合成缺口。它只测试给定源项的路径传输，不证明光源项、多次散射或真实深度生产接线正确。
+`tools/medium-reference.js` 给出常源均匀 slab 的解析解，`mediumreferencetest.js` 用独立细步进交叉验证。`b5transporttest.js` 通过真实不透明绘制、log depth、AtmospherePass、VolumePass 和实际半浮点 history 检查全部 8 例及细前景重建；`b0compositiontest.js` 现为该回归的兼容入口。给定常源传输与实际源项分开验证，后者见 `b5radiancetest.js`/`b5lightingtest.js`。
 
-B5 必须把已知缺口从“应能检出错误”升级为“与参考一致”，并接入真实 opaque depth、空气/云生产积分及太阳/遮挡场。保留晴空、无空气云、单团、薄层、厚云、云内、前景遮挡和内部遮挡各例，不以删掉坏例使测试变绿。统一 TAA/资源接口若变更，更新本文版本及兼容说明，再迁移消费者。
+B5 已将已知缺口从“应能检出错误”升级为“与参考一致”。后续保留晴空、无空气云、单团、薄层、厚云、云内、前景遮挡和内部遮挡各例，不以删掉坏例使测试变绿。统一 TAA/资源接口若变更，更新本文版本及兼容说明，再迁移消费者。

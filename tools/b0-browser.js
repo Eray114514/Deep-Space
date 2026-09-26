@@ -5,10 +5,19 @@ export function installCaptureHold() {
   const pipeline = NMS._pipeline;
   const original = pipeline.render;
   window.__b0Exposure = null;
+  window.__b0RenderedFrames = 0;
+  const renderer = NMS._renderer;
+  let automaticExposure = renderer.toneMappingExposure;
+  Object.defineProperty(renderer, 'toneMappingExposure', {
+    configurable: true,
+    get: () => window.__b0Exposure ?? automaticExposure,
+    set: (value) => { automaticExposure = value; },
+  });
   pipeline.render = function (...args) {
-    if (window.__b0Exposure !== null) NMS._renderer.toneMappingExposure = window.__b0Exposure;
     if (pipeline.grade?.uniforms.uTime) pipeline.grade.uniforms.uTime.value = 0;
-    return original.apply(this, args);
+    const result = original.apply(this, args);
+    window.__b0RenderedFrames++;
+    return result;
   };
 }
 
@@ -31,6 +40,7 @@ export function snapshot(index) {
       localDirection: s.localDirection.toArray(), color: s.colorValue.toArray(), energy: s.irradianceFraction,
       elevationDegrees: Math.asin(THREE.MathUtils.clamp(s.localDirection.dot(radial), -1, 1)) * 180 / Math.PI })),
     render: { exposure: renderer.toneMappingExposure, exposureHeld: window.__b0Exposure !== null,
+      webglError: renderer.getContext().getError(), renderedFrames: window.__b0RenderedFrames,
       css: [innerWidth, innerHeight], drawingBuffer: size.toArray(), browserDpr: devicePixelRatio,
       renderDpr: NMS.stats().dpr, adaptiveLocked: true, post: true, hud: true, gradeTime: 0 },
     stats: NMS.stats(), atmosphere: NMS.atmosphereState(), volume: NMS.volumeState(),

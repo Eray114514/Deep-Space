@@ -745,13 +745,17 @@ export class StarSystem {
   }
 
   stellarLightFieldFrom(pos, visibility = null) {
-    return buildStellarLightField(this.starViews.map((view, index) => ({
+    const field = buildStellarLightField(this.starViews.map((view, index) => ({
       id: view.spec.starId || `${this.catalogId}:star-${index}`,
       positionUniv: view.positionUniv,
+      radius: view.spec.radiusRender,
       luminositySolar: view.spec.luminositySolar,
       temperatureK: view.spec.temperatureK,
       visibility: Array.isArray(visibility) ? visibility[index] ?? 1 : 1,
     })), pos);
+    const totalLuminosity = this.starViews.reduce((sum, view) => sum + view.spec.luminositySolar, 0);
+    field.radianceScale = 3.2 * clamp(Math.sqrt(totalLuminosity), 0.7, 2.2);
+    return field;
   }
 
   dominantStarFrom(pos) {

@@ -46,6 +46,12 @@ export class GameLegacyPipeline {
     target.depthTexture.name = 'scene.depth';
     this.target = target;
     this.composer = new EffectComposer(renderer, target);
+    this.onContextLost = () => {
+      this.composer.renderTarget1.dispose();
+      this.composer.renderTarget2.dispose();
+      this.volumePass?.releaseTargets();
+    };
+    renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderPass = new RenderPass(scene, camera);
     this.composer.addPass(this.renderPass);
 
@@ -57,7 +63,7 @@ export class GameLegacyPipeline {
     if (this.parkedInteriorPass) this.composer.addPass(this.parkedInteriorPass);
 
     // Full-resolution air transmittance/scattering owns the opaque depth. The
-    // independent half-resolution temporal pass after it remains cloud-only.
+    // half-resolution pass after it integrates the cloud/air correction.
     this.atmospherePass = new AtmospherePass(camera);
     this.composer.addPass(this.atmospherePass);
 
@@ -133,6 +139,7 @@ export class GameLegacyPipeline {
   }
 
   dispose() {
+    this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.composer.dispose();
     this.volumePass?.dispose();
     this.atmospherePass.dispose();

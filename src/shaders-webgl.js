@@ -1,3 +1,4 @@
+import { installSurfaceAtmosphere } from './surface-atmosphere.js';
 // Shader-level beauty: a shared procedural detail texture, triplanar
 // micro-detail on terrain (so close-up ground has grain, not flat vertex
 // color), animated water normals, and wind sway for vegetation.
@@ -559,7 +560,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
           // Keep some indirect skylight in totality while the direct surface
           // response tracks the same finite-star penumbra as atmosphere/cloud.
-          diffuseColor.rgb *= mix(0.16, 1.0, eclipseVisibility(vLocalPos));
+          // Direct stellar occlusion is applied per light, never to albedo.
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         // snow glints, damp hollows go faintly glossy, dry rises stay matte —
@@ -613,8 +614,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             * normalVertexFieldFade
             * (1.7 + vMat.x * normalVertexFieldFade * 1.5));
         }`);
+    installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v11-filtered-sediment';
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v12-shared-air';
   return material;
 }
 
@@ -1392,7 +1394,11 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             uSunset * 0.9);
           sunGlint *= mix(1.0, 0.012, uSunset);
           totalEmissiveRadiance += (reflectedSunColor * (sunGlint + warmPath)
-            + uSecondarySunColor * secondGlint)
+            * surfaceSunTransmission(normalize(uSurfaceViewToLocal*vSunDirView))
+            * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSunDirView))
+            + uSecondarySunColor * secondGlint
+            * surfaceSunTransmission(normalize(uSurfaceViewToLocal*vSecondarySunDirView))
+            * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSecondarySunDirView)))
             * (1.0 - cloud * 0.7);
           totalEmissiveRadiance += vec3(0.32, 0.39, 0.44)
             * gWaterFoam * 0.05;
@@ -1411,8 +1417,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           totalEmissiveRadiance += vec3(0.015, 0.62, 0.48)
             * uBiologicalActivity * biologicalAgitation * biologicalNight * 2.0;
         }`);
+    installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v29:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v30-shared-air:${tidalField ? 'tidal' : 'ordinary'}`;
   return material;
 }
 
