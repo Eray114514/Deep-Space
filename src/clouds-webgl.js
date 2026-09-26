@@ -1,9 +1,10 @@
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionUniforms, bindStellarOcclusion, stellarOcclusionGLSL } from './stellar-occlusion.js';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
+import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
 // Volumetric cloud baseline: a raymarched shell around the planet.
-// The analytic coverage input is shared with the old deck; storms and 3D
-// density are still volume-only. New CPU weather is not yet connected here.
+// Macro weather comes from the same atlas as remote decks and surface weather.
+// The old 3D carving remains while local layers/genus optics are migrated.
 // Shape and erosion come from a small tileable 3D noise texture; lighting is
 // a short sun march with Beer extinction, a powder term and an HG phase.
 // Everything is driven by the planet's cloud spin (frozen under ?freeze=1),
@@ -100,8 +101,8 @@ function stormCenters(offX, offY, offZ) {
   return [a, b];
 }
 
-export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
-  _weatherMapHi, { quality = 'ultra', steps = 124 } = {}) {
+export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
+  weatherMapHi, { quality = 'ultra', steps = 124 } = {}) {
   const thick = band.rOut - band.rIn;
   const qualityValue = quality === 'performance' || quality === 'low' ? 0
     : quality === 'balanced' ? 0.55 : 1;
@@ -117,6 +118,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       ...namespacedAtmosphereUniforms(),
       uNoise3: { value: cloudNoiseTexture() },
       uCloudNoise: { value: detailTex },
+      uWeatherMap: { value: weatherMap || detailTex },
+      uWeatherMapHi: { value: weatherMapHi || weatherMap || detailTex },
+      uWeatherReady: { value: weatherMap ? 1 : 0 },
       uCov0: { value: band.cov0 },
       uCov1: { value: band.cov1 },
       uCOff: { value: new THREE.Vector3(band.ox, band.oy, band.oz) },
@@ -167,6 +171,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       precision highp sampler3D;
       uniform sampler3D uNoise3;
       uniform sampler2D uCloudNoise;
+      uniform sampler2D uWeatherMap, uWeatherMapHi;
+      uniform float uWeatherReady;
       uniform sampler2D tSceneDepth;
       uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uMaxSteps;
       uniform float uSunEnergy, uSecondarySunEnergy, uStellarRadianceScale;
@@ -181,6 +187,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
       varying vec3 vViewDirection;
 
       ${stellarOcclusionGLSL}
+      ${weatherAtlasGLSL}
       float eclipseVisibility(vec3 samplePosition, vec3 sunDirection) {
         if (uLocalOccluderCount > 0) return localStellarVisibility(samplePosition,sunDirection);
         if (uEclipseEnabled < 0.5) return 1.0;
@@ -268,14 +275,21 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         float fine = cloudFbm(sd);
         // Both view and light rays sample the same world-point property.
         // A ray-midpoint mask changed density with viewing direction.
-        float systemMask = weatherSystem(uSpin * radial);
+        vec4 weather = textureLod(uWeatherMap, weatherAtlasUV(uSpin * radial), 0.0);
+        float highWeather = uWeatherReady > 0.5
+          ? textureLod(uWeatherMapHi, weatherAtlasUV(uSpin * radial), 0.0).r : 0.0;
+        float systemMask = uWeatherReady > 0.5 ? weather.g : weatherSystem(uSpin * radial);
         // Preserve the complete analytic weather footprint. Earlier the
         // volume raised this mask to 1.42 and then gated it again with Worley,
         // deleting most clouds that were visible in the orbit deck.
         float baseWeather = pow(smoothstep(uCov0, uCov1, fine), 1.34);
         float largeSystem = systemMask * smoothstep(0.30, 0.72, fine) * 0.72;
-        float cov = max(baseWeather, largeSystem);
-        if (cov < 0.01) return 0.0;
+        // Macro occupation permits clouds; it is not unit condensate at every
+        // point. Retain the mature regional carving inside the shared mask.
+        float cov = uWeatherReady > 0.5
+          ? weather.r * pow(smoothstep(0.25, 0.65, fine), 1.1)
+          : max(baseWeather, largeSystem);
+        if (max(cov, highWeather) < 0.01) return 0.0;
         vec3 warp = vec3(
           textureLod(uCloudNoise, sd.yz * 3.1 + uCOff.xy, 0.0).r,
           textureLod(uCloudNoise, sd.zx * 3.7 + uCOff.yz, 0.0).g,
@@ -303,8 +317,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
         // uniformly extruded layer.
         vec2 upperNoise = textureLod(uNoise3,
           q * 1.72 + vec3(5.7, 2.3, 8.1), 1.15).rg;
-        float upperSource = smoothstep(0.28, 0.76, systemMask)
-          * smoothstep(0.26, 0.74, cov);
+        float upperSource = uWeatherReady > 0.5 ? highWeather
+          : smoothstep(0.28, 0.76, systemMask) * smoothstep(0.26, 0.74, cov);
         float upperFloor = 0.48 + (upperNoise.g - 0.5) * 0.12;
         float upperCeil = 0.91 + (upperNoise.r - 0.5) * 0.10;
         float upperProfile = smoothstep(upperFloor, upperFloor + 0.11, h)
@@ -321,12 +335,19 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, _weatherMap,
           upperSource * upperProfile * (0.54 + upperNoise.r * 0.52));
         verticalShape = max(verticalShape, upperSource * wisp * 0.34);
         float d = cov * verticalShape;
+        float highDensity = highWeather
+          * max(upperProfile * (0.54 + upperNoise.r * 0.52), wisp * 0.34);
+        if (uWeatherReady > 0.5) d = cov * lowerProfile * cells;
         float ero = textureLod(uNoise3, q * 3.15, 1.25).g;
         d = clamp(d - (1.0 - ero) * 0.10 * (1.0 - d), 0.0, 1.0);
         // Very low density belongs to clear air, not a planet-wide translucent
         // veil. Preserve soft edges while forcing genuine holes between cloud
         // systems so ocean and terrain keep their native colour.
-        return smoothstep(0.16, 0.62, d);
+        // The high mask was calibrated as translucent ice, not another opaque
+        // liquid deck. Keep its smaller condensate separate from low-cloud
+        // erosion. Per-metre genus optics will replace these legacy amounts.
+        return max(smoothstep(0.16, 0.62, d),
+          uWeatherReady > 0.5 ? highDensity * 0.06 : 0.0);
       }
 
       float hash12(vec2 p) {

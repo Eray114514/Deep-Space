@@ -257,7 +257,7 @@ export function advanceWeatherField(fieldOrState, absoluteHours) {
   }
   return Object.freeze({
     kind: 'weather-state',
-    version: WEATHER_FIELD_VERSION,
+    version: field.version,
     field,
     hours: Number(absoluteHours),
   });
@@ -459,6 +459,7 @@ function applyFixture(sample, fixture) {
 
 export function sampleWeatherField(fieldOrState, directionValue, absoluteHours) {
   const { field, hours } = resolveFieldAndHours(fieldOrState, absoluteHours);
+  if (field.sample) return field.sample(directionValue, hours);
   const direction = unitVector(directionValue);
   const profile = field.profile;
   const lowAngle = field.basePhase + hours * field.windRadiansPerHour;
@@ -713,5 +714,5 @@ export function weatherFieldFingerprint(fieldOrState, absoluteHours = undefined,
       sample.morphology.cloudStreet,
     ]) hash = fingerprintMix(hash, value);
   }
-  return `weather-v${WEATHER_FIELD_VERSION}:${hash.toString(16).padStart(8, '0')}`;
+  return `weather-v${resolved.field.version}:${hash.toString(16).padStart(8, '0')}`;
 }

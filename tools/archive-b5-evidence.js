@@ -10,8 +10,14 @@ import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 
 const source = process.argv[2];
 assert.ok(source, 'Usage: node tools/archive-b5-evidence.js test-results/b5-baseline/<digest>');
-const destination = 'docs/baselines/b5-2026-09-21';
+const destination = process.argv[3] || 'docs/baselines/b5-2026-09-21';
 const manifest = JSON.parse(await readFile(path.join(source, 'manifest.json')));
+if (manifest.phase === 'B4') {
+  const weather = JSON.parse(await readFile(`test-results/b4-weather/${manifest.fingerprint.sourceDigest.slice(0, 12)}/report.json`));
+  assert.deepEqual(weather.fingerprint, await evidenceFingerprint('tools/b4weathergputest.js'));
+  await mkdir(destination, { recursive: true });
+  await writeFile(`${destination}/weather.json`, JSON.stringify(weather, null, 2));
+}
 const reports = await Promise.all(['transport', 'radiance', 'lighting', 'resources'].map(async (name) => ({ name,
   report: JSON.parse(await readFile(`test-results/b5/${name}.json`)) })));
 for (const { name, report } of reports) {
@@ -67,7 +73,7 @@ try {
   browser = await launchHardwareBrowser({ executablePath: resolveSystemChromePath() || undefined, headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 600 } });
   await page.route('**/__b5-motion-gallery', (r) => r.fulfill({ contentType: 'text/html', body:
-    `<meta charset="utf-8"><style>body{background:#111;color:#eee;font:12px sans-serif}main{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}figure{margin:0}img{width:100%}</style><h2>B5 scripted up/down — sampled continuous frames</h2><main>${tiles.join('')}</main>` }));
+    `<meta charset="utf-8"><style>body{background:#111;color:#eee;font:12px sans-serif}main{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}figure{margin:0}img{width:100%}</style><h2>${manifest.phase} scripted up/down — sampled continuous frames</h2><main>${tiles.join('')}</main>` }));
   await page.goto(`http://127.0.0.1:${port}/__b5-motion-gallery`);
   await page.locator('img').evaluateAll((images) => Promise.all(images.map((i) => i.decode())));
   await page.screenshot({ path: `${destination}/motion.png`, fullPage: true });
@@ -79,7 +85,7 @@ for (const name of ['matrix.png', 'motion.png']) {
   archived.push({ path: name, sha256: hash(bytes), bytes: bytes.length });
 }
 manifest.archive = { originalsDirectory: source, archived,
-  note: 'Only archive.archived paths exist alongside this manifest. Other full-resolution originals are local; reproduce with npm run test:b5:player. Matrix and motion sheets retain all normal poses and sampled trajectory frames.' };
+  note: `Only archive.archived paths exist alongside this manifest. Other full-resolution originals are local; reproduce with STAGE_B_PHASE=${manifest.phase} node tools/b0baselinetest.js. Matrix and motion sheets retain all normal poses and sampled trajectory frames.` };
 await writeFile(`${destination}/manifest.json`, JSON.stringify(manifest));
 for(const {name,report} of reports) await writeFile(`${destination}/${name}.json`, JSON.stringify(report,null,2));
 await writeFile(`${destination}/foundation.json`, JSON.stringify(foundation, null, 2));

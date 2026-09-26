@@ -1,4 +1,5 @@
 import { installSurfaceAtmosphere } from './surface-atmosphere.js';
+import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
 // Shader-level beauty: a shared procedural detail texture, triplanar
 // micro-detail on terrain (so close-up ground has grain, not flat vertex
 // color), animated water normals, and wind sway for vegetation.
@@ -220,6 +221,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uMacroK = { value: macroK };
     shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
     shader.uniforms.uCloudTex = { value: cloudTex };
+    material.userData.cloudShadowTextureNode = shader.uniforms.uCloudTex;
     shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.42 : 0 };
     shader.uniforms.uCloudMat = { value: new THREE.Matrix3() };
     shader.uniforms.uEclipseEnabled = { value: 0 };
@@ -297,6 +299,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
         uniform sampler2D uGrassColor;
+        ${weatherAtlasGLSL}
         uniform sampler2D uGrassNormal;
         uniform sampler2D uGrassOrm;
         uniform sampler2D uRockColor;
@@ -555,9 +558,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // shadows mirror about the equator relative to the clouds casting
           // them and leave a visible seam there.
           vec3 cd = uCloudMat * nd;
-          float cu = 0.5 + atan(-cd.z, -cd.x) * 0.15915494;
-          float cvv = acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
-          diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, vec2(cu, cvv)).g * uCloudK;
+          diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, weatherAtlasUV(cd)).r * uCloudK;
           // Keep some indirect skylight in totality while the direct surface
           // response tracks the same finite-star penumbra as atmosphere/cloud.
           // Direct stellar occlusion is applied per light, never to albedo.
@@ -616,7 +617,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v12-shared-air';
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v13-cloud-coverage';
   return material;
 }
 
@@ -957,6 +958,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         ${oceanWaveGLSL}
         ${tidalGLSL}
         uniform float uSwell;
+        ${weatherAtlasGLSL}
         uniform float uWaveS;
         uniform float uFoamK;
         uniform vec3 uDeepC;
@@ -1048,9 +1050,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }
         float waterCloud(vec3 localDirection) {
           vec3 cd = uCloudMat * normalize(localDirection);
-          float cu = 0.5 + atan(-cd.z, -cd.x) * 0.15915494;
-          float cv = acos(clamp(cd.y, -1.0, 1.0)) * 0.31830988;
-          return texture2D(uCloudTex, vec2(cu, cv)).g * uCloudK;
+          return texture2D(uCloudTex, weatherAtlasUV(cd)).r * uCloudK;
         }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
@@ -1419,21 +1419,25 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v30-shared-air:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v31-cloud-coverage:${tidalField ? 'tidal' : 'ordinary'}`;
   return material;
 }
 
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
 // with an analytic threshold. A baked cloud texture shows its texels as
 // hard squares from orbit; this is smooth at every distance.
-export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0) {
+export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0, weatherMap = null) {
   const tex = detailTexture();
   if (!tex) return material;
-  const weatherTex = cloudSystemTexture(offX, offY, offZ);
+  const weatherTex = weatherMap || cloudSystemTexture(offX, offY, offZ);
   material.userData.weatherSystemTexture = weatherTex;
+  material.userData.weatherSystemTextureOwned = !weatherMap;
+  const weatherUniform = { value: weatherTex };
+  material.userData.weatherSystemTextureNode = weatherUniform;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uCloudNoise = { value: tex };
-    shader.uniforms.uWeatherSystem = { value: weatherTex };
+    shader.uniforms.uWeatherSystem = weatherUniform;
+    shader.uniforms.uWeatherReady = { value: weatherMap ? 1 : 0 };
     shader.uniforms.uCov0 = { value: 0.55 - coverage * 0.24 };
     shader.uniforms.uCov1 = { value: 0.86 - coverage * 0.14 };
     shader.uniforms.uCOff = { value: new THREE.Vector3(offX, offY, offZ) };
@@ -1452,6 +1456,8 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
         uniform sampler2D uWeatherSystem;
+        uniform float uWeatherReady;
+        ${weatherAtlasGLSL}
         uniform float uCov0;
         uniform float uCov1;
         uniform vec3 uCOff;
@@ -1470,6 +1476,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           return texture2D(uWeatherSystem, oct * 0.5 + 0.5).r;
         }
         float cloudVertexAmount(vec3 d) {
+          if (uWeatherReady > 0.5) return texture2D(uWeatherSystem, weatherAtlasUV(d)).r;
           float fine = cloudVertexFbm(d);
           float base = smoothstep(uCov0, uCov1, fine);
           float system = weatherSystem(d) * smoothstep(0.24, 0.68, fine) * 0.86;
@@ -1483,6 +1490,8 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
         uniform sampler2D uWeatherSystem;
+        uniform float uWeatherReady;
+        ${weatherAtlasGLSL}
         uniform float uCov0;
         uniform float uCov1;
         uniform vec3 uCOff;
@@ -1505,6 +1514,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           return texture2D(uWeatherSystem, oct * 0.5 + 0.5).r;
         }
         float cloudAmount(vec3 d) {
+          if (uWeatherReady > 0.5) return texture2D(uWeatherSystem, weatherAtlasUV(d)).r;
           float fine = cloudFbm(d);
           float base = smoothstep(
             uCov0 - 0.02 * uSurfaceView,
@@ -1529,7 +1539,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           diffuseColor.rgb *= self * (1.0 - a * 0.3);
         }`);
   };
-  material.customProgramCacheKey = () => 'cloud-field-v4-surface-fallback';
+  material.customProgramCacheKey = () => 'cloud-field-v5-shared-weather';
   return material;
 }
 

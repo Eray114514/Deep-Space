@@ -1,6 +1,6 @@
-// Candidate planet-scale weather model (CPU phase 1 toolbox).
-// Production clouds AND gameplay still consume src/weather-field.js. B4 must
-// migrate both through one authority; passing these CPU tests does not prove C1.
+// Planet-scale weather model. planet-weather.js now bakes a real-terrain
+// snapshot into the production atlas; this model's full storm evolution is
+// still CPU-only. Passing these CPU tests does not prove rendered C1/C5.
 // See docs/cloud-weather-contract.md for the staged consumer/coordinate contract.
 // This model uses a body-local +Y pole, absolute celestial hours and a
 // 350-4200 m LCL range. Its default terrain is synthetic, not Planet.height.
@@ -145,8 +145,8 @@ function fbm(simplex, dir, frequency, octaves, gain = 0.52, lacunarity = 2.07) {
 // Orography is a first-class driver here: it sets orographicLift (lenticular
 // clouds, windward cloud walls), lee-side drying (real deserts sit downwind of
 // ranges), oceanic fraction (marine stratocumulus decks) and terrainConcavity
-// (valley fog). options.terrain permits an injected sampler, but production has
-// not connected Planet.height here yet. The default is a standalone fixture.
+// (valley fog). planet-weather.js injects a fixed regional Planet.height atlas.
+// The default below remains a synthetic standalone fixture.
 // ---------------------------------------------------------------------------
 
 function createDefaultTerrain(namespace) {
@@ -782,7 +782,7 @@ export function createWeatherSystem(seed, options = {}) {
     seed: String(seed),
     namespace,
     terrain,
-    radiusMeters: Math.max(1e5, finite(options.radiusMeters, DEFAULT_RADIUS_METERS)),
+    radiusMeters: Math.max(1, finite(options.radiusMeters, DEFAULT_RADIUS_METERS)),
     rotationPeriodHours: Math.max(0.5, finite(options.rotationPeriodHours, 24)),
     baseTemperatureK: finite(options.temperatureK, 289),
     polarCoolingK: clamp(finite(options.polarCoolingK, 52), 0, 180),

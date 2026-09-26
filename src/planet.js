@@ -20,6 +20,8 @@ import {
 } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
 import { getCloudResourceManager } from './cloud/cloud-resource-manager.js';
+import { sampleWeatherAtlas } from './cloud/weather-atlas.js';
+import { createPlanetWeatherField } from './cloud/planet-weather.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { WORLD_LAYER } from './render-layers.js';
 import { floraPalette } from './flora.js';
@@ -1061,7 +1063,7 @@ export class Planet {
         weatherSpeed: 6,
         temperatureK: this.type === 'ice' ? 258 : this.type === 'lava' ? 430 : 286,
       };
-      this.weatherField = createWeatherField(this.seed, {
+      this.weatherField = createPlanetWeatherField(this, {
         profile: this.weatherProfile,
         fixture: DEV_WEATHER_FIXTURE || undefined,
       });
@@ -1069,11 +1071,9 @@ export class Planet {
       // used by the volume shader. Keeping cloud type and stratus in Lo and
       // high-deck type/multiple scattering in Hi avoids throwing away entire
       // cloud families merely to fit one RGBA atlas.
-      // Atlas texel density follows physical circumference. A fixed 512-wide
-      // bake over-sampled 200–400 km planets at ~3 km/texel even though the
-      // authored weather structures are 20–60 km wide, stalling route launch
-      // for hundreds of milliseconds. Large worlds retain the full 512 width.
-      this.cloudAtlasWidth = clamp(2 ** Math.ceil(Math.log2(
+      // The new atlas carries synoptic structure, not metre-scale density.
+      // Keep its content resolution fixed across rendering quality tiers.
+      this.cloudAtlasWidth = this.weatherField.synoptic ? 256 : clamp(2 ** Math.ceil(Math.log2(
         Math.max(1, (Math.PI * 2 * R) / 8000),
       )), 256, 512);
       const weatherAtlases = makeCloudTextures(
@@ -1446,7 +1446,17 @@ export class Planet {
   }
 
   weatherAt(localDirection, hours = this.weatherHours) {
-    return sampleWeatherField(this.weatherField, localDirection, hours);
+    const weather = sampleWeatherField(this.weatherField, localDirection, hours);
+    const atlas = this.cloudShadowTex?.userData.weatherAtlas;
+    if (!atlas || this.weatherField.synoptic) return weather;
+    const spin = hours * (this.weatherField.windRadiansPerHour ?? 0);
+    const lo = sampleWeatherAtlas(atlas, localDirection, spin);
+    // Coverage is now the same spatial input the volume/deck/shadows consume.
+    // Local precipitation cannot survive inside the shared clear-sky mask.
+    const precipitation = weather.precipitation * smoothstep(0.05, 0.3, lo[0]);
+    return { ...weather, coverage: lo[0], cloudType: lo[1], stratusMask: lo[2],
+      humidity: lo[3], precipitation,
+      precipitationKind: precipitation > 0.02 ? weather.precipitationKind : 'none' };
   }
 
   oceanAt(localDirection, hours = this.weatherHours) {
@@ -1464,7 +1474,7 @@ export class Planet {
   }
 
   setWeatherFixture(name = null) {
-    this.weatherField = createWeatherField(this.seed, {
+    this.weatherField = createPlanetWeatherField(this, {
       profile: this.weatherProfile,
       fixture: name || undefined,
     });
@@ -1497,6 +1507,10 @@ export class Planet {
         || this.volCloudMat?.userData.weatherHiTextureNode;
       if (volumeLoNode) volumeLoNode.value = this.cloudShadowTex;
       if (volumeHiNode) volumeHiNode.value = this.cloudWeatherHiTex;
+      if (this.volCloudMat?.uniforms.uWeatherMap) {
+        this.volCloudMat.uniforms.uWeatherMap.value = this.cloudShadowTex;
+        this.volCloudMat.uniforms.uWeatherMapHi.value = this.cloudWeatherHiTex;
+      }
       if (volumeState) {
         volumeState.weatherLoMap = this.cloudShadowTex;
         volumeState.weatherHiMap = this.cloudWeatherHiTex;
@@ -1575,7 +1589,9 @@ export class Planet {
       if (height <= 0 || height >= 1) continue;
       _dir.copy(camLocal).multiplyScalar(1 / camR)
         .applyQuaternion(_q2.copy(b.mesh.quaternion).invert());
-      const liveWeather = this.weatherAt?.(_dir) || {};
+      // weatherAt owns time advection; do not apply the deck rotation twice.
+      const liveWeather = this.weatherAt?.(camLocal) || {};
+      if ((liveWeather.coverage || 0) < 0.01 && (liveWeather.highMask || 0) < 0.01) continue;
       const base = cloudDensityCPU(_dir, b.cov0, b.cov1, b.ox, b.oy, b.oz);
       const coverage = clamp(liveWeather.coverage || 0, 0, 1);
       const cloudType = clamp(liveWeather.cloudType || 0, 0, 1);
@@ -1677,7 +1693,7 @@ export class Planet {
     }
     if (this.cloudMesh) {
       this.cloudSpin = this.cloudSpinBase
-        + this.weatherHours * (this.weatherField?.windRadiansPerHour || 0.05);
+        + this.weatherHours * (this.weatherField?.windRadiansPerHour ?? 0.05);
       // Planet local Y is already the physical rotation axis. Applying the
       // decorative ring tilt a second time rotated visible clouds away from
       // CPU weather, rain and the shadow atlas. Cloud decks therefore advect
@@ -1754,7 +1770,7 @@ export class Planet {
     }
     if (this.cloudMesh2) {
       this.cloudSpin2 = this.cloudSpin2Base
-        + this.weatherHours * (this.weatherField?.windRadiansPerHour || 0.05) * 1.47;
+        + this.weatherHours * (this.weatherField?.windRadiansPerHour ?? 0.05);
       this.cloudMesh2.quaternion.setFromAxisAngle(_yAxis, this.cloudSpin2);
       if (this.volCloudMesh) {
         const e = clamp(this.volumeBlend || 0, 0, 1);
@@ -1877,7 +1893,7 @@ export class Planet {
       if (o.material) {
         if (o.material.map) o.material.map.dispose();
         if (o.material.alphaMap) o.material.alphaMap.dispose();
-        if (o.material.userData.weatherSystemTexture) o.material.userData.weatherSystemTexture.dispose();
+        if (o.material.userData.weatherSystemTextureOwned) o.material.userData.weatherSystemTexture?.dispose();
         // The WebGPU local cloud shell is a process-wide material shared by all
         // planets. Disposing one cancelled preview must not invalidate the live
         // system's warmed RenderObject/pipeline.
@@ -1922,6 +1938,10 @@ function cloudAtlasTexture(canvas) {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.colorSpace = THREE.NoColorSpace;
+  tex.userData.weatherAtlas = {
+    width: canvas.width, height: canvas.height,
+    data: canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data,
+  };
   return tex;
 }
 
@@ -1947,15 +1967,29 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
   const lowRaw = new Float32Array(W * H);
   const highRaw = new Float32Array(W * H);
   for (let j = 0; j < H; j++) {
-    const phi = (j / H - 0.5) * Math.PI;
+    const phi = ((j + 0.5) / H - 0.5) * Math.PI;
     const cy = Math.sin(phi), cr = Math.cos(phi);
     for (let i = 0; i < W; i++) {
-      const th = (i / W) * Math.PI * 2;
+      const th = ((i + 0.5) / W) * Math.PI * 2;
       const cx = Math.cos(th) * cr, cz = Math.sin(th) * cr;
       // The exact same deterministic weather function drives CPU transit fog
       // and GPU rendering. Fine seeded noise only erodes the shared density;
       // it never creates an independent camera-facing cloud pattern.
       const dir = { x: cx, y: cy, z: cz };
+      if (weatherField?.synoptic) {
+        // The synoptic model owns macro coverage. Do not re-threshold it with
+        // a second noise field or re-calibrate each atlas into a different sky.
+        const w = sampleWeatherField(weatherField, dir, 0), index = j * W + i, k = index * 4;
+        lowRaw[index] = w.coverage; highRaw[index] = w.highMask;
+        lowData[k + 1] = Math.round(w.cloudType * 255);
+        lowData[k + 2] = Math.round(w.stratusMask * 255);
+        lowData[k + 3] = Math.round(w.humidity * 255);
+        highData[k + 1] = Math.round(w.highType * 255);
+        highData[k + 2] = Math.round(w.convective * 255);
+        highData[k + 3] = Math.round(clamp((w.cloudBaseMeters - LCL_MIN_METERS)
+          / (LCL_MAX_METERS - LCL_MIN_METERS)) * 255);
+        continue;
+      }
       const legacyDensity = cloudDensityCPU(dir,
         0.55 - coverage * 0.24, 0.86 - coverage * 0.14,
         offsets[0], offsets[1], offsets[2]);
@@ -2033,13 +2067,13 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
       lowFloor, Math.min(1, lowCutoff + 0.018), lowRaw[index]);
     const lowRelief = clamp(
       (lowRaw[index] - lowFloor) / Math.max(1e-5, 1 - lowFloor), 0, 1);
-    const lowValue = lowSupport
+    const lowValue = weatherField?.synoptic ? lowRaw[index] : lowSupport
       * (0.2 + 0.8 * Math.pow(lowRelief, 0.72));
     const highSupport = smoothstep(
       highFloor, Math.min(1, highCutoff + 0.012), highRaw[index]);
     const highRelief = clamp(
       (highRaw[index] - highFloor) / Math.max(1e-5, 1 - highFloor), 0, 1);
-    const highValue = highSupport
+    const highValue = weatherField?.synoptic ? highRaw[index] : highSupport
       * (0.12 + 0.88 * Math.pow(highRelief, 0.82));
     lowData[index * 4] = Math.round(lowValue * 255);
     highData[index * 4] = Math.round(highValue * 255);
@@ -2063,17 +2097,19 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
   const stats = Object.freeze({
     requested: coverage,
     fixtureRequested: Number.isFinite(fixtureCoverage) ? fixtureCoverage : null,
-    lowTarget,
-    highTarget,
+    representation: weatherField?.synoptic ? 'synoptic-advected-snapshot-v1' : 'legacy-fixture',
+    lowTarget: weatherField?.synoptic ? null : lowTarget,
+    highTarget: weatherField?.synoptic ? null : highTarget,
     lowOccupied: lowOccupied / count,
     highOccupied: highOccupied / count,
     lowMean: lowMean / count,
     highMean: highMean / count,
-    lowCutoff,
-    highCutoff,
+    lowCutoff: weatherField?.synoptic ? null : lowCutoff,
+    highCutoff: weatherField?.synoptic ? null : highCutoff,
   });
   const low = cloudAtlasTexture(lowCanvas);
   const high = cloudAtlasTexture(highCanvas);
+  weatherField?.bindAtlases?.(low.userData.weatherAtlas, high.userData.weatherAtlas);
   low.userData.coverageStats = stats;
   high.userData.coverageStats = stats;
   return { low, high, stats };
