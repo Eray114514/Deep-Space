@@ -1,4 +1,6 @@
-// Cloud density — the single authoritative density function (phase 3, D1).
+// Cloud density — CPU candidate/reference toolbox (phase 3, D1).
+// Production clouds-webgl.js does not yet consume these fields. B4 chooses
+// which parts to migrate; this file is not the current render authority.
 //
 // One intended contract, one data path:
 //   cloudDensityCPU(...)  plain JS — transit fog, CPU cloud tests, consistency
@@ -21,8 +23,8 @@
 //   fine jitter         -> a lane of the same shape texture both sides read
 //
 // Sharing bytes removes stochastic-source drift. Coordinates, interpolation,
-// species mixing and extinction math can still differ in the TSL translation,
-// so phase 4 must compare real WebGPU output/readback against this reference.
+// species mixing and extinction math can still differ in a GLSL translation,
+// so any B4 migration must compare real WebGL2 readback against this reference.
 // `tools/cloudsamplingtest.js` only pins CPU fp32 sensitivity and bake fidelity;
 // it is a prerequisite for, not a substitute for, that hardware gate.
 //

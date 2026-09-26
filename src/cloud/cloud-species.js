@@ -2,15 +2,15 @@
 // contract for every cloud genus the renderer can produce.
 //
 // This module is DELIBERATELY dependency-free pure data. Design decision D1
-// ("one density function") requires the CPU density evaluator, the TSL volume
-// march, the occupancy baker and the weather system to agree on every constant.
+// ("one density function") requires the CPU density evaluator, a future GLSL
+// consumer, the occupancy baker and the weather system to agree on every constant.
 // The moment this file imports THREE or TSL it can no longer be read by the CPU
 // path, and the two implementations start to drift — which is exactly how the
 // previous implementation ended up with CPU transit fog disagreeing with the
 // rendered deck. Keep it importable from anywhere, including tests.
 //
-// See docs/cloud-atmosphere-rewrite.md §3.3 for the authored table and §0 for
-// why the previous single-envelope approach failed.
+// This table is CPU input data, not proof that production draws these species.
+// See docs/cloud-weather-contract.md and docs/cloud-atmosphere-rewrite.md.
 
 // Cloud-base reference frame.
 //

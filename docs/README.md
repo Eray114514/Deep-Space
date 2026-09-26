@@ -6,6 +6,7 @@
 | [未完成任务难度评估](remaining-work-difficulty.md) | 小阶段拆分、难度、前置条件与 agent 交接建议；进度仍以各原计划为准 |
 | [云与大气计划](cloud-atmosphere-rewrite.md) | B 唯一规格、进度和返工顺序 |
 | [阶段 4 云演进](cloud-phase4-volume-march.md) | B 的天气接线、云种/形态、采样实施清单 |
+| [B4 天气接线契约](cloud-weather-contract.md) | 首族、可执行坐标/地形查询、内容/时间语义和消费者迁移位置 |
 | [介质、深度与时域接口](medium-render-contract.md) | B0 冻结的目标语义；约束 B5/B4/B7，不冒称生产 API 已完成 |
 | [B0 基线与交接](baselines/b0-2026-09-20/README.md) | 可复现矩阵、连续帧、传输参考、已知缺陷和 B5 施工边界 |
 | [B5 传输与照明交接](baselines/b5-2026-09-21/README.md) | 解析/GPU 参考、生产画面、近似边界与 B4 施工约束 |

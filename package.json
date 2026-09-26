@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
+    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudweathertest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
     "test:cloud-species": "node tools/cloudspeciestest.js",
     "test:weather-system": "node tools/weathersystemtest.js",
     "test:cloud-sampling": "node tools/cloudsamplingtest.js",
@@ -74,7 +74,8 @@
     "test:b0": "node tools/mediumreferencetest.js && node tools/b0compositiontest.js",
     "test:b0:baseline": "node tools/b0baselinetest.js",
     "test:b5": "node tools/mediumreferencetest.js && node tools/b5transporttest.js && node tools/b5radiancetest.js && node tools/b5lightingtest.js && node tools/b5resourcetest.js",
-    "test:b5:player": "node tools/b5playtest.js"
+    "test:b5:player": "node tools/b5playtest.js",
+    "test:b4:contract": "node tools/cloudweathertest.js && node tools/b4weathertest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

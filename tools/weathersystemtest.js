@@ -1,8 +1,7 @@
 // Weather system invariants (phase 1).
 //
-// docs/cloud-atmosphere-rewrite.md §4 phase 1. This module is the cloud
-// AUTHORITY: everything the renderer draws is a visualization of it, so a
-// defect here cannot be fixed downstream. Each assertion below pins one of the
+// CPU model checks; production still uses weather-field.js. These do not prove
+// production weather/density consistency. Each assertion below pins one of the
 // user requirements that the previous implementation violated, and is written
 // to fail on the specific degenerate form that violation took.
 

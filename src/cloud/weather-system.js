@@ -1,26 +1,13 @@
-// Weather system — planet-scale cloud authority (phase 1).
-//
-// This module decides WHERE clouds are, not what they look like. Everything the
-// renderer draws is a visualization of this field, which is what makes
-// requirement C1 (space and surface agree) structurally true rather than
-// something to be tuned toward.
-//
-// Relationship to the existing src/weather-field.js:
-//   weather-field.js is KEPT (docs/cloud-atmosphere-rewrite.md §4 phase 0) and
-//   still owns *gameplay* weather at the observer: precipitation, visibility,
-//   gusts, fixtures, and the world-lock fingerprint. It is NOT the cloud
-//   authority any more. Its coverage channel is a per-point density target,
-//   which is precisely the C5 violation the rewrite exists to remove: scaling a
-//   local density by 0.5 everywhere yields uniform half-full mottling, never the
-//   large continuous clear and cloudy regions real synoptic weather has.
-//
-//   This module therefore builds the cloud field fresh from circulation
-//   structure, and shares only conventions with weather-field.js: the +Y
-//   rotation axis, the advect-by-absolute-hours clock (never per-frame deltas),
-//   and the 350-4200 m LCL range.
+// Candidate planet-scale weather model (CPU phase 1 toolbox).
+// Production clouds AND gameplay still consume src/weather-field.js. B4 must
+// migrate both through one authority; passing these CPU tests does not prove C1.
+// See docs/cloud-weather-contract.md for the staged consumer/coordinate contract.
+// This model uses a body-local +Y pole, absolute celestial hours and a
+// 350-4200 m LCL range. Its default terrain is synthetic, not Planet.height.
 //
 // THE COVERAGE CONTRACT (C5 / D7) — the core of this phase
-//   Coverage is an AREA FRACTION observed from orbit. The field is built as a
+//   Coverage here is a proxy AREA FRACTION, not measured production opacity.
+//   The field is built as a
 //   large-scale synoptic POTENTIAL (Hadley/Ferrel structure, meandering storm
 //   track, discrete cyclones, discrete subtropical highs, orography) and then
 //   THRESHOLDED. Coverage is calibrated by moving that single threshold until
@@ -158,9 +145,8 @@ function fbm(simplex, dir, frequency, octaves, gain = 0.52, lacunarity = 2.07) {
 // Orography is a first-class driver here: it sets orographicLift (lenticular
 // clouds, windward cloud walls), lee-side drying (real deserts sit downwind of
 // ranges), oceanic fraction (marine stratocumulus decks) and terrainConcavity
-// (valley fog). The real renderer injects the planet's own terrain sampler via
-// options.terrain; the default below keeps this module standalone-testable and
-// deterministic without importing the terrain stack.
+// (valley fog). options.terrain permits an injected sampler, but production has
+// not connected Planet.height here yet. The default is a standalone fixture.
 // ---------------------------------------------------------------------------
 
 function createDefaultTerrain(namespace) {
@@ -827,7 +813,7 @@ export function createWeatherSystem(seed, options = {}) {
 
 // Deterministic fingerprint of the cloud field. Distinct from
 // weatherFieldFingerprint() in weather-field.js: that one covers gameplay
-// weather, this one covers the cloud authority.
+// production weather, this one covers the CPU candidate model.
 export function weatherSystemFingerprint(system, hours = 0, samples = 96) {
   let hash = strHash32(`${system.namespace}|${system.coverageBias.toFixed(6)}`);
   for (const direction of fibonacciDirections(Math.max(16, samples))) {
