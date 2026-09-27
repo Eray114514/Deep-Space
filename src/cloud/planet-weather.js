@@ -54,7 +54,10 @@ export function createPlanetWeatherField(body, options = {}) {
   // Keep bulk advection in physical units; small planets do not inherit a
   // 6,000 km planet's linear cloud speed. weatherSpeed is an explicit time gain.
   const angularSpeed = profile.windSpeed * 3600 / body.R * profile.weatherSpeed;
-  const surfaceRangeMeters = Math.max(1000, body.hAmp || 0, Math.abs(body.seaLevel || 0),
+  // Only physical surface samples define this encoding. Dry bodies use a
+  // -1e9 sea-level sentinel; including it made one 8-bit step millions of
+  // metres and exploded even tiny distant cloud shells across the screen.
+  const surfaceRangeMeters = Math.max(1000, body.hAmp || 0,
     Math.abs(terrain.minSurface), Math.abs(terrain.maxSurface));
   const field = { ...legacy, version: 5, namespace: `${body.seed}:production-synoptic:v2`,
     synoptic: true, windRadiansPerHour: angularSpeed,

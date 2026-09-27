@@ -78,7 +78,8 @@
     "test:b4:contract": "node tools/cloudweathertest.js && node tools/b4weathertest.js",
     "test:b4:weather": "node tools/planetweathertest.js && node tools/b4weathergputest.js",
     "test:b4:optical": "node tools/b4opticalcoveragetest.js",
-    "test:b4:perf": "node tools/b4playerperftest.js"
+    "test:b4:perf": "node tools/b4playerperftest.js",
+    "test:b4:geometry": "node tools/b4cloudgeometrytest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

@@ -1,5 +1,5 @@
 // One spherical mapping for volume, far clouds, surface shadows and CPU queries.
-// Canvas atlases are uploaded flipY=true: row zero is the south pole.
+// CPU atlas row zero is the south pole; upload reverses rows for this UV map.
 export const weatherAtlasGLSL = /* glsl */`
 vec2 weatherAtlasUV(vec3 direction) {
   vec3 d = normalize(direction);

@@ -9,6 +9,15 @@ const body = { seed: 'B4-production-synoptic', R: 6000000, hAmp: 9000,
 const options = { profile: { cloudiness: 0.5, weatherSpeed: 1, windSpeed: 20 } };
 const field = createPlanetWeatherField(body, options);
 const clone = createPlanetWeatherField(body, options);
+// An absent liquid surface is metadata, never part of the height encoding.
+const dry = { ...body, hasLiquid: false, seaLevel: -1e9 };
+const dryField = createPlanetWeatherField(dry, options);
+const dryWithoutSentinel = createPlanetWeatherField({ ...dry, seaLevel: 0 }, options);
+assert.equal(dryField.surfaceRangeMeters, body.hAmp);
+assert.equal(dryField.surfaceRangeMeters, dryWithoutSentinel.surfaceRangeMeters);
+assert.deepEqual(dryField.surfaceBoundsMeters, dryWithoutSentinel.surfaceBoundsMeters);
+const highSea = createPlanetWeatherField({ ...body, seaLevel: 12000 }, options);
+assert.ok(highSea.surfaceRangeMeters >= 12000, 'A real liquid surface still belongs in the encoding');
 const samples = [];
 for (let i = 0; i < 256; i++) {
   const y = 1 - 2 * (i + 0.5) / 256, r = Math.sqrt(1 - y * y), phi = i * 2.399963229728653;

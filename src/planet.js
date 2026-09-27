@@ -1984,15 +1984,24 @@ function coverageCutoff(values, targetCoverage) {
   return 1;
 }
 
-function cloudAtlasTexture(canvas) {
-  const tex = new THREE.CanvasTexture(canvas);
+function cloudAtlasTexture(data, width, height) {
+  // RGBA are four independent weather values; A is LCL/humidity, NOT opacity.
+  // Canvas premultiplication/blur corrupts RGB at low A (and erases it at A=0).
+  // Upload bytes directly, reversing south-first rows for the shared UV map.
+  const uploaded = new Uint8Array(data.length);
+  for (let y = 0; y < height; y++) {
+    uploaded.set(data.subarray(y * width * 4, (y + 1) * width * 4),
+      (height - 1 - y) * width * 4);
+  }
+  const tex = new THREE.DataTexture(uploaded, width, height, THREE.RGBAFormat);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
   tex.colorSpace = THREE.NoColorSpace;
-  tex.userData.weatherAtlas = {
-    width: canvas.width, height: canvas.height,
-    data: canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data,
-  };
+  tex.userData.weatherAtlas = { width, height, data };
+  tex.needsUpdate = true;
   return tex;
 }
 
@@ -2003,18 +2012,9 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
   // larger fixed atlases spent millions of noise evaluations on sub-pixel
   // detail during route preparation.
   const W = clamp(Math.round(width), 256, 512), H = Math.round(W / 2);
-  const lowCanvas = (typeof document !== 'undefined')
-    ? document.createElement('canvas') : null;
-  if (!lowCanvas) return { low: null, high: null, stats: null };
-  const highCanvas = document.createElement('canvas');
-  lowCanvas.width = highCanvas.width = W;
-  lowCanvas.height = highCanvas.height = H;
-  const lowContext = lowCanvas.getContext('2d');
-  const highContext = highCanvas.getContext('2d');
-  const lowImage = lowContext.createImageData(W, H);
-  const highImage = highContext.createImageData(W, H);
-  const lowData = lowImage.data;
-  const highData = highImage.data;
+  if (typeof document === 'undefined') return { low: null, high: null, stats: null };
+  const lowData = new Uint8Array(W * H * 4);
+  const highData = new Uint8Array(W * H * 4);
   const lowRaw = new Float32Array(W * H);
   const highRaw = new Float32Array(W * H);
   for (let j = 0; j < H; j++) {
@@ -2136,17 +2136,6 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
     if (lowValue >= 0.125) lowOccupied++;
     if (highValue >= 0.08) highOccupied++;
   }
-  lowContext.putImageData(lowImage, 0, 0);
-  highContext.putImageData(highImage, 0, 0);
-  // A sub-pixel blur only removes atlas stair-steps. It must not erase the
-  // 20–60 km cloudlets that establish scale in orbital photography.
-  for (const [context, canvas] of [
-    [lowContext, lowCanvas], [highContext, highCanvas],
-  ]) {
-    context.filter = 'blur(0.45px)';
-    context.drawImage(canvas, 0, 0);
-    context.filter = 'none';
-  }
   const count = lowRaw.length;
   const stats = Object.freeze({
     requested: coverage,
@@ -2161,8 +2150,8 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
     lowCutoff: weatherField?.synoptic ? null : lowCutoff,
     highCutoff: weatherField?.synoptic ? null : highCutoff,
   });
-  const low = cloudAtlasTexture(lowCanvas);
-  const high = cloudAtlasTexture(highCanvas);
+  const low = cloudAtlasTexture(lowData, W, H);
+  const high = cloudAtlasTexture(highData, W, H);
   weatherField?.bindAtlases?.(low.userData.weatherAtlas, high.userData.weatherAtlas);
   low.userData.coverageStats = stats;
   high.userData.coverageStats = stats;
