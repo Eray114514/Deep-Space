@@ -76,7 +76,9 @@
     "test:b5": "node tools/mediumreferencetest.js && node tools/b5transporttest.js && node tools/b5radiancetest.js && node tools/b5lightingtest.js && node tools/b5resourcetest.js",
     "test:b5:player": "node tools/b5playtest.js",
     "test:b4:contract": "node tools/cloudweathertest.js && node tools/b4weathertest.js",
-    "test:b4:weather": "node tools/planetweathertest.js && node tools/b4weathergputest.js"
+    "test:b4:weather": "node tools/planetweathertest.js && node tools/b4weathergputest.js",
+    "test:b4:optical": "node tools/b4opticalcoveragetest.js",
+    "test:b4:perf": "node tools/b4playerperftest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

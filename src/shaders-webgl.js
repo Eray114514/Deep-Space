@@ -1426,7 +1426,8 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm
 // with an analytic threshold. A baked cloud texture shows its texels as
 // hard squares from orbit; this is smooth at every distance.
-export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0, weatherMap = null) {
+export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0,
+  weatherMap = null, localLayer = null) {
   const tex = detailTexture();
   if (!tex) return material;
   const weatherTex = weatherMap || cloudSystemTexture(offX, offY, offZ);
@@ -1434,10 +1435,18 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
   material.userData.weatherSystemTextureOwned = !weatherMap;
   const weatherUniform = { value: weatherTex };
   material.userData.weatherSystemTextureNode = weatherUniform;
+  const surfaceUniform = { value: localLayer?.surfaceAtlas || weatherTex };
+  material.userData.surfaceSystemTextureNode = surfaceUniform;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uCloudNoise = { value: tex };
     shader.uniforms.uWeatherSystem = weatherUniform;
     shader.uniforms.uWeatherReady = { value: weatherMap ? 1 : 0 };
+    shader.uniforms.uSurfaceAtlas = surfaceUniform;
+    shader.uniforms.uLocalLayer = { value: localLayer ? 1 : 0 };
+    shader.uniforms.uLayerHigh = { value: localLayer?.high ? 1 : 0 };
+    shader.uniforms.uSurfaceRange = { value: localLayer?.surfaceRange || 1 };
+    shader.uniforms.uDeckBaseAltitude = { value: localLayer?.baseAltitude || 0 };
+    shader.uniforms.uSurfaceSpin = { value: new THREE.Matrix3() };
     shader.uniforms.uCov0 = { value: 0.55 - coverage * 0.24 };
     shader.uniforms.uCov1 = { value: 0.86 - coverage * 0.14 };
     shader.uniforms.uCOff = { value: new THREE.Vector3(offX, offY, offZ) };
@@ -1456,7 +1465,10 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
         uniform sampler2D uWeatherSystem;
+        uniform sampler2D uSurfaceAtlas;
         uniform float uWeatherReady;
+        uniform float uLocalLayer, uLayerHigh, uSurfaceRange, uDeckBaseAltitude;
+        uniform mat3 uSurfaceSpin;
         ${weatherAtlasGLSL}
         uniform float uCov0;
         uniform float uCov1;
@@ -1485,7 +1497,16 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vCDir = normalize(position);
         float vertexCloud = cloudVertexAmount(vCDir);
-        transformed += vCDir * uCloudRelief * pow(vertexCloud, 1.15);`);
+        float altitudeShift = uCloudRelief * pow(vertexCloud, 1.15);
+        if (uLocalLayer > 0.5) {
+          vec4 layer = texture2D(uSurfaceAtlas, weatherAtlasUV(vCDir));
+          float surface = (texture2D(uSurfaceAtlas,
+            weatherAtlasUV(uSurfaceSpin * vCDir)).g * 2.0 - 1.0) * uSurfaceRange;
+          float targetAltitude = uLayerHigh > 0.5 ? 11200.0
+            : max(250.0, surface + 350.0 + layer.a * 3850.0 + 1100.0);
+          altitudeShift += targetAltitude - uDeckBaseAltitude;
+        }
+        transformed += vCDir * altitudeShift;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uCloudNoise;
@@ -1539,7 +1560,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           diffuseColor.rgb *= self * (1.0 - a * 0.3);
         }`);
   };
-  material.customProgramCacheKey = () => 'cloud-field-v5-shared-weather';
+  material.customProgramCacheKey = () => `cloud-field-v6-local:${localLayer ? (localLayer.high ? 'high' : 'low') : 'legacy'}`;
   return material;
 }
 

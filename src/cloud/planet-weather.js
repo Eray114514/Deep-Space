@@ -12,6 +12,7 @@ const rotate = (d, a) => ({ x: Math.cos(a) * d.x + Math.sin(a) * d.z,
 // resolution, never a camera LOD or the synthetic weather-test continents.
 function terrainSource(body) {
   const width = 128, height = 64, data = new Float32Array(width * height * 4);
+  let minSurface = Infinity, maxSurface = -Infinity;
   for (let y = 0; y < height; y++) {
     const latitude = ((y + 0.5) / height - 0.5) * Math.PI;
     for (let x = 0; x < width; x++) {
@@ -19,6 +20,8 @@ function terrainSource(body) {
       const direction = { x: Math.cos(latitude) * Math.cos(longitude), y: Math.sin(latitude),
         z: Math.cos(latitude) * Math.sin(longitude) };
       const column = sampleCloudColumn(body, direction);
+      minSurface = Math.min(minSurface, column.surfaceAltitudeMeters);
+      maxSurface = Math.max(maxSurface, column.surfaceAltitudeMeters);
       const offset = (y * width + x) * 4;
       data[offset] = column.surfaceAltitudeMeters;
       data[offset + 1] = clamp(Math.max(0, column.terrainAltitudeMeters) / Math.max(body.hAmp, 1));
@@ -26,10 +29,11 @@ function terrainSource(body) {
     }
   }
   const atlas = { width, height, data, scale: 1 };
-  return (direction) => {
+  const sample = (direction) => {
     const [elevationMeters, elevation01, oceanic] = sampleWeatherAtlas(atlas, direction);
     return { elevationMeters, elevation01, oceanic };
   };
+  return { sample, minSurface, maxSurface };
 }
 
 // First production migration: one seeded synoptic snapshot, coherently advected
@@ -39,8 +43,9 @@ export function createPlanetWeatherField(body, options = {}) {
   const legacy = createWeatherField(body.seed, options);
   if (legacy.fixture) return legacy; // Explicit diagnostic presets remain available.
   const profile = legacy.profile;
+  const terrain = terrainSource(body);
   const system = createWeatherSystem(body.seed, {
-    radiusMeters: body.R, terrain: terrainSource(body), targetCoverage: profile.cloudiness,
+    radiusMeters: body.R, terrain: terrain.sample, targetCoverage: profile.cloudiness,
     temperatureK: profile.temperatureK, polarCoolingK: profile.polarCoolingK,
     windSpeed: profile.windSpeed, weatherSpeed: profile.weatherSpeed,
     diurnalRangeK: 0, calibrationSamples: 1024,
@@ -49,8 +54,16 @@ export function createPlanetWeatherField(body, options = {}) {
   // Keep bulk advection in physical units; small planets do not inherit a
   // 6,000 km planet's linear cloud speed. weatherSpeed is an explicit time gain.
   const angularSpeed = profile.windSpeed * 3600 / body.R * profile.weatherSpeed;
-  const field = { ...legacy, version: 4, namespace: `${body.seed}:production-synoptic:v1`,
+  const surfaceRangeMeters = Math.max(1000, body.hAmp || 0, Math.abs(body.seaLevel || 0),
+    Math.abs(terrain.minSurface), Math.abs(terrain.maxSurface));
+  const field = { ...legacy, version: 5, namespace: `${body.seed}:production-synoptic:v2`,
     synoptic: true, windRadiansPerHour: angularSpeed,
+    surfaceRangeMeters, surfaceBoundsMeters: [terrain.minSurface, terrain.maxSurface],
+    surfaceAt(direction) {
+      return highAtlas
+        ? (sampleWeatherAtlas(highAtlas, direction)[1] * 2 - 1) * surfaceRangeMeters
+        : terrain.sample(direction).elevationMeters;
+    },
     bindAtlases(low, high) { lowAtlas = low; highAtlas = high; },
     sample(direction, hours) {
       const length = Math.hypot(direction.x, direction.y, direction.z);

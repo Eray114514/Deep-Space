@@ -131,6 +131,9 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
       uRin: { value: band.rIn },
       uRout: { value: band.rOut },
+      uBodyR: { value: planet.R },
+      uSurfaceRange: { value: planet.weatherField?.surfaceRangeMeters || 1 },
+      uLocalBands: { value: band.localWeather ? 1 : 0 },
       uGroundR: { value: planet.hasLiquid ? planet.seaRadius : planet.R },
       tSceneDepth: { value: null },
       uDepthReady: { value: 0 },
@@ -174,7 +177,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uniform sampler2D uWeatherMap, uWeatherMapHi;
       uniform float uWeatherReady;
       uniform sampler2D tSceneDepth;
-      uniform float uCov0, uCov1, uRin, uRout, uGroundR, uEngage, uFrame, uQuality, uMaxSteps;
+      uniform float uCov0, uCov1, uRin, uRout, uBodyR, uGroundR, uSurfaceRange, uLocalBands;
+      uniform float uEngage, uFrame, uQuality, uMaxSteps;
       uniform float uSunEnergy, uSecondarySunEnergy, uStellarRadianceScale;
       uniform vec3 uSecondarySunDir, uSecondarySunC;
       uniform float uEclipseEnabled, uEclipseRadius, uEclipseStarAngle;
@@ -256,15 +260,35 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         return forwardDistance / forwardCos;
       }
 
-      float densityAt(vec3 local) {
+      vec2 cloudLayersAt(vec3 local) {
         float r = length(local);
-        if (r <= uRin || r >= uRout) return 0.0;
-        float h = (r - uRin) / (uRout - uRin);
+        if (r <= uRin || r >= uRout) return vec2(0.0);
+        float shellH = (r - uRin) / (uRout - uRin);
+        float h = shellH;
         vec3 radial = local / r;
+        vec4 weather = textureLod(uWeatherMap, weatherAtlasUV(uSpin * radial), 0.0);
+        vec4 highAtlas = textureLod(uWeatherMapHi, weatherAtlasUV(uSpin * radial), 0.0);
+        float highWeather = uWeatherReady > 0.5 ? highAtlas.r : 0.0;
+        float highH = h;
+        float lowDepth = 1.0;
+        float lowBase = 0.0;
+        if (uLocalBands > 0.5) {
+          float surface = (textureLod(uWeatherMapHi, weatherAtlasUV(radial), 0.0).g
+            * 2.0 - 1.0) * uSurfaceRange;
+          lowBase = surface + 350.0 + highAtlas.a * 3850.0 + 200.0;
+          lowDepth = 2000.0 + weather.g * 1500.0;
+          h = (r - uBodyR - max(250.0, lowBase)) / lowDepth;
+          highH = (r - uBodyR - 8500.0) / 6000.0;
+          // The later fine-noise shift is bounded by +/-180 m. Reject only
+          // heights that cannot enter either layer under any such shift.
+          float margin = 180.0 / lowDepth;
+          if ((h < -0.1 - margin || h > 1.1 + margin)
+            && (highH < -0.1 || highH > 1.1)) return vec2(0.0);
+        }
         vec3 tangentA = normalize(cross(radial,
           abs(radial.y) < 0.88 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 tangentB = normalize(cross(radial, tangentA));
-        float bend = h - 0.42;
+        float bend = shellH - 0.42;
         // A cloud footprint must not be the same 2D mask extruded straight
         // through the whole shell. Shift it laterally with altitude so anvils,
         // shelves and tilted billows replace the former vertical curtains.
@@ -275,9 +299,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         float fine = cloudFbm(sd);
         // Both view and light rays sample the same world-point property.
         // A ray-midpoint mask changed density with viewing direction.
-        vec4 weather = textureLod(uWeatherMap, weatherAtlasUV(uSpin * radial), 0.0);
-        float highWeather = uWeatherReady > 0.5
-          ? textureLod(uWeatherMapHi, weatherAtlasUV(uSpin * radial), 0.0).r : 0.0;
+        if (uLocalBands > 0.5) {
+          h = (r - uBodyR - max(250.0, lowBase + (fine - 0.5) * 360.0)) / lowDepth;
+          if ((h < -0.1 || h > 1.1) && (highH < -0.1 || highH > 1.1)) return vec2(0.0);
+        }
         float systemMask = uWeatherReady > 0.5 ? weather.g : weatherSystem(uSpin * radial);
         // Preserve the complete analytic weather footprint. Earlier the
         // volume raised this mask to 1.42 and then gated it again with Worley,
@@ -289,7 +314,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         float cov = uWeatherReady > 0.5
           ? weather.r * pow(smoothstep(0.25, 0.65, fine), 1.1)
           : max(baseWeather, largeSystem);
-        if (max(cov, highWeather) < 0.01) return 0.0;
+        if (max(cov, highWeather) < 0.01) return vec2(0.0);
         vec3 warp = vec3(
           textureLod(uCloudNoise, sd.yz * 3.1 + uCOff.xy, 0.0).r,
           textureLod(uCloudNoise, sd.zx * 3.7 + uCOff.yz, 0.0).g,
@@ -321,12 +346,12 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
           : smoothstep(0.28, 0.76, systemMask) * smoothstep(0.26, 0.74, cov);
         float upperFloor = 0.48 + (upperNoise.g - 0.5) * 0.12;
         float upperCeil = 0.91 + (upperNoise.r - 0.5) * 0.10;
-        float upperProfile = smoothstep(upperFloor, upperFloor + 0.11, h)
-          * (1.0 - smoothstep(upperCeil - 0.11, upperCeil, h));
+        float upperProfile = smoothstep(upperFloor, upperFloor + 0.11, highH)
+          * (1.0 - smoothstep(upperCeil - 0.11, upperCeil, highH));
         // Sparse high-altitude filaments soften storm tops without inventing
         // a second camera-facing weather map.
         float wisp = smoothstep(0.58, 0.88, upperNoise.g)
-          * smoothstep(0.62, 0.73, h) * (1.0 - smoothstep(0.91, 0.99, h));
+          * smoothstep(0.62, 0.73, highH) * (1.0 - smoothstep(0.91, 0.99, highH));
         // 3D noise shapes density inside the footprint; it must not decide
         // whether the footprint exists. A non-zero floor gives broad cloud
         // bodies real depth while Worley still sculpts billowing edges.
@@ -346,8 +371,21 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         // The high mask was calibrated as translucent ice, not another opaque
         // liquid deck. Keep its smaller condensate separate from low-cloud
         // erosion. Per-metre genus optics will replace these legacy amounts.
-        return max(smoothstep(0.16, 0.62, d),
-          uWeatherReady > 0.5 ? highDensity * 0.06 : 0.0);
+        return vec2(smoothstep(0.16, 0.62, d),
+          uLocalBands > 0.5 ? highDensity : 0.0);
+      }
+
+      float densityAt(vec3 local) {
+        vec2 layers = cloudLayersAt(local);
+        return max(layers.x, layers.y * 0.06);
+      }
+
+      float cloudExtinctionAt(vec3 local, float legacySigma) {
+        if (uLocalBands < 0.5) return densityAt(local) * legacySigma;
+        vec2 layers = cloudLayersAt(local);
+        // Per-metre liquid and ice extinction. Condensate remains a separate
+        // dimensionless field; the shell thickness cannot change this value.
+        return layers.x * 0.025 + layers.y * 0.0006;
       }
 
       float hash12(vec2 p) {
@@ -380,18 +418,18 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         float directVisibility = horizonVisibility * eclipseLight;
         // short sun march: how buried is this sample?
         float od = 0.0;
-        float ls = thick * 0.35;
-        od += densityAt(local + sunDirection * ls * 0.6) * ls * 0.6;
-        od += densityAt(local + sunDirection * ls * 1.5) * ls * 0.9;
+        float ls = uLocalBands > 0.5 ? 650.0 : thick * 0.35;
+        od += cloudExtinctionAt(local + sunDirection * ls * 0.6, sigma) * ls * 0.6;
+        od += cloudExtinctionAt(local + sunDirection * ls * 1.5, sigma) * ls * 0.9;
         if (uQuality > 0.5) {
-          od += densityAt(local + sunDirection * ls * 2.8) * ls * 1.3;
+          od += cloudExtinctionAt(local + sunDirection * ls * 2.8, sigma) * ls * 1.3;
         } else {
           // Preserve approximately the same optical depth with one fewer
           // lookup on the low tier, so the silhouette and coverage stay
           // stable while only fine self-shadow detail is reduced.
           od *= 1.18;
         }
-        float Tsun = exp(-od * sigma * 1.48);
+        float Tsun = exp(-od * 1.48);
         // Clear-sky indirect radiance is supplied by the same air solution.
         float ambientVisibility = mix(0.08, 1.0, horizonVisibility);
         vec3 sunAir = vec3(1.0);
@@ -412,6 +450,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
 
       void main() {
         if (uEngage < 0.01) discard;
+        // A camera below the opaque body has no line of sight to the shell.
+        // sphereHits() otherwise reports an exit on the far side and the
+        // ground.x > 0 test below cannot reject it from inside the sphere.
+        if (length(uCameraLocal) < uGroundR) discard;
         vec3 dir = normalize(vDirection);
         float renderRout = uRout;
         vec2 outer = sphereHits(uCameraLocal, renderRout, dir);
@@ -473,25 +515,36 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         for (int i = 0; i < 124; i++) {
           if (i >= STEPS) break;
           vec3 local = uCameraLocal + dir * t;
-          float d = densityAt(local);
+          vec2 layers = vec2(0.0);
+          float d;
+          if (uLocalBands > 0.5) {
+            layers = cloudLayersAt(local);
+            d = max(layers.x, layers.y * 0.06);
+          } else d = densityAt(local);
           vec3 cloudLight = vec3(0.0);
           if (d > 0.003) {
             cloudLight = cloudSource(local, dir, d, thick, sigma,
               normalize(uSunDir), uSunC, uSunEnergy);
             cloudLight += cloudSource(local, dir, d, thick, sigma,
               normalize(uSecondarySunDir), uSecondarySunC, uSecondarySunEnergy);
-            float powder = mix(0.44, 0.68, 1.0 - exp(-d * 2.2));
+            // The legacy powder factor discarded roughly half of the source
+            // radiance even at an illuminated cloud top. Physical local bands
+            // use the joint medium's extinction/source weighting directly.
+            float powder = uLocalBands > 0.5 ? 1.0
+              : mix(0.44, 0.68, 1.0 - exp(-d * 2.2));
             cloudLight *= powder * uTint;
           } else d = 0.0;
           vec3 airExtinction, airSource;
           // Air uses the cell centre; density jitter samples only cloud detail.
           airSample(uCameraLocal + dir * (t0 + (float(i)+0.5)*dt), dir, dt,
             airExtinction, airSource);
-          float cloudExtinction = d * sigma;
+          float cloudExtinction = uLocalBands > 0.5
+            ? layers.x * 0.025 + layers.y * 0.0006 : d * sigma;
           mediumStep(jointL, jointT, airExtinction + vec3(cloudExtinction),
             airSource + cloudLight * cloudExtinction, dt);
           mediumStep(clearL, clearT, airExtinction, airSource, dt);
           T *= exp(-cloudExtinction * dt);
+          if (uLocalBands > 0.5 && T < 0.0002) break;
           t += dt;
         }
         float alpha = (1.0 - T) * uEngage;

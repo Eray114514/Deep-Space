@@ -22,6 +22,7 @@ import { makeCloudVolumeMaterial } from './clouds.js';
 import { getCloudResourceManager } from './cloud/cloud-resource-manager.js';
 import { sampleWeatherAtlas } from './cloud/weather-atlas.js';
 import { createPlanetWeatherField } from './cloud/planet-weather.js';
+import { CLOUD_TROPOSPHERE_TOP_METERS } from './cloud/cloud-species.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { WORLD_LAYER } from './render-layers.js';
 import { floraPalette } from './flora.js';
@@ -1067,10 +1068,8 @@ export class Planet {
         profile: this.weatherProfile,
         fixture: DEV_WEATHER_FIXTURE || undefined,
       });
-      // The meteorological authority is split into the same Lo/Hi contract
-      // used by the volume shader. Keeping cloud type and stratus in Lo and
-      // high-deck type/multiple scattering in Hi avoids throwing away entire
-      // cloud families merely to fit one RGBA atlas.
+      // Low/high weather plus a stationary, regionally smoothed surface
+      // altitude share the existing two atlas allocations.
       // The new atlas carries synoptic structure, not metre-scale density.
       // Keep its content resolution fixed across rendering quality tiers.
       this.cloudAtlasWidth = this.weatherField.synoptic ? 256 : clamp(2 ** Math.ceil(Math.log2(
@@ -1096,7 +1095,9 @@ export class Planet {
       // towers, and far below the old 230–420 km second-planet shell.
       const authoredRenderLayer = this.tuning.cloudRenderLayer || null;
       const naturalCloudBaseAlt = clamp(this.hAmp * 1.12 + 1400, 12000, 22000);
-      const cloudShellBaseAlt = Number.isFinite(authoredRenderLayer?.minAltitudeMeters)
+      const cloudShellBaseAlt = this.weatherField.synoptic
+        ? Math.max(250, this.weatherField.surfaceBoundsMeters[0] + 250)
+        : Number.isFinite(authoredRenderLayer?.minAltitudeMeters)
         ? clamp(authoredRenderLayer.minAltitudeMeters, 8000, 30000)
         : naturalCloudBaseAlt;
       const cloudR = R + cloudShellBaseAlt;
@@ -1117,7 +1118,10 @@ export class Planet {
         Math.max(6000, R * 0.035),
       );
       const authoredCloudTop = Number(authoredRenderLayer?.maxAltitudeMeters);
-      const cloudShellTopAlt = Number.isFinite(authoredCloudTop)
+      const cloudShellTopAlt = this.weatherField.synoptic
+        ? Math.max(CLOUD_TROPOSPHERE_TOP_METERS,
+          this.weatherField.surfaceBoundsMeters[1] + LCL_MAX_METERS + 4000)
+        : Number.isFinite(authoredCloudTop)
         ? clamp(authoredCloudTop, cloudShellBaseAlt + 45000, 105000)
         : cloudShellBaseAlt + naturalCloudDepth;
       const thick = cloudShellTopAlt - cloudShellBaseAlt;
@@ -1141,7 +1145,11 @@ export class Planet {
       // apparent relief to a planetary-scale cloud fraction.
       const analyticRelief = Math.min(thick * 0.18, R * 0.006);
       const cloudMat = applyCloudField(cmat, coverage, o1[0], o1[1], o1[2],
-        analyticRelief, this.cloudShadowTex);
+        analyticRelief, this.cloudShadowTex, this.weatherField.synoptic ? {
+          surfaceAtlas: this.cloudWeatherHiTex,
+          surfaceRange: this.weatherField.surfaceRangeMeters,
+          baseAltitude: cloudShellBaseAlt,
+        } : null);
       this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cloudMat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
@@ -1162,6 +1170,7 @@ export class Planet {
         // atmosphere without a screen-space raymarch curtain.
         const band = {
           rIn: cloudR, rOut: cloudR + thick,
+          localWeather: !!this.weatherField.synoptic,
           cov0: 0.55 - coverage * 0.24, cov1: 0.86 - coverage * 0.14,
           ox: o1[0], oy: o1[1], oz: o1[2],
           tint: this.type === 'toxic' ? 0xc8e890 : 0xffffff,
@@ -1194,7 +1203,12 @@ export class Planet {
         cmat2.forceSinglePass = true;
         const upperCloudMat = applyCloudField(cmat2, coverage * 0.42,
           o2[0], o2[1], o2[2], Math.min(thick * 0.08, R * 0.003),
-          this.cloudWeatherHiTex, 'high');
+          this.cloudWeatherHiTex, this.weatherField.synoptic ? {
+            surfaceAtlas: this.cloudWeatherHiTex,
+            surfaceRange: this.weatherField.surfaceRangeMeters,
+            baseAltitude: cloudShellBaseAlt + thick * 0.38,
+            high: true,
+          } : null);
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
           new THREE.SphereGeometry(upperR, 192, 128), upperCloudMat);
@@ -1498,7 +1512,14 @@ export class Planet {
       ]) {
         const weatherNode = material?.userData.weatherSystemTextureNode;
         if (weatherNode) weatherNode.value = textureValue;
+        const surfaceNode = material?.userData.surfaceSystemTextureNode;
+        if (surfaceNode) surfaceNode.value = this.cloudWeatherHiTex;
         if (material?.userData) material.userData.weatherSystemTexture = textureValue;
+        const uniforms = material?.userData.shader?.uniforms;
+        if (uniforms?.uLocalLayer) uniforms.uLocalLayer.value = this.weatherField.synoptic ? 1 : 0;
+        if (uniforms?.uSurfaceRange) {
+          uniforms.uSurfaceRange.value = this.weatherField.surfaceRangeMeters || 1;
+        }
       }
       const volumeState = this.volCloudState;
       const volumeLoNode = volumeState?.weatherLoTextureNode
@@ -1510,6 +1531,8 @@ export class Planet {
       if (this.volCloudMat?.uniforms.uWeatherMap) {
         this.volCloudMat.uniforms.uWeatherMap.value = this.cloudShadowTex;
         this.volCloudMat.uniforms.uWeatherMapHi.value = this.cloudWeatherHiTex;
+        this.volCloudMat.uniforms.uLocalBands.value = this.weatherField.synoptic ? 1 : 0;
+        this.volCloudMat.uniforms.uSurfaceRange.value = this.weatherField.surfaceRangeMeters || 1;
       }
       if (volumeState) {
         volumeState.weatherLoMap = this.cloudShadowTex;
@@ -1582,6 +1605,24 @@ export class Planet {
     camLocal = this.worldOffsetToLocal(camLocal, _msp);
     const camR = camLocal.length();
     const altitude = camR - this.R;
+    if (this.weatherField?.synoptic && camR > 0) {
+      _dir.copy(camLocal).multiplyScalar(1 / camR);
+      const weather = this.weatherAt(_dir);
+      if (weather.coverage < 0.01 && weather.highMask < 0.01) return 0;
+      const surface = this.weatherField.surfaceAt(_dir);
+      const base = Math.max(250, surface + weather.cloudBaseMeters + 200);
+      const depth = 2000 + weather.cloudType * 1500;
+      const lowH = (altitude - base) / depth;
+      const highH = (altitude - 8500) / 6000;
+      if ((lowH < 0 || lowH > 1) && (highH < 0 || highH > 1)) return 0;
+      // Gameplay uses a cheap column estimate. The rendered 3D erosion and
+      // solar optical path remain authoritative for the visible cloud.
+      const low = weather.coverage
+        * smoothstep(0, 0.17, lowH) * (1 - smoothstep(0.66, 1, lowH));
+      const high = weather.highMask * 0.12
+        * smoothstep(0, 0.18, highH) * (1 - smoothstep(0.73, 1, highH));
+      return clamp(Math.max(low, high), 0, 1);
+    }
     let t = 0;
     for (const b of this.cloudBands) {
       const thickness = Math.max(1, b.thickness || (b.halfThickness || 1800) * 2);
@@ -1699,6 +1740,11 @@ export class Planet {
       // CPU weather, rain and the shadow atlas. Cloud decks therefore advect
       // only around the body-frame axis.
       this.cloudMesh.quaternion.setFromAxisAngle(_yAxis, this.cloudSpin);
+      const deckShader = this.cloudMesh.material.userData.shader;
+      if (deckShader?.uniforms.uSurfaceSpin) {
+        _m4.makeRotationFromQuaternion(this.cloudMesh.quaternion);
+        deckShader.uniforms.uSurfaceSpin.value.setFromMatrix4(_m4);
+      }
       // keep terrain cloud-shadows tracking the drifting deck
       _m4.makeRotationFromQuaternion(_q2.copy(this.cloudMesh.quaternion).invert());
       const sh = this.terrainMaterial.userData.shader;
@@ -1772,6 +1818,11 @@ export class Planet {
       this.cloudSpin2 = this.cloudSpin2Base
         + this.weatherHours * (this.weatherField?.windRadiansPerHour ?? 0.05);
       this.cloudMesh2.quaternion.setFromAxisAngle(_yAxis, this.cloudSpin2);
+      const upperDeckShader = this.cloudMesh2.material.userData.shader;
+      if (upperDeckShader?.uniforms.uSurfaceSpin) {
+        _m4.makeRotationFromQuaternion(this.cloudMesh2.quaternion);
+        upperDeckShader.uniforms.uSurfaceSpin.value.setFromMatrix4(_m4);
+      }
       if (this.volCloudMesh) {
         const e = clamp(this.volumeBlend || 0, 0, 1);
         this.cloudMesh2.material.opacity = 0.28 * (1 - e);
@@ -1984,7 +2035,10 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
         lowData[k + 1] = Math.round(w.cloudType * 255);
         lowData[k + 2] = Math.round(w.stratusMask * 255);
         lowData[k + 3] = Math.round(w.humidity * 255);
-        highData[k + 1] = Math.round(w.highType * 255);
+        // Hi.G is a stationary regional surface column. Weather channels
+        // rotate with wind; this one is always sampled without uSpin.
+        highData[k + 1] = Math.round(clamp(0.5 + weatherField.surfaceAt(dir)
+          / (2 * weatherField.surfaceRangeMeters)) * 255);
         highData[k + 2] = Math.round(w.convective * 255);
         highData[k + 3] = Math.round(clamp((w.cloudBaseMeters - LCL_MIN_METERS)
           / (LCL_MAX_METERS - LCL_MIN_METERS)) * 255);

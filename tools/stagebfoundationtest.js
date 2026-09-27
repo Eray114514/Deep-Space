@@ -154,9 +154,12 @@ try {
     const badDensity = densityProbe.clone();
     badDensity.uniforms = densityProbe.uniforms;
     badDensity.fragmentShader = badDensity.fragmentShader.replace(
-      'float h = (r - uRin) / (uRout - uRin);',
-      `float h = (r - uRin) / mix(min(uRout-uRin,45000.0),uRout-uRin,
+      'float shellH = (r - uRin) / (uRout - uRin);',
+      `float shellH = (r - uRin) / mix(min(uRout-uRin,45000.0),uRout-uRin,
         smoothstep(220000.0,1600000.0,length(uCameraLocal)-uGroundR));`);
+    if (badDensity.fragmentShader === densityProbe.fragmentShader) {
+      throw Error('Camera-dependent negative control did not modify the production field');
+    }
     u.uCameraLocal.value.set(0, R + 1000, 0);
     const badNear = read(badDensity);
     u.uCameraLocal.value.set(0, R + 1600000, 0);

@@ -24,8 +24,8 @@ assert.ok(samples.filter((s) => s.coverage < 0.01).length > 20, 'Actual broad cl
 assert.ok(samples.filter((s) => s.coverage > 0.9).length > 20, 'Actual occupied regions');
 assert.ok(samples.some((s) => s.morphology.front > 0.3), 'Synoptic fronts reach production source');
 assert.equal(field.windRadiansPerHour, 20 * 3600 / 6000000);
-assert.equal(advanceWeatherField(field, 7).version, 4);
-assert.match(weatherFieldFingerprint(field, 7), /^weather-v4:/);
+assert.equal(advanceWeatherField(field, 7).version, 5);
+assert.match(weatherFieldFingerprint(field, 7), /^weather-v5:/);
 
 // The same authored seed/climate must actually respond to the real surface,
 // rather than merely call Planet.height and then keep synthetic continents.
