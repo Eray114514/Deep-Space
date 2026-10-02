@@ -52,6 +52,7 @@ const _q = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _m = new THREE.Matrix4();
+const _offset = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 
 // shader hooks: proxies dissolve at the far rim and when the camera climbs
@@ -91,7 +92,7 @@ export class FarFlora {
     density = 1 } = {}) {
     this.planet = null;
     this.meshes = null;       // [tree0 proxies, tree1 proxies]
-    this.tiles = new Map();   // signed x:y:z tile key -> {m0: Float32Array, n0, m1, n1}
+    this.tiles = new Map();   // signed x:y:z -> tile-local matrices + double-precision origin
     this.queue = [];
     this.queued = new Set();
     this.activeKeys = new Set();
@@ -112,6 +113,8 @@ export class FarFlora {
     };
     this.uCamL = { value: new THREE.Vector3() };
     this.uAltK = { value: 1 };
+    this.origin = new THREE.Vector3();
+    this.cameraLocal = new THREE.Vector3();
   }
 
   setPlanet(planet) {
@@ -156,6 +159,9 @@ export class FarFlora {
     this.lastKey = '';
     this.dirty = false;
     this.lastRepackAt = -Infinity;
+    this.origin.set(0, 0, 0);
+    this.cameraLocal.set(0, 0, 0);
+    this.uCamL.value.set(0, 0, 0);
   }
 
   pending() { return this.queue.length + (this.job ? 1 : 0); }
@@ -175,6 +181,7 @@ export class FarFlora {
       cachedTiles: this.tiles.size,
       activeTiles: this.activeKeys.size,
       instances: this.meshes ? this.meshes[0].count + this.meshes[1].count : 0,
+      origin: this.origin.toArray(),
     };
   }
 
@@ -186,7 +193,8 @@ export class FarFlora {
       return;
     }
     const p = this.planet;
-    this.uCamL.value.copy(camLocal);
+    this.cameraLocal.copy(camLocal);
+    this.uCamL.value.copy(camLocal).sub(this.origin);
     this.uAltK.value = smooth01((13000 - alt) / 3000);
     const visible = alt < SHOW_BELOW && this.uAltK.value > 0.0001;
     for (const mesh of this.meshes) mesh.visible = visible;
@@ -315,9 +323,12 @@ export class FarFlora {
     const Q = p.R / TILE_M;
     _anchor.set(qx, qy, qz).normalize();
     frame(_anchor, _e1, _e2);
+    // Subtract while coordinates are still doubles; Float32 planet-scale
+    // matrices lose centimetres/metres before camera-relative rendering.
+    const origin = _anchor.clone().multiplyScalar(p.R + p.height(_anchor, p.fullMaxFreq));
     const SUB = Math.round(TILE_M / CELL_M) + 1;
     return {
-      key, qx, qy, qz, Q,
+      key, qx, qy, qz, Q, origin,
       Q3: p.R / CELL_M,
       cellAng: CELL_M / p.R,
       seedI: p.intSeed ^ 0xfa12,
@@ -376,7 +387,7 @@ export class FarFlora {
           // surface by tens of metres — trees planted with it are BURIED
           const hh = p.height(_jd, p.fullMaxFreq);
           if (p.hasLiquid && hh < p.seaLevel + 0.6) continue;
-          _p.copy(_jd).multiplyScalar(p.R + hh - 0.4);
+          _p.copy(_jd).multiplyScalar(p.R + hh - 0.4).sub(job.origin);
           _q.setFromUnitVectors(Y, _jd);
           _q2.setFromAxisAngle(Y, hashFloat(h0, 1) * Math.PI * 2);
           _q.multiply(_q2);
@@ -393,6 +404,7 @@ export class FarFlora {
 
   finishTileJob(job) {
     return {
+      origin: job.origin,
       m0: job.m0, n0: job.n0,
       m1: job.m1, n1: job.n1,
     };
@@ -415,17 +427,23 @@ export class FarFlora {
       .filter((k) => this.tiles.has(k))
       .sort((a, b) => (tileDistanceSq(a, ax, ay, az) - tileDistanceSq(b, ax, ay, az))
         || compareTileKeys(a, b));
+    if (keys.length) this.origin.copy(this.tiles.get(keys[0]).origin);
+    // These translations combine with the camera-relative planet transform
+    // on the CPU. The GPU only adds nearby tile offsets and tree geometry.
+    for (const mesh of this.meshes) mesh.position.copy(this.origin);
+    this.uCamL.value.copy(this.cameraLocal).sub(this.origin);
     let n0 = 0, n1 = 0;
     const a0 = this.meshes[0].instanceMatrix.array;
     const a1 = this.meshes[1].instanceMatrix.array;
     for (const k of keys) {
       const t = this.tiles.get(k);
+      _offset.copy(t.origin).sub(this.origin);
       // Tiles are generated in stable hash order; retaining a prefix is a
       // deterministic far-density reduction and does not make trees shuffle.
       const c0 = Math.min(Math.floor(t.n0 * this.displayDensity), CAP - n0);
       const c1 = Math.min(Math.floor(t.n1 * this.displayDensity), CAP - n1);
-      if (c0 > 0) { a0.set(t.m0.subarray(0, c0 * 16), n0 * 16); n0 += c0; }
-      if (c1 > 0) { a1.set(t.m1.subarray(0, c1 * 16), n1 * 16); n1 += c1; }
+      if (c0 > 0) { copyTileMatrices(a0, t.m0, n0, c0, _offset); n0 += c0; }
+      if (c1 > 0) { copyTileMatrices(a1, t.m1, n1, c1, _offset); n1 += c1; }
     }
     this.meshes[0].count = n0;
     this.meshes[1].count = n1;
@@ -450,6 +468,16 @@ export class FarFlora {
 function tileDistanceSq(key, ax, ay, az) {
   const [qx, qy, qz] = tileCoordinates(key);
   return (qx - ax) * (qx - ax) + (qy - ay) * (qy - ay) + (qz - az) * (qz - az);
+}
+
+function copyTileMatrices(target, source, start, count, offset) {
+  target.set(source.subarray(0, count * 16), start * 16);
+  for (let i = 0; i < count; i++) {
+    const at = (start + i) * 16 + 12;
+    target[at] = source[i * 16 + 12] + offset.x;
+    target[at + 1] = source[i * 16 + 13] + offset.y;
+    target[at + 2] = source[i * 16 + 14] + offset.z;
+  }
 }
 
 function tileCoordinates(key) {

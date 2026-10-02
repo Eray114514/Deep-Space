@@ -7,7 +7,7 @@ import { evidenceFingerprint } from './evidence-fingerprint.js';
 
 // Targeted production integration, not a cloud/weather or performance gate.
 // Disable volume clouds while their implementation is being worked on separately.
-const out = 'test-results/far-flora-player';
+const out = process.env.FAR_FLORA_OUT || 'test-results/far-flora-player';
 await mkdir(out, { recursive: true });
 const fingerprint = await evidenceFingerprint('tools/farfloraplaytest.js');
 const { server, port } = await startServer(0);
@@ -141,6 +141,8 @@ try {
     }
   });
   console.log(JSON.stringify({ isolatedFarFlora: isolated }));
+  // Capture the active player tab before a second boot backgrounds it.
+  await page.screenshot({ path: `${out}/player.png` });
 
   // A second boot with far flora disabled establishes whether the whole-scene
   // error already occurs without constructing any proxy-tree mesh.
@@ -160,7 +162,6 @@ try {
   }));
   await baselinePage.close();
   console.log(JSON.stringify({ withoutFarFlora: baseline }));
-  await page.screenshot({ path: `${out}/player.png` });
   const finalFingerprint = await evidenceFingerprint('tools/farfloraplaytest.js');
   await writeFile(`${out}/report.json`, JSON.stringify({ fingerprint,
     stableSource: fingerprint.sourceDigest === finalFingerprint.sourceDigest,

@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { FarFlora } from '../src/farflora.js';
 
 // Real discovery, generation, streaming and cache paths on a controlled biome.
-// Terrain/lighting quality and Float32 instance precision are separate gates.
+// Terrain/lighting quality and precision have separate focused gates.
 const tileMeters = 1024;
 const geometry = new THREE.BoxGeometry(1, 5, 1);
 const planet = {
@@ -51,11 +51,11 @@ try {
       for (const species of [0, 1]) {
         const matrices = usedMatrices(tile, species);
         for (let i = 0; i < matrices.length; i += 16) {
-          const position = new THREE.Vector3(matrices[i + 12], matrices[i + 13], matrices[i + 14]);
+          const position = new THREE.Vector3(matrices[i + 12], matrices[i + 13], matrices[i + 14]).add(tile.origin);
           assert.ok(position.distanceTo(center) < 800,
             'Generated trees must belong to this tile, including jitter near its edge.');
-          assert.ok(Math.abs(position.length() - (radius + planet.height() - 0.4)) < 2,
-            'Trees must stay on the terrain shell within the existing Float32 precision.');
+          assert.ok(Math.abs(position.length() - (radius + planet.height() - 0.4)) < 0.001,
+            'Trees must stay on the terrain shell within a millimetre.');
           checkedTrees++;
         }
       }

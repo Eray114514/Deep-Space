@@ -3,7 +3,7 @@
 | 文档 | 负责内容 |
 |---|---|
 | [优化路线图](optimization-roadmap.md) | 全局目标、批次依赖、A 验收基线和 C/D/E/R 后续 |
-| [渲染基础改进与交接](render-foundation-improvements.md) | 基础排查、分轮施工与进度；当前远景植被索引修复，后续局部精度与整帧预算 |
+| [渲染基础改进与交接](render-foundation-improvements.md) | 基础排查、分轮施工与进度；植被索引/远景局部精度，后续近景精度与整帧预算 |
 | [未完成任务难度评估](remaining-work-difficulty.md) | 小阶段拆分、难度、前置条件与 agent 交接建议；进度仍以各原计划为准 |
 | [云与大气计划](cloud-atmosphere-rewrite.md) | B 唯一规格、进度和返工顺序 |
 | [阶段 4 云演进](cloud-phase4-volume-march.md) | B 的天气接线、云种/形态、采样实施清单 |
