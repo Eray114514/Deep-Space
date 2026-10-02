@@ -91,7 +91,7 @@ export class FarFlora {
     density = 1 } = {}) {
     this.planet = null;
     this.meshes = null;       // [tree0 proxies, tree1 proxies]
-    this.tiles = new Map();   // packed tile key -> {m0: Float32Array, n0, m1, n1}
+    this.tiles = new Map();   // signed x:y:z tile key -> {m0: Float32Array, n0, m1, n1}
     this.queue = [];
     this.queued = new Set();
     this.activeKeys = new Set();
@@ -215,7 +215,9 @@ export class FarFlora {
           for (let c = 0; c < 8; c++) {
             const qx = fx + (c & 1), qy = fy + ((c >> 1) & 1), qz = fz + (c >> 2);
             if (Math.abs(Math.hypot(qx, qy, qz) - Q) > 0.71) continue;
-            want.add((qx + 512) + (qy + 512) * 1024 + (qz + 512) * 1048576);
+            // Planet-scale coordinates exceed the old 10-bit x/y fields.
+            // Keep the full signed tuple so neighbouring axes cannot alias.
+            want.add(`${qx}:${qy}:${qz}`);
           }
         }
       }
@@ -294,7 +296,7 @@ export class FarFlora {
     this.queue.sort((a, b) => {
       const da = tileDistanceSq(a, ax, ay, az);
       const db = tileDistanceSq(b, ax, ay, az);
-      return (da - db) || (a - b);
+      return (da - db) || compareTileKeys(a, b);
     });
   }
 
@@ -303,14 +305,13 @@ export class FarFlora {
     const [ax, ay, az] = this.anchorK || [0, 0, 0];
     const evict = [...this.tiles.keys()]
       .filter((k) => !this.activeKeys.has(k))
-      .sort((a, b) => (tileDistanceSq(b, ax, ay, az) - tileDistanceSq(a, ax, ay, az)) || (b - a));
+      .sort((a, b) => (tileDistanceSq(b, ax, ay, az) - tileDistanceSq(a, ax, ay, az))
+        || compareTileKeys(b, a));
     while (this.tiles.size > CACHE_LIMIT && evict.length) this.tiles.delete(evict.shift());
   }
 
   createTileJob(p, key) {
-    const qx = (key % 1024) - 512;
-    const qy = (Math.floor(key / 1024) % 1024) - 512;
-    const qz = Math.floor(key / 1048576) - 512;
+    const [qx, qy, qz] = tileCoordinates(key);
     const Q = p.R / TILE_M;
     _anchor.set(qx, qy, qz).normalize();
     frame(_anchor, _e1, _e2);
@@ -412,7 +413,8 @@ export class FarFlora {
     const [ax, ay, az] = this.anchorK || [0, 0, 0];
     const keys = [...this.activeKeys]
       .filter((k) => this.tiles.has(k))
-      .sort((a, b) => (tileDistanceSq(a, ax, ay, az) - tileDistanceSq(b, ax, ay, az)) || (a - b));
+      .sort((a, b) => (tileDistanceSq(a, ax, ay, az) - tileDistanceSq(b, ax, ay, az))
+        || compareTileKeys(a, b));
     let n0 = 0, n1 = 0;
     const a0 = this.meshes[0].instanceMatrix.array;
     const a1 = this.meshes[1].instanceMatrix.array;
@@ -446,10 +448,19 @@ export class FarFlora {
 }
 
 function tileDistanceSq(key, ax, ay, az) {
-  const qx = (key % 1024) - 512;
-  const qy = (Math.floor(key / 1024) % 1024) - 512;
-  const qz = Math.floor(key / 1048576) - 512;
+  const [qx, qy, qz] = tileCoordinates(key);
   return (qx - ax) * (qx - ax) + (qy - ay) * (qy - ay) + (qz - az) * (qz - az);
+}
+
+function tileCoordinates(key) {
+  return key.split(':').map(Number);
+}
+
+function compareTileKeys(a, b) {
+  const [ax, ay, az] = tileCoordinates(a);
+  const [bx, by, bz] = tileCoordinates(b);
+  // Preserve the old packing's z/y/x tie order within its valid domain.
+  return (az - bz) || (ay - by) || (ax - bx);
 }
 
 function sameKeys(a, b) {

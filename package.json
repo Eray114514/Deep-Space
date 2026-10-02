@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/server.js",
-    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudweathertest.js && node tools/planetweathertest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
+    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/farfloratest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudweathertest.js && node tools/planetweathertest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
     "test:cloud-species": "node tools/cloudspeciestest.js",
     "test:weather-system": "node tools/weathersystemtest.js",
     "test:cloud-sampling": "node tools/cloudsamplingtest.js",
@@ -54,6 +54,8 @@
     "test:render-look": "node tools/renderlooktest.js && node tools/renderlookplaytest.js && node tools/renderlookworldtest.js",
     "test:render-look:perf": "node tools/renderlookperftest.js",
     "test:vegetation": "node tools/vegetationtest.js",
+    "test:far-flora": "node tools/farfloratest.js",
+    "test:far-flora:player": "node tools/farfloraplaytest.js",
     "test:rift": "node tools/rifttest.js",
     "test:rift:perf": "node tools/riftperftest.js",
     "test:pointerlock": "node tools/pointerlocktest.js",
