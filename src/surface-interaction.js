@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 export const SURFACE_INTERACTION_CAP = 4;
 
-class SurfaceInteractionField {
+export class SurfaceInteractionField {
   constructor() {
     // xyz planet-local centre, w radius
     this.positions = Array.from({ length: SURFACE_INTERACTION_CAP },
@@ -11,6 +11,7 @@ class SurfaceInteractionField {
     this.data = Array.from({ length: SURFACE_INTERACTION_CAP }, () => new THREE.Vector4(99, 0, 1, 0));
     this.cursor = 0;
     this.planetId = null;
+    this.revision = 0;
   }
 
   setPlanet(planetId) {
@@ -20,6 +21,7 @@ class SurfaceInteractionField {
   }
 
   clear() {
+    this.revision++;
     for (let i = 0; i < SURFACE_INTERACTION_CAP; i++) {
       this.positions[i].set(1e9, 1e9, 1e9, 1);
       this.data[i].set(99, 0, 1, 0);
@@ -27,6 +29,7 @@ class SurfaceInteractionField {
   }
 
   inject(position, radius, strength = 1, recovery = 1) {
+    this.revision++;
     const index = this.cursor++ % SURFACE_INTERACTION_CAP;
     this.positions[index].set(position.x, position.y, position.z, radius);
     this.data[index].set(0, strength, recovery, 0);
@@ -34,6 +37,18 @@ class SurfaceInteractionField {
 
   update(dt) {
     for (const value of this.data) value.x += Math.max(0, dt) * value.z;
+  }
+
+  copyRelativePositions(target, origin, planetId) {
+    for (let i = 0; i < SURFACE_INTERACTION_CAP; i++) {
+      const position = this.positions[i];
+      if (planetId !== this.planetId || this.data[i].y === 0) {
+        target[i].set(1e9, 1e9, 1e9, 1);
+      } else {
+        target[i].set(position.x - origin.x, position.y - origin.y,
+          position.z - origin.z, position.w);
+      }
+    }
   }
 
   activeCount() {

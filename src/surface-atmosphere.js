@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionGLSL, stellarOcclusionUniforms, bindStellarOcclusion } from './stellar-occlusion.js';
-import { surfaceCloudGLSL,surfaceCloudLightingGLSL,surfaceCloudUniforms,bindSurfaceClouds } from './cloud/surface-clouds.js';
+import { surfaceCloudGLSL,surfaceCloudLightingGLSL,surfaceCloudUniforms,bindSurfaceClouds,
+  hasSurfaceCloudMedium } from './cloud/surface-clouds.js';
 
 // Bind the same solar transmission and isotropic sky field to world surfaces.
 // Portal/remote bodies without an active air context retain their own lighting.
@@ -31,7 +32,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
   }
   Object.assign(shader.uniforms, material.userData.surfaceMedium);
   shader.defines ||= {};
-  shader.defines.SURFACE_CLOUD_MEDIUM=planet.cloudSpeciesTex?1:0;
+  shader.defines.SURFACE_CLOUD_MEDIUM=Number(hasSurfaceCloudMedium(planet));
   const transport = /* glsl */`
     ${cloudAtmosphereGLSL}
     ${stellarOcclusionGLSL}

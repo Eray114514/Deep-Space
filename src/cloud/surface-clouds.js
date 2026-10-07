@@ -14,6 +14,11 @@ const names=['uNoise3','uSpeciesMap','uBandsReady','uCandidatesReady','uCandidat
 names.push('uCameraLocal','uCameraFar');
 names.push('uSunDir','uSecondarySunDir',...Object.keys(cloudLightCacheUniforms()));
 const prefix=source=>source.replace(/\bu[A-Z]\w*\b/g,name=>'cloud_'+name);
+export function hasSurfaceCloudMedium(planet) {
+  // Weather bands can exist with volumetrics disabled. A surface variant may
+  // declare the mixed sampler types only when their uniform owner exists.
+  return Boolean(planet.cloudSpeciesTex && (planet.volCloudUniforms || planet.volCloudMat?.uniforms));
+}
 // Surface PBR owns other material textures. Store the small species parameter
 // table in uniforms so the same conservative bounds/candidates fit WebGL2's
 // sixteen fragment samplers. Acceleration is also packed in unused array
@@ -186,7 +191,7 @@ export const surfaceCloudLightingGLSL=/* glsl */`
   }
 `;
 export function surfaceCloudUniforms(planet) {
-  const source=planet.volCloudMat?.uniforms,result={};
+  const source=planet.volCloudUniforms || planet.volCloudMat?.uniforms,result={};
   result.uSurfaceCloudEnabled={value:planet.cloudVisualEnabled===false?0:1};
   result.uCloudShadowViewport={value:new THREE.Vector2(1,1)};
   result.uCloudShadowForward={value:new THREE.Vector3(0,0,-1)};
@@ -204,7 +209,7 @@ export function surfaceCloudUniforms(planet) {
 }
 export function bindSurfaceClouds(uniforms,planet,renderer=null,camera=null,material=null) {
   uniforms.uSurfaceCloudEnabled.value=preparingSurface||planet.cloudVisualEnabled===false?0:1;
-  const source=planet.volCloudMat?.uniforms;
+  const source=planet.volCloudUniforms || planet.volCloudMat?.uniforms;
   uniforms.uCloudForeignReceiver.value=0;
   if(source)for(const name of names)if(uniforms['cloud_'+name])uniforms['cloud_'+name].value=source[name]?.value;
   if(camera && uniforms.cloud_uCameraFar)uniforms.cloud_uCameraFar.value=camera.far;

@@ -1,5 +1,6 @@
 import { installSurfaceAtmosphere } from './surface-atmosphere.js';
 import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
+import { hasSurfaceCloudMedium } from './cloud/surface-clouds.js';
 // Shader-level beauty: a shared procedural detail texture, triplanar
 // micro-detail on terrain (so close-up ground has grain, not flat vertex
 // color), animated water normals, and wind sway for vegetation.
@@ -619,7 +620,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v14-cloud-beam-'+Boolean(planet.cloudSpeciesTex);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v15-owned-cloud-'+hasSurfaceCloudMedium(planet);
   return material;
 }
 
@@ -1422,7 +1423,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v32-cloud-beam:${Boolean(planet.cloudSpeciesTex)}:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v33-owned-cloud:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
   return material;
 }
 
@@ -1579,7 +1580,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
 // camera climbs out — thousands of props must never blink out in one frame
 export const GROW = { value: 1 };
 
-export function applyWindSway(material, amount, foliageLighting = false) {
+export function applyWindSway(material, amount, foliageLighting = false, frame = null) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = TIME;
     shader.uniforms.uGrow = GROW;
@@ -1587,12 +1588,17 @@ export function applyWindSway(material, amount, foliageLighting = false) {
     shader.uniforms.uWind = { value: WIND };
     shader.uniforms.uBendPos = { value: surfaceInteraction.positions };
     shader.uniforms.uBendData = { value: surfaceInteraction.data };
+    shader.uniforms.uWindPhase = { value: new THREE.Vector4() };
+    shader.uniforms.uWindFlutterPhase = { value: 0 };
+    if (frame) Object.assign(shader.uniforms, frame.uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
         uniform float uGrow;
         uniform float uSway;
         uniform vec4 uWind;
+        uniform vec4 uWindPhase;
+        uniform float uWindFlutterPhase;
         uniform vec4 uBendPos[${SURFACE_INTERACTION_CAP}];
         uniform vec4 uBendData[${SURFACE_INTERACTION_CAP}];`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
@@ -1603,12 +1609,12 @@ export function applyWindSway(material, amount, foliageLighting = false) {
           float ph = ip.x * 0.61 + ip.y * 0.53 + ip.z * 0.47;
           float k = uSway * max(transformed.y, 0.0) * uWind.z;
           float gustEnvelope = 1.0 + uWind.w
-            * (0.52 + 0.48 * sin(uTime * 0.23 + ph * 0.11));
-          float along = (0.56 * sin(uTime * 0.82 + ph)
-            + 0.29 * sin(uTime * 1.9 + ph * 1.67)
-            ${foliageLighting ? '+ 0.08 * sin(uTime * 7.6 + ph * 2.31)' : ''}) * gustEnvelope
+            * (0.52 + 0.48 * sin(uTime * 0.23 + ph * 0.11 + uWindPhase.w));
+          float along = (0.56 * sin(uTime * 0.82 + ph + uWindPhase.x)
+            + 0.29 * sin(uTime * 1.9 + ph * 1.67 + uWindPhase.y)
+            ${foliageLighting ? '+ 0.08 * sin(uTime * 7.6 + ph * 2.31 + uWindFlutterPhase)' : ''}) * gustEnvelope
             + 0.34 * uWind.z;
-          float across = 0.13 * sin(uTime * 3.4 + ph * 0.73) * gustEnvelope;
+          float across = 0.13 * sin(uTime * 3.4 + ph * 0.73 + uWindPhase.z) * gustEnvelope;
           transformed.x += (uWind.x * along - uWind.y * across) * k;
           transformed.z += (uWind.y * along + uWind.x * across) * k;
           float pressure = 0.0;
@@ -1619,8 +1625,8 @@ export function applyWindSway(material, amount, foliageLighting = false) {
               * uBendData[i].y * recovery);
           }
           float tip = smoothstep(0.0, 0.65, max(transformed.y, 0.0));
-          transformed.x += sin(ph) * pressure * tip * 0.7;
-          transformed.z += cos(ph) * pressure * tip * 0.7;
+          transformed.x += sin(ph + uWindPhase.x) * pressure * tip * 0.7;
+          transformed.z += cos(ph + uWindPhase.x) * pressure * tip * 0.7;
           transformed.y *= 1.0 - pressure * tip * 0.68;
         }
         #endif`);
@@ -1640,6 +1646,6 @@ export function applyWindSway(material, amount, foliageLighting = false) {
         #endif`);
     }
   };
-  material.customProgramCacheKey = () => 'wind-sway-v3-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
+  material.customProgramCacheKey = () => 'wind-sway-v4-local-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
   return material;
 }

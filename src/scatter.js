@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { hash3i, hashFloat } from './rng.js';
 import { applyWindSway, GROW } from './shaders.js';
 import { buildFlora } from './flora.js';
+import { VegetationFrame } from './vegetation-frame.js';
 
 // WebGL 2 baseline: the instance-architecture Stage C rewrite targeted the
 // shelved WebGPU/TSL line. The classic InstancedMesh deck is authoritative.
@@ -147,6 +148,7 @@ export class Scatter {
     this.grassDensity = Math.max(0.35, Math.min(1, grassDensity));
     this.lastKey = '';
     this.seen = new Set();
+    this.frame = new VegetationFrame();
   }
 
   setPlanet(planet) {
@@ -162,7 +164,7 @@ export class Scatter {
         color: colors[kind], roughness: 0.95, flatShading: true,
         emissive: colors[kind].clone().multiplyScalar(glow),
       });
-      mat = applyWindSway(mat, SWAY[kind] || 0);   // 0 sway still wires the grow scale
+      mat = applyWindSway(mat, SWAY[kind] || 0, false, this.frame);
       this.addMesh(planet, kind, GEO[kind], mat);
     }
     // this world's own species: geometry seeded by the planet, colours baked
@@ -177,7 +179,7 @@ export class Scatter {
         flatShading: kind !== 'grass', side: THREE.DoubleSide,
       });
       mat.emissive.setScalar(FLORA_GLOW[kind]);
-      mat = applyWindSway(mat, SWAY[kind] || 0);
+      mat = applyWindSway(mat, SWAY[kind] || 0, false, this.frame);
       const im = this.addMesh(planet, kind, this.flora[kind], mat);
     }
     for (const [kind, geometryKey] of GRASS_LODS) {
@@ -189,7 +191,7 @@ export class Scatter {
       // Grass is a paper-thin blade but both sides represent the same upward
       // leaf surface.  Tell both renderer paths not to invert its lighting
       // normal on back faces.
-      mat = applyWindSway(mat, SWAY[kind], true);
+      mat = applyWindSway(mat, SWAY[kind], true, this.frame);
       const im = this.addMesh(planet, kind, this.flora[geometryKey], mat);
       im.castShadow = false;
     }
@@ -207,16 +209,24 @@ export class Scatter {
 
   addMesh(planet, kind, geo, mat) {
     const im = new THREE.InstancedMesh(geo, mat, capFor(kind));
+    im.name = 'scatter:' + kind;
     im.count = 0;
     im.frustumCulled = false;
     im.castShadow = true;
     im.receiveShadow = true;
     im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    if (kind.startsWith('grass')) {
-      const anchor = new THREE.InstancedBufferAttribute(new Float32Array(capFor(kind) * 3), 3);
-      anchor.setUsage(THREE.DynamicDrawUsage);
-      geo.setAttribute('iAnchor', anchor);
-    }
+    // Shadow casters must use the same grow/wind/pressure deformation as the
+    // visible mesh. Native shadow materials do not inherit onBeforeCompile.
+    im.customDepthMaterial = applyWindSway(new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking,
+    }), SWAY[kind] || 0, kind.startsWith('grass'), this.frame);
+    im.customDistanceMaterial = applyWindSway(new THREE.MeshDistanceMaterial(),
+      SWAY[kind] || 0, kind.startsWith('grass'), this.frame);
+    // Interaction injection runs after streaming in the main loop. Sync at
+    // both draw entry points; revision caching copies only on real changes.
+    const syncInteractions = () => this.frame.syncInteractions(planet.bodyId || planet.seed);
+    im.onBeforeRender = syncInteractions;
+    im.onBeforeShadow = syncInteractions;
     planet.group.add(im);
     this.meshes[kind] = im;
     return im;
@@ -228,6 +238,8 @@ export class Scatter {
         const im = this.meshes[kind];
         this.planet.group.remove(im);
         im.material.dispose();
+        im.customDepthMaterial.dispose();
+        im.customDistanceMaterial.dispose();
         im.dispose();
       }
     }
@@ -237,6 +249,7 @@ export class Scatter {
     this.job = null;
     this.planet = null;
     this.lastKey = '';
+    this.frame.setOrigin(_v.set(0, 0, 0));
   }
 
   hideAll() {
@@ -255,6 +268,7 @@ export class Scatter {
     if (alt > PREWARM_BELOW_ALT) { this.hideAll(); this.lastKey = ''; return; }
 
     const p = this.planet;
+    this.frame.syncInteractions(p.bodyId || p.seed);
     _dir.copy(camLocal).normalize();
     const Q = p.R / CELL_M;                 // cell-id lattice radius
     const cellAng = CELL_M / p.R;
@@ -294,7 +308,8 @@ export class Scatter {
         signature = Math.imul(signature ^ view.getUint32(0, true), 16777619) >>> 0;
       }
     }
-    return { counts, total: Object.values(counts).reduce((sum, value) => sum + value, 0), signature };
+    return { counts, total: Object.values(counts).reduce((sum, value) => sum + value, 0), signature,
+      origin: this.frame.origin.toArray(), pending: Boolean(this.job) };
   }
 
   beginJob(p, kx, ky, kz, Q, cellAng) {
@@ -311,6 +326,7 @@ export class Scatter {
     this.job = {
       p, Q, cellAng, seedI: p.intSeed ^ 0x5ca7,
       anchor: _anchor.clone(), e1: _e1.clone(), e2: _e2.clone(),
+      origin: _anchor.clone().multiplyScalar(p.R + p.height(_anchor, p.fullMaxFreq)),
       counts, range: this.range,
       cells: [], cellIndex: 0,
       initial: Object.values(this.meshes).every((mesh) => mesh.count === 0),
@@ -341,7 +357,7 @@ export class Scatter {
       const fx = Math.floor(_v.x * job.Q), fy = Math.floor(_v.y * job.Q), fz = Math.floor(_v.z * job.Q);
       for (let corner = 0; corner < 8; corner++) {
         const qx = fx + (corner & 1), qy = fy + ((corner >> 1) & 1), qz = fz + (corner >> 2);
-        const ck = (qx + 16384) + (qy + 16384) * 32768 + (qz + 16384) * 1073741824;
+        const ck = `${qx}:${qy}:${qz}`;
         if (this.seen.has(ck)) continue;
         this.seen.add(ck);
         if (Math.abs(Math.hypot(qx, qy, qz) - job.Q) > 0.7) continue;
@@ -358,22 +374,18 @@ export class Scatter {
   }
 
   commitJob(job) {
+    this.frame.setOrigin(job.origin);
+    this.frame.syncInteractions(job.p.bodyId || job.p.seed);
     for (const kind in this.meshes) {
       const count = job.counts[kind];
       const mesh = this.meshes[kind];
+      mesh.position.copy(job.origin);
       const stage = this.staging[kind];
       mesh.instanceMatrix.array.set(stage.matrix.subarray(0, count * 16), 0);
       mesh.instanceColor.array.set(stage.color.subarray(0, count * 3), 0);
       mesh.count = count;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.instanceColor.needsUpdate = true;
-      const anchor = mesh.geometry.getAttribute('iAnchor');
-      if (anchor) {
-        for (let i = 0; i < count; i++) {
-          anchor.setXYZ(i, stage.matrix[i * 16 + 12], stage.matrix[i * 16 + 13], stage.matrix[i * 16 + 14]);
-        }
-        anchor.needsUpdate = true;
-      }
     }
   }
 
@@ -448,7 +460,7 @@ export class Scatter {
       }
       if (!this.meshes[drawKind] || counts[drawKind] >= capFor(drawKind)) continue;
 
-      _v2.copy(_jd).multiplyScalar(p.R + hh);
+      _v2.copy(_jd).multiplyScalar(p.R + hh).sub(this.job.origin);
       _q.setFromUnitVectors(Y, _jd);
       _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
       _q.multiply(_q2);
