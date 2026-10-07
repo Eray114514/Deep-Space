@@ -132,10 +132,13 @@ export const productionSpeciesGLSL = /* glsl */`
     }
     return max(0.0,distance*0.99);
   }
+  bool speciesHasSupport(float altitude,vec4 band,float baseJitter,float depthJitter) {
+    return !(band.r<0.00001 || band.a<0.00001
+      || altitude<band.g-baseJitter*0.5 || altitude>band.b+(baseJitter+depthJitter)*0.5);
+  }
   float speciesCondensate(vec3 frame,vec3 axis,float altitude,vec4 band,
     float feature,float baseJitter,float depthJitter,int mode,float minimumDepth,vec2 region) {
-    if(band.r<0.00001 || band.a<0.00001) return 0.0;
-    if(altitude<band.g-baseJitter*0.5 || altitude>band.b+(baseJitter+depthJitter)*0.5) return 0.0;
+    if(!speciesHasSupport(altitude,band,baseJitter,depthJitter))return 0.0;
     float share=region.x>=0.0?productionAreaWeight(frame,region):band.r/max(band.a,0.00001);
     if(share<=0.0)return 0.0;
     float coverage=region.x>=0.0?productionFamilyCoverage(frame,clamp(band.a,0.0,1.0))
@@ -194,23 +197,27 @@ export const productionSpeciesGLSL = /* glsl */`
     vec3 radial=local/radius;
     vec2 bounds=productionAltitudeBounds(radial);
     if(altitude<bounds.x || altitude>bounds.y) return vec2(0);
-    float surface=productionSurfaceAt(radial);
-    if(altitude<surface) return vec2(0);
     vec3 weatherRadial=uSpin*radial;
-    vec2 uv=weatherAtlasUV(uSpin*radial);
-    vec2 total=vec2(0);
+    vec2 uv=weatherAtlasUV(weatherRadial);
     uint candidates=65535u;
     if(uCandidatesReady>0.5 && uMediumLayer==0) {
       ivec3 size=textureSize(uBandCandidates,0);
       ivec2 cell=clamp(ivec2(floor(uv*vec2(size.xy))),ivec2(0),size.xy-1);
       candidates=texelFetch(uBandCandidates,ivec3(cell,clamp(int(floor(altitude/500.0)),0,size.z-1)),0).r;
     }
+    if(candidates==0u)return vec2(0);
+    float surface=productionSurfaceAt(radial);
+    if(altitude<surface) return vec2(0);
+    vec2 total=vec2(0);
     for(int i=0;i<int(uSpeciesCount);i++) {
       if((candidates&(1u<<uint(i)))==0u)continue;
       vec4 parameters=speciesOpticsAt(i),shape=speciesShapeAt(i);
       if(uMediumLayer!=int(shape.z) || (uSpeciesMask>=0.0 && abs(uSpeciesMask-float(i))>0.5)) continue;
       vec4 band=productionBandAt(uv,i);
       band=speciesAbsoluteBand(band,shape,surface);
+      // Reject the same zero support as speciesCondensate before computing
+      // the species frame and fetching its independent area partition.
+      if(!speciesHasSupport(altitude,band,parameters.y,parameters.z))continue;
       vec3 axis,frame;productionSpeciesFrame(weatherRadial,i,axis,frame);
       float d=speciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),speciesStructureAt(i).x,productionAreaBand(uv,i));
       if(shape.y<0.5)total.x+=d*parameters.w/0.025;
