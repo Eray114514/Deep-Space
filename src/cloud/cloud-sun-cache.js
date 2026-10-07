@@ -39,10 +39,11 @@ export const cloudSunCacheSamplingGLSL=/* glsl */`
 // is not bound to production until density, motion and cost errors are tested.
 export class CloudSunCache {
   constructor(planet,center,{size=128,spacing=100,depth=256,verticalSpacing=50,shearSolar=true,
-    target=null,tileOffset=0,hours=planet.weatherHours,forecast=null,encodeOpticalDepth=false}={}) {
+    target=null,tileOffset=0,hours=planet.weatherHours,forecast=null,encodeOpticalDepth=false,programOwner=null}={}) {
     this.planet=planet;this.size=size;this.spacing=spacing;this.depth=depth;this.verticalSpacing=verticalSpacing;
     this.center=center.clone();this.field=0;this.layer=depth-1;this.boundaryRow=0;
     this.ready=false;this.disposed=false;this.snapshots=[];
+    this.programOwner=programOwner;
     // ANGLE/D3D11 copyTexSubImage3D can copy an entire volume on each plane
     // update. A slice atlas stores identical R16F data using cheap 2D copies.
     this.ownsTarget=!target;this.tileOffset=tileOffset;
@@ -262,10 +263,21 @@ export class CloudSunCache {
   }
   finish() {
     this.ready=true;for(const texture of this.snapshots)texture.dispose();this.snapshots=[];
-    this.material.uniforms={};this.material.dispose();this.quad.dispose();
+    this.releaseProgram('sweep',this.material);this.quad.dispose();
     this.material=null;this.quad=null;
-    this.copyMaterial?.dispose();this.copyQuad?.dispose();this.copyMaterial=null;this.copyQuad=null;
+    this.releaseProgram('copy',this.copyMaterial);this.copyQuad?.dispose();this.copyMaterial=null;this.copyQuad=null;
     for(const plane of this.planes)plane.dispose();this.planes=[];
+  }
+  releaseProgram(key,material) {
+    if(!material)return;
+    // Keep one compiled material per bank so completing an endpoint does not
+    // evict the identical program needed by the next field. Uniforms belong
+    // to the finished snapshot, not this program lease, and must be released.
+    // Three retains this uniform dictionary in renderer properties too.
+    // Empty that same object, rather than only replacing the public pointer.
+    for(const name of Object.keys(material.uniforms))delete material.uniforms[name];
+    if(this.programOwner && !this.programOwner[key])this.programOwner[key]=material;
+    else material.dispose();
   }
   dispose() {
     if(this.disposed)return;this.disposed=true;

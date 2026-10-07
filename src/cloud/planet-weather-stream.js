@@ -35,8 +35,7 @@ export class PlanetWeatherStream {
     if(this.anchor!==a) {
       const distant=this.anchor!==undefined && Math.abs(a-this.anchor)>FRAME_HOURS*3;
       if(distant && this.pending.size) {
-        this.worker.terminate(); this.pending.clear(); this.frames.clear();
-        this.disposed=true;
+        this.dispose();
         this.planet.weatherStream=new PlanetWeatherStream(this.planet);
         this.planet.weatherStream.update(hours,true); return;
       }
@@ -46,6 +45,10 @@ export class PlanetWeatherStream {
     for(const h of [a,b,b+FRAME_HOURS]) this.request(h);
     const first=this.frames.get(a),second=this.frames.get(b);
     this.ready=Boolean(first&&second);
+    // A prefetched third frame must not re-upload an unchanged active pair.
+    // Worker completion forces a ready pair to commit immediately, but does
+    // not make identical absolute-time bytes a new rendering transaction.
+    if(this.ready && hours===this.lastUpdate && first===this.committedFirst && second===this.committedSecond)return;
     if(!this.ready || (!force && Math.abs(hours-this.lastUpdate)<1/300)) return;
     this.lastUpdate=hours;
     const mix=(hours-a)/FRAME_HOURS, p=this.planet;
@@ -95,7 +98,11 @@ export class PlanetWeatherStream {
       atlas.hours=hours; texture.needsUpdate=true;
     }
     p.weatherField.bindAtlases(p.cloudShadowTex.userData.weatherAtlas,p.cloudWeatherHiTex.userData.weatherAtlas);
+    this.committedFirst=first;this.committedSecond=second;
     this.revision=`${p.weatherField.namespace}:${a}:${b}`;
   }
-  dispose() { if(this.disposed) return;this.disposed=true;this.worker.terminate();this.frames.clear();this.pending.clear(); }
+  dispose() {
+    if(this.disposed) return;this.disposed=true;this.worker.terminate();this.frames.clear();this.pending.clear();
+    this.committedFirst=null;this.committedSecond=null;
+  }
 }

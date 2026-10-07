@@ -25,6 +25,7 @@ export class CloudLightBank {
   constructor(planet,{size=128,depth=128,interval=.0015}={}) {
     this.planet=planet;this.size=size;this.depth=depth;this.interval=interval;
     this.maps=new Map();this.disposed=false;this.baseHours=planet.weatherHours;
+    this.programs={};
     this.fieldOwner=planet.weatherField;this.lightIds=planet.stellarLightField.sources.map(s=>s.id).join('|');
     this.speciesMask=planet.volCloudMat.uniforms.uSpeciesMask.value;
     const position=planet.volCloudMat.uniforms.uCameraLocal.value;
@@ -59,7 +60,7 @@ export class CloudLightBank {
     const rotation=new THREE.Matrix4().makeRotationY((hours-this.baseHours)*p.weatherField.windRadiansPerHour);
     const cache=new CloudSunCache(p,this.center.clone().applyMatrix4(rotation),{
       size:this.size,depth:this.depth,spacing:this.spacing,hours,forecast,target:this.target,
-      tileOffset:(index%3+3)%3*this.depth*4});
+      tileOffset:(index%3+3)%3*this.depth*4,programOwner:this.programs});
     this.maps.set(index,cache);return cache;
   }
   update(renderer) {
@@ -106,5 +107,7 @@ export class CloudLightBank {
   dispose() {
     if(this.disposed)return;this.disposed=true;this.unbind();
     for(const cache of this.maps.values())cache.dispose();this.maps.clear();this.target.dispose();
+    for(const material of Object.values(this.programs))material.dispose();this.programs={};
+    if(this.planet.cloudLightBank===this)this.planet.cloudLightBank=null;
   }
 }

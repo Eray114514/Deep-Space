@@ -343,11 +343,31 @@ export class Scatter {
     // and is reused for every visit to the same field.
     this.job.cells.sort((a, b) => (a[0] * a[0] + a[1] * a[1])
       - (b[0] * b[0] + b[1] * b[1]) || a[1] - b[1] || a[0] - b[0]);
+    this.job.work = this.buildJob(this.job);
   }
 
   stepJob(deadline) {
     const job = this.job;
-    _anchor.copy(job.anchor);
+    // A tuft candidate (including rejection) is the atomic work unit. A
+    // whole meadow cell can contain hundreds of expensive terrain queries.
+    // Keep its cursor across frames rather than checking after four cells.
+    let units = 0;
+    while (!job.work.next().done) {
+      // Amortize clock reads over at most eight candidates/discovery steps,
+      // never over an entire cell. Infinity is useful for controlled builds.
+      if (deadline === Infinity || (++units & 7) !== 0) continue;
+      const now = performance.now();
+      if (now < deadline) continue;
+      if (job.initial && now - job.lastPreviewAt > 90) {
+        this.commitJob(job);
+        job.lastPreviewAt = now;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  *buildJob(job) {
     while (job.cellIndex < job.cells.length) {
       const [gx, gy] = job.cells[job.cellIndex++];
       _v.copy(job.anchor)
@@ -360,17 +380,13 @@ export class Scatter {
         const ck = `${qx}:${qy}:${qz}`;
         if (this.seen.has(ck)) continue;
         this.seen.add(ck);
-        if (Math.abs(Math.hypot(qx, qy, qz) - job.Q) > 0.7) continue;
-        this.placeCell(job.p, qx, qy, qz, job.Q, job.cellAng, job.seedI, job.counts);
+        if (Math.abs(Math.hypot(qx, qy, qz) - job.Q) <= 0.7) {
+          yield* this.placeCell(job, qx, qy, qz);
+        }
+        yield;
       }
-      const now = performance.now();
-      if (job.initial && now - job.lastPreviewAt > 90) {
-        this.commitJob(job);
-        job.lastPreviewAt = now;
-      }
-      if ((job.cellIndex & 3) === 0 && now >= deadline) return false;
+      yield;
     }
-    return true;
   }
 
   commitJob(job) {
@@ -391,12 +407,13 @@ export class Scatter {
 
   // everything here depends ONLY on (planet seed, qx, qy, qz):
   // the same rock stands in the same spot forever
-  placeCell(p, qx, qy, qz, Q, cellAng, seedI, counts) {
+  *placeCell(job, qx, qy, qz) {
+    const {p, cellAng, seedI, counts} = job;
     _up.set(qx, qy, qz).normalize();          // canonical cell direction
     const h0 = hash3i(qx, qy, qz, seedI);
 
     // props near the range edge grow in instead of popping in
-    const dot = Math.min(1, Math.max(-1, _up.dot(_anchor)));
+    const dot = Math.min(1, Math.max(-1, _up.dot(job.anchor)));
     const cells = Math.acos(dot) / cellAng;
     let edge = Math.min(1, Math.max(0, ((this.range - 1) - cells) / Math.max(2, this.range * 0.3)));
     if (edge < 0.03) return;
@@ -411,13 +428,16 @@ export class Scatter {
     if (Math.abs(_up.y) < 0.93) _ce1.set(-_up.z, 0, _up.x).normalize();
     else _ce1.set(1, 0, 0).projectOnPlane(_up).normalize();
     _ce2.crossVectors(_up, _ce1);
+    // Module scratch vectors may be reused by another field between yields.
+    // Only three double-precision vectors are retained for the current cell.
+    const basis = {up: _up.clone(), e1: _ce1.clone(), e2: _ce2.clone()};
 
     // Grass is a continuous biome layer, not a mutually-exclusive prop roll.
     // Trees and rocks may stand in a meadow without deleting a nine-metre
     // square of grass around themselves.
     const meadowCopies = Math.round((MEADOW_DENSITY[biome] || 0) * this.grassDensity);
     if (meadowCopies > 0) {
-      this.placeKind(p, qx, qy, qz, cellAng, seedI, counts,
+      yield* this.placeKind(job, basis, qx, qy, qz,
         'grass', 0.52, 0.96, meadowCopies, h0, edge);
     }
 
@@ -429,11 +449,12 @@ export class Scatter {
     for (const r of structural) { acc += r[1]; if (sel < acc) { chosen = r; break; } }
     if (!chosen) return;
     const [kind, , s0, s1] = chosen;
-    this.placeKind(p, qx, qy, qz, cellAng, seedI, counts,
+    yield* this.placeKind(job, basis, qx, qy, qz,
       kind, s0, s1, 1, hash3i(qx, qy, qz, seedI ^ 0x71a3), edge);
   }
 
-  placeKind(p, qx, qy, qz, cellAng, seedI, counts, kind, s0, s1, copies, h0, edge) {
+  *placeKind(job, basis, qx, qy, qz, kind, s0, s1, copies, h0, edge) {
+    const {p, cellAng, seedI, counts} = job;
     if (kind !== 'grass' && (!this.meshes[kind] || counts[kind] >= capFor(kind))) return;
 
     // grass grows in little clumps; everything else stands alone
@@ -441,18 +462,21 @@ export class Scatter {
     // prop. Candidate positions remain PCG-derived from the canonical cell,
     // so changing camera direction never regenerates or slides the meadow.
     for (let c = 0; c < copies; c++) {
+      // Yield before the next candidate; the previous one is fully staged.
+      // Cancellation discards this iterator without mutating the visible ring.
+      yield;
       const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
       // jitter inside the cell, then re-sample ground height there
-      _jd.copy(_up)
-        .addScaledVector(_ce1, (hashFloat(hc, 1) - 0.5) * cellAng)
-        .addScaledVector(_ce2, (hashFloat(hc, 2) - 0.5) * cellAng)
+      _jd.copy(basis.up)
+        .addScaledVector(basis.e1, (hashFloat(hc, 1) - 0.5) * cellAng)
+        .addScaledVector(basis.e2, (hashFloat(hc, 2) - 0.5) * cellAng)
         .normalize();
       const hh = p.height(_jd, p.fullMaxFreq);
       if (p.hasLiquid && hh < p.seaLevel + 0.4) continue;   // not in the sea
 
       let drawKind = kind;
       if (kind === 'grass') {
-        const distance = Math.acos(Math.min(1, Math.max(-1, _jd.dot(this.job?.anchor || _anchor)))) * p.R;
+        const distance = Math.acos(Math.min(1, Math.max(-1, _jd.dot(job.anchor)))) * p.R;
         // A small hash offset dissolves the circular LOD boundary into the
         // meadow. The same blade always chooses the same side of the blend.
         const noisyDistance = distance + (hashFloat(hc, 3) - 0.5) * 3.2;
@@ -460,7 +484,7 @@ export class Scatter {
       }
       if (!this.meshes[drawKind] || counts[drawKind] >= capFor(drawKind)) continue;
 
-      _v2.copy(_jd).multiplyScalar(p.R + hh).sub(this.job.origin);
+      _v2.copy(_jd).multiplyScalar(p.R + hh).sub(job.origin);
       _q.setFromUnitVectors(Y, _jd);
       _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
       _q.multiply(_q2);
