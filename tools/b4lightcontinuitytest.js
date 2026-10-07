@@ -6,6 +6,7 @@ import {startServer} from './server.js';
 import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
 const {server,port}=await startServer(0);let browser;
+const before=await evidenceFingerprint('tools/b4lightcontinuitytest.js');
 const oldCallControl=process.argv.includes('--old-call-control');
 try {
   browser=await launchHardwareBrowser({executablePath:resolveSystemChromePath(),headless:true});
@@ -21,7 +22,18 @@ try {
   const result=await page.evaluate(async oldCallControl=>{
     const {compareCloudLight}=await import('/tools/b4-light-continuity-browser.js');
     const current=await compareCloudLight(),control=oldCallControl?await compareCloudLight({badControl:true}):null;
-    return {current,control,glError:NMS._renderer.getContext().getError()};
+    const p=NMS._planet(0),bank=p.cloudLightBank,stream=p.weatherStream;
+    const hours=bank.maps.values().next().value.weatherSources.frames[0].hours;
+    const forecast=stream.frames.get(hours);
+    if(!forecast)throw Error('Snapshot source is unavailable for replacement control');
+    // Replace identity with identical bytes. This must invalidate the snapshot,
+    // rebuild it through the actual pipeline and preserve physical consumers.
+    stream.frames.set(hours,{...forecast});stream.update(p.weatherHours,true);
+    const invalidated=bank.needsReset();NMS._pipeline.updateCloudLighting();
+    const replacement={invalidated,oldDisposed:bank.disposed,
+      changed:p.cloudLightBank!==bank,ready:p.volCloudMat.uniforms.uSunCacheReady.value};
+    const rebuilt=await compareCloudLight();
+    return {current,control,replacement,rebuilt,glError:NMS._renderer.getContext().getError()};
   },oldCallControl);
   const difference=records=>Math.max(...records.flatMap(r=>r.full.map((v,i)=>Math.abs(v-r.combinedFull[i]))));
   const metrics={cases:result.current.records.length,occupied:result.current.occupied,
@@ -29,11 +41,18 @@ try {
     oldCallDepthError:result.control?difference(result.control.records):null,
     occupiedSourceCacheError:Math.max(...result.current.records.filter(r=>r.extinction>.0001).map(r=>r.error))};
   await mkdir('test-results/b4-light-continuity',{recursive:true});
-  await writeFile('test-results/b4-light-continuity/report.json',JSON.stringify({fingerprint:await evidenceFingerprint('tools/b4lightcontinuitytest.js'),metrics,result,errors},null,2));
+  const after=await evidenceFingerprint('tools/b4lightcontinuitytest.js');
+  metrics.rebuiltCombinationDepthError=difference(result.rebuilt.records);
+  metrics.rebuiltSourceCacheError=Math.max(...result.rebuilt.records.filter(r=>r.extinction>.0001).map(r=>r.error));
+  await writeFile('test-results/b4-light-continuity/report.json',JSON.stringify({fingerprint:before,after,metrics,result,errors},null,2));
   console.log(JSON.stringify({metrics,glError:result.glError,errors},null,2));
   assert.deepEqual(errors,[]);assert.equal(result.glError,0);assert.ok(metrics.occupied>16);
   assert.ok(metrics.combinationDepthError<.0001,'Compiled source lost fallback optical depth');
   assert.ok(metrics.occupiedSourceCacheError<.05,'The live cache changed occupied-point source radiance');
+  assert.equal(before.sourceDigest,after.sourceDigest);
+  assert.deepEqual(result.replacement,{invalidated:true,oldDisposed:true,changed:true,ready:1});
+  assert.ok(metrics.rebuiltCombinationDepthError<.0001);
+  assert.ok(metrics.rebuiltSourceCacheError<.05);
   // ANGLE-specific old-call reproduction is reported, rather than required on
   // drivers which compile that legal GLSL call correctly.
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

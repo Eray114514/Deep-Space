@@ -4,10 +4,16 @@
 // discover no new shader programs after the player presses "开始游戏". Those
 // are the two player-visible causes of the old pause-then-pop entrance.
 
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { launchBrowser } from './browser.js';
+import { launchBrowser,launchHardwareBrowser,resolveSystemChromePath } from './browser.js';
 import { startServer } from './server.js';
+import { evidenceFingerprint } from './evidence-fingerprint.js';
+import {execFileSync} from 'node:child_process';
+
+const fingerprint=await evidenceFingerprint('tools/hero-playtest.js');
+const reference=process.argv.includes('--reference-prewarm');
+const hardware=process.argv.includes('--hardware'),traceGL=process.argv.includes('--trace-gl');
 
 const outputDir = path.resolve('screenshots/halcyon');
 await mkdir(outputDir, { recursive: true });
@@ -26,8 +32,35 @@ const check = (condition, message) => {
 try {
   const started = await startServer(0);
   server = started.server;
-  browser = await launchBrowser({ headless: true });
+  browser = hardware?await launchHardwareBrowser({executablePath:resolveSystemChromePath()||undefined,headless:true})
+    :await launchBrowser({headless:true});
   const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
+  if(traceGL)await page.addInitScript(()=>{
+    const original=HTMLCanvasElement.prototype.getContext,installed=new WeakSet();window.__heroGLErrors=[];
+    HTMLCanvasElement.prototype.getContext=function(...args) {
+      const gl=original.apply(this,args);
+      if(!gl?.getError || installed.has(gl))return gl;installed.add(gl);
+      const getError=gl.getError.bind(gl),locations=new WeakMap(),names=new Set();
+      for(let prototype=Object.getPrototypeOf(gl);prototype&&prototype!==Object.prototype;prototype=Object.getPrototypeOf(prototype))
+        for(const name of Object.getOwnPropertyNames(prototype))if(typeof gl[name]==='function'&&name!=='getError'&&name!=='constructor')names.add(name);
+      for(const name of names) {
+        const method=gl[name].bind(gl);gl[name]=(...values)=>{
+          const result=method(...values);
+          if(name==='getUniformLocation'&&result)locations.set(result,values[1]);
+          const error=getError();
+          if(error)window.__heroGLErrors.push({name,error,args:values.map(value=>
+            typeof value==='object'?locations.get(value)||(ArrayBuffer.isView(value)?{length:value.length}
+              :value instanceof HTMLImageElement?{src:value.src,width:value.naturalWidth,height:value.naturalHeight,complete:value.complete}
+              :value?.width!==undefined?{type:value.constructor.name,width:value.width,height:value.height,id:value.id||null}:null)
+              :typeof value==='string'?value.slice(0,100):value),stack:new Error().stack});
+          return result;
+        };
+      }
+      return gl;
+    };
+  });
+  if(reference)await page.route('**/src/main.js*',route=>route.fulfill({contentType:'text/javascript',
+    body:execFileSync('git',['show','ebef3ed:src/main.js'],{encoding:'utf8'})}));
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(String(error)));
   page.on('console', (message) => {
@@ -55,11 +88,7 @@ try {
     window.__heroProgramIds = programIds;
     const trace = { startedAt: 0, clickedAt: 0, frames: [] };
     window.__heroPlaytest = trace;
-    document.querySelector('#hero-start-btn')?.addEventListener('click', () => {
-      trace.clickedAt = performance.now();
-    }, { capture: true, once: true });
     const sample = (now) => {
-      if (!trace.startedAt) trace.startedAt = now;
       trace.frames.push({
         elapsed: now - trace.startedAt,
         offset: NMS._internals.ship.introOffset.length(),
@@ -68,7 +97,10 @@ try {
       });
       if (now - trace.startedAt < 3800) requestAnimationFrame(sample);
     };
-    requestAnimationFrame(sample);
+    document.querySelector('#hero-start-btn')?.addEventListener('click', () => {
+      trace.clickedAt=performance.now();trace.startedAt=trace.clickedAt;
+      requestAnimationFrame(sample);
+    }, {capture:true,once:true});
   }, before.programIds);
   await page.click('#hero-start-btn');
   await page.waitForFunction(() => !document.body.classList.contains('hero-active')
@@ -113,6 +145,18 @@ try {
     }
   }
   check(pageErrors.length === 0, `hero hand-off has no page errors (${pageErrors.length})`);
+
+  const after=await evidenceFingerprint('tools/hero-playtest.js');
+  const {gl,glErrors,adapter}=await page.evaluate(()=>{
+    const context=NMS._renderer.getContext(),ext=context.getExtension('WEBGL_debug_renderer_info');
+    return {gl:context.getError(),glErrors:window.__heroGLErrors||[],adapter:ext?context.getParameter(ext.UNMASKED_RENDERER_WEBGL):null};
+  });
+  check(gl===0,`hero hand-off has no WebGL error (${gl})`);
+  check(glErrors.length===0,`traced GL calls have no errors (${glErrors.length})`);
+  check(fingerprint.sourceDigest===after.sourceDigest,'runtime remains fixed during hero hand-off');
+  await mkdir('test-results/hero-handoff',{recursive:true});
+  await writeFile(`test-results/hero-handoff/${traceGL?'trace':reference?'reference':'report'}.json`,JSON.stringify({fingerprint,after,url,reference,hardware,traceGL,
+    before,result,earlyMotion,monotonic,errors:pageErrors,gl,glErrors,adapter,failures},null,2));
 
   await page.screenshot({
     path: path.join(outputDir, '00-hero-handoff.png'),

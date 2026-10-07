@@ -1,0 +1,2 @@
+# Unified diff blank context lines contain one required space.
+experiment.patch text eol=lf -whitespace

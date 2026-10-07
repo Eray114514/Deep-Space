@@ -40,6 +40,11 @@ export class CloudLightBank {
     const p=this.planet,hours=p.weatherHours;
     if(this.fieldOwner!==p.weatherField || this.speciesMask!==p.volCloudMat.uniforms.uSpeciesMask.value || hours<this.baseHours
       || this.lightIds!==p.stellarLightField.sources.map(s=>s.id).join('|'))return true;
+    for(const cache of this.maps.values()) {
+      const sources=cache.weatherSources;
+      if(sources && (sources.stream!==p.weatherStream || sources.frames.some(
+        ({hours,revision})=>sources.stream.revisionAt(hours)!==revision)))return true;
+    }
     const position=p.volCloudMat.uniforms.uCameraLocal.value,radial=position.clone().normalize();
     if(Math.abs(position.length()-p.R-this.cameraHeight)>Math.max(2000,this.size*this.spacing*.2))return true;
     const height=this.center.length()-p.R;
@@ -61,6 +66,8 @@ export class CloudLightBank {
     const cache=new CloudSunCache(p,this.center.clone().applyMatrix4(rotation),{
       size:this.size,depth:this.depth,spacing:this.spacing,hours,forecast,target:this.target,
       tileOffset:(index%3+3)%3*this.depth*4,programOwner:this.programs});
+    cache.weatherSources={stream,frames:[anchor,anchor+stream.frameHours].map(hours=>
+      ({hours,revision:stream.revisionAt(hours)}))};
     this.maps.set(index,cache);return cache;
   }
   update(renderer) {

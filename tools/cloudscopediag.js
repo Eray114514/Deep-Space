@@ -44,10 +44,18 @@ try {
   }
   await page.screenshot({path:`${out}/player.png`});
   const support=await probeCloudLightSupport(page);console.log('Support',JSON.stringify(support));
+  const fields=[];
+  if(process.argv.includes('--fields'))for(let field=0;field<4;field++) {
+    fields.push(await probeCloudLightSupport(page,{field}));console.log('Field',JSON.stringify(fields.at(-1)));
+  }
   const after=await evidenceFingerprint('tools/cloudscopediag.js');
-  await writeFile(`${out}/report.json`,JSON.stringify({before,after,inventory,scenarios,support,errors},null,2));
+  await writeFile(`${out}/report.json`,JSON.stringify({before,after,inventory,scenarios,support,fields,errors},null,2));
   assert.equal(before.sourceDigest,after.sourceDigest);assert.deepEqual(errors,[]);
   for(const s of scenarios)assert.equal(s.gl,0);
   assert.equal(support.gl,0);assert.ok(support.queries>0);assert.ok(support.misses>=0&&support.misses<=support.queries);
+  for(const field of fields) {
+    assert.equal(field.gl,0);assert.ok(field.occupied>1000&&field.queries>0);
+    assert.ok(field.misses>=0&&field.misses<=field.queries);
+  }
   console.log(`PASS: cloud draw scope attribution; ${out}`);
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

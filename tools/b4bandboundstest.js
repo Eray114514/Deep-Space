@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {CLOUD_SPECIES} from '../src/cloud/cloud-species.js';
 import {productionBandBounds,productionBandCandidates,CANDIDATE_WIDTH,CANDIDATE_HEIGHT,
-  CANDIDATE_LAYERS,CANDIDATE_METERS,productionStorageLayers,packProductionAcceleration} from '../src/cloud/production-bands.js';
+  CANDIDATE_LAYERS,CANDIDATE_METERS,productionStorageLayers,packProductionAcceleration,PRODUCTION_PARAMETER_LAYERS} from '../src/cloud/production-bands.js';
 const width=128,height=64,stride=width*height*4;
 const data=new Float32Array(stride*CLOUD_SPECIES.length);
 for(let species=0;species<CLOUD_SPECIES.length;species++)for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
@@ -44,13 +44,13 @@ console.log('PASS conservative interpolated cloud acceleration:',{checked,absent
 for(const size of [64,128,256]) {
   const rows=size/2,layerStride=size*rows*4;
   const packed=new Float32Array(layerStride*productionStorageLayers(size,rows));
-  const before=Float32Array.from({length:16*layerStride},(_,i)=>i%17*.01);
+  const before=Float32Array.from({length:PRODUCTION_PARAMETER_LAYERS*layerStride},(_,i)=>i%17*.01);
   packed.set(before);
   const atlas=Float32Array.from({length:layerStride},(_,i)=>i%4<2?-150+i:90000-i);
   packProductionAcceleration(packed,size,rows,atlas,candidates);
   assert.deepEqual(packed.subarray(0,before.length),before);
   for(let index=0;index<candidates.length;index++) {
-    const pixel=Math.floor(index/4),layer=16+Math.floor(pixel/(size*rows));
+    const pixel=Math.floor(index/4),layer=PRODUCTION_PARAMETER_LAYERS+Math.floor(pixel/(size*rows));
     const y=Math.floor(pixel/size)%rows,x=pixel%size;
     assert.equal(packed[(layer*size*rows+y*size+x)*4+index%4],candidates[index]);
   }

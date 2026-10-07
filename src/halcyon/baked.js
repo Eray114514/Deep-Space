@@ -65,12 +65,19 @@ class Tile {
     t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
     this.views = [];
     this.image = null;
+    this.disposed = false;
     loader.load(
       BASE + file,
       (img) => {
+        if(this.disposed)return;
+        // WebGL2 allocates immutable storage for the 1x1 placeholder. Release
+        // every owner before changing its shared Source; an image update alone
+        // would upload 1024/2048 texels into that original one-pixel allocation.
+        const owned=[t,...this.views];
+        for(const texture of owned)texture.dispose();
         this.image = img.image;
-        this.adopt(t);
-        for (const v of this.views) this.adopt(v);
+        const source=new THREE.Source(this.image);
+        for(const texture of owned){texture.source=source;this.adopt(texture);}
       },
       undefined,
       () => { /* keep the placeholder — an untextured ship beats a black one */ },
@@ -78,7 +85,7 @@ class Tile {
   }
 
   adopt(t) {
-    if (!this.image) return;
+    if (!this.image || this.disposed) return;
     t.image = this.image;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.generateMipmaps = true;
@@ -89,6 +96,7 @@ class Tile {
 
   /** a clone with its own repeat, kept in sync with the real image */
   view(rx, ry = rx) {
+    if(this.disposed)throw new Error('Cannot create a view of a disposed tile');
     const v = this.base.clone();
     v.wrapS = v.wrapT = THREE.RepeatWrapping;
     v.repeat.set(rx, ry);
@@ -101,6 +109,7 @@ class Tile {
   }
 
   dispose() {
+    if(this.disposed)return;this.disposed=true;
     this.base.dispose();
     for (const v of this.views) v.dispose();
     this.views.length = 0;
@@ -185,8 +194,8 @@ export function dress(
         /* The same two textures, no extra memory: only the UV multiplier
            differs, and it is relative to the main repeat because three has
            already folded that into vNormalMapUv. */
-        shader.uniforms.uMicroNrm = { value: set.nrm.view(rep, repY) };
-        shader.uniforms.uMicroOrm = { value: set.orm.view(rep, repY) };
+        shader.uniforms.uMicroNrm = { value: m.normalMap };
+        shader.uniforms.uMicroOrm = { value: orm };
         shader.uniforms.uMicroRep = { value: microRep / rep };
         shader.uniforms.uMicroN = { value: microN };
         shader.uniforms.uMicroR = { value: microR };

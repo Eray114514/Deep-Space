@@ -6,6 +6,7 @@ import {PRODUCTION_PARAMETER_LAYERS,packProductionAcceleration} from './producti
 export class PlanetWeatherStream {
   constructor(planet) {
     this.planet=planet; this.frames=new Map(); this.pending=new Set();
+    this.generations=new WeakMap();this.generation=0;
     this.token=0; this.disposed=false; this.error=null; this.lastUpdate=-Infinity;
     const angularSpeed=Math.abs(planet.weatherField.windRadiansPerHour);
     this.frameHours=.5/2**Math.max(0,Math.ceil(Math.log2(angularSpeed*.5/.05)));
@@ -26,6 +27,12 @@ export class PlanetWeatherStream {
     this.worker.postMessage({type:'frame',token:this.token,hours,
       stellarDirections:this.planet.stellarDirectionsAt?.(hours),
       width:this.planet.cloudAtlasWidth,surfaceRange:this.planet.weatherField.surfaceRangeMeters,frameHours:this.frameHours});
+  }
+  revisionAt(hours) {
+    const frame=this.frames.get(hours);
+    if(!frame)return null;
+    if(!this.generations.has(frame))this.generations.set(frame,++this.generation);
+    return this.generations.get(frame);
   }
   update(hours,force=false) {
     if(this.disposed) return;
@@ -67,8 +74,9 @@ export class PlanetWeatherStream {
       p.cloudSpeciesTex.needsUpdate=true;
       p.cloudSpeciesTex.userData.hours=hours;
     }
-    if(p.cloudBoundsTex && this.boundsAnchor!==a) {
+    if(p.cloudBoundsTex && (this.boundsAnchor!==a || this.boundsFirst!==first || this.boundsSecond!==second)) {
       this.boundsAnchor=a;
+      this.boundsFirst=first;this.boundsSecond=second;
       const data=p.cloudBoundsTex.image.data;
       for(let i=0;i<data.length;i++) data[i]=i%2===0
         ? Math.min(first.bounds[i],second.bounds[i]) : Math.max(first.bounds[i],second.bounds[i]);
@@ -104,5 +112,6 @@ export class PlanetWeatherStream {
   dispose() {
     if(this.disposed) return;this.disposed=true;this.worker.terminate();this.frames.clear();this.pending.clear();
     this.committedFirst=null;this.committedSecond=null;
+    this.boundsFirst=null;this.boundsSecond=null;
   }
 }

@@ -14,6 +14,7 @@ import { SpaceControls, WalkControls, guidePlanetApproach, keys,
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
+import { compileRenderVariant } from './render-prewarm.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
@@ -434,19 +435,9 @@ function prewarmLoadedShipPipelines() {
     || !surfacePipelinesReady) return;
   shipPipelineWarmPending = true;
   surfacePipelinesReady = false;
-  const meshState = [];
   const textures = new Set();
   ship.group.traverse((object) => {
     if (!object.isMesh) return;
-    meshState.push({
-      object,
-      visible: object.visible,
-      frustumCulled: object.frustumCulled,
-    });
-    // compile() visits every mesh in its input group, including hidden cabin
-    // parts. Restrict the input to the hull; camera layers select its lights.
-    object.visible = true;
-    object.frustumCulled = false;
     const materials = Array.isArray(object.material)
       ? object.material : [object.material];
     for (const material of materials) {
@@ -458,7 +449,6 @@ function prewarmLoadedShipPipelines() {
       }
     }
   });
-  const cameraLayerMask = camera.layers.mask;
   // Match the light set that ForegroundPass enables later in the same frame.
   // Starting the compile before these layers were enabled produced a 13-light
   // variant; the first visible hero frame then needed the real 16-light plus
@@ -470,19 +460,11 @@ function prewarmLoadedShipPipelines() {
   // Pipeline compilation does not force image upload. Initializing the unique
   // hull textures here keeps the webp transfers behind the loading veil
   // instead of clustering them in the pull-back shot.
-  const restoreMeshState = () => {
-    camera.layers.mask = cameraLayerMask;
-    for (const { object, visible, frustumCulled } of meshState) {
-      object.visible = visible;
-      object.frustumCulled = frustumCulled;
-    }
-  };
   try {
     if (typeof renderer.initTexture === 'function') {
       for (const textureValue of textures) renderer.initTexture(textureValue);
     }
   } catch (error) {
-    restoreMeshState();
     shipPipelineWarmPending = false;
     surfacePipelinesReady = true;
     console.warn('ship texture prewarm failed', error);
@@ -492,13 +474,15 @@ function prewarmLoadedShipPipelines() {
   // live foreground pass draws into the composer's half-float buffer, while
   // compiling against the default framebuffer only warmed an sRGB variant;
   // pressing Start then synchronously discovered the real 19 hull programs.
-  const compileLayer = async (layer, target) => {
-    camera.layers.set(layer);
-    const compileTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(target);
-    const task = renderer.compileAsync(ship.group, camera, scene);
-    renderer.setRenderTarget(compileTarget);
-    await task;
+  const compileLayer = (layer, target) => {
+    const foreground=ship.foregroundOnly,sunVisible=sunShadow.visible;
+    try {
+      if(layer===0){ship.setForegroundOnly(false);sunShadow.visible=true;}
+      return compileRenderVariant(renderer,ship.group,camera,scene,
+        {layer,target,shadowLight:layer===0?sunShadow:null});
+    } finally {
+      ship.setForegroundOnly(foreground);sunShadow.visible=sunVisible;
+    }
   };
   const foregroundCompile = (async () => {
     await compileLayer(SHIP_FOREGROUND_LAYER, nodePipeline.composer.readBuffer);
@@ -512,26 +496,18 @@ function prewarmLoadedShipPipelines() {
     // DIFFERENT light set (sunShadow joins near the surface), so every dress
     // material compiles a second program family. Compiling it here keeps a
     // multi-second stall off the first landed frame.
-    const savedSunVisible = sunShadow.visible;
     try {
-      sunShadow.visible = true;
-      ship.setForegroundOnly(false);
       await compileLayer(0, nodePipeline.composer.writeBuffer);
       if (RENDER_LOOK_NEXT) {
         await compileLayer(SHIP_INTERIOR_LAYER, nodePipeline.composer.writeBuffer);
       }
     } catch (error) {
       console.warn('ship main-pass prewarm failed', error);
-    } finally {
-      ship.setForegroundOnly(true);
-      sunShadow.visible = savedSunVisible;
     }
-    restoreMeshState();
     shipPipelinesWarmed = true;
     shipPipelineWarmPending = false;
     surfacePipelinesReady = true;
   }).catch((error) => {
-    restoreMeshState();
     shipPipelineWarmPending = false;
     surfacePipelinesReady = true;
     console.warn('ship pipeline prewarm failed', error);

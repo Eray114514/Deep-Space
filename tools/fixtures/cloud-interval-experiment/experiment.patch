@@ -1,0 +1,882 @@
+diff --git a/package.json b/package.json
+index ee1c4bd..071b0f9 100644
+--- a/package.json
++++ b/package.json
+@@ -5,7 +5,7 @@
+   "type": "module",
+   "scripts": {
+     "dev": "node tools/server.js",
+-    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/farfloratest.js && node tools/farfloraprecisiontest.js && node tools/vegetationprecisiontest.js && node tools/vegetationstreamtest.js && node tools/frameworkbudgettest.js && node tools/waterstreamtest.js && node tools/renderprofilertest.js && node tools/weatherstreamtest.js && node tools/surfacevarianttest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudweathertest.js && node tools/planetweathertest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
++    "test": "node tools/test.js && node tools/graphicssettingstest.js && node tools/renderlooktest.js && node tools/farfloratest.js && node tools/farfloraprecisiontest.js && node tools/vegetationprecisiontest.js && node tools/vegetationstreamtest.js && node tools/frameworkbudgettest.js && node tools/waterstreamtest.js && node tools/renderprofilertest.js && node tools/renderprewarmtest.js && node tools/cloudintervaltest.js && node tools/b4bandboundstest.js && node tools/weatherstreamtest.js && node tools/surfacevarianttest.js && node tools/cloudspeciestest.js && node tools/weathersystemtest.js && node tools/cloudweathertest.js && node tools/planetweathertest.js && node tools/cloudsamplingtest.js && node tools/cloudresourcetest.js && node tools/astronomytest.js && node tools/galaxycatalogtest.js && node tools/artificialtest.js && node tools/atmospherequadraturetest.js && node tools/worldlocktest.js",
+     "test:cloud-species": "node tools/cloudspeciestest.js",
+     "test:weather-system": "node tools/weathersystemtest.js",
+     "test:cloud-sampling": "node tools/cloudsamplingtest.js",
+@@ -55,7 +55,7 @@
+     "test:render-look:perf": "node tools/renderlookperftest.js",
+     "test:vegetation": "node tools/vegetationtest.js",
+     "test:vegetation:precision": "node tools/vegetationprecisiontest.js",
+-    "test:foundation:stream": "node tools/vegetationstreamtest.js && node tools/weatherstreamtest.js && node tools/frameworkbudgettest.js && node tools/waterstreamtest.js && node tools/renderprofilertest.js",
++    "test:foundation:stream": "node tools/vegetationstreamtest.js && node tools/weatherstreamtest.js && node tools/frameworkbudgettest.js && node tools/waterstreamtest.js && node tools/renderprofilertest.js && node tools/renderprewarmtest.js && node tools/cloudintervaltest.js && node tools/b4bandboundstest.js",
+     "test:foundation:stream:perf": "node tools/foundationstreamperftest.js",
+     "test:vegetation:gpu": "node tools/vegetationgputest.js",
+     "test:vegetation:player": "node tools/vegetationplaytest.js",
+@@ -89,7 +89,8 @@
+     "test:b4:perf": "node tools/b4playerperftest.js",
+     "test:b4:geometry": "node tools/b4cloudgeometrytest.js",
+     "test:foundation:frame": "node tools/foundationframeperftest.js",
+-    "test:foundation:flight": "node tools/foundationflightperftest.js"
++    "test:foundation:flight": "node tools/foundationflightperftest.js",
++    "test:cloud:interval": "node tools/cloudintervalperftest.js"
+   },
+   "devDependencies": {
+     "@gltf-transform/cli": "^4.3.0",
+diff --git a/src/cloud/cloud-light-bank.js b/src/cloud/cloud-light-bank.js
+index b5c4f53..4f22392 100644
+--- a/src/cloud/cloud-light-bank.js
++++ b/src/cloud/cloud-light-bank.js
+@@ -40,6 +40,11 @@ export class CloudLightBank {
+     const p=this.planet,hours=p.weatherHours;
+     if(this.fieldOwner!==p.weatherField || this.speciesMask!==p.volCloudMat.uniforms.uSpeciesMask.value || hours<this.baseHours
+       || this.lightIds!==p.stellarLightField.sources.map(s=>s.id).join('|'))return true;
++    for(const cache of this.maps.values()) {
++      const sources=cache.weatherSources;
++      if(sources && (sources.stream!==p.weatherStream || sources.frames.some(
++        ({hours,revision})=>sources.stream.revisionAt(hours)!==revision)))return true;
++    }
+     const position=p.volCloudMat.uniforms.uCameraLocal.value,radial=position.clone().normalize();
+     if(Math.abs(position.length()-p.R-this.cameraHeight)>Math.max(2000,this.size*this.spacing*.2))return true;
+     const height=this.center.length()-p.R;
+@@ -61,6 +66,8 @@ export class CloudLightBank {
+     const cache=new CloudSunCache(p,this.center.clone().applyMatrix4(rotation),{
+       size:this.size,depth:this.depth,spacing:this.spacing,hours,forecast,target:this.target,
+       tileOffset:(index%3+3)%3*this.depth*4,programOwner:this.programs});
++    cache.weatherSources={stream,frames:[anchor,anchor+stream.frameHours].map(hours=>
++      ({hours,revision:stream.revisionAt(hours)}))};
+     this.maps.set(index,cache);return cache;
+   }
+   update(renderer) {
+diff --git a/src/cloud/cloud-sun-cache.js b/src/cloud/cloud-sun-cache.js
+index d29f134..7548847 100644
+--- a/src/cloud/cloud-sun-cache.js
++++ b/src/cloud/cloud-sun-cache.js
+@@ -3,7 +3,7 @@ import { FullScreenQuad } from '../../vendor/jsm/postprocessing/Pass.js';
+ import { productionCloudGLSL } from './production-medium-glsl.js';
+ import { weatherAtlasGLSL } from './weather-atlas.js';
+ import { cloudBeamGLSL } from './cloud-beam-glsl.js';
+-import {packProductionAcceleration,PRODUCTION_PARAMETER_LAYERS} from './production-bands.js';
++import {packProductionAcceleration,PRODUCTION_PARAMETER_LAYERS,buildCandidateAcceleration} from './production-bands.js';
+ 
+ export const cloudSunCacheSamplingGLSL=/* glsl */`
+   float cloudSunCachePlaneAt(sampler2D cache,vec3 coordinate,float size,float layer,float offset) {
+@@ -83,12 +83,13 @@ export class CloudSunCache {
+       const bands=first.bands.slice(),image=source.uSpeciesMap.value.image;
+       for(let i=0;i<image.width*image.height*4*PRODUCTION_PARAMETER_LAYERS;i++)
+         bands[i]=first.bands[i]*(1-mix)+second.bands[i]*mix;
+-      packProductionAcceleration(bands,image.width,image.height,bounds,candidates);
++      const acceleration=buildCandidateAcceleration(candidates);
++      packProductionAcceleration(bands,image.width,image.height,bounds,candidates,acceleration);
+       const high=first.high.map((v,i)=>v*(1-mix)+second.high[i]*mix),highImage=source.uWeatherMapHi.value.image;
+       const north=new Float32Array(high.length);
+       for(let y=0;y<highImage.height;y++)north.set(high.subarray(y*highImage.width*4,(y+1)*highImage.width*4),
+         (highImage.height-1-y)*highImage.width*4);
+-      Object.assign(forecastBytes,{uSpeciesMap:bands,uBandBounds:bounds,uBandCandidates:candidates,uWeatherMapHi:north});
++      Object.assign(forecastBytes,{uSpeciesMap:bands,uBandBounds:bounds,uBandCandidates:acceleration,uWeatherMapHi:north});
+     }
+     for(const name of ['uSpeciesMap','uBandBounds','uBandCandidates','uWeatherMapHi']) {
+       const original=source[name].value,image=original.image;
+diff --git a/src/cloud/planet-weather-stream.js b/src/cloud/planet-weather-stream.js
+index e010f31..dbd9422 100644
+--- a/src/cloud/planet-weather-stream.js
++++ b/src/cloud/planet-weather-stream.js
+@@ -1,11 +1,12 @@
+ // Absolute-time forecasts blended in potential space. The two existing atlas
+ // textures commit together; every renderer/gameplay consumer sees those bytes.
+ import * as THREE from 'three';
+-import {PRODUCTION_PARAMETER_LAYERS,packProductionAcceleration} from './production-bands.js';
++import {PRODUCTION_PARAMETER_LAYERS,packProductionAcceleration,buildCandidateAcceleration} from './production-bands.js';
+ 
+ export class PlanetWeatherStream {
+   constructor(planet) {
+     this.planet=planet; this.frames=new Map(); this.pending=new Set();
++    this.generations=new WeakMap();this.generation=0;
+     this.token=0; this.disposed=false; this.error=null; this.lastUpdate=-Infinity;
+     const angularSpeed=Math.abs(planet.weatherField.windRadiansPerHour);
+     this.frameHours=.5/2**Math.max(0,Math.ceil(Math.log2(angularSpeed*.5/.05)));
+@@ -27,6 +28,12 @@ export class PlanetWeatherStream {
+       stellarDirections:this.planet.stellarDirectionsAt?.(hours),
+       width:this.planet.cloudAtlasWidth,surfaceRange:this.planet.weatherField.surfaceRangeMeters,frameHours:this.frameHours});
+   }
++  revisionAt(hours) {
++    const frame=this.frames.get(hours);
++    if(!frame)return null;
++    if(!this.generations.has(frame))this.generations.set(frame,++this.generation);
++    return this.generations.get(frame);
++  }
+   update(hours,force=false) {
+     if(this.disposed) return;
+     const FRAME_HOURS=this.frameHours;
+@@ -67,19 +74,22 @@ export class PlanetWeatherStream {
+       p.cloudSpeciesTex.needsUpdate=true;
+       p.cloudSpeciesTex.userData.hours=hours;
+     }
+-    if(p.cloudBoundsTex && this.boundsAnchor!==a) {
++    if(p.cloudBoundsTex && (this.boundsAnchor!==a || this.boundsFirst!==first || this.boundsSecond!==second)) {
+       this.boundsAnchor=a;
++      this.boundsFirst=first;this.boundsSecond=second;
+       const data=p.cloudBoundsTex.image.data;
+       for(let i=0;i<data.length;i++) data[i]=i%2===0
+         ? Math.min(first.bounds[i],second.bounds[i]) : Math.max(first.bounds[i],second.bounds[i]);
+       p.cloudBoundsTex.needsUpdate=true;
+-      const candidates=p.cloudCandidatesTex?.image.data;
+-      if(candidates) {
+-        for(let i=0;i<candidates.length;i++)candidates[i]=first.candidates[i]|second.candidates[i];
++      this.candidates ||= new Uint16Array(first.candidates.length);
++      const candidates=this.candidates,acceleration=p.cloudCandidatesTex?.image.data;
++      for(let i=0;i<candidates.length;i++)candidates[i]=first.candidates[i]|second.candidates[i];
++      if(acceleration) {
++        buildCandidateAcceleration(candidates,undefined,undefined,undefined,acceleration);
+         p.cloudCandidatesTex.needsUpdate=true;
+       }
+       if(bandData)packProductionAcceleration(bandData,p.cloudSpeciesTex.image.width,
+-        p.cloudSpeciesTex.image.height,data,candidates);
++        p.cloudSpeciesTex.image.height,data,candidates,acceleration);
+     }
+     for(const [texture,key] of [[p.cloudShadowTex,'low'],[p.cloudWeatherHiTex,'high']]) {
+       const atlas=texture.userData.weatherAtlas;
+@@ -104,5 +114,6 @@ export class PlanetWeatherStream {
+   dispose() {
+     if(this.disposed) return;this.disposed=true;this.worker.terminate();this.frames.clear();this.pending.clear();
+     this.committedFirst=null;this.committedSecond=null;
++    this.boundsFirst=null;this.boundsSecond=null;this.candidates=null;
+   }
+ }
+diff --git a/src/cloud/production-bands.js b/src/cloud/production-bands.js
+index c857f39..af11a7f 100644
+--- a/src/cloud/production-bands.js
++++ b/src/cloud/production-bands.js
+@@ -3,15 +3,37 @@
+ import { CLOUD_SPECIES, speciesAltitudeBand } from './cloud-species.js';
+ import {sampleWeatherAtlas} from './weather-atlas.js';
+ 
+-export const PRODUCTION_BAND_VERSION = 5;
++export const PRODUCTION_BAND_VERSION = 6;
+ export const PRODUCTION_BAND_COUNT = CLOUD_SPECIES.length;
+ export const PRODUCTION_PARAMETER_LAYERS = PRODUCTION_BAND_COUNT+8;
+ export function productionStorageLayers(width,height=width/2) {
+-  return PRODUCTION_PARAMETER_LAYERS+Math.ceil(CANDIDATE_WIDTH*CANDIDATE_HEIGHT*CANDIDATE_LAYERS/(width*height*4))+2;
++  return PRODUCTION_PARAMETER_LAYERS+Math.ceil(CANDIDATE_WIDTH*CANDIDATE_HEIGHT*CANDIDATE_LAYERS*2/(width*height*4))+2;
+ }
+-export function packProductionAcceleration(data,width,height,bounds,candidates) {
++// R keeps the exact species mask. G stores the nearest occupied radial bins
++// below/above (7 bits each); 0/depth mark the unchanged shell-boundary fallback.
++// Build from the conservative mask union, never from interpolated weather.
++export function buildCandidateAcceleration(candidates,width=CANDIDATE_WIDTH,height=CANDIDATE_HEIGHT,
++  depth=CANDIDATE_LAYERS,output=new Uint16Array(candidates.length*2)) {
++  const stride=width*height;
++  if(depth>127 || candidates.length!==stride*depth || output.length!==candidates.length*2)
++    throw new RangeError('Invalid candidate acceleration dimensions');
++  const nearest=new Uint16Array(stride);
++  for(let z=0;z<depth;z++)for(let cell=0;cell<stride;cell++) {
++    const i=z*stride+cell;
++    output[i*2]=candidates[i];output[i*2+1]=nearest[cell];
++    if(candidates[i])nearest[cell]=z+1;
++  }
++  nearest.fill(depth);
++  for(let z=depth-1;z>=0;z--)for(let cell=0;cell<stride;cell++) {
++    const i=z*stride+cell;
++    output[i*2+1]|=nearest[cell]<<7;
++    if(candidates[i])nearest[cell]=z;
++  }
++  return output;
++}
++export function packProductionAcceleration(data,width,height,bounds,candidates,acceleration=null) {
+   const stride=width*height*4;
+-  data.set(candidates,PRODUCTION_PARAMETER_LAYERS*stride);
++  data.set(acceleration||buildCandidateAcceleration(candidates),PRODUCTION_PARAMETER_LAYERS*stride);
+   data.set(bounds,(productionStorageLayers(width,height)-2)*stride);
+ }
+ export function buildProductionBands(sample,width=128,terrain=null,{spin=0,angularGuard=0.05}={}) {
+diff --git a/src/cloud/production-shape.js b/src/cloud/production-shape.js
+index 2bfd2eb..18bed3d 100644
+--- a/src/cloud/production-shape.js
++++ b/src/cloud/production-shape.js
+@@ -18,7 +18,7 @@ export const productionSpeciesGLSL = /* glsl */`
+   uniform sampler2DArray uSpeciesMap;
+   precision highp usampler2DArray;
+   uniform usampler2DArray uBandCandidates;
+-  uniform float uCandidatesReady,uCandidateLayers;
++  uniform float uCandidatesReady,uCandidateLayers,uCandidateIntervalsReady;
+   uniform sampler2D uBandBounds;
+   uniform float uBandsReady, uSpeciesMask;
+   uniform float uSpeciesCount;
+@@ -107,21 +107,24 @@ export const productionSpeciesGLSL = /* glsl */`
+     ivec2 cell=clamp(ivec2(floor(uv*vec2(size.xy))),ivec2(0),size.xy-1);
+     int layer=clamp(int(floor(altitude/500.0)),0,size.z-1);
+     if(texelFetch(uBandCandidates,ivec3(cell,layer),0).r!=0u)return 0.0;
+-    float below=uRin,above=uRout;
+-    for(int k=1;k<int(uCandidateLayers);k++) {
+-      int index=layer-k;
+-      if(index<0)break;
+-      if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u) {
+-        below=max(below,uBodyR+float(index+1)*500.0);break;
++    uint lower=0u,upper=uint(size.z);
++    if(uCandidateIntervalsReady>.5) {
++      uint interval=texelFetch(uBandCandidates,ivec3(cell,layer),0).g;
++      lower=interval&127u;upper=interval>>7;
++    } else {
++      // Keep an independent scan path for unindexed fixtures and same-program
++      // equivalence checks. Both paths share every floating-point operation.
++      for(int k=1;k<int(uCandidateLayers);k++) {
++        int index=layer-k;if(index<0)break;
++        if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u){lower=uint(index+1);break;}
+       }
+-    }
+-    for(int k=1;k<int(uCandidateLayers);k++) {
+-      int index=layer+k;
+-      if(index>=size.z)break;
+-      if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u) {
+-        above=min(above,uBodyR+float(index)*500.0);break;
++      for(int k=1;k<int(uCandidateLayers);k++) {
++        int index=layer+k;if(index>=size.z)break;
++        if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u){upper=uint(index);break;}
+       }
+     }
++    float below=lower>0u?max(uRin,uBodyR+float(lower)*500.0):uRin;
++    float above=upper<uint(size.z)?min(uRout,uBodyR+float(upper)*500.0):uRout;
+     float distance=min(radius-below,above-radius);
+     float theta=weatherAtan2(length(point.xz),point.y);
+     for(int side=0;side<2;side++) {
+diff --git a/src/cloud/surface-clouds.js b/src/cloud/surface-clouds.js
+index 8578e1f..ada2ecb 100644
+--- a/src/cloud/surface-clouds.js
++++ b/src/cloud/surface-clouds.js
+@@ -8,7 +8,7 @@ import * as THREE from 'three';
+ let preparingSurface=false;
+ export function setCloudSurfacePreparation(value) {preparingSurface=Boolean(value);}
+ 
+-const names=['uNoise3','uSpeciesMap','uBandsReady','uCandidatesReady','uCandidateLayers',
++const names=['uNoise3','uSpeciesMap','uBandsReady','uCandidatesReady','uCandidateLayers','uCandidateIntervalsReady',
+   'uSpeciesMask','uSpeciesCount','uMediumLayer','uWeatherMapHi','uCloudAdvectionPhase','uSpeciesPartition',
+   'uSpin','uCOff','uBodyR','uSurfaceRange','uRin','uRout','uGroundR','uCloudLightSteps'];
+ names.push('uCameraLocal','uCameraFar');
+@@ -32,7 +32,9 @@ const surfaceDensity = productionCloudGLSL
+     'packedCloudBounds(weatherAtlasUV(uSpin*radial))')
+   .replaceAll('textureSize(uBandCandidates,0)', 'ivec3(64,32,64)')
+   .replaceAll(/texelFetch\(uBandCandidates,ivec3\(cell,([^\n]+?)\),0\)\.r/g,
+-    'packedCloudCandidates(ivec3(cell,$1))')
++    'packedCloudCandidateAt(ivec3(cell,$1),0)')
++  .replaceAll(/texelFetch\(uBandCandidates,ivec3\(cell,([^\n]+?)\),0\)\.g/g,
++    'packedCloudCandidateAt(ivec3(cell,$1),1)')
+   .replace('uniform sampler2D uSpeciesParameters;',
+     'uniform vec4 uSpeciesOptics[16],uSpeciesShapes[16],uSpeciesStructures[16],uSelectionCDF[16];')
+   .replace('texelFetch(uSpeciesParameters,ivec2(i,0),0)', 'uSpeciesOptics[i]')
+@@ -46,9 +48,9 @@ const surfaceDensity = productionCloudGLSL
+       ivec2 cell=clamp(ivec2(floor(uv*vec2(size.xy))),ivec2(0),size.xy-1);
+       return texelFetch(uSpeciesMap,ivec3(cell,size.z-2),0);
+     }
+-    uint packedCloudCandidates(ivec3 cell) {
++    uint packedCloudCandidateAt(ivec3 cell,int channel) {
+       ivec3 size=textureSize(uSpeciesMap,0);
+-      int index=(cell.z*32+cell.y)*64+cell.x,pixel=index/4;
++      int index=((cell.z*32+cell.y)*64+cell.x)*2+channel,pixel=index/4;
+       ivec3 location=ivec3(pixel%size.x,(pixel/size.x)%size.y,${PRODUCTION_PARAMETER_LAYERS}+pixel/(size.x*size.y));
+       return uint(texelFetch(uSpeciesMap,location,0)[index%4]);
+     }
+diff --git a/src/clouds-webgl.js b/src/clouds-webgl.js
+index c0bd6f4..8ecd08a 100644
+--- a/src/clouds-webgl.js
++++ b/src/clouds-webgl.js
+@@ -104,6 +104,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
+       uCandidateLayers: { value: 64 },
+       uBandCandidates: { value: planet.cloudCandidatesTex || null },
+       uCandidatesReady: { value: planet.cloudCandidatesTex ? 1 : 0 },
++      uCandidateIntervalsReady: { value: planet.cloudCandidatesTex?.format===THREE.RGIntegerFormat ? 1 : 0 },
+       uBandsReady: { value: planet.cloudSpeciesTex ? 1 : 0 },
+       uSpeciesMask: { value: -1 },
+       uMediumLayer: { value: 0 },
+diff --git a/src/main.js b/src/main.js
+index 005bbb8..fd7bc9a 100644
+--- a/src/main.js
++++ b/src/main.js
+@@ -14,6 +14,7 @@ import { SpaceControls, WalkControls, guidePlanetApproach, keys,
+ import { Scatter } from './scatter.js';
+ import { FarFlora } from './farflora.js';
+ import { createSurfaceWarmupScene } from './surface-warmup.js';
++import { compileRenderVariant } from './render-prewarm.js';
+ import { FrameWorkBudget } from './frame-work-budget.js';
+ import { landingDescentProgress, SHIP_LANDING_PROFILE,
+   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
+@@ -434,19 +435,9 @@ function prewarmLoadedShipPipelines() {
+     || !surfacePipelinesReady) return;
+   shipPipelineWarmPending = true;
+   surfacePipelinesReady = false;
+-  const meshState = [];
+   const textures = new Set();
+   ship.group.traverse((object) => {
+     if (!object.isMesh) return;
+-    meshState.push({
+-      object,
+-      visible: object.visible,
+-      frustumCulled: object.frustumCulled,
+-    });
+-    // compile() visits every mesh in its input group, including hidden cabin
+-    // parts. Restrict the input to the hull; camera layers select its lights.
+-    object.visible = true;
+-    object.frustumCulled = false;
+     const materials = Array.isArray(object.material)
+       ? object.material : [object.material];
+     for (const material of materials) {
+@@ -458,7 +449,6 @@ function prewarmLoadedShipPipelines() {
+       }
+     }
+   });
+-  const cameraLayerMask = camera.layers.mask;
+   // Match the light set that ForegroundPass enables later in the same frame.
+   // Starting the compile before these layers were enabled produced a 13-light
+   // variant; the first visible hero frame then needed the real 16-light plus
+@@ -470,19 +460,11 @@ function prewarmLoadedShipPipelines() {
+   // Pipeline compilation does not force image upload. Initializing the unique
+   // hull textures here keeps the webp transfers behind the loading veil
+   // instead of clustering them in the pull-back shot.
+-  const restoreMeshState = () => {
+-    camera.layers.mask = cameraLayerMask;
+-    for (const { object, visible, frustumCulled } of meshState) {
+-      object.visible = visible;
+-      object.frustumCulled = frustumCulled;
+-    }
+-  };
+   try {
+     if (typeof renderer.initTexture === 'function') {
+       for (const textureValue of textures) renderer.initTexture(textureValue);
+     }
+   } catch (error) {
+-    restoreMeshState();
+     shipPipelineWarmPending = false;
+     surfacePipelinesReady = true;
+     console.warn('ship texture prewarm failed', error);
+@@ -492,13 +474,15 @@ function prewarmLoadedShipPipelines() {
+   // live foreground pass draws into the composer's half-float buffer, while
+   // compiling against the default framebuffer only warmed an sRGB variant;
+   // pressing Start then synchronously discovered the real 19 hull programs.
+-  const compileLayer = async (layer, target) => {
+-    camera.layers.set(layer);
+-    const compileTarget = renderer.getRenderTarget();
+-    renderer.setRenderTarget(target);
+-    const task = renderer.compileAsync(ship.group, camera, scene);
+-    renderer.setRenderTarget(compileTarget);
+-    await task;
++  const compileLayer = (layer, target) => {
++    const foreground=ship.foregroundOnly,sunVisible=sunShadow.visible;
++    try {
++      if(layer===0){ship.setForegroundOnly(false);sunShadow.visible=true;}
++      return compileRenderVariant(renderer,ship.group,camera,scene,
++        {layer,target,shadowLight:layer===0?sunShadow:null});
++    } finally {
++      ship.setForegroundOnly(foreground);sunShadow.visible=sunVisible;
++    }
+   };
+   const foregroundCompile = (async () => {
+     await compileLayer(SHIP_FOREGROUND_LAYER, nodePipeline.composer.readBuffer);
+@@ -512,26 +496,18 @@ function prewarmLoadedShipPipelines() {
+     // DIFFERENT light set (sunShadow joins near the surface), so every dress
+     // material compiles a second program family. Compiling it here keeps a
+     // multi-second stall off the first landed frame.
+-    const savedSunVisible = sunShadow.visible;
+     try {
+-      sunShadow.visible = true;
+-      ship.setForegroundOnly(false);
+       await compileLayer(0, nodePipeline.composer.writeBuffer);
+       if (RENDER_LOOK_NEXT) {
+         await compileLayer(SHIP_INTERIOR_LAYER, nodePipeline.composer.writeBuffer);
+       }
+     } catch (error) {
+       console.warn('ship main-pass prewarm failed', error);
+-    } finally {
+-      ship.setForegroundOnly(true);
+-      sunShadow.visible = savedSunVisible;
+     }
+-    restoreMeshState();
+     shipPipelinesWarmed = true;
+     shipPipelineWarmPending = false;
+     surfacePipelinesReady = true;
+   }).catch((error) => {
+-    restoreMeshState();
+     shipPipelineWarmPending = false;
+     surfacePipelinesReady = true;
+     console.warn('ship pipeline prewarm failed', error);
+diff --git a/src/planet.js b/src/planet.js
+index f774229..2ff4be5 100644
+--- a/src/planet.js
++++ b/src/planet.js
+@@ -23,7 +23,7 @@ import { getCloudResourceManager } from './cloud/cloud-resource-manager.js';
+ import { sampleWeatherAtlas, decodeSynopticCoverage } from './cloud/weather-atlas.js';
+ import { createPlanetWeatherField } from './cloud/planet-weather.js';
+ import { PlanetWeatherStream } from './cloud/planet-weather-stream.js';
+-import { buildProductionBands, CANDIDATE_WIDTH, CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from './cloud/production-bands.js';
++import { buildProductionBands, buildCandidateAcceleration, CANDIDATE_WIDTH, CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from './cloud/production-bands.js';
+ import { sampleProductionMedium } from './cloud/production-shape.js';
+ import { CLOUD_TROPOSPHERE_TOP_METERS } from './cloud/cloud-species.js';
+ import { VOLUME_LAYER } from './volumetric-pass.js';
+@@ -1564,6 +1564,7 @@ export class Planet {
+         this.volCloudMat.uniforms.uBandBounds.value = this.cloudBoundsTex;
+         this.volCloudMat.uniforms.uBandCandidates.value = this.cloudCandidatesTex;
+         this.volCloudMat.uniforms.uCandidatesReady.value = this.cloudCandidatesTex ? 1 : 0;
++        this.volCloudMat.uniforms.uCandidateIntervalsReady.value = this.cloudCandidatesTex?.format===THREE.RGIntegerFormat ? 1 : 0;
+         this.volCloudMat.uniforms.uBandsReady.value = this.cloudSpeciesTex ? 1 : 0;
+         this.volCloudMat.uniforms.uColumnsReady.value = 0;
+         this.volCloudMat.uniforms.uLocalBands.value = this.weatherField.synoptic ? 1 : 0;
+@@ -2225,9 +2226,9 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
+     bounds=new THREE.DataTexture(packed.bounds,packed.width,packed.height,THREE.RGBAFormat,THREE.FloatType);
+     bounds.wrapS=THREE.RepeatWrapping;bounds.minFilter=bounds.magFilter=THREE.NearestFilter;
+     bounds.colorSpace=THREE.NoColorSpace;bounds.needsUpdate=true;
+-    candidates=new THREE.DataArrayTexture(packed.candidates,CANDIDATE_WIDTH,CANDIDATE_HEIGHT,CANDIDATE_LAYERS);
+-    candidates.format=THREE.RedIntegerFormat;candidates.type=THREE.UnsignedShortType;
+-    candidates.internalFormat='R16UI';candidates.minFilter=candidates.magFilter=THREE.NearestFilter;
++    candidates=new THREE.DataArrayTexture(buildCandidateAcceleration(packed.candidates),CANDIDATE_WIDTH,CANDIDATE_HEIGHT,CANDIDATE_LAYERS);
++    candidates.format=THREE.RGIntegerFormat;candidates.type=THREE.UnsignedShortType;
++    candidates.internalFormat='RG16UI';candidates.minFilter=candidates.magFilter=THREE.NearestFilter;
+     candidates.needsUpdate=true;
+   }
+   return { low, high, bands, bounds, candidates, stats };
+diff --git a/tools/b4bandboundstest.js b/tools/b4bandboundstest.js
+index 1a20458..b2e52a8 100644
+--- a/tools/b4bandboundstest.js
++++ b/tools/b4bandboundstest.js
+@@ -3,7 +3,8 @@
+ import assert from 'node:assert/strict';
+ import {CLOUD_SPECIES} from '../src/cloud/cloud-species.js';
+ import {productionBandBounds,productionBandCandidates,CANDIDATE_WIDTH,CANDIDATE_HEIGHT,
+-  CANDIDATE_LAYERS,CANDIDATE_METERS,productionStorageLayers,packProductionAcceleration} from '../src/cloud/production-bands.js';
++  CANDIDATE_LAYERS,CANDIDATE_METERS,productionStorageLayers,packProductionAcceleration,
++  PRODUCTION_PARAMETER_LAYERS,buildCandidateAcceleration} from '../src/cloud/production-bands.js';
+ const width=128,height=64,stride=width*height*4;
+ const data=new Float32Array(stride*CLOUD_SPECIES.length);
+ for(let species=0;species<CLOUD_SPECIES.length;species++)for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
+@@ -44,15 +45,16 @@ console.log('PASS conservative interpolated cloud acceleration:',{checked,absent
+ for(const size of [64,128,256]) {
+   const rows=size/2,layerStride=size*rows*4;
+   const packed=new Float32Array(layerStride*productionStorageLayers(size,rows));
+-  const before=Float32Array.from({length:16*layerStride},(_,i)=>i%17*.01);
++  const before=Float32Array.from({length:PRODUCTION_PARAMETER_LAYERS*layerStride},(_,i)=>i%17*.01);
+   packed.set(before);
+   const atlas=Float32Array.from({length:layerStride},(_,i)=>i%4<2?-150+i:90000-i);
+   packProductionAcceleration(packed,size,rows,atlas,candidates);
+   assert.deepEqual(packed.subarray(0,before.length),before);
+-  for(let index=0;index<candidates.length;index++) {
+-    const pixel=Math.floor(index/4),layer=16+Math.floor(pixel/(size*rows));
++  const acceleration=buildCandidateAcceleration(candidates);
++  for(let index=0;index<acceleration.length;index++) {
++    const pixel=Math.floor(index/4),layer=PRODUCTION_PARAMETER_LAYERS+Math.floor(pixel/(size*rows));
+     const y=Math.floor(pixel/size)%rows,x=pixel%size;
+-    assert.equal(packed[(layer*size*rows+y*size+x)*4+index%4],candidates[index]);
++    assert.equal(packed[(layer*size*rows+y*size+x)*4+index%4],acceleration[index]);
+   }
+   const boundsOffset=(productionStorageLayers(size,rows)-2)*layerStride;
+   assert.deepEqual(packed.subarray(boundsOffset,boundsOffset+layerStride),atlas);
+diff --git a/tools/cloud-light-support-browser.js b/tools/cloud-light-support-browser.js
+index cad2060..d0fe286 100644
+--- a/tools/cloud-light-support-browser.js
++++ b/tools/cloud-light-support-browser.js
+@@ -1,14 +1,14 @@
+ // Diagnostic only: retain real quantile positions and cache support tests,
+ // replace missed beams with zero, and output counters instead of radiance.
+ // No variant of this shader is shipped in the runtime.
+-export async function probeCloudLightSupport(page) {
+-  return page.evaluate(async()=>{
++export async function probeCloudLightSupport(page,{field=-1}={}) {
++  return page.evaluate(async field=>{
+     const T=NMS._THREE,r=NMS._renderer,p=NMS._pipeline.volumePass.activePlanet;
+-    const original=p.volCloudMat,probe=original.clone();probe.uniforms=original.uniforms;
++    const original=p.volCloudMat,probe=original.clone();probe.uniforms={...original.uniforms,uDiagnosticField:{value:field}};
+     probe.fragmentShader=probe.fragmentShader
+-      .replace('vec3 cloudCombinedSource(', 'float diagnosticMisses=0.0,diagnosticQueries=0.0,diagnosticVertical=0.0,diagnosticHorizontal=0.0;\nvec3 cloudCombinedSource(')
++      .replace('vec3 cloudCombinedSource(', 'uniform int uDiagnosticField;float diagnosticMisses=0.0,diagnosticQueries=0.0,diagnosticVertical=0.0,diagnosticHorizontal=0.0;\nvec3 cloudCombinedSource(')
+       .replace('if(!cached)pathDepth=cloudSunOpticalDepthLimit(local,direction,sigma,path<2?12.0:128.0);',
+-        `diagnosticQueries+=1.0;if(!cached) {
++        `if(uDiagnosticField<0||path==uDiagnosticField) {diagnosticQueries+=1.0;if(!cached) {
+           diagnosticMisses+=1.0;
+           vec3 diagnosticA=(uSunCacheMatrixA[path]*vec4(local,1)).xyz;
+           vec3 diagnosticB=(uSunCacheMatrixB[path]*vec4(local,1)).xyz;
+@@ -16,7 +16,7 @@ export async function probeCloudLightSupport(page) {
+           if(diagnosticA.z<mz||diagnosticA.z>1.0-mz||diagnosticB.z<mz||diagnosticB.z>1.0-mz)diagnosticVertical+=1.0;
+           if(any(lessThan(diagnosticA.xy,vec2(ma)))||any(greaterThan(diagnosticA.xy,vec2(1.0-ma)))
+             ||any(lessThan(diagnosticB.xy,vec2(mb)))||any(greaterThan(diagnosticB.xy,vec2(1.0-mb))))diagnosticHorizontal+=1.0;
+-        }`)
++        }}`)
+       .replace('void main() {','void diagnosticOriginalMain() {')
+       +'\nvoid main(){diagnosticOriginalMain();gl_FragColor=vec4(diagnosticMisses,diagnosticQueries,diagnosticVertical,diagnosticHorizontal);}';
+     probe.blending=T.NoBlending;probe.needsUpdate=true;
+@@ -45,7 +45,7 @@ export async function probeCloudLightSupport(page) {
+           if(bytes[i]===bytes[i+1])allMissPixels++;if(bytes[i]===0)allHitPixels++;
+         }
+         const bank=p.cloudLightBank,u=original.uniforms;
+-        resolve({width:target.width,height:target.height,occupied,queries,misses,verticalRejects,horizontalRejects,
++        resolve({field,width:target.width,height:target.height,occupied,queries,misses,verticalRejects,horizontalRejects,
+           missRatio:misses/queries,allMissPixels,allHitPixels,gl:r.getContext().getError(),
+           cache:{ready:u.uSunCacheReady.value,validA:u.uSunCacheValidA.value.toArray(),validB:u.uSunCacheValidB.value.toArray(),
+             cameraAltitude:u.uCameraLocal.value.length()-p.R,centerAltitude:bank?.center.length()-p.R,
+@@ -57,5 +57,5 @@ export async function probeCloudLightSupport(page) {
+       NMS._pipeline.volumePass.historyValid=false;
+       probe.dispose();target.dispose();geometry.dispose();material.dispose();
+     }
+-  });
++  },field);
+ }
+diff --git a/tools/cloudscopediag.js b/tools/cloudscopediag.js
+index 299bc94..f6e7324 100644
+--- a/tools/cloudscopediag.js
++++ b/tools/cloudscopediag.js
+@@ -44,8 +44,12 @@ try {
+   }
+   await page.screenshot({path:`${out}/player.png`});
+   const support=await probeCloudLightSupport(page);console.log('Support',JSON.stringify(support));
++  const fields=[];
++  if(process.argv.includes('--fields'))for(let field=0;field<4;field++) {
++    fields.push(await probeCloudLightSupport(page,{field}));console.log('Field',JSON.stringify(fields.at(-1)));
++  }
+   const after=await evidenceFingerprint('tools/cloudscopediag.js');
+-  await writeFile(`${out}/report.json`,JSON.stringify({before,after,inventory,scenarios,support,errors},null,2));
++  await writeFile(`${out}/report.json`,JSON.stringify({before,after,inventory,scenarios,support,fields,errors},null,2));
+   assert.equal(before.sourceDigest,after.sourceDigest);assert.deepEqual(errors,[]);
+   for(const s of scenarios)assert.equal(s.gl,0);
+   assert.equal(support.gl,0);assert.ok(support.queries>0);assert.ok(support.misses>=0&&support.misses<=support.queries);
+diff --git a/tools/weatherstreamtest.js b/tools/weatherstreamtest.js
+index 3a3caee..dc53f79 100644
+--- a/tools/weatherstreamtest.js
++++ b/tools/weatherstreamtest.js
+@@ -2,7 +2,9 @@
+ import assert from 'node:assert/strict';
+ import * as THREE from 'three';
+ import { PlanetWeatherStream } from '../src/cloud/planet-weather-stream.js';
+-import { PRODUCTION_PARAMETER_LAYERS } from '../src/cloud/production-bands.js';
++import { CloudLightBank } from '../src/cloud/cloud-light-bank.js';
++import { PRODUCTION_PARAMETER_LAYERS, productionStorageLayers, CANDIDATE_WIDTH,
++  CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from '../src/cloud/production-bands.js';
+ 
+ const originalWorker = globalThis.Worker;
+ class WorkerFixture {
+@@ -53,5 +55,42 @@ try {
+   assert.equal(p.cloudSpeciesTex.image.data[3],frame(.5,2).bands[3]);
+   stream.dispose();assert.equal(stream.worker.terminated,true);
+   assert.equal(stream.committedFirst,null);assert.equal(stream.committedSecond,null);
+-  console.log('PASS: exact weather transaction, prefetch deduplication, replacement frame, time advance, bracket turnover and disposal.');
++  const w=64,h=32,stride=CANDIDATE_WIDTH*CANDIDATE_HEIGHT;
++  const p2={...p,weatherHours:.25,cloudAtlasWidth:w,
++    cloudSpeciesTex:new THREE.DataArrayTexture(new Float32Array(w*h*4*productionStorageLayers(w,h)),w,h,productionStorageLayers(w,h)),
++    cloudBoundsTex:new THREE.DataTexture(new Float32Array(w*h*4),w,h,THREE.RGBAFormat,THREE.FloatType),
++    cloudCandidatesTex:new THREE.DataArrayTexture(new Uint16Array(stride*CANDIDATE_LAYERS*2),CANDIDATE_WIDTH,CANDIDATE_HEIGHT,CANDIDATE_LAYERS)};
++  const s2=new PlanetWeatherStream(p2);p2.weatherStream=s2;
++  const acceleratedFrame=(hours,layer,top)=>{
++    const result={...frame(hours),bands:new Float32Array(p2.cloudSpeciesTex.image.data.length),
++      bounds:Float32Array.from({length:w*h*4},(_,i)=>i%2?top:1000),
++      candidates:new Uint16Array(stride*CANDIDATE_LAYERS)};
++    result.candidates[layer*stride]=1;return result;
++  };
++  s2.update(.25);s2.worker.deliver(acceleratedFrame(0,3,8000));s2.worker.deliver(acceleratedFrame(.5,5,9000));
++  p2.R=6000000;p2.stellarLightField={sources:[]};
++  p2.volCloudMat={uniforms:{uSpeciesMask:{value:-1},uCameraLocal:{value:new THREE.Vector3(0,6003000,0)}}};
++  const captureSources=()=>({stream:s2,frames:[0,.5].map(hours=>({hours,revision:s2.revisionAt(hours)}))});
++  const cache={weatherSources:captureSources()};
++  const bank={planet:p2,fieldOwner:p2.weatherField,speciesMask:-1,baseHours:0,lightIds:'',
++    maps:new Map([[0,cache]]),center:new THREE.Vector3(0,6003000,0),cameraHeight:3000,size:128,spacing:100};
++  assert.equal(CloudLightBank.prototype.needsReset.call(bank),false);
++  const at=4*stride*2,metadata=p2.cloudCandidatesTex.image.data;
++  assert.equal(metadata[at+1]&127,4);assert.equal(metadata[at+1]>>7,5);
++  const oldVersion=p2.cloudCandidatesTex.version;
++  // Replacement at the same timestamp must refresh conservative support,
++  // not merely the interpolated species/atmosphere textures.
++  s2.worker.deliver(acceleratedFrame(.5,7,12000));
++  assert.equal(CloudLightBank.prototype.needsReset.call(bank),true,'Replaced forecast left a completed lighting cache valid');
++  cache.weatherSources=captureSources();assert.equal(CloudLightBank.prototype.needsReset.call(bank),false);
++  assert.ok(p2.cloudCandidatesTex.version>oldVersion);
++  assert.equal(metadata[at+1]>>7,7);assert.equal(p2.cloudBoundsTex.image.data[1],12000);
++  assert.equal(p2.cloudSpeciesTex.image.data[PRODUCTION_PARAMETER_LAYERS*w*h*4+at+1],metadata[at+1]);
++  const version=p2.cloudCandidatesTex.version;
++  s2.worker.deliver(acceleratedFrame(1,9,15000));
++  assert.equal(CloudLightBank.prototype.needsReset.call(bank),false,'Unrelated prefetch invalidated live light endpoints');
++  assert.equal(p2.cloudCandidatesTex.version,version,'Prefetch changed active acceleration');
++  s2.dispose();assert.equal(s2.boundsFirst,null);assert.equal(s2.boundsSecond,null);assert.equal(s2.candidates,null);
++  for(const texture of [p2.cloudSpeciesTex,p2.cloudBoundsTex,p2.cloudCandidatesTex])texture.dispose();
++  console.log('PASS: exact weather transaction, prefetch deduplication, replacement support indexes, time advance, bracket turnover and disposal.');
+ } finally {globalThis.Worker=originalWorker;}
+diff --git a/src/render-prewarm.js b/src/render-prewarm.js
+new file mode 100644
+--- /dev/null
++++ b/src/render-prewarm.js
+@@ -0,0 +1,27 @@
++import * as THREE from 'three';
++import { createSurfaceWarmupScene } from './surface-warmup.js';
++
++// Three.compileAsync gathers programs synchronously, then polls readiness.
++// Give that synchronous phase its own camera/renderable/light objects. Never
++// retain a lease on live camera layers, mesh flags or framebuffer while awaiting.
++export function compileRenderVariant(renderer,source,camera,scene,{layer,target,shadowLight=null}) {
++  const compileCamera=camera.clone(),group=new THREE.Group(),instances=[];
++  compileCamera.layers.set(layer);
++  source.traverse(object=>{
++    if(!(object.isMesh||object.isPoints||object.isLine||object.isSprite)
++      || !object.layers.test(compileCamera.layers))return;
++    const copy=object.clone(false);group.add(copy);
++    if(copy.isInstancedMesh)instances.push(copy);
++  });
++  // The input contains no lights, so compile's two traversals cannot collect
++  // the ship's interior lights twice. Only the private target scene owns them.
++  const warmup=createSurfaceWarmupScene(scene,group,compileCamera,shadowLight);
++  const saved=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
++  try {
++    renderer.setRenderTarget(target);
++    return renderer.compileAsync(group,compileCamera,warmup.scene);
++  } finally {
++    renderer.setRenderTarget(saved,face,mip);
++    warmup.dispose();for(const instance of instances)instance.dispose();group.clear();
++  }
++}
+diff --git a/tools/renderprewarmtest.js b/tools/renderprewarmtest.js
+new file mode 100644
+--- /dev/null
++++ b/tools/renderprewarmtest.js
+@@ -0,0 +1,37 @@
++import assert from 'node:assert/strict';
++import * as THREE from 'three';
++import { compileRenderVariant } from '../src/render-prewarm.js';
++
++const scene=new THREE.Scene(),source=new THREE.Group(),camera=new THREE.PerspectiveCamera();
++const geometry=new THREE.BoxGeometry(),material=new THREE.MeshStandardMaterial();
++const exterior=new THREE.InstancedMesh(geometry,material,1),interior=new THREE.Mesh(geometry,material);
++exterior.layers.set(3);exterior.visible=false;interior.layers.set(5);
++const light=new THREE.PointLight();light.layers.set(3);light.castShadow=true;
++source.add(exterior,interior,light);scene.add(source);
++let sharedDisposals=0;material.addEventListener('dispose',()=>sharedDisposals++);geometry.addEventListener('dispose',()=>sharedDisposals++);
++let target='player',face=2,mip=1,reject,privateDisposals=0,observed;
++const renderer={getRenderTarget:()=>target,getActiveCubeFace:()=>face,getActiveMipmapLevel:()=>mip,
++  setRenderTarget(value,f=0,m=0){target=value;face=f;mip=m;},
++  compileAsync(group,compileCamera,compileScene) {
++    const lights=[],renderables=[];compileScene.traverse(o=>{if(o.isLight)lights.push(o);});
++    group.traverse(o=>{if(o.isMesh)renderables.push(o);assert.equal(Boolean(o.isLight),false);});
++    assert.equal(camera.layers.mask,1);assert.equal(compileCamera.layers.mask,8);
++    assert.equal(lights.length,1,'Compile must not collect ship interior lights twice');
++    assert.equal(renderables.length,1);assert.equal(renderables[0].geometry,geometry);assert.equal(renderables[0].material,material);
++    assert.notEqual(renderables[0],exterior);assert.equal(renderables[0].isInstancedMesh,true);
++    renderables[0].addEventListener('dispose',()=>privateDisposals++);
++    assert.equal(exterior.visible,false);assert.equal(source.parent,scene);assert.equal(target,'hdr');
++    observed={group,compileCamera};return new Promise((_resolve,fail)=>{reject=fail;});
++  }};
++const pending=compileRenderVariant(renderer,source,camera,scene,{layer:3,target:'hdr'});
++assert.equal(target,'player');assert.equal(face,2);assert.equal(mip,1);
++assert.equal(privateDisposals,1);assert.equal(sharedDisposals,0);assert.equal(observed.group.children.length,0);
++// The player is free to change state while KHR readiness remains unresolved.
++camera.layers.set(5);exterior.visible=true;renderer.setRenderTarget('next-player');
++reject(Error('compile failed'));await assert.rejects(pending,/compile failed/);
++assert.equal(camera.layers.mask,32);assert.equal(exterior.visible,true);assert.equal(target,'next-player');
++renderer.compileAsync=()=>{throw Error('synchronous compile failure');};
++assert.throws(()=>compileRenderVariant(renderer,source,camera,scene,{layer:3,target:'hdr'}),/synchronous/);
++assert.equal(target,'next-player');assert.equal(camera.layers.mask,32);assert.equal(sharedDisposals,0);
++geometry.dispose();material.dispose();
++console.log('PASS: private render variants, one light traversal, layer/type filtering, synchronous restore, delayed rejection and shared-resource ownership.');
+diff --git a/tools/cloudintervaltest.js b/tools/cloudintervaltest.js
+new file mode 100644
+--- /dev/null
++++ b/tools/cloudintervaltest.js
+@@ -0,0 +1,40 @@
++// Independent scan reference for every conservative cell, including shell
++// sentinels. Intervals accelerate traversal; they must not change its support.
++import assert from 'node:assert/strict';
++import { buildCandidateAcceleration, CANDIDATE_WIDTH, CANDIDATE_HEIGHT,
++  CANDIDATE_LAYERS } from '../src/cloud/production-bands.js';
++
++const width=CANDIDATE_WIDTH,height=CANDIDATE_HEIGHT,depth=CANDIDATE_LAYERS;
++const stride=width*height;
++const cases=[new Uint16Array(stride*depth),new Uint16Array(stride*depth).fill(65535),
++  Uint16Array.from({length:stride*depth},(_,i)=>{
++    const z=Math.floor(i/stride),cell=i%stride;
++    return (z===0&&cell%3===0)||(z===depth-1&&cell%5===0)||(z*17+cell*13)%29<4
++      ? 1<<((z+cell)%16):0;
++  })];
++let checked=0;
++for(const masks of cases) {
++  const original=masks.slice(),output=new Uint16Array(masks.length*2);
++  assert.equal(buildCandidateAcceleration(masks,width,height,depth,output),output);
++  assert.deepEqual(masks,original,'Building acceleration changed authored mask bits');
++  for(let z=0;z<depth;z++)for(let cell=0;cell<stride;cell++) {
++    const i=z*stride+cell,packed=output[i*2+1];
++    assert.equal(output[i*2],masks[i]);
++    let below=0,above=depth;
++    for(let k=z-1;k>=0;k--)if(masks[k*stride+cell]){below=k+1;break;}
++    for(let k=z+1;k<depth;k++)if(masks[k*stride+cell]){above=k;break;}
++    assert.equal(packed&127,below);assert.equal(packed>>7,above);
++    assert.ok(packed<=16383,'Packed metadata must be exact in the Float32 surface atlas');
++    checked++;
++  }
++}
++// The OR of endpoints may fill a gap; deriving endpoint indexes then mixing
++// them would miss this support. Rebuild from the exact conservative union.
++const first=new Uint16Array(4*8),second=first.slice();
++first[4]=1;second[20]=32768;
++const union=first.map((v,i)=>v|second[i]),acceleration=buildCandidateAcceleration(union,2,2,8);
++assert.equal(acceleration[(3*4)*2+1]&127,2);
++assert.equal(acceleration[(3*4)*2+1]>>7,5);
++assert.throws(()=>buildCandidateAcceleration(first,2,2,128),RangeError);
++assert.throws(()=>buildCandidateAcceleration(first,2,2,8,new Uint16Array(1)),RangeError);
++console.log(`PASS: ${checked} exact radial interval/mask cells, empty/full/edge/mixed columns, conservative union and surface encoding.`);
+diff --git a/tools/cloudintervalperftest.js b/tools/cloudintervalperftest.js
+new file mode 100644
+--- /dev/null
++++ b/tools/cloudintervalperftest.js
+@@ -0,0 +1,157 @@
++// Same-page physical cloud integration against the previous scan kernel.
++// Pin jitter and pause RAF only for the isolated comparison; normal-player
++// asynchronous phase evidence and screenshots are collected separately.
++import assert from 'node:assert/strict';
++import {execFileSync} from 'node:child_process';
++import {mkdir,writeFile} from 'node:fs/promises';
++import {startServer} from './server.js';
++import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
++import {evidenceFingerprint} from './evidence-fingerprint.js';
++
++const reference='ebef3ed',out='test-results/cloud-interval';
++const historical=process.argv.includes('--historical-control');
++const resetState=process.argv.includes('--reset-state-control');
++const scanOnly=process.argv.includes('--scan-only-control');
++const before=await evidenceFingerprint('tools/cloudintervalperftest.js');
++const old=execFileSync('git',['show',`${reference}:src/cloud/production-shape.js`],{encoding:'utf8'});
++const {server,port}=await startServer(0);let browser;
++await mkdir(out,{recursive:true});const errors=[];
++try {
++  browser=await launchHardwareBrowser({executablePath:resolveSystemChromePath()||undefined});
++  const page=await browser.newPage({viewport:{width:1280,height:720}});
++  page.on('pageerror',e=>errors.push(String(e)));
++  page.on('console',m=>{if(m.type()==='error')errors.push(m.text());else if(m.text().startsWith('Interval:'))console.log(m.text());});
++  await page.route('**/src/cloud/production-shape-before-interval.js',route=>route.fulfill({contentType:'text/javascript',body:old}));
++  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&freeze=1&time=9.5&scene=lowflight&alt=400&planet=0&bias=meadow&quality=balanced&vclouds=1&post=1`);
++  await page.waitForFunction(()=>NMS?.booted,null,{timeout:180000});
++  await page.waitForFunction(()=>NMS._planet(0).volCloudMat.uniforms.uSunCacheReady.value===1,null,{timeout:180000});
++  await page.evaluate(()=>{NMS.setAdaptiveQualityLocked(true);NMS._pipeline.startProfiling({every:1,history:100});});
++  await page.waitForFunction(()=>NMS._pipeline.performanceSnapshot().frame>=32,null,{timeout:180000});
++  await page.screenshot({path:`${out}/player.png`});
++  const player=await page.evaluate(()=>({profile:NMS._pipeline.performanceSnapshot(),stats:NMS.stats(),pose:NMS.referenceState(),gl:NMS._renderer.getContext().getError()}));
++  await page.evaluate(()=>NMS._pipeline.stopProfiling());
++  // Composer reuses its depth attachment after the volume stage. Freeze the
++  // actual opaque depth at that stage, not the stale texture after a full frame.
++  await page.evaluate(()=>new Promise(resolve=>{
++    const T=NMS._THREE,r=NMS._renderer,vp=NMS._pipeline.volumePass;
++    const target=new T.WebGLRenderTarget(r.domElement.width,r.domElement.height,
++      {type:T.FloatType,format:T.RedFormat,depthBuffer:false,minFilter:T.NearestFilter,magFilter:T.NearestFilter});
++    const geometry=new T.PlaneGeometry(2,2),scene=new T.Scene(),camera=new T.Camera();
++    const material=new T.ShaderMaterial({uniforms:{tDepth:{value:null}},
++      vertexShader:'varying vec2 vUV;void main(){vUV=uv;gl_Position=vec4(position.xy,0,1);}',
++      fragmentShader:'uniform sampler2D tDepth;varying vec2 vUV;void main(){gl_FragColor=vec4(texture2D(tDepth,vUV).r,0,0,1);}',depthTest:false,depthWrite:false});
++    scene.add(new T.Mesh(geometry,material));const original=vp.render;
++    vp.render=function(renderer,writeBuffer,readBuffer) {
++      vp.render=original;
++      const saved=r.getRenderTarget(),face=r.getActiveCubeFace(),mip=r.getActiveMipmapLevel(),auto=r.autoClear;
++      material.uniforms.tDepth.value=vp.sceneDepthSource?.sceneDepthTexture||readBuffer.depthTexture;
++      if(!material.uniforms.tDepth.value)throw Error('Actual volume depth is unavailable');
++      try {r.autoClear=true;r.setRenderTarget(target);r.render(scene,camera);}
++      finally {r.setRenderTarget(saved,face,mip);r.autoClear=auto;geometry.dispose();material.dispose();}
++      NMS._intervalDepth=target;
++      const result=original.apply(this,arguments);resolve();return result;
++    };
++  }));
++  console.log('Interval: normal-player phase baseline captured; comparing frozen physical integrations.');
++  const result=await page.evaluate(async ({historical,resetState,scanOnly})=>{
++    const {productionSpeciesGLSL:current}=await import('/src/cloud/production-shape.js');
++    const {productionSpeciesGLSL:reference}=await import('/src/cloud/production-shape-before-interval.js');
++    const T=NMS._THREE,r=NMS._renderer,scene=NMS._internals.scene,camera=NMS._internals.camera;
++    const p=NMS._pipeline.volumePass.activePlanet,mesh=p.volCloudMesh,production=p.volCloudMat;
++    const gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
++    if(!ext)throw Error('Hardware GPU timer required');
++    const request=window.requestAnimationFrame,cancel=window.cancelAnimationFrame,pending=new Map();let id=-1;
++    window.requestAnimationFrame=callback=>{const key=id--;pending.set(key,callback);return key;};
++    window.cancelAnimationFrame=key=>{if(!pending.delete(key))cancel.call(window,key);};
++    await new Promise(resolve=>request.call(window,resolve));
++    const original=mesh.material,saved=r.getRenderTarget(),face=r.getActiveCubeFace(),mip=r.getActiveMipmapLevel();
++    const mask=camera.layers.mask,auto=r.autoClear,color=r.getClearColor(new T.Color()),alpha=r.getClearAlpha();
++    const materials=[current,historical?reference:current].map((kernel,index)=>{
++      const material=production.clone();material.uniforms={...production.uniforms,uFrame:{value:0},
++        tSceneDepth:{value:NMS._intervalDepth.texture},uCandidateIntervalsReady:{value:index||scanOnly?0:1}};
++      if(!material.fragmentShader.includes(current))throw Error('Production shader kernel missing');
++      material.fragmentShader=material.fragmentShader.replace(current,kernel);material.needsUpdate=true;return material;
++    });
++    const vp=NMS._pipeline.volumePass,target=new T.WebGLRenderTarget(vp.width,vp.height,{type:T.HalfFloatType,depthBuffer:false});
++    const readTarget=new T.WebGLRenderTarget(vp.width,vp.height,{type:T.FloatType,depthBuffer:false});
++    const geometry=new T.PlaneGeometry(2,2),readScene=new T.Scene(),readCamera=new T.Camera();
++    const readMaterial=new T.ShaderMaterial({uniforms:{tInput:{value:target.texture}},
++      vertexShader:'varying vec2 vUV;void main(){vUV=uv;gl_Position=vec4(position.xy,0,1);}',
++      fragmentShader:'uniform sampler2D tInput;varying vec2 vUV;void main(){gl_FragColor=texture2D(tInput,vUV);}',
++      depthTest:false,depthWrite:false});readScene.add(new T.Mesh(geometry,readMaterial));
++    const records=[],byImplementation=[],nativeByImplementation=[];let expected=null,nativeExpected=null,changed=0,nativeChanged=0,maximumError=0,occupied=0;
++    const inputState=()=>JSON.stringify(Object.fromEntries(Object.entries(mesh.material.uniforms).filter(([name])=>name!=='uCandidateIntervalsReady').map(([name,{value}])=>
++      [name,value?.isTexture?{uuid:value.uuid,version:value.version}:value])));
++    let firstInputs=null,firstGPU=null;
++    const textureIds=new WeakMap();let nextTextureId=0;
++    const textureId=value=>{if(!value)return null;if(!textureIds.has(value))textureIds.set(value,++nextTextureId);return textureIds.get(value);};
++    try {
++      camera.layers.set(2);r.autoClear=true;r.setClearColor(0,0);
++      for(let round=0;round<4;round++)for(const index of round%2?[1,0]:[0,1]) {
++        mesh.material=materials[index];mesh.material.uniformsNeedUpdate=true;
++        if(resetState)r.resetState();
++        const inputs=inputState();firstInputs||=inputs;
++        r.setRenderTarget(target);r.clear(true,false,false);
++        const query=gl.createQuery(),started=performance.now();gl.beginQuery(ext.TIME_ELAPSED_EXT,query);
++        try {r.render(scene,camera);} finally {gl.endQuery(ext.TIME_ELAPSED_EXT);}
++        const properties=r.properties.get(mesh.material),program=properties.currentProgram.program;
++        const intervalFlag={requested:mesh.material.uniforms.uCandidateIntervalsReady.value,
++          owner:properties.uniforms.uCandidateIntervalsReady?.value,
++          uploaded:gl.getUniform(program,gl.getUniformLocation(program,'uCandidateIntervalsReady'))};
++        const gpuInputs={};
++        const savedUnit=gl.getParameter(gl.ACTIVE_TEXTURE);
++        for(let i=0;i<gl.getProgramParameter(program,gl.ACTIVE_UNIFORMS);i++) {
++          const {name,type}=gl.getActiveUniform(program,i);if(name==='uCandidateIntervalsReady')continue;
++          const value=gl.getUniform(program,gl.getUniformLocation(program,name));
++          gpuInputs[name]=ArrayBuffer.isView(value)?Array.from(value):value;
++          const binding=type===gl.SAMPLER_2D?gl.TEXTURE_BINDING_2D:type===gl.SAMPLER_3D?gl.TEXTURE_BINDING_3D:
++            type===gl.SAMPLER_2D_ARRAY||type===gl.UNSIGNED_INT_SAMPLER_2D_ARRAY?gl.TEXTURE_BINDING_2D_ARRAY:null;
++          if(binding){gl.activeTexture(gl.TEXTURE0+value);gpuInputs[name+'Texture']=textureId(gl.getParameter(binding));}
++        }
++        gl.activeTexture(savedUnit);
++        firstGPU||=gpuInputs;
++        const gpuChanged=Object.keys(gpuInputs).filter(name=>JSON.stringify(gpuInputs[name])!==JSON.stringify(firstGPU[name]));
++        const cpuMs=performance.now()-started;gl.flush();
++        while(!gl.getQueryParameter(query,gl.QUERY_RESULT_AVAILABLE))await new Promise(resolve=>setTimeout(resolve,5));
++        if(gl.getParameter(ext.GPU_DISJOINT_EXT))throw Error('Disjoint timer');
++        const gpuMs=gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6;gl.deleteQuery(query);
++        const native=new Uint16Array(target.width*target.height*4);
++        r.readRenderTargetPixels(target,0,0,target.width,target.height,native);
++        let nativeRepeatChanged=0;
++        if(nativeExpected) {
++          for(let i=0;i<native.length;i++)if(native[i]!==nativeExpected[i])nativeChanged++;
++        } else nativeExpected=native;
++        if(nativeByImplementation[index])for(let i=0;i<native.length;i++)if(native[i]!==nativeByImplementation[index][i])nativeRepeatChanged++;
++        nativeByImplementation[index]||=native;
++        r.setRenderTarget(readTarget);r.render(readScene,readCamera);
++        const pixels=new Float32Array(target.width*target.height*4);r.readRenderTargetPixels(readTarget,0,0,target.width,target.height,pixels);
++        if(!expected){expected=pixels;for(let i=3;i<pixels.length;i+=4)if(pixels[i]>.004)occupied++;}
++        else for(let i=0;i<pixels.length;i++){const error=Math.abs(pixels[i]-expected[i]);if(error)changed++;maximumError=Math.max(maximumError,error);}
++        let sameImplementationChanged=0,sameImplementationMaximum=0;
++        if(byImplementation[index])for(let i=0;i<pixels.length;i++) {
++          const error=Math.abs(pixels[i]-byImplementation[index][i]);if(error)sameImplementationChanged++;
++          sameImplementationMaximum=Math.max(sameImplementationMaximum,error);
++        }
++        byImplementation[index]||=pixels;
++        records.push({round,implementation:index?'reference':'current',cpuMs,gpuMs,sameImplementationChanged,sameImplementationMaximum,nativeRepeatChanged,intervalFlag,inputsChanged:inputs!==firstInputs,gpuChanged});
++        console.log('Interval: '+JSON.stringify(records.at(-1)));
++      }
++      return {records,changed,nativeChanged,maximumError,occupied,width:target.width,height:target.height,gl:gl.getError(),
++        accelerationBytes:p.cloudCandidatesTex.image.data.byteLength,
++        bandsBytes:p.cloudSpeciesTex.image.data.byteLength,
++        historical,resetState,scanOnly,scope:'Actual occupied view rays; shared immutable weather/cache/depth/air, fixed jitter, order reversed. Default compares indexed versus independent scan in the same compiled shader, historical control substitutes ebef3ed shader. Full physical beam unchanged; RAF isolated only in tool.'};
++    } finally {
++      mesh.material=original;camera.layers.mask=mask;r.autoClear=auto;r.setClearColor(color,alpha);r.setRenderTarget(saved,face,mip);
++      materials.forEach(m=>m.dispose());target.dispose();readTarget.dispose();geometry.dispose();readMaterial.dispose();
++      NMS._intervalDepth.dispose();delete NMS._intervalDepth;
++      window.requestAnimationFrame=request;window.cancelAnimationFrame=cancel;
++      for(const callback of pending.values())request.call(window,callback);
++    }
++  },{historical,resetState,scanOnly});
++  const after=await evidenceFingerprint('tools/cloudintervalperftest.js');
++  await writeFile(`${out}/${historical?'historical-control':'report'}.json`,JSON.stringify({reference,before,after,player,result,errors},null,2));
++  assert.equal(before.sourceDigest,after.sourceDigest);assert.deepEqual(errors,[]);assert.equal(player.gl,0);assert.equal(result.gl,0);
++  assert.ok(result.occupied>1000);assert.equal(result.nativeChanged,0,'Native cloud HDR changed against the scan kernel');
++  assert.equal(result.changed,0,'Cloud HDR changed against the scan kernel');
++  console.log(`PASS: exact physical cloud HDR and warm GPU attribution; ${out}`);
++} finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

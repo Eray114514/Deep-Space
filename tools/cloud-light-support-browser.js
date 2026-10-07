@@ -1,14 +1,14 @@
 // Diagnostic only: retain real quantile positions and cache support tests,
 // replace missed beams with zero, and output counters instead of radiance.
 // No variant of this shader is shipped in the runtime.
-export async function probeCloudLightSupport(page) {
-  return page.evaluate(async()=>{
+export async function probeCloudLightSupport(page,{field=-1}={}) {
+  return page.evaluate(async field=>{
     const T=NMS._THREE,r=NMS._renderer,p=NMS._pipeline.volumePass.activePlanet;
-    const original=p.volCloudMat,probe=original.clone();probe.uniforms=original.uniforms;
+    const original=p.volCloudMat,probe=original.clone();probe.uniforms={...original.uniforms,uDiagnosticField:{value:field}};
     probe.fragmentShader=probe.fragmentShader
-      .replace('vec3 cloudCombinedSource(', 'float diagnosticMisses=0.0,diagnosticQueries=0.0,diagnosticVertical=0.0,diagnosticHorizontal=0.0;\nvec3 cloudCombinedSource(')
+      .replace('vec3 cloudCombinedSource(', 'uniform int uDiagnosticField;float diagnosticMisses=0.0,diagnosticQueries=0.0,diagnosticVertical=0.0,diagnosticHorizontal=0.0;\nvec3 cloudCombinedSource(')
       .replace('if(!cached)pathDepth=cloudSunOpticalDepthLimit(local,direction,sigma,path<2?12.0:128.0);',
-        `diagnosticQueries+=1.0;if(!cached) {
+        `if(uDiagnosticField<0||path==uDiagnosticField) {diagnosticQueries+=1.0;if(!cached) {
           diagnosticMisses+=1.0;
           vec3 diagnosticA=(uSunCacheMatrixA[path]*vec4(local,1)).xyz;
           vec3 diagnosticB=(uSunCacheMatrixB[path]*vec4(local,1)).xyz;
@@ -16,7 +16,7 @@ export async function probeCloudLightSupport(page) {
           if(diagnosticA.z<mz||diagnosticA.z>1.0-mz||diagnosticB.z<mz||diagnosticB.z>1.0-mz)diagnosticVertical+=1.0;
           if(any(lessThan(diagnosticA.xy,vec2(ma)))||any(greaterThan(diagnosticA.xy,vec2(1.0-ma)))
             ||any(lessThan(diagnosticB.xy,vec2(mb)))||any(greaterThan(diagnosticB.xy,vec2(1.0-mb))))diagnosticHorizontal+=1.0;
-        }`)
+        }}`)
       .replace('void main() {','void diagnosticOriginalMain() {')
       +'\nvoid main(){diagnosticOriginalMain();gl_FragColor=vec4(diagnosticMisses,diagnosticQueries,diagnosticVertical,diagnosticHorizontal);}';
     probe.blending=T.NoBlending;probe.needsUpdate=true;
@@ -45,7 +45,7 @@ export async function probeCloudLightSupport(page) {
           if(bytes[i]===bytes[i+1])allMissPixels++;if(bytes[i]===0)allHitPixels++;
         }
         const bank=p.cloudLightBank,u=original.uniforms;
-        resolve({width:target.width,height:target.height,occupied,queries,misses,verticalRejects,horizontalRejects,
+        resolve({field,width:target.width,height:target.height,occupied,queries,misses,verticalRejects,horizontalRejects,
           missRatio:misses/queries,allMissPixels,allHitPixels,gl:r.getContext().getError(),
           cache:{ready:u.uSunCacheReady.value,validA:u.uSunCacheValidA.value.toArray(),validB:u.uSunCacheValidB.value.toArray(),
             cameraAltitude:u.uCameraLocal.value.length()-p.R,centerAltitude:bank?.center.length()-p.R,
@@ -57,5 +57,5 @@ export async function probeCloudLightSupport(page) {
       NMS._pipeline.volumePass.historyValid=false;
       probe.dispose();target.dispose();geometry.dispose();material.dispose();
     }
-  });
+  },field);
 }
