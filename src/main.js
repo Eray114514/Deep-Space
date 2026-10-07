@@ -213,6 +213,7 @@ const sunDirCam = new THREE.Vector3(0, 1, 0);
 let warmedSurfacePlanet = null;
 let surfacePipelinesReady = true;
 const surfaceBootstrapMeshes = [];
+const surfaceBootstrapGroup = new THREE.Group();
 let surfaceBootstrapPending = false;
 const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
 let shipPipelinesWarmed = false;
@@ -302,7 +303,7 @@ function finishSurfaceBootstrap() {
   }
   if (shipPipelinesWarmed) {
     for (const mesh of surfaceBootstrapMeshes.splice(0)) {
-      scene.remove(mesh);
+      mesh.removeFromParent();
       if (mesh.isInstancedMesh) mesh.dispose();
       else mesh.geometry.dispose();
     }
@@ -346,6 +347,7 @@ function prewarmSurfacePipelines(planet) {
   }
   warmedSurfacePlanet = planet;
   surfacePipelinesReady = false;
+  scene.add(surfaceBootstrapGroup);
 
   const surfaceSources = new Map();
   planet.group.traverse((object) => {
@@ -374,7 +376,7 @@ function prewarmSurfacePipelines(planet) {
     mesh.castShadow = source.castShadow;
     mesh.receiveShadow = source.receiveShadow;
     mesh.visible = false;
-    scene.add(mesh);
+    surfaceBootstrapGroup.add(mesh);
     surfaceBootstrapMeshes.push(mesh);
   }
   const instancedSources = [
@@ -389,7 +391,7 @@ function prewarmSurfacePipelines(planet) {
     mesh.frustumCulled = false;
     mesh.castShadow = source.castShadow;
     mesh.visible = false;
-    scene.add(mesh);
+    surfaceBootstrapGroup.add(mesh);
     surfaceBootstrapMeshes.push(mesh);
   }
 
@@ -400,7 +402,7 @@ function prewarmSurfacePipelines(planet) {
   const lightIntensity = sunShadow.intensity;
   sunShadow.visible = true;
   sunShadow.intensity = 1e-7;
-  const tasks = [renderer.compileAsync(scene, camera)];
+  const tasks = [renderer.compileAsync(surfaceBootstrapGroup, camera, scene)];
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
@@ -433,9 +435,8 @@ function prewarmLoadedShipPipelines() {
       visible: object.visible,
       frustumCulled: object.frustumCulled,
     });
-    // compileAsync still respects object visibility/frustum state. Temporarily
-    // include the whole hull (ramp, interior, canopy) so later flight/landing
-    // frames do not discover an uncompiled variant.
+    // compile() visits every mesh in its input group, including hidden cabin
+    // parts. Restrict the input to the hull; camera layers select its lights.
     object.visible = true;
     object.frustumCulled = false;
     const materials = Array.isArray(object.material)
@@ -487,7 +488,7 @@ function prewarmLoadedShipPipelines() {
     camera.layers.set(layer);
     const compileTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(target);
-    const task = renderer.compileAsync(scene, camera);
+    const task = renderer.compileAsync(ship.group, camera, scene);
     renderer.setRenderTarget(compileTarget);
     await task;
   };
@@ -3968,7 +3969,8 @@ let latestRenderCalls = 0;
 let latestRenderTriangles = 0;
 
 function performanceSnapshot() {
-  if (!perfFrameTimes.length) return { averageFps: 0, low1Fps: 0, longFrames: 0, longFrameRatio: 0 };
+  if (!perfFrameTimes.length) return { averageFps: 0, low1Fps: 0, longFrames: 0, longFrameRatio: 0,
+    performanceFrames: 0, performanceWindowSeconds: 0, maximumFrameMs: 0 };
   const sorted = [...perfFrameTimes].sort((a, b) => a - b);
   const averageMs = perfFrameTimes.reduce((sum, value) => sum + value, 0) / perfFrameTimes.length;
   const p99Ms = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
@@ -3977,6 +3979,9 @@ function performanceSnapshot() {
     low1Fps: Math.round(10000 / Math.max(0.1, p99Ms)) / 10,
     longFrames: perfLongFrames,
     longFrameRatio: Math.round(perfLongFrames / perfFrameTimes.length * 10000) / 10000,
+    performanceFrames: perfFrameTimes.length,
+    performanceWindowSeconds: Math.round(perfFrameTimes.reduce((sum,ms)=>sum+ms,0)) / 1000,
+    maximumFrameMs: Math.round(sorted[sorted.length-1]*100) / 100,
   };
 }
 
@@ -4033,7 +4038,9 @@ function frame() {
   // tunnel through terrain. A 100 ms ceiling still gives stable collision at
   // the browser game's supported low-quality floor.
   const dt = clamp(rawDt, 0.0001, 0.1);
-  if (!paused && realDt > 0 && realDt < 0.5) {
+  // Severe stalls are part of player performance. Dropping >=500 ms frames
+  // made a 1 FPS cloud view report a historical average above 100 FPS.
+  if (!paused && realDt > 0 && Number.isFinite(realDt)) {
     const ms = realDt * 1000;
     perfFrameTimes.push(ms);
     if (ms > 50) perfLongFrames++;
@@ -4931,7 +4938,7 @@ function frame() {
     && startupAssetsReady && terrainReady && startupVolumeWarmState === 'complete') {
     if (!shipPipelinesWarmed) {
       for (const mesh of surfaceBootstrapMeshes.splice(0)) {
-        scene.remove(mesh);
+        mesh.removeFromParent();
         if (mesh.isInstancedMesh) mesh.dispose();
         else mesh.geometry.dispose();
       }
@@ -5199,9 +5206,26 @@ window.NMS = {
       activeBodyId: planet?.bodyId || null,
       cloudDepthReady: uniforms?.uDepthReady?.value || 0,
       steps: uniforms?.uMaxSteps?.value || 0,
+      maximumViewSteps: planet?.volCloudMat?.defines?.CLOUD_VIEW_MAX_STEPS || 124,
+      cloudLightSteps: uniforms?.uCloudLightSteps?.value || 0,
       scale: effectiveVolumeScale,
       drawingBuffer: [size.x, size.y],
-      weatherTime: uniforms?.uWeatherTime?.value || 0,
+      weatherTime: planet?.weatherHours ?? null,
+      productionShapeVersion:planet?.volCloudMat?.userData.productionShapeVersion ?? null,
+      speciesMask:uniforms?.uSpeciesMask?.value ?? null,
+      advectionPhase:uniforms?.uCloudAdvectionPhase?.value ?? null,
+      committedWeatherTime: planet?.cloudSpeciesTex?.userData?.hours ?? null,
+      weatherReady: planet?.weatherStream?.ready ?? false,
+      columnsReady: uniforms?.uColumnsReady?.value || 0,
+      sunlightCacheReady:uniforms?.uSunCacheReady?.value || 0,
+      sunlightCacheMix:uniforms?.uSunCacheMix?.value ?? null,
+      sunlightCacheFields:[...(planet?.cloudLightBank?.maps?.values() || [])]
+        .map(cache=>({hours:cache.hours,ready:cache.ready,field:cache.field,layer:cache.layer,
+          available:cache.available,margins:cache.interiorMargins})),
+      columnGenerations: [...(planet?.cloudColumnMap?.maps?.values() || [])]
+        .map(map=>({hours:map.generation,ready:map.ready,rows:map.row,totalRows:map.height})),
+      representation: planet?.volCloudMesh?.material?.defines?.CLOUD_FAR_VIEW ? 'far-column' : 'near-volume',
+      lightQuadratureSamples: uniforms?.uLightQuadratureSteps?.value ?? null,
       sunShaftStrength: nodePipeline.sunShafts?.uniforms?.uStrength?.value || 0,
       sunShaftUv: nodePipeline.sunShafts?.uniforms?.uSunUv?.value?.toArray?.() || null,
       sunShaftDebug: { ...sunShaftDebug },

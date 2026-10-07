@@ -6,12 +6,15 @@
 // the legacy atmosphere shell.
 
 import * as THREE from 'three';
+import { CloudColumnBank } from './cloud/cloud-column-bank.js';
+import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 
 export const VOLUME_LAYER = 2;
 
 const _clear = new THREE.Color();
 const _savedClear = new THREE.Color();
+const _depthRotation = new THREE.Matrix4();
 
 function target(w, h, name, depth = false) {
   const rt = new THREE.WebGLRenderTarget(w, h, {
@@ -52,6 +55,8 @@ export class VolumetricPass extends Pass {
     this.motion = 1;
     this.frame = 0;
     this.activePlanet = null;
+    this.columnMaps=new Map();
+    this.columnRelease=new Map();
     this.prevViewProjection = new THREE.Matrix4();
 
     this.resolveMaterial = new THREE.ShaderMaterial({
@@ -176,29 +181,22 @@ export class VolumetricPass extends Pass {
           return exp(-abs(z-other)/max(2.0,z*0.005));
         }
         vec4 volumeSample(vec2 uv) {
-          // Fetch exact low-resolution texel centres; a bilinear fetch has
-          // already mixed opposite sides of an opaque edge before rejection.
-          vec2 q=(floor(uv/uTexel)+0.5)*uTexel;
-          vec2 qa=q+vec2(uTexel.x,0),qb=q-vec2(uTexel.x,0);
-          vec2 qd=q+vec2(0,uTexel.y),qe=q-vec2(0,uTexel.y);
-          vec4 c = texture2D(tVolume, q);
-          vec4 a = texture2D(tVolume, qa);
-          vec4 b = texture2D(tVolume, qb);
-          vec4 d = texture2D(tVolume, qd);
-          vec4 e = texture2D(tVolume, qe);
-          // Alpha similarity preserves cloud silhouettes while filtering the
-          // sparse raymarch signal in smooth interiors.
-          float wa = exp(-abs(a.a - c.a) * 18.0);
-          float wb = exp(-abs(b.a - c.a) * 18.0);
-          float wd = exp(-abs(d.a - c.a) * 18.0);
-          float we = exp(-abs(e.a - c.a) * 18.0);
+          // Reconstruct around the four enclosing pixel centres. Alpha is a
+          // filtered participating-medium signal, not an opaque edge: rejecting
+          // its neighbours quantizes cloud contours into low-resolution cells.
+          // Test opaque depth before mixing, so a thin foreground object still
+          // rejects all cloud samples taken behind it.
+          vec2 p=uv/uTexel-.5,f=fract(p),q=(floor(p)+.5)*uTexel;
+          vec2 qa=q+vec2(uTexel.x,0),qb=q+vec2(0,uTexel.y),qc=q+uTexel;
           float centerDepth=texture2D(tSceneDepth,uv).r;
-          float wc=3.0*depthWeight(q,centerDepth);
-          wa*=depthWeight(qa,centerDepth); wb*=depthWeight(qb,centerDepth);
-          wd*=depthWeight(qd,centerDepth); we*=depthWeight(qe,centerDepth);
+          float w0=(1.0-f.x)*(1.0-f.y)*depthWeight(q,centerDepth);
+          float w1=f.x*(1.0-f.y)*depthWeight(qa,centerDepth);
+          float w2=(1.0-f.x)*f.y*depthWeight(qb,centerDepth);
+          float w3=f.x*f.y*depthWeight(qc,centerDepth);
           // No matching low-resolution support: retain the full-resolution
           // clear-air surface rather than painting a cloud over a thin object.
-          return (c*wc+a*wa+b*wb+d*wd+e*we)/max(wc+wa+wb+wd+we,1e-8);
+          return (texture2D(tVolume,q)*w0+texture2D(tVolume,qa)*w1
+            +texture2D(tVolume,qb)*w2+texture2D(tVolume,qc)*w3)/max(w0+w1+w2+w3,1e-8);
         }
 
         void main() {
@@ -212,6 +210,7 @@ export class VolumetricPass extends Pass {
 
   setActivePlanet(planet, nav, motion = 0) {
     if (!planet?.volCloudMesh) {
+      if(this.activePlanet)this.columnRelease.set(this.activePlanet,this.frame+2);
       this.activePlanet = null;
       this.historyValid = false;
       this.radius = 1;
@@ -219,6 +218,8 @@ export class VolumetricPass extends Pass {
       return;
     }
     if (this.activePlanet !== planet) {
+      if(this.activePlanet)this.columnRelease.set(this.activePlanet,this.frame+2);
+      this.columnRelease.delete(planet);
       this.activePlanet = planet;
       this.historyValid = false;
       this.prevNav.copy(nav);
@@ -249,6 +250,10 @@ export class VolumetricPass extends Pass {
   }
 
   render(renderer, writeBuffer, readBuffer) {
+    for(const [planet,frame] of this.columnRelease)if(this.frame>=frame) {
+      this.columnMaps.get(planet)?.dispose();this.columnMaps.delete(planet);
+      this.columnRelease.delete(planet);planet.volCloudMat.uniforms.uColumnsReady.value=0;
+    }
     const oldTarget = renderer.getRenderTarget();
     const oldMask = this.camera.layers.mask;
     const oldAutoClear = renderer.autoClear;
@@ -271,6 +276,46 @@ export class VolumetricPass extends Pass {
     };
     bindSceneDepth(this.activePlanet?.volCloudMat);
     const cloudUniforms = this.activePlanet?.volCloudMat?.uniforms;
+    const planet=this.activePlanet;
+    if(cloudUniforms?.uDepthInvProjection && planet?.volCloudMesh) {
+      this.camera.updateMatrixWorld(true);planet.volCloudMesh.updateWorldMatrix(true,false);
+      _depthRotation.copy(planet.volCloudMesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
+      cloudUniforms.uDepthInvProjection.value.copy(this.camera.projectionMatrixInverse);
+      cloudUniforms.uDepthViewToLocal.value.setFromMatrix4(_depthRotation);
+      cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
+      cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
+    }
+    if(planet?.volCloudMesh && planet.volCloudFarMat) {
+      const far=planet.volCloudMat.uniforms.uCameraLocal.value.length()
+        -planet.volCloudBand.rOut>200000;
+      planet.volCloudMesh.material=far?planet.volCloudFarMat:planet.volCloudMat;
+    }
+    if(planet?.weatherField?.synoptic && planet.weatherStream?.ready
+      && planet.volCloudMesh.material===planet.volCloudFarMat) {
+      let columns=this.columnMaps.get(planet);
+      if(!columns || columns.disposed) {
+        columns=new CloudColumnBank(planet);this.columnMaps.set(planet,columns);
+        planet.cloudColumnMap=columns;
+      }
+      columns.update(renderer);
+      const minimumCone=minimumCloudRayCone(this.camera.projectionMatrix.elements,this.width,this.height);
+      const nearestDistance=Math.max(0,planet.volCloudMat.uniforms.uCameraLocal.value.length()-planet.volCloudBand.rOut);
+      const cacheOnly=planet.volCloudMat.uniforms.uColumnsReady.value>.5
+        && nearestDistance*minimumCone>2400;
+      if(planet.volCloudFarMat.defines.CLOUD_FAR_CACHE!==Number(cacheOnly)) {
+        planet.volCloudFarMat.defines.CLOUD_FAR_CACHE=Number(cacheOnly);
+        planet.volCloudFarMat.needsUpdate=true;
+      }
+      if(this.columnMaps.size>2) {
+        const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);
+        this.columnMaps.get(oldest).dispose();this.columnMaps.delete(oldest);
+        oldest.volCloudMat.uniforms.uColumnsReady.value=0;
+      }
+    } else if(planet && this.columnMaps.has(planet)) {
+      // Near sunlight transport and far optical columns have separate owners.
+      // Retain neither unused baking snapshots nor far targets in a near view.
+      this.columnMaps.get(planet).dispose();this.columnMaps.delete(planet);
+    }
     const air = this.sceneDepthSource;
     if (cloudUniforms) {
       if (air?.activePlanet === this.activePlanet) {
@@ -332,6 +377,8 @@ export class VolumetricPass extends Pass {
   }
 
   releaseTargets() {
+    for(const columns of this.columnMaps.values())columns.dispose();
+    this.columnMaps.clear();this.columnRelease.clear();
     this.current.dispose();
     this.historyA.dispose();
     this.historyB.dispose();

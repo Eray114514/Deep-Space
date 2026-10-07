@@ -634,6 +634,14 @@ export class StarSystem {
     planet.positionAt = (time, out = new THREE.Vector3()) => this.positionAt(s.bodyId, time, out);
     planet.velocityAt = (time, out = new THREE.Vector3()) => this.velocityAt(s.bodyId, time, out);
     planet.orientationAt = (time, out = new THREE.Quaternion()) => bodyOrientationAt(s, time, out);
+    planet.stellarDirectionsAt = (time) => {
+      const position=planet.positionAt(time),inverse=planet.orientationAt(time).invert();
+      return this.stellarLightFieldFrom(position,null,time).sources.map(source=>({
+        id:source.id,
+        direction:new THREE.Vector3().fromArray(source.direction).applyQuaternion(inverse).toArray(),
+        irradianceFraction:source.irradianceFraction,
+      }));
+    };
     planet.orbitIndex = s.orbitIndex;
     if (s.parentId) planet.parentPlanet = this.bodyById.get(s.parentId) || null;
     planet.setFrame(frame.orientation);
@@ -744,10 +752,22 @@ export class StarSystem {
     return out.copy(this.dominantStarFrom(pos).positionUniv).sub(pos).normalize();
   }
 
-  stellarLightFieldFrom(pos, visibility = null) {
+  stellarLightFieldFrom(pos, visibility = null, timeHours = null) {
+    let positions=null;
+    if(Number.isFinite(timeHours)) {
+      if(this.spec.isBlackHoleSystem)positions=this.starViews.map(view=>
+        orbitalPosition(view.spec.orbit,timeHours,new THREE.Vector3()).add(this.star.pos));
+      else if(this.starViews.length===1)positions=[this.star.pos];
+      else {
+        const separation=orbitalPosition(this.spec.binaryOrbit,timeHours,new THREE.Vector3());
+        const a=this.starViews[0].spec.massSolar,b=this.starViews[1].spec.massSolar;
+        positions=[this.star.pos.clone().addScaledVector(separation,-b/(a+b)),
+          this.star.pos.clone().addScaledVector(separation,a/(a+b))];
+      }
+    }
     const field = buildStellarLightField(this.starViews.map((view, index) => ({
       id: view.spec.starId || `${this.catalogId}:star-${index}`,
-      positionUniv: view.positionUniv,
+      positionUniv: positions?.[index] || view.positionUniv,
       radius: view.spec.radiusRender,
       luminositySolar: view.spec.luminositySolar,
       temperatureK: view.spec.temperatureK,

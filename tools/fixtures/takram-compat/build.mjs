@@ -1,0 +1,1 @@
+import {build} from "./node_modules/esbuild/lib/main.js"; await build({entryPoints:["entry.js"],outfile:"bundle.js",bundle:true,format:"esm",external:["three"]});

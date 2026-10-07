@@ -319,7 +319,7 @@ export class AtmospherePass extends Pass {
     uniforms.uSunDirection1.value.copy(secondary?.localDirection || planet.sunDirLocal);
     uniforms.uSunColor1.value.copy(secondary?.colorValue || new THREE.Color(1, 1, 1));
     uniforms.uSunEnergy1.value = secondary?.irradianceFraction ?? 0;
-    bindStellarOcclusion(uniforms, planet);
+    bindStellarOcclusion(uniforms, planet, this.material);
     const eclipse = planet.eclipseOccluder;
     uniforms.uEclipseEnabled.value = eclipse ? 1 : 0;
     if (eclipse) {

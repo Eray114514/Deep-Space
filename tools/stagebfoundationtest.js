@@ -58,6 +58,7 @@ try {
     function probe(source, main, extraUniforms = {}, declarations = '') {
       const prefix = source.fragmentShader.slice(0, source.fragmentShader.lastIndexOf('void main()'));
       return new THREE.ShaderMaterial({
+        defines: source.defines,
         uniforms: { ...source.uniforms, ...extraUniforms }, vertexShader,
         fragmentShader: prefix + declarations + '\nvoid main() {\n' + main + '\n}',
         depthTest: false, depthWrite: false,

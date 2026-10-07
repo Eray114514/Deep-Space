@@ -222,6 +222,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
     shader.uniforms.uCloudTex = { value: cloudTex };
     material.userData.cloudShadowTextureNode = shader.uniforms.uCloudTex;
+    shader.uniforms.uCloudSynoptic = { value: planet.weatherField?.synoptic ? 1 : 0 };
     shader.uniforms.uCloudK = { value: planet.cloudMesh ? 0.42 : 0 };
     shader.uniforms.uCloudMat = { value: new THREE.Matrix3() };
     shader.uniforms.uEclipseEnabled = { value: 0 };
@@ -310,7 +311,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uMacroK;
         uniform vec2 uDetailS;
         uniform sampler2D uCloudTex;
-        uniform float uCloudK;
+        uniform float uCloudK, uCloudSynoptic;
         uniform mat3 uCloudMat;
         uniform float uEclipseEnabled;
         uniform vec3 uEclipseCenter;
@@ -558,7 +559,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // shadows mirror about the equator relative to the clouds casting
           // them and leave a visible seam there.
           vec3 cd = uCloudMat * nd;
-          diffuseColor.rgb *= 1.0 - texture2D(uCloudTex, weatherAtlasUV(cd)).r * uCloudK;
+          float cloudCover = weatherAtlasSample(uCloudTex, cd).r;
+          if (uCloudSynoptic > 0.5) cloudCover = synopticCoverage(cloudCover, 0.12);
           // Keep some indirect skylight in totality while the direct surface
           // response tracks the same finite-star penumbra as atmosphere/cloud.
           // Direct stellar occlusion is applied per light, never to albedo.
@@ -617,7 +619,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v13-cloud-coverage';
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v14-cloud-beam-'+Boolean(planet.cloudSpeciesTex);
   return material;
 }
 
@@ -867,6 +869,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
       shader.uniforms[name] = drawUniforms[name];
     }
     material.userData.waterCloudTexture = shader.uniforms.uCloudTex;
+    shader.uniforms.uCloudSynoptic = { value: planet.weatherField?.synoptic ? 1 : 0 };
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
@@ -953,7 +956,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
         uniform sampler2D uCloudTex;
-        uniform float uTime;
+        uniform float uTime, uCloudSynoptic;
         varying vec3 vOceanRelative;
         ${oceanWaveGLSL}
         ${tidalGLSL}
@@ -1050,7 +1053,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }
         float waterCloud(vec3 localDirection) {
           vec3 cd = uCloudMat * normalize(localDirection);
-          return texture2D(uCloudTex, weatherAtlasUV(cd)).r * uCloudK;
+          float cloudCover = weatherAtlasSample(uCloudTex, cd).r;
+          if (uCloudSynoptic > 0.5) cloudCover = synopticCoverage(cloudCover, 0.12);
+          return cloudCover * uCloudK;
         }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
@@ -1268,7 +1273,6 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             vec3(0.92, 0.97, 0.99), gWaterFoam * 0.9);
           float cloud = waterCloud(vLocalPos);
           gWaterCloud = cloud;
-          diffuseColor.rgb *= 1.0 - cloud * 0.32;
           // Preserve a coherent water surface while allowing the actual shelf
           // geometry to read through clear shallows. Deep water is fully
           // opaque; foam locally restores full coverage.
@@ -1398,8 +1402,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSunDirView))
             + uSecondarySunColor * secondGlint
             * surfaceSunTransmission(normalize(uSurfaceViewToLocal*vSecondarySunDirView))
-            * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSecondarySunDirView)))
-            * (1.0 - cloud * 0.7);
+            * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSecondarySunDirView)));
           totalEmissiveRadiance += vec3(0.32, 0.39, 0.44)
             * gWaterFoam * 0.05;
           // Aerated wake water remains bright even when it interrupts a dark
@@ -1419,7 +1422,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v31-cloud-coverage:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v32-cloud-beam:${Boolean(planet.cloudSpeciesTex)}:${tidalField ? 'tidal' : 'ordinary'}`;
   return material;
 }
 
@@ -1488,7 +1491,10 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           return texture2D(uWeatherSystem, oct * 0.5 + 0.5).r;
         }
         float cloudVertexAmount(vec3 d) {
-          if (uWeatherReady > 0.5) return texture2D(uWeatherSystem, weatherAtlasUV(d)).r;
+          if (uWeatherReady > 0.5) {
+            float amount = weatherAtlasSample(uWeatherSystem, d).r;
+            return uLocalLayer > 0.5 ? synopticCoverage(amount, uLayerHigh > 0.5 ? 0.14 : 0.12) : amount;
+          }
           float fine = cloudVertexFbm(d);
           float base = smoothstep(uCov0, uCov1, fine);
           float system = weatherSystem(d) * smoothstep(0.24, 0.68, fine) * 0.86;
@@ -1499,9 +1505,9 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
         float vertexCloud = cloudVertexAmount(vCDir);
         float altitudeShift = uCloudRelief * pow(vertexCloud, 1.15);
         if (uLocalLayer > 0.5) {
-          vec4 layer = texture2D(uSurfaceAtlas, weatherAtlasUV(vCDir));
-          float surface = (texture2D(uSurfaceAtlas,
-            weatherAtlasUV(uSurfaceSpin * vCDir)).g * 2.0 - 1.0) * uSurfaceRange;
+          vec4 layer = weatherAtlasSample(uSurfaceAtlas, vCDir);
+          float surface = (weatherAtlasSample(uSurfaceAtlas,
+            uSurfaceSpin * vCDir).g * 2.0 - 1.0) * uSurfaceRange;
           float targetAltitude = uLayerHigh > 0.5 ? 11200.0
             : max(250.0, surface + 350.0 + layer.a * 3850.0 + 1100.0);
           altitudeShift += targetAltitude - uDeckBaseAltitude;
@@ -1512,6 +1518,7 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
         uniform sampler2D uCloudNoise;
         uniform sampler2D uWeatherSystem;
         uniform float uWeatherReady;
+        uniform float uLocalLayer, uLayerHigh;
         ${weatherAtlasGLSL}
         uniform float uCov0;
         uniform float uCov1;
@@ -1535,7 +1542,10 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
           return texture2D(uWeatherSystem, oct * 0.5 + 0.5).r;
         }
         float cloudAmount(vec3 d) {
-          if (uWeatherReady > 0.5) return texture2D(uWeatherSystem, weatherAtlasUV(d)).r;
+          if (uWeatherReady > 0.5) {
+            float amount = weatherAtlasSample(uWeatherSystem, d).r;
+            return uLocalLayer > 0.5 ? synopticCoverage(amount, uLayerHigh > 0.5 ? 0.14 : 0.12) : amount;
+          }
           float fine = cloudFbm(d);
           float base = smoothstep(
             uCov0 - 0.02 * uSurfaceView,

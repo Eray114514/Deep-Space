@@ -20,8 +20,11 @@ import {
 } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
 import { getCloudResourceManager } from './cloud/cloud-resource-manager.js';
-import { sampleWeatherAtlas } from './cloud/weather-atlas.js';
+import { sampleWeatherAtlas, decodeSynopticCoverage } from './cloud/weather-atlas.js';
 import { createPlanetWeatherField } from './cloud/planet-weather.js';
+import { PlanetWeatherStream } from './cloud/planet-weather-stream.js';
+import { buildProductionBands, CANDIDATE_WIDTH, CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from './cloud/production-bands.js';
+import { sampleProductionMedium } from './cloud/production-shape.js';
 import { CLOUD_TROPOSPHERE_TOP_METERS } from './cloud/cloud-species.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { WORLD_LAYER } from './render-layers.js';
@@ -1079,6 +1082,9 @@ export class Planet {
         this.nD, coverage, o1, this.weatherField, this.cloudAtlasWidth);
       this.cloudShadowTex = weatherAtlases.low;
       this.cloudWeatherHiTex = weatherAtlases.high;
+      this.cloudSpeciesTex = weatherAtlases.bands;
+      this.cloudBoundsTex = weatherAtlases.bounds;
+      this.cloudCandidatesTex = weatherAtlases.candidates;
       this.cloudCoverageStats = weatherAtlases.stats;
       const terrainCloudNode = this.terrainMaterial.userData.cloudShadowTextureNode;
       if (terrainCloudNode) terrainCloudNode.value = this.cloudShadowTex;
@@ -1096,7 +1102,7 @@ export class Planet {
       const authoredRenderLayer = this.tuning.cloudRenderLayer || null;
       const naturalCloudBaseAlt = clamp(this.hAmp * 1.12 + 1400, 12000, 22000);
       const cloudShellBaseAlt = this.weatherField.synoptic
-        ? Math.max(250, this.weatherField.surfaceBoundsMeters[0] + 250)
+        ? Math.min(250, this.weatherField.surfaceBoundsMeters[0])
         : Number.isFinite(authoredRenderLayer?.minAltitudeMeters)
         ? clamp(authoredRenderLayer.minAltitudeMeters, 8000, 30000)
         : naturalCloudBaseAlt;
@@ -1120,7 +1126,7 @@ export class Planet {
       const authoredCloudTop = Number(authoredRenderLayer?.maxAltitudeMeters);
       const cloudShellTopAlt = this.weatherField.synoptic
         ? Math.max(CLOUD_TROPOSPHERE_TOP_METERS,
-          this.weatherField.surfaceBoundsMeters[1] + LCL_MAX_METERS + 4000)
+          this.weatherField.surfaceBoundsMeters[1] + CLOUD_TROPOSPHERE_TOP_METERS)
         : Number.isFinite(authoredCloudTop)
         ? clamp(authoredCloudTop, cloudShellBaseAlt + 45000, 105000)
         : cloudShellBaseAlt + naturalCloudDepth;
@@ -1181,6 +1187,9 @@ export class Planet {
           volumetricCloudProfile);
         this.volCloudUniforms ||= this.volCloudMat.uniforms;
         this.volCloudBand ||= band;
+        this.volCloudFarMat=this.volCloudMat.clone();
+        this.volCloudFarMat.defines.CLOUD_FAR_VIEW=1;
+        this.volCloudFarMat.uniforms=this.volCloudMat.uniforms;
         this.volCloudUniforms.uAmbC.value
           .copy(this.skyColor).multiplyScalar(0.58);
         this.volCloudMesh = new THREE.Mesh(
@@ -1358,6 +1367,9 @@ export class Planet {
     this.stellarOccluders = occluders.map((b) => ({ ...b, centerLocal: b.centerLocal.clone() }));
     for (const uniforms of [this.volCloudMat?.uniforms, this.terrainMaterial?.userData?.shader?.uniforms,
       this.liquidMat?.userData?.shader?.uniforms]) bindStellarOcclusion(uniforms, this);
+    for (const material of [this.volCloudMat, this.terrainMaterial, this.liquidMat]) {
+      if (material) bindStellarOcclusion(material.uniforms || material.userData?.shader?.uniforms, this, material);
+    }
   }
 
   setEclipseOccluder(occluder = null) {
@@ -1392,6 +1404,10 @@ export class Planet {
   setWeatherTime(hours) {
     if (!Number.isFinite(hours)) return this.weatherState;
     this.weatherHours = Number(hours);
+    if (this.weatherField?.synoptic && this.cloudShadowTex && typeof Worker !== 'undefined') {
+      this.weatherStream ||= new PlanetWeatherStream(this);
+      this.weatherStream.update(this.weatherHours);
+    }
     this.weatherState = advanceWeatherField(this.weatherField, this.weatherHours);
     const uniforms = this.volCloudUniforms || this.volCloudMat?.uniforms;
     if (uniforms?.uWeatherTime) uniforms.uWeatherTime.value = this.weatherHours;
@@ -1488,6 +1504,11 @@ export class Planet {
   }
 
   setWeatherFixture(name = null) {
+    this.weatherStream?.dispose(); this.weatherStream = null;
+    this.cloudColumnMap?.dispose(); this.cloudColumnMap = null;
+    this.cloudSpeciesTex?.dispose();
+    this.cloudBoundsTex?.dispose();
+    this.cloudCandidatesTex?.dispose();
     this.weatherField = createPlanetWeatherField(this, {
       profile: this.weatherProfile,
       fixture: name || undefined,
@@ -1500,9 +1521,17 @@ export class Planet {
         this.weatherField, this.cloudAtlasWidth || 512);
       this.cloudShadowTex = weatherAtlases.low;
       this.cloudWeatherHiTex = weatherAtlases.high;
+      this.cloudSpeciesTex = weatherAtlases.bands;
+      this.cloudBoundsTex = weatherAtlases.bounds;
+      this.cloudCandidatesTex = weatherAtlases.candidates;
       this.cloudCoverageStats = weatherAtlases.stats;
       const terrainNode = this.terrainMaterial.userData.cloudShadowTextureNode;
       if (terrainNode) terrainNode.value = this.cloudShadowTex;
+      for (const material of [this.terrainMaterial, this.liquidMat]) {
+        const u = material?.userData?.shader?.uniforms?.uCloudSynoptic;
+        if (u) u.value = this.weatherField.synoptic ? 1 : 0;
+        if(material)material.needsUpdate=true;
+      }
       if (this.liquidMat?.userData.waterCloudTexture) {
         this.liquidMat.userData.waterCloudTexture.value = this.cloudShadowTex;
       }
@@ -1531,7 +1560,19 @@ export class Planet {
       if (this.volCloudMat?.uniforms.uWeatherMap) {
         this.volCloudMat.uniforms.uWeatherMap.value = this.cloudShadowTex;
         this.volCloudMat.uniforms.uWeatherMapHi.value = this.cloudWeatherHiTex;
+        this.volCloudMat.uniforms.uSpeciesMap.value = this.cloudSpeciesTex;
+        this.volCloudMat.uniforms.uBandBounds.value = this.cloudBoundsTex;
+        this.volCloudMat.uniforms.uBandCandidates.value = this.cloudCandidatesTex;
+        this.volCloudMat.uniforms.uCandidatesReady.value = this.cloudCandidatesTex ? 1 : 0;
+        this.volCloudMat.uniforms.uBandsReady.value = this.cloudSpeciesTex ? 1 : 0;
+        this.volCloudMat.uniforms.uColumnsReady.value = 0;
         this.volCloudMat.uniforms.uLocalBands.value = this.weatherField.synoptic ? 1 : 0;
+        this.volCloudMat.defines.PRODUCTION_CLOUD_MEDIUM = this.weatherField.synoptic ? 1 : 0;
+        this.volCloudMat.needsUpdate = true;
+        if(this.volCloudFarMat) {
+          this.volCloudFarMat.defines.PRODUCTION_CLOUD_MEDIUM=this.weatherField.synoptic?1:0;
+          this.volCloudFarMat.needsUpdate=true;
+        }
         this.volCloudMat.uniforms.uSurfaceRange.value = this.weatherField.surfaceRangeMeters || 1;
       }
       if (volumeState) {
@@ -1606,6 +1647,7 @@ export class Planet {
     const camR = camLocal.length();
     const altitude = camR - this.R;
     if (this.weatherField?.synoptic && camR > 0) {
+      if(this.cloudSpeciesTex) return clamp(sampleProductionMedium(this,camLocal).density,0,1);
       _dir.copy(camLocal).multiplyScalar(1 / camR);
       const weather = this.weatherAt(_dir);
       if (weather.coverage < 0.01 && weather.highMask < 0.01) return 0;
@@ -1794,6 +1836,7 @@ export class Planet {
         u.uEngage.value = e;
         u.uCameraLocal.value.copy(camLocal);
         u.uSpin.value.setFromMatrix4(_m4);
+        u.uCloudAdvectionPhase.value=this.weatherHours*this.weatherField.windRadiansPerHour;
         u.uFrame.value = (u.uFrame.value + 1) % 4096;
         // The legacy volume material lights clouds from the live planet-local
         // sun direction. Losing this copy (during the WebGPU rewrite) left the
@@ -1932,8 +1975,15 @@ export class Planet {
     this.liquidMat?.userData?.waterInteractionTexture?.dispose?.();
     this.liquidMat?.dispose();
     this.waterUnderlayMaterial?.dispose();
+    this.weatherStream?.dispose();
+    this.cloudColumnMap?.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
     if (this.cloudWeatherHiTex) this.cloudWeatherHiTex.dispose();
+    this.cloudSpeciesTex?.dispose();
+    this.cloudBoundsTex?.dispose();
+    this.cloudCandidatesTex?.dispose();
+    this.volCloudMat?.dispose();
+    this.volCloudFarMat?.dispose();
     if (this.cloudShadowTex2) this.cloudShadowTex2.dispose();
     if (this.flora) {
       for (const k in this.flora) if (this.flora[k] && this.flora[k].dispose) this.flora[k].dispose();
@@ -2001,6 +2051,7 @@ function cloudAtlasTexture(data, width, height) {
   tex.generateMipmaps = true;
   tex.colorSpace = THREE.NoColorSpace;
   tex.userData.weatherAtlas = { width, height, data };
+  tex.userData.weatherAtlas.hours=0;
   tex.needsUpdate = true;
   return tex;
 }
@@ -2031,7 +2082,8 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
         // The synoptic model owns macro coverage. Do not re-threshold it with
         // a second noise field or re-calibrate each atlas into a different sky.
         const w = sampleWeatherField(weatherField, dir, 0), index = j * W + i, k = index * 4;
-        lowRaw[index] = w.coverage; highRaw[index] = w.highMask;
+        lowRaw[index] = clamp(0.5 + w.potentials.low / 4);
+        highRaw[index] = clamp(0.5 + w.potentials.high / 4);
         lowData[k + 1] = Math.round(w.cloudType * 255);
         lowData[k + 2] = Math.round(w.stratusMask * 255);
         lowData[k + 3] = Math.round(w.humidity * 255);
@@ -2131,16 +2183,18 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
       * (0.12 + 0.88 * Math.pow(highRelief, 0.82));
     lowData[index * 4] = Math.round(lowValue * 255);
     highData[index * 4] = Math.round(highValue * 255);
-    lowMean += lowValue;
-    highMean += highValue;
-    if (lowValue >= 0.125) lowOccupied++;
-    if (highValue >= 0.08) highOccupied++;
+    const lowAmount = weatherField?.synoptic ? decodeSynopticCoverage(lowValue) : lowValue;
+    const highAmount = weatherField?.synoptic ? decodeSynopticCoverage(highValue, 0.14) : highValue;
+    lowMean += lowAmount;
+    highMean += highAmount;
+    if (lowAmount >= 0.125) lowOccupied++;
+    if (highAmount >= 0.08) highOccupied++;
   }
   const count = lowRaw.length;
   const stats = Object.freeze({
     requested: coverage,
     fixtureRequested: Number.isFinite(fixtureCoverage) ? fixtureCoverage : null,
-    representation: weatherField?.synoptic ? 'synoptic-advected-snapshot-v1' : 'legacy-fixture',
+    representation: weatherField?.synoptic ? 'synoptic-potential-snapshot-v2' : 'legacy-fixture',
     lowTarget: weatherField?.synoptic ? null : lowTarget,
     highTarget: weatherField?.synoptic ? null : highTarget,
     lowOccupied: lowOccupied / count,
@@ -2155,7 +2209,23 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
   weatherField?.bindAtlases?.(low.userData.weatherAtlas, high.userData.weatherAtlas);
   low.userData.coverageStats = stats;
   high.userData.coverageStats = stats;
-  return { low, high, stats };
+  let bands = null,bounds=null,candidates=null;
+  if (weatherField?.synoptic) {
+    const packed=buildProductionBands(d=>weatherField.sampleRaw(d,0),128,weatherField.streamDescriptor.terrain);
+    bands = new THREE.DataArrayTexture(packed.data, packed.width, packed.height, packed.layers);
+    bands.format = THREE.RGBAFormat; bands.type = THREE.FloatType;
+    bands.minFilter = bands.magFilter = THREE.LinearFilter;
+    bands.wrapS = THREE.RepeatWrapping; bands.wrapT = THREE.ClampToEdgeWrapping;
+    bands.colorSpace = THREE.NoColorSpace; bands.needsUpdate = true;
+    bounds=new THREE.DataTexture(packed.bounds,packed.width,packed.height,THREE.RGBAFormat,THREE.FloatType);
+    bounds.wrapS=THREE.RepeatWrapping;bounds.minFilter=bounds.magFilter=THREE.NearestFilter;
+    bounds.colorSpace=THREE.NoColorSpace;bounds.needsUpdate=true;
+    candidates=new THREE.DataArrayTexture(packed.candidates,CANDIDATE_WIDTH,CANDIDATE_HEIGHT,CANDIDATE_LAYERS);
+    candidates.format=THREE.RedIntegerFormat;candidates.type=THREE.UnsignedShortType;
+    candidates.internalFormat='R16UI';candidates.minFilter=candidates.magFilter=THREE.NearestFilter;
+    candidates.needsUpdate=true;
+  }
+  return { low, high, bands, bounds, candidates, stats };
 }
 
 function makeRingTexture(rand, tint) {

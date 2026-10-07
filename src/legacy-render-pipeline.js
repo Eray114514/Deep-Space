@@ -11,6 +11,8 @@ import { AtmospherePass } from './atmosphere-pass-webgl.js';
 import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
 import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
+import {CloudLightBank} from './cloud/cloud-light-bank.js';
+import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 
 function aliasUniforms(uniforms, aliases) {
   for (const [alias, original] of Object.entries(aliases)) {
@@ -36,6 +38,8 @@ export class GameLegacyPipeline {
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
+    this.cloudLightBanks=new Map();this.cloudLightFrame=0;
+    this.cloudSurfaceShadow=new CloudSurfaceShadowPass(scene,camera);
     const target = new THREE.WebGLRenderTarget(1, 1, {
       samples: 0,
       type: THREE.HalfFloatType,
@@ -50,9 +54,16 @@ export class GameLegacyPipeline {
       this.composer.renderTarget1.dispose();
       this.composer.renderTarget2.dispose();
       this.volumePass?.releaseTargets();
+      for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
+      this.cloudSurfaceShadow.dispose();
     };
     renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderPass = new RenderPass(scene, camera);
+    const renderOpaque=this.renderPass.render;
+    this.renderPass.render=(...args)=>{
+      try {return renderOpaque.apply(this.renderPass,args);}
+      finally {this.cloudSurfaceShadow.depthValid=false;}
+    };
     this.composer.addPass(this.renderPass);
 
     // Parked ships participate in the world depth buffer, but their cabin
@@ -131,6 +142,28 @@ export class GameLegacyPipeline {
   }
 
   render() {
+    this.cloudLightFrame++;
+    const p=this.volumePass?.activePlanet;
+    const local=p?.volCloudMat?.uniforms.uCameraLocal.value;
+    const eligible=p?.weatherField?.synoptic && p.weatherStream?.ready
+      && local?.length()>0 && local.length()-p.R<200000;
+    for(const [body,bank] of this.cloudLightBanks) {
+      if(body===p && eligible) {bank.retireAt=null;continue;}
+      bank.unbind();bank.retireAt??=this.cloudLightFrame+2;
+      if(this.cloudLightFrame>=bank.retireAt) {bank.dispose();this.cloudLightBanks.delete(body);}
+    }
+    if(eligible) {
+      let bank=this.cloudLightBanks.get(p);
+      if(bank?.needsReset()) {bank.dispose();bank=null;this.cloudLightBanks.delete(p);}
+      if(!bank || bank.disposed) {
+        bank=new CloudLightBank(p);this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
+      }
+      bank.update(this.renderer);
+    }
+    // RenderPass writes readBuffer. Preserve the receiver depth in the other
+    // target during that draw; sampling its own depth attachment is feedback.
+    // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
+    this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,p);
     this.composer.render();
   }
 
@@ -139,6 +172,8 @@ export class GameLegacyPipeline {
   }
 
   dispose() {
+    this.cloudSurfaceShadow.dispose();
+    for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.composer.dispose();
     this.volumePass?.dispose();

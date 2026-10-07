@@ -7,6 +7,7 @@ import { integrateMediumSlabs, MEDIUM_FIXTURES } from './medium-reference.js';
 
 const fixtures = MEDIUM_FIXTURES.map((f) => ({ ...f,
   reference: integrateMediumSlabs(f.slabs, f.depth, f.background) }));
+const production=process.argv.includes('--production');
 const { server, port } = await startServer(0);
 let browser;
 try {
@@ -17,7 +18,7 @@ try {
   await page.route('**/__b5', (r) => r.fulfill({ contentType: 'text/html', body:
     '<link rel="icon" href="data:,"><script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>' }));
   await page.goto(`http://127.0.0.1:${port}/__b5`);
-  const result = await page.evaluate(async (fixtures) => {
+  const result = await page.evaluate(async ({fixtures,production}) => {
     const THREE = await import('three');
     const { AtmospherePass } = await import('/src/atmosphere-pass-webgl.js');
     const { VolumetricPass } = await import('/src/volumetric-pass-webgl.js');
@@ -57,6 +58,7 @@ try {
     const R = 100000;
     const cloud = makeCloudVolumeMaterial({ R: R - 100, hasLiquid: false }, {
       rIn: R + 1, rOut: R + 2, cov0: 0.2, cov1: 0.7, ox: 0, oy: 0, oz: 0,
+      localWeather:production,
     }, detail);
     cloud.side = THREE.FrontSide; cloud.blending = THREE.NoBlending; cloud.depthTest = false;
     cloud.vertexShader = 'varying vec3 vDirection,vViewDirection; void main(){vDirection=vec3(0,1,0);vViewDirection=vec3(0,0,-1);gl_Position=vec4(position.xy,0,1);}';
@@ -64,6 +66,12 @@ try {
       'float densityAt(', 'return 1.0;'), 'void airSample(', 'extinction=uTestAirExt; source=uTestAirSource;');
     cloud.fragmentShader = cloud.fragmentShader.replace('float sigma = 3.80 / thick;', 'float sigma = uTestSigma;')
       .replace('cloudLight *= powder * uTint;', 'cloudLight = uTestCloudSource / max(sigma,1e-30);');
+    if(production) {
+      cloud.fragmentShader=replaceBody(cloud.fragmentShader,'float cloudExtinctionAt(','return uTestSigma;');
+      cloud.fragmentShader=replaceBody(cloud.fragmentShader,'vec3 cloudCombinedSource(',
+        'return uTestCloudSource/max(uTestSigma,1e-30);');
+      cloud.uniforms.uLightQuadratureSteps.value=32;
+    }
     Object.assign(cloud.uniforms, constants);
     const cloudMesh = new THREE.Mesh(new THREE.PlaneGeometry(2,2),cloud);
     cloudMesh.frustumCulled=false; cloudMesh.layers.set(2); volume.scene.add(cloudMesh);
@@ -130,7 +138,7 @@ try {
     geometry.dispose(); surface.material.dispose(); air.dispose(); volume.dispose(); cloudMesh.geometry.dispose(); cloud.dispose();
     detail.dispose(); disposeCloudNoiseTexture(); renderer.dispose();
     return { cases, edgeError };
-  }, fixtures);
+  }, {fixtures,production});
   assert.deepEqual(errors, []);
   assert.ok(result.edgeError<1e-6, `thin opaque foreground leak: ${result.edgeError}`);
   const cases = result.cases.map((actual, i) => {
@@ -141,7 +149,7 @@ try {
     return { ...actual, reference, maxAbsoluteRgbError: error };
   });
   await mkdir('test-results/b5', { recursive: true });
-  await writeFile('test-results/b5/transport.json', JSON.stringify({ fingerprint: await evidenceFingerprint('tools/b5transporttest.js'),
+  await writeFile(`test-results/b5/transport${production?'-production':''}.json`, JSON.stringify({ fingerprint: await evidenceFingerprint('tools/b5transporttest.js'),
     cases, edgeError: result.edgeError, errors, scope: 'Production air/cloud transfer and log depth from an actual opaque draw; prescribed constant coefficients/sources, includes thin-foreground upscale rejection, not full physical source or temporal reconstruction acceptance.' }, null, 2));
   console.log('PASS B5 joint transport + actual opaque depth:', cases.map((c) => [c.name, c.maxAbsoluteRgbError]));
 } finally {

@@ -2,12 +2,15 @@ import * as THREE from 'three';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionGLSL, stellarOcclusionUniforms, bindStellarOcclusion } from './stellar-occlusion.js';
+import { surfaceCloudGLSL,surfaceCloudLightingGLSL,surfaceCloudUniforms,bindSurfaceClouds } from './cloud/surface-clouds.js';
 
 // Bind the same solar transmission and isotropic sky field to world surfaces.
 // Portal/remote bodies without an active air context retain their own lighting.
 export function installSurfaceAtmosphere(material, planet, shader) {
+  material.userData.surfaceCloudOwner=planet;
   if (!material.userData.surfaceMedium) {
     const uniforms = { ...namespacedAtmosphereUniforms(), ...stellarOcclusionUniforms(),
+      ...surfaceCloudUniforms(planet),
       uSurfaceViewToLocal: { value: new THREE.Matrix3() } };
     const rotation = new THREE.Matrix4();
     const previous = material.onBeforeRender;
@@ -15,7 +18,8 @@ export function installSurfaceAtmosphere(material, planet, shader) {
       previous?.call(this, renderer, scene, camera, ...args);
       rotation.makeRotationFromQuaternion(planet._invFrame).multiply(camera.matrixWorld);
       uniforms.uSurfaceViewToLocal.value.setFromMatrix4(rotation);
-      bindStellarOcclusion(uniforms, planet);
+      bindStellarOcclusion(uniforms, planet, material);
+      bindSurfaceClouds(uniforms,planet,renderer,camera,material);
       const air = planet.atmosphereTransportUniforms;
       if (air) {
         for (const [name, uniform] of Object.entries(air)) {
@@ -26,18 +30,23 @@ export function installSurfaceAtmosphere(material, planet, shader) {
     material.userData.surfaceMedium = uniforms;
   }
   Object.assign(shader.uniforms, material.userData.surfaceMedium);
+  shader.defines ||= {};
+  shader.defines.SURFACE_CLOUD_MEDIUM=planet.cloudSpeciesTex?1:0;
   const transport = /* glsl */`
     ${cloudAtmosphereGLSL}
     ${stellarOcclusionGLSL}
+    ${surfaceCloudGLSL}
+    ${surfaceCloudLightingGLSL}
     uniform mat3 uSurfaceViewToLocal;
     vec3 surfaceSunTransmission(vec3 direction) {
-      if(air_uEnabled<0.5) return vec3(1);
+      float cloud=surfaceCloudLighting(direction);
+      if(air_uEnabled<0.5) return vec3(cloud);
       float h=max(length(vLocalPos)-air_uGroundR,0.0);
       float mu=dot(normalize(vLocalPos),direction);
       vec3 od=air_sunlightOpticalDepth(h,mu).rgb
         *vec3(air_uRayleighScaleHeight,air_uMieScaleHeight,air_uOzoneHalfWidth)*air_uDensityScale;
       float visible=step(0.0,air_solarHorizonClearance(vLocalPos,direction));
-      return exp(-(air_uBetaRayleigh*od.r+air_uBetaMieExtinction*od.g+air_uBetaOzone*od.b))*visible;
+      return exp(-(air_uBetaRayleigh*od.r+air_uBetaMieExtinction*od.g+air_uBetaOzone*od.b))*visible*cloud;
     }
     vec3 surfaceSkyIrradiance() {
       float h=max(length(vLocalPos)-air_uGroundR,0.0);
@@ -49,6 +58,8 @@ export function installSurfaceAtmosphere(material, planet, shader) {
   `;
   shader.fragmentShader = shader.fragmentShader.replace('#include <lights_physical_pars_fragment>',
     '#include <lights_physical_pars_fragment>\n' + transport);
+  shader.fragmentShader=shader.fragmentShader.replace('#include <logdepthbuf_fragment>',
+    '#include <logdepthbuf_fragment>\ninitializeSurfaceCloudLighting(vLocalPos);');
   const lights = THREE.ShaderChunk.lights_fragment_begin.replace(
     'getDirectionalLightInfo( directionalLight, directLight );', `getDirectionalLightInfo( directionalLight, directLight );
     {

@@ -1,5 +1,8 @@
 // Browser-only helpers, imported by B0 diagnostics. No campaign mutations.
 import * as THREE from 'three';
+import {CLOUD_SPECIES} from '../src/cloud/cloud-species.js';
+import {productionCloudGLSL} from '../src/cloud/production-medium-glsl.js';
+import {weatherAtlasGLSL} from '../src/cloud/weather-atlas.js';
 
 export function installCaptureHold() {
   const pipeline = NMS._pipeline;
@@ -79,11 +82,20 @@ export function groundPose(index, degrees) {
 // Read production density on a spherical grid, then choose an occupied column
 // near the requested local solar elevation. This confirms cloud presence, not
 // global coverage or species identity. Never use the disconnected CPU fixture.
-export function occupiedColumn(index, solarDegrees) {
+export function occupiedColumn(index, solarDegrees,{speciesId=null}={}) {
   const p = NMS._planet(index), source = p.volCloudMat;
-  const columns = 1024, rows = 48;
-  const prefix = source.fragmentShader.slice(0, source.fragmentShader.lastIndexOf('void main()'));
-  const material = new THREE.ShaderMaterial({ uniforms: source.uniforms, depthTest: false, depthWrite: false,
+  const species=speciesId===null?-1:CLOUD_SPECIES.findIndex(s=>s.id===speciesId);
+  if(speciesId!==null && species<0)throw Error(`Unknown cloud genus: ${speciesId}`);
+  const columns = 1024, rows = species<0?48:128;
+  const prefix = p.cloudSpeciesTex ? `precision highp sampler3D;uniform sampler3D uNoise3;
+    uniform sampler2D uWeatherMapHi;uniform mat3 uSpin;
+    uniform vec3 uCOff;uniform float uBodyR,uSurfaceRange,uRin,uRout;
+    ${weatherAtlasGLSL}\n${productionCloudGLSL}
+    float densityAt(vec3 p) {float r=length(p);if(r<=uRin||r>=uRout)return 0.0;
+      vec2 layers=productionCloudLayersAt(p);return max(layers.x,layers.y*.06);}`
+    :source.fragmentShader.slice(0, source.fragmentShader.lastIndexOf('void main()'));
+  const material = new THREE.ShaderMaterial({ defines: source.defines,
+    uniforms:{...source.uniforms,uSpeciesMask:{value:species}},depthTest: false, depthWrite: false,
     vertexShader: `varying vec3 vDirection,vViewDirection; void main() {
       vDirection=vec3(0,1,0);vViewDirection=vec3(0,0,-1);gl_Position=vec4(position.xy,0,1); }`,
     fragmentShader: prefix + `void main() {
@@ -122,7 +134,7 @@ export function occupiedColumn(index, solarDegrees) {
       if (d > maximum) { maximum = d; row = j; }
       sum += d;
     }
-    if (maximum > 0.1 && Math.abs(elevation - solarDegrees) < 6) {
+    if (maximum > (species<0?.1:.03) && Math.abs(elevation - solarDegrees) < 6) {
       const firstAltitude = band.rIn - p.R + (first + 0.5) / rows * thickness;
       if (p.surfaceRadius(direction) - p.R + 500 >= firstAltitude) continue;
       candidates.push({ gridIndex: i, direction: direction.toArray(), elevation,
@@ -133,9 +145,10 @@ export function occupiedColumn(index, solarDegrees) {
   candidates.sort((a, b) => b.sum - a.sum);
   if (!candidates.length) throw Error(`No occupied sun-angle column for body ${index}, ${solarDegrees}°`);
   return { ...candidates[0], occupiedSamples: occupied, totalSamples: columns * rows,
-    method: 'Production densityAt, 1024 directions x 48 heights; occupancy >0.01, peak >0.1',
+    speciesId,method:`Production densityAt, ${columns} directions x ${rows} heights; genus ${speciesId||'all'}, occupancy >0.01`,
     belowAltitude: Math.max(p.surfaceRadius(new THREE.Vector3(...candidates[0].direction)) - p.R + 500,
-      candidates[0].firstAltitude - 1500), aboveAltitude: band.rOut - p.R + 1500 };
+      candidates[0].firstAltitude - 1500),
+    aboveAltitude:species<0?band.rOut-p.R+1500:candidates[0].lastAltitude+1500 };
 }
 
 export function cloudPose(index, column, scene) {
@@ -144,6 +157,7 @@ export function cloudPose(index, column, scene) {
   let pitch = 0;
   if (scene === 'S2-below') { altitude = column.belowAltitude; pitch = 0.3; }
   if (scene === 'S2-above') { altitude = column.aboveAltitude; pitch = -0.22; }
+  if (scene === 'S2-topdown') { altitude = column.aboveAltitude; pitch = -1.1; }
   if (scene === 'S3-oblique') { altitude = Math.max(p.R / 15, column.aboveAltitude * 2); pitch = -0.28; }
   if (scene === 'S4-globe') {
     NMS.teleport(index, 1.2, { dir: column.direction }); return;

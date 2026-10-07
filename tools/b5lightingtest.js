@@ -87,7 +87,8 @@ try {
     actual.slice(0, 2).forEach((v, c) => assert.ok(Math.abs(v - fixtures[i].expected[c]) < 0.015,
       `${fixtures[i].name}: star ${c} actual ${v}, expected ${fixtures[i].expected[c]}`));
   });
-  assert.deepEqual(cases[4], cases[5], 'overlapping blockers must not double-count the same disc');
+  cases[4].forEach((value, channel) => assert.ok(Math.abs(value-cases[5][channel]) < 1e-6,
+    'overlapping blockers must not double-count the same disc (fp32 coordinate rounding)'));
   await mkdir('test-results/b5', { recursive: true });
   await writeFile('test-results/b5/lighting.json', JSON.stringify({ fingerprint: await evidenceFingerprint('tools/b5lightingtest.js'),
     cases: fixtures.map((f, i) => ({ ...f, actual: cases[i] })), errors }, null, 2));

@@ -21,6 +21,8 @@ try {
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.goto(`http://127.0.0.1:${port}/?renderer=webgl&quality=ultra&freeze=1&time=9.5&nohero=1&vclouds=1&post=1&nolock=1`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 150000 });
+  await page.waitForFunction(()=>NMS._internals.universe.system.planets.every(p=>
+    !p.weatherField?.synoptic || p.weatherStream?.ready),null,{timeout:60000});
   console.log('Booted; probing all production cloud decks.');
   const geometry = await page.evaluate(() => {
     const THREE = NMS._THREE, renderer = NMS._renderer;
@@ -28,11 +30,13 @@ try {
     const results = [];
     for (const p of NMS._internals.universe.system.planets) {
       if (!p.cloudMesh || !p.weatherField.synoptic) continue;
-      const field = p.weatherField, quantization = field.surfaceRangeMeters / 255;
+      const field = p.weatherField,atlas=p.cloudWeatherHiTex.userData.weatherAtlas;
+      const quantization = atlas.data instanceof Float32Array
+        ? field.surfaceRangeMeters*2e-7 : field.surfaceRangeMeters/255;
       let surfaceMin = Infinity, surfaceMax = -Infinity;
       const data = p.cloudWeatherHiTex.userData.weatherAtlas.data;
       for (let i = 1; i < data.length; i += 4) {
-        const height = (data[i] / 255 * 2 - 1) * field.surfaceRangeMeters;
+        const height = (data[i] / (atlas.scale??255) * 2 - 1) * field.surfaceRangeMeters;
         surfaceMin = Math.min(surfaceMin, height); surfaceMax = Math.max(surfaceMax, height);
       }
       for (const [layer, deck] of [['low', p.cloudMesh], ['high', p.cloudMesh2]]) {

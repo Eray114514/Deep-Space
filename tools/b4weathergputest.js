@@ -17,13 +17,14 @@ try {
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 150000 });
   const result = await page.evaluate(async () => {
     const THREE = NMS._THREE;
-    const { sampleWeatherAtlas } = await import('/src/cloud/weather-atlas.js');
+    const { sampleWeatherAtlas, decodeSynopticCoverage } = await import('/src/cloud/weather-atlas.js');
     const renderer = NMS._renderer;
     NMS.land(0);
     const p = NMS._planet(0), source = p.volCloudMat;
     const prefix = source.fragmentShader.slice(0, source.fragmentShader.lastIndexOf('void main()'));
     const geometry = new THREE.PlaneGeometry(2, 2), scene = new THREE.Scene(), camera = new THREE.Camera();
     const material = new THREE.ShaderMaterial({
+      defines: source.defines,
       uniforms: { ...source.uniforms, uProbe: { value: new THREE.Vector3() }, uProbeMode: { value: 0 } },
       vertexShader: 'varying vec3 vDirection,vViewDirection; void main(){ vDirection=vec3(0.,1.,0.); vViewDirection=vec3(0.,0.,-1.); gl_Position=vec4(position.xy,0.,1.); }',
       fragmentShader: prefix + '\nuniform vec3 uProbe; uniform float uProbeMode; void main(){ if(uProbeMode < 0.5) gl_FragColor=vec4(textureLod(uWeatherMap,weatherAtlasUV(uSpin*uProbe),0.0).rgb,1.0); else if(uProbeMode < 1.5) gl_FragColor=vec4(densityAt(uProbe),0.0,0.0,1.0); else { float surface=(textureLod(uWeatherMapHi,weatherAtlasUV(uProbe),0.0).g*2.0-1.0)*uSurfaceRange; float lcl=350.0+textureLod(uWeatherMapHi,weatherAtlasUV(uSpin*uProbe),0.0).a*3850.0; gl_FragColor=vec4(surface,lcl,max(250.0,surface+lcl+200.0),1.0); } }',
@@ -72,12 +73,13 @@ try {
           Math.abs(local[0] - surface), Math.abs(local[1] - lcl),
           Math.abs(local[2] - Math.max(250, surface + lcl + 200)));
         const gameplay = p.weatherAt(d, spin / p.weatherField.windRadiansPerHour);
-        gameplayError = Math.max(gameplayError, Math.abs(gameplay.coverage - expected[0]));
+        const decoded = decodeSynopticCoverage(expected[0]);
+        gameplayError = Math.max(gameplayError, Math.abs(gameplay.coverage - decoded));
         farMaterial.uniforms.uProbe.value.copy(d).applyMatrix3(material.uniforms.uSpin.value);
         mesh.material = farMaterial;
         renderer.render(scene, camera);
         renderer.readRenderTargetPixels(target, 0, 0, 1, 1, pixels);
-        farError = Math.max(farError, Math.abs(pixels[0] - expected[0]));
+        farError = Math.max(farError, Math.abs(pixels[0] - decoded));
         mesh.material = material;
         maxError = Math.max(maxError, ...actual.slice(0, 3).map((v, k) => Math.abs(v - expected[k])));
         cases++;

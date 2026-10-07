@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createPlanetWeatherField } from '../src/cloud/planet-weather.js';
-import { sampleWeatherAtlas } from '../src/cloud/weather-atlas.js';
+import { sampleWeatherAtlas, decodeSynopticCoverage } from '../src/cloud/weather-atlas.js';
 import { advanceWeatherField, sampleWeatherField, weatherFieldFingerprint } from '../src/weather-field.js';
 
 const body = { seed: 'B4-production-synoptic', R: 6000000, hAmp: 9000,
@@ -33,23 +33,23 @@ assert.ok(samples.filter((s) => s.coverage < 0.01).length > 20, 'Actual broad cl
 assert.ok(samples.filter((s) => s.coverage > 0.9).length > 20, 'Actual occupied regions');
 assert.ok(samples.some((s) => s.morphology.front > 0.3), 'Synoptic fronts reach production source');
 assert.equal(field.windRadiansPerHour, 20 * 3600 / 6000000);
-assert.equal(advanceWeatherField(field, 7).version, 5);
-assert.match(weatherFieldFingerprint(field, 7), /^weather-v5:/);
+assert.equal(advanceWeatherField(field, 7).version, 9);
+assert.match(weatherFieldFingerprint(field, 7), /^weather-v9:/);
 
 // The same authored seed/climate must actually respond to the real surface,
 // rather than merely call Planet.height and then keep synthetic continents.
 const ocean = createPlanetWeatherField({ ...body, height: () => -100 }, options);
 const land = createPlanetWeatherField({ ...body, height: () => 5000 }, options);
-let surfaceResponse = 0;
+let surfaceResponse = 0, evolvedResponse=0;
 for (let i = 0; i < 32; i++) {
   const d = { x: Math.cos(i), y: 0.4, z: Math.sin(i) };
   surfaceResponse += Math.abs(ocean.sample(d, 0).humidity - land.sample(d, 0).humidity);
   const angle = 23 * field.windRadiansPerHour;
   const advected = { x: Math.cos(angle) * d.x + Math.sin(angle) * d.z, y: d.y,
     z: -Math.sin(angle) * d.x + Math.cos(angle) * d.z };
-  assert.ok(Math.abs(field.sample(d, 0).coverage - field.sample(advected, 23).coverage) < 1e-10,
-    'An advected column keeps its weather at the same absolute phase');
+  evolvedResponse+=Math.abs(field.sample(d,0).coverage-field.sample(advected,23).coverage);
 }
+assert.ok(evolvedResponse>.5,'Native storm lifecycle/current terrain must evolve beyond rigid advection');
 assert.ok(surfaceResponse > 0.5, 'Real ocean/land changes must affect production humidity');
 assert.throws(() => field.sample({ x: 0, y: 0, z: 0 }, 0), RangeError);
 assert.throws(() => field.sample({ x: 1, y: 0, z: 0 }, NaN), RangeError);
@@ -64,6 +64,7 @@ field.bindAtlases(low, high);
 for (const d of [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0.3, z: 1e-8 }, { x: 0, y: 1, z: 0 }]) {
   for (const hours of [-120, 0, 5000]) {
     const expected = sampleWeatherAtlas(low, d, hours * field.windRadiansPerHour);
+    expected[0] = decodeSynopticCoverage(expected[0]);
     const actual = sampleWeatherField(field, d, hours);
     assert.deepEqual([actual.coverage, actual.cloudType, actual.stratusMask, actual.humidity], expected);
     assert.equal(actual.hours, hours);
@@ -74,4 +75,17 @@ field.bindAtlases(zero, zero);
 assert.equal(sampleWeatherField(field, { x: 1, y: 0, z: 0 }, 0).precipitation, 0);
 assert.equal(sampleWeatherField(field, { x: 1, y: 0, z: 0 }, 0).kind, 'clear');
 assert.equal(createPlanetWeatherField(body, { ...options, fixture: 'clear' }).fixture.name, 'clear');
+// Actual ephemeris input owns day/night. Clock hours cannot rotate an
+// unrelated test sun, and a second illuminating star prevents fake night.
+const litBody={...body,stellarDirectionsAt:()=>[
+  {direction:[0,0,1],irradianceFraction:.75},
+  {direction:[0,0,-1],irradianceFraction:.25},
+]};
+const litField=createPlanetWeatherField(litBody,options);
+for(const hours of [-120,0,17.25,5000]) {
+  assert.equal(litField.sampleRaw({x:0,y:0,z:1},hours).nightSide,0);
+  assert.equal(litField.sampleRaw({x:0,y:0,z:-1},hours).nightSide,0);
+}
+litBody.stellarDirectionsAt=()=>[{direction:[0,0,1],irradianceFraction:1}];
+assert.equal(litField.sampleRaw({x:0,y:0,z:-1},17.25).nightSide,1);
 console.log('Production synoptic weather: real terrain, deterministic atlas consumers, clear/front regions, wind units, fixtures and clock passed.');

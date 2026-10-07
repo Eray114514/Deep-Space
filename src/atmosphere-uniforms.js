@@ -7,6 +7,7 @@ export function atmosphereUniforms(camera = { far: 1e7 }) {
     tMultipleScattering: { value: null },
     uMultipleEnabled: { value: 0 },
     uEnabled: { value: 0 },
+    uViewSteps: { value: 48 },
     uCameraFar: { value: camera.far },
     uCameraLocal: { value: new THREE.Vector3() },
     uInvProjection: { value: new THREE.Matrix4() },

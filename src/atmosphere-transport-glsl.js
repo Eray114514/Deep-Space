@@ -4,7 +4,7 @@ import { ATMOSPHERE_VIEW_STEPS, atmosphereQuadratureGLSL } from './atmosphere-qu
 const VIEW_STEPS = ATMOSPHERE_VIEW_STEPS;
 export const atmosphereUniformGLSL = `        uniform sampler2D tOpticalDepth, tMultipleScattering;
         uniform float uMultipleEnabled;
-        uniform float uEnabled, uCameraFar;
+        uniform float uEnabled, uCameraFar, uViewSteps;
         uniform vec3 uCameraLocal;
         uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal;
         uniform float uGroundR, uTopR, uTopAltitude;
@@ -172,4 +172,8 @@ export const atmosphereTransportGLSL = `
 // Cloud material has its own geometry/light uniforms; bind this namespaced view
 // to the active atmosphere pass without owning its LUT or duplicating its model.
 export const cloudAtmosphereGLSL = ('#define VIEW_STEPS '+VIEW_STEPS+'\n' + atmosphereUniformGLSL + atmosphereTransportGLSL)
-  .replace(/\bu[A-Z]\w*|\btOpticalDepth|\btMultipleScattering|\bPI|\bsphereHits|\bozoneDensity|\beclipseVisibility|\bsolarHorizonClearance|\bsunlightOpticalDepth|\bstarScatter|\blocalStellarVisibility|\bmultipleRadiance/g, (name) => 'air_' + name);
+  .replace(/\bu[A-Z]\w*|\btOpticalDepth|\btMultipleScattering|\bPI|\bsphereHits|\bozoneDensity|\beclipseVisibility|\bsolarHorizonClearance|\bsunlightOpticalDepth|\bstarScatter|\blocalStellarVisibility|\bstellarDiscVisibility|\bmultipleRadiance/g, (name) => 'air_' + name)
+  // Keep the same 48-cell quadrature but avoid expanding it inside every
+  // cloud view/light loop in ANGLE's D3D compiler.
+  .replace('for (int i = 0; i < VIEW_STEPS; i++)', 'for (int i = 0; i < int(air_uViewSteps); i++)')
+  .replace('float(i+1)/float(VIEW_STEPS)', 'float(i+1)/air_uViewSteps');

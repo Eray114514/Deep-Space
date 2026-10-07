@@ -7,6 +7,10 @@ import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
 
 const fingerprint = await evidenceFingerprint('tools/b4opticalcoveragetest.js');
+const hours=Number(process.env.B4_HOURS || 9.5);
+const directions=Number(process.env.B4_DIRECTIONS || 1024);
+assert.ok(Number.isFinite(hours));
+assert.ok(Number.isInteger(directions) && directions>=512);
 const { server, port } = await startServer(0);
 let browser;
 try {
@@ -15,9 +19,13 @@ try {
   const errors = [];
   page.on('pageerror', (error) => errors.push(String(error)));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1&freeze=1&time=9.5&quality=ultra&vclouds=1&post=1&nolock=1`);
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1&freeze=1&time=${hours}&quality=ultra&vclouds=1&post=1&nolock=1`);
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 150000 });
-  const results = await page.evaluate(() => {
+  await page.waitForFunction(()=>[0,2,4].every(i=>{
+    const p=NMS._planet(i);return p.weatherStream?.ready
+      && Math.abs(p.cloudSpeciesTex.userData.hours-p.weatherHours)<1/300;
+  }),null,{timeout:60000});
+  const results = await page.evaluate((count) => {
     const THREE = NMS._THREE, renderer = NMS._renderer;
     const geometry = new THREE.PlaneGeometry(2, 2);
     const scene = new THREE.Scene(), camera = new THREE.Camera();
@@ -31,7 +39,8 @@ try {
         new THREE.Matrix4().makeRotationY(-spin));
       const prefix = source.fragmentShader.slice(0, source.fragmentShader.lastIndexOf('void main()'));
       const material = new THREE.ShaderMaterial({
-        uniforms: { ...source.uniforms, uSamples: { value: 128 }, uDirections: { value: 512 } },
+        defines: source.defines,
+        uniforms: { ...source.uniforms, uSamples: { value: 128 }, uDirections: { value: count } },
         vertexShader: 'varying vec3 vDirection,vViewDirection; void main(){vDirection=vec3(0.,1.,0.);vViewDirection=vec3(0.,0.,-1.);gl_Position=vec4(position.xy,0.,1.);}',
         fragmentShader: prefix + `
           uniform int uSamples; uniform float uDirections;
@@ -43,7 +52,7 @@ try {
               sqrt(max(0.0,1.0-y*y))*sin(phi));
             float low=0.0, high=0.0;
             float stepMeters=(uRout-uBodyR)/float(uSamples);
-            for(int k=0;k<256;k++) {
+            for(int k=0;k<2048;k++) {
               if(k>=uSamples) break;
               vec2 layers=cloudLayersAt(dir*(uBodyR+(float(k)+0.5)*stepMeters));
               low+=layers.x*0.025*stepMeters;
@@ -54,17 +63,22 @@ try {
           }`, depthTest: false, depthWrite: false,
       });
       const mesh = new THREE.Mesh(geometry, material); scene.add(mesh);
-      const count = 512;
       const target = new THREE.WebGLRenderTarget(count, 1, { type: THREE.FloatType, depthBuffer: false });
       const pixels = new Float32Array(count * 4);
       const savedTarget = renderer.getRenderTarget();
       const values = [];
-      for (const samples of [64, 128, 256]) {
+      // A fixed sample count changes its metre spacing when the conservative
+      // terrain/AGL envelope grows. Resolve the production 80 m feature bound
+      // and double it independently; do not weaken the opacity tolerances.
+      const thickness=source.uniforms.uRout.value-source.uniforms.uBodyR.value;
+      const sampleCounts=[160,80,40].map(step=>Math.ceil(thickness/step));
+      if(sampleCounts[2]>2048)throw Error('Optical reference exceeds its explicit sampling support');
+      for (const samples of sampleCounts) {
         material.uniforms.uSamples.value = samples;
         renderer.setRenderTarget(target);
         renderer.render(scene, camera);
         renderer.readRenderTargetPixels(target, 0, 0, count, 1, pixels);
-        const stats = { samples, lowCovered: 0, highCovered: 0, covered: 0,
+        const stats = { samples, stepMeters:thickness/samples, lowCovered: 0, highCovered: 0, covered: 0,
           clear: 0, meanObstruction: 0, opacity: [] };
         for (let i = 0; i < count; i++) {
           const low = pixels[i * 4], high = pixels[i * 4 + 1], alpha = pixels[i * 4 + 2];
@@ -84,13 +98,17 @@ try {
       renderer.setRenderTarget(savedTarget);
       const glError = renderer.getContext().getError();
       records.push({ index, seed: p.seed, weatherHours: p.weatherHours,
+        opticalCalibration:p.weatherField.opticalCalibration,
         targetCoverage: p.cloudCoverage,
         coverageProxy: p.cloudCoverageStats, values, glError });
       target.dispose(); material.dispose(); scene.remove(mesh);
     }
     geometry.dispose();
     return records;
-  });
+  },directions);
+  const output = `test-results/b4-optical-coverage/${fingerprint.sourceDigest.slice(0, 12)}-${hours}h-${directions}`;
+  await mkdir(output, { recursive: true });
+  await writeFile(`${output}/report.json`, JSON.stringify({ fingerprint, results, errors }, null, 2) + '\n');
   assert.deepEqual(errors, []);
   for (const body of results) {
     assert.equal(body.glError, 0);
@@ -99,18 +117,17 @@ try {
         `body ${body.index} needs occupied and clear production columns`);
     }
     const coarse = body.values[1], reference = body.values[2];
+    assert.ok(Math.abs(reference.covered-body.targetCoverage)<=0.05,
+      `body ${body.index} optical covered area ${reference.covered} differs from target ${body.targetCoverage}`);
     const meanError = coarse.opacity.reduce((sum, opacity, i) =>
       sum + Math.abs(opacity - reference.opacity[i]), 0) / coarse.opacity.length;
     assert.ok(meanError < 0.01, `body ${body.index} optical column mean error ${meanError}`);
     assert.ok(Math.abs(coarse.covered - reference.covered) < 0.02,
       `body ${body.index} occupied area did not converge`);
   }
-  const output = `test-results/b4-optical-coverage/${fingerprint.sourceDigest.slice(0, 12)}`;
-  await mkdir(output, { recursive: true });
-  await writeFile(`${output}/report.json`, JSON.stringify({ fingerprint, results, errors }, null, 2) + '\n');
   console.log(JSON.stringify({ output, results: results.map(({ index, targetCoverage, values }) => ({
-    index, targetCoverage, values: values.map(({ samples, lowCovered, highCovered,
-      covered, clear, meanObstruction }) => ({ samples, lowCovered, highCovered,
+    index, targetCoverage, values: values.map(({ samples, stepMeters, lowCovered, highCovered,
+      covered, clear, meanObstruction }) => ({ samples, stepMeters, lowCovered, highCovered,
       covered, clear, meanObstruction })),
   })) }, null, 2));
 } finally {

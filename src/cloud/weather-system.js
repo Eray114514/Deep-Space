@@ -22,7 +22,7 @@ import {
   CLOUD_LCL_MAX_METERS, CLOUD_LCL_MIN_METERS, CLOUD_SPECIES,
 } from './cloud-species.js';
 
-export const WEATHER_SYSTEM_VERSION = 2;
+export const WEATHER_SYSTEM_VERSION = 3;
 
 // Coverage is solved to within this absolute area fraction. Tighter than this
 // is not meaningful: the measurement itself is a finite equal-area sample.
@@ -258,7 +258,7 @@ function placeSubtropicalHighs(rand, count, terrain) {
 
 // One cyclone's contribution at a direction: shield, eye, eyewall, spiral arms,
 // and the trailing cold/warm front pair.
-function cycloneAt(cyclone, direction, hours) {
+function cycloneAt(cyclone, direction, hours, evolutionSpeed) {
   const center = rotateY(cyclone.center, hours * cyclone.drift);
   const cosine = clamp(dot(direction, center), -1, 1);
   const angular = Math.acos(cosine);
@@ -269,13 +269,17 @@ function cycloneAt(cyclone, direction, hours) {
   const reach = cyclone.reach;
   const phase = cyclone.phase + hours * 0.012;
 
-  const shield = smoothstep(reach * 1.55, reach * 0.28, angular) * cyclone.strength;
+  const age = hours * evolutionSpeed * 0.065 + cyclone.phase;
+  // A smooth seeded lifecycle, reconstructed from absolute time. No per-frame
+  // RNG or recalibration: individual lows develop and dissipate independently.
+  const strength = cyclone.strength * (0.20 + 0.80 * Math.pow(0.5 + 0.5 * Math.cos(age), 2));
+  const shield = smoothstep(reach * 1.55, reach * 0.28, angular) * strength;
   const eyeRadius = cyclone.tropical ? reach * 0.07 : reach * 0.02;
   const eye = cyclone.tropical
     ? 1 - smoothstep(eyeRadius * 0.6, eyeRadius * 1.9, angular) : 0;
   const eyewall = cyclone.tropical
     ? smoothstep(eyeRadius * 0.9, eyeRadius * 1.7, angular)
-      * smoothstep(reach * 0.5, reach * 0.22, angular) * cyclone.strength
+      * smoothstep(reach * 0.5, reach * 0.22, angular) * strength
     : 0;
 
   // Integer-count logarithmic arms stay continuous across atan2's seam, so a
@@ -285,7 +289,7 @@ function cycloneAt(cyclone, direction, hours) {
     - phase) * 0.5 + 0.5;
   const spiral = smoothstep(reach * 0.3, reach * 0.6, angular)
     * smoothstep(reach * 1.7, reach * 0.9, angular)
-    * smoothstep(0.42, 0.86, wave) * cyclone.strength * (1 - eye);
+    * smoothstep(0.42, 0.86, wave) * strength * (1 - eye);
 
   // Fronts are finite curved tails attached to the low, not great-circle belts.
   const heading = phase * 0.4;
@@ -369,7 +373,7 @@ function evaluateField(system, directionValue, hours, full) {
   let insideCyclone = 0;
   let cycloneEyeDistance = Math.PI;
   for (const cyclone of system.cyclones) {
-    const c = cycloneAt(cyclone, direction, hours);
+    const c = cycloneAt(cyclone, direction, hours, system.evolutionSpeed);
     if (!c) continue;
     shield = Math.max(shield, c.shield);
     spiral = Math.max(spiral, c.spiral);
@@ -406,8 +410,10 @@ function evaluateField(system, directionValue, hours, full) {
 
   // -- Potentials -----------------------------------------------------------
   const macroTexture = fbm(system.macroNoise, advected, 2.3, 5, 0.5) * 0.52;
-  const midTexture = fbm(system.midNoise, advected, 2.9, 4, 0.5) * 0.55;
-  const highTexture = fbm(system.highNoise, advected, 2.0, 4, 0.5) * 0.6;
+  const midAdvected = rotateY(direction, -hours * system.advectionRadiansPerHour * 1.25);
+  const highAdvected = rotateY(direction, -hours * system.advectionRadiansPerHour * 1.65);
+  const midTexture = fbm(system.midNoise, midAdvected, 2.9, 4, 0.5) * 0.55;
+  const highTexture = fbm(system.highNoise, highAdvected, 2.0, 4, 0.5) * 0.6;
 
   const marine = oceanic * gaussian(absLatitude, 0.42, 0.22) * 0.34;
 
@@ -447,7 +453,11 @@ function evaluateField(system, directionValue, hours, full) {
   // -- Thermodynamics -------------------------------------------------------
   const sunDirection = rotateY(system.sunDirection,
     hours * TAU / system.rotationPeriodHours);
-  const cosSun = dot(direction, sunDirection);
+  const lights=system.lightDirectionsAt?.(hours);
+  const cosSun = Array.isArray(lights)
+    ? Math.max(-1,...lights.filter(light=>light.irradianceFraction>0).map(light=>
+      dot(direction,{x:light.direction[0],y:light.direction[1],z:light.direction[2]})))
+    : dot(direction, sunDirection);
   const nightSide = smoothstep(0.1, -0.14, cosSun);
 
   const temperatureK = system.baseTemperatureK
@@ -511,6 +521,7 @@ function evaluateField(system, directionValue, hours, full) {
     regime: null,
     // Coverage / area structure (C5, C1)
     lowMask, midMask, highMask, obstruction,
+    lowPotential, midPotential, highPotential,
     clearSkyMask: 1 - obstruction,
     covered: obstruction >= OCCUPANCY_THRESHOLD,
     // Synoptic geometry
@@ -705,7 +716,7 @@ export function sampleWeather(system, direction, timeHours = 0) {
 // Equal-area sampling directions. The Fibonacci lattice gives near-uniform
 // spherical area per sample, which is required for an AREA measurement — a
 // lat/lon grid would over-count the poles and quietly bias the contract.
-function fibonacciDirections(count) {
+export function fibonacciDirections(count) {
   const directions = new Array(count);
   const golden = Math.PI * (3 - Math.sqrt(5));
   for (let index = 0; index < count; index++) {
@@ -791,6 +802,7 @@ export function createWeatherSystem(seed, options = {}) {
     sunDirection: unitVector(options.sunDirection || { x: 1, y: 0, z: 0 }),
     advectionRadiansPerHour: (0.004 + rand() * 0.008)
       * clamp(finite(options.weatherSpeed, 1), 0, 8),
+    evolutionSpeed: clamp(finite(options.weatherSpeed, 1), 0, 8),
     wavePhase: rand() * TAU,
     macroNoise: new Simplex(makeRng(`${namespace}:macro`)),
     midNoise: new Simplex(makeRng(`${namespace}:mid`)),
