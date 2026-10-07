@@ -24,7 +24,7 @@ for (const { radius, terrainProfile } of scenarios) {
       const camera = new THREE.Vector3(...direction).normalize();
       camera.multiplyScalar(radius + planet.height(camera, planet.fullMaxFreq) + 400);
       flora.update(planet, camera, 400);
-      const key = flora.job.key;
+      const key = flora.job?.key ?? flora.queue[0];
       fixture.reset();
       const tile = flora.buildTile(planet, key);
       for (const species of [0, 1]) {

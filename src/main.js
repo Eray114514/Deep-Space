@@ -13,6 +13,8 @@ import { SpaceControls, WalkControls, guidePlanetApproach, keys,
   flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } from './controls.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
+import { createSurfaceWarmupScene } from './surface-warmup.js';
+import { FrameWorkBudget } from './frame-work-budget.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
@@ -216,6 +218,7 @@ const surfaceBootstrapMeshes = [];
 const surfaceBootstrapGroup = new THREE.Group();
 let surfaceBootstrapPending = false;
 const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true });
+let surfaceBootstrapStats=null;
 let shipPipelinesWarmed = false;
 let shipPipelineWarmPending = false;
 let heroTransitionActive = false;
@@ -251,64 +254,61 @@ function startupTerrainReady() {
     && settled(water, planet.waterLod?.planet?.orbitLevelCap ?? 0);
 }
 
+function disposeSurfaceBootstrap() {
+  for (const mesh of surfaceBootstrapMeshes.splice(0)) {
+    mesh.removeFromParent();
+    if (mesh.isInstancedMesh) mesh.dispose();
+    else mesh.geometry.dispose();
+  }
+  surfaceBootstrapGroup.removeFromParent();
+  surfaceBootstrapTarget.dispose();
+}
+
 function releaseStartupPrewarm(reason) {
   if (startupPrewarmExpired) return;
   startupPrewarmExpired = true;
   surfaceBootstrapPending = false;
   surfacePipelinesReady = true;
   for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
+  surfaceBootstrapStats||={skipped:true,reason,cpuMs:0,calls:0,meshes:surfaceBootstrapMeshes.length};
+  disposeSurfaceBootstrap();
   renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
   console.warn(`startup shader prewarm released: ${reason}`);
 }
 
 function finishSurfaceBootstrap() {
   if (!surfaceBootstrapPending || contextLost) return;
+  if(loadingCleared) {releaseStartupPrewarm('loading mask already released');return;}
   surfaceBootstrapPending = false;
   const savedTarget = renderer.getRenderTarget();
+  const savedFace=renderer.getActiveCubeFace(),savedMip=renderer.getActiveMipmapLevel();
   const savedAutoClear = renderer.autoClear;
-  const savedLight = {
-    visible: sunShadow.visible,
-    intensity: sunShadow.intensity,
-    position: sunShadow.position.clone(),
-    target: sunShadow.target.position.clone(),
-  };
+  const warmup=createSurfaceWarmupScene(scene,surfaceBootstrapGroup,camera,sunShadow);
+  const started=performance.now(),calls=renderer.info.render.calls;
   try {
-    // Seed the actual shadow-map programs in a private 2×2 target. The old
-    // bootstrap temporarily replaced the live sun with a near-zero test light
-    // and then presented that frame, which could expose a completely black
-    // surface on the high-quality path.
-    sunShadow.visible = true;
-    sunShadow.intensity = 1;
-    sunShadow.position.set(0, 4000, 0);
-    sunShadow.target.position.set(0, 0, 0);
-    sunShadow.updateMatrixWorld(true);
-    sunShadow.target.updateMatrixWorld(true);
+    // All materials and attributes are production representatives; only the
+    // warmup light maps and colour target are tiny. Never draw the whole live
+    // scene here: that submitted every planet/asset and full-size shadow map.
     for (const mesh of surfaceBootstrapMeshes) mesh.visible = true;
     renderer.autoClear = true;
     renderer.setRenderTarget(surfaceBootstrapTarget);
     renderer.clear(true, true, false);
-    renderer.render(scene, camera);
+    renderer.render(warmup.scene, camera);
   } catch (error) {
     console.warn('surface bootstrap render failed', error);
   } finally {
     for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
-    sunShadow.visible = savedLight.visible;
-    sunShadow.intensity = savedLight.intensity;
-    sunShadow.position.copy(savedLight.position);
-    sunShadow.target.position.copy(savedLight.target);
-    sunShadow.updateMatrixWorld(true);
-    sunShadow.target.updateMatrixWorld(true);
-    renderer.setRenderTarget(savedTarget);
+    surfaceBootstrapStats={cpuMs:performance.now()-started,
+      calls:renderer.info.render.calls-calls,meshes:surfaceBootstrapMeshes.length,
+      shadowMapSizes:warmup.lights.filter(l=>l.shadow).map(l=>l.shadow.mapSize.toArray()),
+      privateScene:true};
+    warmup.dispose();
+    renderer.setRenderTarget(savedTarget,savedFace,savedMip);
     renderer.autoClear = savedAutoClear;
   }
-  if (shipPipelinesWarmed) {
-    for (const mesh of surfaceBootstrapMeshes.splice(0)) {
-      mesh.removeFromParent();
-      if (mesh.isInstancedMesh) mesh.dispose();
-      else mesh.geometry.dispose();
-    }
-    surfaceBootstrapTarget.dispose();
-  }
+  // Ship compilation takes ship.group and the world light list; it never
+  // owns these representatives. Do not retain their geometry after warmup.
+  disposeSurfaceBootstrap();
   // All startup shaders were checked while the loading mask was active.
   // Querying program logs for every later LOD/GLB variant forces ANGLE to
   // synchronously finish compilation on the flight frame.
@@ -374,6 +374,10 @@ function prewarmSurfacePipelines(planet) {
     mesh.position.set(0, 0, 0);
     mesh.frustumCulled = false;
     mesh.castShadow = source.castShadow;
+    mesh.customDepthMaterial=source.customDepthMaterial;
+    mesh.customDistanceMaterial=source.customDistanceMaterial;
+    mesh.onBeforeRender=source.onBeforeRender;
+    mesh.onBeforeShadow=source.onBeforeShadow;
     mesh.receiveShadow = source.receiveShadow;
     mesh.visible = false;
     surfaceBootstrapGroup.add(mesh);
@@ -390,6 +394,11 @@ function prewarmSurfacePipelines(planet) {
     mesh.position.set(0, 0, 0);
     mesh.frustumCulled = false;
     mesh.castShadow = source.castShadow;
+    mesh.customDepthMaterial=source.customDepthMaterial;
+    mesh.customDistanceMaterial=source.customDistanceMaterial;
+    mesh.receiveShadow=source.receiveShadow;
+    mesh.onBeforeRender=source.onBeforeRender;
+    mesh.onBeforeShadow=source.onBeforeShadow;
     mesh.visible = false;
     surfaceBootstrapGroup.add(mesh);
     surfaceBootstrapMeshes.push(mesh);
@@ -406,9 +415,8 @@ function prewarmSurfacePipelines(planet) {
   sunShadow.visible = lightWasVisible;
   sunShadow.intensity = lightIntensity;
 
-  // WebGPURenderer derives backend-specific shadow materials from the node
-  // surface graph. The private 2×2 bootstrap render below warms those real
-  // variants without injecting an incompatible legacy MeshDepthMaterial.
+  // The private render also warms the native depth/distance variants using
+  // each representative's production deformation materials and draw hooks.
   Promise.all(tasks).then(() => {
     if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
@@ -809,6 +817,7 @@ const sceneRadiance = new SceneRadianceState(renderer, scene, universe, {
   enabled: RENDER_LOOK_NEXT,
   probeResolution: QUALITY_PROFILE.reflectionProbeResolution,
 });
+const sceneBuildBudget=new FrameWorkBudget();
 const scatter = new Scatter({
   grassRadius: QUALITY_PROFILE.grassRadius,
   grassDensity: QUALITY_PROFILE.grassDensity,
@@ -4369,6 +4378,13 @@ function frame() {
     }
   }
 
+  const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
+  const terrainBuildMs=debugBuildBudgetMs || (!loadingCleared
+    ? QUALITY_LOW ? 5.5 : 42
+    : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6);
+  const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
+  sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),
+    {terrain:terrainBuildMs,near:scatter.streamBudgetMs});
   // Render adapters consume the already-updated simulation frames.
   for (const p of universe.planets()) {
     // While the tunnel owns the frame, only the selected reveal body may
@@ -4396,7 +4412,7 @@ function frame() {
       const nearWater = p === nearest && Math.abs(localRadius - p.seaRadius) < 520;
       p.waterLod.startupPriority = (!loadingCleared && p === nearest) || nearWater;
     }
-    p.update(_v, dt, p === nearest, FREEZE || photoMode ? 0 : dt);
+    p.update(_v, dt, p === nearest, FREEZE || photoMode ? 0 : dt,sceneBuildBudget);
     // The destination ocean's first WebGPU production draw can synchronously
     // specialize the full physical water pipeline for nearly a second. During
     // stellar warp the planet is still covered by starflow and atmospheric
@@ -4407,14 +4423,16 @@ function frame() {
   if (nearest && !nearest.isGasGiant) {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearest.worldOffsetToLocal(_v, _v);
-    scatter.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt);
+    sceneBuildBudget.run('near',scatter.streamBudgetMs,
+      budget=>scatter.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt,budget));
     if (scatter.planet) {
       prewarmSurfacePipelines(scatter.planet);
       if (!surfacePipelinesReady) {
         for (const mesh of Object.values(scatter.meshes)) mesh.visible = false;
       }
     }
-    if (FARFLORA) farFlora.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt);
+    if (FARFLORA)sceneBuildBudget.run('far',farFlora.streamBudgetMs,
+      budget=>farFlora.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt,budget));
   } else {
     if (scatter.planet) scatter.clear();
     if (farFlora.planet) farFlora.clear();
@@ -4478,7 +4496,6 @@ function frame() {
 
   // chunk builds: a per-frame millisecond budget (overridable for slow
   // software-rendered test environments via ?buildms=)
-  const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
   // Build the opening planet behind the loading mask. Previously the mask was
   // released with only the six root faces present, so the player watched the
   // whole planet change shape for the first seconds of flight. This larger
@@ -4487,10 +4504,7 @@ function frame() {
   // High-tier devices can spend a larger slice while the loading mask is up;
   // this finishes the same final orbit mesh sooner instead of deferring work
   // into playable frames. Keep the low tier conservative for integrated GPUs.
-  const startupBuildMs = QUALITY_LOW ? 5.5 : 42;
-  const built = flushChunkQueue(debugBuildBudgetMs || (!loadingCleared
-    ? startupBuildMs
-    : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6));
+  const built = sceneBuildBudget.run('terrain',terrainBuildMs,flushChunkQueue);
   if (built > 0) lastBuildFrame = frameNo;
 
   // camera-relative placement. shipView.tick runs first: while the interior
@@ -4955,6 +4969,8 @@ function frame() {
     // compileAsync) leaves the mask up past the worst-case budget, force it
     // down so the player is never stranded on the loading screen.
     console.warn('loading mask forced clear by safety-net timeout');
+    if(!surfacePipelinesReady||surfaceBootstrapPending)
+      releaseStartupPrewarm('loading mask safety deadline exceeded');
     startupVolumeWarmState = 'complete';
     loadingProgress = 1;
     ui.setLoadingProgress(1);
@@ -5021,6 +5037,9 @@ window.NMS = {
     return loadingCleared;
   },
   get state() { return state; },
+  surfaceWarmupState() {return {ready:surfacePipelinesReady,pending:surfaceBootstrapPending,
+    expired:startupPrewarmExpired,remainingMeshes:surfaceBootstrapMeshes.length,stats:surfaceBootstrapStats};},
+  sceneBuildState() {return sceneBuildBudget.snapshot();},
   warpPreparationState() {
     const prepared = warpPreparedSystem || transferredPreparedDestination?.system || null;
     const route = pendingRoute || transferredPreparedDestination?.route || null;

@@ -257,7 +257,7 @@ export class Scatter {
   }
 
   // camLocal: camera in planet-local coords; alt: metres above terrain
-  update(planet, camLocal, alt) {
+  update(planet, camLocal, alt, budgetMs=this.streamBudgetMs) {
     if (planet !== this.planet) this.setPlanet(alt < PREWARM_BELOW_ALT ? planet : null);
     if (!this.planet) return;
     // climbing away: props shrink to nothing across a 200 m band instead of
@@ -281,7 +281,8 @@ export class Scatter {
       this.beginJob(p, kx, ky, kz, Q, cellAng);
     }
     if (!this.job) return;
-    if (this.stepJob(performance.now() + this.streamBudgetMs)) {
+    if (budgetMs<=0)return;
+    if (this.stepJob(performance.now() + budgetMs)) {
       this.commitJob(this.job);
       this.job = null;
     }

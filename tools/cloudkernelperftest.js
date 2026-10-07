@@ -9,7 +9,8 @@ import {evidenceFingerprint} from './evidence-fingerprint.js';
 
 const reference='140c969',out='test-results/cloud-kernel';
 const badSupportControl=process.argv.includes('--bad-support-control');
-const livePumpControl=process.argv.includes('--live-pump-control');
+const traceLive=process.argv.includes('--trace-live');
+const livePumpControl=process.argv.includes('--live-pump-control')||traceLive;
 const before=await evidenceFingerprint('tools/cloudkernelperftest.js');
 const original=execFileSync('git',['show',`${reference}:src/cloud/production-shape.js`],{encoding:'utf8'});
 const {server,port}=await startServer(0);let browser;
@@ -25,7 +26,7 @@ try {
   await page.evaluate(()=>{NMS._savedKernelRender=NMS._pipeline.render;NMS._pipeline.render=()=>{};});
   await page.waitForFunction(()=>NMS._planet(0).weatherStream?.ready,null,{timeout:60000});
   console.log('Real home weather ready; comparing density and formal-size caches.');
-  const result=await page.evaluate(async({badSupportControl,livePumpControl})=>{
+  const result=await page.evaluate(async({badSupportControl,livePumpControl,traceLive})=>{
     const {productionSpeciesGLSL:current}=await import('/src/cloud/production-shape.js');
     const {productionSpeciesGLSL:reference}=await import('/src/cloud/production-shape-reference.js');
     const {CloudSunCache}=await import('/src/cloud/cloud-sun-cache.js');
@@ -138,6 +139,7 @@ try {
       return pixels;
     };
     const records=[],pixels={changed:0,maximumError:0,comparisons:0};
+    const trace=traceLive?(await import('/tools/cloud-render-trace-browser.js')).traceRendererWrites(r):null;
     // Each sun angle warms both programs, then reverses the measured ordering.
     for(const cosine of [1,.4]) {
       const sun=pinnedUniforms.uSunDir.value.clone().normalize();
@@ -153,10 +155,11 @@ try {
           const batches=[];
           while(!cache.ready) {
             const field=cache.field,boundary=cache.boundaryRow,layer=cache.layer;
-            const timing=await timed(()=>cache.bakeSlice(r,{boundaryRows:128,slices:128}));
+            const bake=()=>cache.bakeSlice(r,{boundaryRows:128,slices:128});
+            const timing=await timed(()=>trace?trace.own(bake):bake());
             batches.push({field,boundary,layer,...timing});
           }
-          const bytes=read(cache);
+          const bytes=trace?trace.own(()=>read(cache)):read(cache);
           let occupied=0;for(let i=0;i<bytes.length;i+=4)if(bytes[i])occupied++;
           const difference={changed:0,maximumError:0,sameImplementationChanged:0,examples:[]};
           if(expected)for(let i=0;i<bytes.length;i++) {
@@ -175,19 +178,23 @@ try {
           records.push({cosine,run,implementation:implementation?'current':'reference',batches,
             cpuMs:batches.reduce((s,b)=>s+b.cpuMs,0),gpuMs:batches.reduce((s,b)=>s+b.gpuMs,0),bytes:bytes.length,occupied,difference,
             hours:p.weatherHours,spin:p.volCloudMat.uniforms.uSpin.value.toArray(),sun:cache.directions.map(d=>d.toArray())});
-          cache.dispose();
+          if(trace)trace.own(()=>cache.dispose());else cache.dispose();
         }
-      } finally {leases.forEach(owner=>Object.values(owner).forEach(m=>m.dispose()));}
+      } finally {
+        const release=()=>leases.forEach(owner=>Object.values(owner).forEach(m=>m.dispose()));
+        if(trace)trace.own(release);else release();
+      }
     }
+    const background=trace?.snapshot();trace?.dispose();
     pinnedTextures.forEach(t=>t.dispose());geometry.dispose();r.setRenderTarget(saved);
     window.requestAnimationFrame=requestFrame;window.cancelAnimationFrame=cancelFrame;
     for(const callback of deferred.values())requestFrame.call(window,callback);
     NMS._pipeline.render=NMS._savedKernelRender;delete NMS._savedKernelRender;
-    return {density,pixels,readback,records,deferredFrames:deferred.size,glError:gl.getError(),renderer:gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL)};
-  },{badSupportControl,livePumpControl});
+    return {density,pixels,readback,records,background,deferredFrames:deferred.size,glError:gl.getError(),renderer:gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL)};
+  },{badSupportControl,livePumpControl,traceLive});
   const after=await evidenceFingerprint('tools/cloudkernelperftest.js');
   const report={reference,before,after,result,errors,badSupportControl,livePumpControl};
-  const name=badSupportControl?'bad-support-control':livePumpControl?'live-pump-control':'report';
+  const name=badSupportControl?'bad-support-control':traceLive?'trace-live':livePumpControl?'live-pump-control':'report';
   await writeFile(`${out}/${name}.json`,JSON.stringify(report,null,2));
   console.log(JSON.stringify({density:result.density,pixels:result.pixels,records:result.records.map(({batches,...r})=>r),gl:result.glError,errors},null,2));
   assert.equal(before.sourceDigest,after.sourceDigest,'Runtime changed during attribution');

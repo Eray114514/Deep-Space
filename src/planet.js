@@ -1731,7 +1731,7 @@ export class Planet {
   // camLocal: camera position in planet-local coords (f64 Vector3).
   // animDt drives scenery-in-motion (cloud drift); the seam test freezes it
   // to zero so static frames are pixel-comparable — LOD morphs keep dt.
-  update(camLocal, dt, focused, animDt = dt) {
+  update(camLocal, dt, focused, animDt = dt, buildBudget=null) {
     if (focused && this.volumeActive && this.volCloudState?.rewrite === 'phase4-A') {
       this.ensureCloudResources();
     }
@@ -1742,7 +1742,12 @@ export class Planet {
     if (this.waterLod) {
       this.waterLod.focused = focused;
       this.waterLod.update(camLocal, dt);
-      this.nearWaterPatch?.update(camLocal, focused, dt);
+      if(this.nearWaterPatch) {
+        const patch=this.nearWaterPatch;
+        if(buildBudget&&focused)buildBudget.run('water',patch.preferredBudget(camLocal.length()-this.seaRadius,dt),
+          budget=>patch.update(camLocal,focused,dt,budget));
+        else patch.update(camLocal,focused,dt,buildBudget?0:null);
+      }
       const waterShader = this.liquidMat?.userData.shader;
       if (waterShader?.uniforms.uCameraLocal) {
         waterShader.uniforms.uCameraLocal.value.copy(camLocal);

@@ -1,19 +1,24 @@
 // Real-input near-water traversal. GPU execution must be serialized externally.
 // CPU triangle reconstruction below is attribution, NOT GPU pixel/depth parity.
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { startServer } from './server.js';
-import { launchHardwareBrowser } from './browser.js';
+import { launchHardwareBrowser,resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
 
 const out = `test-results/near-water-player/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 const caps = process.env.NEAR_WATER_FPS ? [Number(process.env.NEAR_WATER_FPS)] : [60, 30];
+const volumeClouds=process.env.NEAR_WATER_VCLOUDS!=='0';
+const reference=process.env.NEAR_WATER_REFERENCE||null;
+const browserChoice=process.env.NEAR_WATER_BROWSER||'bundled';
 assert.ok(caps.every((fps) => [30, 60].includes(fps)));
 await mkdir(out, { recursive: true });
 const fingerprint = await evidenceFingerprint('tools/nearwaterplaytest.js');
 const { server, port } = await startServer(0);
-const browser = await launchHardwareBrowser({ headless: true });
-const evidence = { ...fingerprint, boundary: 'Normal HUD/post and real flight inputs after initial QA pose. '
+const browser = await launchHardwareBrowser({ headless: true,
+  executablePath:browserChoice==='system'?resolveSystemChromePath()||undefined:undefined });
+const evidence = { ...fingerprint, volumeClouds, reference, browserChoice, boundary: 'Normal HUD/post and real flight inputs after initial QA pose. '
   + 'CPU reconstruction of committed mesh attributes is not GPU raster/depth readback. '
   + 'RAF cap limits maximum presentation rate; actual frame times and speeds are measured, never assumed.', runs: [] };
 try {
@@ -21,6 +26,14 @@ try {
     const context = await browser.newContext({ viewport: { width: 1920, height: 1080 },
       recordVideo: { dir: out, size: { width: 1920, height: 1080 } } });
     const page = await context.newPage();
+    if(reference) {
+      const source=execFileSync('git',['show',`${reference}:src/near-water-patch.js`],{encoding:'utf8'})
+        +`\nNearWaterPatch.prototype.preferredBudget=function(altitude,dt=1/60) {
+          return this.adaptiveLowBudget&&altitude<this.lowAltitude
+            ?THREE.MathUtils.clamp(240*(Number.isFinite(dt)&&dt>0?dt:1/60),4,8):this.baseBuildBudgetMs;
+        };\n`;
+      await page.route('**/src/near-water-patch.js',route=>route.fulfill({contentType:'text/javascript',body:source}));
+    }
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -58,7 +71,7 @@ try {
           if (!requests.size && scheduled != null) { nativeCancel(scheduled); scheduled = null; }
         };
       }, fps);
-      await page.goto(`http://127.0.0.1:${port}/?quality=ultra&nohero=1&nolock=1&post=1&vclouds=1&farflora=1`);
+      await page.goto(`http://127.0.0.1:${port}/?quality=ultra&nohero=1&nolock=1&post=1&vclouds=${Number(volumeClouds)}&farflora=1`);
       await page.waitForFunction(() => window.NMS?.booted, null, { timeout: 120000 });
       await page.evaluate(() => {
         const p = NMS._planet(0);

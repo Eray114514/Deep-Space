@@ -141,6 +141,7 @@ export class NearWaterPatch {
       tangent,
       bitangent,
       row: 0,
+      column: 0,
       position: new Float32Array(count * 3),
       normal: new Float32Array(count * 3),
       local: new Float32Array(count * 3),
@@ -152,16 +153,17 @@ export class NearWaterPatch {
     };
   }
 
-  _buildRows() {
+  _buildRows(budgetMs=this.buildBudgetMs) {
     const job = this.build;
-    if (!job) return;
+    if (!job || budgetMs<=0) {this.lastBuildRows=0;this.lastBuildMs=0;return;}
     const stride = this.cells + 1;
     const startedAt = performance.now();
     const firstRow = job.row;
     const end = Math.min(stride, job.row + Math.max(1, this.rowsPerFrame));
-    for (let y = firstRow; y < end; y++) {
+    let units=0;
+    rows: for (let y = firstRow; y < end; y++) {
       const z = this._gridCoordinate(y);
-      for (let x = 0; x < stride; x++) {
+      for (let x = job.column; x < stride; x++) {
         const px = this._gridCoordinate(x);
         const index = y * stride + x;
         this._sample.copy(job.centerPosition)
@@ -196,11 +198,16 @@ export class NearWaterPatch {
           cell = Math.max(cell, this._cellNeighbor.distanceTo(this._sample));
         }
         job.waterCell[index] = cell + 0.00001; // avoid downward Float32 rounding
+        job.column=x+1;
+        if(++units%8===0 && performance.now()-startedAt>=budgetMs) {
+          if(job.column===stride) {job.row=y+1;job.column=0;}
+          break rows;
+        }
       }
-      job.row = y + 1;
-      // One whole row is the minimum progress unit, even under severe load.
-      // Never restart an in-flight build: a fast observer must not starve it.
-      if (performance.now() - startedAt >= this.buildBudgetMs) break;
+      job.row = y + 1;job.column=0;
+      // Preserve both row and column: one 513-vertex row can itself exceed
+      // the entire scene generation budget on real procedural bathymetry.
+      if (performance.now() - startedAt >= budgetMs) break;
     }
     this.lastBuildRows = job.row - firstRow;
     this.lastBuildMs = performance.now() - startedAt;
@@ -245,7 +252,13 @@ export class NearWaterPatch {
     this.lastCommitMs = performance.now() - startedAt;
   }
 
-  update(cameraLocal, focused, dt = 1 / 60) {
+  preferredBudget(altitude,dt=1/60) {
+    return this.adaptiveLowBudget && altitude<this.lowAltitude
+      ? THREE.MathUtils.clamp(240*(Number.isFinite(dt)&&dt>0?dt:1/60),4,8)
+      : this.baseBuildBudgetMs;
+  }
+
+  update(cameraLocal, focused, dt = 1 / 60, budgetMs=null) {
     const altitude = cameraLocal.length() - this.planet.seaRadius;
     const shouldShow = focused && altitude < 18000 && altitude > -1200;
     if (!shouldShow) {
@@ -262,11 +275,9 @@ export class NearWaterPatch {
     const direction = this._cameraDirection.copy(cameraLocal).normalize();
     this.effectiveRebuildDistance = altitude < this.lowAltitude
       ? this.lowRebuildDistance : this.rebuildDistance;
-    this.buildBudgetMs = this.adaptiveLowBudget && altitude < this.lowAltitude
-      ? THREE.MathUtils.clamp(240 * (Number.isFinite(dt) && dt > 0 ? dt : 1 / 60), 4, 8)
-      : this.baseBuildBudgetMs;
-    if (!this.centerDirection && !this.build) this._begin(direction);
-    if (this.centerDirection && !this.build) {
+    this.buildBudgetMs=budgetMs??this.preferredBudget(altitude,dt);
+    if (!this.centerDirection && !this.build && this.buildBudgetMs>0) this._begin(direction);
+    if (this.centerDirection && !this.build && this.buildBudgetMs>0) {
       const angular = Math.acos(THREE.MathUtils.clamp(
         this.centerDirection.dot(direction), -1, 1,
       ));
@@ -294,6 +305,7 @@ export class NearWaterPatch {
       visible: this.mesh.visible,
       pending: !!this.build,
       row: this.build?.row ?? null,
+      column: this.build?.column ?? null,
       cells: this.cells,
       cellSize: this.cellSize,
       coreRadius: this.coreRadius,

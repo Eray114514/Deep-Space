@@ -43,7 +43,7 @@ try {
         checkedTiles++;
       }
 
-      const key = flora.job.key;
+      const key = flora.job?.key ?? flora.queue[0];
       const job = flora.createTileJob(planet, key);
       const tile = flora.buildTile(planet, key);
       assert.ok(tile.n0 + tile.n1 > 20, 'Controlled forest must populate the nearest tile.');

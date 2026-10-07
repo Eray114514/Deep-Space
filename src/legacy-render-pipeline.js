@@ -13,6 +13,8 @@ import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
 import {CloudLightBank} from './cloud/cloud-light-bank.js';
 import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
+import {RenderProfiler} from './render-profiler.js';
+import {withPreparedShadows} from './render-shadow-state.js';
 
 function aliasUniforms(uniforms, aliases) {
   for (const [alias, original] of Object.entries(aliases)) {
@@ -61,7 +63,8 @@ export class GameLegacyPipeline {
     this.renderPass = new RenderPass(scene, camera);
     const renderOpaque=this.renderPass.render;
     this.renderPass.render=(...args)=>{
-      try {return renderOpaque.apply(this.renderPass,args);}
+      try {return withPreparedShadows(this.renderer,this.cloudSurfaceShadow.depthValid,
+        ()=>renderOpaque.apply(this.renderPass,args));}
       finally {this.cloudSurfaceShadow.depthValid=false;}
     };
     this.composer.addPass(this.renderPass);
@@ -142,6 +145,35 @@ export class GameLegacyPipeline {
   }
 
   render() {
+    this.profiler?.beginFrame();
+    this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
+    // RenderPass writes readBuffer. Preserve the receiver depth in the other
+    // target during that draw; sampling its own depth attachment is feedback.
+    // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
+    this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
+      this.volumePass?.activePlanet,this.profiler);
+    this.composer.render();
+  }
+
+  profilePhase(name,work) {return this.profiler?this.profiler.run(name,work):work();}
+
+  startProfiling(options={}) {
+    this.stopProfiling();this.profiler=new RenderProfiler(this.renderer,options);
+    this.profiledPasses=this.composer.passes.map((pass,index)=>{
+      const render=pass.render,name=`${index}:${pass.constructor.name}`;
+      pass.render=(...args)=>this.profilePhase(name,()=>render.apply(pass,args));
+      return {pass,render};
+    });
+  }
+
+  stopProfiling() {
+    for(const {pass,render} of this.profiledPasses||[])pass.render=render;
+    this.profiledPasses=[];this.profiler?.dispose();this.profiler=null;
+  }
+
+  performanceSnapshot() {return this.profiler?.snapshot()||null;}
+
+  updateCloudLighting() {
     this.cloudLightFrame++;
     const p=this.volumePass?.activePlanet;
     const local=p?.volCloudMat?.uniforms.uCameraLocal.value;
@@ -160,11 +192,6 @@ export class GameLegacyPipeline {
       }
       bank.update(this.renderer);
     }
-    // RenderPass writes readBuffer. Preserve the receiver depth in the other
-    // target during that draw; sampling its own depth attachment is feedback.
-    // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
-    this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,p);
-    this.composer.render();
   }
 
   async compileAsync() {
@@ -172,6 +199,7 @@ export class GameLegacyPipeline {
   }
 
   dispose() {
+    this.stopProfiling();
     this.cloudSurfaceShadow.dispose();
     for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);

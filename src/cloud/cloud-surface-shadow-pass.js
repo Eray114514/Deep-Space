@@ -69,7 +69,7 @@ export class CloudSurfaceShadowPass {
         }`});
     this.quad=new FullScreenQuad(this.material);this.rotation=new THREE.Matrix4();
   }
-  render(renderer,opaque,planet) {
+  render(renderer,opaque,planet,profiler=null) {
     this.ready=false;this.depthValid=false;this.receiverIds.clear();this.receiverTransforms.clear();
     if(this.owner&&this.owner!==planet)this.owner.cloudSurfaceShadowCache=null;
     this.owner=planet;
@@ -90,7 +90,8 @@ export class CloudSurfaceShadowPass {
     try {
       setCloudSurfacePreparation(true);
       renderer.setRenderTarget(opaque);renderer.autoClear=true;
-      renderer.render(this.scene,this.camera);
+      const depth=()=>renderer.render(this.scene,this.camera);
+      if(profiler)profiler.run('cloud-receiver-depth',depth);else depth();
       setCloudSurfacePreparation(false);
       // One depth owner and one transport image for every actual receiver.
       // Remote bodies otherwise retained the enormous point-density kernel in
@@ -114,7 +115,9 @@ export class CloudSurfaceShadowPass {
         u.uReceiverId={value:receiverId};this.receiverIds.set(body,receiverId++);
         // Uniform objects change between bodies even when the shader program
         // is shared. ShaderMaterial must explicitly upload each receiver.
-        this.material.uniformsNeedUpdate=true;this.quad.render(renderer);
+        this.material.uniformsNeedUpdate=true;
+        const transport=()=>this.quad.render(renderer);
+        if(profiler)profiler.run('cloud-receiver-transport',transport);else transport();
       }
       this.ready=true;this.depthValid=true;this.opaqueDepth=opaque.depthTexture;
       this.renderer=renderer;renderer.cloudSurfaceReceiver=this;

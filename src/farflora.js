@@ -185,7 +185,7 @@ export class FarFlora {
     };
   }
 
-  update(planet, camLocal, alt) {
+  update(planet, camLocal, alt, budgetMs=this.streamBudgetMs) {
     if (planet !== this.planet) this.setPlanet(alt < PREWARM_BELOW ? planet : null);
     if (!this.planet) return;
     if (alt > PREWARM_BELOW) {
@@ -257,9 +257,10 @@ export class FarFlora {
     // frames to fill the invisible 16→13 km warm-up band, but no individual
     // frame inherits a full tile's procedural height/biome cost.
     const streamStart = performance.now();
-    const deadline = streamStart + this.streamBudgetMs;
+    const deadline = streamStart + budgetMs;
     let completed = 0;
     do {
+      if(budgetMs<=0)break;
       if (!this.job) {
         const k = this.queue.shift();
         if (k == null) break;

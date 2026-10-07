@@ -163,6 +163,7 @@ export function pendingChunks(lod = null) {
 // budget is in MILLISECONDS: build as many chunks as fit, so refinement
 // speed tracks the hardware instead of starving on big worlds
 export function flushChunkQueue(budgetMs = 7) {
+  if(budgetMs<=0)return 0;
   if (buildQueue.length === 0 && !activeBuildJob) return 0;
   const t0 = performance.now();
   const deadline = t0 + budgetMs;
