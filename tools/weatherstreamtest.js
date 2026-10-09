@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { PlanetWeatherStream } from '../src/cloud/planet-weather-stream.js';
 import { CloudLightBank } from '../src/cloud/cloud-light-bank.js';
+import {captureWeatherSources,weatherSourcesCurrent} from '../src/cloud/weather-sources.js';
 import { PRODUCTION_PARAMETER_LAYERS, productionStorageLayers, CANDIDATE_WIDTH,
   CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from '../src/cloud/production-bands.js';
 
@@ -70,7 +71,7 @@ try {
   s2.update(.25);s2.worker.deliver(acceleratedFrame(0,3,8000));s2.worker.deliver(acceleratedFrame(.5,5,9000));
   p2.R=6000000;p2.stellarLightField={sources:[]};
   p2.volCloudMat={uniforms:{uSpeciesMask:{value:-1},uCameraLocal:{value:new THREE.Vector3(0,6003000,0)}}};
-  const captureSources=()=>({stream:s2,frames:[0,.5].map(hours=>({hours,revision:s2.revisionAt(hours)}))});
+  const captureSources=()=>captureWeatherSources(s2,[0,.5]);
   const cache={weatherSources:captureSources()};
   const bank={planet:p2,fieldOwner:p2.weatherField,speciesMask:-1,baseHours:0,lightIds:'',
     maps:new Map([[0,cache]]),center:new THREE.Vector3(0,6003000,0),cameraHeight:3000,size:128,spacing:100};
@@ -94,8 +95,11 @@ try {
   assert.equal(p2.cloudCandidatesTex.version,version,'Prefetch changed active acceleration');
   const s3=new PlanetWeatherStream(p2);p2.weatherStream=s3;
   assert.equal(CloudLightBank.prototype.needsReset.call(bank),true,'Replaced stream left completed light endpoints valid');
+  assert.equal(weatherSourcesCurrent(captureWeatherSources(s3,[0]),s3),false,'Missing sources are not a valid snapshot');
+  assert.equal(weatherSourcesCurrent(cache.weatherSources,undefined),false);
   s3.dispose();
   s2.dispose();assert.equal(s2.boundsFirst,null);assert.equal(s2.boundsSecond,null);
+  assert.equal(s2.ready,false);assert.equal(weatherSourcesCurrent(cache.weatherSources,s2),false);
   for(const texture of [p2.cloudSpeciesTex,p2.cloudBoundsTex,p2.cloudCandidatesTex])texture.dispose();
   console.log('PASS: exact weather transaction, prefetch deduplication, replacement support indexes, time advance, bracket turnover and disposal.');
 } finally {globalThis.Worker=originalWorker;}

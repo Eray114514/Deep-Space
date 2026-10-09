@@ -2,14 +2,17 @@ import * as THREE from 'three';
 import { FullScreenQuad } from '../../vendor/jsm/postprocessing/Pass.js';
 import { productionCloudGLSL } from './production-medium-glsl.js';
 import { weatherAtlasGLSL } from './weather-atlas.js';
+import { captureWeatherSources } from './weather-sources.js';
 
 // Opacity, not averaged noise, is filtered for unresolved cloud cells. Columns
 // are baked from the production density kernel; no independent cloud layout.
 export class CloudColumnMap {
-  constructor(planet, { width=1024, samples=128, footprintSamples=64, hours=planet.weatherHours }={}) {
+  constructor(planet, { width=1024, samples=128, footprintSamples=64, hours=planet.weatherHours, programOwner=null }={}) {
     this.planet=planet; this.width=width; this.height=width/2;
     this.samples=samples; this.footprintSamples=footprintSamples;
     this.row=0; this.ready=false; this.disposed=false;
+    this.programOwner=programOwner;
+    this.weatherSources=planet.weatherStream?captureWeatherSources(planet.weatherStream,[hours]):null;
     this.target=new THREE.WebGLRenderTarget(width,this.height,{depthBuffer:false,count:2,
       type:THREE.UnsignedByteType,minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
     this.target.textures[1].type=THREE.HalfFloatType;
@@ -136,7 +139,7 @@ export class CloudColumnMap {
         for(const texture of this.snapshots)texture.dispose();this.snapshots=[];
         // Shader uniforms also retain the CPU snapshot image arrays. A ready
         // column only needs its finished targets, not the baking material.
-        this.material.uniforms={};this.material.dispose();this.quad.dispose();
+        this.releaseProgram();this.quad.dispose();
         this.material=null;this.quad=null;
       }
     } finally {
@@ -144,6 +147,15 @@ export class CloudColumnMap {
     }
     this.uploadMs.push(performance.now()-started);
   }
-  dispose() { if(this.disposed) return;this.disposed=true;this.target.dispose();this.material?.dispose();this.quad?.dispose();
-    for(const texture of this.snapshots)texture.dispose(); }
+  releaseProgram() {
+    if(!this.material)return;
+    // Three also retains this dictionary in renderer properties. Empty the
+    // same object so the compiled program lease does not pin CPU snapshots.
+    for(const name of Object.keys(this.material.uniforms))delete this.material.uniforms[name];
+    if(this.programOwner && !this.programOwner.columns)this.programOwner.columns=this.material;
+    else this.material.dispose();
+  }
+  dispose() { if(this.disposed) return;this.disposed=true;this.target.dispose();this.releaseProgram();this.quad?.dispose();
+    this.material=null;this.quad=null;
+    for(const texture of this.snapshots)texture.dispose();this.snapshots=[]; }
 }

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import {CloudSunCache} from './cloud-sun-cache.js';
 import {sampleProductionMedium} from './production-shape.js';
+import {captureWeatherSources,weatherSourcesCurrent} from './weather-sources.js';
 
 function cloudAnchor(planet,position) {
   const radial=position.clone().normalize(),surface=planet.weatherField.surfaceAt(radial);
@@ -42,8 +43,7 @@ export class CloudLightBank {
       || this.lightIds!==p.stellarLightField.sources.map(s=>s.id).join('|'))return true;
     for(const cache of this.maps.values()) {
       const sources=cache.weatherSources;
-      if(sources && (sources.stream!==p.weatherStream || sources.frames.some(
-        ({hours,revision})=>sources.stream.revisionAt(hours)!==revision)))return true;
+      if(sources && !weatherSourcesCurrent(sources,p.weatherStream))return true;
     }
     const position=p.volCloudMat.uniforms.uCameraLocal.value,radial=position.clone().normalize();
     if(Math.abs(position.length()-p.R-this.cameraHeight)>Math.max(2000,this.size*this.spacing*.2))return true;
@@ -66,33 +66,40 @@ export class CloudLightBank {
     const cache=new CloudSunCache(p,this.center.clone().applyMatrix4(rotation),{
       size:this.size,depth:this.depth,spacing:this.spacing,hours,forecast,target:this.target,
       tileOffset:(index%3+3)%3*this.depth*4,programOwner:this.programs});
-    cache.weatherSources={stream,frames:[anchor,anchor+stream.frameHours].map(hours=>
-      ({hours,revision:stream.revisionAt(hours)}))};
+    cache.weatherSources=captureWeatherSources(stream,[anchor,anchor+stream.frameHours]);
     this.maps.set(index,cache);return cache;
   }
   update(renderer) {
     if(this.disposed)return;
     const p=this.planet,hours=p.weatherHours,u=p.volCloudMat.uniforms;
     u.uSunCacheReady.value=0;
+    const started=performance.now();
     const index=Math.floor((hours-this.baseHours)/this.interval+1e-8);
     for(const [key,cache] of this.maps)if(key<index || key>index+2) {
       cache.dispose();this.maps.delete(key);
     }
-    for(const key of [index,index+1,index+2])if(!this.maps.has(key))this.create(key);
-    const a=this.maps.get(index),b=this.maps.get(index+1);
     // Bootstrap once before the first scene draw. Steady updates are sliced;
     // startup and steady costs are reported separately by runtime validation.
-    const started=performance.now();
-    if(!this.initialized && a && b) {
-      for(const cache of [a,b])while(!cache.ready)cache.bakeSlice(renderer,{boundaryRows:this.size,slices:this.depth});
-      this.initialized=true;
+    if(!this.initialized) {
+      // Copy and finish each bootstrap endpoint before allocating the next
+      // snapshot. Completed endpoints retain only their atlas and metadata.
+      for(const key of [index,index+1]) {
+        const cache=this.maps.get(key)||this.create(key);
+        if(!cache)break;
+        while(!cache.ready)cache.bakeSlice(renderer,{boundaryRows:this.size,slices:this.depth});
+      }
+      this.initialized=Boolean(this.maps.get(index)?.ready && this.maps.get(index+1)?.ready);
     } else {
-      const pending=[...this.maps.values()].find(cache=>!cache.ready);
+      // Preserve endpoint priority, but never allocate three baking snapshots
+      // when only one can be submitted this update (also after a clock jump).
+      const key=[index,index+1,index+2].find(key=>!this.maps.get(key)?.ready);
+      const pending=key===undefined?null:this.maps.get(key)||this.create(key);
       if(pending)for(let pass=0;pass<2 && !pending.ready;pass++)
         pending.bakeSlice(renderer,{boundaryRows:this.size,slices:64});
     }
     this.submissions.push(performance.now()-started);
     if(this.submissions.length>120)this.submissions.shift();
+    const a=this.maps.get(index),b=this.maps.get(index+1);
     if(!a?.ready || !b?.ready || hours<a.hours-1e-9 || hours>b.hours+1e-9)return;
     u.uSunTransport.value=this.target.texture;u.uSunCacheEncoded.value=1;
     u.uSunCacheDepth.value=this.depth;u.uSunCacheMix.value=(hours-a.hours)/(b.hours-a.hours);

@@ -1,12 +1,12 @@
 // Compare the actual bound cache and its physical fallback at identical points.
-export async function compareCloudLight({badControl=false}={}) {
+export async function compareCloudLight({badControl=false,center=null,extent=null}={}) {
   const T=NMS._THREE,r=NMS._renderer,p=NMS._planet(0),m=p.volCloudMat;
   const bank=p.cloudLightBank;
   if(!bank || m.uniforms.uSunCacheReady.value<.5)throw Error('Live light bank is not ready');
   const width=16,height=16;
-  const u={...m.uniforms,uProbeCenter:{value:bank.center.clone()},
+  const u={...m.uniforms,uProbeCenter:{value:center?new T.Vector3().fromArray(center):bank.center.clone()},
     uProbeBasis:{value:bank.maps.values().next().value.frames[2]},
-    uProbeExtent:{value:bank.size*bank.spacing*.8},uProbeMode:{value:0},
+    uProbeExtent:{value:extent??bank.size*bank.spacing*.8},uProbeMode:{value:0},
     uSunCacheReady:{value:1}};
   let prefix=m.fragmentShader.slice(0,m.fragmentShader.lastIndexOf('void main()'))
     .replace('vec3 cloudCombinedSource(', 'vec4 probeCombinedDepths;\nvec3 cloudCombinedSource(')

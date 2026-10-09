@@ -23,17 +23,32 @@ try {
     const {compareCloudLight}=await import('/tools/b4-light-continuity-browser.js');
     const current=await compareCloudLight(),control=oldCallControl?await compareCloudLight({badControl:true}):null;
     const p=NMS._planet(0),bank=p.cloudLightBank,stream=p.weatherStream;
+    const {CloudLightBank}=await import('/src/cloud/cloud-light-bank.js');
+    const originalCreate=CloudLightBank.prototype.create;
+    const snapshots={maxPending:0,maxRetainedBytes:0,creations:0};
+    CloudLightBank.prototype.create=function(...args) {
+      const result=originalCreate.apply(this,args);
+      if(this.planet===p && result) {
+        snapshots.creations++;
+        const pending=[...this.maps.values()].filter(cache=>!cache.ready);
+        snapshots.maxPending=Math.max(snapshots.maxPending,pending.length);
+        snapshots.maxRetainedBytes=Math.max(snapshots.maxRetainedBytes,pending.reduce((n,cache)=>
+          n+cache.snapshots.reduce((bytes,t)=>bytes+t.image.data.byteLength,0),0));
+      }
+      return result;
+    };
     const hours=bank.maps.values().next().value.weatherSources.frames[0].hours;
     const forecast=stream.frames.get(hours);
     if(!forecast)throw Error('Snapshot source is unavailable for replacement control');
     // Replace identity with identical bytes. This must invalidate the snapshot,
     // rebuild it through the actual pipeline and preserve physical consumers.
     stream.frames.set(hours,{...forecast});stream.update(p.weatherHours,true);
-    const invalidated=bank.needsReset();NMS._pipeline.updateCloudLighting();
+    const invalidated=bank.needsReset();
+    try {NMS._pipeline.updateCloudLighting();} finally {CloudLightBank.prototype.create=originalCreate;}
     const replacement={invalidated,oldDisposed:bank.disposed,
       changed:p.cloudLightBank!==bank,ready:p.volCloudMat.uniforms.uSunCacheReady.value};
     const rebuilt=await compareCloudLight();
-    return {current,control,replacement,rebuilt,glError:NMS._renderer.getContext().getError()};
+    return {current,control,replacement,snapshots,rebuilt,glError:NMS._renderer.getContext().getError()};
   },oldCallControl);
   const difference=records=>Math.max(...records.flatMap(r=>r.full.map((v,i)=>Math.abs(v-r.combinedFull[i]))));
   const metrics={cases:result.current.records.length,occupied:result.current.occupied,
@@ -51,6 +66,8 @@ try {
   assert.ok(metrics.occupiedSourceCacheError<.05,'The live cache changed occupied-point source radiance');
   assert.equal(before.sourceDigest,after.sourceDigest);
   assert.deepEqual(result.replacement,{invalidated:true,oldDisposed:true,changed:true,ready:1});
+  assert.equal(result.snapshots.maxPending,1);assert.equal(result.snapshots.creations,2);
+  assert.ok(result.snapshots.maxRetainedBytes>1000000);
   assert.ok(metrics.rebuiltCombinationDepthError<.0001);
   assert.ok(metrics.rebuiltSourceCacheError<.05);
   // ANGLE-specific old-call reproduction is reported, rather than required on

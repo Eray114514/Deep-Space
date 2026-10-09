@@ -110,7 +110,7 @@ export class PlanetWeatherStream {
     this.revision=`${p.weatherField.namespace}:${a}:${b}`;
   }
   dispose() {
-    if(this.disposed) return;this.disposed=true;this.worker.terminate();this.frames.clear();this.pending.clear();
+    if(this.disposed) return;this.disposed=true;this.ready=false;this.worker.terminate();this.frames.clear();this.pending.clear();
     this.committedFirst=null;this.committedSecond=null;
     this.boundsFirst=null;this.boundsSecond=null;
   }
