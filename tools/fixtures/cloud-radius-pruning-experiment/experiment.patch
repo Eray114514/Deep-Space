@@ -1,0 +1,66 @@
+diff --git a/src/cloud/cloud-beam-glsl.js b/src/cloud/cloud-beam-glsl.js
+index 6b5b1b6..6742bcc 100644
+--- a/src/cloud/cloud-beam-glsl.js
++++ b/src/cloud/cloud-beam-glsl.js
+@@ -21,7 +21,7 @@ export const cloudBeamGLSL = /* glsl */`
+       float radialRate=abs(dot(normalize(point),sunDirection));
+       float stepMeters=min(200.0,80.0/max(radialRate,0.08))*refinement;
+       float dt=min(end-t,stepMeters);
+-      float emptyRadius=productionEmptyRadius(point);
++      float emptyRadius=productionEmptyRadiusBeyond(point,dt);
+       if(emptyRadius>dt) {
+         float skip=min(end-t,emptyRadius);t+=skip;cloudBeamEmptyMeters+=skip;continue;
+       }
+diff --git a/src/cloud/production-shape.js b/src/cloud/production-shape.js
+index 2bfd2eb..581997e 100644
+--- a/src/cloud/production-shape.js
++++ b/src/cloud/production-shape.js
+@@ -98,7 +98,7 @@ export const productionSpeciesGLSL = /* glsl */`
+   // Radius of an empty ball, bounded by the current angular cell and the
+   // nearest occupied radial bins. Radius/plane/cone distances are independent
+   // of beam direction, so a curved altitude trajectory cannot leave support.
+-  float productionEmptyRadius(vec3 local) {
++  float productionEmptyRadiusBeyond(vec3 local,float minimumRadius) {
+     if(uCandidatesReady<0.5 || uMediumLayer!=0)return 0.0;
+     vec3 point=uSpin*local;
+     float radius=length(point),altitude=radius-uBodyR;
+@@ -107,6 +107,18 @@ export const productionSpeciesGLSL = /* glsl */`
+     ivec2 cell=clamp(ivec2(floor(uv*vec2(size.xy))),ivec2(0),size.xy-1);
+     int layer=clamp(int(floor(altitude/500.0)),0,size.z-1);
+     if(texelFetch(uBandCandidates,ivec3(cell,layer),0).r!=0u)return 0.0;
++    // If the angular cell or shell boundary already prevents a useful jump,
++    // searching all radial bins cannot make this empty ball any larger.
++    // Preserve the original radius arithmetic; only omit an unobservable scan.
++    float angularDistance=min(radius-uRin,uRout-radius);
++    float theta=weatherAtan2(length(point.xz),point.y);
++    for(int side=0;side<2;side++) {
++      float latitude=float(cell.y+side)*3.14159265359/float(size.y);
++      angularDistance=min(angularDistance,radius*abs(sin(theta-latitude)));
++      float longitude=float(cell.x+side)*6.28318530718/float(size.x);
++      angularDistance=min(angularDistance,abs(dot(point,vec3(-sin(longitude),0,cos(longitude)))));
++    }
++    if(max(0.0,angularDistance*0.99)<=minimumRadius)return 0.0;
+     float below=uRin,above=uRout;
+     for(int k=1;k<int(uCandidateLayers);k++) {
+       int index=layer-k;
+@@ -122,16 +134,12 @@ export const productionSpeciesGLSL = /* glsl */`
+         above=min(above,uBodyR+float(index)*500.0);break;
+       }
+     }
+-    float distance=min(radius-below,above-radius);
+-    float theta=weatherAtan2(length(point.xz),point.y);
+-    for(int side=0;side<2;side++) {
+-      float latitude=float(cell.y+side)*3.14159265359/float(size.y);
+-      distance=min(distance,radius*abs(sin(theta-latitude)));
+-      float longitude=float(cell.x+side)*6.28318530718/float(size.x);
+-      distance=min(distance,abs(dot(point,vec3(-sin(longitude),0,cos(longitude)))));
+-    }
++    float distance=min(min(radius-below,above-radius),angularDistance);
+     return max(0.0,distance*0.99);
+   }
++  float productionEmptyRadius(vec3 local) {
++    return productionEmptyRadiusBeyond(local,0.0);
++  }
+   bool speciesHasSupport(float altitude,vec4 band,float baseJitter,float depthJitter) {
+     return !(band.r<0.00001 || band.a<0.00001
+       || altitude<band.g-baseJitter*0.5 || altitude>band.b+(baseJitter+depthJitter)*0.5);

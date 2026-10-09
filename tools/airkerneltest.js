@@ -1,0 +1,122 @@
+// Shared air kernel against the independent previous GLSL. Real RGBA32F input,
+// native Float32 readback; no floating-point filtering extension is required.
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {startServer} from './server.js';
+import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
+import {evidenceFingerprint} from './evidence-fingerprint.js';
+
+const reference='ec966fa',out='test-results/air-kernel';
+const sameKernel=process.argv.includes('--same-kernel-control');
+const old=execFileSync('git',['show',`${reference}:src/atmosphere-transport-glsl.js`],{encoding:'utf8'});
+const before=await evidenceFingerprint('tools/airkerneltest.js');
+const {server,port}=await startServer(0);let browser;
+await mkdir(out,{recursive:true});const errors=[];
+try {
+  browser=await launchHardwareBrowser({executablePath:resolveSystemChromePath(),headless:true});
+  const page=await browser.newPage();page.on('pageerror',e=>errors.push(String(e)));
+  page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+  await page.route('**/src/air-transport-reference.js',r=>r.fulfill({contentType:'text/javascript',body:old}));
+  await page.route('**/__airkernel',r=>r.fulfill({contentType:'text/html',body:
+    '<link rel="icon" href="data:,"><script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>'}));
+  await page.goto(`http://127.0.0.1:${port}/__airkernel`);
+  const result=await page.evaluate(async sameKernel=>{
+    const T=await import('three');
+    const {atmosphereUniformGLSL,atmosphereTransportGLSL:current}=await import('/src/atmosphere-transport-glsl.js');
+    const {atmosphereTransportGLSL:previous}=await import('/src/air-transport-reference.js');
+    const old=sameKernel?current:previous;
+    const {atmosphereUniforms}=await import('/src/atmosphere-uniforms.js');
+    const {atmosphereRenderProfile,createAtmosphereOpticalDepthLut}=await import('/src/atmosphere-pass-webgl.js');
+    const names=new Set([...old.matchAll(/\b(?:float|vec[234]|void|int|bool)\s+(\w+)\s*\(/g)].map(m=>m[1]));
+    names.add('PI');
+    for(const name of ['airPhaseReady','airPhaseDirection','airRayleighPhase','airMiePhase'])names.add(name);
+    const independent=old.replace(/\buniform\s+[^;]+;/g,'').replace(/\b\w+\b/g,name=>names.has(name)?'reference_'+name:name);
+    const renderer=new T.WebGLRenderer(),gl=renderer.getContext();renderer.setSize(512,192);
+    const uniforms={...atmosphereUniforms(),uMode:{value:0},uBadControl:{value:0}};
+    const material=new T.ShaderMaterial({uniforms,vertexShader:'void main(){gl_Position=vec4(position.xy,0,1);}',
+      fragmentShader:'#define VIEW_STEPS 48\n'+atmosphereUniformGLSL+current+independent+`
+      uniform float uMode,uBadControl;
+      void main(){vec2 uv=gl_FragCoord.xy/vec2(512,192);
+        float h=uTopAltitude*(uv.y*1.2-.1),mu=uv.x*2.4-1.2;
+        if(uMode<.5){vec4 a=sunlightOpticalDepth(h,mu),b=reference_sunlightOpticalDepth(h,mu);
+          gl_FragColor=vec4(max(max(abs(a.x-b.x),abs(a.y-b.y)),max(abs(a.z-b.z),abs(a.w-b.w))),a.x,a.y,1);}
+        else{vec3 position=vec3(0,uGroundR+h,0),dir=normalize(vec3(uv.x*2.-1.,.2,.4));
+          vec3 ea,sa,eb,sb;float distance=10.+uv.x*2000.;
+          // Compare both changed and restored directions across the grid.
+          // Merely visiting -dir and checking only the final +dir can miss a
+          // cache that incorrectly keeps the first direction forever.
+          airSample(position,dir,distance,ea,sa);airSample(position,-dir,distance,ea,sa);
+          vec3 probeDirection=uv.x<.5?dir:-dir;
+          airSample(position,probeDirection,distance,ea,sa);airSample(position,probeDirection,distance,ea,sa);
+          reference_airSample(position,probeDirection,distance,eb,sb);
+          if(uBadControl>.5)sb+=vec3(.01);
+          vec3 la=vec3(0),ta=vec3(1),lb=vec3(0),tb=vec3(1);
+          mediumStep(la,ta,ea,sa,distance);reference_mediumStep(lb,tb,eb,sb,distance);
+          float error=max(max(abs(la.x-lb.x),abs(la.y-lb.y)),abs(la.z-lb.z));
+          float magnitude=max(max(abs(lb.x),abs(lb.y)),abs(lb.z));
+          gl_FragColor=vec4(error,
+            max(max(abs(ta.x-tb.x),abs(ta.y-tb.y)),abs(ta.z-tb.z)),length(la),error/max(magnitude,1e-8));}}
+      `,depthTest:false,depthWrite:false,blending:T.NoBlending});
+    const target=new T.WebGLRenderTarget(512,192,{type:T.FloatType,depthBuffer:false});
+    const geometry=new T.PlaneGeometry(2,2),scene=new T.Scene(),camera=new T.Camera();scene.add(new T.Mesh(geometry,material));
+    const records=[];let badControl;
+    const read=()=>{
+      renderer.setRenderTarget(target);renderer.render(scene,camera);
+      const pixels=new Float32Array(512*192*4);renderer.readRenderTargetPixels(target,0,0,512,192,pixels);
+      let maximumError=0,secondMaximum=0,relativeMaximum=0,occupied=0;
+      for(let i=0;i<pixels.length;i+=4){
+        for(let channel=0;channel<4;channel++)if(!Number.isFinite(pixels[i+channel]))throw Error('Nonfinite kernel output');
+        maximumError=Math.max(maximumError,pixels[i]);secondMaximum=Math.max(secondMaximum,pixels[i+1]);
+        if(uniforms.uMode.value>0.5)relativeMaximum=Math.max(relativeMaximum,pixels[i+3]);
+        if(pixels[i+2]>0)occupied++;}
+      return {maximumError,secondMaximum,relativeMaximum,occupied,samples:512*192};
+    };
+    const planets=[{R:6000000,type:'lush',weatherProfile:{temperatureK:286}},
+      {R:900000,type:'ice',weatherProfile:{temperatureK:190}},
+      {R:7000000,type:'desert',weatherProfile:{temperatureK:410}}];
+    try {
+      for(const planet of planets) {
+        const {profile,densityScale}=atmosphereRenderProfile(planet),lut=createAtmosphereOpticalDepthLut(profile);
+        const texture=new T.DataTexture(lut.data,lut.width,lut.height,T.RGBAFormat,T.FloatType);
+        texture.minFilter=texture.magFilter=T.NearestFilter;texture.needsUpdate=true;
+        uniforms.tOpticalDepth.value=texture;uniforms.uEnabled.value=1;uniforms.uMultipleEnabled.value=0;
+        for(const [name,value] of Object.entries({uGroundR:profile.groundRadiusMeters,uTopR:profile.topRadiusMeters,
+          uTopAltitude:profile.topAltitudeMeters,uRayleighScaleHeight:profile.rayleighScaleHeightMeters,
+          uMieScaleHeight:profile.mieScaleHeightMeters,uOzoneCenter:profile.ozoneCenterMeters,
+          uOzoneHalfWidth:profile.ozoneHalfWidthMeters,uDensityScale:densityScale}))uniforms[name].value=value;
+        uniforms.uBetaRayleigh.value.fromArray(profile.rayleigh);uniforms.uBetaMieScatter.value.fromArray(profile.mie.scattering);
+        uniforms.uBetaMieExtinction.value.fromArray(profile.mie.extinction);uniforms.uBetaOzone.value.fromArray(profile.ozoneAbsorption);
+        uniforms.uMode.value=0;records.push({type:planet.type,mode:'lut',...read()});
+        uniforms.uMode.value=1;uniforms.uSunEnergy0.value=.7;uniforms.uSunEnergy1.value=.3;
+        try {
+          for(const cosine of [-.8,-.03,0,.2,.8]) {
+            uniforms.uSunDirection0.value.set(Math.sqrt(1-cosine*cosine),cosine,0);
+            uniforms.uSunDirection1.value.copy(uniforms.uSunDirection0.value).negate();
+            records.push({type:planet.type,mode:'air-cell',cosine,...read()});
+          }
+          if(planet===planets.at(-1)) {
+            uniforms.uBadControl.value=1;badControl=read();uniforms.uBadControl.value=0;
+          }
+        } finally {texture.dispose();}
+      }
+      return {records,badControl,gl:gl.getError(),gpu:gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL),
+        scope:'Three physical profiles; dense off-grid LUT domain including clamped edges and solar horizon. Two-star homogeneous air transfer across day/night/twilight. No multiple LUT, eclipse, full view-ray quadrature or player-motion acceptance.'};
+    } finally {target.dispose();geometry.dispose();material.dispose();renderer.dispose();}
+  },sameKernel);
+  const after=await evidenceFingerprint('tools/airkerneltest.js');
+  await writeFile(`${out}/${sameKernel?'same-kernel-control':'report'}.json`,JSON.stringify({reference,before,after,sameKernel,result,errors},null,2));
+  assert.equal(before.sourceDigest,after.sourceDigest);assert.deepEqual(errors,[]);assert.equal(result.gl,0);
+  assert.ok(result.records.every(r=>r.occupied>1000));
+  for(const r of result.records){
+    if(r.mode==='lut')assert.equal(r.maximumError,0,'LUT texels/interpolation must remain exact');
+    else {
+      assert.equal(r.secondMaximum,0,'Air transmission must remain exact');
+      // Independently compiled downstream arithmetic may reassociate. Budget
+      // eight Float32 epsilons, separate from LUT exactness and physical gates.
+      assert.ok(r.relativeMaximum<=8*2**-23,'Air radiance exceeded Float32 roundoff budget');
+    }
+  }
+  assert.ok(result.badControl.maximumError>.001,'Bad control must fail');
+  console.log(JSON.stringify(result));console.log(`PASS air kernel; ${out}`);
+} finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

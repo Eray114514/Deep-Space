@@ -1,0 +1,42 @@
+diff --git a/src/stellar-occlusion.js b/src/stellar-occlusion.js
+index 3a08b7e..98432d4 100644
+--- a/src/stellar-occlusion.js
++++ b/src/stellar-occlusion.js
+@@ -81,7 +81,7 @@ export const stellarOcclusionGLSL = /* glsl */`
+     if(uLocalStarCount>1 && dot(normalize(uLocalStars[1].xyz),direction)
+       >dot(normalize(uLocalStars[0].xyz),direction)) star=1;
+     vec3 delta=uLocalStars[star].xyz-position;
+-    float distance=length(delta), starAngle=asin(clamp(uLocalStars[star].w/distance,0.0,0.9999));
++    float distance=length(delta), starSine=clamp(uLocalStars[star].w/distance,0.0,0.9999);
+     vec3 sun=delta/distance;
+     // The common one-moon case has an exact angular-disc intersection. Do not
+     // execute the 64-direction union quadrature in every air/cloud sample.
+@@ -91,11 +91,26 @@ export const stellarOcclusionGLSL = /* glsl */`
+       float d=length(v), along=dot(v,sun), radius=uLocalOccluders[0].w;
+       if(d<=radius) return 0.0;
+       if(along<=0.0 || along>=distance) return 1.0;
+-      float angle=asin(clamp(radius/d,0.0,0.9999));
+-      float separation=acos(clamp(dot(v/d,sun),-1.0,1.0));
++      float blockerSine=clamp(radius/d,0.0,0.9999);
++      float separationCosine=clamp(dot(v/d,sun),-1.0,1.0);
++      // Well-separated or fully contained small discs need no inverse-angle
++      // separation. Guard the cosine boundaries and retain the original lens
++      // evaluation at contacts and for large nearby discs.
++      if(max(starSine,blockerSine)<=0.25) {
++        float cosineProduct=sqrt(1.0-starSine*starSine)*sqrt(1.0-blockerSine*blockerSine);
++        if(separationCosine<cosineProduct-starSine*blockerSine-0.000002)return 1.0;
++        if(starSine>1e-8 && starSine>=blockerSine
++          && separationCosine>cosineProduct+starSine*blockerSine+0.000002) {
++          float angle=asin(blockerSine),starAngle=asin(starSine);
++          return 1.0-(angle*angle)/(starAngle*starAngle);
++        }
++      }
++      float starAngle=asin(starSine),angle=asin(blockerSine);
++      float separation=acos(separationCosine);
+       if(starAngle<1e-8) return step(angle,separation);
+       return stellarDiscVisibility(starAngle,angle,separation);
+     }
++    float starAngle=asin(starSine);
+     #if STELLAR_UNION_OCCLUSION
+     vec3 axis=abs(sun.y)<0.9?vec3(0,1,0):vec3(1,0,0);
+     vec3 x=normalize(cross(sun,axis)), y=cross(sun,x);

@@ -1,0 +1,67 @@
+// Old/new native Float32 visibility, with dense contact/clear/containment
+// points. Fast classification is only allowed to preserve the old result.
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {startServer} from './server.js';
+import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
+import {evidenceFingerprint} from './evidence-fingerprint.js';
+const reference='ec966fa',out='test-results/stellar-visibility';
+const old=execFileSync('git',['show',`${reference}:src/stellar-occlusion.js`],{encoding:'utf8'});
+const before=await evidenceFingerprint('tools/stellarvisibilitytest.js');
+const {server,port}=await startServer(0);let browser;const errors=[];
+await mkdir(out,{recursive:true});
+try {
+  browser=await launchHardwareBrowser({executablePath:resolveSystemChromePath(),headless:true});
+  const page=await browser.newPage();page.on('pageerror',e=>errors.push(String(e)));
+  page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+  await page.route('**/src/stellar-visibility-reference.js',r=>r.fulfill({contentType:'text/javascript',body:old}));
+  await page.route('**/__stellar',r=>r.fulfill({contentType:'text/html',body:
+    '<link rel="icon" href="data:,"><script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>'}));
+  await page.goto(`http://127.0.0.1:${port}/__stellar`);
+  const result=await page.evaluate(async()=>{
+    const T=await import('three');
+    const {stellarOcclusionGLSL:current,stellarOcclusionUniforms}=await import('/src/stellar-occlusion.js');
+    const {stellarOcclusionGLSL:old}=await import('/src/stellar-visibility-reference.js');
+    const independent=old.replace(/\buniform\s+[^;]+;/g,'')
+      .replace(/\b(stellarDiscVisibility|localStellarVisibility)\b/g,name=>'reference_'+name);
+    const renderer=new T.WebGLRenderer(),gl=renderer.getContext();renderer.setSize(512,128);
+    const u={...stellarOcclusionUniforms(),uExtent:{value:1},uContact:{value:0},uBase:{value:0}};
+    u.uLocalStarCount.value=1;u.uLocalOccluderCount.value=1;
+    const material=new T.ShaderMaterial({uniforms:u,vertexShader:'void main(){gl_Position=vec4(position.xy,0,1);}',
+      fragmentShader:current+independent+`uniform float uExtent,uContact,uBase;
+      void main(){vec2 uv=gl_FragCoord.xy/vec2(512,128);
+        vec3 point=vec3((uv.x-.5)*uExtent+uBase,(uv.y-.5)*uExtent*.25,0);
+        float a=localStellarVisibility(point,vec3(0,0,1)),b=reference_localStellarVisibility(point,vec3(0,0,1));
+        gl_FragColor=vec4(a,b,abs(a-b),1);}`,depthTest:false,depthWrite:false,blending:T.NoBlending});
+    const target=new T.WebGLRenderTarget(512,128,{type:T.FloatType,depthBuffer:false});
+    const geometry=new T.PlaneGeometry(2,2),scene=new T.Scene(),camera=new T.Camera();scene.add(new T.Mesh(geometry,material));
+    const cases=[];
+    try {
+      for(const [star,moon] of [[0,.03],[1e-9,.001],[.00001,.000003],[.01,.001],[.08,.002],[.08,.03],
+        [.08,.15],[.2,.1],[.25,.01],[.6,.5]]) {
+        u.uLocalStars.value[0].set(0,0,1e7,star*1e7);u.uLocalOccluders.value[0].set(0,0,5e6,moon*5e6);
+        for(const scale of [1,1e-3]) {
+          u.uExtent.value=scale===1?Math.max(20000,(star+moon)*4e7):20000;
+          // A thin strip at the external contact resolves fallback boundaries.
+          u.uBase.value=scale===1?0:(star+moon)*1e7;
+          renderer.setRenderTarget(target);renderer.render(scene,camera);
+          const pixels=new Float32Array(512*128*4);renderer.readRenderTargetPixels(target,0,0,512,128,pixels);
+          let maximumError=0,clear=0,blocked=0,partial=0;
+          for(let i=0;i<pixels.length;i+=4){maximumError=Math.max(maximumError,pixels[i+2]);
+            if(!Number.isFinite(pixels[i])||pixels[i]<0||pixels[i]>1)throw Error('Invalid visibility');
+            if(pixels[i]===1)clear++;else if(pixels[i]===0)blocked++;else partial++;}
+          cases.push({star,moon,scale,maximumError,clear,blocked,partial,samples:512*128});
+        }
+      }
+      return {cases,gl:gl.getError(),gpu:gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL)};
+    } finally {target.dispose();geometry.dispose();material.dispose();renderer.dispose();}
+  });
+  const after=await evidenceFingerprint('tools/stellarvisibilitytest.js');
+  await writeFile(`${out}/report.json`,JSON.stringify({reference,before,after,result,errors},null,2));
+  assert.equal(before.sourceDigest,after.sourceDigest);assert.deepEqual(errors,[]);assert.equal(result.gl,0);
+  assert.ok(result.cases.reduce((s,c)=>s+c.partial,0)>10000);
+  assert.ok(result.cases.reduce((s,c)=>s+c.blocked,0)>1000);
+  assert.ok(result.cases.every(c=>c.maximumError===0),'Single-occluder visibility changed');
+  console.log(JSON.stringify(result));console.log('PASS stellar visibility');
+} finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

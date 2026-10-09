@@ -1,0 +1,122 @@
+diff --git a/src/atmosphere-transport-glsl.js b/src/atmosphere-transport-glsl.js
+index 0642e16..e5c949f 100644
+--- a/src/atmosphere-transport-glsl.js
++++ b/src/atmosphere-transport-glsl.js
+@@ -24,6 +24,23 @@ export const atmosphereUniformGLSL = `        uniform sampler2D tOpticalDepth, t
+ export const atmosphereTransportGLSL = `
+         ${stellarOcclusionGLSL}
+         const float PI = 3.141592653589793;
++        bool airPhaseReady = false;
++        vec3 airPhaseDirection = vec3(0.0);
++        vec2 airRayleighPhase = vec2(0.0), airMiePhase = vec2(0.0);
++        // Phase depends on the view ray and stellar directions, not altitude.
++        // Own this cache within one fragment; a new direction invalidates it
++        // even when a caller integrates several rays in the same invocation.
++        void prepareAirViewPhase(vec3 direction) {
++          if (airPhaseReady && all(equal(direction, airPhaseDirection))) return;
++          for (int star = 0; star < 2; star++) {
++            vec3 sun = normalize(star == 0 ? uSunDirection0 : uSunDirection1);
++            float mu = dot(direction, sun), g = 0.8;
++            airRayleighPhase[star] = 3.0 / (16.0 * PI) * (1.0 + mu * mu);
++            airMiePhase[star] = (1.0 - g * g) / (4.0 * PI
++              * pow(max(0.025, 1.0 + g * g - 2.0 * g * mu), 1.5));
++          }
++          airPhaseDirection = direction; airPhaseReady = true;
++        }
+         ${atmosphereQuadratureGLSL}
+
+         vec2 sphereHits(vec3 origin, float radius, vec3 direction) {
+@@ -51,14 +68,14 @@ export const atmosphereTransportGLSL = `
+           vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * (size - 1.0);
+           vec2 i = floor(p);
+           vec2 f = fract(p);
+-          vec2 p00 = (clamp(i, vec2(0.0), size - 1.0) + 0.5) / size;
+-          vec2 p10 = (clamp(i + vec2(1.0, 0.0), vec2(0.0), size - 1.0) + 0.5) / size;
+-          vec2 p01 = (clamp(i + vec2(0.0, 1.0), vec2(0.0), size - 1.0) + 0.5) / size;
+-          vec2 p11 = (clamp(i + vec2(1.0), vec2(0.0), size - 1.0) + 0.5) / size;
+-          vec4 a = mix(texture2D(tOpticalDepth, p00),
+-            texture2D(tOpticalDepth, p10), f.x);
+-          vec4 b = mix(texture2D(tOpticalDepth, p01),
+-            texture2D(tOpticalDepth, p11), f.x);
++          // Explicit integer loads retain the same four RGBA32F texels and mix
++          // order. Avoid normalized-coordinate reconstruction and sampler
++          // addressing at every air cell; float-linear support is not needed.
++          ivec2 cell = ivec2(i), last = ivec2(255, 95);
++          vec4 a = mix(texelFetch(tOpticalDepth, cell, 0),
++            texelFetch(tOpticalDepth, min(cell + ivec2(1, 0), last), 0), f.x);
++          vec4 b = mix(texelFetch(tOpticalDepth, min(cell + ivec2(0, 1), last), 0),
++            texelFetch(tOpticalDepth, min(cell + ivec2(1), last), 0), f.x);
+           return mix(a, b, f.y);
+         }
+
+@@ -87,9 +104,9 @@ export const atmosphereTransportGLSL = `
+           return dot(position / radius, sunDirection) - horizonMu;
+         }
+
+-        vec3 starScatter(vec3 position, vec3 viewDirection, float segmentLength,
++        vec3 starScatterPhased(vec3 position, vec3 viewDirection, float segmentLength,
+           float rayleighDensity, float mieDensity, vec3 sunDirection,
+-          vec3 sunColor, float sunEnergy) {
++          vec3 sunColor, float sunEnergy, float rayleighPhase, float miePhase) {
+           if (sunEnergy <= 0.00001) return vec3(0.0);
+           float radius = length(position);
+           float altitude = clamp(radius - uGroundR, 0.0, uTopAltitude);
+@@ -114,11 +131,6 @@ export const atmosphereTransportGLSL = `
+             + uBetaMieExtinction * sunDepth.y
+             + uBetaOzone * sunDepth.z;
+           vec3 transmission = exp(-min(opticalDepth, vec3(50.0)));
+-          float mu = dot(viewDirection, sunDirection);
+-          float rayleighPhase = 3.0 / (16.0 * PI) * (1.0 + mu * mu);
+-          float g = 0.8;
+-          float miePhase = (1.0 - g * g) / (4.0 * PI
+-            * pow(max(0.025, 1.0 + g * g - 2.0 * g * mu), 1.5));
+           vec3 coefficient = uBetaRayleigh * rayleighDensity * rayleighPhase
+             + uBetaMieScatter * mieDensity * miePhase;
+           vec3 direct = coefficient * transmission * visibility * eclipseVisibility(position, sunDirection);
+@@ -127,6 +139,21 @@ export const atmosphereTransportGLSL = `
+           return (direct + indirect) * sunColor * sunEnergy;
+         }
+
++        // The sphere-mean multiple-scattering bake supplies its own solar and
++        // view directions. Preserve its generic entry, independent of the
++        // fixed two-source phase cache used by ordinary view-ray integration.
++        vec3 starScatter(vec3 position, vec3 viewDirection, float segmentLength,
++          float rayleighDensity, float mieDensity, vec3 sunDirection,
++          vec3 sunColor, float sunEnergy) {
++          if (sunEnergy <= 0.00001) return vec3(0.0);
++          float mu = dot(viewDirection, sunDirection), g = 0.8;
++          float rayleighPhase = 3.0 / (16.0 * PI) * (1.0 + mu * mu);
++          float miePhase = (1.0 - g * g) / (4.0 * PI
++            * pow(max(0.025, 1.0 + g * g - 2.0 * g * mu), 1.5));
++          return starScatterPhased(position, viewDirection, segmentLength,
++            rayleighDensity, mieDensity, sunDirection, sunColor, sunEnergy, rayleighPhase, miePhase);
++        }
++
+
+         // Homogeneous-cell exact transfer, including the zero-extinction limit.
+         // Radiance is unexposed; extinction is inverse metres.
+@@ -148,10 +175,11 @@ export const atmosphereTransportGLSL = `
+           float mieDensity = exp(-altitude / uMieScaleHeight) * uDensityScale;
+           extinction = uBetaRayleigh * rayleighDensity + uBetaMieExtinction * mieDensity
+             + uBetaOzone * ozoneDensity(altitude) * uDensityScale;
+-          source = starScatter(position, direction, distance, rayleighDensity, mieDensity,
+-            normalize(uSunDirection0), uSunColor0, uSunEnergy0);
+-          source += starScatter(position, direction, distance, rayleighDensity, mieDensity,
+-            normalize(uSunDirection1), uSunColor1, uSunEnergy1);
++          prepareAirViewPhase(direction);
++          source = starScatterPhased(position, direction, distance, rayleighDensity, mieDensity,
++            normalize(uSunDirection0), uSunColor0, uSunEnergy0, airRayleighPhase.x, airMiePhase.x);
++          source += starScatterPhased(position, direction, distance, rayleighDensity, mieDensity,
++            normalize(uSunDirection1), uSunColor1, uSunEnergy1, airRayleighPhase.y, airMiePhase.y);
+           source *= uRadianceScale;
+         }
+         void airIntegrate(vec3 origin, vec3 direction, float t0, float t1, out vec3 L, out vec3 T) {
+@@ -172,7 +200,7 @@ export const atmosphereTransportGLSL = `
+ // Cloud material has its own geometry/light uniforms; bind this namespaced view
+ // to the active atmosphere pass without owning its LUT or duplicating its model.
+ export const cloudAtmosphereGLSL = ('#define VIEW_STEPS '+VIEW_STEPS+'\n' + atmosphereUniformGLSL + atmosphereTransportGLSL)
+-  .replace(/\bu[A-Z]\w*|\btOpticalDepth|\btMultipleScattering|\bPI|\bsphereHits|\bozoneDensity|\beclipseVisibility|\bsolarHorizonClearance|\bsunlightOpticalDepth|\bstarScatter|\blocalStellarVisibility|\bstellarDiscVisibility|\bmultipleRadiance/g, (name) => 'air_' + name)
++  .replace(/\bu[A-Z]\w*|\btOpticalDepth|\btMultipleScattering|\bPI|\bsphereHits|\bozoneDensity|\beclipseVisibility|\bsolarHorizonClearance|\bsunlightOpticalDepth|\bstarScatterPhased|\bstarScatter|\bprepareAirViewPhase|\bairPhaseReady|\bairPhaseDirection|\bairRayleighPhase|\bairMiePhase|\blocalStellarVisibility|\bstellarDiscVisibility|\bmultipleRadiance/g, (name) => 'air_' + name)
+   // Keep the same 48-cell quadrature but avoid expanding it inside every
+   // cloud view/light loop in ANGLE's D3D compiler.
+   .replace('for (int i = 0; i < VIEW_STEPS; i++)', 'for (int i = 0; i < int(air_uViewSteps); i++)')

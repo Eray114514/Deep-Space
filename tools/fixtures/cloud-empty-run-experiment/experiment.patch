@@ -1,0 +1,90 @@
+diff --git a/src/cloud/cloud-beam-glsl.js b/src/cloud/cloud-beam-glsl.js
+index 6b5b1b6..5f669d8 100644
+--- a/src/cloud/cloud-beam-glsl.js
++++ b/src/cloud/cloud-beam-glsl.js
+@@ -11,6 +11,7 @@ export const cloudBeamGLSL = /* glsl */`
+     vec2 ground=sphereHits(local,uGroundR,sunDirection);
+     if(ground.x>0.0)end=min(end,ground.x);
+     float refinement=12.0/max(uCloudLightSteps,4.0),od=0.0,t=0.0;
++    ivec2 emptyCell=ivec2(-1);vec2 emptyInterval=vec2(0);
+     // Resolve the thinnest physical cloud structure all along the beam. A
+     // logarithmic 12-cell schedule can skip a whole 600 m deck farther away.
+     // Work ends only at the shell/opaque boundary or negligible transmission.
+@@ -21,7 +22,7 @@ export const cloudBeamGLSL = /* glsl */`
+       float radialRate=abs(dot(normalize(point),sunDirection));
+       float stepMeters=min(200.0,80.0/max(radialRate,0.08))*refinement;
+       float dt=min(end-t,stepMeters);
+-      float emptyRadius=productionEmptyRadius(point);
++      float emptyRadius=productionEmptyRadiusInCell(point,emptyCell,emptyInterval);
+       if(emptyRadius>dt) {
+         float skip=min(end-t,emptyRadius);t+=skip;cloudBeamEmptyMeters+=skip;continue;
+       }
+diff --git a/src/cloud/production-shape.js b/src/cloud/production-shape.js
+index 2bfd2eb..94cb5e5 100644
+--- a/src/cloud/production-shape.js
++++ b/src/cloud/production-shape.js
+@@ -98,7 +98,11 @@ export const productionSpeciesGLSL = /* glsl */`
+   // Radius of an empty ball, bounded by the current angular cell and the
+   // nearest occupied radial bins. Radius/plane/cone distances are independent
+   // of beam direction, so a curved altitude trajectory cannot leave support.
+-  float productionEmptyRadius(vec3 local) {
++  // A beam can remain in the same empty radial run across many steps. Only
++  // retain that run, not the empty-ball radius: angular boundary distances
++  // must still be evaluated at the current point. State belongs to one beam
++  // invocation, so weather generations and neighbouring pixels cannot mix.
++  float productionEmptyRadiusInCell(vec3 local,inout ivec2 emptyCell,inout vec2 emptyInterval) {
+     if(uCandidatesReady<0.5 || uMediumLayer!=0)return 0.0;
+     vec3 point=uSpin*local;
+     float radius=length(point),altitude=radius-uBodyR;
+@@ -106,21 +110,28 @@ export const productionSpeciesGLSL = /* glsl */`
+     vec2 uv=weatherAtlasUV(point);
+     ivec2 cell=clamp(ivec2(floor(uv*vec2(size.xy))),ivec2(0),size.xy-1);
+     int layer=clamp(int(floor(altitude/500.0)),0,size.z-1);
+-    if(texelFetch(uBandCandidates,ivec3(cell,layer),0).r!=0u)return 0.0;
+     float below=uRin,above=uRout;
+-    for(int k=1;k<int(uCandidateLayers);k++) {
+-      int index=layer-k;
+-      if(index<0)break;
+-      if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u) {
+-        below=max(below,uBodyR+float(index+1)*500.0);break;
++    if(all(equal(cell,emptyCell)) && radius>emptyInterval.x && radius<emptyInterval.y) {
++      below=emptyInterval.x;above=emptyInterval.y;
++    } else {
++      if(texelFetch(uBandCandidates,ivec3(cell,layer),0).r!=0u) {
++        emptyCell=ivec2(-1);return 0.0;
+       }
+-    }
+-    for(int k=1;k<int(uCandidateLayers);k++) {
+-      int index=layer+k;
+-      if(index>=size.z)break;
+-      if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u) {
+-        above=min(above,uBodyR+float(index)*500.0);break;
++      for(int k=1;k<int(uCandidateLayers);k++) {
++        int index=layer-k;
++        if(index<0)break;
++        if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u) {
++          below=max(below,uBodyR+float(index+1)*500.0);break;
++        }
+       }
++      for(int k=1;k<int(uCandidateLayers);k++) {
++        int index=layer+k;
++        if(index>=size.z)break;
++        if(texelFetch(uBandCandidates,ivec3(cell,index),0).r!=0u) {
++          above=min(above,uBodyR+float(index)*500.0);break;
++        }
++      }
++      emptyCell=cell;emptyInterval=vec2(below,above);
+     }
+     float distance=min(radius-below,above-radius);
+     float theta=weatherAtan2(length(point.xz),point.y);
+@@ -132,6 +143,10 @@ export const productionSpeciesGLSL = /* glsl */`
+     }
+     return max(0.0,distance*0.99);
+   }
++  float productionEmptyRadius(vec3 local) {
++    ivec2 cell=ivec2(-1);vec2 interval=vec2(0);
++    return productionEmptyRadiusInCell(local,cell,interval);
++  }
+   bool speciesHasSupport(float altitude,vec4 band,float baseJitter,float depthJitter) {
+     return !(band.r<0.00001 || band.a<0.00001
+       || altitude<band.g-baseJitter*0.5 || altitude>band.b+(baseJitter+depthJitter)*0.5);
