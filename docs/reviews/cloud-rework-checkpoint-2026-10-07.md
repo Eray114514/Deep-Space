@@ -53,6 +53,8 @@ F3c 已隔离正式预热范围、复用同帧原生阴影图，并提供 opt-in
 
 2026-10-09 F3f 合流补充：运行时局部候选全部撤回，当前仍是 F3e 的 `ec966fa` 实现。工具归因发现抑制缓存外物理回退后仍约 47 ms，去掉联合视线空气约 8 ms；实际低飞计数没有空气阴影回退。下一步除四场支持/更新，还须验证联合 shader 的执行结构与空气区间传输边界，不能以末尾空气叠色取代云内有序合成。读[F3f 证据](../baselines/foundation-air-cost-2026-10-09/README.md)区分候选和最终源码；未声称本轮生产加速。云专项继续等待基础工程完成，基础任务仍可改云接口/算法，不关闭 B4。
 
+2026-10-12 F3g 合流：云内空气首段/缓存/回退共用区间入口，缓存属于当前光线；本机旧 GPU 控制未满足 CPU 状态合同，新终点差约 .017 mm。独立空气、B5、私有网格重复与正常启动通过，完整回退此机位 GPU 小样本约降 13.3%，仍数百毫秒。原密度/分位、光照回退、band/shape 内容未改；实时 Scene 的 RGB 变化来源和三档/2K/运动仍开放。恢复专项前读[最新证据](../baselines/foundation-air-transport-2026-10-12/README.md)与新 `cloud-air-transport-glsl.js`，不从暂停提交继承数值/性能验收。基础优化未完成，专项继续等待；基础仍可以改云。
+
 关键入口：`node tools/b4lightcontinuitytest.js`、`node tools/b4sunbeamtest.js`、`node tools/b4airgaptest.js`、`npm run test:b4:optical`、`npm run test:b4:geometry`、`npm run test:b5`、`npm run test:smoke`。照明探针可加 `--old-call-control` 复现旧 ANGLE 调用。
 
 参考试验已保留可重建源和依赖锁，见 `tools/fixtures/takram-compat/README.md`；其关空气轨道图不是本项目验收。详细试验见[执行记录](cloud-rework-progress-2026-09-30.md)。恢复时从成本/支持失败继续，不能从勾选首族通过或扩云族开始。

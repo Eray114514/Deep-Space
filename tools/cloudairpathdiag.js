@@ -33,18 +33,25 @@ try {
     let end=brace+1,depth=1;
     while(depth){const c=probe.fragmentShader[end++];if(c==='{')depth++;if(c==='}')depth--;}
     probe.fragmentShader=probe.fragmentShader.slice(0,brace)+'{return local/uBodyR;}'+probe.fragmentShader.slice(end);
-    replace('if (air_uEnabled < 0.5 || b <= a) return;',
-      'if (air_uEnabled < 0.5 || b <= a) return;diagnosticGaps+=1.;');
-    replace('if(air_uEnabled<0.5 || b<=a)return;',
-      'if(air_uEnabled<0.5 || b<=a)return;diagnosticAdvances+=1.;');
+    const unified=probe.fragmentShader.includes('void cloudAirTransport(');
+    if(unified){
+      replace('if(air_uEnabled<0.5 || b<=a)return;', 'if(air_uEnabled<0.5 || b<=a)return;if(reuseCells)diagnosticAdvances+=1.;');
+      replace('if(!gapReady) {','if(!gapReady) {diagnosticGaps+=1.;');
+    } else {
+      replace('if (air_uEnabled < 0.5 || b <= a) return;', 'if (air_uEnabled < 0.5 || b <= a) return;diagnosticGaps+=1.;');
+      replace('if(air_uEnabled<0.5 || b<=a)return;', 'if(air_uEnabled<0.5 || b<=a)return;diagnosticAdvances+=1.;');
+    }
     replace('if (air_uEnabled < 0.5 || altitude < 0.0 || altitude > air_uTopAltitude) return;',
       'if (air_uEnabled < 0.5 || altitude < 0.0 || altitude > air_uTopAltitude) return;diagnosticSamples+=1.;');
-    replace('crossing=crossing || air_solarHorizonClearance(start,sun)\n                *air_solarHorizonClearance(end,sun)<=0.0;',
+    const horizon=/crossing=crossing \|\| air_solarHorizonClearance\(start,sun\)\s*\*air_solarHorizonClearance\(end,sun\)<=0\.0;/;
+    if(!horizon.test(probe.fragmentShader))throw Error('Horizon predicate changed');
+    probe.fragmentShader=probe.fragmentShader.replace(horizon,
       'float h0=air_solarHorizonClearance(start,sun),h1=air_solarHorizonClearance(end,sun);bool horizon=h0*h1<=0.;if(horizon)diagnosticHorizons+=1.;crossing=crossing||horizon;');
     replace('crossing=crossing || min(v0,v1)<0.999 && max(v0,v1)>0.001;',
       'bool partial=min(v0,v1)<0.999 && max(v0,v1)>0.001;if(partial){diagnosticPartial+=1.;if(h0<0. && h1<0.)diagnosticHiddenPartial+=1.;}crossing=crossing||partial;');
     replace('if(crossing) {','if(crossing) {diagnosticFallbacks+=1.;');
-    replace('if(cursor<b) {','if(cursor<b) {diagnosticRemainders+=1.;');
+    if(unified)replace('if(advanced>=64) {','if(advanced>=64) {diagnosticRemainders+=1.;');
+    else replace('if(cursor<b) {','if(cursor<b) {diagnosticRemainders+=1.;');
     replace('void main() {','void diagnosticOriginalMain() {');
     probe.fragmentShader+='\nvoid main(){diagnosticOriginalMain();gl_FragColor=uAirCounterField==0?vec4(diagnosticGaps,diagnosticAdvances,diagnosticFallbacks,diagnosticSamples):vec4(diagnosticHorizons,diagnosticPartial,diagnosticHiddenPartial,diagnosticRemainders);}';
     probe.blending=T.NoBlending;probe.needsUpdate=true;

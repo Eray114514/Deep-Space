@@ -65,8 +65,14 @@ try {
             if(!material.fragmentShader.includes(current))throw Error('Air transport prefix changed');
             material.fragmentShader=material.fragmentShader.replace(current,previous);
           }
-          if(noAir===1||noAir===2)replace('if (air_uEnabled < 0.5 || b <= a) return;', 'if (true) return;');
-          if(noAir===1||noAir===3)replace('if(air_uEnabled<0.5 || b<=a)return;', 'if(true)return;');
+          if(material.fragmentShader.includes('void cloudAirTransport(')) {
+            if(noAir===1)replace('if(air_uEnabled<0.5 || b<=a)return;','if(true)return;');
+            if(noAir===2)replace('if(gap) {','if(gap)break;\n          if(gap) {');
+            if(noAir===3)replace('if(air_uEnabled<0.5 || b<=a)return;','if(air_uEnabled<0.5 || b<=a || reuseCells)return;');
+          } else {
+            if(noAir===1||noAir===2)replace('if (air_uEnabled < 0.5 || b <= a) return;', 'if (true) return;');
+            if(noAir===1||noAir===3)replace('if(air_uEnabled<0.5 || b<=a)return;', 'if(true)return;');
+          }
           if(noSource) {
             const start=material.fragmentShader.indexOf('vec3 cloudCombinedSource(');
             if(start<0)throw Error('Cost diagnostic source function changed');

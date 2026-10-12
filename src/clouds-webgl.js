@@ -1,3 +1,4 @@
+import { cloudAirTransportGLSL } from './cloud/cloud-air-transport-glsl.js';
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionUniforms, bindStellarOcclusion, stellarOcclusionGLSL } from './stellar-occlusion.js';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
@@ -732,69 +733,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         return source;
       }
 
-      void cloudAirGap(vec3 origin, vec3 dir, float a, float b,
-        out vec3 light, out vec3 transmission) {
-        light = vec3(0.0); transmission = vec3(1.0);
-        if (air_uEnabled < 0.5 || b <= a) return;
-        // A 100 m gap needs one air cell, not the entire 32-cell planetary
-        // quadrature. Bound the cell by the shortest air density scale.
-        float cellLimit = min(air_uRayleighScaleHeight, air_uMieScaleHeight) * 0.25;
-        if(b-a>cellLimit*min(32.0,air_uViewSteps)) {
-          airIntegrate(origin,dir,a,b,light,transmission);return;
-        }
-        int cells = int(clamp(ceil((b-a)/max(cellLimit,50.0)),1.0,32.0));
-        float stride = (b-a)/float(cells);
-        for(int k=0;k<cells;k++) {
-          vec3 ext,source;
-          airSample(origin+dir*(a+(float(k)+0.5)*stride),dir,stride,ext,source);
-          mediumStep(light,transmission,ext,source,stride);
-        }
-      }
-
-      // Consecutive cloud interaction quantiles often lie only metres apart.
-      // Reuse a bounded homogeneous air cell rather than re-evaluating both
-      // stellar LUTs at every quantile. Shadow crossings retain the original
-      // interval quadrature, because its finite-cell visibility cannot be
-      // reused for a partial interval on the other side of a crossing.
-      void cloudAirAdvance(vec3 origin,vec3 dir,float a,float b,
-        inout float cellEnd,inout vec3 cellExt,inout vec3 cellSource,
-        out vec3 light,out vec3 transmission) {
-        light=vec3(0);transmission=vec3(1);
-        if(air_uEnabled<0.5 || b<=a)return;
-        float limit=max(25.0,min(air_uRayleighScaleHeight,air_uMieScaleHeight)*0.1);
-        float cursor=a;
-        for(int k=0;k<64;k++) {
-          if(cursor>=b)break;
-          if(cellEnd<=cursor) {
-            cellEnd=cursor+limit;
-            vec3 start=origin+dir*cursor,end=origin+dir*cellEnd;
-            bool crossing=false;
-            for(int star=0;star<2;star++) {
-              vec3 sun=star==0?air_uSunDirection0:air_uSunDirection1;
-              float energy=star==0?air_uSunEnergy0:air_uSunEnergy1;
-              if(energy<=0.0)continue;
-              crossing=crossing || air_solarHorizonClearance(start,sun)
-                *air_solarHorizonClearance(end,sun)<=0.0;
-              float v0=air_eclipseVisibility(start,sun),v1=air_eclipseVisibility(end,sun);
-              crossing=crossing || min(v0,v1)<0.999 && max(v0,v1)>0.001;
-            }
-            if(crossing) {
-              vec3 restLight,restTransmission;
-              cloudAirGap(origin,dir,cursor,b,restLight,restTransmission);
-              light+=transmission*restLight;transmission*=restTransmission;
-              cellEnd=b;return;
-            }
-            airSample(origin+dir*(cursor+limit*0.5),dir,limit,cellExt,cellSource);
-          }
-          float next=min(b,cellEnd);
-          mediumStep(light,transmission,cellExt,cellSource,next-cursor);
-          cursor=next;
-        }
-        if(cursor<b) {
-          vec3 restL,restT;cloudAirGap(origin,dir,cursor,b,restL,restT);
-          light+=transmission*restL;transmission*=restT;cellEnd=b;
-        }
-      }
+      ${cloudAirTransportGLSL}
 
       // Pixel columns retain the point-density field but compress illumination
       // once the individual cells are unresolved. This is a radiance LOD,
@@ -995,8 +934,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
           float distance=anchors[bin];vec3 local=uCameraLocal+dir*distance;
           float nextAnchor=min(distance,airBounds.y);
           vec3 gapLight,gapTransmission;
-          if(bin==0)cloudAirGap(uCameraLocal,dir,previousAnchor,nextAnchor,gapLight,gapTransmission);
-          else cloudAirAdvance(uCameraLocal,dir,previousAnchor,nextAnchor,
+          cloudAirTransport(uCameraLocal,dir,previousAnchor,nextAnchor,bin>0,
             airCellEnd,airCellExt,airCellSource,gapLight,gapTransmission);
           frontLight+=frontTransmission*gapLight;frontTransmission*=gapTransmission;
           previousAnchor=nextAnchor;
