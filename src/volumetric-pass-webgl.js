@@ -256,9 +256,19 @@ export class VolumetricPass extends Pass {
   }
 
   setLightBatchesEnabled(enabled,options={}) {
-    this.releaseLightBatches();
+    const next={...this.lightBatchOptions};
+    for(const [name,value] of Object.entries(options)) {
+      if(!['budgetBytes','maxBatchTiles'].includes(name))throw Error('Unknown cloud batch option: '+name);
+      if(!Number.isSafeInteger(value)||value<(name==='budgetBytes'?0:1))throw Error('Invalid cloud batch option: '+name);
+      next[name]=value;
+    }
+    if(!!enabled===this.lightBatchesEnabled&&(enabled||!this.lightBatch)
+      &&Object.keys(next).every(name=>next[name]===this.lightBatchOptions[name]))return;
     this.lightBatchesEnabled=!!enabled;
-    Object.assign(this.lightBatchOptions,options);
+    this.lightBatchOptions=next;
+    if(!enabled)this.releaseLightBatches();
+    else this.lightBatch?.releaseScratch();
+    this.lightBatchStatus={reason:enabled?'pending':'disabled',submitted:false};
     this.historyValid=false;
   }
 
@@ -269,7 +279,8 @@ export class VolumetricPass extends Pass {
   renderLightBatches(renderer) {
     const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=mesh?.material;
     const refuse=reason=>{
-      this.releaseLightBatches();this.lightBatchStatus={reason,submitted:false};return false;
+      if(reason==='disabled')this.releaseLightBatches();else this.lightBatch?.releaseScratch();
+      this.lightBatchStatus={reason,submitted:false};return false;
     };
     if(!this.lightBatchesEnabled)return refuse('disabled');
     if(!mesh?.visible||material!==planet.volCloudMat||material.defines.PRODUCTION_CLOUD_MEDIUM!==1
@@ -288,15 +299,15 @@ export class VolumetricPass extends Pass {
     if(owners!==1||foreign)return refuse('multiple-volume-owners');
     const gl=renderer.getContext();
     if(gl.getParameter(gl.MAX_DRAW_BUFFERS)<4||!gl.getExtension('EXT_color_buffer_float'))return refuse('capabilities');
-    const signature=JSON.stringify(material.defines);
-    const current=this.lightBatch;
-    if(current&&(current.source!==material||current.plan.width!==this.width||current.plan.height!==this.height
-      ||current.fragment!==material.fragmentShader||current.vertex!==material.vertexShader||current.signature!==signature))
-      this.releaseLightBatches();
+    const options={...this.lightBatchOptions,width:this.width,height:this.height,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)};
     if(!this.lightBatch) {
-      this.lightBatch=new CloudLightBatchRenderer(material,{width:this.width,height:this.height,
-        maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE),...this.lightBatchOptions});
-      this.lightBatch.fragment=material.fragmentShader;this.lightBatch.vertex=material.vertexShader;this.lightBatch.signature=signature;
+      this.lightBatch=new CloudLightBatchRenderer(material,options);
+    } else this.lightBatch.configure(material,options);
+    if(!this.lightBatch.plan.direct&&!this.lightBatch.programsReady) {
+      if(!this.lightBatch.preparationError)this.lightBatch.prepareAsync(renderer,this.camera,mesh,this.current);
+      this.lightBatchStatus={reason:this.lightBatch.preparationError?'preparation-error':'preparing',submitted:false,
+        error:this.lightBatch.preparationError,plan:this.lightBatch.plan};
+      return false;
     }
     const submitted=this.lightBatch.render(renderer,this.camera,mesh,this.current);
     this.lightBatchStatus={reason:submitted?'same-frame':'budget',submitted,plan:this.lightBatch.plan};
@@ -305,7 +316,7 @@ export class VolumetricPass extends Pass {
 
   setSize(width, height) {
     const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
-    if(nextWidth!==this.width||nextHeight!==this.height)this.releaseLightBatches();
+    if(nextWidth!==this.width||nextHeight!==this.height)this.lightBatch?.releaseScratch();
     this.width=nextWidth;this.height=nextHeight;
     this.current.setSize(this.width, this.height);
     resizeVolumeHistoryTarget(this.historyA,this.width,this.height);
