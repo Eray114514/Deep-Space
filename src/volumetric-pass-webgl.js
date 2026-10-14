@@ -8,6 +8,7 @@
 import * as THREE from 'three';
 import { CloudColumnBank } from './cloud/cloud-column-bank.js';
 import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
+import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 
 export const VOLUME_LAYER = 2;
@@ -29,6 +30,17 @@ function target(w, h, name, depth = false) {
   rt.texture.name = name;
   rt.texture.generateMipmaps = false;
   return rt;
+}
+
+// RenderTarget.setSize resizes COLOR images but leaves DepthTexture metadata
+// unchanged. History depth can be sampled before its owner FBO is next bound;
+// that upload must already use the new size (immutable GPU storage).
+export function resizeVolumeHistoryTarget(rt,width,height) {
+  rt.setSize(width,height);
+  const depth=rt.depthTexture;
+  if(depth&&(depth.image.width!==width||depth.image.height!==height)) {
+    depth.image.width=width;depth.image.height=height;depth.needsUpdate=true;
+  }
 }
 
 export class VolumetricPass extends Pass {
@@ -57,6 +69,10 @@ export class VolumetricPass extends Pass {
     this.activePlanet = null;
     this.columnMaps=new Map();
     this.columnRelease=new Map();
+    this.lightBatchesEnabled=false;
+    this.lightBatchOptions={budgetBytes:64*1024*1024,maxBatchTiles:128};
+    this.lightBatch=null;
+    this.lightBatchStatus={reason:'disabled',submitted:false};
     this.prevViewProjection = new THREE.Matrix4();
 
     this.resolveMaterial = new THREE.ShaderMaterial({
@@ -239,12 +255,61 @@ export class VolumetricPass extends Pass {
     this.historyValid = false;
   }
 
+  setLightBatchesEnabled(enabled,options={}) {
+    this.releaseLightBatches();
+    this.lightBatchesEnabled=!!enabled;
+    Object.assign(this.lightBatchOptions,options);
+    this.historyValid=false;
+  }
+
+  releaseLightBatches() {
+    this.lightBatch?.dispose();this.lightBatch=null;
+  }
+
+  renderLightBatches(renderer) {
+    const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=mesh?.material;
+    const refuse=reason=>{
+      this.releaseLightBatches();this.lightBatchStatus={reason,submitted:false};return false;
+    };
+    if(!this.lightBatchesEnabled)return refuse('disabled');
+    if(!mesh?.visible||material!==planet.volCloudMat||material.defines.PRODUCTION_CLOUD_MEDIUM!==1
+      ||material.defines.CLOUD_FAR_VIEW||material.uniforms.uLightQuadratureSteps.value!==16)return refuse('representation');
+    if(mesh.onBeforeRender!==THREE.Object3D.prototype.onBeforeRender
+      ||mesh.onAfterRender!==THREE.Object3D.prototype.onAfterRender
+      ||material.onBeforeRender!==THREE.Material.prototype.onBeforeRender
+      ||material.onBeforeCompile!==THREE.Material.prototype.onBeforeCompile
+      ||this.scene.onBeforeRender!==THREE.Object3D.prototype.onBeforeRender
+      ||this.scene.onAfterRender!==THREE.Object3D.prototype.onAfterRender)return refuse('custom-render-callback');
+    let owners=0,foreign=false;
+    this.scene.traverseVisible(object=>{
+      if(!(object.isMesh||object.isLine||object.isPoints||object.isSprite)||!object.layers.test(this.camera.layers))return;
+      owners++;if(object!==mesh)foreign=true;
+    });
+    if(owners!==1||foreign)return refuse('multiple-volume-owners');
+    const gl=renderer.getContext();
+    if(gl.getParameter(gl.MAX_DRAW_BUFFERS)<4||!gl.getExtension('EXT_color_buffer_float'))return refuse('capabilities');
+    const signature=JSON.stringify(material.defines);
+    const current=this.lightBatch;
+    if(current&&(current.source!==material||current.plan.width!==this.width||current.plan.height!==this.height
+      ||current.fragment!==material.fragmentShader||current.vertex!==material.vertexShader||current.signature!==signature))
+      this.releaseLightBatches();
+    if(!this.lightBatch) {
+      this.lightBatch=new CloudLightBatchRenderer(material,{width:this.width,height:this.height,
+        maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE),...this.lightBatchOptions});
+      this.lightBatch.fragment=material.fragmentShader;this.lightBatch.vertex=material.vertexShader;this.lightBatch.signature=signature;
+    }
+    const submitted=this.lightBatch.render(renderer,this.camera,mesh,this.current);
+    this.lightBatchStatus={reason:submitted?'same-frame':'budget',submitted,plan:this.lightBatch.plan};
+    return submitted;
+  }
+
   setSize(width, height) {
-    this.width = Math.max(1, Math.round(width * this.scale));
-    this.height = Math.max(1, Math.round(height * this.scale));
+    const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
+    if(nextWidth!==this.width||nextHeight!==this.height)this.releaseLightBatches();
+    this.width=nextWidth;this.height=nextHeight;
     this.current.setSize(this.width, this.height);
-    this.historyA.setSize(this.width, this.height);
-    this.historyB.setSize(this.width, this.height);
+    resizeVolumeHistoryTarget(this.historyA,this.width,this.height);
+    resizeVolumeHistoryTarget(this.historyB,this.width,this.height);
     this.compositeMaterial.uniforms.uTexel.value.set(1 / this.width, 1 / this.height);
     this.historyValid = false;
   }
@@ -332,7 +397,7 @@ export class VolumetricPass extends Pass {
     renderer.setClearColor(0x000000, 0);
     renderer.setRenderTarget(this.current);
     renderer.clear(true, false, false);
-    renderer.render(this.scene, this.camera);
+    if(!this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
 
     this.camera.layers.mask = oldMask;
     renderer.autoClear = oldAutoClear;
@@ -377,6 +442,7 @@ export class VolumetricPass extends Pass {
   }
 
   releaseTargets() {
+    this.releaseLightBatches();
     for(const columns of this.columnMaps.values())columns.dispose();
     this.columnMaps.clear();this.columnRelease.clear();
     this.current.dispose();
