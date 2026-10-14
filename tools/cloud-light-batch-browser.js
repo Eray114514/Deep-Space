@@ -1,7 +1,7 @@
 import {CloudLightBatchRenderer} from '../src/cloud/cloud-light-batch-renderer.js';
 import {cloudLightBatchShaders} from '../src/cloud/cloud-light-batch-glsl.js';
 
-export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0}={}) {
+export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false}={}) {
   const T=NMS._THREE,r=NMS._renderer,camera=NMS._internals.camera,vp=NMS._pipeline.volumePass,p=vp.activePlanet;
   const production=p.volCloudMat,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
   if(!ext)throw Error('Actual hardware GPU timer required');
@@ -27,7 +27,7 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
   const vertex='varying vec3 vDirection,vViewDirection;void main(){vDirection=vec3(0,1,0);vViewDirection=vec3(0,0,-1);gl_Position=vec4(position.xy,0,1);}';
   const copy=new T.ShaderMaterial({uniforms:{tInput:{value:output.texture}},vertexShader:vertex,depthTest:false,depthWrite:false,
     fragmentShader:'uniform sampler2D tInput;void main(){gl_FragColor=texelFetch(tInput,ivec2(gl_FragCoord.xy),0);}',blending:T.NoBlending});
-  let batches=null,badCached=null,forbiddenCalls=0;
+  let batches=null,previous=null,badCached=null,forbiddenCalls=0;
   const inputState=()=>JSON.stringify({matrix:mesh.matrixWorld.elements,camera:camera.matrixWorld.elements,projection:camera.projectionMatrix.elements,
     uniforms:Object.fromEntries(Object.entries(common).map(([key,{value}])=>[key,
       value?.isTexture?{uuid:value.uuid,version:value.version,sourceVersion:value.source.version}:value]))});
@@ -51,26 +51,35 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
     r.setRenderTarget(readback);quad.material=copy;r.render(quadScene,quadCamera);
     const data=new Float32Array(width*height*4);r.readRenderTargetPixels(readback,0,0,width,height,data);return data;
   };
-  const submit=()=>{
+  const submit=(stage=batches)=>{
     const replacements=[];
     for(const [object,name] of [[r,'readRenderTargetPixels'],[r,'readRenderTargetPixelsAsync'],[gl,'readPixels'],
       [gl,'finish'],[gl,'clientWaitSync'],[gl,'getQueryParameter']]) {
       const fn=object[name];object[name]=()=>{forbiddenCalls++;throw Error('Forbidden in same-frame batch submission: '+name);};
       replacements.push(()=>{object[name]=fn;});
     }
-    try{return batches.render(r,camera,mesh,output);}finally{for(const restore of replacements)restore();}
+    try{return stage.render(r,camera,mesh,output);}finally{for(const restore of replacements)restore();}
   };
   try {
     camera.layers.set(2);r.autoClear=false;r.setClearColor(0,0);
     batches=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
-    for(let round=0;round<rounds;round++)for(const index of round%2?[0,1]:[1,0]) {
+    let previousMetadata=null;
+    if(compareMetadata&&!batches.plan.direct) {
+      previous=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
+      const from='float totalOpacity=texelFetch(tPageOpacity,ivec2(queryPixel.xy),0).r;';
+      if(!previous.metadataMaterial.fragmentShader.includes(from))throw Error('Metadata reference boundary changed');
+      previous.metadataMaterial.fragmentShader=previous.metadataMaterial.fragmentShader.replace(from,'float totalOpacity=0.0;')
+        .replace('for(int pass=1;pass<2;pass++) {','for(int pass=0;pass<2;pass++) {');
+      previousMetadata=previous.metadataMaterial.fragmentShader;
+    }
+    for(let round=0;round<rounds;round++)for(const index of previous?(round%2?[0,1,2]:[2,1,0]):round%2?[0,1]:[1,0]) {
       const drawCalls=r.info.render.calls;
-      const timing=await timed(()=>{if(index===0||batches.plan.direct)drawOriginal(original);else if(submit()!==true)throw Error('Batch submission must be synchronous and complete');});
+      const timing=await timed(()=>{if(index===0||batches.plan.direct)drawOriginal(original);else if(submit(index===2?previous:batches)!==true)throw Error('Batch submission must be synchronous and complete');});
       const calls=r.info.render.calls-drawCalls;
       const native=new Uint16Array(width*height*4);r.readRenderTargetPixels(output,0,0,width,height,native);
       let nativeRepeatChanged=0;if(nativeExpected[index])for(let i=0;i<native.length;i++)if(native[i]!==nativeExpected[index][i])nativeRepeatChanged++;
       nativeExpected[index]||=native;pixelsExpected[index]||=pixels();
-      records.push({round,implementation:index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
+      records.push({round,implementation:index===2?'previous-metadata':index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
       console.log('Page: '+JSON.stringify(records.at(-1)));
     }
     const compare=data=>{const channels=[0,0,0,0];let maximumError=0;
@@ -86,11 +95,12 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
     drawOriginal(badFields);const badFieldsControl=compare(pixels());
     const info=gl.getExtension('WEBGL_debug_renderer_info');
     return {width,height,budgetBytes,beamBytes,jitterFrame,records,plan:batches.plan,comparison:compare(pixelsExpected[1]),
+      previousMetadata,previousComparison:previous?compare(pixelsExpected[2]):null,
       forbiddenCalls,badCachedControl,badFieldsControl,occupied:Array.from(pixelsExpected[0]).filter((v,i)=>i%4===3&&v>.004).length,
       inputsChanged:inputState()!==firstInputs,inputs:JSON.parse(firstInputs),gl:gl.getError(),gpu:info?gl.getParameter(info.UNMASKED_RENDERER_WEBGL):null,
       scope:'One complete same-frame command sequence, GPU mask clips empty tile/field rectangles, fixed pages reused for every batch. No readback or wait inside submission. Timers/readbacks only outside the kernel. Static private scene, not continuous or whole-frame acceptance.'};
   } finally {
-    batches?.dispose();original.dispose();badFields.dispose();badCached?.dispose();copy.dispose();quadGeometry.dispose();output.dispose();readback.dispose();
+    batches?.dispose();previous?.dispose();original.dispose();badFields.dispose();badCached?.dispose();copy.dispose();quadGeometry.dispose();output.dispose();readback.dispose();
     r.autoClear=auto;camera.layers.mask=mask;r.setClearColor(color,alpha);r.setRenderTarget(saved,face,mip);
     NMS._queryDepth.dispose();delete NMS._queryDepth;
     if(worker){worker.onmessage=receive;for(const event of messages)receive?.call(worker,event);}

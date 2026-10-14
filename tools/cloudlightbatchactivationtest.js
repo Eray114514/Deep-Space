@@ -4,7 +4,9 @@ import {startServer} from './server.js';
 import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
 
-const out='test-results/cloud-light-batch/activation',before=await evidenceFingerprint('tools/cloudlightbatchactivationtest.js');
+const trace=process.argv.includes('--trace');
+assert.ok(process.argv.slice(2).every(arg=>arg==='--trace'),'Supported option: --trace');
+const out='test-results/cloud-light-batch/'+(trace?'activation-trace':'activation'),before=await evidenceFingerprint('tools/cloudlightbatchactivationtest.js');
 await mkdir(out,{recursive:true});
 const {server,port}=await startServer(0);let browser;const errors=[];
 try {
@@ -13,6 +15,12 @@ try {
   page.on('pageerror',error=>errors.push(String(error)));page.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&freeze=1&time=9.5&scene=lowflight&alt=400&planet=0&bias=meadow&quality=balanced&vclouds=1&post=1`);
   await page.waitForFunction(()=>NMS?.booted&&NMS._planet(0).volCloudMat.uniforms.uSunCacheReady.value===1,null,{timeout:180000});
+  let cdp;
+  if(trace) {
+    cdp=await page.context().newCDPSession(page);
+    await cdp.send('Tracing.start',{categories:'gpu,disabled-by-default-gpu.service,disabled-by-default-gpu.debug,disabled-by-default-gpu.angle,devtools.timeline,blink.user_timing',
+      transferMode:'ReturnAsStream'});
+  }
   await page.evaluate(()=>{
     NMS.setAdaptiveQualityLocked(true);
     const vp=NMS._pipeline.volumePass,r=NMS._renderer,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -36,7 +44,8 @@ try {
     };
   });
   await page.waitForTimeout(8000);
-  await page.evaluate(()=>{window._batchActivation.phase='activation';NMS._pipeline.volumePass.setLightBatchesEnabled(true,{budgetBytes:8*1024*1024});});
+  await page.evaluate(()=>{performance.mark('cloud-batch-enable');window._batchActivation.phase='activation';
+    NMS._pipeline.volumePass.setLightBatchesEnabled(true,{budgetBytes:8*1024*1024});});
   await page.waitForTimeout(40000);
   const result=await page.evaluate(async()=>{
     const state=window._batchActivation,vp=NMS._pipeline.volumePass,r=NMS._renderer,gl=r.getContext();
@@ -56,6 +65,18 @@ try {
       status:vp.lightBatchStatus,elapsedMs:performance.now()-state.started,gpu:debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null,
       scope:'Normal HUD/post, stationary lowflight and locked balanced quality. No per-draw errors, readbacks or timer polling during measurement. RAF cadence is whole-page scheduling, not display presentation or long-flight acceptance.'};
   });
+  if(cdp) {
+    const finished=new Promise(resolve=>cdp.once('Tracing.tracingComplete',resolve));await cdp.send('Tracing.end');
+    const {stream}=await finished;let contents='';
+    for(;;){const chunk=await cdp.send('IO.read',{handle:stream});contents+=chunk.base64Encoded?Buffer.from(chunk.data,'base64').toString('utf8'):chunk.data;if(chunk.eof)break;}
+    await cdp.send('IO.close',{handle:stream});await writeFile(`${out}/chrome-trace.json`,contents);
+    const events=JSON.parse(contents).traceEvents;
+    await writeFile(`${out}/trace-summary.json`,JSON.stringify({
+      metadata:events.filter(event=>event.ph==='M'),marks:events.filter(event=>event.name==='cloud-batch-enable'),
+      longEvents:events.filter(event=>event.dur>100000).sort((a,b)=>b.dur-a.dur).slice(0,60),
+      compilerEvents:events.filter(event=>/compile|link|shader/i.test(event.name)).sort((a,b)=>(b.dur||0)-(a.dur||0)).slice(0,60)
+    },null,2));
+  }
   await page.screenshot({path:`${out}/player.png`});
   const after=await evidenceFingerprint('tools/cloudlightbatchactivationtest.js');
   await writeFile(`${out}/report.json`,JSON.stringify({before,after,result,errors},null,2));

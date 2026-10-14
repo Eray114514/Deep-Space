@@ -13,7 +13,8 @@ const quality=caseName==='near-cloud'?'ultra':'balanced';
 const budgetMiB=Number(process.argv.find(arg=>arg.startsWith('--budget='))?.slice(9)??64);
 const beamBytes=process.argv.includes('--half')?2:4;
 const jitterFrame=Number(process.argv.find(arg=>arg.startsWith('--jitter='))?.slice(9)??0);
-const out=`test-results/cloud-light-batch/${caseName}-${budgetMiB}-${beamBytes}-${jitterFrame}`,before=await evidenceFingerprint('tools/cloudlightbatchtest.js');
+const compareMetadata=process.argv.includes('--paired');
+const out=`test-results/cloud-light-batch/${caseName}-${budgetMiB}-${beamBytes}-${jitterFrame}${compareMetadata?'-paired':''}`,before=await evidenceFingerprint('tools/cloudlightbatchtest.js');
 const dependencies=['tools/cloud-light-batch-browser.js'];
 const helperBefore=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
 const {server,port}=await startServer(0);let browser;
@@ -54,7 +55,7 @@ try {
   assert.equal(player.volume.representation,'near-volume','Prototype must exercise the actually selected near representation');
   const result=await page.evaluate(async options=>{
     const {probeLightBatches}=await import('/tools/cloud-light-batch-browser.js');return probeLightBatches(options);
-  },{budgetBytes:budgetMiB*1024*1024,beamBytes,jitterFrame}).catch(error=>{console.error(errors.map(e=>e.slice(0,5000)));throw error;});
+  },{budgetBytes:budgetMiB*1024*1024,beamBytes,jitterFrame,compareMetadata}).catch(error=>{console.error(errors.map(e=>e.slice(0,5000)));throw error;});
   assert.equal(result.forbiddenCalls,0,'No readback/wait may occur in batch submission');
   const after=await evidenceFingerprint('tools/cloudlightbatchtest.js');
   const helperAfter=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
@@ -67,6 +68,7 @@ try {
   assert.equal(result.comparison.alphaChanged,0);
   assert.ok(result.comparison.maximumError<.002,'Paged transport must preserve physical radiance');
   if(beamBytes===4)assert.equal(result.comparison.maximumError,0,'R32F exact-query paging must match reference HDR');
+  if(result.previousComparison)assert.equal(result.previousComparison.maximumError,0,'Previous metadata control must match the same physical reference');
   assert.ok(result.plan.residentBytes<=result.budgetBytes,'Actual padded intermediate texture allocations must fit');
   assert.ok(result.badFieldsControl.maximumError>.002,'Wrong light fields must fail the same radiance gate');
   if(caseName!=='near-cloud'&&!result.plan.direct)assert.ok(result.badCachedControl.maximumError>.002,'Lowflight must require uncached beams');

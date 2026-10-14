@@ -67,6 +67,11 @@ export function cloudLightBatchShaders(source) {
   const shared=cloudLightPageShaders(source);
   const adapt=shader=>replace(shader,lightPageDeclarations,declarations);
   let metadata=adapt(shared.metadata);
+  // Preparation already owns the FP32 ray opacity. Reuse that CDF mass
+  // instead of traversing the same density a third time in every batch.
+  metadata=replace(metadata,'float totalOpacity=0.0;',
+    'float totalOpacity=texelFetch(tPageOpacity,ivec2(queryPixel.xy),0).r;');
+  metadata=replace(metadata,'for(int pass=0;pass<2;pass++) {','for(int pass=1;pass<2;pass++) {');
   metadata=replace(metadata,'int tile=int(pageJob(tPageMetaJobs,slot).r)-1;if(tile<0)discard;',
     'int tile=uBatchStart+slot;if(slot>=uBatchCount)discard;');
   let beams=adapt(shared.beams);
