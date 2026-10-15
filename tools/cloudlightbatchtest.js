@@ -1,10 +1,12 @@
-// Bounded exact-query pages with a complete cached path and complete original
-// transport on overflow. Synchronous mask readback remains tool-only.
+// Same-frame bounded exact queries. No mask readback inside submission;
+// insufficient budgets use the complete original transport.
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {startServer} from './server.js';
 import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
+assert.ok(process.argv.slice(2).every(arg=>['--half','--paired','--paired-prepare'].includes(arg)
+  ||['--case=','--budget=','--jitter='].some(prefix=>arg.startsWith(prefix))),'Unknown cloud batch option');
 
 const caseName=process.argv.find(arg=>arg.startsWith('--case='))?.slice(7)||'lowflight';
 assert.ok(['lowflight','lowflight-2k','near-cloud'].includes(caseName),'Unknown query scenario');
@@ -14,8 +16,10 @@ const budgetMiB=Number(process.argv.find(arg=>arg.startsWith('--budget='))?.slic
 const beamBytes=process.argv.includes('--half')?2:4;
 const jitterFrame=Number(process.argv.find(arg=>arg.startsWith('--jitter='))?.slice(9)??0);
 const compareMetadata=process.argv.includes('--paired');
-const out=`test-results/cloud-light-batch/${caseName}-${budgetMiB}-${beamBytes}-${jitterFrame}${compareMetadata?'-paired':''}`,before=await evidenceFingerprint('tools/cloudlightbatchtest.js');
-const dependencies=['tools/cloud-light-batch-browser.js'];
+const comparePreparation=process.argv.includes('--paired-prepare');
+assert.ok(!compareMetadata||!comparePreparation,'Choose metadata or preparation comparison');
+const out=`test-results/cloud-light-batch/${caseName}-${budgetMiB}-${beamBytes}-${jitterFrame}${compareMetadata?'-paired':''}${comparePreparation?'-prepare':''}`,before=await evidenceFingerprint('tools/cloudlightbatchtest.js');
+const dependencies=['tools/cloud-light-batch-browser.js','tools/cloud-light-preparation-reference.js'];
 const helperBefore=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
 const {server,port}=await startServer(0);let browser;
 const errors=[];await mkdir(out,{recursive:true});
@@ -55,7 +59,7 @@ try {
   assert.equal(player.volume.representation,'near-volume','Prototype must exercise the actually selected near representation');
   const result=await page.evaluate(async options=>{
     const {probeLightBatches}=await import('/tools/cloud-light-batch-browser.js');return probeLightBatches(options);
-  },{budgetBytes:budgetMiB*1024*1024,beamBytes,jitterFrame,compareMetadata}).catch(error=>{console.error(errors.map(e=>e.slice(0,5000)));throw error;});
+  },{budgetBytes:budgetMiB*1024*1024,beamBytes,jitterFrame,compareMetadata,comparePreparation}).catch(error=>{console.error(errors.map(e=>e.slice(0,5000)));throw error;});
   assert.equal(result.forbiddenCalls,0,'No readback/wait may occur in batch submission');
   const after=await evidenceFingerprint('tools/cloudlightbatchtest.js');
   const helperAfter=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
@@ -68,10 +72,12 @@ try {
   assert.equal(result.comparison.alphaChanged,0);
   assert.ok(result.comparison.maximumError<.002,'Paged transport must preserve physical radiance');
   if(beamBytes===4)assert.equal(result.comparison.maximumError,0,'R32F exact-query paging must match reference HDR');
-  if(result.previousComparison)assert.equal(result.previousComparison.maximumError,0,'Previous metadata control must match the same physical reference');
+  if(result.previousComparison)assert.equal(result.previousComparison.maximumError,0,'Previous batch control must match the same physical reference');
   assert.ok(result.plan.residentBytes<=result.budgetBytes,'Actual padded intermediate texture allocations must fit');
   assert.ok(result.badFieldsControl.maximumError>.002,'Wrong light fields must fail the same radiance gate');
   if(caseName!=='near-cloud'&&!result.plan.direct)assert.ok(result.badCachedControl.maximumError>.002,'Lowflight must require uncached beams');
+  if(result.badCachedControl)assert.equal(result.badCachedControl.alphaChanged,0,'Suppressing only missing light beams must retain opacity');
+  if(caseName==='near-cloud'&&!result.plan.direct)assert.equal(result.badCachedControl.maximumError,0,'Cached-only near-cloud control must retain all actual light paths');
   for(const record of result.records)assert.equal(record.nativeRepeatChanged,0,'Each implementation must repeat exactly');
   console.log(`PASS scoped numerical/repeat gates; performance and representation are findings: ${out}`);
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

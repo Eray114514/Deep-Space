@@ -5,8 +5,10 @@ import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
 
 const trace=process.argv.includes('--trace');
-assert.ok(process.argv.slice(2).every(arg=>arg==='--trace'),'Supported option: --trace');
-const out='test-results/cloud-light-batch/'+(trace?'activation-trace':'activation'),before=await evidenceFingerprint('tools/cloudlightbatchactivationtest.js');
+const previousPrepare=process.argv.includes('--previous-prepare');
+assert.ok(process.argv.slice(2).every(arg=>['--trace','--previous-prepare'].includes(arg)),'Supported options: --trace --previous-prepare');
+const out='test-results/cloud-light-batch/'+(trace?'activation-trace':'activation')+(previousPrepare?'-previous':''),before=await evidenceFingerprint('tools/cloudlightbatchactivationtest.js');
+const dependencies=['tools/cloud-light-preparation-reference.js'],helperBefore=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
 await mkdir(out,{recursive:true});
 const {server,port}=await startServer(0);let browser;const errors=[];
 try {
@@ -21,7 +23,10 @@ try {
     await cdp.send('Tracing.start',{categories:'gpu,disabled-by-default-gpu.service,disabled-by-default-gpu.debug,disabled-by-default-gpu.angle,devtools.timeline,blink.user_timing',
       transferMode:'ReturnAsStream'});
   }
-  await page.evaluate(()=>{
+  await page.evaluate(async({previousPrepare})=>{
+    if(previousPrepare) {
+      const {installPreviousPreparationReference}=await import('/tools/cloud-light-preparation-reference.js');await installPreviousPreparationReference();
+    }
     NMS.setAdaptiveQualityLocked(true);
     const vp=NMS._pipeline.volumePass,r=NMS._renderer,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
     if(!ext)throw Error('Hardware timer required');
@@ -42,7 +47,7 @@ try {
         state.submissions.push({phase:state.phase,cpuMs,reason:this.lightBatchStatus.reason,submitted,elapsedMs:performance.now()-state.started});
       }
     };
-  });
+  },{previousPrepare});
   await page.waitForTimeout(8000);
   await page.evaluate(()=>{performance.mark('cloud-batch-enable');window._batchActivation.phase='activation';
     NMS._pipeline.volumePass.setLightBatchesEnabled(true,{budgetBytes:8*1024*1024});});
@@ -61,7 +66,8 @@ try {
       queries.push({submitted,gpuMs:gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6});gl.deleteQuery(query);
     }
     const debug=gl.getExtension('WEBGL_debug_renderer_info');
-    return {frames:state.frames,submissions:state.submissions,queries,gl:gl.getError(),disjoint:gl.getParameter(ext.GPU_DISJOINT_EXT),
+    const compiledShaders=vp.lightBatch.materials.map(material=>({name:material.name,shaders:gl.getAttachedShaders(r.properties.get(material).currentProgram.program).map(shader=>gl.getShaderSource(shader))}));
+    return {compiledShaders,frames:state.frames,submissions:state.submissions,queries,gl:gl.getError(),disjoint:gl.getParameter(ext.GPU_DISJOINT_EXT),
       status:vp.lightBatchStatus,elapsedMs:performance.now()-state.started,gpu:debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null,
       scope:'Normal HUD/post, stationary lowflight and locked balanced quality. No per-draw errors, readbacks or timer polling during measurement. RAF cadence is whole-page scheduling, not display presentation or long-flight acceptance.'};
   });
@@ -79,9 +85,12 @@ try {
   }
   await page.screenshot({path:`${out}/player.png`});
   const after=await evidenceFingerprint('tools/cloudlightbatchactivationtest.js');
-  await writeFile(`${out}/report.json`,JSON.stringify({before,after,result,errors},null,2));
+  const helperAfter=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
+  await writeFile(`${out}/report.json`,JSON.stringify({before,after,dependencies,helperBefore,helperAfter,result,errors},null,2));
+  for(let i=0;i<helperBefore.length;i++)assert.equal(helperBefore[i].verifierDigest,helperAfter[i].verifierDigest);
   assert.equal(before.sourceDigest,after.sourceDigest);assert.equal(before.verifierDigest,after.verifierDigest);
   assert.deepEqual(errors,[]);assert.equal(result.gl,0);assert.equal(result.disjoint,false);
   assert.equal(result.status.reason,'same-frame');assert.ok(result.submissions.filter(record=>record.submitted).length>10);
+  assert.equal(result.compiledShaders.find(record=>record.name==='cloud-batch-prepare').shaders.some(shader=>shader.includes('queryMask=vec4(15.0/255.0)')),!previousPrepare);
   console.log(`PASS passive activation, whole-page RAF cadence and outside-kernel GPU timers: ${out}`);
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}

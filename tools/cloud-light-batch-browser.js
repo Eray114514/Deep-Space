@@ -1,7 +1,8 @@
 import {CloudLightBatchRenderer} from '../src/cloud/cloud-light-batch-renderer.js';
 import {cloudLightBatchShaders} from '../src/cloud/cloud-light-batch-glsl.js';
+import {previousCloudPreparation} from './cloud-light-preparation-reference.js';
 
-export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false}={}) {
+export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false,comparePreparation=false}={}) {
   const T=NMS._THREE,r=NMS._renderer,camera=NMS._internals.camera,vp=NMS._pipeline.volumePass,p=vp.activePlanet;
   const production=p.volCloudMat,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
   if(!ext)throw Error('Actual hardware GPU timer required');
@@ -63,14 +64,18 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
   try {
     camera.layers.set(2);r.autoClear=false;r.setClearColor(0,0);
     batches=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
-    let previousMetadata=null;
-    if(compareMetadata&&!batches.plan.direct) {
+    let previousMetadata=null,previousPreparation=null;
+    if((compareMetadata||comparePreparation)&&!batches.plan.direct) {
       previous=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
       const from='float totalOpacity=texelFetch(tPageOpacity,ivec2(queryPixel.xy),0).r;';
       if(!previous.metadataMaterial.fragmentShader.includes(from))throw Error('Metadata reference boundary changed');
-      previous.metadataMaterial.fragmentShader=previous.metadataMaterial.fragmentShader.replace(from,'float totalOpacity=0.0;')
+      if(compareMetadata)previous.metadataMaterial.fragmentShader=previous.metadataMaterial.fragmentShader.replace(from,'float totalOpacity=0.0;')
         .replace('for(int pass=1;pass<2;pass++) {','for(int pass=0;pass<2;pass++) {');
       previousMetadata=previous.metadataMaterial.fragmentShader;
+      if(comparePreparation) {
+        previousPreparation=previousCloudPreparation({compose:previous.compose.fragmentShader},production.fragmentShader);
+        previous.prepare.fragmentShader=previousPreparation.prepare;previous.compose.fragmentShader=previousPreparation.compose;
+      }
     }
     for(let round=0;round<rounds;round++)for(const index of previous?(round%2?[0,1,2]:[2,1,0]):round%2?[0,1]:[1,0]) {
       const drawCalls=r.info.render.calls;
@@ -79,7 +84,7 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
       const native=new Uint16Array(width*height*4);r.readRenderTargetPixels(output,0,0,width,height,native);
       let nativeRepeatChanged=0;if(nativeExpected[index])for(let i=0;i<native.length;i++)if(native[i]!==nativeExpected[index][i])nativeRepeatChanged++;
       nativeExpected[index]||=native;pixelsExpected[index]||=pixels();
-      records.push({round,implementation:index===2?'previous-metadata':index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
+      records.push({round,implementation:index===2?(comparePreparation?'previous-preparation':'previous-metadata'):index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
       console.log('Page: '+JSON.stringify(records.at(-1)));
     }
     const compare=data=>{const channels=[0,0,0,0];let maximumError=0;
@@ -87,15 +92,18 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
       return {channels,maximumError,alphaChanged:channels[3]};};
     let badCachedControl=null;
     if(!batches.plan.direct) {
-      badCached=new T.ShaderMaterial({uniforms:{tPageCached:{value:batches.frame.textures[1]}},vertexShader:vertex,
-        fragmentShader:'uniform sampler2D tPageCached;void main(){gl_FragColor=texelFetch(tPageCached,ivec2(gl_FragCoord.xy),0);}',
-        depthTest:false,depthWrite:false,blending:T.NoBlending});
-      r.setRenderTarget(output);r.clear(true,false,false);quad.material=badCached;r.render(quadScene,quadCamera);badCachedControl=compare(pixels());
+      // The new preparation intentionally has no cached radiance. A zero
+      // scratch image cannot prove that uncached beams matter. Keep every
+      // cached path and opacity in the physical shader, suppress misses only.
+      const miss='if(!cached)pathDepth=cloudSunOpticalDepthLimit(local,direction,sigma,path<2?12.0:128.0);';
+      if(!production.fragmentShader.includes(miss))throw Error('Missing-beam control boundary changed');
+      badCached=make(production.fragmentShader.replace(miss,''));
+      drawOriginal(badCached);badCachedControl=compare(pixels());
     }
     drawOriginal(badFields);const badFieldsControl=compare(pixels());
     const info=gl.getExtension('WEBGL_debug_renderer_info');
     return {width,height,budgetBytes,beamBytes,jitterFrame,records,plan:batches.plan,comparison:compare(pixelsExpected[1]),
-      previousMetadata,previousComparison:previous?compare(pixelsExpected[2]):null,
+      previousPreparation,previousMetadata,previousComparison:previous?compare(pixelsExpected[2]):null,
       forbiddenCalls,badCachedControl,badFieldsControl,occupied:Array.from(pixelsExpected[0]).filter((v,i)=>i%4===3&&v>.004).length,
       inputsChanged:inputState()!==firstInputs,inputs:JSON.parse(firstInputs),gl:gl.getError(),gpu:info?gl.getParameter(info.UNMASKED_RENDERER_WEBGL):null,
       scope:'One complete same-frame command sequence, GPU mask clips empty tile/field rectangles, fixed pages reused for every batch. No readback or wait inside submission. Timers/readbacks only outside the kernel. Static private scene, not continuous or whole-frame acceptance.'};

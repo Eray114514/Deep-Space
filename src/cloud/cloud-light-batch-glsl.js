@@ -63,6 +63,25 @@ function replace(source,from,to) {
   return source.replace(from,to);
 }
 
+function opacityPreparation(source) {
+  // A prepared ray owns only visibility and optical mass. Cached and missing
+  // light paths both compose once, after anchors and complete beams exist.
+  const start=source.indexOf('        vec3 correction=vec3(0);'),end=source.indexOf('        #else',start);
+  if(start<0||end<0)throw Error('Cloud preparation correction boundary changed');
+  source=source.slice(0,start)+`
+    queryRay=vec4(dir,queryOpaqueLimit);queryCached=vec4(0);
+    queryMask=vec4(15.0/255.0);queryOpacity=vec4(totalOpacity);
+  `+source.slice(end);
+  const anchorStart=source.indexOf('            if(pass==1 && ext>0.0) {');
+  if(anchorStart<0)throw Error('Cloud preparation quantile boundary changed');
+  let depth=1,anchorEnd=source.indexOf('{',anchorStart)+1;
+  while(depth&&anchorEnd<source.length){const c=source[anchorEnd++];if(c==='{')depth++;if(c==='}')depth--;}
+  if(depth)throw Error('Unterminated cloud preparation quantile traversal');
+  source=source.slice(0,anchorStart)+source.slice(anchorEnd);
+  source=replace(source,'float anchors[32];','');
+  return replace(source,'for(int pass=0;pass<2;pass++) {','for(int pass=0;pass<1;pass++) {');
+}
+
 export function cloudLightBatchShaders(source) {
   const shared=cloudLightPageShaders(source);
   const adapt=shader=>replace(shader,lightPageDeclarations,declarations);
@@ -77,8 +96,12 @@ export function cloudLightBatchShaders(source) {
   let beams=adapt(shared.beams);
   beams=replace(beams,'uvec4 job=pageJob(tPageLightJobs,slot);int tile=int(job.r)-1;if(tile<0)discard;',
     'uvec4 job=uvec4(uBatchStart+slot/4+1,slot%4,slot/4+1,0);int tile=int(job.r)-1;if(slot/4>=uBatchCount)discard;');
-  const compose=replace(adapt(shared.compose),'int meta=int(texelFetch(tPageMetaMap,pageTile(pixel),0).r)-1;',
+  let compose=replace(adapt(shared.compose),'int meta=int(texelFetch(tPageMetaMap,pageTile(pixel),0).r)-1;',
     'int meta=pageSlot(pixel);');
-  return {prepare:shared.prepare,metadata,beams,compose,base:adapt(shared.base),reduce:adapt(shared.reduce),
+  // One owner chooses cached versus physical depth for each anchor/field.
+  // Composition reads that complete FP32 page instead of querying the cache
+  // again or relying on matching cache branches in two compiled programs.
+  compose=replace(compose,'bool cached=cloudCachedLight(local,path,pathDepth);','bool cached=false;');
+  return {prepare:opacityPreparation(shared.prepare),metadata,beams,compose,base:adapt(shared.base),reduce:adapt(shared.reduce),
     badCached:adapt(shared.badCached),badFields:shared.badFields};
 }
