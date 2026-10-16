@@ -89,7 +89,7 @@ try {
       const mainShortest = Math.min(...p.oceanSurface.waveField.modes.map((m) => Math.PI * 2 / m.k));
       held.microField = micro.createOceanMicroCandidate(p.seed, {
         gravity: p.gravity, maxWavelength: Math.max(0.8, Math.min(20, mainShortest * 0.7)) });
-      held.microAnchor = material.userData.waterUniforms.uNearPatchCenter.value.clone();
+      held.microAnchor = (material.userData.oceanSamplingAnchor || material.userData.waterUniforms.uNearPatchCenter.value).clone();
       held.microPhaseValues = micro.oceanMicroCandidatePhases(held.microField, held.microAnchor, held.oceanTime);
       held.microGLSL = micro.oceanMicroCandidateGLSL(held.microField);
       held.microUniforms = {
@@ -129,7 +129,7 @@ try {
         oceanTime: material.userData.waterUniforms.uOceanTime.value,
         cameraPosition: camera.position.toArray(), cameraQuaternion: camera.quaternion.toArray() };
       if (held.microUniforms) {
-        held.lastDraw.microAnchor = material.userData.waterUniforms.uNearPatchCenter.value.toArray();
+        held.lastDraw.microAnchor = (material.userData.oceanSamplingAnchor || material.userData.waterUniforms.uNearPatchCenter.value).toArray();
         held.lastDraw.microPhases = held.microUniforms.uMicroPhases.value.map((v) => v.toArray());
       }
       return result;

@@ -146,7 +146,9 @@ try {
             if (vertexCache.has(k)) return vertexCache.get(k);
             if (morph.getX(k) !== 0 || nearPass.getX(k) !== 1)
               throw new Error('Reconstruction requires committed non-morphing near-pass vertices');
-            const relative = new T.Vector3().fromBufferAttribute(position, k);
+            const meshRelative = new T.Vector3().fromBufferAttribute(position, k);
+            const relative = meshRelative.clone().add(mesh.position)
+              .sub(mesh.material.userData.oceanSamplingAnchor || mesh.position);
             const authored = new T.Vector3().fromBufferAttribute(localAttribute, k);
             const up = authored.clone().normalize();
             const footprint = Math.max(4, cells.getX(k));
@@ -162,10 +164,10 @@ try {
             }
             wave *= Math.max(0, hs) * uniforms.uOceanNormalization.value;
             const shoal = Math.min(1, Math.max(0, depth.getX(k)) * 0.62 / Math.max(hs, 0.001));
-            const distance = authored.distanceTo(uniforms.uNearPatchCenter.value);
+            const distance = meshRelative.length();
             const blend = T.MathUtils.smoothstep(distance, uniforms.uNearPatchRadius.value - 1840,
               uniforms.uNearPatchRadius.value - 640);
-            const value = { footprint, position: relative.addScaledVector(up, wave * shoal * (1 - blend) + 0.18)
+            const value = { footprint, position: meshRelative.addScaledVector(up, wave * shoal * (1 - blend) + 0.18)
               .add(mesh.position) };
             vertexCache.set(k, value);
             return value;

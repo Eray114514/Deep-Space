@@ -68,8 +68,8 @@ export function sampleOceanWaveField(field, position, seconds, {
   return { height: height * scale, gradient };
 }
 
-// The draw owner supplies phases reduced on the CPU at its mesh-local centre.
-// relativePosition must be relative to that SAME centre, in the same axes as
+// The draw owner supplies phases reduced on the CPU at its sampling anchor.
+// relativePosition must be relative to that SAME anchor, in the same axes as
 // the modes. This keeps metre-scale waves stable on million-metre planets.
 export const oceanWaveGLSL = /* glsl */ `
 uniform vec4 uOceanModes[12];

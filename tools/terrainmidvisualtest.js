@@ -171,6 +171,7 @@ try {
           return;
         }
         const clone = held.material.clone();
+        clone.onBeforeRender = held.material.onBeforeRender;
         clone.onBeforeCompile = (shader, renderer) => {
           held.material.onBeforeCompile(shader, renderer);
           const replaceRequired = (from, to) => {

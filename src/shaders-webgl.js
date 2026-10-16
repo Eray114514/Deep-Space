@@ -18,6 +18,7 @@ import { createOceanWaveField, oceanWavePhases, oceanWaveGLSL } from './ocean-wa
 import { oceanSeconds } from './ocean-clock.js';
 import { oceanWakePacketGLSL } from './ocean-wake-packet.js';
 import { createOceanDetailFrame, oceanDetailOffsets, oceanDetailGLSL } from './ocean-detail-frame.js';
+import { OceanRenderFrame, oceanRenderFrameGLSL } from './ocean-render-frame.js';
 import { createOceanTidalEvent, oceanTidalEventUniforms, oceanTidalEventGLSL } from './ocean-tidal-event.js';
 
 // one global clock drives water and wind everywhere
@@ -681,7 +682,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     dryShellDiscard: true,
     directionalWake: true,
   };
+  const oceanFrame = new OceanRenderFrame(planet);
   const drawUniforms = {
+    ...oceanFrame.uniforms,
     uNearPatchCenter: { value: new THREE.Vector3(1e9, 1e9, 1e9) },
     uNearPatchRadius: { value: 0 },
     uRippleCount: { value: 0 },
@@ -704,17 +707,18 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   }
   material.userData.oceanWaveField = oceanField;
   material.userData.oceanTidalField = tidalField;
+  material.userData.oceanSamplingAnchor = oceanFrame.anchor;
   material.userData.syncOceanField = () => {
     const center = drawUniforms.uNearPatchRadius.value > 0
       ? drawUniforms.uNearPatchCenter.value : new THREE.Vector3();
     const seconds = oceanSeconds(planet.weatherHours || 0);
     drawUniforms.uOceanTime.value = seconds;
-    oceanDetailOffsets(detailFrame, center).forEach((offset, i) =>
+    oceanDetailOffsets(detailFrame, oceanFrame.anchor).forEach((offset, i) =>
       drawUniforms.uOceanDetailOffsets.value[i].set(...offset));
-    const phases = oceanWavePhases(oceanField, center, seconds);
+    const phases = oceanWavePhases(oceanField, oceanFrame.anchor, seconds);
     for (let i = 0; i < phases.length; i++) drawUniforms.uOceanPhases.value[i].set(...phases[i]);
     if (tidalField) {
-      const state = oceanTidalEventUniforms(tidalField, center, seconds);
+      const state = oceanTidalEventUniforms(tidalField, oceanFrame.anchor, seconds);
       for (const name of ['Axis', 'Side', 'Up', 'Offset']) {
         drawUniforms[`uTidal${name}`].value.set(...state[name.toLowerCase()]);
       }
@@ -777,8 +781,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
       const position = waterInteraction.positions[sourceIndex];
       const direction = waterInteraction.directions[sourceIndex];
       let offset = packedIndex * 4;
-      const anchor = drawUniforms.uNearPatchRadius.value > 0
-        ? drawUniforms.uNearPatchCenter.value : { x: 0, y: 0, z: 0 };
+      const anchor = oceanFrame.anchor;
       interactionPixels[offset] = position.x - anchor.x;
       interactionPixels[offset + 1] = position.y - anchor.y;
       interactionPixels[offset + 2] = position.z - anchor.z;
@@ -810,7 +813,18 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   material.defaultAttributeValues.aWaterCell = [144];
   material.userData.waterInteractionTexture = interactionTexture;
   material.userData.syncWaterInteractionTexture = syncWaterInteractionTexture;
+  const previousWaterDraw = material.onBeforeRender;
+  material.onBeforeRender = function (renderer, scene, camera, ...args) {
+    previousWaterDraw?.call(this, renderer, scene, camera, ...args);
+    const rebased = oceanFrame.sync(camera, drawUniforms.uNearPatchRadius.value > 0
+      ? drawUniforms.uNearPatchCenter.value : null);
+    if (rebased || drawUniforms.uOceanTime.value !== oceanSeconds(planet.weatherHours || 0)) {
+      material.userData.syncOceanField();
+      syncWaterInteractionTexture();
+    }
+  };
   material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, oceanFrame.uniforms);
     const cloudTex = planet.cloudShadowTex || blankTexture();
     const deep = planet?.pal?.sea
       ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor, 0.34)
@@ -885,7 +899,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform float uSwell;
         uniform vec3 uSunDir;
         uniform vec3 uSecondarySunDir;
-        uniform vec3 uNearPatchCenter;
+        ${oceanRenderFrameGLSL}
         uniform float uNearPatchRadius;
         attribute vec3 aLocal;
         attribute float aDepth;
@@ -921,12 +935,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 waveB = cross(waveUp, waveT);
         float macroWave = 0.0;
-        vec3 waveRelative = uNearPatchRadius > 0.0
-          ? vLocalPos - uNearPatchCenter : vLocalPos;
-        // The patch position is already relative to its double-precision
-        // centre. Keep that small value instead of subtracting two rounded
-        // six-million-metre positions when evaluating short waves.
-        vOceanRelative = aNearPatchPass > 0.5 ? transformed : waveRelative;
+        // Both meshes use the same pre-displacement rendered position and
+        // sampling anchor. Never subtract planet-scale Float32 attributes.
+        vOceanRelative = oceanRelativeFromView((modelViewMatrix * vec4(transformed, 1.0)).xyz);
         float localCell = aNearPatchPass > 0.5
           ? max(4.0, aWaterCell)
           : 144.0;
@@ -939,7 +950,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         // 1.2 km returns continuously to the base sphere before the coverage
         // hand-off, so the coarse global shell and the patch meet at exactly
         // the same position instead of exposing a rectangular step.
-        float patchDistanceVertex = length(vLocalPos - uNearPatchCenter);
+        float patchDistanceVertex = oceanPatchDistance(vOceanRelative);
         float patchGeometry = 1.0 - smoothstep(uNearPatchRadius - 1840.0,
           uNearPatchRadius - 640.0, patchDistanceVertex);
         float geometryNear = step(0.5, aNearPatchPass) * patchGeometry;
@@ -977,7 +988,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform vec3 uAbsorption;
         uniform float uBiologicalActivity;
         uniform float uDepthHazeDistance;
-        uniform vec3 uNearPatchCenter;
+        ${oceanRenderFrameGLSL}
         uniform float uNearPatchRadius;
         uniform vec3 uSkyZenith;
         uniform vec3 uSkyHorizon;
@@ -1049,13 +1060,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             oceanDetailA(p, drift * 9.0),
             oceanDetailB(p, drift.yx * vec2(-7.0, 11.0)));
         }
-        vec3 waterWaveGradient(vec3 p) {
-          vec3 waveLocalUp = normalize(p);
-          vec3 waveLocalT = normalize(cross(waveLocalUp,
-            abs(waveLocalUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-          vec3 waveLocalB = cross(waveLocalUp, waveLocalT);
-          vec3 waveRelative = uNearPatchRadius > 0.0
-            ? p - uNearPatchCenter : p;
+        vec3 waterWaveGradient() {
           float footprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
           return oceanWaveField(vOceanRelative, footprint).yzw;
         }
@@ -1067,7 +1072,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
-          float patchDistance = length(vLocalPos - uNearPatchCenter);
+          float patchDistance = oceanPatchDistance(vOceanRelative);
           if (uNearPatchRadius > 0.0) {
             // World-space ownership boundary. Geometric waves have already
             // reached zero before this radius, so both meshes meet on the
@@ -1121,7 +1126,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 transmission = exp(-uAbsorption * waterPath);
           float depthHaze = smoothstep(0.0, uDepthHazeDistance, opticalDepth) * 0.9;
           vec3 bodyTransmit = transmission * (1.0 - depthHaze);
-          vec3 analyticWaveGradient = waterWaveGradient(vLocalPos);
+          vec3 analyticWaveGradient = waterWaveGradient();
           float fragmentShoal = min(1.0, dep * 0.62 / max(uOceanHeight, 0.001));
           gWaterMacroSlope = vec2(dot(analyticWaveGradient, localT),
             dot(analyticWaveGradient, localB)) * fragmentShoal * vWaveNear;
@@ -1430,7 +1435,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v33-owned-cloud:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v34-view-frame:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
   return material;
 }
 

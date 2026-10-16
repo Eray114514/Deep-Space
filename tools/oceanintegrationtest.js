@@ -120,6 +120,7 @@ try {
         // Current diagnostics only vary terrain; preserve the production water
         // compile callback on its identity clone for comparable captures.
         material.onBeforeCompile = (shader) => p.liquidMat.onBeforeCompile(shader);
+        material.onBeforeRender = p.liquidMat.onBeforeRender;
         material.customProgramCacheKey = () => `diagnostic-${mode}`;
         p.nearWaterPatch.mesh.material = material;
       }, mode);

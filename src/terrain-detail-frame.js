@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { SurfaceViewFrame } from './surface-view-frame.js';
 
 // Each final RepeatWrapping lookup owns its phase. In particular, the rock
 // scale cannot be applied AFTER reducing the grass coordinate modulo one.
@@ -34,30 +35,21 @@ vec3 terrainDetailPosition() { return uTerrainViewToLocal * -vViewPosition; }
 }
 
 export function bindTerrainDetailFrame(material, planet, domains) {
+  const frame = new SurfaceViewFrame(planet);
   const uniforms = {
-    uTerrainViewToLocal: { value: new THREE.Matrix3() },
+    uTerrainViewToLocal: frame.linear,
     uTerrainDomains: { value: domains.map(() => new THREE.Vector4()) },
   };
-  const cameraMatrix = new THREE.Matrix4(), bodyMatrix = new THREE.Matrix4();
-  const localView = new THREE.Matrix4(), anchor = new THREE.Vector3();
   const phase = [0, 0, 0];
-  let initialized = false;
   const previous = material.onBeforeRender;
   material.onBeforeRender = function (renderer, scene, camera, ...args) {
     previous?.call(this, renderer, scene, camera, ...args);
     // Common to all chunks: no per-object StandardMaterial uniform upload.
     // Actual draw camera includes cockpit offsets, remote views and rotation.
-    const body = planet.group.matrixWorld;
-    if (initialized && cameraMatrix.equals(camera.matrixWorld) && bodyMatrix.equals(body)) return;
-    initialized = true;
-    cameraMatrix.copy(camera.matrixWorld);
-    bodyMatrix.copy(body);
-    localView.copy(body).invert().multiply(camera.matrixWorld);
-    anchor.setFromMatrixPosition(localView);
-    uniforms.uTerrainViewToLocal.value.setFromMatrix4(localView);
+    if (!frame.sync(camera)) return;
     for (let index = 0; index < domains.length; index++) {
       const domain = domains[index];
-      terrainDetailPhase(domain, anchor, phase);
+      terrainDetailPhase(domain, frame.origin, phase);
       uniforms.uTerrainDomains.value[index].set(...phase, domain.scale);
     }
   };
