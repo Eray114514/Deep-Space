@@ -1,3 +1,4 @@
+import { terrainDetailDomains, terrainDetailGLSL, bindTerrainDetailFrame } from './terrain-detail-frame.js';
 import { installSurfaceAtmosphere } from './surface-atmosphere.js';
 import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
 import { hasSurfaceCloudMedium } from './cloud/surface-clouds.js';
@@ -199,15 +200,18 @@ function blankTexture() {
   return _blankTex;
 }
 
-// Triplanar terrain detail in stable planet-local space (the aLocal
-// attribute — world space would swim under camera-relative rendering).
+// Triplanar detail uses camera-relative metres plus CPU-reduced planet-local
+// phases. aLocal is retained only for radial and regional-scale fields.
 // Per-vertex biome weights (aMat) blend rock strata against organic mottle,
 // micro-normals give relief, and the planet's own cloud layer casts moving
 // shadows via one extra texture sample.
 export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.4, scale1 = 1 / 26, scale2 = 1 / 3.2) {
   const tex = detailTexture();
   if (!tex) return material;
+  const detailDomains = terrainDetailDomains(scale1, scale2);
+  const detailUniforms = bindTerrainDetailFrame(material, planet, detailDomains);
   material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, detailUniforms);
     // compiled at first render — by then the planet knows if it has clouds
     const cloudTex = planet.cloudShadowTex || blankTexture();
     shader.uniforms.uDetailTex = { value: tex };
@@ -220,7 +224,6 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uEarthLike = { value: planet.type === 'lush' || planet.type === 'ocean' ? 1 : 0 };
     shader.uniforms.uDetailK = { value: strength };
     shader.uniforms.uMacroK = { value: macroK };
-    shader.uniforms.uDetailS = { value: new THREE.Vector2(scale1, scale2) };
     shader.uniforms.uCloudTex = { value: cloudTex };
     material.userData.cloudShadowTextureNode = shader.uniforms.uCloudTex;
     shader.uniforms.uCloudSynoptic = { value: planet.weatherField?.synoptic ? 1 : 0 };
@@ -310,7 +313,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uEarthLike;
         uniform float uDetailK;
         uniform float uMacroK;
-        uniform vec2 uDetailS;
+        ${terrainDetailGLSL(detailDomains)}
         uniform sampler2D uCloudTex;
         uniform float uCloudK, uCloudSynoptic;
         uniform mat3 uCloudMat;
@@ -371,16 +374,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           return smoothstep(max(angularRadius - penumbra, 0.0),
             angularRadius + penumbra, separation);
         }
-        vec2 surfaceMaterialUv(vec3 p, vec3 n) {
+        vec2 surfaceMaterialUv(vec3 p, vec3 n, vec4 domain) {
           vec3 an = abs(n);
-          if (an.x > an.y && an.x > an.z) return p.yz * 0.085;
-          if (an.y > an.z) return p.zx * 0.085;
-          return p.xy * 0.085;
+          vec3 q = p * domain.w + domain.xyz;
+          if (an.x > an.y && an.x > an.z) return q.yz;
+          if (an.y > an.z) return q.zx;
+          return q.xy;
         }
-        float triDetail(vec3 p, vec3 w, float s, int ch) {
-          vec2 a = texture2D(uDetailTex, p.yz * s).rg;
-          vec2 b = texture2D(uDetailTex, p.zx * s).rg;
-          vec2 c = texture2D(uDetailTex, p.xy * s).rg;
+        float triDetail(vec3 p, vec3 w, vec4 domain, int ch) {
+          vec3 q = p * domain.w + domain.xyz;
+          vec2 a = texture2D(uDetailTex, q.yz).rg;
+          vec2 b = texture2D(uDetailTex, q.zx).rg;
+          vec2 c = texture2D(uDetailTex, q.xy).rg;
           vec2 m = a * w.x + b * w.y + c * w.z;
           return ch == 0 ? m.r : m.g;
         }
@@ -439,14 +444,14 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             float shelf = 1.0 - smoothstep(2.0, 42.0, seabedDepth);
             vec3 seaW = pow(abs(normalize(vLocalNrm)), vec3(4.0));
             seaW /= max(seaW.x + seaW.y + seaW.z, 1e-5);
-            float sediment = triDetail(vLocalPos, seaW, 0.035, 0)
-              * 0.58 + triDetail(vLocalPos, seaW, 0.18, 1) * 0.42;
+            float sediment = triDetail(terrainDetailPosition(), seaW, terrainSediment, 0)
+              * 0.58 + triDetail(terrainDetailPosition(), seaW, terrainSedimentFine, 1) * 0.42;
             // Unfiltered trigonometric bars evaluated at multi-million-metre
             // coordinates alias differently across triangle derivatives. The
             // isolated fixed-height floor retained those wedges until the bars
             // were removed. Mip-filtered sediment has a stable distant mean.
             float rippleBars = smoothstep(0.28, 0.72,
-              triDetail(vLocalPos, seaW, 0.12, 1));
+              triDetail(terrainDetailPosition(), seaW, terrainRipple, 1));
             vec3 shelfSand = uLandC[0]
               * (0.46 + sediment * 0.48 + rippleBars * 0.18);
             base = mix(base, shelfSand, shelf * 0.88);
@@ -483,19 +488,19 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // Give beaches an irregular damp band whose lower roughness and
           // cooler albedo connect the moving swash to the authored terrain.
           if (uHasSea > 0.5 && hgt >= uT0) {
-            float shoreDrift = triDetail(vLocalPos, w, 0.0048, 1)
-              + triDetail(vLocalPos, w, 0.0011, 0) - 1.0;
+            float shoreDrift = triDetail(terrainDetailPosition(), w, terrainShore, 1)
+              + triDetail(terrainDetailPosition(), w, terrainShoreFine, 0) - 1.0;
             float wetReach = 2.4 + shoreDrift * 1.1;
             gShoreWet = 1.0 - smoothstep(0.2, wetReach, hgt - uT0);
             diffuseColor.rgb = mix(diffuseColor.rgb,
               diffuseColor.rgb * vec3(0.56, 0.65, 0.69), gShoreWet * 0.80);
           }
-          float grain = (triDetail(vLocalPos, w, uDetailS.x, 0) - 0.5)
-                      + (triDetail(vLocalPos, w, uDetailS.y, 1) - 0.5) * 0.8;
+          float grain = (triDetail(terrainDetailPosition(), w, terrainGrain, 0) - 0.5)
+                      + (triDetail(terrainDetailPosition(), w, terrainGrainFine, 1) - 0.5) * 0.8;
           float strat = texture2D(uDetailTex, vec2(vSurfaceHeight * 0.055, 0.31)).r - 0.5;
           float d = mix(grain, grain * 0.5 + strat * 1.15,
             vMat.x * vertexFieldFade);
-          d += (triDetail(vLocalPos, w, uDetailS.y * 0.32, 0) - 0.5)
+          d += (triDetail(terrainDetailPosition(), w, terrainOrganic, 0) - 0.5)
             * vMat.y * vertexFieldFade * 0.75;
           diffuseColor.rgb *= 1.0 + d * uDetailK;
 
@@ -508,16 +513,17 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // and plains a few hundred metres away from collapsing to one tint.
           float pbrNear = 1.0 - smoothstep(70.0, 720.0, length(vViewPosition));
           float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
-          vec2 pbrUv = surfaceMaterialUv(vLocalPos, normalize(vLocalNrm));
+          vec2 pbrUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
+          vec2 pbrRockUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
           vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb;
-          vec3 pbrStone = texture2D(uRockColor, pbrUv * 0.78 + 0.17).rgb;
+          vec3 pbrStone = texture2D(uRockColor, pbrRockUv).rgb;
           vec3 pbrSample = mix(pbrGrass, pbrStone, pbrRock);
           float pbrLum = dot(pbrSample, vec3(0.2126, 0.7152, 0.0722));
           vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, uEarthLike * 0.42);
           pbrStructure = clamp(pbrStructure * 1.45, vec3(0.58), vec3(1.42));
           diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.48);
           gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
-            texture2D(uRockRoughness, pbrUv * 0.78 + 0.17).r, pbrRock);
+            texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
 
           // ---- continental-scale tint drift: dry-brown swathes
           float macro = terrainRegionalField(vLocalPos) * 2.0 - 1.0;
@@ -528,8 +534,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // ---- mid-scale patchiness (~100–500 m): soil and moisture
           // variation seen from a hilltop — the octave between micro grain
           // and continental swathes that uniform game terrain lacks
-          float pch = triDetail(vLocalPos, w, 0.0035, 1)
-                    + triDetail(vLocalPos, w, 0.0012, 0) - 1.0;
+          float pch = triDetail(terrainDetailPosition(), w, terrainPatch, 1)
+                    + triDetail(terrainDetailPosition(), w, terrainPatchFine, 0) - 1.0;
           pch *= 1.0 - smoothstep(1800.0, 10000.0, length(vViewPosition));
           gPatch = pch;
           diffuseColor.rgb *= 1.0 + pch * (0.30 + 0.20 * vMat.z) * (0.5 + uMacroK);
@@ -591,16 +597,17 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // this, more than geometry, is what makes ground read as *real*
           vec3 wN = pow(abs(normalize(vLocalNrm)), vec3(4.0));
           wN /= (wN.x + wN.y + wN.z);
-          float gx = triDetail(vLocalPos + vec3(0.35, 0.0, 0.0), wN, uDetailS.y, 1)
-                   - triDetail(vLocalPos - vec3(0.35, 0.0, 0.0), wN, uDetailS.y, 1);
-          float gy = triDetail(vLocalPos + vec3(0.0, 0.35, 0.0), wN, uDetailS.y, 1)
-                   - triDetail(vLocalPos - vec3(0.0, 0.35, 0.0), wN, uDetailS.y, 1);
+          float gx = triDetail(terrainDetailPosition() + vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1)
+                   - triDetail(terrainDetailPosition() - vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1);
+          float gy = triDetail(terrainDetailPosition() + vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1)
+                   - triDetail(terrainDetailPosition() - vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1);
           vec3 ndPbr = normalize(vLocalPos);
           float slopePbr = 1.0 - clamp(dot(normalize(vLocalNrm), ndPbr), 0.0, 1.0);
           float rockPbr = smoothstep(uSlopeLo, uSlopeHi, slopePbr);
-          vec2 uvPbr = surfaceMaterialUv(vLocalPos, normalize(vLocalNrm));
+          vec2 uvPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
+          vec2 uvRockPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
           vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
-          vec2 rockN = texture2D(uRockNormal, uvPbr * 0.78 + 0.17).xy * 2.0 - 1.0;
+          vec2 rockN = texture2D(uRockNormal, uvRockPbr).xy * 2.0 - 1.0;
           vec2 scanN = mix(grassN, rockN, rockPbr);
           float scanNear = 1.0 - smoothstep(35.0, 420.0, length(vViewPosition));
           gx += scanN.x * scanNear * 0.34;
@@ -620,7 +627,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v15-owned-cloud-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v16-relative-detail-'+hasSurfaceCloudMedium(planet);
   return material;
 }
 

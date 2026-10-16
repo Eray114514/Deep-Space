@@ -83,14 +83,14 @@ try {
             // Only triDetail's three lookups change; PBR/other texture paths
             // retain production sampling. Fixed LOD is attribution, not a fix.
             for (const axis of ['yz', 'zx', 'xy']) replaceRequired(
-              `texture2D(uDetailTex, p.${axis} * s).rg`, `textureLod(uDetailTex, p.${axis} * s, 4.0).rg`);
+              `texture2D(uDetailTex, q.${axis}).rg`, `textureLod(uDetailTex, q.${axis}, 4.0).rg`);
           }
           const fixedHeight = mode === 'floor-fixed-height' || mode === 'floor-no-ripples';
           const baseOnly = mode === 'floor-base-only' || fixedHeight;
           if (fixedHeight) replaceRequired(
             'float hgt = vSurfaceHeight;', 'float hgt = uT0 - 1.0;');
           if (mode === 'floor-no-ripples') replaceRequired(
-            'float rippleBars = smoothstep(0.28, 0.72,\n              triDetail(vLocalPos, seaW, 0.12, 1));',
+            'float rippleBars = smoothstep(0.28, 0.72,\n              triDetail(terrainDetailPosition(), seaW, terrainRipple, 1));',
             'float rippleBars = 0.5;');
           if (baseOnly) {
             replaceRequired('#include <common>', '#include <common>\nvec3 diagnosticBaseAlbedo = vec3(0.0);');

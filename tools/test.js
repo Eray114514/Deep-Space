@@ -314,4 +314,7 @@ try {
   occupied.server.close();
 }
 
-console.log(`PASS: ${sourceFiles.length} modules parse; version ${runtimeVersion}, flight controls, stationary hover, polar approach guidance, horizon stabilization, and dev-port fallback are valid.`);
+// Keep the shared terrain sampling contract in the fast default gate.
+await import('./terraindetailframetest.js');
+
+console.log(`PASS: ${sourceFiles.length} modules parse; version ${runtimeVersion}, flight controls, stationary hover, polar approach guidance, horizon stabilization, terrain detail phases, and dev-port fallback are valid.`);
