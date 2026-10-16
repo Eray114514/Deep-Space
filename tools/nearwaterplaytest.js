@@ -271,6 +271,7 @@ try {
       }
       await page.screenshot({ path: `${out}/${fps}-stopped-player.png` });
       const state = await page.evaluate(() => ({ stats: NMS.stats(), water: NMS.waterState(0),
+        gl: NMS._renderer.getContext().getError(), contextLost: NMS._renderer.getContext().isContextLost(),
         frameIntervals: window.__nearFrameIntervals }));
       const moving = samples.filter((v) => v.phase !== 'stop');
       const nearSamples = samples.flatMap((v) => v.samples).filter((v) => v.wet);
@@ -285,6 +286,7 @@ try {
         actualFps: 1000 / (state.frameIntervals.reduce((a, b) => a + b, 0) / state.frameIntervals.length),
       };
       const gates = { noErrors: errors.length === 0, webgl2: state.stats.rendererBackend === 'webgl2',
+        glClean: state.gl === 0, contextAlive: !state.contextLost,
         actualLowFlight: samples.every((v) => v.altitude > 0 && v.altitude < 100),
         targetSpeedExercised: measurements.targetSpeedCoverage >= 0.8,
         actualTurnExercised: measurements.maximumTurnDeg >= 70 && measurements.maximumTurnDeg <= 120,
@@ -308,7 +310,8 @@ try {
     } finally { await context.close(); }
   }
   const finalFingerprint = await evidenceFingerprint('tools/nearwaterplaytest.js');
-  evidence.stableSource = finalFingerprint.sourceDigest === fingerprint.sourceDigest;
+  evidence.stableSource = finalFingerprint.sourceDigest === fingerprint.sourceDigest
+    && finalFingerprint.verifierDigest === fingerprint.verifierDigest;
   await writeFile(`${out}/report.json`, JSON.stringify(evidence, null, 2));
   assert.ok(evidence.stableSource, 'source changed while capture was running');
   assert.ok(evidence.runs.every((r) => Object.values(r.gates).every(Boolean)),

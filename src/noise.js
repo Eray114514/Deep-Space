@@ -20,7 +20,12 @@ const G3 = 1 / 6;
 // frequency caps instead of admitting an entire octave in one frame.
 export function frequencyBlend(f, maxFreq) {
   if (!Number.isFinite(maxFreq)) return 1;
-  const t = clamp(Math.log2(Math.max(maxFreq, 1e-12) / Math.max(f, 1e-12)), 0, 1);
+  const frequency = Math.max(f, 1e-12);
+  // Most terrain octaves are fully admitted or excluded. Only the transition
+  // octave needs a logarithm; keep the original formula within that interval.
+  if (maxFreq <= frequency) return 0;
+  if (maxFreq >= frequency * 2) return 1;
+  const t = clamp(Math.log2(Math.max(maxFreq, 1e-12) / frequency), 0, 1);
   return t * t * (3 - 2 * t);
 }
 

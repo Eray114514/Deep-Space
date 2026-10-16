@@ -167,11 +167,12 @@ if (process.env.NEAR_WATER_BUDGET_ONLY) {
         patch._begin(new THREE.Vector3(0.34669147556655305, 0.07291666666666663, -0.9351407276403421));
         const batches = [], rows = [];
         while (patch.build) {
+          const beforeRow=patch.build.row,beforeColumn=patch.build.column;
           const start = performance.now();
           patch._buildRows();
           batches.push(performance.now() - start);
           rows.push(patch.lastBuildRows);
-          assert.ok(patch.lastBuildRows >= 1);
+          assert.ok(!patch.build||patch.build.row>beforeRow||patch.build.column>beforeColumn);
         }
         const sorted = [...batches].sort((a, b) => a - b);
         runs.push({ run, phase: run ? 'repeat-build' : 'fresh-process-first-build',
@@ -207,8 +208,7 @@ if (process.env.NEAR_WATER_BUDGET_ONLY) {
 
 const reports = [];
 try {
-  // A zero budget deterministically exercises minimum progress and cannot
-  // starve a moving observer by continuously restarting its unfinished build.
+  // A zero grant holds the cursor; a positive grant resumes the same build.
   const fake = { name: 'budget-contract', group: new THREE.Group(), seaRadius: 6000000,
     seaLevel: 0, fullMaxFreq: 1, height: () => -10 };
   const mat = new THREE.MeshBasicMaterial();
@@ -240,19 +240,21 @@ try {
     budgetPatch._begin(new THREE.Vector3(1, 0, 0));
     const initialJob = budgetPatch.build;
     for (let i = 0; i < 9; i++) {
-      const direction = new THREE.Vector3(1, i * 150 / fake.seaRadius, 0).normalize();
+      const direction = new THREE.Vector3(1, 0, 0);
       budgetPatch.update(direction.multiplyScalar(fake.seaRadius + 50), true);
-      assert.equal(budgetPatch.lastBuildRows, 1);
+      assert.equal(budgetPatch.lastBuildRows, 0);
       if (budgetPatch.build) assert.equal(budgetPatch.build, initialJob);
     }
-    assert.equal(budgetPatch.rebuilds, 1);
+    assert.equal(budgetPatch.rebuilds, 0,'Zero grant retains resumable work');
+    budgetPatch._buildRows(Infinity);
+    assert.equal(budgetPatch.rebuilds,1);
     const moved = new THREE.Vector3(1, 300 / fake.seaRadius, 0).normalize();
     budgetPatch.update(moved.clone().multiplyScalar(fake.seaRadius + 150), true);
     assert.equal(budgetPatch.build, null, 'high-altitude rebuild threshold remains 1024 m');
-    budgetPatch.update(moved.clone().multiplyScalar(fake.seaRadius + 50), true);
+    budgetPatch.update(moved.clone().multiplyScalar(fake.seaRadius + 50), true,1/60,Number.MIN_VALUE);
     assert.ok(budgetPatch.build, 'below 100 m the 256 m threshold starts a replacement');
     assert.equal(budgetPatch.debugStats().rebuildDistance, 256);
-    assert.equal(budgetPatch.buildBudgetMs, 0);
+    assert.equal(budgetPatch.buildBudgetMs, Number.MIN_VALUE);
     const committed = budgetPatch.mesh.geometry;
     budgetPatch.update(moved.clone().multiplyScalar(fake.seaRadius + 18001), true);
     assert.equal(budgetPatch.build, null, 'hidden patch cancels orphaned pending work');
@@ -312,7 +314,13 @@ try {
           // Execute the real builder only for needed rows (all vertices in each
           // row), preserving its Float32 assignments and terrain frequency.
           for (const row of [y, y + 1]) if (!builtRows.has(row)) {
-            job.row = row; patch._buildRows(); builtRows.add(row);
+            job.row = row; job.column = 0;
+            // This sparse attribution fixture needs the complete requested
+            // row. Production 2 ms slices can pause inside a row; marking that
+            // partial row complete silently sampled zero-filled attributes.
+            patch._buildRows(Infinity);
+            assert.equal(patch.lastBuildRows,1);
+            builtRows.add(row);
           }
           const lower = fx + fy <= 1;
           const indices = lower ? [y * stride + x, y * stride + x + 1, (y + 1) * stride + x]
@@ -385,10 +393,12 @@ try {
     timedPatch._begin(sites[1][1]);
     const batches = [];
     while (timedPatch.build) {
+      const beforeRow=timedPatch.build.row,beforeColumn=timedPatch.build.column;
       const started = performance.now();
       timedPatch._buildRows();
       batches.push({ rows: timedPatch.lastBuildRows, milliseconds: performance.now() - started });
-      assert.ok(timedPatch.lastBuildRows >= 1, 'budget cannot starve construction');
+      assert.ok(!timedPatch.build||timedPatch.build.row>beforeRow||timedPatch.build.column>beforeColumn,
+        'budget cannot starve construction');
     }
     const durations = batches.map((batch) => batch.milliseconds).sort((a, b) => a - b);
     budgetProbe = { budgetMs: timedPatch.buildBudgetMs, batches: batches.length,

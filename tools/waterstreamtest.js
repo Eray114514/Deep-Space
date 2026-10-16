@@ -38,9 +38,10 @@ try {
   // A focused scene reservation can pause an existing row without destroying
   // it; the next frame's renewed grant must make progress.
   const budget=new FrameWorkBudget(()=>0).begin(0,{terrain:3});b.patch._begin(away);
-  budget.run('water',2,grant=>b.patch.update(cam,true,1/60,grant));
+  const awayCam=away.clone().multiplyScalar(b.planet.R+400);
+  budget.run('water',2,grant=>b.patch.update(awayCam,true,1/60,grant));
   assert.equal(b.patch.build.row,0);assert.equal(b.patch.build.column,0);
-  budget.begin(5,{terrain:3});budget.run('water',2,grant=>b.patch.update(cam,true,1/60,grant));
+  budget.begin(5,{terrain:3});budget.run('water',2,grant=>b.patch.update(awayCam,true,1/60,grant));
   assert.ok(!b.patch.build||b.patch.build.row>0||b.patch.build.column>0);
   console.log(`PASS: water row/column resumability (${slices} slices, max ${maximum} queries), zero grant, full attribute parity, old mesh retention, cancellation/return and shared reservation.`);
 } finally {for(const f of [a,b]){f.patch.dispose();f.material.dispose();}}

@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { hash3i, hashFloat, makeRng } from '../src/rng.js';
 import { worley3 } from '../src/noise.js';
 import { Planet } from '../src/planet.js';
+import { TerrainCraterField } from '../src/terrain-crater-field.js';
 const craterCandidate = Planet.prototype.craters;
+const ownerFor = intSeed => ({ intSeed, _craterField: new TerrainCraterField() });
 
 let crossings = 0, oldWorst = 0, newWorst = 0, gradientWorst = 0;
 const rows = [];
 for (let seed = 0; seed < 24; seed++) {
-  const owner = { intSeed: seed };
+  const owner = ownerFor(seed);
   const f = (p) => craterCandidate.call(owner, ...p, 1, 1, 0);
   const legacy = (p) => {
     const w = worley3(...p, seed), h = w.h;
@@ -45,8 +47,8 @@ let integerWorst = 0;
 for (let i = 0; i < 1000; i++) {
   const p = [rng() * 10 - 5, rng() * 10 - 5, rng() * 10 - 5], axis = i % 3;
   p[axis] = Math.round(p[axis]); const q = [...p]; p[axis] -= 1e-9; q[axis] += 1e-9;
-  integerWorst = Math.max(integerWorst, Math.abs(craterCandidate.call({ intSeed: i }, ...p, 1, 1, 0)
-    - craterCandidate.call({ intSeed: i }, ...q, 1, 1, 0)));
+  integerWorst = Math.max(integerWorst, Math.abs(craterCandidate.call(ownerFor(i), ...p, 1, 1, 0)
+    - craterCandidate.call(ownerFor(i), ...q, 1, 1, 0)));
 }
 assert.ok(integerWorst < 1e-7);
 console.log(JSON.stringify({ crossings, oldWorst, newWorst, gradientWorst, integerWorst, rows }, null, 2));

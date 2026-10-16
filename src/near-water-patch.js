@@ -1,4 +1,12 @@
 import * as THREE from 'three';
+import { createWaterGeometryJob, buildWaterGeometryRows, waterGridCoordinate,
+  WATER_GEOMETRY_ATTRIBUTES } from './near-water-geometry.js';
+
+const defaultWorkerFactory = typeof Worker === 'undefined' ? null : () => {
+  const url = new URL('./near-water-worker.js', import.meta.url);
+  url.search = new URL(import.meta.url).search;
+  return new Worker(url, { type: 'module' });
+};
 
 const DEFAULT_CELLS = 512;
 const DEFAULT_SIZE = 16384;
@@ -28,14 +36,6 @@ function buildIndices(cells) {
   return new THREE.BufferAttribute(indices, 1);
 }
 
-function tangentBasis(direction, tangent, bitangent) {
-  tangent.crossVectors(direction,
-    Math.abs(direction.y) < 0.92
-      ? new THREE.Vector3(0, 1, 0)
-      : new THREE.Vector3(1, 0, 0)).normalize();
-  bitangent.crossVectors(direction, tangent).normalize();
-}
-
 /**
  * A small, camera-following spherical water patch.
  *
@@ -62,6 +62,7 @@ export class NearWaterPatch {
     buildBudgetMs = null,
     adaptiveLowBudget = buildBudgetMs == null,
     rowsPerFrame = DEFAULT_ROWS_PER_FRAME,
+    workerFactory = defaultWorkerFactory,
   } = {}) {
     this.planet = planet;
     this.material = material;
@@ -93,13 +94,15 @@ export class NearWaterPatch {
     this.centerDirection = null;
     this.build = null;
     this.rebuilds = 0;
-    this._tangent = new THREE.Vector3();
-    this._bitangent = new THREE.Vector3();
-    this._sample = new THREE.Vector3();
-    this._direction = new THREE.Vector3();
+    this.workerFactory = workerFactory;
+    this.worker = null;
+    this.workerToken = 0;
+    this.workerError = null;
+    this.disposed = false;
+    this.lastWorkerCpuMs = 0;
+    this.lastWorkerWallMs = 0;
     this._cameraDirection = new THREE.Vector3();
     this._centerPosition = new THREE.Vector3();
-    this._cellNeighbor = new THREE.Vector3();
     this._indices = buildIndices(cells);
 
     this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
@@ -118,100 +121,85 @@ export class NearWaterPatch {
     planet.group.add(this.mesh);
   }
 
-  _gridCoordinate(index) {
-    const offset = index - this.cells / 2;
-    const distance = Math.abs(offset);
-    const outer = Math.max(0, distance - this.coreCells);
-    const outerCells = this.cells / 2 - this.coreCells;
-    // Fixed metre-scale core, C1 cubic tail, unchanged outer extent. Unlike
-    // camera-dependent filtering, geometry remains fine while a build is pending.
-    const extra = Math.max(0, this.size / 2 - this.cells / 2 * this.cellSize);
-    return Math.sign(offset) * (distance * this.cellSize + extra * (outer / outerCells) ** 3);
-  }
+  _gridCoordinate(index) { return waterGridCoordinate(this, index); }
 
   _begin(direction) {
-    const count = (this.cells + 1) * (this.cells + 1);
-    const centerDirection = direction.clone().normalize();
-    const tangent = new THREE.Vector3();
-    const bitangent = new THREE.Vector3();
-    tangentBasis(centerDirection, tangent, bitangent);
-    this.build = {
-      centerDirection,
-      centerPosition: centerDirection.clone().multiplyScalar(this.planet.seaRadius),
-      tangent,
-      bitangent,
-      row: 0,
-      column: 0,
-      position: new Float32Array(count * 3),
-      normal: new Float32Array(count * 3),
-      local: new Float32Array(count * 3),
-      depth: new Float32Array(count),
-      waterCell: new Float32Array(count),
-      positionDelta: new Float32Array(count * 3),
-      normalDelta: new Float32Array(count * 3),
-      depthDelta: new Float32Array(count),
-    };
+    if (this.disposed) return;
+    if (!this.worker && this.workerFactory && !this.workerError && this.planet.createTerrainSnapshot) {
+      try {
+        const worker = this.workerFactory();
+        this.worker = worker;
+        worker.onmessage = ({ data }) => {
+          if (this.disposed || this.worker !== worker || !this.build?.worker
+            || data.token !== this.workerToken) return;
+          if (data.error) { this._workerFailed(data.error); return; }
+          const count = (this.cells+1)**2;
+          if (!WATER_GEOMETRY_ATTRIBUTES.every(key => data.attributes?.[key] instanceof Float32Array
+            && data.attributes[key].length === count * (['depth', 'waterCell', 'depthDelta'].includes(key) ? 1 : 3))) {
+            this._workerFailed('Invalid near-water worker attributes'); return;
+          }
+          // Completion does not mutate a live mesh or uniforms. Only update's
+          // renewed scene grant can publish all attributes together.
+          Object.assign(this.build, data.attributes, { ready: true });
+          this.lastWorkerCpuMs = data.cpuMs;
+          this.lastWorkerWallMs = data.wallMs;
+        };
+        worker.onerror = event => { if (this.worker === worker) this._workerFailed(event.message); };
+        worker.onmessageerror = () => { if (this.worker === worker) this._workerFailed('Near-water message decoding failed'); };
+        worker.postMessage({ type: 'init', snapshot: this.planet.createTerrainSnapshot() });
+      } catch (error) { this._workerFailed(String(error)); }
+    }
+    this.build = createWaterGeometryJob(direction, this.cells, this.planet.seaRadius, !this.worker);
+    if (this.worker) {
+      this.build.worker = true;
+      this.build.workerLastCheck = performance.now();
+      this.build.workerObservedMs = 0;
+      this.workerToken++;
+      try {
+        this.worker.postMessage({ type: 'build', token: this.workerToken, direction: direction.toArray(),
+          grid: { cells: this.cells, size: this.size, coreCells: this.coreCells, cellSize: this.cellSize } });
+      } catch (error) { this._workerFailed(String(error)); }
+    }
   }
 
-  _buildRows(budgetMs=this.buildBudgetMs) {
-    const job = this.build;
-    if (!job || budgetMs<=0) {this.lastBuildRows=0;this.lastBuildMs=0;return;}
-    const stride = this.cells + 1;
-    const startedAt = performance.now();
-    const firstRow = job.row;
-    const end = Math.min(stride, job.row + Math.max(1, this.rowsPerFrame));
-    let units=0;
-    rows: for (let y = firstRow; y < end; y++) {
-      const z = this._gridCoordinate(y);
-      for (let x = job.column; x < stride; x++) {
-        const px = this._gridCoordinate(x);
-        const index = y * stride + x;
-        this._sample.copy(job.centerPosition)
-          .addScaledVector(job.tangent, px)
-          .addScaledVector(job.bitangent, z);
-        this._direction.copy(this._sample).normalize();
-        this._sample.copy(this._direction).multiplyScalar(this.planet.seaRadius);
-        const offset = index * 3;
-        job.position[offset] = this._sample.x - job.centerPosition.x;
-        job.position[offset + 1] = this._sample.y - job.centerPosition.y;
-        job.position[offset + 2] = this._sample.z - job.centerPosition.z;
-        job.normal[offset] = this._direction.x;
-        job.normal[offset + 1] = this._direction.y;
-        job.normal[offset + 2] = this._direction.z;
-        job.local[offset] = this._sample.x;
-        job.local[offset + 1] = this._sample.y;
-        job.local[offset + 2] = this._sample.z;
-        job.depth[index] = this.planet.seaLevel
-          - this.planet.height(this._direction, this.planet.fullMaxFreq);
-        // Actual spherical row/column neighbour spacing, including the wider
-        // cell on either side of a graded-grid vertex. Not distance from the
-        // camera, average cell size, or the triangle's diagonal edge length.
-        let cell = 0;
-        for (let neighbor = 0; neighbor < 4; neighbor++) {
-          const nx = x + (neighbor === 0 ? -1 : neighbor === 1 ? 1 : 0);
-          const ny = y + (neighbor === 2 ? -1 : neighbor === 3 ? 1 : 0);
-          if (nx < 0 || nx > this.cells || ny < 0 || ny > this.cells) continue;
-          this._cellNeighbor.copy(job.centerPosition)
-            .addScaledVector(job.tangent, this._gridCoordinate(nx))
-            .addScaledVector(job.bitangent, this._gridCoordinate(ny))
-            .normalize().multiplyScalar(this.planet.seaRadius);
-          cell = Math.max(cell, this._cellNeighbor.distanceTo(this._sample));
-        }
-        job.waterCell[index] = cell + 0.00001; // avoid downward Float32 rounding
-        job.column=x+1;
-        if(++units%8===0 && performance.now()-startedAt>=budgetMs) {
-          if(job.column===stride) {job.row=y+1;job.column=0;}
-          break rows;
-        }
-      }
-      job.row = y + 1;job.column=0;
-      // Preserve both row and column: one 513-vertex row can itself exceed
-      // the entire scene generation budget on real procedural bathymetry.
-      if (performance.now() - startedAt >= budgetMs) break;
+  _stopWorker() {
+    this.workerToken++;
+    this.worker?.terminate();
+    this.worker = null;
+  }
+
+  _workerFailed(error) {
+    this.workerError = String(error);
+    this._stopWorker();
+    if (this.build?.worker) {
+      const job = this.build;
+      this.build = createWaterGeometryJob(job.centerDirection, this.cells, this.planet.seaRadius);
+      for (const key of ['centerDirection', 'centerPosition', 'tangent', 'bitangent']) this.build[key] = job[key];
     }
-    this.lastBuildRows = job.row - firstRow;
-    this.lastBuildMs = performance.now() - startedAt;
-    if (job.row >= stride) this._commit();
+  }
+
+  _buildRows(budgetMs = this.buildBudgetMs) {
+    const job = this.build;
+    if (!job || budgetMs <= 0) { this.lastBuildRows=0; this.lastBuildMs=0; return; }
+    if (job.worker) {
+      this.lastBuildRows=0; this.lastBuildMs=0;
+      if (job.ready) { this._commit(); return; }
+      const now = performance.now();
+      // A blocked/hidden main thread cannot dispatch a completed worker's
+      // message. Do not charge an entire driver stall or suspension as worker
+      // inactivity and kill the response before its event can be delivered.
+      job.workerObservedMs += Math.min(250, Math.max(0, now-job.workerLastCheck));
+      job.workerLastCheck = now;
+      if (job.workerObservedMs > 30000) {
+        this._workerFailed('Near-water worker exceeded 30 s of observed frame wait');
+        return;
+      }
+      return;
+    }
+    const result = buildWaterGeometryRows(job, this.planet, i => this._gridCoordinate(i),
+      this.cells, budgetMs, this.rowsPerFrame);
+    this.lastBuildRows=result.rows; this.lastBuildMs=result.milliseconds;
+    if (job.row >= this.cells+1) this._commit();
   }
 
   _commit() {
@@ -266,6 +254,7 @@ export class NearWaterPatch {
       // A hidden surface cannot advance row work. Retain its committed mesh,
       // but do not leave idle()/pending observers waiting for an orphaned job.
       this.build = null;
+      this._stopWorker();
       const uniforms = this.material?.userData?.waterUniforms
         || this.material?.userData?.shader?.uniforms;
       if (uniforms?.uNearPatchRadius) uniforms.uNearPatchRadius.value = 0;
@@ -273,6 +262,13 @@ export class NearWaterPatch {
     }
 
     const direction = this._cameraDirection.copy(cameraLocal).normalize();
+    if (this.build && Math.acos(THREE.MathUtils.clamp(
+      this.build.centerDirection.dot(direction), -1, 1)) * this.planet.seaRadius > this.radius) {
+      // A discontinuous relocation supersedes even a completed-but-unpublished
+      // result. Ordinary turns/flight keep the one active job, avoiding churn.
+      this.build = null;
+      this._stopWorker();
+    }
     this.effectiveRebuildDistance = altitude < this.lowAltitude
       ? this.lowRebuildDistance : this.rebuildDistance;
     this.buildBudgetMs=budgetMs??this.preferredBudget(altitude,dt);
@@ -321,10 +317,17 @@ export class NearWaterPatch {
       lastBuildRows: this.lastBuildRows,
       lastBuildMs: this.lastBuildMs,
       lastCommitMs: this.lastCommitMs,
+      worker: !!this.worker,
+      workerReady: !!this.build?.ready,
+      workerError: this.workerError,
+      lastWorkerCpuMs: this.lastWorkerCpuMs,
+      lastWorkerWallMs: this.lastWorkerWallMs,
     };
   }
 
   dispose() {
+    this.disposed = true;
+    this._stopWorker();
     this.planet.group.remove(this.mesh);
     this.mesh.geometry.dispose();
     this.build = null;
