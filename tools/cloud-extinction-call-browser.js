@@ -1,5 +1,6 @@
-// Diagnostic only: compare explicitly supported cloudExtinctionAt call sites.
-// Same near-cloud traversals, physical nodes and arithmetic as the old wrapper.
+// Diagnostic only: compare explicitly supported complete near-cloud programs.
+// Traversals and physical nodes stay fixed; same-count loop controls also
+// require exact native HDR in addition to the common physical error gate.
 export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=null,expectedSize=null,
   referenceFragmentShader=null,includeSources=false}={}) {
   const T=NMS._THREE,r=NMS._renderer,camera=NMS._internals.camera;
@@ -15,6 +16,8 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
   if(expectedQuality!==null&&stats.quality!==expectedQuality)throw Error('Unexpected actual quality');
   if(expectedSize!==null&&(expectedSize[0]!==width||expectedSize[1]!==height))throw Error('Unexpected actual volume size');
   const source=production.fragmentShader;
+  if(source.split('float framePhase = mod(uFrame, 16.0);').length!==2)
+    throw Error('Temporal phase authority changed; update distinct-phase controls');
   const oldWrapper=`      float cloudExtinctionAt(vec3 local, float legacySigma) {
         if (uLocalBands < 0.5) return densityAt(local) * legacySigma;
         vec2 layers = cloudLayersAt(local);
@@ -43,16 +46,28 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
       }`;
   const supported=[['shared-call',sharedWrapper],['production-specialized',specializedWrapper]];
   const matches=supported.filter(([,wrapper])=>source.includes(wrapper));
-  if(matches.length!==1||source.split(matches[0][1]).length!==2)
-    throw Error('Expected exactly one explicitly supported complete extinction wrapper');
-  const [candidateKind,candidateWrapper]=matches[0];
-  const reference=source.replace(candidateWrapper,oldWrapper);
+  let candidateKind,reference;
+  if(source.includes('for(int star=0;star<uCloudSourceCount;star++)')) {
+    const changes=[['for(int star=0;star<uCloudSourceCount;star++)','for(int star=0;star<2;star++)'],
+      ['      uniform int uCloudSourceCount;\n','']];
+    reference=source;candidateKind='uniform-star-loop';
+    for(const [from,to] of changes) {
+      if(reference.split(from).length!==2)throw Error('Star loop reference requires exactly one supported change');
+      reference=reference.replace(from,to);
+    }
+    if(!source.includes(oldWrapper)||production.uniforms.uCloudSourceCount?.value!==2)
+      throw Error('Star loop must preserve the original extinction and two sources');
+  } else {
+    if(matches.length!==1||source.split(matches[0][1]).length!==2)
+      throw Error('Expected exactly one explicitly supported complete extinction wrapper');
+    [candidateKind]=matches[0];reference=source.replace(matches[0][1],oldWrapper);
+  }
   if(typeof referenceFragmentShader!=='string'||reference!==referenceFragmentShader)
     throw Error('Reconstructed old shader differs from the frozen reference');
   const productionOwnershipInvariant={verified:true,PRODUCTION_CLOUD_MEDIUM:production.defines.PRODUCTION_CLOUD_MEDIUM,
     uLocalBands:production.uniforms.uLocalBands.value,actualDrawLocalBandsRequired:1,
     relation:'Production is defined only with local bands enabled. The runner verifies constructor and Planet.setWeatherFixture ownership; all positive actual GPU draws must upload uLocalBands=1.',
-    legacyBranch:'Specialization retains the complete old dynamic wrapper under #else; this matrix exercises the production branch.'};
+    legacyBranch:'This matrix exercises production near mode; exact full-shader reconstruction bounds the edit, not legacy fixture acceptance.'};
   const head='float cloudExtinctionAt(vec3 local, float legacySigma) {';
   const begin=source.indexOf(head),open=source.indexOf('{',begin);
   if(begin<0||source.indexOf(head,begin+1)!==-1)throw Error('Expected one extinction wrapper');
@@ -124,6 +139,8 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
     const old=make(reference,'separate-extinction-call-reference');
     const current=make(source,candidateKind+'-extinction-call-production');
     const wrong=make(zeroSource,'zero-extinction-negative-control');
+    const wrongStars=candidateKind==='uniform-star-loop'
+      ?make(source,'zero-source-count-negative-control',{uCloudSourceCount:{value:0}}):null;
     const output=new T.WebGLRenderTarget(width,height,{type:T.HalfFloatType,depthBuffer:false,
       minFilter:T.NearestFilter,magFilter:T.NearestFilter});
     const floatOutput=new T.WebGLRenderTarget(width,height,{type:T.FloatType,depthBuffer:false,
@@ -178,7 +195,7 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
     };
     const actualUniforms=material=>{
       const program=r.properties.get(material).currentProgram?.program;
-      const names=['uLocalBands','uSecondarySunEnergy','uSecondarySunDir','uSecondarySunC','uLocalStarCount',
+      const names=['uCloudSourceCount','uLocalBands','uSecondarySunEnergy','uSecondarySunDir','uSecondarySunC','uLocalStarCount',
         'uLocalStars[0]','uLocalStars[1]','air_uSunEnergy1','air_uSunDirection1','air_uSunColor1',
         'air_uLocalStarCount','air_uLocalStars[0]','air_uLocalStars[1]'];
       return Object.fromEntries(names.map(name=>{
@@ -244,7 +261,10 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
       check('Warm draw '+material.name);return {cpuMs,gpuMs,localBandsUniform:localBandsUniform(material)};
     };
     const records=[];let zeroSecondary=null;
-    for(const jitter of [0,192])for(const cache of [true,false])for(const secondaryEnergy of [0,.35]){
+    // The shader folds uFrame modulo 16: historical 0/192 cases sampled the
+    // same temporal phase. Use distinct phases for future candidates; retain
+    // the old raw reports as repeated phase-zero controls, not phase coverage.
+    for(const jitter of [0,7])for(const cache of [true,false])for(const secondaryEnergy of [0,.35]){
       uniforms.uFrame.value=jitter;uniforms.uSunCacheReady.value=cache?cacheReady:0;
       uniforms.uSecondarySunEnergy.value=secondaryEnergy;uniforms.uSecondarySunDir.value.copy(second);
       uniforms.air_uSunEnergy1.value=secondaryEnergy;
@@ -266,6 +286,13 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
       const negative=capture(wrong),negativeComparison=compare(captures[0],negative);
       const negativeRejected=!negative.summary.finite||negativeComparison.nonfinite>0
         ||negativeComparison.alphaChanged>0||negativeComparison.maximumError>=.002;
+      const sourceCountNegative=wrongStars?compare(captures[0],capture(wrongStars)):null;
+      const sourceCountRejected=!sourceCountNegative||(sourceCountNegative.nonfinite===0
+        &&sourceCountNegative.alphaChanged===0&&sourceCountNegative.maximumError>=.002);
+      const sourceCountUploaded=candidateKind!=='uniform-star-loop'
+        ||[captures[1],captures[3]].every(c=>c.summary.actualUniforms.uCloudSourceCount===2);
+      const nativeExactRequired=candidateKind==='uniform-star-loop';
+      const nativeQualityAccepted=!nativeExactRequired||comparisons.every(c=>c.nativeChanged===0);
       const restored=capture(current),after=snapshot(),restoreRepeat=compare(captures[1],restored);
       const inputsStable=before.hash===after.hash&&JSON.stringify(before.value)===JSON.stringify(after.value);
       const uploadedDirection=values=>Array.isArray(values)&&values.length===3
@@ -283,6 +310,7 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
         &&originalRepeat.nativeChanged===0&&currentRepeat.nativeChanged===0&&restoreRepeat.nativeChanged===0
         &&comparisons.every(c=>c.passed)&&captures.every(c=>c.summary.localBandsUniform===1)
         &&captures[0].summary.occupied>1000&&lit&&starUploadsValid&&negativeRejected
+        &&sourceCountRejected&&sourceCountUploaded&&nativeQualityAccepted
         &&(!secondaryEffect||(secondaryEffect.nonfinite===0&&secondaryEffect.alphaChanged===0));
       const violations=[];
       if(!inputsStable)violations.push('Frozen inputs changed inside the case');
@@ -295,11 +323,14 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
       if(!lit)violations.push('Need positive nonzero cloud RGB at more than 1000 pixels');
       if(!starUploadsValid)violations.push('Actual GPU secondary-star inputs do not match the controlled fixture');
       if(!negativeRejected)violations.push('Zero-extinction negative control was not rejected');
+      if(!sourceCountRejected)violations.push('Zero-source-count negative control was not rejected');
+      if(!sourceCountUploaded)violations.push('Actual GPU source count must remain two');
+      if(!nativeQualityAccepted)violations.push('Same-count star loop changed native HDR');
       if(secondaryEffect&&(secondaryEffect.nonfinite||secondaryEffect.alphaChanged))violations.push('Secondary control changed opacity or became nonfinite');
-      records.push({jitter,cache,secondaryEnergy,secondaryDirection:second.toArray(),inputHash:before.hash,
+      records.push({jitter,framePhase:jitter%16,cache,secondaryEnergy,secondaryDirection:second.toArray(),inputHash:before.hash,
         inputsStable,captures:captures.map(c=>c.summary),originalRepeat,currentRepeat,comparisons,warm,
         negative:{...negative.summary,comparison:negativeComparison,rejected:negativeRejected},restoreRepeat,
-        occupied:captures[0].summary.occupied,secondaryEffect,starUploadsValid,lit,passed,violations});
+        occupied:captures[0].summary.occupied,secondaryEffect,sourceCountNegative,sourceCountRejected,sourceCountUploaded,nativeExactRequired,nativeQualityAccepted,starUploadsValid,lit,passed,violations});
       console.log('Extinction call: '+JSON.stringify({jitter,cache,secondaryEnergy,passed,comparisons,
         negativeRejected,cold:captures.slice(0,2).map(c=>c.summary)}));
     }
@@ -316,7 +347,7 @@ export async function probeCloudExtinctionCall({warmRounds=3,expectedQuality=nul
       reconstructionVerified:referenceFragmentShader!==null,gl:0,
       gpu:debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null,
       ...(includeSources?{shaders:{separate:reference,shared:source,negative:zeroSource}}:{}),
-      scope:`Frozen actual near-cloud geometry, camera, opaque depth and weather; all nodes and quality steps retained. Candidate ${candidateKind} versus the exact reconstructed bc340db branch-specific wrapper. Production ownership requires PRODUCTION_CLOUD_MEDIUM=1 and uLocalBands=1; the specialized #else retains the old dynamic legacy body. Native HalfFloat repeats and Float32 copies; ${warmRounds} interleaved warm GPU samples per implementation in every case, separate from cold captures/readbacks. Synthetic secondary star always takes its own full physical beam. Tool waits/RAF holds are diagnostic, not player FPS or cold whole-page acceptance.`};
+      scope:`Frozen actual near-cloud geometry, camera, opaque depth and weather; all nodes and quality steps retained. Candidate ${candidateKind} versus the exact frozen full reference shader. Production ownership requires PRODUCTION_CLOUD_MEDIUM=1 and uLocalBands=1; this is not legacy fixture acceptance. Frames 0/7 are distinct modulo-16 phases; same-count star-loop controls also require exact native HDR. Native HalfFloat repeats and Float32 copies; ${warmRounds} interleaved warm GPU samples per implementation in every case, separate from cold captures/readbacks. Synthetic secondary star always takes its own full physical beam. Tool waits/RAF holds are diagnostic, not player FPS or cold whole-page acceptance.`};
   } finally {
     for(const query of queries)if(!gl.isContextLost())gl.deleteQuery(query);
     r.debug.checkShaderErrors=saved.shaderChecks;camera.layers.mask=saved.mask;

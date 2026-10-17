@@ -1,5 +1,6 @@
 // Default production cloud path. Passive GL timing before placement; optional
-// intrusive first-error attribution only after the replacement has completed.
+// first-error attribution from boot or after replacement. Route/prewarm controls
+// are explicitly experimental and must not be presented as runtime acceptance.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -9,15 +10,17 @@ import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
 import {installFoundationGLProbe} from './foundation-gl-probe.js';
 import {installFoundationContextProbe} from './foundation-context-probe.js';
+import {probeCloudProgramPrewarm} from './cloud-program-prewarm-browser.js';
 
 const trace=process.argv.includes('--trace'),errorsProbe=process.argv.includes('--errors');
 const errorsFromBoot=process.argv.includes('--errors-from-boot');
 const ownerModes=process.argv.includes('--owner-modes');
+const parallelNearControl=process.argv.includes('--parallel-near-control');
 const viewLoopControl=process.argv.includes('--view-loop-control');
 const beamLoopControl=process.argv.includes('--beam-loop-control');
 const extinctionCallControl=process.argv.includes('--extinction-call-control');
 const legacyColdControl=process.argv.includes('--legacy-cold-control');
-assert.ok([viewLoopControl,beamLoopControl,extinctionCallControl,legacyColdControl].filter(Boolean).length<=1,'Isolate one shader change per experiment');
+assert.ok([viewLoopControl,beamLoopControl,extinctionCallControl,legacyColdControl,parallelNearControl].filter(Boolean).length<=1,'Isolate one program control per experiment');
 const traceCategories='gpu,devtools.timeline,blink.user_timing';
 let cloudOverride=null,cloudOverrideBody=null,legacyLutBody=null;
 if(viewLoopControl||beamLoopControl||extinctionCallControl||legacyColdControl) {
@@ -51,10 +54,12 @@ await mkdir(out,{recursive:true});
 const before=await evidenceFingerprint('tools/foundationdefaultdiag.js');
 const helperBefore=await evidenceFingerprint('tools/foundation-gl-probe.js');
 const contextHelperBefore=await evidenceFingerprint('tools/foundation-context-probe.js');
+const warmHelperBefore=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
 const {server,port}=await startServer(0);
 let browser;
 const errors=[],warnings=[],driverWarnings=[],checkpoints=[],workerEvents=[],networkFailures=[];
 let warningDropped=0,driverWarningCount=0,page,cdp,traceStarted=false,report,ownerModesResult=null;
+let parallelNearResult=null;
 let traceState={requested:trace,categories:traceCategories,completed:false};
 async function finishTrace() {
   if(!traceStarted)return;traceStarted=false;
@@ -146,6 +151,10 @@ try {
     console.log(JSON.stringify({label,gl:state.gl,near:state.near}));
   };
   await checkpoint('boot-before-placement');
+  if(parallelNearControl) {
+    parallelNearResult=await page.evaluate(probeCloudProgramPrewarm);
+    console.log(JSON.stringify({parallelNearResult}));
+  }
   await page.evaluate(()=>{
     NMS._pipeline.startProfiling({every:1,history:2000});
     window.__foundationGLProbe.mark('initial-placement');performance.mark('foundation-default-placement');
@@ -156,6 +165,11 @@ try {
   });
   await page.waitForFunction(()=>{const n=NMS.waterState(0)?.near;return n?.visible&&!n.pending;},null,{timeout:120000});
   await checkpoint('initial-complete');
+  if(parallelNearControl)parallelNearResult.actualNear=await page.evaluate(()=>{
+    const material=NMS._planet(0).volCloudMat,program=NMS._renderer.properties.get(material).currentProgram;
+    return {programId:program?.id,reused:program===window.__foundationPrewarmProgram,
+      nativeHandlePresent:Boolean(program?.program),materialVersion:material.version};
+  });
   const initial=await page.evaluate(()=>{NMS.setBuildBudget(0);return NMS.waterState(0);});
   await page.evaluate(()=>{
     window.__foundationGLProbe.mark('replacement');
@@ -281,9 +295,10 @@ try {
   });
   const after=await evidenceFingerprint('tools/foundationdefaultdiag.js'),helperAfter=await evidenceFingerprint('tools/foundation-gl-probe.js');
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
-  report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
+  const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
+  report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,
-    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest,
+    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest,
     boundary:'Default 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.'};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
   console.log(JSON.stringify({out,stableSource:report.stableSource,viewLoopControl,cloudOverride,traceState,
@@ -294,6 +309,8 @@ try {
       slowCalls:finalState.probe.slowCalls.length,shaders:finalState.probe.shaders.length,programs:finalState.probe.programs.length,
       dropped:finalState.probe.dropped,faults:finalState.probe.faults}}));
   assert.ok(report.stableSource);assert.deepEqual(errors,[]);assert.ok(checkpoints.every(p=>p.gl===0&&!p.lost));assert.equal(state.lostEvents,0);
+  assert.equal(warmHelperBefore.verifierDigest,warmHelperAfter.verifierDigest);
+  if(parallelNearControl)assert.equal(parallelNearResult.actualNear.reused,true,'Actual near draw must reuse the prepared program');
   assert.equal(finalState.gl,0,'Post-screenshot/teardown GL error must remain a failure');
   assert.equal(finalState.lost,false);assert.equal(finalState.lostEvents,0);
   assert.ok(finalState.contexts.installed&&finalState.contexts.disposed&&finalState.contexts.wrapperRestored);
@@ -323,10 +340,10 @@ try {
 } catch(error) {
   const state=await page?.evaluate(()=>({stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
     profile:window.NMS?._pipeline?.performanceSnapshot(),probe:window.__foundationGLProbe?.snapshot(),workers:window.__foundationWorkers,
-    ownerModes:window.__foundationOwnerModes,contexts:window.__foundationContextProbe?.snapshot(),
+    ownerModes:window.__foundationOwnerModes,parallelPreparation:window.__foundationCloudPrewarm,contexts:window.__foundationContextProbe?.snapshot(),
     mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)})).catch(captureError=>({captureError:String(captureError)}));
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
-  await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
+  await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,error:String(error)},null,2));
   await finishTrace();console.error(JSON.stringify({out,error:String(error)}));throw error;
 } finally {

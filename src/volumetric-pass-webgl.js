@@ -331,125 +331,141 @@ export class VolumetricPass extends Pass {
       this.columnRelease.delete(planet);planet.volCloudMat.uniforms.uColumnsReady.value=0;
     }
     const oldTarget = renderer.getRenderTarget();
+    const oldFace = renderer.getActiveCubeFace(), oldMip = renderer.getActiveMipmapLevel();
     const oldMask = this.camera.layers.mask;
     const oldAutoClear = renderer.autoClear;
     const oldAlpha = renderer.getClearAlpha();
     renderer.getClearColor(_savedClear);
 
-    // The opaque scene was rendered into readBuffer immediately before this
-    // pass. Feed its logarithmic depth texture into the cloud shader so ray
-    // integration terminates at terrain, flora, props and the ship instead of
-    // compositing as a screen-front layer.
-    const depthTexture = this.sceneDepthSource?.sceneDepthTexture
-      || readBuffer.depthTexture || null;
-    const bindSceneDepth = (material) => {
-      const uniforms = material?.uniforms;
-      if (!uniforms?.tSceneDepth) return;
-      uniforms.tSceneDepth.value = depthTexture;
-      uniforms.uDepthReady.value = depthTexture ? 1 : 0;
-      uniforms.uCameraFar.value = this.camera.far;
-      uniforms.uVolumeSize.value.set(this.width, this.height);
-    };
-    bindSceneDepth(this.activePlanet?.volCloudMat);
-    const cloudUniforms = this.activePlanet?.volCloudMat?.uniforms;
-    const planet=this.activePlanet;
-    if(cloudUniforms?.uDepthInvProjection && planet?.volCloudMesh) {
-      this.camera.updateMatrixWorld(true);planet.volCloudMesh.updateWorldMatrix(true,false);
-      _depthRotation.copy(planet.volCloudMesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
-      cloudUniforms.uDepthInvProjection.value.copy(this.camera.projectionMatrixInverse);
-      cloudUniforms.uDepthViewToLocal.value.setFromMatrix4(_depthRotation);
-      cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
-      cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
-    }
-    if(planet?.volCloudMesh && planet.volCloudFarMat) {
-      const far=planet.volCloudMat.uniforms.uCameraLocal.value.length()
-        -planet.volCloudBand.rOut>200000;
-      planet.volCloudMesh.material=far?planet.volCloudFarMat:planet.volCloudMat;
-    }
-    if(planet?.weatherField?.synoptic && planet.weatherStream?.ready
-      && planet.volCloudMesh.material===planet.volCloudFarMat) {
-      let columns=this.columnMaps.get(planet);
-      if(!columns || columns.disposed) {
-        columns=new CloudColumnBank(planet);this.columnMaps.set(planet,columns);
-        planet.cloudColumnMap=columns;
+    // Keep scalar copies: nested draws can reuse the module scratch color.
+    const oldClearR = _savedClear.r, oldClearG = _savedClear.g, oldClearB = _savedClear.b;
+    let completed = false;
+    try {
+      // The opaque scene was rendered into readBuffer immediately before this
+      // pass. Feed its logarithmic depth texture into the cloud shader so ray
+      // integration terminates at terrain, flora, props and the ship instead of
+      // compositing as a screen-front layer.
+      const depthTexture = this.sceneDepthSource?.sceneDepthTexture
+        || readBuffer.depthTexture || null;
+      const bindSceneDepth = (material) => {
+        const uniforms = material?.uniforms;
+        if (!uniforms?.tSceneDepth) return;
+        uniforms.tSceneDepth.value = depthTexture;
+        uniforms.uDepthReady.value = depthTexture ? 1 : 0;
+        uniforms.uCameraFar.value = this.camera.far;
+        uniforms.uVolumeSize.value.set(this.width, this.height);
+      };
+      bindSceneDepth(this.activePlanet?.volCloudMat);
+      const cloudUniforms = this.activePlanet?.volCloudMat?.uniforms;
+      const planet=this.activePlanet;
+      if(cloudUniforms?.uDepthInvProjection && planet?.volCloudMesh) {
+        this.camera.updateMatrixWorld(true);planet.volCloudMesh.updateWorldMatrix(true,false);
+        _depthRotation.copy(planet.volCloudMesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
+        cloudUniforms.uDepthInvProjection.value.copy(this.camera.projectionMatrixInverse);
+        cloudUniforms.uDepthViewToLocal.value.setFromMatrix4(_depthRotation);
+        cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
+        cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
       }
-      columns.update(renderer);
-      const minimumCone=minimumCloudRayCone(this.camera.projectionMatrix.elements,this.width,this.height);
-      const nearestDistance=Math.max(0,planet.volCloudMat.uniforms.uCameraLocal.value.length()-planet.volCloudBand.rOut);
-      const cacheOnly=planet.volCloudMat.uniforms.uColumnsReady.value>.5
-        && nearestDistance*minimumCone>2400;
-      if(planet.volCloudFarMat.defines.CLOUD_FAR_CACHE!==Number(cacheOnly)) {
-        planet.volCloudFarMat.defines.CLOUD_FAR_CACHE=Number(cacheOnly);
-        planet.volCloudFarMat.needsUpdate=true;
+      if(planet?.volCloudMesh && planet.volCloudFarMat) {
+        const far=planet.volCloudMat.uniforms.uCameraLocal.value.length()
+          -planet.volCloudBand.rOut>200000;
+        planet.volCloudMesh.material=far?planet.volCloudFarMat:planet.volCloudMat;
       }
-      if(this.columnMaps.size>2) {
-        const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);
-        this.columnMaps.get(oldest).dispose();this.columnMaps.delete(oldest);
-        oldest.volCloudMat.uniforms.uColumnsReady.value=0;
-      }
-    } else if(planet && this.columnMaps.has(planet)) {
-      // Near sunlight transport and far optical columns have separate owners.
-      // Retain neither unused baking snapshots nor far targets in a near view.
-      this.columnMaps.get(planet).dispose();this.columnMaps.delete(planet);
-    }
-    const air = this.sceneDepthSource;
-    if (cloudUniforms) {
-      if (air?.activePlanet === this.activePlanet) {
-        for (const [name, uniform] of Object.entries(air.material.uniforms)) {
-          if (name.startsWith('u') || name === 'tOpticalDepth' || name === 'tMultipleScattering') cloudUniforms['air_' + name] = uniform;
+      if(planet?.weatherField?.synoptic && planet.weatherStream?.ready
+        && planet.volCloudMesh.material===planet.volCloudFarMat) {
+        let columns=this.columnMaps.get(planet);
+        if(!columns || columns.disposed) {
+          columns=new CloudColumnBank(planet);this.columnMaps.set(planet,columns);
+          planet.cloudColumnMap=columns;
         }
-      } else cloudUniforms.air_uEnabled = { value: 0 };
+        columns.update(renderer);
+        const minimumCone=minimumCloudRayCone(this.camera.projectionMatrix.elements,this.width,this.height);
+        const nearestDistance=Math.max(0,planet.volCloudMat.uniforms.uCameraLocal.value.length()-planet.volCloudBand.rOut);
+        const cacheOnly=planet.volCloudMat.uniforms.uColumnsReady.value>.5
+          && nearestDistance*minimumCone>2400;
+        if(planet.volCloudFarMat.defines.CLOUD_FAR_CACHE!==Number(cacheOnly)) {
+          planet.volCloudFarMat.defines.CLOUD_FAR_CACHE=Number(cacheOnly);
+          planet.volCloudFarMat.needsUpdate=true;
+        }
+        if(this.columnMaps.size>2) {
+          const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);
+          this.columnMaps.get(oldest).dispose();this.columnMaps.delete(oldest);
+          oldest.volCloudMat.uniforms.uColumnsReady.value=0;
+        }
+      } else if(planet && this.columnMaps.has(planet)) {
+        // Near sunlight transport and far optical columns have separate owners.
+        // Retain neither unused baking snapshots nor far targets in a near view.
+        this.columnMaps.get(planet).dispose();this.columnMaps.delete(planet);
+      }
+      const air = this.sceneDepthSource;
+      if (cloudUniforms) {
+        if (air?.activePlanet === this.activePlanet) {
+          for (const [name, uniform] of Object.entries(air.material.uniforms)) {
+            if (name.startsWith('u') || name === 'tOpticalDepth' || name === 'tMultipleScattering') cloudUniforms['air_' + name] = uniform;
+          }
+        } else cloudUniforms.air_uEnabled = { value: 0 };
+      }
+
+      // Render only cloud volume meshes into a half-resolution HDR
+      // buffer. Clear alpha is important: discarded rays must stay transparent.
+      this.camera.layers.set(VOLUME_LAYER);
+      renderer.autoClear = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(this.current);
+      renderer.clear(true, false, false);
+      if(!this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
+
+      this.camera.layers.mask = oldMask;
+      renderer.autoClear = oldAutoClear;
+      _savedClear.setRGB(oldClearR, oldClearG, oldClearB);
+      renderer.setClearColor(_savedClear, oldAlpha);
+
+      this.camera.updateMatrixWorld(true);
+      const u = this.resolveMaterial.uniforms;
+      u.tSceneDepth.value = depthTexture;
+      u.tHistoryDepth.value = this.historyRead.depthTexture;
+      u.uCameraFar.value = this.camera.far;
+      u.tCurrent.value = this.current.texture;
+      u.tHistory.value = this.historyRead.texture;
+      u.uHistoryValid.value = this.historyValid ? 1 : 0;
+      u.uMotion.value = this.motion;
+      u.uCenter.value.copy(this.center);
+      u.uRadius.value = this.radius;
+      u.uNavDelta.value.copy(this.nav).sub(this.prevNav);
+      u.uInvProjection.value.copy(this.camera.projectionMatrixInverse);
+      u.uCameraWorld.value.copy(this.camera.matrixWorld);
+      u.uPrevViewProjection.value.copy(this.prevViewProjection);
+      renderer.setRenderTarget(this.historyWrite);
+      this.resolveQuad.render(renderer);
+
+      this.compositeMaterial.uniforms.tBase.value = readBuffer.texture;
+      this.compositeMaterial.uniforms.tVolume.value = this.historyWrite.texture;
+      this.compositeMaterial.uniforms.tSceneDepth.value = depthTexture;
+      this.compositeMaterial.uniforms.uDepthReady.value = depthTexture ? 1 : 0;
+      this.compositeMaterial.uniforms.uCameraFar.value = this.camera.far;
+      renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
+      if (this.clear) renderer.clear();
+      this.compositeQuad.render(renderer);
+
+      this.prevNav.copy(this.nav);
+      this.prevViewProjection.multiplyMatrices(
+        this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+      this.historyValid = true;
+      const swap = this.historyRead;
+      this.historyRead = this.historyWrite;
+      this.historyWrite = swap;
+      this.frame++;
+      completed = true;
+    } finally {
+      // A failed current/resolve/composite draw must not publish partial
+      // history or leak the volume layer and framebuffer into later passes.
+      if (!completed) this.historyValid = false;
+      this.camera.layers.mask = oldMask;
+      renderer.autoClear = oldAutoClear;
+      _savedClear.setRGB(oldClearR, oldClearG, oldClearB);
+      renderer.setClearColor(_savedClear, oldAlpha);
+      renderer.setRenderTarget(oldTarget, oldFace, oldMip);
     }
-
-    // Render only cloud volume meshes into a half-resolution HDR
-    // buffer. Clear alpha is important: discarded rays must stay transparent.
-    this.camera.layers.set(VOLUME_LAYER);
-    renderer.autoClear = true;
-    renderer.setClearColor(0x000000, 0);
-    renderer.setRenderTarget(this.current);
-    renderer.clear(true, false, false);
-    if(!this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
-
-    this.camera.layers.mask = oldMask;
-    renderer.autoClear = oldAutoClear;
-    renderer.setClearColor(_savedClear, oldAlpha);
-
-    this.camera.updateMatrixWorld(true);
-    const u = this.resolveMaterial.uniforms;
-    u.tSceneDepth.value = depthTexture;
-    u.tHistoryDepth.value = this.historyRead.depthTexture;
-    u.uCameraFar.value = this.camera.far;
-    u.tCurrent.value = this.current.texture;
-    u.tHistory.value = this.historyRead.texture;
-    u.uHistoryValid.value = this.historyValid ? 1 : 0;
-    u.uMotion.value = this.motion;
-    u.uCenter.value.copy(this.center);
-    u.uRadius.value = this.radius;
-    u.uNavDelta.value.copy(this.nav).sub(this.prevNav);
-    u.uInvProjection.value.copy(this.camera.projectionMatrixInverse);
-    u.uCameraWorld.value.copy(this.camera.matrixWorld);
-    u.uPrevViewProjection.value.copy(this.prevViewProjection);
-    renderer.setRenderTarget(this.historyWrite);
-    this.resolveQuad.render(renderer);
-
-    this.compositeMaterial.uniforms.tBase.value = readBuffer.texture;
-    this.compositeMaterial.uniforms.tVolume.value = this.historyWrite.texture;
-    this.compositeMaterial.uniforms.tSceneDepth.value = depthTexture;
-    this.compositeMaterial.uniforms.uDepthReady.value = depthTexture ? 1 : 0;
-    this.compositeMaterial.uniforms.uCameraFar.value = this.camera.far;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    if (this.clear) renderer.clear();
-    this.compositeQuad.render(renderer);
-
-    this.prevNav.copy(this.nav);
-    this.prevViewProjection.multiplyMatrices(
-      this.camera.projectionMatrix, this.camera.matrixWorldInverse);
-    this.historyValid = true;
-    const swap = this.historyRead;
-    this.historyRead = this.historyWrite;
-    this.historyWrite = swap;
-    this.frame++;
-    renderer.setRenderTarget(oldTarget);
   }
 
   releaseTargets() {

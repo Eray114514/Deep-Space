@@ -13,9 +13,10 @@ const quality=process.argv.find(x=>x.startsWith('--quality='))?.slice(10)||'bala
 const warmRounds=Number(process.argv.find(x=>x.startsWith('--warm-rounds='))?.slice(14)??3);
 const experimental=process.argv.includes('--experimental-call');
 const productionExtinctionControl=process.argv.includes('--production-extinction-control');
+const starLoopControl=process.argv.includes('--star-loop-control');
 assert.ok(['lowflight','near-cloud','lowflight-2k'].includes(caseName));
 assert.ok(['performance','balanced','ultra'].includes(quality));
-assert.ok(!(experimental&&productionExtinctionControl),'Choose one extinction-call control');
+assert.ok([experimental,productionExtinctionControl,starLoopControl].filter(Boolean).length<=1,'Choose one cloud program control');
 assert.ok(Number.isSafeInteger(warmRounds)&&warmRounds>=3&&warmRounds<=20,
   '--warm-rounds must be an integer from 3 to 20');
 const viewport=caseName==='lowflight-2k'?{width:2560,height:1440}:{width:1280,height:720};
@@ -66,7 +67,7 @@ for(const [source,expected] of ownershipInputs)
 const productionOwnershipInvariant={verified:true,
   relation:'The constructor derives PRODUCTION_CLOUD_MEDIUM and uLocalBands from band.localWeather; Planet.setWeatherFixture synchronizes both from weatherField.synoptic before needsUpdate.',
   requiredNearProduction:{PRODUCTION_CLOUD_MEDIUM:1,uLocalBands:1},
-  legacyBranch:'The complete bc340db dynamic wrapper remains under #else, including legacySigma.',
+  legacyBranch:'This matrix exercises production near mode. Complete candidate-source reconstruction bounds the edit; it does not accept legacy fixture optics.',
   planetSourceDigest:createHash('sha256').update(planetSource).digest('hex')};
 let experimentalSource=null;
 let candidateKind=null,candidateModuleFile=null;
@@ -74,6 +75,17 @@ if(experimental) {
   assert.equal(runtimeSource.split(oldWrapper).length-1,1,'Expected one complete old extinction wrapper');
   experimentalSource=runtimeSource.replace(oldWrapper,sharedWrapper);
   candidateKind='shared-call';candidateModuleFile='experimental-clouds-webgl.js';
+} else if(starLoopControl) {
+  experimentalSource=runtimeSource;
+  for(const [from,to] of [
+    ['uLightPathCount: { value: 4 },','uLightPathCount: { value: 4 },\n      uCloudSourceCount: { value: 2 },'],
+    ['uniform int uLightPathCount;','uniform int uLightPathCount;\n      uniform int uCloudSourceCount;'],
+    ['for(int star=0;star<2;star++)','for(int star=0;star<uCloudSourceCount;star++)'],
+  ]) {
+    assert.equal(experimentalSource.split(from).length-1,1,'Star loop change must match once');
+    experimentalSource=experimentalSource.replace(from,to);
+  }
+  candidateKind='uniform-star-loop';candidateModuleFile='uniform-star-loop-clouds-webgl.js';
 } else if(productionExtinctionControl) {
   const matches=[oldWrapper,sharedWrapper].filter(wrapper=>runtimeSource.includes(wrapper));
   assert.equal(matches.length,1,'Expected exactly one explicitly supported extinction wrapper');
@@ -89,7 +101,7 @@ const experimentalDigest=experimentalSource?createHash('sha256').update(experime
 const candidateModule=experimentalSource?{kind:candidateKind,file:candidateModuleFile,sha256:experimentalDigest,
   productionOwnershipInvariant}:null;
 if(experimentalSource) {
-  assert.equal(experimentalSource.split(candidateKind==='shared-call'?sharedWrapper:specializedWrapper).length-1,1);
+  if(candidateKind!=='uniform-star-loop')assert.equal(experimentalSource.split(candidateKind==='shared-call'?sharedWrapper:specializedWrapper).length-1,1);
   await writeFile(`${out}/${candidateModuleFile}`,experimentalSource);
   await writeFile(`${out}/candidate-module.json`,JSON.stringify(candidateModule,null,2));
 }
@@ -139,7 +151,7 @@ try {
   },warmRounds);
   const after=await evidenceFingerprint('tools/cloudextinctioncalltest.js'),helperAfter=await evidenceFingerprint('tools/cloud-extinction-call-browser.js');
   const report={caseName,quality,warmRounds,viewport,reference,referenceDigest,experimental,experimentalDigest,
-    productionExtinctionControl,candidateModule,productionOwnershipInvariant,before,after,helperBefore,helperAfter,player,result,errors};
+    productionExtinctionControl,starLoopControl,candidateModule,productionOwnershipInvariant,before,after,helperBefore,helperAfter,player,result,errors};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));
   assert.equal(before.sourceDigest,after.sourceDigest);assert.equal(before.verifierDigest,after.verifierDigest);
   assert.equal(helperBefore.verifierDigest,helperAfter.verifierDigest);assert.deepEqual(errors,[]);
@@ -152,9 +164,11 @@ try {
     record.warm.filter(sample=>sample.implementation===implementation).length===warmRounds)));
   // The helper checks physical, repeat, negative-control and actual uniform gates.
   assert.equal(result.gl,0);assert.equal(result.passed,true);
+  if(starLoopControl)assert.ok(result.records.every(record=>record.comparisons.every(c=>c.nativeChanged===0)),
+    'Same-count star-loop candidate must retain exact native HDR');
   console.log(`PASS near cloud extinction-call matrix; ${out}`);
 } catch(error) {
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
   await writeFile(`${out}/failure.json`,JSON.stringify({before,helperBefore,reference,referenceDigest,experimental,experimentalDigest,
-    productionExtinctionControl,candidateModule,productionOwnershipInvariant,warmRounds,errors,error:String(error)},null,2));throw error;
+    productionExtinctionControl,starLoopControl,candidateModule,productionOwnershipInvariant,warmRounds,errors,error:String(error)},null,2));throw error;
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

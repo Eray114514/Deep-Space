@@ -33,9 +33,10 @@ export class ForegroundPass extends Pass {
     const oldAutoClear = renderer.autoClear;
     const oldMask = this.camera.layers.mask;
     const oldTarget = renderer.getRenderTarget();
-    renderer.autoClear = false;
-    renderer.setRenderTarget(target);
+    const oldFace = renderer.getActiveCubeFace(), oldMip = renderer.getActiveMipmapLevel();
     try {
+      renderer.autoClear = false;
+      renderer.setRenderTarget(target);
       if (this.clearDepth) renderer.clearDepth();
       // One render call per semantic layer is intentional. Three gathers
       // lights against the camera mask, not per receiving object; rendering
@@ -48,7 +49,7 @@ export class ForegroundPass extends Pass {
     } finally {
       this.camera.layers.mask = oldMask;
       renderer.autoClear = oldAutoClear;
-      renderer.setRenderTarget(oldTarget);
+      renderer.setRenderTarget(oldTarget, oldFace, oldMip);
     }
   }
 }
