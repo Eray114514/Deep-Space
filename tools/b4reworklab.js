@@ -54,7 +54,10 @@ try {
         for (const p of NMS._internals.universe.system.planets) {
           if (!p.volCloudMat) continue;
           const old = p.volCloudMat, u = old.uniforms;
-          const candidate = makeCloudVolumeMaterial(p, p.volCloudBand, u.uCloudNoise.value,
+          // Fixture changes update the live material topology; the original
+          // shell descriptor can still carry its authored localWeather value.
+          const band={...p.volCloudBand,localWeather:old.defines.PRODUCTION_CLOUD_MEDIUM===1};
+          const candidate = makeCloudVolumeMaterial(p, band, u.uCloudNoise.value,
             p.cloudShadowTex, p.cloudWeatherHiTex, { steps: u.uMaxSteps.value });
           if (candidate.uniforms.uNoise3.value !== u.uNoise3.value) candidate.uniforms.uNoise3.value.dispose();
           old.fragmentShader = candidate.fragmentShader;

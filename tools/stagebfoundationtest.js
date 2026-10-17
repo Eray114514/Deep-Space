@@ -121,7 +121,9 @@ try {
     cachePass.dispose();
     const texturesAfterDispose = renderer.info.memory.textures - memoryBaseline;
 
-    // Deliberately non-empty coverage, real production 3D shape noise.
+    // Deliberately non-empty legacy fixture using the shared 3D shape noise.
+    // Keep localWeather disabled: these camera-invariance and stellar-binding
+    // controls do not provide the species/forecast inputs of the real medium.
     const detail = new THREE.DataTexture(new Uint8Array([230, 230, 230, 255]), 1, 1);
     detail.needsUpdate = true;
     const R = 6000000;
@@ -167,12 +169,15 @@ try {
     const badFar = read(badDensity);
     const badCameraDifference = Math.max(...badNear.map((v, i) => Math.abs(v - badFar[i])));
     badDensity.dispose();
+    // The combination owner supplies per-star optical depths to the current
+    // nine-argument cloudSource helper. Calling that private helper with the
+    // former eight-argument ABI made this verifier fail shader compilation.
+    // Preserve the fixture's points, density, stars and optical parameters.
     const lightingProbe = probe(cloud, `
       vec3 p=vec3(0.0,uRin+18000.0,0.0);
       vec3 d=normalize(vec3(0.2,1.0,0.0));
       float thick=uRout-uRin;
-      vec3 s=cloudSource(p,d,0.6,thick,3.8/thick,normalize(uSunDir),uSunC,uSunEnergy);
-      s+=cloudSource(p,d,0.6,thick,3.8/thick,normalize(uSecondarySunDir),uSecondarySunC,uSecondarySunEnergy);
+      vec3 s=cloudCombinedSource(p,d,0.6,thick,3.8/thick);
       gl_FragColor=vec4(s,1.0);`);
     u.uAmbC.value.setRGB(0, 0, 0);
     const body = { _invFrame: new THREE.Quaternion(), sunDirWorld: new THREE.Vector3(),
@@ -238,7 +243,7 @@ try {
   assert.equal(result.lighting.staleCompanionEnergy, 0, 'single-star handoff must clear the old companion');
   const report = { ...result, maxColumnError, maxSunlightError,
     fingerprint: await evidenceFingerprint('tools/stagebfoundationtest.js'),
-    scope: 'Column integration, density invariance, local stellar lighting, LUT allocation. Not final RGB/composition/TAA acceptance.', errors };
+    scope: 'Column integration, legacy-fixture density invariance and stellar binding/totality controls, LUT allocation. This fixture does not supply the real production medium species/forecast inputs or accept final RGB/composition/TAA.', errors };
   await mkdir('test-results/stage-b-foundation', { recursive: true });
   await writeFile('test-results/stage-b-foundation/report.json', JSON.stringify(report, null, 2));
   console.log('PASS: production WebGL B foundation', JSON.stringify({ ...report,

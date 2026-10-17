@@ -15,6 +15,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
     depthTest: false, depthWrite: false, blending: THREE.NoBlending,
     uniforms: { ...uniforms,
       uEnabled: { value: 1 }, uMultipleEnabled: { value: 0 },
+      uMultipleDirections: { value: directions },
       uLocalOccluderCount: { value: 0 }, uEclipseEnabled: { value: 0 }, uRadianceScale: { value: 1 },
       uSunDirection0: { value: new THREE.Vector3() }, uSunEnergy0: { value: 1 },
       uSunColor0: { value: new THREE.Color(1, 1, 1) }, uSunEnergy1: { value: 0 },
@@ -22,6 +23,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
     vertexShader: 'void main(){gl_Position=vec4(position.xy,0,1);}',
     fragmentShader: `precision highp float;
       #define VIEW_STEPS ${steps}
+      uniform int uMultipleDirections;
       ${atmosphereUniformGLSL}
       ${atmosphereTransportGLSL}
       void main() {
@@ -30,7 +32,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
         float sunMu = (gl_FragCoord.x-0.5)/31.0*2.0-1.0;
         vec3 sun = vec3(sqrt(max(0.0,1.0-sunMu*sunMu)),sunMu,0);
         vec3 meanL=vec3(0), meanReturn=vec3(0);
-        for(int j=0;j<${directions};j++) {
+        for(int j=0;j<uMultipleDirections;j++) {
           float y=1.0-2.0*(float(j)+0.5)/float(${directions});
           float phi=float(j)*2.399963229728653;
           vec3 dir=vec3(sqrt(1.0-y*y)*cos(phi),y,sqrt(1.0-y*y)*sin(phi));
