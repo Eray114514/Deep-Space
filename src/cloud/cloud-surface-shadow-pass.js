@@ -106,6 +106,10 @@ export class CloudSurfaceShadowPass {
         for(const [name,uniform] of Object.entries(source))u[name]=uniform;
         body.volCloudMesh.updateWorldMatrix(true,false);
         this.rotation.copy(body.volCloudMesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
+        // Reconstruct receivers from the same real eye as opaque rendering,
+        // including chase/cockpit offsets; the source uniform may be nav-local
+        // for another visible body's inactive cloud representation.
+        u.uCameraLocal={value:new THREE.Vector3().setFromMatrixPosition(this.rotation)};
         u.uInvProjection={value:this.camera.projectionMatrixInverse};
         u.uViewToLocal={value:new THREE.Matrix3().setFromMatrix4(this.rotation)};
         this.receiverTransforms.set(body,u.uViewToLocal.value);

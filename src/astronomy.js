@@ -500,6 +500,7 @@ export class CelestialClock {
     if (persist && typeof localStorage !== 'undefined') saved = Number(localStorage.getItem(this.key));
     this.hours = Number.isFinite(initialHours) ? initialHours : Number.isFinite(saved) ? saved : 0;
     this._saveAcc = 0;
+    this.epoch = 0;
   }
   update(realSeconds, active = true) {
     if (!this.frozen && active) this.hours += realSeconds * this.scale / 3600;
@@ -507,8 +508,8 @@ export class CelestialClock {
     if (this._saveAcc > 2) { this._saveAcc = 0; this.save(); }
     return this.hours;
   }
-  set(hours) { this.hours = Number(hours) || 0; this.save(); return this.hours; }
-  advance(hours) { this.hours += Number(hours) || 0; this.save(); return this.hours; }
+  set(hours) { this.hours = Number(hours) || 0; this.epoch++; this.save(); return this.hours; }
+  advance(hours) { this.hours += Number(hours) || 0; this.epoch++; this.save(); return this.hours; }
   save() { if (this.persist && typeof localStorage !== 'undefined') localStorage.setItem(this.key, String(this.hours)); }
   snapshot() { return { hours: this.hours, scale: this.scale, frozen: this.frozen, generationVersion: GENERATION_VERSION }; }
 }

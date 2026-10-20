@@ -2292,7 +2292,6 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     intensity: sunShadow.intensity,
   };
   const previousVolumePlanet = volumePass?.activePlanet || null;
-  const previousVolumeHistory = volumePass?.historyValid || false;
   const previousAtmospherePlanet = atmospherePass.activePlanet || null;
   const oldTarget = renderer.getRenderTarget();
   const oldMrt = renderer.getMRT?.();
@@ -2315,27 +2314,29 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     // uploads their bindings before the player can reach the threshold.
     nodePipeline.render();
   } finally {
-    renderer.setRenderTarget(oldTarget);
-    renderer.setMRT?.(oldMrt);
-    volumePass?.setActivePlanet(previousVolumePlanet, nav.pos, 0);
-    nodePipeline.setActiveAtmosphere(previousAtmospherePlanet, nav.pos);
-    if (volumePass) volumePass.historyValid = previousVolumeHistory;
-    previousVolumePlanet?.syncAtmoMaterial?.();
-    previousVolumePlanet?.syncVolCloudMaterial?.();
-    nodePipeline.bindVolumeDepth?.(previousVolumePlanet);
     // That draw ran the production graph from the destination's arrival pose
     // into a private target with most of the scene masked out. Its pixels are a
     // valid warm-up for the GPU pipeline and complete nonsense as temporal
     // history for the frame the player actually sees next.
-    nodePipeline.invalidateVolumeHistory?.();
-    camera.position.copy(cameraState.position);
-    camera.quaternion.copy(cameraState.quaternion);
-    camera.fov = cameraState.fov;
-    camera.updateProjectionMatrix();
-    camera.updateMatrixWorld(true);
-    sunShadow.visible = shadowState.visible;
-    sunShadow.intensity = shadowState.intensity;
-    for (const state of visibility) state.object.visible = state.visible;
+    nodePipeline.invalidateVolumeHistory('private-prewarm');
+    try {
+      renderer.setRenderTarget(oldTarget);
+      renderer.setMRT?.(oldMrt);
+      volumePass?.setActivePlanet(previousVolumePlanet, nav.pos, 0);
+      nodePipeline.setActiveAtmosphere(previousAtmospherePlanet, nav.pos);
+      previousVolumePlanet?.syncAtmoMaterial?.();
+      previousVolumePlanet?.syncVolCloudMaterial?.();
+      nodePipeline.bindVolumeDepth?.(previousVolumePlanet);
+    } finally {
+      camera.position.copy(cameraState.position);
+      camera.quaternion.copy(cameraState.quaternion);
+      camera.fov = cameraState.fov;
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld(true);
+      sunShadow.visible = shadowState.visible;
+      sunShadow.intensity = shadowState.intensity;
+      for (const state of visibility) state.object.visible = state.visible;
+    }
   }
 }
 
@@ -4697,7 +4698,6 @@ function frame() {
     ? null : localAtmospherePlanet, nav.pos);
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
-    const previousVolumePlanet = volumePass.activePlanet;
     if (startupVolumeWarmState === 'submitted'
         && frameNo > startupVolumeWarmSubmittedFrame) {
       // render() returned after the production graph submitted the previous
@@ -4766,18 +4766,8 @@ function frame() {
     // are warm before the warp reveal.
     volumePass.activePlanet?.syncAtmoMaterial?.();
     volumePass.activePlanet?.syncVolCloudMaterial?.();
-    nodePipeline.setVolumeMotion?.(motion,
-      previousVolumePlanet === volumePass.activePlanet && volumePass.historyValid);
-    // Temporal accumulation reprojects against the cloud shell, so it needs the
-    // shell in camera-relative render space plus the nav origin the frame is
-    // relative to. VolumetricPass already tracks both for the active body.
-    nodePipeline.setVolumeFrame?.({
-      center: volumePass.center,
-      radius: volumePass.radius,
-      nav: volumePass.nav,
-      key: volumePass.activePlanet,
-    });
-    volumePass.historyValid = !!volumePass.activePlanet;
+    // Only a successful production draw can publish history. The pipeline
+    // captures the real camera/origin/body pose once for all temporal consumers.
   }
   // The cockpit hull and the first-person weapon rig share the depth-cleared
   // foreground layer. Walking parks the ship back in world space, but the gun
@@ -4884,7 +4874,7 @@ function frame() {
       gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
         ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
     }
-    nodePipeline.render();
+    nodePipeline.render({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch });
     if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
       startupVolumeWarmState = 'submitted';
       startupVolumeWarmSubmittedFrame = frameNo;
@@ -5387,6 +5377,7 @@ window.NMS = {
   teleport(i, altFactor = 2.5, opts = {}) {
     const p = universe.system.planets[i];
     if (!p) return false;
+    nodePipeline.invalidateVolumeHistory('teleport');
     tweens.length = 0;
     if (walkCtl.active) walkCtl.exit();
     setState('space');
@@ -5447,6 +5438,7 @@ window.NMS = {
       if (w) seaward.addScaledVector(e1, cx).addScaledVector(e2, cy);
     });
     if (seaward.lengthSq() < 0.01) seaward.copy(e1);
+    nodePipeline.invalidateVolumeHistory('teleport');
     p.localPositionToWorld(best.clone().multiplyScalar(p.R + p.seaLevel + alt), nav.pos);
     nav.vel.set(0, 0, 0);
     nav.quat.copy(p.frameOrientation).multiply(horizonQuat(best, seaward, new THREE.Quaternion()));
@@ -5461,6 +5453,7 @@ window.NMS = {
   land(i, yawDeg = 0, bias = null) {
     const p = universe.system.planets[i];
     if (!p || p.isGasGiant || p.landable === false) return false;
+    nodePipeline.invalidateVolumeHistory('teleport');
     window.NMS_NOLOCK = true;
     tweens.length = 0;
     if (p.type === 'artificialHabitat') {
@@ -6465,6 +6458,7 @@ window.NMS = {
   },
   // park the camera anywhere in universe coords (testing manual flight)
   setPosition(x, y, z, lookX, lookY, lookZ) {
+    nodePipeline.invalidateVolumeHistory('teleport');
     tweens.length = 0;
     if (walkCtl.active) walkCtl.exit();
     setState('space');

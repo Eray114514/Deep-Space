@@ -17,6 +17,7 @@ const VIEW_STEPS = ATMOSPHERE_VIEW_STEPS;
 const LUT_CACHE_LIMIT = 4;
 
 const _cameraOffset = new THREE.Vector3();
+const _eyeOffset = new THREE.Vector3();
 const _localCamera = new THREE.Vector3();
 const _rotation = new THREE.Matrix4();
 
@@ -305,6 +306,8 @@ export class AtmospherePass extends Pass {
     const uniforms = this.material.uniforms;
     planet.atmosphereTransportUniforms = uniforms;
     _cameraOffset.copy(nav || planet.posUniv).sub(planet.posUniv);
+    this.camera.updateWorldMatrix(true, false);
+    _cameraOffset.add(_eyeOffset.setFromMatrixPosition(this.camera.matrixWorld));
     planet.worldOffsetToLocal?.(_cameraOffset, _localCamera);
     uniforms.uCameraLocal.value.copy(_localCamera);
     _rotation.makeRotationFromQuaternion(planet._invFrame);

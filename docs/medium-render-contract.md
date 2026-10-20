@@ -1,6 +1,6 @@
 # B 的介质、深度与时域接口
 
-这是 B0 冻结、B5 落地修订的**目标语义 v1.1**。B5 已提供分段空气与云/空气联合传输；云运动、占用深度和统一 TAA 仍为 B4/B7 目标，不要求预先分配所有纹理。状态与关闭条件只在[批次 B](cloud-atmosphere-rewrite.md)维护。
+这是 B0 冻结、B5 落地和 F4 帧接口修订的**目标语义 v1.2**。B5 已提供分段空气与云/空气联合传输；2026-10-20 接入共同前后帧状态及云刚体映射，天气平流、占用深度和统一 TAA 仍为 B4/B7 目标，不要求预先分配所有纹理。状态与关闭条件只在[批次 B](cloud-atmosphere-rewrite.md)维护。
 
 ## 坐标、时间和单位
 
@@ -43,6 +43,16 @@ B5 实际表示：设云区间前空气为 `(Lf,Tf)`，区间内联合空气/云
 - 切星/门户上下文变化、teleport、不连续时间跳变、介质参数或坐标编码改变、resize、质量档导致布局变化、context restore 必须失效。连续相机运动、天气平流和曝光变化应通过对应映射处理，而非无条件丢历史。曝光改变不能改变 T。
 - 渲染目标由 pass 创建/resize/dispose；天气资源由 manager 按内容代际创建/取消/交换/释放；共享 LUT 按 profile 由大气 pass 管理。每个资源只有一个释放所有者，消费者仅借用；context restore 禁止跨 WebGL context 使用旧句柄。
 - 预算沿用 B7；在接入新 GPU 表示时同时报告尺寸/格式/字节、常态和双场峰值。释放以实际最后消费者帧为准；当前两帧 grace 必须由实测支撑，不能视作所有后端/门户的普遍保证。
+
+## 已实现的帧接口与边界（2026-10-20）
+
+`GameLegacyPipeline.frameState` 是本视角的 `RenderFrameState`，不是第二个颜色累积器。主循环调用 `render({origin,context,timeEpoch})`：origin 是双精度导航原点，context 是实际系统对象，timeEpoch 是 `CelestialClock.epoch`（显式 set/advance 增加，连续 update 不增加）。begin 复制当前真实相机 world/projection/inverse-projection/view-projection、near/far、原点，以及活动行星的位置/旋转/天气来源；pending 期间 `current` 可读，`previous` 仅指最后一次成功提交。整帧与目标恢复成功后才交换快照；任一 pass 或恢复抛错则 abort，不把部分帧提交为 previous。不要在主循环重新赋值云的 historyValid。
+
+云仍拥有原来的半浮点颜色/不透明深度双缓冲，但只在其 sequence 紧邻共同 previous 时复用；中间跳过 volume 的帧不会借用错帧矩阵。来源/行星、材质版本/表示、半径或深度编码改变均拒绝不匹配历史；resize、显式跳转、私有预热、context loss 失效。显式失效发生在私有预热恢复的第一步。连续 FOV、姿态和正常时钟变化使用前后矩阵，不因每帧变化一律清历史。
+
+刚体对应为 `previousPoint = (previousRotation * inverse(currentRotation)) * currentPoint + delta`，delta 由两个原点相对各自行星中心的 CPU 双精度差构造；上传前不把宇宙绝对平移写进 float。积分与重投影均从真实镜头而非 nav 发射：空气、云、云照明支持和屏幕云影接收体使用真实局部眼点。地表材质眼点是每个材质自己的值，复用 `SurfaceViewFrame` 计算实际 draw camera 的局部位置，不改写共享天气 uniform；支持独立相机依次绑定。
+
+这只修正当前刚体/视点对应。球壳代表位置仍是近似；没有新增云占用深度、天气平流补偿、逐物体 motion、云反遮挡/颜色限幅、曝光适配或完整 TAA。opaque/history depth 仍是对数不透明深度，不能解释为云深度。下一步在此接口上增加共同抖动/天气时间映射和几何运动消费者，成套替换局部反馈，禁止再叠一个独立累积器。[固定证据与边界](baselines/foundation-frame-state-2026-10-20/README.md)包含独立坐标参考、真实 resolve、介质偏移和正常玩家检查。
 
 ## 参考入口与升级规则
 

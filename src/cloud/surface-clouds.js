@@ -5,6 +5,8 @@ import { cloudNoiseDistribution } from './cloud-noise.js';
 import { PRODUCTION_PARAMETER_LAYERS } from './production-bands.js';
 import {cloudLightCacheGLSL,cloudLightCacheUniforms} from './cloud-light-cache-glsl.js';
 import * as THREE from 'three';
+import { SurfaceViewFrame } from '../surface-view-frame.js';
+const surfaceViews = new WeakMap();
 let preparingSurface=false;
 export function setCloudSurfacePreparation(value) {preparingSurface=Boolean(value);}
 
@@ -199,6 +201,8 @@ export function surfaceCloudUniforms(planet) {
   result.uCloudReceiverId={value:0};
   result.uCloudBodyBoundRadius={value:planet.R+Math.max(1000,(planet.hAmp||0)*4)};
   if(source)for(const name of names)result['cloud_'+name]={value:source[name]?.value};
+  // This is view-local, unlike the borrowed weather and lighting resources.
+  result.cloud_uCameraLocal={value:source?.uCameraLocal?.value?.clone() || new THREE.Vector3()};
   const parameters=productionSpeciesParameters();
   result.cloud_uSpeciesOptics={value:new Float32Array(parameters.flatMap(p=>p.optics))};
   result.cloud_uSpeciesShapes={value:new Float32Array(parameters.flatMap(p=>p.shape))};
@@ -211,7 +215,12 @@ export function bindSurfaceClouds(uniforms,planet,renderer=null,camera=null,mate
   uniforms.uSurfaceCloudEnabled.value=preparingSurface||planet.cloudVisualEnabled===false?0:1;
   const source=planet.volCloudUniforms || planet.volCloudMat?.uniforms;
   uniforms.uCloudForeignReceiver.value=0;
-  if(source)for(const name of names)if(uniforms['cloud_'+name])uniforms['cloud_'+name].value=source[name]?.value;
+  if(source)for(const name of names)if(name!=='uCameraLocal' && uniforms['cloud_'+name])uniforms['cloud_'+name].value=source[name]?.value;
+  if(camera && planet.group) {
+    let view=surfaceViews.get(planet);
+    if(!view){view=new SurfaceViewFrame(planet);surfaceViews.set(planet,view);}
+    view.sync(camera);uniforms.cloud_uCameraLocal.value.copy(view.origin);
+  } else if(source?.uCameraLocal)uniforms.cloud_uCameraLocal.value.copy(source.uCameraLocal.value);
   if(camera && uniforms.cloud_uCameraFar)uniforms.cloud_uCameraFar.value=camera.far;
   const sharedScreen=renderer?.cloudSurfaceReceiver;
   const screen=sharedScreen?.receiverIds?.has(planet)?sharedScreen:planet.cloudSurfaceShadowCache;

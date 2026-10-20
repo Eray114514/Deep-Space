@@ -10,6 +10,7 @@ import { CloudColumnBank } from './cloud/cloud-column-bank.js';
 import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
+import { RenderFrameState } from './render-frame-state.js';
 
 export const VOLUME_LAYER = 2;
 
@@ -44,11 +45,12 @@ export function resizeVolumeHistoryTarget(rt,width,height) {
 }
 
 export class VolumetricPass extends Pass {
-  constructor(scene, camera, { scale = 0.5 } = {}) {
+  constructor(scene, camera, { scale = 0.5, frameState = null } = {}) {
     super();
     this.scene = scene;
     this.camera = camera;
     this.scale = scale;
+    this.frameState = frameState || new RenderFrameState();
     this.width = 1;
     this.height = 1;
     this.current = target(1, 1, 'volume.current');
@@ -57,11 +59,11 @@ export class VolumetricPass extends Pass {
     this.historyRead = this.historyA;
     this.historyWrite = this.historyB;
     this.historyValid = false;
+    this.historySequence = -1;
     this.enabled = true;
     this.needsSwap = true;
 
     this.nav = new THREE.Vector3();
-    this.prevNav = new THREE.Vector3();
     this.center = new THREE.Vector3();
     this.radius = 1;
     this.motion = 1;
@@ -73,7 +75,6 @@ export class VolumetricPass extends Pass {
     this.lightBatchOptions={budgetBytes:64*1024*1024,maxBatchTiles:128};
     this.lightBatch=null;
     this.lightBatchStatus={reason:'disabled',submitted:false};
-    this.prevViewProjection = new THREE.Matrix4();
 
     this.resolveMaterial = new THREE.ShaderMaterial({
       depthTest: true,
@@ -91,9 +92,10 @@ export class VolumetricPass extends Pass {
         uCenter: { value: this.center },
         uRadius: { value: this.radius },
         uNavDelta: { value: new THREE.Vector3() },
+        uCurrentToPrevious: { value: new THREE.Matrix3() },
         uInvProjection: { value: new THREE.Matrix4() },
         uCameraWorld: { value: new THREE.Matrix4() },
-        uPrevViewProjection: { value: this.prevViewProjection },
+        uPrevViewProjection: { value: new THREE.Matrix4() },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -108,6 +110,7 @@ export class VolumetricPass extends Pass {
         uniform float uHistoryValid, uMotion, uRadius;
         uniform vec3 uCenter, uNavDelta;
         uniform mat4 uInvProjection, uCameraWorld, uPrevViewProjection;
+        uniform mat3 uCurrentToPrevious;
         varying vec2 vUv;
 
         vec2 sphereHits(vec3 origin, float r, vec3 dir) {
@@ -127,7 +130,8 @@ export class VolumetricPass extends Pass {
           vec4 view = uInvProjection * clip;
           vec3 dirView = normalize(view.xyz / max(abs(view.w), 1e-5));
           vec3 dirWorld = normalize((uCameraWorld * vec4(dirView, 0.0)).xyz);
-          vec2 hit = sphereHits(vec3(0.0), uRadius, dirWorld);
+          vec3 rayOrigin = uCameraWorld[3].xyz;
+          vec2 hit = sphereHits(rayOrigin, uRadius, dirWorld);
 
           vec2 prevUv = vec2(-2.0);
           if (hit.y > 0.0) {
@@ -135,7 +139,7 @@ export class VolumetricPass extends Pass {
             // Inside: bias into the volume instead of using the far boundary.
             float nearT = max(hit.x, 0.0);
             float t = hit.x > 0.0 ? nearT : mix(nearT, hit.y, 0.42);
-            vec3 prevRelative = dirWorld * t + uNavDelta;
+            vec3 prevRelative = uCurrentToPrevious * (rayOrigin + dirWorld * t) + uNavDelta;
             vec4 prevClip = uPrevViewProjection * vec4(prevRelative, 1.0);
             if (prevClip.w > 0.0) prevUv = prevClip.xy / prevClip.w * 0.5 + 0.5;
           }
@@ -238,8 +242,7 @@ export class VolumetricPass extends Pass {
       this.columnRelease.delete(planet);
       this.activePlanet = planet;
       this.historyValid = false;
-      this.prevNav.copy(nav);
-    } else if (this.historyValid && this.prevNav.distanceTo(nav) > this.radius * 0.18) {
+    } else if (this.historyValid && this.frameState.previous.origin.distanceTo(nav) > this.radius * 0.18) {
       // Teleports/warps have no valid correspondence in the old history.
       this.historyValid = false;
     }
@@ -326,6 +329,7 @@ export class VolumetricPass extends Pass {
   }
 
   render(renderer, writeBuffer, readBuffer) {
+    const ownFrame = !this.frameState.pending;
     for(const [planet,frame] of this.columnRelease)if(this.frame>=frame) {
       this.columnMaps.get(planet)?.dispose();this.columnMaps.delete(planet);
       this.columnRelease.delete(planet);planet.volCloudMat.uniforms.uColumnsReady.value=0;
@@ -339,8 +343,9 @@ export class VolumetricPass extends Pass {
 
     // Keep scalar copies: nested draws can reuse the module scratch color.
     const oldClearR = _savedClear.r, oldClearG = _savedClear.g, oldClearB = _savedClear.b;
-    let completed = false;
+    let completed = false, restored = false, volumeMaterial;
     try {
+      if (ownFrame) this.frameState.begin(this.camera, this.nav, { context: this.scene, body: this.activePlanet });
       // The opaque scene was rendered into readBuffer immediately before this
       // pass. Feed its logarithmic depth texture into the cloud shader so ray
       // integration terminates at terrain, flora, props and the ship instead of
@@ -358,6 +363,7 @@ export class VolumetricPass extends Pass {
       bindSceneDepth(this.activePlanet?.volCloudMat);
       const cloudUniforms = this.activePlanet?.volCloudMat?.uniforms;
       const planet=this.activePlanet;
+      if (cloudUniforms?.uCameraLocal) this.frameState.localEye(planet, cloudUniforms.uCameraLocal.value);
       if(cloudUniforms?.uDepthInvProjection && planet?.volCloudMesh) {
         this.camera.updateMatrixWorld(true);planet.volCloudMesh.updateWorldMatrix(true,false);
         _depthRotation.copy(planet.volCloudMesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
@@ -427,14 +433,20 @@ export class VolumetricPass extends Pass {
       u.uCameraFar.value = this.camera.far;
       u.tCurrent.value = this.current.texture;
       u.tHistory.value = this.historyRead.texture;
-      u.uHistoryValid.value = this.historyValid ? 1 : 0;
+      const correspondence = this.frameState.mapBody();
+      volumeMaterial = this.activePlanet?.volCloudMesh.material;
+      const sameRepresentation = volumeMaterial === this.previousVolumeMaterial
+        && volumeMaterial?.version === this.previousVolumeVersion && this.radius === this.previousRadius;
+      const precedingFrame = this.historySequence + 1 === this.frameState.sequence;
+      u.uHistoryValid.value = this.historyValid && correspondence && sameRepresentation && precedingFrame ? 1 : 0;
       u.uMotion.value = this.motion;
       u.uCenter.value.copy(this.center);
       u.uRadius.value = this.radius;
-      u.uNavDelta.value.copy(this.nav).sub(this.prevNav);
-      u.uInvProjection.value.copy(this.camera.projectionMatrixInverse);
-      u.uCameraWorld.value.copy(this.camera.matrixWorld);
-      u.uPrevViewProjection.value.copy(this.prevViewProjection);
+      u.uNavDelta.value.copy(this.frameState.translation);
+      u.uCurrentToPrevious.value.copy(this.frameState.rotation);
+      u.uInvProjection.value.copy(this.frameState.current.inverseProjection);
+      u.uCameraWorld.value.copy(this.frameState.current.cameraWorld);
+      u.uPrevViewProjection.value.copy(this.frameState.previous.viewProjection);
       renderer.setRenderTarget(this.historyWrite);
       this.resolveQuad.render(renderer);
 
@@ -447,25 +459,34 @@ export class VolumetricPass extends Pass {
       if (this.clear) renderer.clear();
       this.compositeQuad.render(renderer);
 
-      this.prevNav.copy(this.nav);
-      this.prevViewProjection.multiplyMatrices(
-        this.camera.projectionMatrix, this.camera.matrixWorldInverse);
-      this.historyValid = true;
-      const swap = this.historyRead;
-      this.historyRead = this.historyWrite;
-      this.historyWrite = swap;
-      this.frame++;
       completed = true;
     } finally {
       // A failed current/resolve/composite draw must not publish partial
       // history or leak the volume layer and framebuffer into later passes.
-      if (!completed) this.historyValid = false;
-      this.camera.layers.mask = oldMask;
-      renderer.autoClear = oldAutoClear;
-      _savedClear.setRGB(oldClearR, oldClearG, oldClearB);
-      renderer.setClearColor(_savedClear, oldAlpha);
-      renderer.setRenderTarget(oldTarget, oldFace, oldMip);
+      try {
+        this.camera.layers.mask = oldMask;
+        renderer.autoClear = oldAutoClear;
+        _savedClear.setRGB(oldClearR, oldClearG, oldClearB);
+        renderer.setClearColor(_savedClear, oldAlpha);
+        renderer.setRenderTarget(oldTarget, oldFace, oldMip);
+        restored = true;
+      } finally {
+        if (!completed || !restored) {
+          this.historyValid = false;
+          if (ownFrame) this.frameState.abort();
+        }
+      }
     }
+    this.historyValid = !!this.activePlanet;
+    this.historySequence = this.frameState.sequence;
+    this.previousVolumeMaterial = volumeMaterial;
+    this.previousVolumeVersion = volumeMaterial?.version;
+    this.previousRadius = this.radius;
+    const swap = this.historyRead;
+    this.historyRead = this.historyWrite;
+    this.historyWrite = swap;
+    this.frame++;
+    if (ownFrame) this.frameState.commit();
   }
 
   releaseTargets() {

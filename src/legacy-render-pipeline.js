@@ -15,6 +15,7 @@ import {CloudLightBank} from './cloud/cloud-light-bank.js';
 import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 import {RenderProfiler} from './render-profiler.js';
 import {withPreparedShadows} from './render-shadow-state.js';
+import { RenderFrameState } from './render-frame-state.js';
 
 function aliasUniforms(uniforms, aliases) {
   for (const [alias, original] of Object.entries(aliases)) {
@@ -40,6 +41,7 @@ export class GameLegacyPipeline {
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
+    this.frameState = new RenderFrameState();
     this.cloudLightBanks=new Map();this.cloudLightFrame=0;
     this.cloudSurfaceShadow=new CloudSurfaceShadowPass(scene,camera);
     const target = new THREE.WebGLRenderTarget(1, 1, {
@@ -53,6 +55,7 @@ export class GameLegacyPipeline {
     this.target = target;
     this.composer = new EffectComposer(renderer, target);
     this.onContextLost = () => {
+      this.frameState.abort('context-lost');
       this.composer.renderTarget1.dispose();
       this.composer.renderTarget2.dispose();
       this.volumePass?.releaseTargets();
@@ -81,7 +84,7 @@ export class GameLegacyPipeline {
     this.atmospherePass = new AtmospherePass(camera);
     this.composer.addPass(this.atmospherePass);
 
-    this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale }) : null;
+    this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale, frameState: this.frameState }) : null;
     if (this.volumePass) {
       this.volumePass.sceneDepthSource = this.atmospherePass;
       this.composer.addPass(this.volumePass);
@@ -131,6 +134,7 @@ export class GameLegacyPipeline {
   }
 
   setSize(width, height, dpr = 1) {
+    this.frameState.invalidate('resize');
     this.composer.setPixelRatio(dpr);
     this.composer.setSize(width, height);
   }
@@ -144,15 +148,39 @@ export class GameLegacyPipeline {
     this.atmospherePass.setActivePlanet(planet, nav);
   }
 
-  render() {
-    this.profiler?.beginFrame();
-    this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
-    // RenderPass writes readBuffer. Preserve the receiver depth in the other
-    // target during that draw; sampling its own depth attachment is feedback.
-    // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
-    this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
-      this.volumePass?.activePlanet,this.profiler);
-    this.composer.render();
+  invalidateVolumeHistory(reason = 'explicit') {
+    this.frameState.invalidate(reason);
+    this.volumePass?.resetHistory();
+  }
+
+  render({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
+    const target = this.renderer.getRenderTarget();
+    const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
+    this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
+    try {
+      try {
+        const body = this.volumePass?.activePlanet;
+        const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
+        if (localEye) this.frameState.localEye(body, localEye.value);
+        const airBody = this.atmospherePass.activePlanet;
+        if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
+        this.profiler?.beginFrame();
+        this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
+        // RenderPass writes readBuffer. Preserve the receiver depth in the other
+        // target during that draw; sampling its own depth attachment is feedback.
+        // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
+        this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
+          this.volumePass?.activePlanet,this.profiler);
+        this.composer.render();
+      } finally {
+        this.renderer.setRenderTarget(target, face, mip);
+      }
+      this.frameState.commit();
+    } catch (error) {
+      this.frameState.abort();
+      this.volumePass?.resetHistory();
+      throw error;
+    }
   }
 
   profilePhase(name,work) {return this.profiler?this.profiler.run(name,work):work();}
