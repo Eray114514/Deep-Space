@@ -68,6 +68,11 @@ for (const radius of [6e6, 20e6]) for (const distance of [1e9, 1e12, 1e15]) for 
 assert.ok(maximumError < 2e-8, `Rigid mapping error ${maximumError}`);
 assert.ok(oldMaximumError > 10000, 'The old origin-only control must detect body motion');
 
+begin();frame.commit();begin();assert.equal(frame.stationaryBodyView(), true);frame.commit();
+camera.position.x += 1e-8;begin();assert.equal(frame.stationaryBodyView(), false, 'Tiny real motion is not snapped to stationary');frame.commit();
+camera.fov += 1e-8;camera.updateProjectionMatrix();begin();
+assert.equal(frame.stationaryBodyView(), false, 'Projection changes keep real reprojection');frame.commit();
+
 // Surface receivers can belong to an inactive body or a second camera. Their
 // eye uniform must not alias/mutate that body's borrowed cloud field uniforms.
 body.group = new THREE.Group();

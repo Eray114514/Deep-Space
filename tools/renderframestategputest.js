@@ -109,7 +109,7 @@ try {
     draw('after-private-warmup', 0);draw('warmup-recovered', 1);
     pipeline.onContextLost();draw('after-context-resource-release', 0);draw('context-recovered', 1);
 
-    // Static old/new/old/new: same two draws, history really contributes.
+    // Static old/new/old/new: unchanged scene must remain native-identical.
     const target = () => new T.WebGLRenderTarget(32, 32, { type: T.HalfFloatType,
       depthTexture: new T.DepthTexture(32, 32, T.UnsignedIntType) });
     const read = target(), write = target();
@@ -119,16 +119,31 @@ try {
     for (const Type of [Original, Current, Original, Current]) {
       const pass = new Type(scene, camera, { scale: 1 });pass.setSize(32, 32);pass.setActivePlanet(body, nav, 0);
       material.uniforms.change.value = 0;pass.render(renderer, write, read);
-      material.uniforms.change.value = .02;pass.render(renderer, write, read);
+      pass.render(renderer, write, read);
       const pixels = new Uint16Array(32 * 32 * 4);renderer.setRenderTarget(pass.historyRead);
       renderer.readRenderTargetPixels(pass.historyRead, 0, 0, 32, 32, pixels);native.push(pixels);pass.dispose();
     }
     const differences = native.slice(1).map(pixels => pixels.reduce((count, value, i) => count + (value !== native[0][i]), 0));
+    // A small supported change separately proves reuse. A large unsupported
+    // change intentionally clips now, so it is no longer an equality oracle.
+    const accumulating = new Current(scene, camera, { scale: 1 });accumulating.setSize(32, 32);accumulating.setActivePlanet(body, nav, 0);
+    accumulating.render(renderer, write, read);material.uniforms.change.value = .002;accumulating.render(renderer, write, read);
+    const accumulated = new Uint16Array(32 * 32 * 4);renderer.setRenderTarget(accumulating.historyRead);
+    renderer.readRenderTargetPixels(accumulating.historyRead, 0, 0, 32, 32, accumulated);accumulating.dispose();
     const noHistory = new Current(scene, camera, { scale: 1 });noHistory.setSize(32, 32);noHistory.setActivePlanet(body, nav, 0);
     noHistory.render(renderer, write, read);const unfiltered = new Uint16Array(32 * 32 * 4);
     renderer.setRenderTarget(noHistory.historyRead);renderer.readRenderTargetPixels(noHistory.historyRead, 0, 0, 32, 32, unfiltered);
-    const historyContribution = unfiltered.reduce((count, value, i) => count + (i % 4 !== 3 && value !== native[0][i]), 0);
+    const historyContribution = unfiltered.reduce((count, value, i) => count + (i % 4 !== 3 && value !== accumulated[i]), 0);
     noHistory.dispose();
+    const noDepth = new T.WebGLRenderTarget(32, 32, { type: T.HalfFloatType, depthBuffer: false });
+    renderer.setRenderTarget(noDepth);renderer.clear();
+    const depthOwner = new Current(scene, camera, { scale: 1 });depthOwner.setSize(32, 32);depthOwner.setActivePlanet(body, nav, 0);
+    const missingDepthSequence = [];
+    depthOwner.resolveQuad._mesh.onBeforeRender = () => missingDepthSequence.push({ valid: depthOwner.resolveMaterial.uniforms.uHistoryValid.value });
+    for (const source of [noDepth, noDepth, read, read]) {
+      depthOwner.render(renderer, write, source);missingDepthSequence.at(-1).published = depthOwner.historyValid;
+    }
+    depthOwner.dispose();noDepth.dispose();
     const standalone = new Current(scene, camera, { scale: 1 });standalone.setSize(32, 32);standalone.setActivePlanet(body, nav, 0);
     const standaloneCube = new T.WebGLCubeRenderTarget(16);renderer.setRenderTarget(standaloneCube, 2, 0);
     const standaloneRead = standalone.historyRead;let standaloneCaught = false;
@@ -180,7 +195,7 @@ try {
       oldMaximumUvError = Math.max(oldMaximumUvError, Math.abs(oldPoint.x - expected.x), Math.abs(oldPoint.y - expected.y));samples++;
     }
     const debug = gl.getExtension('WEBGL_debug_renderer_info');
-    const result = { transitions, abort, restoreFailure, standaloneFailure, historyContribution, failureObserved, differences, samples, maximumUvError, oldMaximumUvError,
+    const result = { transitions, abort, restoreFailure, standaloneFailure, missingDepthSequence, historyContribution, failureObserved, differences, samples, maximumUvError, oldMaximumUvError,
       finite: native.every(pixels => pixels.every(value => Number.isFinite(T.DataUtils.fromHalfFloat(value)))),
       nonempty: native[0].some((value, i) => i % 4 !== 3 && value > 0), gl: gl.getError(), lost: gl.isContextLost(),
       gpu: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
@@ -195,7 +210,8 @@ try {
   assert.ok(result.transitions.every(row => row.valid === row.expected && row.pending), JSON.stringify(result.transitions));
   assert.deepEqual(result.abort, { caught: true, historyInvalid: true, frameInvalid: true, sequenceUnchanged: true, previousUnchanged: true, pending: false, targetRestored: true });
   assert.deepEqual(result.restoreFailure, { caught: true, sequenceUnchanged: true, historyInvalid: true, pending: false, frameInvalid: true });
-  assert.ok(Object.values(result.standaloneFailure).every(Boolean));assert.ok(result.historyContribution > 1000);
+  assert.ok(Object.values(result.standaloneFailure).every(Boolean));assert.ok(result.historyContribution > 900);
+  assert.deepEqual(result.missingDepthSequence, [{ valid: 0, published: false }, { valid: 0, published: false }, { valid: 0, published: true }, { valid: 1, published: true }]);
   assert.deepEqual(result.differences, [0, 0, 0]);assert.ok(result.finite && result.nonempty);
   assert.ok(result.maximumUvError < 2e-6);assert.ok(result.oldMaximumUvError > .01);
   console.log(`PASS actual pipeline transitions, native static output and GPU rigid mapping: ${out}`);

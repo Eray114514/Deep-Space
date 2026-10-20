@@ -15,7 +15,8 @@ import {probeCloudProgramPrewarm} from './cloud-program-prewarm-browser.js';
 const trace=process.argv.includes('--trace'),errorsProbe=process.argv.includes('--errors');
 const errorsFromBoot=process.argv.includes('--errors-from-boot');
 const ownerModes=process.argv.includes('--owner-modes');
-const historyTransitions=process.argv.includes('--history-transitions');
+const historySweep=process.argv.includes('--history-sweep');
+const historyTransitions=process.argv.includes('--history-transitions')||historySweep;
 const parallelNearControl=process.argv.includes('--parallel-near-control');
 const viewLoopControl=process.argv.includes('--view-loop-control');
 const beamLoopControl=process.argv.includes('--beam-loop-control');
@@ -150,6 +151,8 @@ try {
       if(!data.phase)return;
       const count=data.counts[data.phase]=(data.counts[data.phase]||0)+1;
       if(count<=8)data.records.push({phase:data.phase,valid:pass.resolveMaterial.uniforms.uHistoryValid.value,
+        depthReady:pass.resolveMaterial.uniforms.uDepthReady?.value,
+        stationary:pass.resolveMaterial.uniforms.uStationaryHistory?.value,motion:pass.motion,
         sequence:NMS._pipeline.frameState.sequence,historySequence:pass.historySequence,
         epoch:NMS._pipeline.frameState.epoch,reason:NMS._pipeline.frameState.reason,
         bodyMatches:NMS._pipeline.frameState.current.body===pass.activePlanet,
@@ -218,6 +221,22 @@ try {
       await page.waitForFunction(phase=>window.__foundationHistory.records.some(row=>row.phase===phase&&row.valid===1),phase,{timeout:15000});
     }
     await checkpoint('history-transitions-complete');
+  }
+  if(historySweep) {
+    // Controlled orientation changes on consecutive real player renders. This
+    // is a debug-camera integration check, not physical mouse-input acceptance
+    // or proof of cloud advection / full TAA. Keep the original worker gates.
+    await page.screenshot({path:`${out}/sweep-00.png`,timeout:90000});
+    for(let step=0;step<32;step++) {
+      const phase=`sweep-${step}`;
+      await page.evaluate(({phase,degrees})=>{
+        const data=window.__foundationHistory;data.phase=phase;
+        NMS.lookYaw(degrees);
+      },{phase,degrees:step<16?1.5:-1.5});
+      await page.waitForFunction(phase=>window.__foundationHistory.records.some(row=>row.phase===phase),phase,{timeout:15000});
+      if((step+1)%8===0)await page.screenshot({path:`${out}/sweep-${String(step+1).padStart(2,'0')}.png`,timeout:90000});
+    }
+    await checkpoint('history-sweep-complete');
   }
   const state=await page.evaluate(()=>({stats:NMS.stats(),water:NMS.waterState(0),
     profile:NMS._pipeline.performanceSnapshot(),probe:window.__foundationGLProbe.snapshot(),lostEvents:__foundationLost,
@@ -331,7 +350,7 @@ try {
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
   const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
   report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
-    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,
+    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,
     stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest,
     boundary:'Default 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.'};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
@@ -366,6 +385,14 @@ try {
       const rows=finalState.history.records.filter(row=>row.phase===phase);
       assert.equal(rows[0]?.valid,0,`First actual ${phase} resolve must reject stale history`);
       assert.ok(rows.some(row=>row.valid===1),`${phase} must recover history on a subsequent player frame`);
+    }
+  }
+  if(historySweep) {
+    for(let step=0;step<32;step++) {
+      const row=finalState.history.records.find(row=>row.phase===`sweep-${step}`);
+      assert.equal(row?.depthReady,1,'Real player resolve must borrow opaque depth');
+      assert.equal(row?.valid,1,'Continuous controlled turn must retain valid history');
+      assert.equal(row?.stationary,0,'Real turn must not take the stationary shortcut');
     }
   }
   if(ownerModes) {

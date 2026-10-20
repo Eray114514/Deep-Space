@@ -92,6 +92,14 @@ export class RenderFrameState {
     return out;
   }
 
+  stationaryBodyView() {
+    const c = this.current, p = this.previous;
+    return this.pending && this.valid && c.body === p.body && c.medium === p.medium
+      && c.origin.equals(p.origin) && c.bodyPosition.equals(p.bodyPosition)
+      && c.bodyOrientation.equals(p.bodyOrientation) && c.cameraWorld.equals(p.cameraWorld)
+      && c.projection.equals(p.projection);
+  }
+
   commit() {
     if (!this.pending) throw new Error('No render frame pending');
     this.pending = false;

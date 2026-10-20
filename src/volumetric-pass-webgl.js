@@ -11,6 +11,7 @@ import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 import { RenderFrameState } from './render-frame-state.js';
+import { volumeHistoryGLSL } from './volume-history-glsl.js';
 
 export const VOLUME_LAYER = 2;
 
@@ -88,6 +89,8 @@ export class VolumetricPass extends Pass {
         tHistoryDepth: { value: this.historyRead.depthTexture },
         uCameraFar: { value: camera.far },
         uHistoryValid: { value: 0 },
+        uDepthReady: { value: 0 },
+        uStationaryHistory: { value: 0 },
         uMotion: { value: 1 },
         uCenter: { value: this.center },
         uRadius: { value: this.radius },
@@ -107,11 +110,13 @@ export class VolumetricPass extends Pass {
         precision highp float;
         uniform sampler2D tCurrent, tHistory, tSceneDepth, tHistoryDepth;
         uniform float uCameraFar;
-        uniform float uHistoryValid, uMotion, uRadius;
+        uniform float uHistoryValid, uDepthReady, uStationaryHistory, uMotion, uRadius;
         uniform vec3 uCenter, uNavDelta;
         uniform mat4 uInvProjection, uCameraWorld, uPrevViewProjection;
         uniform mat3 uCurrentToPrevious;
         varying vec2 vUv;
+
+        ${volumeHistoryGLSL}
 
         vec2 sphereHits(vec3 origin, float r, vec3 dir) {
           vec3 oc = origin - uCenter;
@@ -123,9 +128,10 @@ export class VolumetricPass extends Pass {
         }
 
         void main() {
-          float currentDepth=texture2D(tSceneDepth,vUv).r;
+          float currentDepth=uDepthReady>0.5?texture2D(tSceneDepth,vUv).r:1.0;
           gl_FragDepth=currentDepth;
           vec4 cur = texture2D(tCurrent, vUv);
+          if (uHistoryValid < 0.5 || uDepthReady < 0.5) { gl_FragColor = cur; return; }
           vec4 clip = vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
           vec4 view = uInvProjection * clip;
           vec3 dirView = normalize(view.xyz / max(abs(view.w), 1e-5));
@@ -146,22 +152,20 @@ export class VolumetricPass extends Pass {
 
           float inside = step(0.0, prevUv.x) * step(prevUv.x, 1.0)
             * step(0.0, prevUv.y) * step(prevUv.y, 1.0);
-          vec4 hist = texture2D(tHistory, clamp(prevUv, 0.0, 1.0));
+          if (inside < 0.5) { gl_FragColor = cur; return; }
           float uvMotion = length(prevUv - vUv);
-          float alphaReject = smoothstep(0.34, 0.04, abs(hist.a - cur.a));
+          if (uStationaryHistory > 0.5) uvMotion = 0.0;
+          float depthSupport;
+          vec4 hist = volumeHistorySample(prevUv, currentDepth, uvMotion, depthSupport);
+          if (depthSupport < 1e-6) { gl_FragColor = cur; return; }
+          float alphaReject = 1.0 - smoothstep(0.04, 0.34, abs(hist.a - cur.a));
           float stable = exp(-uvMotion * 48.0) * alphaReject;
           float historyWeight = uHistoryValid * inside * stable
             * mix(0.86, 0.18, clamp(uMotion, 0.0, 1.0));
           // Current samples always dominate newly revealed edges.
           historyWeight *= smoothstep(0.0, 0.12, cur.a + hist.a);
-          // Opaque silhouettes and disocclusions must not inherit a cloudy
-          // sky sample. World-surface motion reprojection is a B7 concern;
-          // until then reuse sky-to-sky history or a stationary matching ray.
-          float previousDepth=texture2D(tHistoryDepth,clamp(prevUv,0.0,1.0)).r;
-          float skyMatch=step(0.999999,currentDepth)*step(0.999999,previousDepth);
-          float stillMatch=(1.0-smoothstep(0.000001,0.00001,abs(currentDepth-previousDepth)))
-            *exp(-uvMotion*1000.0)*(1.0-step(0.001,uMotion));
-          historyWeight *= max(skyMatch,stillMatch);
+          historyWeight *= depthSupport;
+          hist = volumeHistoryClip(hist, cur, currentDepth);
           gl_FragColor = mix(cur, hist, historyWeight);
         }`,
     });
@@ -343,7 +347,7 @@ export class VolumetricPass extends Pass {
 
     // Keep scalar copies: nested draws can reuse the module scratch color.
     const oldClearR = _savedClear.r, oldClearG = _savedClear.g, oldClearB = _savedClear.b;
-    let completed = false, restored = false, volumeMaterial;
+    let completed = false, restored = false, volumeMaterial, hasDepth = false;
     try {
       if (ownFrame) this.frameState.begin(this.camera, this.nav, { context: this.scene, body: this.activePlanet });
       // The opaque scene was rendered into readBuffer immediately before this
@@ -352,6 +356,7 @@ export class VolumetricPass extends Pass {
       // compositing as a screen-front layer.
       const depthTexture = this.sceneDepthSource?.sceneDepthTexture
         || readBuffer.depthTexture || null;
+      hasDepth = !!depthTexture;
       const bindSceneDepth = (material) => {
         const uniforms = material?.uniforms;
         if (!uniforms?.tSceneDepth) return;
@@ -429,6 +434,7 @@ export class VolumetricPass extends Pass {
       this.camera.updateMatrixWorld(true);
       const u = this.resolveMaterial.uniforms;
       u.tSceneDepth.value = depthTexture;
+      u.uDepthReady.value = depthTexture ? 1 : 0;
       u.tHistoryDepth.value = this.historyRead.depthTexture;
       u.uCameraFar.value = this.camera.far;
       u.tCurrent.value = this.current.texture;
@@ -439,6 +445,7 @@ export class VolumetricPass extends Pass {
         && volumeMaterial?.version === this.previousVolumeVersion && this.radius === this.previousRadius;
       const precedingFrame = this.historySequence + 1 === this.frameState.sequence;
       u.uHistoryValid.value = this.historyValid && correspondence && sameRepresentation && precedingFrame ? 1 : 0;
+      u.uStationaryHistory.value = this.frameState.stationaryBodyView() ? 1 : 0;
       u.uMotion.value = this.motion;
       u.uCenter.value.copy(this.center);
       u.uRadius.value = this.radius;
@@ -477,7 +484,7 @@ export class VolumetricPass extends Pass {
         }
       }
     }
-    this.historyValid = !!this.activePlanet;
+    this.historyValid = !!this.activePlanet && hasDepth;
     this.historySequence = this.frameState.sequence;
     this.previousVolumeMaterial = volumeMaterial;
     this.previousVolumeVersion = volumeMaterial?.version;
