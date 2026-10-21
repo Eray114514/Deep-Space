@@ -6,7 +6,7 @@
 // the legacy atmosphere shell.
 
 import * as THREE from 'three';
-import { CloudColumnBank } from './cloud/cloud-column-bank.js';
+import { CloudColumnBank, setCloudFarCacheEnabled } from './cloud/cloud-column-bank.js';
 import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
@@ -321,6 +321,41 @@ export class VolumetricPass extends Pass {
     return submitted;
   }
 
+  updateCloudColumns(renderer) {
+    const planet=this.activePlanet;
+    if(!planet)return;
+    const mesh=planet.volCloudMesh,farMaterial=planet.volCloudFarMat;
+    const far=Boolean(mesh && farMaterial && planet.volCloudMat.uniforms.uCameraLocal.value.length()
+      -planet.volCloudBand.rOut>200000);
+    if(mesh && farMaterial)mesh.material=far?farMaterial:planet.volCloudMat;
+    const stream=planet.weatherStream;
+    if(far && planet.weatherField?.synoptic && stream && !stream.disposed) {
+      let columns=this.columnMaps.get(planet);
+      if(!columns || columns.disposed) {
+        columns=new CloudColumnBank(planet);this.columnMaps.set(planet,columns);
+        planet.cloudColumnMap=columns;
+      }
+      // A real immutable endpoint may bake before its forecast partner arrives.
+      // The bank alone decides when the complete pair is safe to sample.
+      columns.update(renderer);
+      if(this.columnMaps.size>2) {
+        const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);
+        this.columnMaps.get(oldest).dispose();this.columnMaps.delete(oldest);
+      }
+    } else if(this.columnMaps.has(planet)) {
+      this.columnMaps.get(planet).dispose();this.columnMaps.delete(planet);
+    }
+    let cacheOnly=false;
+    if(far && this.columnMaps.has(planet) && planet.volCloudMat.uniforms.uColumnsReady.value>.5) {
+      const minimumCone=minimumCloudRayCone(this.camera.projectionMatrix.elements,this.width,this.height);
+      const nearestDistance=Math.max(0,planet.volCloudMat.uniforms.uCameraLocal.value.length()-planet.volCloudBand.rOut);
+      cacheOnly=nearestDistance*minimumCone>2400;
+    }
+    // This selection must also run on missing/replaced forecasts. CACHE1 has
+    // no runtime ready branch and must never sample the unbound weather map.
+    setCloudFarCacheEnabled(planet,cacheOnly);
+  }
+
   setSize(width, height) {
     const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
     if(nextWidth!==this.width||nextHeight!==this.height)this.lightBatch?.releaseScratch();
@@ -377,37 +412,7 @@ export class VolumetricPass extends Pass {
         cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
         cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
       }
-      if(planet?.volCloudMesh && planet.volCloudFarMat) {
-        const far=planet.volCloudMat.uniforms.uCameraLocal.value.length()
-          -planet.volCloudBand.rOut>200000;
-        planet.volCloudMesh.material=far?planet.volCloudFarMat:planet.volCloudMat;
-      }
-      if(planet?.weatherField?.synoptic && planet.weatherStream?.ready
-        && planet.volCloudMesh.material===planet.volCloudFarMat) {
-        let columns=this.columnMaps.get(planet);
-        if(!columns || columns.disposed) {
-          columns=new CloudColumnBank(planet);this.columnMaps.set(planet,columns);
-          planet.cloudColumnMap=columns;
-        }
-        columns.update(renderer);
-        const minimumCone=minimumCloudRayCone(this.camera.projectionMatrix.elements,this.width,this.height);
-        const nearestDistance=Math.max(0,planet.volCloudMat.uniforms.uCameraLocal.value.length()-planet.volCloudBand.rOut);
-        const cacheOnly=planet.volCloudMat.uniforms.uColumnsReady.value>.5
-          && nearestDistance*minimumCone>2400;
-        if(planet.volCloudFarMat.defines.CLOUD_FAR_CACHE!==Number(cacheOnly)) {
-          planet.volCloudFarMat.defines.CLOUD_FAR_CACHE=Number(cacheOnly);
-          planet.volCloudFarMat.needsUpdate=true;
-        }
-        if(this.columnMaps.size>2) {
-          const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);
-          this.columnMaps.get(oldest).dispose();this.columnMaps.delete(oldest);
-          oldest.volCloudMat.uniforms.uColumnsReady.value=0;
-        }
-      } else if(planet && this.columnMaps.has(planet)) {
-        // Near sunlight transport and far optical columns have separate owners.
-        // Retain neither unused baking snapshots nor far targets in a near view.
-        this.columnMaps.get(planet).dispose();this.columnMaps.delete(planet);
-      }
+      this.updateCloudColumns(renderer);
       const air = this.sceneDepthSource;
       if (cloudUniforms) {
         if (air?.activePlanet === this.activePlanet) {

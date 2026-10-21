@@ -80,9 +80,12 @@ try {
       && u.uOpticalColumnsNext.value===prefetch.target.textures[0] && oldest.disposed;
     const countAfterCross=bank.maps.size;
     const oldStream=p.weatherStream,retained=[...bank.maps.values()];
+    // A real endpoint may start production before the pair is publishable.
+    // Its partial result remains unbound while the replacement stream loads.
     p.weatherStream={...oldStream,ready:false,frames:new Map(oldStream.frames),generations:new WeakMap(),generation:0};
     update();
-    const loadingStreamRejected=bank.maps.size===0 && retained.every(map=>map.disposed)
+    const loadingStreamRejected=bank.maps.size===1 && [...bank.maps.values()].every(map=>!map.ready)
+      && retained.every(map=>map.disposed)
       && u.uColumnsReady.value===0 && samplers.every(name=>u[name].value===u.uWeatherMap.value);
     p.weatherStream=oldStream;
     p.weatherHours=10;p.weatherStream.anchor=10;frames.clear();

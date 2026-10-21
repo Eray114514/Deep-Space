@@ -13,6 +13,63 @@ export const productionAdvectionScale = species => species.family==='mid'?1.25
 // Parameters come from the authoritative species table. Each genus has
 // its own band, scale, optical coefficient and transfer curve, rather than a
 // label attached to the original two decks.
+// Keep the point-density source byte-for-byte stable while the column producer
+// reuses its altitude-independent amount and the exact same height profile.
+const speciesAmountGLSL = /* glsl */`    float share=region.x>=0.0?productionAreaWeight(frame,region):band.r/max(band.a,0.00001);
+    if(share<=0.0)return 0.0;
+    float coverage=region.x>=0.0?productionFamilyCoverage(frame,clamp(band.a,0.0,1.0))
+      :smoothstep(0.12,0.68,band.a);
+    float amount=coverage*share;
+`;
+const speciesHeightProfileGLSL = /* glsl */`    if(amount<=0.0)return 0.0;
+    float tile=feature*6.0;
+    vec2 fine=cloudNoiseAt(frame+axis*altitude*0.31,tile);
+    float base=band.g+(fine.g*2.0-1.0)*baseJitter*0.5;
+    float depth=max(1.0,band.b-band.g+(fine.r*2.0-1.0)*depthJitter*0.5);
+    if(mode==1) {
+      float cellTop=cloudNoiseAt(frame,tile).r;
+      depth=max(minimumDepth,depth*mix(0.4,1.0,smoothstep(0.35,0.70,cellTop)));
+    }
+    float h=(altitude-base)/depth;
+    if(h<=0.0 || h>=1.0) return 0.0;
+    float stretch=mode==0?2.5:mode==1?0.65:mode==2?0.45:mode==3?0.2:mode==4?0.12:mode==5?1.6:2.0;
+    vec3 q=frame+axis*(altitude-base)*stretch;
+    if(mode==4) q=frame*vec3(0.16,1.0,0.48)+axis*(altitude-base)*stretch;
+    vec2 n=cloudNoiseAt(q,tile);
+    float profile=smoothstep(0.0,0.10,h)*(1.0-smoothstep(0.36,1.0,h));
+    float shape;
+    if(mode==0 || mode==6) {
+      profile=smoothstep(0.0,0.14,h)*(1.0-smoothstep(0.80,1.0,h));
+      shape=0.45+0.55*n.r;
+    } else if(mode==5) {
+      profile=pow(sin(h*3.14159265359),1.2);
+      shape=smoothstep(0.48,0.68,n.r)*(0.5+0.5*n.g);
+    } else if(mode==4) {
+      profile=smoothstep(0.0,0.15,h)*(1.0-smoothstep(0.8,1.0,h));
+      shape=smoothstep(0.48,0.69,n.r+n.g*0.14);
+    } else {
+      // A rounded vertical support changes the cloud boundary, rather than
+      // merely dimming a full column up to a shared flat ceiling. The coverage
+      // -> shape remap follows three-geospatial's separated weather/shape
+      // construction; our metre-scale field and extinction remain authoritative.
+      float rounded=1.0-pow(clamp(2.0*pow(h,0.35)-1.0,-1.0,1.0),2.0);
+      float envelope=rounded*smoothstep(0.0,0.08,h);
+      // Raw Perlin-Worley noise has a positive floor. Using it directly makes
+      // every horizontal column intersect the maximum of the envelope: a
+      // continuous ceiling with dimples instead of separated cells. The
+      // measured CDF provides an explicit empty tail and a full shape range.
+      float emptyTail=mode==1?0.10:mode==2?0.35:0.20;
+      float cell=pow(max(0.0,(productionNoiseCDF(n.r)-emptyTail)/(1.0-emptyTail)),0.65);
+      if(cell<=0.0)return 0.0;
+      shape=clamp((envelope-(1.0-cell))/cell,0.0,1.0);
+      profile=smoothstep(0.0,0.08,h);
+      float erosion=cloudNoiseAt(q*3.7+vec3(1.7,5.3,9.1)*tile,tile).g;
+      shape=max(0.0,shape-(1.0-erosion)*0.10*(1.0-rounded));
+    }
+    float peak=mode==0?0.20:mode==1?0.24:mode==2?0.28:mode==3?0.35:mode==4?0.22:mode==5?0.24:0.15;
+    return amount*shape*profile*peak;
+`;
+
 export const productionSpeciesGLSL = /* glsl */`
   precision highp sampler2DArray;
   uniform sampler2DArray uSpeciesMap;
@@ -139,59 +196,7 @@ export const productionSpeciesGLSL = /* glsl */`
   float speciesCondensate(vec3 frame,vec3 axis,float altitude,vec4 band,
     float feature,float baseJitter,float depthJitter,int mode,float minimumDepth,vec2 region) {
     if(!speciesHasSupport(altitude,band,baseJitter,depthJitter))return 0.0;
-    float share=region.x>=0.0?productionAreaWeight(frame,region):band.r/max(band.a,0.00001);
-    if(share<=0.0)return 0.0;
-    float coverage=region.x>=0.0?productionFamilyCoverage(frame,clamp(band.a,0.0,1.0))
-      :smoothstep(0.12,0.68,band.a);
-    float amount=coverage*share;
-    if(amount<=0.0)return 0.0;
-    float tile=feature*6.0;
-    vec2 fine=cloudNoiseAt(frame+axis*altitude*0.31,tile);
-    float base=band.g+(fine.g*2.0-1.0)*baseJitter*0.5;
-    float depth=max(1.0,band.b-band.g+(fine.r*2.0-1.0)*depthJitter*0.5);
-    if(mode==1) {
-      float cellTop=cloudNoiseAt(frame,tile).r;
-      depth=max(minimumDepth,depth*mix(0.4,1.0,smoothstep(0.35,0.70,cellTop)));
-    }
-    float h=(altitude-base)/depth;
-    if(h<=0.0 || h>=1.0) return 0.0;
-    float stretch=mode==0?2.5:mode==1?0.65:mode==2?0.45:mode==3?0.2:mode==4?0.12:mode==5?1.6:2.0;
-    vec3 q=frame+axis*(altitude-base)*stretch;
-    if(mode==4) q=frame*vec3(0.16,1.0,0.48)+axis*(altitude-base)*stretch;
-    vec2 n=cloudNoiseAt(q,tile);
-    float profile=smoothstep(0.0,0.10,h)*(1.0-smoothstep(0.36,1.0,h));
-    float shape;
-    if(mode==0 || mode==6) {
-      profile=smoothstep(0.0,0.14,h)*(1.0-smoothstep(0.80,1.0,h));
-      shape=0.45+0.55*n.r;
-    } else if(mode==5) {
-      profile=pow(sin(h*3.14159265359),1.2);
-      shape=smoothstep(0.48,0.68,n.r)*(0.5+0.5*n.g);
-    } else if(mode==4) {
-      profile=smoothstep(0.0,0.15,h)*(1.0-smoothstep(0.8,1.0,h));
-      shape=smoothstep(0.48,0.69,n.r+n.g*0.14);
-    } else {
-      // A rounded vertical support changes the cloud boundary, rather than
-      // merely dimming a full column up to a shared flat ceiling. The coverage
-      // -> shape remap follows three-geospatial's separated weather/shape
-      // construction; our metre-scale field and extinction remain authoritative.
-      float rounded=1.0-pow(clamp(2.0*pow(h,0.35)-1.0,-1.0,1.0),2.0);
-      float envelope=rounded*smoothstep(0.0,0.08,h);
-      // Raw Perlin-Worley noise has a positive floor. Using it directly makes
-      // every horizontal column intersect the maximum of the envelope: a
-      // continuous ceiling with dimples instead of separated cells. The
-      // measured CDF provides an explicit empty tail and a full shape range.
-      float emptyTail=mode==1?0.10:mode==2?0.35:0.20;
-      float cell=pow(max(0.0,(productionNoiseCDF(n.r)-emptyTail)/(1.0-emptyTail)),0.65);
-      if(cell<=0.0)return 0.0;
-      shape=clamp((envelope-(1.0-cell))/cell,0.0,1.0);
-      profile=smoothstep(0.0,0.08,h);
-      float erosion=cloudNoiseAt(q*3.7+vec3(1.7,5.3,9.1)*tile,tile).g;
-      shape=max(0.0,shape-(1.0-erosion)*0.10*(1.0-rounded));
-    }
-    float peak=mode==0?0.20:mode==1?0.24:mode==2?0.28:mode==3?0.35:mode==4?0.22:mode==5?0.24:0.15;
-    return amount*shape*profile*peak;
-  }
+${speciesAmountGLSL}${speciesHeightProfileGLSL}  }
   vec2 productionSpeciesAt(vec3 local) {
     float radius=length(local),altitude=radius-uBodyR;
     vec3 radial=local/radius;
@@ -225,6 +230,19 @@ export const productionSpeciesGLSL = /* glsl */`
     }
     return total;
   }
+`;
+
+// These functions reuse the point-density arithmetic. Only a caller that keeps
+// frame/band/region fixed across altitude samples may cache the amount.
+// Append after productionSpeciesGLSL, which owns their support/noise helpers.
+export const productionColumnCondensateGLSL = /* glsl */`
+  float columnSpeciesAmount(vec3 frame,vec4 band,vec2 region) {
+${speciesAmountGLSL}    return amount;
+  }
+  float columnSpeciesCondensate(vec3 frame,vec3 axis,float altitude,vec4 band,
+    float feature,float baseJitter,float depthJitter,int mode,float minimumDepth,float amount) {
+    if(!speciesHasSupport(altitude,band,baseJitter,depthJitter))return 0.0;
+${speciesHeightProfileGLSL}  }
 `;
 
 export function productionSpeciesParameters() {

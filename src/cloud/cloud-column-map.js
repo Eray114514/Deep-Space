@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { productionColumnCondensateGLSL } from './production-shape.js';
 import { OwnedScreenTriangle as FullScreenQuad } from '../owned-screen-triangle.js';
 import { productionCloudGLSL } from './production-medium-glsl.js';
 import { weatherAtlasGLSL } from './weather-atlas.js';
@@ -42,7 +43,7 @@ export class CloudColumnMap {
     const prefix=`precision highp sampler3D;uniform sampler3D uNoise3;
       uniform sampler2D uWeatherMapHi;uniform mat3 uSpin;
       uniform vec3 uCOff;uniform float uBodyR,uSurfaceRange,uRin,uRout;
-      ${weatherAtlasGLSL}\n${productionCloudGLSL}`;
+      ${weatherAtlasGLSL}\n${productionCloudGLSL}${productionColumnCondensateGLSL}`;
     this.material=new THREE.ShaderMaterial({
       defines:{...source.defines},
       glslVersion:THREE.GLSL3,
@@ -84,11 +85,14 @@ export class CloudColumnMap {
               vec3 axis,frame;productionSpeciesFrame(weatherRadial,species,axis,frame);
               float stepMeters=(top-bottom)/float(count);
               float integrated=0.0,firstMoment=0.0;
+              vec2 columnRegion=productionAreaBand(uv,species);
+              float minimumDepth=speciesStructureAt(species).x;
+              float columnAmount=columnSpeciesAmount(frame,band,columnRegion);
               for(int k=0;k<count;k++) {
                 // A space-facing ray first interacts at the top of a dense
                 // deck, not at its extinction-weighted interior centroid.
                 float altitude=top-(float(k)+0.5)*stepMeters;
-                float sigma=speciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),speciesStructureAt(species).x,productionAreaBand(uv,species))*parameters.w;
+                float sigma=columnSpeciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),minimumDepth,columnAmount)*parameters.w;
                 float opticalDepth=sigma*stepMeters;
                 firstMoment+=exp(-integrated)*(1.0-exp(-opticalDepth))*altitude;
                 integrated+=opticalDepth;
