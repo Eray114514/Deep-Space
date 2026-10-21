@@ -46,6 +46,10 @@ B5 实际表示：设云区间前空气为 `(Lf,Tf)`，区间内联合空气/云
 
 ## 已实现的帧接口与边界（2026-10-20）
 
+2026-10-21 补充地表首用顺序：terrain/water 构造时调用 `prepareSurfaceAtmosphere` 注册 receiver owner 与幂等 draw binder，owner/安装状态放 WeakMap/WeakSet，不把 live planet 提前塞入可 JSON 序列化的 userData。介质 uniforms 仍到首次 draw/compile 才惰性创建，避免材质早于云纹理构造时捕获不完整字典。首次 `onBeforeRender` 就绑定真实眼点、恒星/空气与屏幕模式；Three 先 draw callback 再编译，不能等 `onBeforeCompile` 才安装 callback。原 terrain detail/ocean/interaction 回调必须保留，所有变体复用同组 uniforms。
+
+屏幕云影按已发布 production 纹理、`uBandsReady`、同一 `uSpeciesMap` 所有者和可用体积网格准入，不再等待 `weatherStream.ready`。后者属于未来预测 bracket/缓存优化；尚未就绪时仍可按当前已发布场完整积分物理 beam，不能将预测未完成误当当前场无效。legacy/clear、缺纹理、失配所有者或显式隐藏仍不进入 production receiver。此改动不等待 worker 换输入、不伪造预测 ready，也不解决当前快照与目标天气时刻之间的既有延迟。`compileAsync` 不执行 draw callback，仍须单独管理其变体与生命周期，不能用首用修复宣称预热图已完整。[首用证据](baselines/foundation-receiver-startup-2026-10-21/README.md)分别记录同快照 GPU 合同与整页失败。
+
 `GameLegacyPipeline.frameState` 是本视角的 `RenderFrameState`，不是第二个颜色累积器。主循环调用 `render({origin,context,timeEpoch})`：origin 是双精度导航原点，context 是实际系统对象，timeEpoch 是 `CelestialClock.epoch`（显式 set/advance 增加，连续 update 不增加）。begin 复制当前真实相机 world/projection/inverse-projection/view-projection、near/far、原点，以及活动行星的位置/旋转/天气来源；pending 期间 `current` 可读，`previous` 仅指最后一次成功提交。整帧与目标恢复成功后才交换快照；任一 pass 或恢复抛错则 abort，不把部分帧提交为 previous。不要在主循环重新赋值云的 historyValid。
 
 云仍拥有原来的半浮点颜色/不透明深度双缓冲，但只在其 sequence 紧邻共同 previous 时复用；中间跳过 volume 的帧不会借用错帧矩阵。来源/行星、材质版本/表示、半径或深度编码改变均拒绝不匹配历史；resize、显式跳转、私有预热、context loss 失效。显式失效发生在私有预热恢复的第一步。连续 FOV、姿态和正常时钟变化使用前后矩阵，不因每帧变化一律清历史。

@@ -3,20 +3,30 @@ import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionGLSL, stellarOcclusionUniforms, bindStellarOcclusion } from './stellar-occlusion.js';
 import { surfaceCloudGLSL,surfaceCloudLightingGLSL,surfaceCloudUniforms,bindSurfaceClouds,
-  hasSurfaceCloudMedium } from './cloud/surface-clouds.js';
+  hasSurfaceCloudMedium, registerSurfaceCloudOwner } from './cloud/surface-clouds.js';
+const preparedSurfaces = new WeakSet();
 
-// Bind the same solar transmission and isotropic sky field to world surfaces.
-// Portal/remote bodies without an active air context retain their own lighting.
-export function installSurfaceAtmosphere(material, planet, shader) {
-  material.userData.surfaceCloudOwner=planet;
+function surfaceMediumUniforms(material, planet) {
   if (!material.userData.surfaceMedium) {
-    const uniforms = { ...namespacedAtmosphereUniforms(), ...stellarOcclusionUniforms(),
+    material.userData.surfaceMedium = { ...namespacedAtmosphereUniforms(), ...stellarOcclusionUniforms(),
       ...surfaceCloudUniforms(planet),
       uSurfaceViewToLocal: { value: new THREE.Matrix3() } };
+  }
+  return material.userData.surfaceMedium;
+}
+
+// Register the receiver and draw binder before the first compile. Three calls
+// material.onBeforeRender BEFORE compiling a cold material, so installation in
+// onBeforeCompile is too late for the first receiver-depth draw's screen mode.
+// Uniforms stay lazy: a planet's material predates its published cloud textures.
+export function prepareSurfaceAtmosphere(material, planet) {
+  registerSurfaceCloudOwner(material, planet);
+  if (!preparedSurfaces.has(material)) {
     const rotation = new THREE.Matrix4();
     const previous = material.onBeforeRender;
     material.onBeforeRender = function (renderer, scene, camera, ...args) {
       previous?.call(this, renderer, scene, camera, ...args);
+      const uniforms = surfaceMediumUniforms(material, planet);
       rotation.makeRotationFromQuaternion(planet._invFrame).multiply(camera.matrixWorld);
       uniforms.uSurfaceViewToLocal.value.setFromMatrix4(rotation);
       bindStellarOcclusion(uniforms, planet, material);
@@ -28,9 +38,16 @@ export function installSurfaceAtmosphere(material, planet, shader) {
         }
       } else uniforms.air_uEnabled.value = 0;
     };
-    material.userData.surfaceMedium = uniforms;
+    preparedSurfaces.add(material);
   }
-  Object.assign(shader.uniforms, material.userData.surfaceMedium);
+  return material;
+}
+
+// Bind the same solar transmission and isotropic sky field to world surfaces.
+// Portal/remote bodies without an active air context retain their own lighting.
+export function installSurfaceAtmosphere(material, planet, shader) {
+  prepareSurfaceAtmosphere(material, planet);
+  Object.assign(shader.uniforms, surfaceMediumUniforms(material, planet));
   shader.defines ||= {};
   shader.defines.SURFACE_CLOUD_MEDIUM=Number(hasSurfaceCloudMedium(planet));
   const transport = /* glsl */`

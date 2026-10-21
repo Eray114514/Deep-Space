@@ -1,5 +1,5 @@
 import { terrainDetailDomains, terrainDetailGLSL, bindTerrainDetailFrame } from './terrain-detail-frame.js';
-import { installSurfaceAtmosphere } from './surface-atmosphere.js';
+import { installSurfaceAtmosphere, prepareSurfaceAtmosphere } from './surface-atmosphere.js';
 import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
 import { hasSurfaceCloudMedium } from './cloud/surface-clouds.js';
 // Shader-level beauty: a shared procedural detail texture, triplanar
@@ -629,7 +629,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     installSurfaceAtmosphere(material, planet, shader);
   };
   material.customProgramCacheKey = () => 'terrain-layered-pbr-v16-relative-detail-'+hasSurfaceCloudMedium(planet);
-  return material;
+  return prepareSurfaceAtmosphere(material, planet);
 }
 
 // Living water combines a deterministic gravity-wave cascade, a camera-local
@@ -1436,7 +1436,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     installSurfaceAtmosphere(material, planet, shader);
   };
   material.customProgramCacheKey = () => `water-regional-wave-field-v34-view-frame:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
-  return material;
+  return prepareSurfaceAtmosphere(material, planet);
 }
 
 // Procedural cloud coverage evaluated per-FRAGMENT: a texture-based fBm

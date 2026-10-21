@@ -1,6 +1,6 @@
 # 云与大气：批次 B 执行计划
 
-更新：2026-10-20（基础任务接入共同帧接口及局部历史深度/范围约束；B4 视觉返工仍保留暂停断点，未新增整项完成）。本文件是 B 的唯一规格与进度入口；[阶段 4 专项](cloud-phase4-volume-march.md)维护云的落地步骤，[视觉协议](visual-targets/README.md)维护统一评估方法。[基础审查](reviews/cloud-atmosphere-2026-09-20.md)记录早期代码依据；[最新反馈与参考审查](reviews/cloud-visual-rework-2026-09-30.md)记录本轮返工决定。
+更新：2026-10-21（基础任务接入共同帧接口、局部历史约束及地表首用依赖修复；B4 视觉返工仍保留暂停断点，未新增整项完成）。本文件是 B 的唯一规格与进度入口；[阶段 4 专项](cloud-phase4-volume-march.md)维护云的落地步骤，[视觉协议](visual-targets/README.md)维护统一评估方法。[基础审查](reviews/cloud-atmosphere-2026-09-20.md)记录早期代码依据；[最新反馈与参考审查](reviews/cloud-visual-rework-2026-09-30.md)记录本轮返工决定。
 
 **B0、B5 已完成，B4 进行中；查询契约、生产宏观天气迁移和局地云高接线已交付，首族密度/光学闭环仍未完成。** B5 已闭合大气传输、云/空气联合合成与局部双星照明，证据和近似边界见[B5 交接](baselines/b5-2026-09-21/README.md)。天气输入的历史交接见[B4 天气交接](baselines/b4-weather-2026-09-26/README.md)，本轮变化与剩余问题见[局地高度诊断](reviews/b4-local-height-2026-09-27.md)。多云种、全场景反射/降水与统一 TAA 仍待推进。
 
@@ -128,6 +128,8 @@ B4 沿用 B5 的正确传输与照明输入，再校准各云族的光学表现�
 - [ ] S1–S4、多云种侧切面、多种子/光照通过五维目视评审，并保留正常玩家画面。
 
 ### B7：统一 TAA、性能与生命周期
+
+2026-10-21 基础任务另修地表首用依赖：receiver按已发布production场准备，不等待未来预测bracket；terrain/water首次draw前已有owner/binder，uniforms仍惰性创建、保持原回调链。冻结hour-zero、无worker、cache=0的真实冷材质/双星receiver与正确装配旧路径native零差。详见[接口补充](medium-render-contract.md)与[首用证据](baselines/foundation-receiver-startup-2026-10-21/README.md)。本轮一页复现GL1281，最终被动复验未复现但最长仍87.2754秒，整页稳定性/冷性能未关闭；不勾选B7，也不恢复B4艺术返工。
 
 2026-10-20 基础任务接入了共同 `RenderFrameState`：前后帧相机/双精度原点/行星刚体、成功整帧提交、sequence/时间 epoch/内容/布局失效，以及空气/云/云影实际眼点。修复主循环强制使 history 有效和私有预热失效调用为空的漏洞，云已有刚体映射；[帧接口固定证据](baselines/foundation-frame-state-2026-10-20/README.md)保留原检查。续轮增加逐 tap 不透明深度支持、天空分类、未知深度拒绝、当前邻域 signed RGBA 限幅，以及严格静止的原 texel 路径，见[接口 v1.3](medium-render-contract.md)与[过滤固定证据](baselines/foundation-history-filter-2026-10-20/README.md)。这是现有局部 history 的质量约束；云占用深度/天气平流、逐物体 motion、共同 jitter、完整反遮挡和统一 TAA 仍未实现，下列整项不勾选。不同云层平流速度及天气场变形不能用一个全局风旋转冒充正确对应。默认长冷暂停及画质否决继续保留，这不是云专项恢复或性能完成。
 

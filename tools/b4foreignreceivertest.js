@@ -28,8 +28,15 @@ try {
     // Controlled beam, independent of cloud shape. Count full integrations to
     // distinguish a correct result from work still happening on hidden pixels.
     const start=surfaceCloudGLSL.indexOf('float cloudSunOpticalDepth(');
-    const end=surfaceCloudGLSL.indexOf('\n  }',surfaceCloudGLSL.indexOf('return od;',start))+6;
-    if(start<0||end<start)throw Error('Missing physical beam');
+    if(start<0)throw Error('Missing physical beam');
+    // The shared beam wrapper delegates to cloudSunOpticalDepthLimit now.
+    // Match its function body, not the obsolete literal "return od".
+    const open=surfaceCloudGLSL.indexOf('{',start);let end=open+1,nesting=1;
+    while(nesting&&end<surfaceCloudGLSL.length) {
+      if(surfaceCloudGLSL[end]==='{')nesting++;
+      if(surfaceCloudGLSL[end++]==='}')nesting--;
+    }
+    if(open<0||nesting!==0)throw Error('Incomplete physical beam wrapper');
     const controlled=surfaceCloudGLSL.slice(0,start)+
       'float cloudSunOpticalDepth(vec3 local,vec3 direction,float sigma){testCalls+=1.0;return 1.6094379124341;}'+surfaceCloudGLSL.slice(end);
     const material=new T.ShaderMaterial({defines:{SURFACE_CLOUD_MEDIUM:1},uniforms,

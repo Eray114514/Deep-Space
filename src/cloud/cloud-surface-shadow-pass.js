@@ -4,7 +4,18 @@ import {productionCloudGLSL} from './production-medium-glsl.js';
 import {weatherAtlasGLSL} from './weather-atlas.js';
 import {cloudBeamGLSL} from './cloud-beam-glsl.js';
 import {cloudLightCacheGLSL} from './cloud-light-cache-glsl.js';
-import {setCloudSurfacePreparation} from './surface-clouds.js';
+import {setCloudSurfacePreparation, surfaceCloudOwner} from './surface-clouds.js';
+
+// Forecast readiness owns cache endpoints, not the currently published field.
+// Before a forecast bracket is ready, the receiver can integrate that field's
+// full physical beam. Legacy/clear materials do not publish production bands.
+export function cloudSurfaceReceiverReady(body) {
+  const material = body?.volCloudMat, u = material?.uniforms;
+  return Boolean(body?.volCloudMesh && body.cloudVisualEnabled !== false
+    && material?.defines?.PRODUCTION_CLOUD_MEDIUM === 1 && body.cloudSpeciesTex
+    && u.uBandsReady?.value > 0.5 && u.uSpeciesMap?.value === body.cloudSpeciesTex
+    && u.uNoise3?.value && u.uWeatherMapHi?.value);
+}
 
 // Compute the same two physical solar beams on a depth-guided screen grid.
 // The opaque depth is current-frame, from the original displaced materials.
@@ -75,11 +86,11 @@ export class CloudSurfaceShadowPass {
     this.owner=planet;
     const bodies=new Set();
     const add=body=>{
-      if(body?.volCloudMat && body.weatherStream?.ready && body.cloudVisualEnabled!==false)bodies.add(body);
+      if(cloudSurfaceReceiverReady(body))bodies.add(body);
     };
     add(planet);
     this.scene.traverseVisible(object=>{
-      for(const material of [object.material].flat())add(material?.userData.surfaceCloudOwner);
+      for(const material of [object.material].flat())add(surfaceCloudOwner(material));
     });
     if(!bodies.size)return;
     const size=renderer.getDrawingBufferSize(this.viewport);

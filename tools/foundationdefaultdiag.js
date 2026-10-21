@@ -17,6 +17,7 @@ const errorsFromBoot=process.argv.includes('--errors-from-boot');
 const ownerModes=process.argv.includes('--owner-modes');
 const historySweep=process.argv.includes('--history-sweep');
 const historyTransitions=process.argv.includes('--history-transitions')||historySweep;
+const receiverStartup=process.argv.includes('--receiver-startup');
 const parallelNearControl=process.argv.includes('--parallel-near-control');
 const viewLoopControl=process.argv.includes('--view-loop-control');
 const beamLoopControl=process.argv.includes('--beam-loop-control');
@@ -143,6 +144,31 @@ try {
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1`);
   await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
   await page.evaluate(installFoundationGLProbe);
+  if(receiverStartup)await page.evaluate(async()=>{
+    const {surfaceCloudOwner}=await import('/src/cloud/surface-clouds.js');
+    const pass=NMS._pipeline.cloudSurfaceShadow,original=pass.render;
+    const data=window.__foundationReceiverStartup={records:[],restored:false};
+    const summary=body=>body?{id:body.id??body.name,streamReady:!!body.weatherStream?.ready,
+      hasBands:!!body.cloudSpeciesTex,hasVolume:!!body.volCloudMat,
+      bandsReady:body.volCloudMat?.uniforms.uBandsReady?.value,
+      visual:body.cloudVisualEnabled!==false}:null;
+    const wrapper=function(...args){
+      if(data.records.length>=16)return original.apply(this,args);
+      const materials=new Set();this.scene.traverseVisible(object=>{
+        for(const material of [object.material].flat())if(material)materials.add(material);
+      });
+      const row={atMs:performance.now(),active:summary(args[2]),
+        discovered:[...materials].filter(m=>surfaceCloudOwner(m)).map(m=>summary(surfaceCloudOwner(m))),
+        surfaceVariants:[...materials].filter(m=>m.customProgramCacheKey?.().match(/terrain-layered|water-regional/))
+          .map(m=>({type:m.type,compiled:!!m.userData.shader,owner:!!surfaceCloudOwner(m),screen:m.defines?.SURFACE_CLOUD_SCREEN}))};
+      data.records.push(row);
+      try{return original.apply(this,args);}
+      finally{row.ready=this.ready;row.receivers=[...this.receiverIds.keys()].map(summary);row.wallMs=performance.now()-row.atMs;}
+    };
+    pass.render=wrapper;window.__foundationReceiverStartupRestore=()=>{
+      if(pass.render===wrapper){pass.render=original;data.restored=true;}
+    };
+  });
   if(historyTransitions)await page.evaluate(()=>{
     const pass=NMS._pipeline.volumePass,object=pass.resolveQuad._mesh,original=object.onBeforeRender;
     const data={phase:null,records:[],counts:{},restored:false};window.__foundationHistory=data;
@@ -341,6 +367,7 @@ try {
     const final={gl:gl.getError(),lost:gl.isContextLost(),lostEvents:__foundationLost,
       workers:window.__foundationWorkers,probe:window.__foundationGLProbe.snapshot()};
     window.__foundationHistoryRestore?.();final.history=window.__foundationHistory??null;
+    window.__foundationReceiverStartupRestore?.();final.receiverStartup=window.__foundationReceiverStartup??null;
     final.mainContextId=window.__foundationContextProbe.idForCanvas(NMS._renderer.domElement);
     window.__foundationContextProbe.dispose();
     final.contexts=window.__foundationContextProbe.snapshot();
@@ -350,7 +377,7 @@ try {
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
   const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
   report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
-    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,
+    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,
     stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest,
     boundary:'Default 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.'};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
@@ -375,6 +402,7 @@ try {
   assert.equal(finalState.probe.firstError,null,'Intrusive trace errors must not be erased by checkpoints or screenshot frames');
   assert.ok(finalState.probe.errorArms.every(arm=>arm.preexisting===0));assert.deepEqual(finalState.probe.faults,[]);
   assert.deepEqual(finalState.probe.lifetimeFaults,[],'Deleted programs must not be queried');
+  assert.deepEqual(finalState.probe.programQueryFailures,[],'Fast invalid program queries remain failures');
   assert.ok(checkpoints.slice(1).every(p=>p.near?.worker&&!p.near.workerError),'Cloud/near-water integration must retain its actual worker');
   assert.ok(finalState.workers.every(event=>event.kind!=='error'&&event.kind!=='messageerror'));
   assert.equal(driverWarningCount,0,'Driver GL warnings must not be hidden by a clean final getError');
@@ -395,6 +423,7 @@ try {
       assert.equal(row?.stationary,0,'Real turn must not take the stationary shortcut');
     }
   }
+  if(receiverStartup)assert.ok(finalState.receiverStartup.restored);
   if(ownerModes) {
     assert.ok(ownerModesResult?.restored,'Owner draw observer must restore renderBufferDirect');
     assert.deepEqual(ownerModesResult.faults,[]);assert.equal(ownerModesResult.droppedDraws,0);
@@ -410,7 +439,7 @@ try {
 } catch(error) {
   const state=await page?.evaluate(()=>({stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
     profile:window.NMS?._pipeline?.performanceSnapshot(),probe:window.__foundationGLProbe?.snapshot(),workers:window.__foundationWorkers,
-    ownerModes:window.__foundationOwnerModes,history:window.__foundationHistory,parallelPreparation:window.__foundationCloudPrewarm,contexts:window.__foundationContextProbe?.snapshot(),
+    ownerModes:window.__foundationOwnerModes,history:window.__foundationHistory,receiverStartup:window.__foundationReceiverStartup,parallelPreparation:window.__foundationCloudPrewarm,contexts:window.__foundationContextProbe?.snapshot(),
     mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)})).catch(captureError=>({captureError:String(captureError)}));
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
   await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,

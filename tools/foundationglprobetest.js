@@ -107,6 +107,24 @@ function fixture(extraMethods = 0) {
 
 {
   const f = fixture();
+  const unknown = {};f.native.deleteProgram.call(f.gl, unknown);
+  assert.equal(f.gl.getProgramParameter(unknown, 0x91b1), null);
+  const data = f.probe.snapshot();
+  assert.equal(f.errors(), 0, 'Failed-query capture must remain passive');
+  assert.equal(data.slowCalls.length, 0);
+  assert.equal(data.programQueryFailures.length, 1);
+  assert.equal(data.programQueryFailures[0].queriedProgramId, null);
+  assert.equal(data.programQueryFailures[0].parameter, 0x91b1);
+  assert.ok(data.programQueryFailures[0].stack.includes('wrapper'));
+  assert.equal(f.gl.getError(), 1281, 'Native error must remain available to the application');
+  for (let i = 0; i < 130; i++) f.gl.getProgramParameter(unknown, 0x91b1);
+  assert.equal(f.probe.snapshot().programQueryFailures.length, data.limits.programQueryFailures);
+  assert.equal(f.probe.snapshot().dropped.programQueryFailures, 3);
+  f.probe.dispose();
+}
+
+{
+  const f = fixture();
   f.probe.mark('error-reproduction');
   f.setError(1282);
   const arm = f.probe.armErrors();

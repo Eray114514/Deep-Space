@@ -7,6 +7,9 @@ import {cloudLightCacheGLSL,cloudLightCacheUniforms} from './cloud-light-cache-g
 import * as THREE from 'three';
 import { SurfaceViewFrame } from '../surface-view-frame.js';
 const surfaceViews = new WeakMap();
+const surfaceOwners = new WeakMap();
+export function registerSurfaceCloudOwner(material, planet) { surfaceOwners.set(material, planet); }
+export function surfaceCloudOwner(material) { return material ? surfaceOwners.get(material) : undefined; }
 let preparingSurface=false;
 export function setCloudSurfacePreparation(value) {preparingSurface=Boolean(value);}
 

@@ -1,6 +1,6 @@
 # 渲染基础改进与交接
 
-更新：2026-10-20。本文维护基础问题、施工顺序和每轮交付边界，供长期任务继续执行。全局画质目标与批次状态见[优化路线图](optimization-roadmap.md)；云、大气、天气与统一时域的规格和进度仍只在[B 计划](cloud-atmosphere-rewrite.md)维护。
+更新：2026-10-21。本文维护基础问题、施工顺序和每轮交付边界，供长期任务继续执行。全局画质目标与批次状态见[优化路线图](optimization-roadmap.md)；云、大气、天气与统一时域的规格和进度仍只在[B 计划](cloud-atmosphere-rewrite.md)维护。
 
 ## 目标与判断
 
@@ -494,9 +494,21 @@ F4 已有可用前后帧接口，但仍不等于完整运动/TAA：球壳代表�
 
 范围、原图、失败控制、167文件原始运行时和冻结工具见[过滤固定证据](baselines/foundation-history-filter-2026-10-20/README.md)，介质接口升级至[v1.3](medium-render-contract.md)。局部深度/范围约束已经实现，不再列成完全空白；云占用、混层平流、逐物体motion、共同jitter和完整反遮挡/TAA继续开放，B4视觉暂停断点不变。
 
+## 2026-10-21 交付：地表首用绑定与当前天气准入
+
+实际首帧观察确认：当前production bands/volume已发布且`uBandsReady=1`，预测`weatherStream.ready=false`却使屏幕云影准备跳过；另10份冷terrain/water材质在发现阶段没有owner。原owner和draw binder都直到`onBeforeCompile`才安装，而Three先执行draw callback再首次编译，所以第一draw还会漏掉眼点、恒星、准备禁用和SCREEN1绑定。
+
+现在按已发布、同一纹理所有者的production快照准备receiver；缺预测缓存时完整积分物理beam，legacy/clear、缺失/失配或隐藏的资源仍排除。terrain/water构造结束就注册owner和幂等binder，保留原detail/ocean/interaction回调，uniforms仍到首次draw/compile惰性创建以等待云纹理同步构造结束；变体复用原uniform身份。owner/安装状态放WeakMap/WeakSet，不扩大冷Material.clone的userData循环引用风险。没有修改云物理节点、尺寸/质量或增加累积器，也没有完成depth-only或compile-only预热图。
+
+真实冷Planet的hour-zero天气冻结、无worker、GPU缓存明确0：4096个非空receiver与双星非平凡物理beam通过；新实现无active owner仍发现冷地形/水，第一draw已绑定SCREEN1/enabled0/正确bands。强制旧receiver资格、保持同快照输入后，原生Float receiver、重复与最终地表RGBA16F都逐位零差。Node合同覆盖callback链/幂等/晚发布/clone/生产准入，frame/volume/history、B5两分支偏移和smoke仍过；148模块及所有锁前合同通过，npm test仍仅在已暂缓宇宙锁退出1，锁未改。
+
+**只接受以上首用合同修复，不关闭整页稳定性或冷性能。** 本轮旧页最大95.5825秒；首个新被动页虽为65.4989秒，但输入处GL1281及12条`Program object expected`警告，门槛失败。两次同步查错页83.3937/81.4181秒未复现，不能当作修复。最终同源码被动页87.2754秒，原120/45秒初建/替换、W输入与time/teleport/resize历史恢复通过，GL0/context存活；首调用预测未ready已产生6个receiver。73个非首帧可用volume GPU样本中位224.074976ms，未排空55项查询、含混合状态，不构成配对暖性能/FPS成绩。原图已看，块状云和海面重复仍明显，视觉不通过。
+
+为下次抓实际GL1281调用，探针增加被动保存快速`getProgramParameter→null`的实际查询ID/参数/堆栈，限量128；不新增getError/isProgram/flush，不清错。最终页null查询、driver警告、lifetimeFault均0；失败页发生在新增观察之前，尚不能归因。startup compileAsync跟随live程序/无取消等问题仅为待核路径，本轮未改vendor。完整失败、工具修正、同快照oracle、原图和167文件原始运行时见[首用固定证据](baselines/foundation-receiver-startup-2026-10-21/README.md)，最终digest`6f49cb576212de11fb9df960130cb7e890574132efb7a94bb999a747b2857e99`。另一任务B4视觉断点保留，近云冷准备、F3候选准入/四场吞吐、F4/B7/F5及整体画质继续开放。
+
 ## 下轮启动条件与具体工作
 
-先读本文、云断点、`git status` 和当前坐标/介质契约。当前最终源码/测试入口以本轮`41fb31b9…`的[过滤固定证据](baselines/foundation-history-filter-2026-10-20/README.md)为准；下列旧摘要仅用于追溯各冷控制和候选的独立失败，不能覆盖当前接受版本。底层尚未全部完成；另一任务的云专项继续等待，基础任务继续覆盖云的底层成本和接口。F3 候选准入仍严格保留，但**不再把其他默认路径的基础修复全部串行阻塞在该候选的 Scene 问题上**。F2c 地形与海面采样、精确 terrain 快照和近水 worker 已有生产实现，不重复开发；本机双档近水跟随已过，下一轮推进 F4 消费者、其他实际生成/驻留瓶颈及全效果范围，同时按新证据处理 F3：
+先读本文、云断点、`git status` 和当前坐标/介质契约。当前最终源码/测试入口以`6f49cb57…`的[首用固定证据](baselines/foundation-receiver-startup-2026-10-21/README.md)为准；局部历史过滤保留10-20已实现合同，不重做；下列旧摘要仅用于追溯各冷控制和候选的独立失败，不能覆盖当前接受版本。底层尚未全部完成；另一任务的云专项继续等待，基础任务继续覆盖云的底层成本和接口。优先用新增快速程序查询记录抓GL1281实际栈，继续覆盖完整冷准备依赖，不能把首帧receiver修复当作近云大程序或全部响应性已解决。F3 候选准入仍严格保留，但**不再把其他默认路径的基础修复全部串行阻塞在该候选的 Scene 问题上**。F2c 地形与海面采样、精确 terrain 快照和近水 worker 已有生产实现，不重复开发；本机双档近水跟随已过，下一轮推进 F4 消费者、其他实际生成/驻留瓶颈及全效果范围，同时按新证据处理 F3：
 
 1. **继续追默认启动/冷暂停、context lost 与独立 GL1281，同时拒绝以冷减费换暖态回退。** 前轮只安装了同值 LUT 方向循环，本轮另修通道状态/失败 history（见上方续交付与新证据）；shared-call 与 production-specialized 云候选均已撤回，约45～46秒只属于被否决的 shared-call 页。先核对最新状态修复 `a3f02238…` 的证据，再读前轮 `bf224d59…` 的 `acceptance.json`；首个最终页lost后，该页冷帧无效。早期context事件/timeStamp/statusMessage观察已接入，先读本轮loss与74秒legacy冷期限失败，不重复开发事件探针；原生调用观察仍需继续追启动任务，失败页的boot后探针仅见飞船预热贴图上传慢调用，没有正式pipeline draw/LUT编译，不能归因LUT，也不能倒推安装前未执行。独立复验后再按实际程序/等待位置拆分地形、水体和云冷准备；保留候选源码与十轮2K配对作为失败控制，不原样重复安装。轨道提前编译近云与同值双星循环也已否决，不继续当作已验证方向；先覆盖近云/未缓存远云/地表的真实准备依赖和可用性，再决定执行职责拆分。抖动检查使用不同的mod16相位，旧0/192只算phase0重复。任何新调用/编译结构须同时过逐位 HDR/native 重复、实际物理分支及足够暖样本成本检查。用 `foundationdefaultdiag.js` 的默认被动/`--errors-from-boot` 分开成本与错误归因，保持首次放置前观察与截图后最终检查；`waterworkercloudtest.js --reference` 的旧网格控制原45秒替换失败，不能拿其未执行输入排除问题。不关云、加超时或清错后只看末帧来关闭失败。**F3 候选仍以实际 Scene HDR 与冷执行为准入门槛。** F3k 程序保留/取消、F3l 质量复用、F3m 职责拆分已有实现，默认关闭。先读 F3m 的输入/插桩控制范围，再用 `cloudlightbatchpipetest.js --jitter=192` 及 `cloudlightbatchscenediag.js --quantiles` 复现；只有 mode-zero 仍匹配未改参考，才可据内部数据归因。顶点/纹理/实际GL上传已有对照，不继续凭更换程序、reset 或初始化猜测解决。常见采样均为显式LOD0或无mip过滤，不能未经阳性控制就把隐式LOD当既定根因。冷执行改善不代替三档/2K动态、长飞、变源/切星及释放；四场可见支持、误差受控空间复用和更新期限仍是吞吐方向，不扩大网格、miss置零、缩短光程或放宽门槛，保持有序介质传输与独立物理/native重复验收。
 2. 协调该照明策略与 `.0015 h` 预测期限、cold compile、bank 创建/快照、过期取消、GPU 提交和 resident bytes；保持近景/远景已统一的来源失效合同，继续验收正式列尺寸的吞吐、跨 epoch、动态消费者和切星/释放。精确 sampler/近水有界后台工作已实现，本机双档 core/接触通过；扩大适配器与全效果范围，并按实际瓶颈决定其他生成消费者的迁移，禁止为每个消费者各开无上限 worker。2026-10-16 正式 2K 路径记录的 339 ms 体积动态成本、预热过期跳过、两版全局队列未清空与旧版移动 context lost 仍需分别复核，不把 patch 跟随通过当成全场景已追上，也不把 driver reset 归因于没有复现控制的某一 shader。小批次的测量不能代替吞吐约束；共同 CPU 账本也不能代称全部工作已有整帧预算。继续归因带正常输入的长暂停，追踪 renderer write 的 R8 控制差异；LOD 发现、上传、worker 与内存/GC 仍在范围内。
