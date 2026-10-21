@@ -9,10 +9,14 @@ exterior.layers.set(3);exterior.visible=false;interior.layers.set(5);
 const light=new THREE.PointLight();light.layers.set(3);light.castShadow=true;
 source.add(exterior,interior,light);scene.add(source);
 let sharedDisposals=0;material.addEventListener('dispose',()=>sharedDisposals++);geometry.addEventListener('dispose',()=>sharedDisposals++);
-let target='player',face=2,mip=1,reject,privateDisposals=0,observed;
+let target='player',face=2,mip=1,privateDisposals=0,observed;
+const controller=new AbortController(),program={program:{},isReady:()=>false};
+const props={programs:new Map([['test',program]]),currentProgram:program};
 const renderer={getRenderTarget:()=>target,getActiveCubeFace:()=>face,getActiveMipmapLevel:()=>mip,
+  domElement:new EventTarget(),getContext:()=>({isContextLost:()=>false}),
+  properties:{get:()=>props,has:()=>true},
   setRenderTarget(value,f=0,m=0){target=value;face=f;mip=m;},
-  compileAsync(group,compileCamera,compileScene) {
+  compile(group,compileCamera,compileScene) {
     const lights=[],renderables=[];compileScene.traverse(o=>{if(o.isLight)lights.push(o);});
     group.traverse(o=>{if(o.isMesh)renderables.push(o);assert.equal(Boolean(o.isLight),false);});
     assert.equal(camera.layers.mask,1);assert.equal(compileCamera.layers.mask,8);
@@ -21,16 +25,16 @@ const renderer={getRenderTarget:()=>target,getActiveCubeFace:()=>face,getActiveM
     assert.notEqual(renderables[0],exterior);assert.equal(renderables[0].isInstancedMesh,true);
     renderables[0].addEventListener('dispose',()=>privateDisposals++);
     assert.equal(exterior.visible,false);assert.equal(source.parent,scene);assert.equal(target,'hdr');
-    observed={group,compileCamera};return new Promise((_resolve,fail)=>{reject=fail;});
+    observed={group,compileCamera};return new Set([material]);
   }};
-const pending=compileRenderVariant(renderer,source,camera,scene,{layer:3,target:'hdr'});
+const pending=compileRenderVariant(renderer,source,camera,scene,{layer:3,target:'hdr',signal:controller.signal});
 assert.equal(target,'player');assert.equal(face,2);assert.equal(mip,1);
 assert.equal(privateDisposals,1);assert.equal(sharedDisposals,0);assert.equal(observed.group.children.length,0);
 // The player is free to change state while KHR readiness remains unresolved.
 camera.layers.set(5);exterior.visible=true;renderer.setRenderTarget('next-player');
-reject(Error('compile failed'));await assert.rejects(pending,/compile failed/);
+controller.abort();await assert.rejects(pending,{code:'aborted'});
 assert.equal(camera.layers.mask,32);assert.equal(exterior.visible,true);assert.equal(target,'next-player');
-renderer.compileAsync=()=>{throw Error('synchronous compile failure');};
+renderer.compile=()=>{throw Error('synchronous compile failure');};
 assert.throws(()=>compileRenderVariant(renderer,source,camera,scene,{layer:3,target:'hdr'}),/synchronous/);
 assert.equal(target,'next-player');assert.equal(camera.layers.mask,32);assert.equal(sharedDisposals,0);
 geometry.dispose();material.dispose();

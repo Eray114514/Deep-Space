@@ -16,6 +16,7 @@ import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 import {RenderProfiler} from './render-profiler.js';
 import {withPreparedShadows} from './render-shadow-state.js';
 import { RenderFrameState } from './render-frame-state.js';
+import { compilePrograms } from './program-preparation.js';
 
 function aliasUniforms(uniforms, aliases) {
   for (const [alias, original] of Object.entries(aliases)) {
@@ -42,6 +43,7 @@ export class GameLegacyPipeline {
     this.scene = scene;
     this.camera = camera;
     this.frameState = new RenderFrameState();
+    this.programPreparation = new AbortController();
     this.cloudLightBanks=new Map();this.cloudLightFrame=0;
     this.cloudSurfaceShadow=new CloudSurfaceShadowPass(scene,camera);
     const target = new THREE.WebGLRenderTarget(1, 1, {
@@ -223,10 +225,11 @@ export class GameLegacyPipeline {
   }
 
   async compileAsync() {
-    await this.renderer.compileAsync(this.scene, this.camera);
+    await compilePrograms(this.renderer, this.scene, this.camera, null, {signal:this.programPreparation.signal});
   }
 
   dispose() {
+    this.programPreparation.abort();
     this.stopProfiling();
     this.cloudSurfaceShadow.dispose();
     for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();

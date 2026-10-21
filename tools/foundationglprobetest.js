@@ -31,8 +31,9 @@ function fixture(extraMethods = 0) {
   method('useProgram', () => {});
   method('deleteShader', () => {});
   method('deleteProgram', program => { if (program) deletedPrograms.add(program); });
-  method('getProgramParameter', program => {
+  method('getProgramParameter', (program, parameter) => {
     if (deletedPrograms.has(program)) { pendingError = 1281; return null; }
+    if (parameter === 0x8b86) return 0;
     return true;
   });
   method('getProgramInfoLog', () => '');
@@ -113,7 +114,9 @@ function fixture(extraMethods = 0) {
   assert.equal(f.errors(), 0, 'Failed-query capture must remain passive');
   assert.equal(data.slowCalls.length, 0);
   assert.equal(data.programQueryFailures.length, 1);
-  assert.equal(data.programQueryFailures[0].queriedProgramId, null);
+  const id = data.programQueryFailures[0].queriedProgramId;
+  assert.ok(Number.isInteger(id));assert.notEqual(id, data.programs[0].id, 'Unknown queried handle must not inherit the current draw program');
+  assert.equal(data.programs.find(p => p.id === id).creationUnobserved, true);
   assert.equal(data.programQueryFailures[0].parameter, 0x91b1);
   assert.ok(data.programQueryFailures[0].stack.includes('wrapper'));
   assert.equal(f.gl.getError(), 1281, 'Native error must remain available to the application');
@@ -121,6 +124,24 @@ function fixture(extraMethods = 0) {
   assert.equal(f.probe.snapshot().programQueryFailures.length, data.limits.programQueryFailures);
   assert.equal(f.probe.snapshot().dropped.programQueryFailures, 3);
   f.probe.dispose();
+}
+
+{
+  const f = fixture(), unknown = {};
+  f.gl.useProgram(unknown);
+  f.gl.getActiveUniform(unknown, 3);
+  const data = f.probe.snapshot(), row = data.programQueryObservations[0];
+  assert.equal(f.errors(), 0);assert.equal(row.name, 'getActiveUniform');assert.equal(row.result, null);
+  assert.equal(row.queriedProgramId, data.programs.find(p => p.creationUnobserved).id);
+  assert.equal(data.programQueryFailures.length, 0, 'Empty reflection alone is not a GL failure');
+  assert.equal(f.gl.getProgramParameter(unknown, 0x8b86), 0);
+  assert.equal(f.probe.snapshot().programQueryObservations.at(-1).result, 0);
+  assert.equal(f.probe.snapshot().programQueryFailures.length, 0);assert.equal(f.errors(), 0);
+  f.gl.deleteProgram(unknown);f.gl.useProgram(unknown);
+  assert.equal(f.probe.snapshot().programQueryObservations.at(-1).deletedUse, true);
+  for (let i = 0; i < 140; i++) f.gl.getActiveAttrib(f.program, 0);
+  assert.equal(f.probe.snapshot().programQueryObservations.length, data.limits.programQueryObservations);
+  assert.ok(f.probe.snapshot().dropped.programQueryObservations > 0);f.probe.dispose();
 }
 
 {
@@ -152,6 +173,13 @@ function fixture(extraMethods = 0) {
   assert.equal(f.errors(), callsAtFailure, 'first API error must stop per-call checking');
   assert.equal(f.gl.getError(), 1281, 'after disarming, application receives native pending error');
   f.probe.dispose();
+}
+
+{
+  const f = fixture();f.gl.useProgram(f.program);f.probe.armErrors();f.setError(1281);
+  f.gl.getProgramParameter(null, 0x8b86);
+  assert.equal(f.probe.snapshot().firstError.programId, null, 'An explicit null handle must not inherit the last requested draw program');
+  assert.equal(f.probe.snapshot().firstError.args[0], null);f.probe.dispose();
 }
 
 {
@@ -218,7 +246,7 @@ function fixture(extraMethods = 0) {
   assert.equal(data.lifetimeFaults[0].deletion.stage, 'retired-owner');
   assert.match(data.lifetimeFaults[0].stack, /wrapper|inspectLifetime/);
   assert.match(data.lifetimeFaults[0].deletion.stack, /wrapper|track/);
-  assert.equal(data.programs.find(program => program.id === data.lifetimeFaults[1].programId).createdBeforeProbe, true);
+  assert.equal(data.programs.find(program => program.id === data.lifetimeFaults[1].programId).creationUnobserved, true);
   assert.equal(data.totals.find(row => row.name === 'getProgramParameter').slowCalls, 0,
     'fast stale KHR polls must still retain lifetime evidence');
   assert.equal(f.errors(), 0, 'passive lifetime capture must not ask GL for validity or errors');

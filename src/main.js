@@ -15,6 +15,7 @@ import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
 import { compileRenderVariant } from './render-prewarm.js';
+import { compilePrograms } from './program-preparation.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
@@ -225,6 +226,7 @@ let shipPipelineWarmPending = false;
 let heroTransitionActive = false;
 const startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
+const startupCompile = new AbortController();
 // Shader compilation may consume most of the general warm-up deadline on a
 // cold browser profile.  Give the visible terrain/water LOD a separate,
 // bounded settling window so control is not handed over during a morph.  The
@@ -268,6 +270,7 @@ function disposeSurfaceBootstrap() {
 function releaseStartupPrewarm(reason) {
   if (startupPrewarmExpired) return;
   startupPrewarmExpired = true;
+  startupCompile.abort();
   surfaceBootstrapPending = false;
   surfacePipelinesReady = true;
   for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
@@ -331,11 +334,8 @@ function prewarmSurfacePipelines(planet) {
   // representative warm-up is therefore enough.  Recompiling when a nearby
   // moon briefly becomes the closest body can overlap the live frame and
   // leave Three.js without a currentProgram while it polls isReady().
-  if (!planet || warmedSurfacePlanet || typeof renderer.compileAsync !== 'function') return;
-  // compileAsync is not re-entrant for a shared renderer/material registry.
-  // A scripted teleport (or a very close moon) can change the nearest body
-  // while the opening planet is still compiling; starting a second compile
-  // then leaves one material without currentProgram and crashes isReady().
+  if (!planet || warmedSurfacePlanet) return;
+  // Serialize startup scene preparation; readiness itself owns program identities.
   if (!surfacePipelinesReady) return;
   // The private target is a startup-only cache warmer. Once the first playable
   // frame has been released (or its budget expired), later planets compile on
@@ -412,16 +412,26 @@ function prewarmSurfacePipelines(planet) {
   const lightIntensity = sunShadow.intensity;
   sunShadow.visible = true;
   sunShadow.intensity = 1e-7;
-  const tasks = [renderer.compileAsync(surfaceBootstrapGroup, camera, scene)];
-  sunShadow.visible = lightWasVisible;
-  sunShadow.intensity = lightIntensity;
+  let compilation;
+  try {
+    compilation = compilePrograms(renderer, surfaceBootstrapGroup, camera, scene, {signal:startupCompile.signal});
+  } catch (error) {
+    surfacePipelinesReady = true;
+    disposeSurfaceBootstrap();
+    console.warn('surface pipeline submission failed', error);
+    return;
+  } finally {
+    sunShadow.visible = lightWasVisible;
+    sunShadow.intensity = lightIntensity;
+  }
 
   // The private render also warms the native depth/distance variants using
   // each representative's production deformation materials and draw hooks.
-  Promise.all(tasks).then(() => {
+  compilation.then(() => {
     if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
     surfacePipelinesReady = true;
+    disposeSurfaceBootstrap();
     console.warn('surface pipeline prewarm failed', error);
   });
 }
@@ -433,6 +443,10 @@ function prewarmLoadedShipPipelines() {
   }
   if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending
     || !surfacePipelinesReady) return;
+  if (startupPrewarmExpired) {
+    shipPipelinesWarmed = true;
+    return;
+  }
   shipPipelineWarmPending = true;
   surfacePipelinesReady = false;
   const textures = new Set();
@@ -479,7 +493,7 @@ function prewarmLoadedShipPipelines() {
     try {
       if(layer===0){ship.setForegroundOnly(false);sunShadow.visible=true;}
       return compileRenderVariant(renderer,ship.group,camera,scene,
-        {layer,target,shadowLight:layer===0?sunShadow:null});
+        {layer,target,shadowLight:layer===0?sunShadow:null,signal:startupCompile.signal});
     } finally {
       ship.setForegroundOnly(foreground);sunShadow.visible=sunVisible;
     }
@@ -704,6 +718,7 @@ let pendingRoute = null;
 let warpPreparedSystem = null;
 let transferredPreparedDestination = null;
 let warpPreparationToken = 0;
+let warpCompile = new AbortController();
 let warpPreparedWaterWarmState = 'idle';
 let warpPreparedWaterWarmPlanet = null;
 let warpPreparedWaterWarmMesh = null;
@@ -2063,6 +2078,7 @@ function resetPreparedDestinationWarmState() {
 
 function disposePreparedWarpSystem() {
   warpPreparationToken++;
+  warpCompile.abort();warpCompile = new AbortController();
   transferredPreparedDestination = null;
   resetPreparedDestinationWarmState();
   if (!warpPreparedSystem) return;
@@ -2121,15 +2137,18 @@ async function prewarmWorldMaterials(body) {
     mesh.position.set(0, 0, -Math.max(8, camera.near * 4));
     mesh.scale.setScalar(1e-7);
     scene.add(mesh);
+    let compilation;
     try {
-      await renderer.compileAsync(mesh, camera);
+      compilation = compilePrograms(renderer, mesh, camera, scene);
     } finally {
       scene.remove(mesh);
     }
+    await compilation;
   }
 }
 
 async function uploadPreparedLodMeshes(targetBody, prepared) {
+  const signal = warpCompile.signal;
   const meshes = [];
   const collectBuiltMeshes = (lod) => {
     const visit = (node) => {
@@ -2142,11 +2161,9 @@ async function uploadPreparedLodMeshes(targetBody, prepared) {
   collectBuiltMeshes(targetBody?.waterLod);
   if (meshes.length === 0) return;
 
-  // Compile the real chunk objects, not look-alike clones. WebGPU caches a
-  // RenderObject per mesh; clones warm the shared shader but still leave every
-  // destination chunk to create bindings on its first tunnel frame. Keep the
-  // hidden system tiny and behind the route camera while compilation walks all
-  // prepared objects, then restore its authored transform and visibility.
+  // Submit the real prepared chunks against destination lighting, then restore
+  // every live transform and flag before readiness can yield to another frame.
+  // Compilation prepares programs; real buffer upload still needs a warm draw.
   const group = targetBody.group;
   const groupState = {
     visible: group.visible,
@@ -2193,22 +2210,10 @@ async function uploadPreparedLodMeshes(targetBody, prepared) {
       body.group.visible = false;
     }
   }
+  let compilation;
   try {
-    // Capture the exact post-adoption light topology and every object that is
-    // visible on the first destination frame. Compiling against source-system
-    // lights created different WebGPU RenderObject keys and merely postponed
-    // the real 4x-MSAA pipelines until the threshold.
-    // Compile the whole production scene, not only the target group. Three's
-    // WebGPU render context keys every visible object against the active light
-    // layout, so the destination-only topology also needs variants for the
-    // star field, sky and other persistent world objects.
-    const compilations = [renderer.compileAsync(scene, camera)];
-    for (const state of lightStates) {
-      state.view.group.visible = state.groupVisible;
-      state.view.light.visible = state.lightVisible;
-    }
-    for (const [object, visible] of sourceVisibility) object.visible = visible;
-    await Promise.all(compilations);
+    // Persistent world objects also need destination light-count variants.
+    compilation = compilePrograms(renderer, scene, camera, null, {signal});
   } finally {
     for (const state of lightStates) {
       state.view.group.visible = state.groupVisible;
@@ -2224,6 +2229,7 @@ async function uploadPreparedLodMeshes(targetBody, prepared) {
       state.mesh.frustumCulled = state.frustumCulled;
     }
   }
+  await compilation;
 }
 
 async function prewarmPreparedRiftStructure(token, route, prepared) {
@@ -2234,7 +2240,7 @@ async function prewarmPreparedRiftStructure(token, route, prepared) {
   spatialRift.portalSurface.visible = true;
   let compilation;
   try {
-    compilation = renderer.compileAsync(spatialRift.group, camera);
+    compilation = compilePrograms(renderer, spatialRift.group, camera, null, {signal:warpCompile.signal});
     // The render contexts and object traversal are captured synchronously.
     // Never leave the cold, zero-open structure in the live scene while the
     // driver finishes its asynchronous pipeline work.
@@ -2567,15 +2573,17 @@ async function prewarmPreparedWater(targetBody, token, route, prepared) {
   warpPreparedWaterWarmState = 'compiling';
 
   try {
-    const lightVisibility = prepared.starViews.map((view) => view.light.visible);
-    for (const view of universe.system?.starViews || []) view.light.visible = false;
-    for (const view of prepared.starViews) view.light.visible = true;
-    const compilation = renderer.compileAsync(mesh, camera);
-    // compileAsync captures the target system's light topology synchronously
-    // before its first await. Restore the live departure scene immediately;
-    // the async pipeline work can then finish without changing the route view.
-    for (const view of prepared.starViews) view.light.visible = lightVisibility.shift() ?? false;
-    for (const view of universe.system?.starViews || []) view.light.visible = true;
+    const lightVisibility = new Map([...(universe.system?.starViews || []), ...prepared.starViews]
+      .map(view => [view.light, view.light.visible]));
+    let compilation;
+    try {
+      for (const view of universe.system?.starViews || []) view.light.visible = false;
+      for (const view of prepared.starViews) view.light.visible = true;
+      compilation = compilePrograms(renderer, mesh, camera, scene, {signal:warpCompile.signal});
+    } finally {
+      for (const [light, visible] of lightVisibility) light.visible = visible;
+      mesh.removeFromParent();
+    }
     await compilation;
     if (!preparedDestinationIsActive(token, route, prepared)) return;
     clearPreparedWaterWarmMesh();
@@ -2685,6 +2693,7 @@ function disposeRiftPreview() {
   if (!riftPreviewSystem) return;
   if (transferredPreparedDestination?.system === riftPreviewSystem) {
     warpPreparationToken++;
+    warpCompile.abort();warpCompile = new AbortController();
     transferredPreparedDestination = null;
     resetPreparedDestinationWarmState();
   }

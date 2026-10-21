@@ -7,12 +7,13 @@ export function installFoundationGLProbe() {
   host.__foundationGLProbe?.dispose?.();
   const gl = nms._renderer.getContext();
   const originalGetError = gl.getError;
-  const limits = { methods: 512, slowCalls: 256, lifetimeFaults: 128, programQueryFailures: 128, marks: 128, shaders: 128, programs: 128,
+  const limits = { methods: 512, slowCalls: 256, lifetimeFaults: 128, programQueryFailures: 128, programQueryObservations: 128, marks: 128, shaders: 128, programs: 128,
     shaderBytes: 8 * 1024 * 1024, shaderChars: 2 * 1024 * 1024, stackChars: 5000 };
   const totals = new Map();
   const slowCalls = [];
   const lifetimeFaults = [];
   const programQueryFailures = [];
+  const programQueryObservations = [];
   const marks = [];
   const shaders = new Map();
   const programs = new Map();
@@ -22,7 +23,7 @@ export function installFoundationGLProbe() {
   const scopeNames = [];
   const scopeStack = [];
   const faults = [];
-  const dropped = { methods: 0, slowCalls: 0, lifetimeFaults: 0, programQueryFailures: 0, marks: 0, shaders: 0, programs: 0, shaderChars: 0 };
+  const dropped = { methods: 0, slowCalls: 0, lifetimeFaults: 0, programQueryFailures: 0, programQueryObservations: 0, marks: 0, shaders: 0, programs: 0, shaderChars: 0 };
   // These APIs require a live program handle. isProgram is intentionally not
   // included: testing a deleted handle is a valid application operation.
   const programInspections = new Set(['getProgramParameter', 'getProgramInfoLog',
@@ -30,6 +31,8 @@ export function installFoundationGLProbe() {
     'getAttribLocation', 'getUniform', 'getUniformIndices', 'getActiveUniforms',
     'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName',
     'getFragDataLocation', 'getTransformFeedbackVarying']);
+  const programArguments = new Set([...programInspections, 'useProgram', 'linkProgram', 'validateProgram',
+    'attachShader', 'detachShader', 'deleteProgram', 'bindAttribLocation', 'transformFeedbackVaryings']);
   let stage = 'installed';
   let disposed = false;
   let armed = false;
@@ -45,6 +48,13 @@ export function installFoundationGLProbe() {
   const scope = () => scopeStack.join(' > ') || 'outside-pipeline-scope';
   const location = () => ({ stage, scope: scope(), atMs: clock() });
   const resource = (value, ids) => value && (typeof value === 'object' || typeof value === 'function') ? ids.get(value) || null : null;
+  const observeProgram = (name, args, callLocation) => {
+    if (!programArguments.has(name) || !args[0] || typeof args[0] !== 'object' || programIds.has(args[0])) return;
+    const id = nextProgramId++;programIds.set(args[0], id);
+    if (programs.size < limits.programs) programs.set(id,
+      { id, shaderIds: [], deleted: false, creationUnobserved: true, firstObserved: { name, ...callLocation } });
+    else dropped.programs++;
+  };
   const summarize = value => {
     const shaderId = resource(value, shaderIds);
     if (shaderId) return { shaderId };
@@ -60,7 +70,7 @@ export function installFoundationGLProbe() {
   const context = (name, args) => {
     const explicitProgram = resource(args[0], programIds);
     const shaderId = resource(args[0], shaderIds);
-    return { programId: explicitProgram || currentProgram, shaderId,
+    return { programId: programArguments.has(name) ? explicitProgram : currentProgram, shaderId,
       ...(shaderId ? { attachedProgramIds: [...programs.values()].filter(p => p.shaderIds.includes(shaderId)).map(p => p.id) } : {}) };
   };
   const record = (kind, name, ms, args, callLocation, callContext, threw) => {
@@ -128,16 +138,7 @@ export function installFoundationGLProbe() {
       const row = shaders.get(resource(args[0], shaderIds));
       if (row) row.deleted = true;
     } else if (name === 'deleteProgram') {
-      let id = resource(args[0], programIds);
-      // Startup compilation may have created the handle before injection.
-      // Observe deletion without asking GL to introspect that old program.
-      if (!id && args[0] && typeof args[0] === 'object') {
-        id = nextProgramId++;
-        programIds.set(args[0], id);
-        if (programs.size < limits.programs) programs.set(id,
-          { id, shaderIds: [], deleted: false, createdBeforeProbe: true });
-        else dropped.programs++;
-      }
+      const id = resource(args[0], programIds);
       const row = programs.get(id);
       if (row && !row.deleted) {
         row.deleted = true;
@@ -166,6 +167,7 @@ export function installFoundationGLProbe() {
     const wrapper = function (...args) {
       if (kind === 'scope') scopeStack.push(name);
       const callLocation = { stage, scope: scope(), atMs: clock() };
+      if (kind === 'gl') observeProgram(name, args, callLocation);
       const callContext = kind === 'gl' ? context(name, args) : {};
       if (kind === 'gl') inspectLifetime(name, args, callLocation);
       const started = clock();
@@ -184,6 +186,20 @@ export function installFoundationGLProbe() {
             ...callLocation, queriedProgramId: resource(args[0], programIds), parameter: args[1],
             argumentNull: args[0] == null, stack: stack() });
           else dropped.programQueryFailures++;
+        }
+        // Zero active counts and inactive locations can be legitimate. Record
+        // them as observations, never as proof of a GL error. Native implicit
+        // GetProgramiv failures need not become a JS null return.
+        const emptyReflection = (name === 'getProgramParameter' && (result === 0 || result === null))
+          || (['getActiveUniform', 'getActiveAttrib', 'getUniformLocation'].includes(name) && result === null)
+          || (name === 'getAttribLocation' && result === -1);
+        const deletedUse = ['useProgram', 'linkProgram', 'validateProgram'].includes(name)
+          && programs.get(resource(args[0], programIds))?.deleted;
+        if (!threw && (emptyReflection || deletedUse)) {
+          if (programQueryObservations.length < limits.programQueryObservations) programQueryObservations.push({
+            name, ...callLocation, queriedProgramId: resource(args[0], programIds), args: args.slice(0, 3).map(summarize),
+            result: summarize(result), deletedUse: Boolean(deletedUse), stack: stack() });
+          else dropped.programQueryObservations++;
         }
         if (!threw) track(name, args, result, callLocation);
         checkError(name, args, result, callLocation, callContext);
@@ -267,6 +283,7 @@ export function installFoundationGLProbe() {
         slowCalls: slowCalls.map(value => ({ ...value })), shaders: [...shaders.values()].map(value => ({ ...value })),
         lifetimeFaults: lifetimeFaults.map(value => ({ ...value, deletion: { ...value.deletion } })),
         programQueryFailures: programQueryFailures.map(value => ({ ...value })),
+        programQueryObservations: programQueryObservations.map(value => ({ ...value })),
         programs: [...programs.values()].map(value => ({ ...value, shaderIds: [...value.shaderIds],
           ...(value.deletion ? { deletion: { ...value.deletion } } : {}) })),
         shaderChars, limits: { ...limits }, dropped: { ...dropped }, faults: faults.map(value => ({ ...value })) };

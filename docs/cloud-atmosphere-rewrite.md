@@ -129,6 +129,8 @@ B4 沿用 B5 的正确传输与照明输入，再校准各云族的光学表现�
 
 ### B7：统一 TAA、性能与生命周期
 
+2026-10-21 续轮基础任务给生产程序准备增加固定程序集合、取消、期限、dispose/registry/context保护；旧轮询的live变体误判和dispose后无限等待已有独立反例。world/water mesh继承生产目标scene，临时场景状态在提交后同步恢复，路由交接保留任务、退役取消。未改云艺术/密度/采样，未关闭B7或完整冷依赖；[程序准备证据](baselines/foundation-program-preparation-2026-10-21/README.md)明确真实GPU、context恢复fixture与正常玩家页的各自边界。
+
 2026-10-21 基础任务另修地表首用依赖：receiver按已发布production场准备，不等待未来预测bracket；terrain/water首次draw前已有owner/binder，uniforms仍惰性创建、保持原回调链。冻结hour-zero、无worker、cache=0的真实冷材质/双星receiver与正确装配旧路径native零差。详见[接口补充](medium-render-contract.md)与[首用证据](baselines/foundation-receiver-startup-2026-10-21/README.md)。本轮一页复现GL1281，最终被动复验未复现但最长仍87.2754秒，整页稳定性/冷性能未关闭；不勾选B7，也不恢复B4艺术返工。
 
 2026-10-20 基础任务接入了共同 `RenderFrameState`：前后帧相机/双精度原点/行星刚体、成功整帧提交、sequence/时间 epoch/内容/布局失效，以及空气/云/云影实际眼点。修复主循环强制使 history 有效和私有预热失效调用为空的漏洞，云已有刚体映射；[帧接口固定证据](baselines/foundation-frame-state-2026-10-20/README.md)保留原检查。续轮增加逐 tap 不透明深度支持、天空分类、未知深度拒绝、当前邻域 signed RGBA 限幅，以及严格静止的原 texel 路径，见[接口 v1.3](medium-render-contract.md)与[过滤固定证据](baselines/foundation-history-filter-2026-10-20/README.md)。这是现有局部 history 的质量约束；云占用深度/天气平流、逐物体 motion、共同 jitter、完整反遮挡和统一 TAA 仍未实现，下列整项不勾选。不同云层平流速度及天气场变形不能用一个全局风旋转冒充正确对应。默认长冷暂停及画质否决继续保留，这不是云专项恢复或性能完成。
