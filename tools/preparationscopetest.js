@@ -71,21 +71,36 @@ for (const fault of ['none', 'sync', 'async']) {
   load('prewarmLoadedShipPipelines', context)();
   assert.equal(context.shipPipelinesWarmed, true);assert.equal(context.surfacePipelinesReady, true);
 }
-for (const fault of ['sync', 'async']) {
+for (const fault of ['none', 'sync', 'async']) {
   const light = { visible: false, intensity: 7 };
-  let disposed = 0, reject;
+  let disposed = 0, reject, resolve, submitted, target = 'player', face = 3, mip = 2;
   const context = { QUALITY_LOW: false, warmedSurfacePlanet: null, surfacePipelinesReady: true,
     loadingCleared: false, startupPrewarmExpired: false, THREE, scene: new THREE.Scene(),
     surfaceBootstrapGroup: new THREE.Group(), surfaceBootstrapMeshes: [], scatter: { meshes: {} }, farFlora: {},
-    sunShadow: light, renderer: {}, camera: {}, startupCompile: new AbortController(),
+    sunShadow: light, renderer: {
+      getRenderTarget: () => target, getActiveCubeFace: () => face, getActiveMipmapLevel: () => mip,
+      setRenderTarget(value, nextFace = 0, nextMip = 0) { target = value;face = nextFace;mip = nextMip; },
+    }, surfaceBootstrapTarget: 'linear-hdr', camera: {}, startupCompile: new AbortController(),
+    surfaceBootstrapPending: false, withSurfaceWarmupVariant: (_source, work) => work(),
     disposeSurfaceBootstrap() { disposed++;context.surfaceBootstrapGroup.removeFromParent(); },
-    console: { warn() {} }, compilePrograms() { if (fault === 'sync') throw Error('sync fault');return new Promise((_r, fail) => { reject = fail; }); } };
+    console: { warn() {} }, compilePrograms() {
+      submitted = { target, face, mip };
+      if (fault === 'sync') throw Error('sync fault');return new Promise((yes, fail) => { resolve = yes;reject = fail; });
+    } };
   const body = { group: new THREE.Group() };
   load('prewarmSurfacePipelines', context)(body);
+  assert.deepEqual(submitted, { target: 'linear-hdr', face: 0, mip: 0 },
+    'Surface preparation must submit the actual offscreen variant');
   assert.equal(light.visible, false);assert.equal(light.intensity, 7);
+  assert.equal(target, 'player');assert.equal(face, 3);assert.equal(mip, 2);
+  context.renderer.setRenderTarget('next-player', 1, 4);
+  if (fault === 'none') { resolve();await Promise.resolve();await Promise.resolve(); }
   if (fault === 'async') { reject(Error('async fault'));await Promise.resolve();await Promise.resolve(); }
-  assert.equal(disposed, 1);assert.equal(context.surfacePipelinesReady, true);
-  assert.equal(context.surfaceBootstrapGroup.parent, null);
+  assert.equal(target, 'next-player');assert.equal(face, 1);assert.equal(mip, 4);
+  assert.equal(disposed, fault === 'none' ? 0 : 1);
+  assert.equal(context.surfacePipelinesReady, fault !== 'none');
+  assert.equal(context.surfaceBootstrapPending, fault === 'none');
+  assert.equal(context.surfaceBootstrapGroup.parent, fault === 'none' ? context.scene : null);
 }
 {
   const context = { warpPreparationToken: 4, warpCompile: new AbortController(),

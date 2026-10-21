@@ -12,6 +12,14 @@ export function registerSurfaceCloudOwner(material, planet) { surfaceOwners.set(
 export function surfaceCloudOwner(material) { return material ? surfaceOwners.get(material) : undefined; }
 let preparingSurface=false;
 export function setCloudSurfacePreparation(value) {preparingSurface=Boolean(value);}
+// Submission/draw scopes end synchronously, even when work returns a Promise.
+// A nested private warm-up must not clear another receiver's preparation flag.
+export function withCloudSurfacePreparation(value, work) {
+  const previous=preparingSurface;
+  preparingSurface=Boolean(value);
+  try { return work(); }
+  finally { preparingSurface=previous; }
+}
 
 const names=['uNoise3','uSpeciesMap','uBandsReady','uCandidatesReady','uCandidateLayers',
   'uSpeciesMask','uSpeciesCount','uMediumLayer','uWeatherMapHi','uCloudAdvectionPhase','uSpeciesPartition',

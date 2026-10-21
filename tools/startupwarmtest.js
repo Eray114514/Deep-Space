@@ -3,7 +3,7 @@ import {readFile,mkdir,writeFile} from 'node:fs/promises';
 import {startServer} from './server.js';
 import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
-const out='test-results/startup-warm',before=await evidenceFingerprint('tools/startupwarmtest.js');
+const out=`test-results/startup-warm/${new Date().toISOString().replace(/[:.]/g,'-')}`,before=await evidenceFingerprint('tools/startupwarmtest.js');
 const {server,port}=await startServer(0);let browser;
 await mkdir(out,{recursive:true});const errors=[];
 try {
@@ -11,8 +11,17 @@ try {
   const page=await browser.newPage({viewport:{width:1280,height:720}});
   page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
   const source=await readFile('src/main.js','utf8');
-  const delayed=source.replace('const tasks = [renderer.compileAsync(surfaceBootstrapGroup, camera, scene)];',
-    'const tasks = [renderer.compileAsync(surfaceBootstrapGroup, camera, scene).then(()=>new Promise(resolve=>setTimeout(resolve,22000)))];');
+  const point='  compilation.then(() => {';
+  assert.equal(source.split(point).length-1,1,'Delay must identify only startup surface completion');
+  const delayed=source.replace(point,`  compilation.then(()=>{
+    window.__surfaceWarmDelay={startedAtMs:performance.now(),completed:false};
+    return new Promise(resolve=>setTimeout(()=>{
+      window.__surfaceWarmDelay.completed=true;
+      window.__surfaceWarmDelay.completedAtMs=performance.now();
+      window.__surfaceWarmDelay.expiredAtCompletion=window.NMS?.surfaceWarmupState().expired;
+      resolve();
+    },22000));
+  }).then(() => {`);
   assert.notEqual(delayed,source,'Control must delay the actual surface warmup completion');
   await page.route('**/src/main.js*',route=>route.fulfill({contentType:'text/javascript',body:delayed}));
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&freeze=1&time=9.5&scene=walk&planet=0&bias=meadow&quality=balanced&vclouds=0&post=1`);
@@ -20,7 +29,7 @@ try {
   await page.waitForFunction(()=>NMS.surfaceWarmupState().expired,null,{timeout:10000});
   await page.waitForFunction(()=>NMS.stats().grass>20,null,{timeout:60000});
   await page.waitForTimeout(24000);
-  const result=await page.evaluate(()=>({warmup:NMS.surfaceWarmupState(),stats:NMS.stats(),
+  const result=await page.evaluate(()=>({warmup:NMS.surfaceWarmupState(),stats:NMS.stats(),delay:window.__surfaceWarmDelay??null,
     gl:NMS._renderer.getContext().getError(),scope:'Surface completion deliberately delayed 22 s; safety release must not allow late optional drawing or retain representatives.'}));
   await page.screenshot({path:`${out}/player.png`});
   const after=await evidenceFingerprint('tools/startupwarmtest.js');
@@ -29,5 +38,7 @@ try {
   assert.equal(result.warmup.ready,true);assert.equal(result.warmup.pending,false);
   assert.equal(result.warmup.stats.skipped,true);assert.equal(result.warmup.stats.calls,0);
   assert.equal(result.warmup.remainingMeshes,0);assert.ok(result.stats.grass>20);
+  assert.equal(result.delay?.completed,true,'The actual late continuation must execute');
+  assert.equal(result.delay.expiredAtCompletion,true,'Late completion must follow ownership release');
   console.log(`PASS: delayed surface warmup cancelled after loading release; real grass rendered, GL 0, no retained representatives; ${out}`);
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

@@ -145,6 +145,8 @@ B4 沿用 B5 的正确传输与照明输入，再校准各云族的光学表现�
 
 2026-10-21 基础任务再修原生程序安全退役、临时producer独立全屏几何与跨照明bank空uniform程序lease。Chrome155的KHR后台删除竞态已有最小正反控制；最终默认初建/替换/输入/32步转向GL0、driver警告0，四组实际cache atlas及HDR零差。大气LUT严格原生重复仍通过；本轮不改云密度/积分/采样。最长帧间隔107.911秒，整体预算与B7未关闭，B4艺术返工仍等待底层推进。原始失败、隔离/组合版本及边界见[固定证据](baselines/foundation-program-retirement-2026-10-21/README.md)。
 
+2026-10-21 基础任务把地表compile/私有warm draw匹配到正式离屏SCREEN接收体家族，复用当前发布天气资格，不等forecast；四组真实材质控制新增program2→0且native HDR零差，未改云GLSL。导航前记录已将当前启动的82.7819秒等待关联到未缓存远云，近云首次等待也仍在；[固定证据](baselines/foundation-surface-preparation-2026-10-21/README.md)保留不同插桩与上限边界。不是完整预热或B7完成，B4艺术返工继续等待底层推进。
+
 ### B8：关闭批次
 
 - [ ] 所有必需云种、天气表现和 C1–C5 通过，用户完成 S1–S4 与连续运动实机审美验收。代理截图评审不能替用户作此决定。

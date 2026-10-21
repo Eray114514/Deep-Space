@@ -14,7 +14,7 @@ import { SpaceControls, WalkControls, guidePlanetApproach, keys,
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
-import { compileRenderVariant } from './render-prewarm.js';
+import { compileRenderVariant, withSurfaceWarmupVariant } from './render-prewarm.js';
 import { compilePrograms } from './program-preparation.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
@@ -297,7 +297,7 @@ function finishSurfaceBootstrap() {
     renderer.autoClear = true;
     renderer.setRenderTarget(surfaceBootstrapTarget);
     renderer.clear(true, true, false);
-    renderer.render(warmup.scene, camera);
+    withSurfaceWarmupVariant(surfaceBootstrapGroup, () => renderer.render(warmup.scene, camera));
   } catch (error) {
     console.warn('surface bootstrap render failed', error);
   } finally {
@@ -410,17 +410,24 @@ function prewarmSurfacePipelines(planet) {
   // light makes the cached surface variants match the eventual ground pass.
   const lightWasVisible = sunShadow.visible;
   const lightIntensity = sunShadow.intensity;
+  const savedTarget = renderer.getRenderTarget();
+  const savedFace = renderer.getActiveCubeFace(), savedMip = renderer.getActiveMipmapLevel();
   sunShadow.visible = true;
   sunShadow.intensity = 1e-7;
   let compilation;
   try {
-    compilation = compilePrograms(renderer, surfaceBootstrapGroup, camera, scene, {signal:startupCompile.signal});
+    // The private warm draw and the composer use linear offscreen programs.
+    // A default-framebuffer compile prepares a different output/tone-map key.
+    renderer.setRenderTarget(surfaceBootstrapTarget);
+    compilation = withSurfaceWarmupVariant(surfaceBootstrapGroup,
+      () => compilePrograms(renderer, surfaceBootstrapGroup, camera, scene, {signal:startupCompile.signal}));
   } catch (error) {
     surfacePipelinesReady = true;
     disposeSurfaceBootstrap();
     console.warn('surface pipeline submission failed', error);
     return;
   } finally {
+    renderer.setRenderTarget(savedTarget, savedFace, savedMip);
     sunShadow.visible = lightWasVisible;
     sunShadow.intensity = lightIntensity;
   }

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { installFoundationGLProbe } from './foundation-gl-probe.js';
+import { installFoundationBootProbe } from './foundation-boot-probe.js';
 
-function fixture(extraMethods = 0) {
+function fixture(extraMethods = 0, early = false) {
   let time = 0;
   let pendingError = 0;
   let errorCalls = 0;
@@ -53,11 +54,13 @@ function fixture(extraMethods = 0) {
   const originalRender = pipeline.render;
   const originalVolume = pipeline.volumePass.render;
   const host = { NMS: { _renderer: { getContext: () => gl }, _pipeline: pipeline } };
-  const sandbox = vm.createContext({ window: host, performance: { now: () => time } });
+  const nms = host.NMS;if (early) delete host.NMS;
+  const sandbox = vm.createContext({ window: host, acquiredContext: gl, performance: { now: () => time } });
   // Execute the serialized body, exactly as browser page.evaluate does. An
   // accidental module closure would fail in this isolated context.
-  const installed = vm.runInContext(`(${installFoundationGLProbe.toString()})()`, sandbox);
+  const installed = vm.runInContext(`(${installFoundationGLProbe.toString()})(${early ? 'acquiredContext' : ''})`, sandbox);
   const probe = host.__foundationGLProbe;
+  if (early) { host.NMS = nms;probe.attachPipeline();probe.attachPipeline(); }
   const shader = gl.createShader(35632);
   const program = gl.createProgram();
   return { gl, native, pipeline, probe, installed, shader, program, originalRender, originalVolume,
@@ -276,4 +279,24 @@ function fixture(extraMethods = 0) {
   f.host.__foundationGLProbe.dispose();
 }
 
-console.log('PASS: serialized GL probe passive/active contracts, scope/program lifetime attribution, caps and restoration');
+{
+  const f = fixture(0, true);
+  assert.equal(f.probe.snapshot().scopeNames.length, 4, 'Late attachment must be idempotent');
+  f.pipeline.render();assert.equal(f.errors(), 0);assert.equal(f.probe.snapshot().programs.length, 1);
+  f.probe.dispose();assert.equal(f.pipeline.render, f.originalRender);assert.equal(f.gl.drawElements, f.native.drawElements);
+}
+for (const failure of [false, true]) {
+  const gl = {}, canvas = {}, seen = [], host = {};
+  const native = function(type) { assert.equal(this, canvas);if (type === 'throw') throw Error('native failure');return type === 'webgl2' ? gl : null; };
+  const prototype = { getContext: native };
+  const sandbox = vm.createContext({ window: host, HTMLCanvasElement: { prototype }, performance: { now: () => 7 },
+    install(context) { seen.push(context);if (failure) throw Error('observer failure'); } });
+  vm.runInContext(`(${installFoundationBootProbe})(install)`, sandbox);
+  assert.throws(() => prototype.getContext.call(canvas, 'throw'), /native failure/);
+  assert.equal(prototype.getContext.call(canvas, '2d'), null);assert.equal(seen.length, 0);
+  assert.equal(prototype.getContext.call(canvas, 'webgl2'), gl);assert.deepEqual(seen, [gl]);
+  assert.equal(prototype.getContext, native);assert.equal(host.__foundationBootProbe.restored, true);
+  assert.equal(host.__foundationBootProbe.installed, !failure);
+  assert.equal(prototype.getContext.call(canvas, 'webgl2'), gl);assert.equal(seen.length, 1);
+}
+console.log('PASS: serialized passive/active and navigation-time GL probes, late idempotent scopes, caps, native acquisition errors and restoration');

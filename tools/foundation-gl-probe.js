@@ -1,14 +1,18 @@
 // Diagnostic injection only. This function deliberately has no module closures so
 // Playwright can serialize it with page.evaluate(installFoundationGLProbe).
-export function installFoundationGLProbe() {
+export function installFoundationGLProbe(acquiredContext = null) {
   const host = window;
   const nms = host.NMS;
-  if (!nms?._renderer?.getContext) throw new Error('Foundation GL probe needs NMS._renderer');
+  if (!acquiredContext && !nms?._renderer?.getContext) throw new Error('Foundation GL probe needs NMS._renderer or an acquired context');
   host.__foundationGLProbe?.dispose?.();
-  const gl = nms._renderer.getContext();
+  const gl = acquiredContext || nms._renderer.getContext();
+  const installedAtMs = performance.now();
   const originalGetError = gl.getError;
-  const limits = { methods: 512, slowCalls: 256, lifetimeFaults: 128, programQueryFailures: 128, programQueryObservations: 128, marks: 128, shaders: 128, programs: 128,
-    shaderBytes: 8 * 1024 * 1024, shaderChars: 2 * 1024 * 1024, stackChars: 5000 };
+  // Navigation capture includes boot/ship programs absent from the post-boot
+  // observer (164 shaders in the measured scene). Keep an explicit bounded
+  // budget for that larger scope, without changing ordinary capture limits.
+  const limits = { methods: 512, slowCalls: 256, lifetimeFaults: 128, programQueryFailures: 128, programQueryObservations: 128, marks: 128, shaders: acquiredContext ? 256 : 128, programs: 128,
+    shaderBytes: (acquiredContext ? 16 : 8) * 1024 * 1024, shaderChars: 2 * 1024 * 1024, stackChars: 5000 };
   const totals = new Map();
   const slowCalls = [];
   const lifetimeFaults = [];
@@ -230,9 +234,13 @@ export function installFoundationGLProbe() {
   }
   let wrappedMethods = 0;
   for (const name of names) if (wrap(gl, name, gl[name], 'gl')) wrappedMethods++;
-  const pipeline = nms._pipeline;
+  const scopeOwners = new WeakMap();
   const addScope = (object, name, label) => {
     if (!object || typeof object[name] !== 'function') return;
+    let names = scopeOwners.get(object);
+    if (!names) { names = new Set();scopeOwners.set(object, names); }
+    if (names.has(name)) return;
+    names.add(name);
     // Use the readable owner-qualified name in both scope and totals.
     const own = Object.getOwnPropertyDescriptor(object, name);
     const original = object[name];
@@ -249,14 +257,22 @@ export function installFoundationGLProbe() {
       scopeNames.push(label);
     } catch (error) { faults.push({ operation: 'scope-wrap', name: label, message: String(error) }); }
   };
-  addScope(pipeline, 'render', 'pipeline.render');
-  addScope(pipeline, 'updateCloudLighting', 'pipeline.updateCloudLighting');
-  addScope(pipeline?.volumePass, 'render', 'volumePass.render');
-  addScope(pipeline?.renderPass, 'render', 'sceneRenderPass.render');
-  addScope(pipeline?.atmospherePass, 'render', 'atmospherePass.render');
-  addScope(pipeline?.cloudSurfaceShadow, 'render', 'cloudSurfaceShadow.render');
-  addScope(pipeline?.foregroundPass, 'render', 'foregroundPass.render');
+  const attachPipeline = () => {
+    const pipeline = host.NMS?._pipeline;
+    addScope(pipeline, 'render', 'pipeline.render');
+    addScope(pipeline, 'updateCloudLighting', 'pipeline.updateCloudLighting');
+    addScope(pipeline?.volumePass, 'render', 'volumePass.render');
+    addScope(pipeline?.renderPass, 'render', 'sceneRenderPass.render');
+    addScope(pipeline?.atmospherePass, 'render', 'atmospherePass.render');
+    addScope(pipeline?.cloudSurfaceShadow, 'render', 'cloudSurfaceShadow.render');
+    addScope(pipeline?.foregroundPass, 'render', 'foregroundPass.render');
+  };
+  attachPipeline();
   const api = {
+    attachPipeline() {
+      if (disposed) throw new Error('Foundation GL probe was disposed');
+      attachPipeline();return [...scopeNames];
+    },
     mark(value) {
       stage = String(value).slice(0, 160);
       if (marks.length < limits.marks) marks.push(location());
@@ -275,7 +291,7 @@ export function installFoundationGLProbe() {
       return { ...arm, armed, intrusive: true, performanceAcceptanceAllowed: false };
     },
     snapshot() {
-      return { installed: true, disposed, stage, scope: scope(), wrappedMethods, scopeNames: [...scopeNames],
+      return { installed: true, installedAtMs, disposed, stage, scope: scope(), wrappedMethods, scopeNames: [...scopeNames],
         mode: errorArms.length ? 'intrusive-error-attribution' : 'passive-timing',
         performanceAcceptanceAllowed: errorArms.length === 0, armed, errorChecks,
         firstError: firstError ? { ...firstError } : null, errorArms: errorArms.map(value => ({ ...value })),
