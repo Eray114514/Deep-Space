@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FullScreenQuad } from '../../vendor/jsm/postprocessing/Pass.js';
+import { OwnedScreenTriangle as FullScreenQuad } from '../owned-screen-triangle.js';
 import { productionCloudGLSL } from './production-medium-glsl.js';
 import { weatherAtlasGLSL } from './weather-atlas.js';
 import { captureWeatherSources } from './weather-sources.js';

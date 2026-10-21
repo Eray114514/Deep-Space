@@ -61,6 +61,7 @@ const warmHelperBefore=await evidenceFingerprint('tools/cloud-program-prewarm-br
 const {server,port}=await startServer(0);
 let browser;
 const errors=[],warnings=[],driverWarnings=[],checkpoints=[],workerEvents=[],networkFailures=[];
+const nativeLogs=[];let nativeLogsDropped=0,browserInfo=null;
 let warningDropped=0,driverWarningCount=0,page,cdp,traceStarted=false,report,ownerModesResult=null;
 let parallelNearResult=null;
 let traceState={requested:trace,categories:traceCategories,completed:false};
@@ -100,6 +101,16 @@ async function finishTrace() {
 try {
   browser=await launchHardwareBrowser({executablePath:resolveSystemChromePath()||undefined});
   page=await browser.newPage({viewport:{width:1280,height:720}});
+  const logSession=await page.context().newCDPSession(page);
+  logSession.on('Log.entryAdded',({entry})=>{
+    if(entry.source!=='rendering')return;
+    if(nativeLogs.length<256)nativeLogs.push({receivedAtEpochMs:Date.now(),entry});else nativeLogsDropped++;
+  });
+  await logSession.send('Log.enable');
+  const browserSession=await browser.newBrowserCDPSession();
+  browserInfo={version:await browserSession.send('Browser.getVersion'),
+    system:await browserSession.send('SystemInfo.getInfo').catch(error=>({error:String(error)}))};
+  await browserSession.detach();
   await page.addInitScript(installFoundationContextProbe);
   await page.addInitScript(()=>{
     const records=[];window.__foundationWorkers=records;
@@ -192,7 +203,8 @@ try {
     const state=await page.evaluate(label=>{
       performance.mark(`foundation-default-${label}`);window.__foundationGLProbe.mark(label);
       return {gl:NMS._renderer.getContext().getError(),lost:NMS._renderer.getContext().isContextLost(),
-        near:NMS.waterState(0)?.near,stats:NMS.stats()};
+        near:NMS.waterState(0)?.near,stats:NMS.stats(),atEpochMs:performance.timeOrigin+performance.now(),
+        retirement:NMS._renderer.programRetirement?.snapshot()};
     },label);checkpoints.push({label,...state});
     console.log(JSON.stringify({label,gl:state.gl,near:state.near}));
   };
@@ -365,7 +377,8 @@ try {
     NMS._pipeline.stopProfiling();
     const gl=NMS._renderer.getContext();
     const final={gl:gl.getError(),lost:gl.isContextLost(),lostEvents:__foundationLost,
-      workers:window.__foundationWorkers,probe:window.__foundationGLProbe.snapshot()};
+      workers:window.__foundationWorkers,probe:window.__foundationGLProbe.snapshot(),
+      retirement:NMS._renderer.programRetirement?.snapshot()};
     window.__foundationHistoryRestore?.();final.history=window.__foundationHistory??null;
     window.__foundationReceiverStartupRestore?.();final.receiverStartup=window.__foundationReceiverStartup??null;
     final.mainContextId=window.__foundationContextProbe.idForCanvas(NMS._renderer.domElement);
@@ -377,7 +390,7 @@ try {
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
   const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
   report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
-    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,
+    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,nativeLogs,nativeLogsDropped,browserInfo,
     stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest,
     boundary:'Default 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.'};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
@@ -406,6 +419,10 @@ try {
   assert.ok(checkpoints.slice(1).every(p=>p.near?.worker&&!p.near.workerError),'Cloud/near-water integration must retain its actual worker');
   assert.ok(finalState.workers.every(event=>event.kind!=='error'&&event.kind!=='messageerror'));
   assert.equal(driverWarningCount,0,'Driver GL warnings must not be hidden by a clean final getError');
+  if(finalState.retirement) {
+    assert.deepEqual(finalState.retirement.faults,[]);assert.equal(finalState.retirement.blocked,0);
+    assert.ok(finalState.retirement.nativeDeletes>0,'Production must exercise guarded program retirement');
+  }
   if(historyTransitions) {
     assert.ok(finalState.history.restored);
     assert.ok(finalState.history.records.every(row=>row.bodyMatches));
@@ -443,7 +460,7 @@ try {
     mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)})).catch(captureError=>({captureError:String(captureError)}));
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
   await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
-    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,error:String(error)},null,2));
+    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,nativeLogs,nativeLogsDropped,browserInfo,error:String(error)},null,2));
   await finishTrace();console.error(JSON.stringify({out,error:String(error)}));throw error;
 } finally {
   try {await browser?.close();}

@@ -23,10 +23,10 @@ function cloudAnchor(planet,position) {
 // endpoints remain immutable while the third slot is baked. Invalid time or
 // spatial support always falls back to the physical beam; never extrapolate.
 export class CloudLightBank {
-  constructor(planet,{size=128,depth=128,interval=.0015}={}) {
+  constructor(planet,{size=128,depth=128,interval=.0015,programOwner=null}={}) {
     this.planet=planet;this.size=size;this.depth=depth;this.interval=interval;
     this.maps=new Map();this.disposed=false;this.baseHours=planet.weatherHours;
-    this.programs={};
+    this.programs=programOwner||{};this.ownsPrograms=!programOwner;
     this.fieldOwner=planet.weatherField;this.lightIds=planet.stellarLightField.sources.map(s=>s.id).join('|');
     this.speciesMask=planet.volCloudMat.uniforms.uSpeciesMask.value;
     const position=planet.volCloudMat.uniforms.uCameraLocal.value;
@@ -121,7 +121,8 @@ export class CloudLightBank {
   dispose() {
     if(this.disposed)return;this.disposed=true;this.unbind();
     for(const cache of this.maps.values())cache.dispose();this.maps.clear();this.target.dispose();
-    for(const material of Object.values(this.programs))material.dispose();this.programs={};
+    if(this.ownsPrograms)for(const material of Object.values(this.programs))material.dispose();
+    this.programs={};
     if(this.planet.cloudLightBank===this)this.planet.cloudLightBank=null;
   }
 }

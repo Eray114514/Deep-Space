@@ -44,7 +44,7 @@ export class GameLegacyPipeline {
     this.camera = camera;
     this.frameState = new RenderFrameState();
     this.programPreparation = new AbortController();
-    this.cloudLightBanks=new Map();this.cloudLightFrame=0;
+    this.cloudLightBanks=new Map();this.cloudLightFrame=0;this.cloudLightPrograms={};
     this.cloudSurfaceShadow=new CloudSurfaceShadowPass(scene,camera);
     const target = new THREE.WebGLRenderTarget(1, 1, {
       samples: 0,
@@ -62,6 +62,7 @@ export class GameLegacyPipeline {
       this.composer.renderTarget2.dispose();
       this.volumePass?.releaseTargets();
       for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
+      this.releaseCloudLightPrograms();
       this.cloudSurfaceShadow.dispose();
     };
     renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
@@ -218,7 +219,7 @@ export class GameLegacyPipeline {
       let bank=this.cloudLightBanks.get(p);
       if(bank?.needsReset()) {bank.dispose();bank=null;this.cloudLightBanks.delete(p);}
       if(!bank || bank.disposed) {
-        bank=new CloudLightBank(p);this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
+        bank=new CloudLightBank(p,{programOwner:this.cloudLightPrograms});this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
       }
       bank.update(this.renderer);
     }
@@ -228,11 +229,20 @@ export class GameLegacyPipeline {
     await compilePrograms(this.renderer, this.scene, this.camera, null, {signal:this.programPreparation.signal});
   }
 
+  releaseCloudLightPrograms() {
+    // These two empty-uniform material leases retain only the stable sweep/R8
+    // copy programs across bank, weather and body replacement. They are never
+    // drawn with another snapshot's data. Epoch/context teardown owns release.
+    for(const material of Object.values(this.cloudLightPrograms))material.dispose();
+    this.cloudLightPrograms={};
+  }
+
   dispose() {
     this.programPreparation.abort();
     this.stopProfiling();
     this.cloudSurfaceShadow.dispose();
     for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
+    this.releaseCloudLightPrograms();
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.composer.dispose();
     this.volumePass?.dispose();

@@ -29,8 +29,12 @@ const sha=value=>createHash('sha256').update(value).digest('hex');
 const current=await readFile('src/atmosphere-multiple-scattering.js');
 const candidateControl=process.argv.includes('--candidate-control');
 if(!candidateControl) {
-  assert.equal(current.toString().replaceAll('\r\n','\n'),candidate.replaceAll('\r\n','\n'),
-    'Production module must be exactly the verified angular-loop change');
+  const sharedImport="import { FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';";
+  const ownedImport="import { OwnedScreenTriangle as FullScreenQuad } from './owned-screen-triangle.js';";
+  assert.equal(candidate.split(sharedImport).length-1,1);
+  const installed=candidate.replace(sharedImport,ownedImport);
+  assert.equal(current.toString().replaceAll('\r\n','\n'),installed.replaceAll('\r\n','\n'),
+    'Production must contain only the verified loop change and explicit geometry-ownership import');
   candidate=current.toString();
 }
 const sources={reference,module:'src/atmosphere-multiple-scattering.js',originalSha256:sha(original),

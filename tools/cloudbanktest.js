@@ -49,3 +49,18 @@ assert.equal(bank.maps.get(13).ready,true);assert.equal(liveSnapshots,0);assert.
 assert.ok(created===5 && retired===3);
 for(const cache of bank.maps.values())cache.dispose();assert.equal(liveSnapshots,0);
 console.log('PASS light-bank sequential bootstrap, missing source, forecast cancellation, clock jump and atomic endpoint readiness.');
+
+// A bank borrows the pipeline's two program leases across weather/body resets;
+// standalone banks own their leases. Neither owner retains snapshot uniforms.
+uniforms.uWeatherMapHi={value:{}};
+let releases=0;
+const pool={sweep:{dispose(){releases++;}},copy:{dispose(){releases++;}}};
+function disposableBank(ownsPrograms) {
+  const item=Object.create(CloudLightBank.prototype);
+  Object.assign(item,{planet,programs:pool,ownsPrograms,maps:new Map(),disposed:false,target:{dispose(){}}});
+  return item;
+}
+const borrowed=disposableBank(false);borrowed.dispose();borrowed.dispose();
+assert.equal(releases,0);assert.equal(Object.keys(pool).length,2);assert.equal(Object.keys(borrowed.programs).length,0);
+const owned=disposableBank(true);owned.dispose();owned.dispose();assert.equal(releases,2);
+console.log('PASS borrowed light programs survive bank replacement; owned standalone programs retire once.');

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
+import { OwnedScreenTriangle as FullScreenQuad } from './owned-screen-triangle.js';
 import { atmosphereUniformGLSL, atmosphereTransportGLSL } from './atmosphere-transport-glsl.js';
 
 // Hillaire's isotropic higher-order closure: sphere-mean incident radiance
