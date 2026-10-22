@@ -14,6 +14,7 @@ import { hardenBloom } from './halcyon/gfx/sanitize.js';
 import {CloudLightBank} from './cloud/cloud-light-bank.js';
 import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 import {RenderProfiler} from './render-profiler.js';
+import {GpuWorkBudget} from './gpu-work-budget.js';
 import {withPreparedShadows} from './render-shadow-state.js';
 import { RenderFrameState } from './render-frame-state.js';
 import { compilePrograms } from './program-preparation.js';
@@ -168,6 +169,7 @@ export class GameLegacyPipeline {
         const airBody = this.atmospherePass.activePlanet;
         if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
         this.profiler?.beginFrame();
+        this.columnWorkBudget?.beginFrame();
         this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
         // RenderPass writes readBuffer. Preserve the receiver depth in the other
         // target during that draw; sampling its own depth attachment is feedback.
@@ -210,6 +212,23 @@ export class GameLegacyPipeline {
 
   performanceSnapshot() {return this.profiler?.snapshot()||null;}
 
+  startColumnWork({tileRows=64,footprintBatch=2,...options}={}) {
+    if(!this.volumePass)throw Error('Column work requires a volume pass');
+    if(this.columnWorkBudget)throw Error('Column work is already enabled');
+    if(!Number.isInteger(tileRows)||tileRows<1||!Number.isInteger(footprintBatch)||footprintBatch<1)throw Error('Invalid column work shape');
+    const budget=new GpuWorkBudget(this.renderer,options);
+    this.columnWorkBudget=budget;
+    try {this.volumePass.configureColumnWork({budget,tileRows,footprintBatch});}
+    catch(error) {if(this.columnWorkBudget===budget)this.columnWorkBudget=null;budget.dispose();throw error;}
+    return budget;
+  }
+
+  stopColumnWork() {
+    if(!this.columnWorkBudget)return;
+    const budget=this.columnWorkBudget;this.columnWorkBudget=null;
+    try {this.volumePass.configureColumnWork(null);} finally {budget.dispose();}
+  }
+
   updateCloudLighting() {
     this.cloudLightFrame++;
     const p=this.volumePass?.activePlanet;
@@ -246,6 +265,7 @@ export class GameLegacyPipeline {
   dispose() {
     this.programPreparation.abort();
     this.stopProfiling();
+    this.stopColumnWork();
     this.cloudSurfaceShadow.dispose();
     for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
     this.releaseCloudLightPrograms();

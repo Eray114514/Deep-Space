@@ -53,6 +53,7 @@ export class VolumetricPass extends Pass {
     this.scale = scale;
     this.frameState = frameState || new RenderFrameState();
     this.profiler = null; // Borrowed from the pipeline only while profiling.
+    this.columnWork = null; // Optional measured work admission; ordinary rows remain the baseline.
     this.width = 1;
     this.height = 1;
     this.current = target(1, 1, 'volume.current');
@@ -333,12 +334,17 @@ export class VolumetricPass extends Pass {
     if(far && planet.weatherField?.synoptic && stream && !stream.disposed) {
       let columns=this.columnMaps.get(planet);
       if(!columns || columns.disposed) {
-        columns=new CloudColumnBank(planet);this.columnMaps.set(planet,columns);
+        columns=new CloudColumnBank(planet,this.columnWork?{producer:'tile',
+          tileRows:this.columnWork.tileRows,footprintBatch:this.columnWork.footprintBatch,deadlineAware:true}:undefined);
+        this.columnMaps.set(planet,columns);
         planet.cloudColumnMap=columns;
       }
       // A real immutable endpoint may bake before its forecast partner arrives.
       // The bank alone decides when the complete pair is safe to sample.
-      columns.update(renderer);
+      if(this.columnWork) {
+        this.columnWork.budget.run(planet.weatherField,grant=>columns.update(renderer,
+          {workQuanta:grant,allowCreate:grant>0}));
+      } else columns.update(renderer);
       if(this.columnMaps.size>2) {
         const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);
         this.columnMaps.get(oldest).dispose();this.columnMaps.delete(oldest);
@@ -357,7 +363,13 @@ export class VolumetricPass extends Pass {
     setCloudFarCacheEnabled(planet,cacheOnly);
   }
 
-  profilePhase(name,work) {return this.profiler?this.profiler.run(name,work):work();}
+  configureColumnWork(policy) {
+    const banks=[...this.columnMaps.values()];
+    this.columnMaps.clear();this.columnRelease.clear();this.columnWork=policy;
+    for(const bank of banks)bank.dispose();
+  }
+
+  profilePhase(name,work,options) {return this.profiler?this.profiler.run(name,work,options):work();}
 
   setSize(width, height) {
     const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
@@ -415,7 +427,8 @@ export class VolumetricPass extends Pass {
         cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
         cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
       }
-      this.profilePhase('cloud-columns',()=>this.updateCloudColumns(renderer));
+      // The work budget owns sparse GPU intervals inside this CPU parent.
+      this.profilePhase('cloud-columns',()=>this.updateCloudColumns(renderer),this.columnWork?{gpu:false}:undefined);
       const air = this.sceneDepthSource;
       if (cloudUniforms) {
         if (air?.activePlanet === this.activePlanet) {
@@ -520,6 +533,7 @@ export class VolumetricPass extends Pass {
 
   dispose() {
     this.profiler=null;
+    this.columnWork=null;
     this.releaseTargets();
     this.resolveMaterial.dispose();
     this.compositeMaterial.dispose();

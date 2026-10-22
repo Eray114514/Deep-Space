@@ -494,6 +494,45 @@ for(const reset of ['frame-revision','field','context-epoch'])test(`disposing th
   } finally {bank.dispose();}
 });
 
+test('zero admission retires stale sources without copying a new immutable snapshot',()=>{
+  const f=fixture(),bank=new CloudColumnBank(f.planet,{producer:'tile',width:4,workQuanta:0});
+  f.scratches.push(bank.scratch);
+  try {
+    for(const frame of f.stream.frames.values())for(const value of Object.values(frame))if(ArrayBuffer.isView(value)) {
+      value.slice=()=>{throw Error('Zero-admission snapshot copy');};
+    }
+    bank.update(f.renderer,{workQuanta:0,allowCreate:false});
+    assert.equal(bank.maps.size,0);assert.equal(f.planet.volCloudMat.uniforms.uColumnsReady.value,0);
+    assert.equal(bank.scratch.owner,null);
+  } finally {bank.dispose();}
+});
+
+test('zero admission can publish an existing pair and unbind a replaced revision without reconstruction',()=>{
+  const f=fixture(),{bank,first}=readyBank(f);
+  try {
+    bank.update(f.renderer,{workQuanta:0,allowCreate:false});
+    assert.equal(f.planet.volCloudMat.uniforms.uColumnsReady.value,1);
+    f.stream.frames.set(.25,{...f.stream.frames.get(.25)});
+    bank.update(f.renderer,{workQuanta:0,allowCreate:false});
+    assert.equal(first.map.disposed,true);assert.equal(bank.maps.has(.25),false);
+    assert.equal(f.planet.volCloudMat.uniforms.uColumnsReady.value,0);assertBankResources(f,bank);
+  } finally {bank.dispose();}
+});
+
+test('absolute production plans distinguish first use from retirement and report partial draw work',()=>{
+  const f=fixture(),bank=new CloudColumnBank(f.planet,{producer:'tile',width:4,tileRows:2,footprintBatch:8,workQuanta:0});
+  f.scratches.push(bank.scratch);
+  try {
+    const before=bank.plan(),forecast=before.jobs[2];
+    assert.equal(bank.maps.size,0);assert.equal(forecast.firstNeededHours,before.anchor+before.frameHours);
+    assert.equal(forecast.retiresAtHours,forecast.hours+before.frameHours);assert.equal(forecast.remainingDraws,8);
+    bank.update(f.renderer,{workQuanta:0});const map=bank.maps.get(.25);f.track(map);
+    const submitted=bank.update(f.renderer,{workQuanta:1,allowCreate:false});assert.equal(submitted.draws,1);
+    const partial=bank.plan().jobs[0];assert.equal(partial.footprintCursor,8);assert.equal(partial.remainingDraws,7);
+    assert.equal(partial.ready,false);assert.notEqual(partial.revision,null);
+  } finally {bank.dispose();}
+});
+
 console.log(JSON.stringify({passed:results.every(result=>result.passed),cases:results.length,results,
   scope:'Pure CPU contracts: actual TileMap/Scratch/material/revision classes, recorded uniforms/targets/rectangles and resource events. No shader execution, actual GPU completion, native parity, throughput or dynamic-budget acceptance.'},null,2));
 assert.equal(results.filter(result=>!result.passed).length,0,'Column work contracts failed; see individual cases above');

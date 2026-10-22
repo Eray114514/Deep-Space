@@ -63,7 +63,7 @@ try {
     cloudCandidatesTex:new THREE.DataArrayTexture(new Uint16Array(stride*CANDIDATE_LAYERS),CANDIDATE_WIDTH,CANDIDATE_HEIGHT,CANDIDATE_LAYERS)};
   const s2=new PlanetWeatherStream(p2);p2.weatherStream=s2;
   const acceleratedFrame=(hours,layer,top)=>{
-    const result={...frame(hours),bands:new Float32Array(p2.cloudSpeciesTex.image.data.length),
+    const result={...frame(hours),token:s2.token,bands:new Float32Array(p2.cloudSpeciesTex.image.data.length),
       bounds:Float32Array.from({length:w*h*4},(_,i)=>i%2?top:1000),
       candidates:new Uint16Array(stride*CANDIDATE_LAYERS)};
     result.candidates[layer*stride]=1;return result;
@@ -103,3 +103,6 @@ try {
   for(const texture of [p2.cloudSpeciesTex,p2.cloudBoundsTex,p2.cloudCandidatesTex])texture.dispose();
   console.log('PASS: exact weather transaction, prefetch deduplication, replacement support indexes, time advance, bracket turnover and disposal.');
 } finally {globalThis.Worker=originalWorker;}
+
+// Keep bounded worker dispatch in the existing stream regression gate.
+await import('./weatherworkqueuetest.js');

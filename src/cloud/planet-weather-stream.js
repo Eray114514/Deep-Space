@@ -6,27 +6,59 @@ import {PRODUCTION_PARAMETER_LAYERS,packProductionAcceleration} from './producti
 export class PlanetWeatherStream {
   constructor(planet) {
     this.planet=planet; this.frames=new Map(); this.pending=new Set();
+    this.desired=[];this.inFlight=null;this.failedHours=new Set();this.workerFailed=false;
     this.generations=new WeakMap();this.generation=0;
     this.token=0; this.disposed=false; this.error=null; this.lastUpdate=-Infinity;
     const angularSpeed=Math.abs(planet.weatherField.windRadiansPerHour);
     this.frameHours=.5/2**Math.max(0,Math.ceil(Math.log2(angularSpeed*.5/.05)));
-    this.worker=new Worker(new URL('./planet-weather-worker.js',import.meta.url),{type:'module'});
-    this.worker.postMessage({type:'init',descriptor:planet.weatherField.streamDescriptor});
-    this.worker.onmessage=({data}) => {
-      if(this.disposed || data.token!==this.token) return;
-      this.pending.delete(data.hours);
-      if(data.error) { this.error=data.error; return; }
-      this.frames.set(data.hours,data);
-      this.update(this.planet.weatherHours,true);
-    };
-    this.worker.onerror=e => { this.error=e.message; };
+    this.startWorker();
   }
-  request(hours) {
-    if(this.frames.has(hours) || this.pending.has(hours)) return;
-    this.pending.add(hours);
-    this.worker.postMessage({type:'frame',token:this.token,hours,
-      stellarDirections:this.planet.stellarDirectionsAt?.(hours),
-      width:this.planet.cloudAtlasWidth,surfaceRange:this.planet.weatherField.surfaceRangeMeters,frameHours:this.frameHours});
+  startWorker() {
+    let worker;this.workerFailed=false;
+    try {
+      worker=new Worker(new URL('./planet-weather-worker.js',import.meta.url),{type:'module'});
+      this.worker=worker;
+      worker.onmessage=({data}) => {
+        if(this.disposed || this.workerFailed || worker!==this.worker)return;
+        // The unchanged worker reports init failures before any frame token
+        // exists. Treat that protocol response as a failed worker, not a job.
+        if(data.error&&data.token===undefined&&data.hours===undefined){this.failWorker(data.error);return;}
+        if(data.token!==this.token)return;
+        const active=this.inFlight?.hours===data.hours&&this.inFlight.token===data.token;
+        // Existing-hour replacement is a real revision transaction, but must
+        // never release a different request's slot or accept an old token.
+        if(!active&&!this.frames.has(data.hours))return;
+        if(active){this.pending.delete(data.hours);this.inFlight=null;}
+        if(data.error) {
+          if(!active)return;
+          this.error=data.error;this.failedHours.add(data.hours);
+          this.advance(this.planet.weatherHours,true);return;
+        }
+        const a=Math.floor(this.planet.weatherHours/this.frameHours)*this.frameHours;
+        if(data.hours>=a-this.frameHours&&data.hours<=a+this.frameHours*3)this.frames.set(data.hours,data);
+        this.failedHours.delete(data.hours);if(!this.failedHours.size)this.error=null;
+        this.advance(this.planet.weatherHours,true);
+      };
+      worker.onerror=e => {if(!this.disposed&&!this.workerFailed&&worker===this.worker)this.failWorker(e.message);};
+      worker.postMessage({type:'init',descriptor:this.planet.weatherField.streamDescriptor});
+    } catch(error) {
+      this.worker=worker;this.failWorker(String(error));
+    }
+  }
+  failWorker(error) {
+    this.error=error;this.workerFailed=true;this.pending.clear();this.inFlight=null;
+    this.worker?.terminate();
+  }
+  dispatch() {
+    if(this.disposed||this.workerFailed||this.inFlight)return;
+    const hours=this.desired.find(hours=>!this.frames.has(hours)&&!this.failedHours.has(hours));
+    if(hours===undefined)return;
+    const token=++this.token;this.inFlight={hours,token};this.pending.add(hours);
+    try {
+      this.worker.postMessage({type:'frame',token,hours,
+        stellarDirections:this.planet.stellarDirectionsAt?.(hours),
+        width:this.planet.cloudAtlasWidth,surfaceRange:this.planet.weatherField.surfaceRangeMeters,frameHours:this.frameHours});
+    } catch(error) {this.failWorker(String(error));}
   }
   revisionAt(hours) {
     const frame=this.frames.get(hours);
@@ -35,6 +67,14 @@ export class PlanetWeatherStream {
     return this.generations.get(frame);
   }
   update(hours,force=false) {
+    if(this.disposed)return;
+    // Only an external tick retries failed jobs/workers. Error completions
+    // can drain the remaining desired hours without creating a retry spin.
+    this.failedHours.clear();
+    if(this.workerFailed)this.startWorker();
+    return this.advance(hours,force);
+  }
+  advance(hours,force=false) {
     if(this.disposed) return;
     const FRAME_HOURS=this.frameHours;
     const a=Math.floor(hours/FRAME_HOURS)*FRAME_HOURS,b=a+FRAME_HOURS;
@@ -49,7 +89,9 @@ export class PlanetWeatherStream {
       this.anchor=a;
       for(const h of this.frames.keys()) if(h<a-FRAME_HOURS || h>b+FRAME_HOURS*2) this.frames.delete(h);
     }
-    for(const h of [a,b,b+FRAME_HOURS]) this.request(h);
+    // Keep the desired set on the main thread. At most one frame has entered
+    // the worker FIFO; a completion re-evaluates this absolute-time bracket.
+    this.desired=[a,b,b+FRAME_HOURS];this.dispatch();
     const first=this.frames.get(a),second=this.frames.get(b);
     this.ready=Boolean(first&&second);
     // A prefetched third frame must not re-upload an unchanged active pair.
@@ -110,7 +152,8 @@ export class PlanetWeatherStream {
     this.revision=`${p.weatherField.namespace}:${a}:${b}`;
   }
   dispose() {
-    if(this.disposed) return;this.disposed=true;this.ready=false;this.worker.terminate();this.frames.clear();this.pending.clear();
+    if(this.disposed) return;this.disposed=true;this.ready=false;this.worker?.terminate();this.frames.clear();this.pending.clear();
+    this.desired=[];this.inFlight=null;this.failedHours.clear();
     this.committedFirst=null;this.committedSecond=null;
     this.boundsFirst=null;this.boundsSecond=null;
   }
