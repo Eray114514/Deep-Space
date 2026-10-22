@@ -51,7 +51,7 @@ assert.match(profile,/return amount\*shape\*profile\*peak;/,'Do not reassociate 
 assert.doesNotMatch(productionColumnCondensateGLSL,/parameters\.w/,'Extinction multiplication remains owned by the column caller');
 assert.equal((productionColumnCondensateGLSL.match(/float share=/g)||[]).length,1);
 assert.equal((productionColumnCondensateGLSL.match(/vec2 fine=/g)||[]).length,1);
-const producer=readFileSync(new URL('../src/cloud/cloud-column-map.js',import.meta.url),'utf8');
+const producer=readFileSync(new URL('../src/cloud/cloud-column-shader.js',import.meta.url),'utf8');
 assert.ok(producer.includes('${productionCloudGLSL}${productionColumnCondensateGLSL}'));
 const loop=producer.indexOf('for(int k=0;k<count;k++)');
 const amountIndex=producer.indexOf('float columnAmount=columnSpeciesAmount(frame,band,columnRegion);');

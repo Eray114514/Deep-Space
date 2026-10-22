@@ -6,6 +6,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { startServer } from './server.js';
 import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
+import { verifyColumnShaderContract } from './columnshadercontracttest.js';
 
 const full = process.argv.includes('--full'), skipEmpty = process.argv.includes('--skip-empty');
 assert.ok(process.argv.slice(2).every(value => ['--full','--skip-empty'].includes(value)), 'Only --full and --skip-empty are supported');
@@ -33,19 +34,21 @@ const gatedAmount=baseAmount.replace('float columnAmount=columnSpeciesAmount(fra
   'float columnAmount=columnSpeciesAmount(frame,band,columnRegion);\n              if(columnAmount<=0.0)continue;');
 const installed = await readFile(new URL('../src/cloud/cloud-column-map.js', import.meta.url));
 const normalized=source=>source.replaceAll('\r\n','\n');
-assert.ok([baseAmount,gatedAmount].some(source=>normalized(source)===normalized(installed.toString('utf8'))),
-  'Installed producer must be the independently derived amount or empty-species variant');
+const shaderContract=verifyColumnShaderContract();
 const amount=skipEmpty?gatedAmount:installed.toString('utf8');
-const candidateKind=normalized(amount)===normalized(gatedAmount)?'skip-empty-species':'shared-column-amount';
+const candidateKind='skip-empty-species';
 const experimentalOverride=normalized(amount)!==normalized(installed.toString('utf8'));
 
 const variants = { original, parameters: a, amount, shared:baseAmount,
-  wrong: amount.replace('columnSpeciesAmount(frame,band,columnRegion)', 'columnSpeciesAmount(frame,band,vec2(0.0,1.0))') };
+  wrong: gatedAmount.replace('columnSpeciesAmount(frame,band,columnRegion)', 'columnSpeciesAmount(frame,band,vec2(0.0,1.0))') };
 for (const [name, body] of Object.entries(variants)) await writeFile(`${out}/${name}-source.js`, body);
 await writeFile(`${out}/original-fixture.json`, fixtureBytes);
+await writeFile(`${out}/verifier.js`,await readFile(new URL(import.meta.url)));
+await writeFile(`${out}/shader-contract.js`,await readFile(new URL('./columnshadercontracttest.js',import.meta.url)));
+await writeFile(`${out}/shader-contract-fixture.json`,await readFile(new URL('./fixtures/cloud-column-work-original.json',import.meta.url)));
 const reference = { path: fixturePath, fixtureSha256: sha256(fixtureBytes), revision: fixture.revision,
   installedRawSha256: sha256(installed), installedRawBytes: installed.length,
-  candidateKind, experimentalOverride, skipEmptyRequested:skipEmpty,
+  candidateKind, experimentalOverride, skipEmptyRequested:skipEmpty,shaderContract,
   originalPath: fixture.path, sourceSha256: fixture.sha256, sourceBytes: fixture.bytes,
   variants: Object.fromEntries(Object.entries(variants).map(([name, source]) => [name, { sha256: sha256(source), bytes: Buffer.byteLength(source) }])) };
 const before = await evidenceFingerprint('tools/cloudcolumncostdiag.js');
@@ -313,6 +316,7 @@ try {
   const referenceAfter = await readFile(new URL('./fixtures/cloud-column-cost-original.json', import.meta.url));
   await writeFile(`${out}/report.json`, JSON.stringify({ before, after, reference, referenceAfterSha256: sha256(referenceAfter), result, errors }, null, 2));
   assert.deepEqual(before, after);assert.deepEqual(referenceAfter, fixtureBytes);
+  assert.deepEqual(verifyColumnShaderContract(),shaderContract);
   assert.deepEqual(errors, []);assert.equal(result.error, 0);assert.equal(result.lost, false);
   const zero = row => row.optical === 0 && row.heights === 0;
   if (result.rowWindow) {

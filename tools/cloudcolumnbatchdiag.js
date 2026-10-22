@@ -7,6 +7,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { startServer } from './server.js';
 import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
+import { verifyColumnShaderContract } from './columnshadercontracttest.js';
 
 const options = { mode: 'both', rounds: 2, forecast: false, batchRows: [2, 8, 16, 32, 64, 128, 512], pollMs: 20, timeoutMs: 300000 };
 for (const argument of process.argv.slice(2)) {
@@ -27,24 +28,18 @@ const fixture = JSON.parse(fixtureBytes.toString('utf8'));
 assert.equal(fixture.sha256, '20c1943dce46665d0258225a82b9db0a5f40163f0b35c799b684c0076890b759');
 assert.equal(sha256(fixture.source), fixture.sha256);assert.equal(Buffer.byteLength(fixture.source), fixture.bytes);
 const installed = await readFile(new URL('../src/cloud/cloud-column-map.js', import.meta.url));
-const call = 'speciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),speciesStructureAt(species).x,productionAreaBand(uv,species))';
-const point = '              for(int k=0;k<count;k++) {';
-assert.equal(fixture.source.split(call).length - 1, 1);assert.equal(fixture.source.split(point).length - 1, 1);
-const expected = fixture.source.replace("import * as THREE from 'three';", "import * as THREE from 'three';\nimport { productionColumnCondensateGLSL } from './production-shape.js';")
-  .replace('${productionCloudGLSL}', '${productionCloudGLSL}${productionColumnCondensateGLSL}')
-  .replace(point, '              vec2 columnRegion=productionAreaBand(uv,species);\n              float minimumDepth=speciesStructureAt(species).x;\n              float columnAmount=columnSpeciesAmount(frame,band,columnRegion);\n' + point)
-  .replace(call, 'columnSpeciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),minimumDepth,columnAmount)');
-const gated=expected.replace('float columnAmount=columnSpeciesAmount(frame,band,columnRegion);',
-  'float columnAmount=columnSpeciesAmount(frame,band,columnRegion);\n              if(columnAmount<=0.0)continue;');
-const normalize=source=>source.replaceAll('\r\n','\n');
-assert.ok([expected,gated].some(source=>normalize(source)===normalize(installed.toString('utf8'))),
-  'Installed producer must equal the independently derived amount or empty-species variant');
-const candidateKind=normalize(installed.toString('utf8'))===normalize(gated)?'skip-empty-species':'shared-column-amount';
+// Material construction is shared with the explicit tile producer. Compare
+// executed default constructors against the frozen pre-extraction class;
+// whole-module text equality would reject that source-only extraction.
+const shaderContract=verifyColumnShaderContract();
+const candidateKind='skip-empty-species';
 
 const sources = { original: { fixture: 'tools/fixtures/cloud-column-cost-original.json', revision: fixture.revision,
   path: fixture.path, rawSha256: fixture.sha256, rawBytes: fixture.bytes, fixtureRawSha256: sha256(fixtureBytes) },
-  installed: { path: 'src/cloud/cloud-column-map.js', rawSha256: sha256(installed), rawBytes: installed.length, candidateKind, matchesDerivedCandidate: true } };
+  installed: { path: 'src/cloud/cloud-column-map.js', rawSha256: sha256(installed), rawBytes: installed.length, candidateKind, shaderContract } };
 await writeFile(`${out}/verifier.js`, verifier);await writeFile(`${out}/original-fixture.json`, fixtureBytes);
+await writeFile(`${out}/shader-contract.js`,await readFile(new URL('./columnshadercontracttest.js',import.meta.url)));
+await writeFile(`${out}/shader-contract-fixture.json`,await readFile(new URL('./fixtures/cloud-column-work-original.json',import.meta.url)));
 await writeFile(`${out}/original-source.js`, fixture.source);await writeFile(`${out}/installed-source.js`, installed);
 const before = await evidenceFingerprint('tools/cloudcolumnbatchdiag.js');
 const { server, port } = await startServer(0);let browser, browserInfo;
@@ -358,6 +353,7 @@ try {
     installedAfterRawSha256: sha256(installedAfter), fixtureAfterRawSha256: sha256(fixtureAfter), browserInfo,
     result, summary, errors, driverWarnings, droppedWarnings }, null, 2));
   assert.deepEqual(before, after);assert.deepEqual(installedAfter, installed);assert.deepEqual(fixtureAfter, fixtureBytes);
+  assert.deepEqual(verifyColumnShaderContract(),shaderContract);
   assert.deepEqual(errors, []);assert.deepEqual(driverWarnings, []);assert.equal(droppedWarnings, 0);
   assert.deepEqual(result.contextEvents, []);assert.equal(result.final.error, 0);assert.equal(result.final.lost, false);
   const zero = value => value.optical === 0 && value.heights === 0;
