@@ -67,9 +67,15 @@ try {
     assert.equal(s.gl,0);assert.equal(s.profile.supported,true);
     assert.ok(s.profile.records.some(r=>r.gpuMs>0),'Need completed, nonempty asynchronous GPU results');
     console.log(s.label,JSON.stringify(Object.fromEntries([...new Set(s.profile.records.map(r=>r.name))].map(name=>{
-      const rows=s.profile.records.filter(r=>r.name===name&&r.gpuMs!==null);
-      return [name,{samples:rows.length,cpuMean:rows.reduce((n,r)=>n+r.cpuMs,0)/rows.length,
-        gpuMean:rows.reduce((n,r)=>n+r.gpuMs,0)/rows.length,gpuMax:Math.max(...rows.map(r=>r.gpuMs))}];
+      const rows=s.profile.records.filter(r=>r.name===name),gpuRows=rows.filter(r=>r.gpuMs!==null);
+      // VolumetricPass is a CPU-only inclusive parent. GPU children have
+      // separate names; neither parent/child CPU totals nor missing GPU data
+      // may be turned into an invented aggregate or a zero-sample NaN.
+      return [name,{scope:rows[0]?.scope||'gpu',cpuInclusive:rows[0]?.cpuInclusive??true,
+        cpuSamples:rows.length,gpuSamples:gpuRows.length,
+        cpuMean:rows.length?rows.reduce((n,r)=>n+r.cpuMs,0)/rows.length:null,
+        gpuMean:gpuRows.length?gpuRows.reduce((n,r)=>n+r.gpuMs,0)/gpuRows.length:null,
+        gpuMax:gpuRows.length?Math.max(...gpuRows.map(r=>r.gpuMs)):null}];
     }))));
   }
   console.log(`PASS: bounded asynchronous production phase timing and isolated surface warmup; ${out}`);

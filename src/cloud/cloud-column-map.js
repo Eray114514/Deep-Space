@@ -88,6 +88,7 @@ export class CloudColumnMap {
               vec2 columnRegion=productionAreaBand(uv,species);
               float minimumDepth=speciesStructureAt(species).x;
               float columnAmount=columnSpeciesAmount(frame,band,columnRegion);
+              if(columnAmount<=0.0)continue;
               for(int k=0;k<count;k++) {
                 // A space-facing ray first interacts at the top of a dense
                 // deck, not at its extinction-weighted interior centroid.

@@ -52,6 +52,7 @@ export class VolumetricPass extends Pass {
     this.camera = camera;
     this.scale = scale;
     this.frameState = frameState || new RenderFrameState();
+    this.profiler = null; // Borrowed from the pipeline only while profiling.
     this.width = 1;
     this.height = 1;
     this.current = target(1, 1, 'volume.current');
@@ -356,6 +357,8 @@ export class VolumetricPass extends Pass {
     setCloudFarCacheEnabled(planet,cacheOnly);
   }
 
+  profilePhase(name,work) {return this.profiler?this.profiler.run(name,work):work();}
+
   setSize(width, height) {
     const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
     if(nextWidth!==this.width||nextHeight!==this.height)this.lightBatch?.releaseScratch();
@@ -412,7 +415,7 @@ export class VolumetricPass extends Pass {
         cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
         cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
       }
-      this.updateCloudColumns(renderer);
+      this.profilePhase('cloud-columns',()=>this.updateCloudColumns(renderer));
       const air = this.sceneDepthSource;
       if (cloudUniforms) {
         if (air?.activePlanet === this.activePlanet) {
@@ -428,8 +431,10 @@ export class VolumetricPass extends Pass {
       renderer.autoClear = true;
       renderer.setClearColor(0x000000, 0);
       renderer.setRenderTarget(this.current);
-      renderer.clear(true, false, false);
-      if(!this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
+      this.profilePhase('volume-current',()=>{
+        renderer.clear(true, false, false);
+        if(!this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
+      });
 
       this.camera.layers.mask = oldMask;
       renderer.autoClear = oldAutoClear;
@@ -460,7 +465,7 @@ export class VolumetricPass extends Pass {
       u.uCameraWorld.value.copy(this.frameState.current.cameraWorld);
       u.uPrevViewProjection.value.copy(this.frameState.previous.viewProjection);
       renderer.setRenderTarget(this.historyWrite);
-      this.resolveQuad.render(renderer);
+      this.profilePhase('volume-resolve',()=>this.resolveQuad.render(renderer));
 
       this.compositeMaterial.uniforms.tBase.value = readBuffer.texture;
       this.compositeMaterial.uniforms.tVolume.value = this.historyWrite.texture;
@@ -468,8 +473,10 @@ export class VolumetricPass extends Pass {
       this.compositeMaterial.uniforms.uDepthReady.value = depthTexture ? 1 : 0;
       this.compositeMaterial.uniforms.uCameraFar.value = this.camera.far;
       renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-      if (this.clear) renderer.clear();
-      this.compositeQuad.render(renderer);
+      this.profilePhase('volume-composite',()=>{
+        if (this.clear) renderer.clear();
+        this.compositeQuad.render(renderer);
+      });
 
       completed = true;
     } finally {
@@ -512,6 +519,7 @@ export class VolumetricPass extends Pass {
   }
 
   dispose() {
+    this.profiler=null;
     this.releaseTargets();
     this.resolveMaterial.dispose();
     this.compositeMaterial.dispose();

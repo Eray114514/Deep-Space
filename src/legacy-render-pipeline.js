@@ -186,19 +186,25 @@ export class GameLegacyPipeline {
     }
   }
 
-  profilePhase(name,work) {return this.profiler?this.profiler.run(name,work):work();}
+  profilePhase(name,work,options) {return this.profiler?this.profiler.run(name,work,options):work();}
 
   startProfiling(options={}) {
     this.stopProfiling();this.profiler=new RenderProfiler(this.renderer,options);
+    if(this.volumePass)this.volumePass.profiler=this.profiler;
     this.profiledPasses=this.composer.passes.map((pass,index)=>{
       const render=pass.render,name=`${index}:${pass.constructor.name}`;
-      pass.render=(...args)=>this.profilePhase(name,()=>render.apply(pass,args));
+      // Retain the parent CPU total, including its children. Only the four
+      // non-overlapping volume subphases own GPU intervals; do not sum the
+      // inclusive parent CPU record with those child CPU records.
+      const scope=pass===this.volumePass?{gpu:false}:undefined;
+      pass.render=(...args)=>this.profilePhase(name,()=>render.apply(pass,args),scope);
       return {pass,render};
     });
   }
 
   stopProfiling() {
     for(const {pass,render} of this.profiledPasses||[])pass.render=render;
+    if(this.volumePass)this.volumePass.profiler=null;
     this.profiledPasses=[];this.profiler?.dispose();this.profiler=null;
   }
 

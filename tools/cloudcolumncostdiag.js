@@ -7,8 +7,8 @@ import { startServer } from './server.js';
 import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
 
-const full = process.argv.includes('--full');
-assert.ok(process.argv.slice(2).every(value => value === '--full'), 'Only --full is supported');
+const full = process.argv.includes('--full'), skipEmpty = process.argv.includes('--skip-empty');
+assert.ok(process.argv.slice(2).every(value => ['--full','--skip-empty'].includes(value)), 'Only --full and --skip-empty are supported');
 const out = `test-results/cloud-column-cost/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const fixturePath = 'tools/fixtures/cloud-column-cost-original.json';
@@ -23,21 +23,29 @@ const point = '              for(int k=0;k<count;k++) {';
 assert.equal(original.split(call).length - 1, 1);assert.equal(original.split(point).length - 1, 1);
 const a = original.replace(point, '              vec2 columnRegion=productionAreaBand(uv,species);\n              float minimumDepth=speciesStructureAt(species).x;\n' + point)
   .replace(call, 'speciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),minimumDepth,columnRegion)');
-const amount = original.replace("import * as THREE from 'three';", "import * as THREE from 'three';\nimport { productionColumnCondensateGLSL } from './production-shape.js';")
+const baseAmount = original.replace("import * as THREE from 'three';", "import * as THREE from 'three';\nimport { productionColumnCondensateGLSL } from './production-shape.js';")
   .replace('${productionCloudGLSL}', '${productionCloudGLSL}${productionColumnCondensateGLSL}')
   .replace(point, '              vec2 columnRegion=productionAreaBand(uv,species);\n              float minimumDepth=speciesStructureAt(species).x;\n              float columnAmount=columnSpeciesAmount(frame,band,columnRegion);\n' + point)
   .replace(call, 'columnSpeciesCondensate(frame,axis,altitude,band,parameters.x,parameters.y,parameters.z,int(shape.x),minimumDepth,columnAmount)');
-assert.notEqual(amount, original);
-assert.ok(amount.includes('${productionCloudGLSL}${productionColumnCondensateGLSL}'));
+assert.notEqual(baseAmount, original);
+assert.ok(baseAmount.includes('${productionCloudGLSL}${productionColumnCondensateGLSL}'));
+const gatedAmount=baseAmount.replace('float columnAmount=columnSpeciesAmount(frame,band,columnRegion);',
+  'float columnAmount=columnSpeciesAmount(frame,band,columnRegion);\n              if(columnAmount<=0.0)continue;');
 const installed = await readFile(new URL('../src/cloud/cloud-column-map.js', import.meta.url));
-assert.equal(installed.toString('utf8').replaceAll('\r\n', '\n'), amount.replaceAll('\r\n', '\n'),
-  'The complete-atlas candidate must equal the installed producer');
-const variants = { original, parameters: a, amount,
+const normalized=source=>source.replaceAll('\r\n','\n');
+assert.ok([baseAmount,gatedAmount].some(source=>normalized(source)===normalized(installed.toString('utf8'))),
+  'Installed producer must be the independently derived amount or empty-species variant');
+const amount=skipEmpty?gatedAmount:installed.toString('utf8');
+const candidateKind=normalized(amount)===normalized(gatedAmount)?'skip-empty-species':'shared-column-amount';
+const experimentalOverride=normalized(amount)!==normalized(installed.toString('utf8'));
+
+const variants = { original, parameters: a, amount, shared:baseAmount,
   wrong: amount.replace('columnSpeciesAmount(frame,band,columnRegion)', 'columnSpeciesAmount(frame,band,vec2(0.0,1.0))') };
 for (const [name, body] of Object.entries(variants)) await writeFile(`${out}/${name}-source.js`, body);
 await writeFile(`${out}/original-fixture.json`, fixtureBytes);
 const reference = { path: fixturePath, fixtureSha256: sha256(fixtureBytes), revision: fixture.revision,
   installedRawSha256: sha256(installed), installedRawBytes: installed.length,
+  candidateKind, experimentalOverride, skipEmptyRequested:skipEmpty,
   originalPath: fixture.path, sourceSha256: fixture.sha256, sourceBytes: fixture.bytes,
   variants: Object.fromEntries(Object.entries(variants).map(([name, source]) => [name, { sha256: sha256(source), bytes: Buffer.byteLength(source) }])) };
 const before = await evidenceFingerprint('tools/cloudcolumncostdiag.js');
@@ -69,7 +77,7 @@ try {
     if (!ext) throw Error('Hardware GPU timer required');
     const options = { width: 1024, samples: 128, footprintSamples: 64 };
     const constructors = {}, maps = {}, leases = { original: {}, amount: {} };
-    for (const name of (full ? ['original', 'amount'] : ['original', 'parameters', 'amount', 'wrong']))
+    for (const name of (full ? ['original', 'amount'] : ['original', 'parameters', 'amount', 'shared', 'wrong']))
       constructors[name] = (await import(`/src/cloud/cost-${name}.js`)).CloudColumnMap;
     const check = (condition, message) => { if (!condition) throw Error(message); };
     const checkpoint = label => {
@@ -157,7 +165,7 @@ try {
         for (const row of rows) {
           await draw('original', row);const reference = readTarget(maps.original.target, row, 2);rowReferences.set(row, reference);
           await draw('original', row);const repeat = delta(reference, readTarget(maps.original.target, row, 2));
-          for (const name of ['parameters', 'amount', 'wrong']) {
+          for (const name of ['parameters', 'amount', 'shared', 'wrong']) {
             await draw(name, row);const first = readTarget(maps[name].target, row, 2);await draw(name, row);
             parity.push({ row, name, delta: delta(reference, first), repeat: delta(first, readTarget(maps[name].target, row, 2)),
               originalRepeat: repeat, occupied: reference.optical.filter((value, i) => i % 4 < 2 && value > 0).length });
@@ -169,7 +177,7 @@ try {
         // Expanded doubles the serial footprint loop to 128; primary draws remain 64.
         for (const row of [96, 256, 384]) {
           for (let round = 0; round < 10; round++) {
-            const order = round % 2 ? ['expanded', 'amount', 'original'] : ['original', 'amount', 'expanded'];
+            const order = round % 2 ? ['expanded', 'amount', 'shared', 'original'] : ['original', 'shared', 'amount', 'expanded'];
             for (const name of order) {
               const sample = { round, ...await draw(name === 'expanded' ? 'original' : name, row, name === 'expanded') };
               if (name === 'expanded') controls.push(sample);else warm.push(sample);
@@ -185,8 +193,9 @@ try {
         const costControls = [96, 256, 384].map(row => {
           const old = median(warm.filter(value => value.row === row && value.name === 'original').map(value => value.gpuMs));
           const candidate = median(warm.filter(value => value.row === row && value.name === 'amount').map(value => value.gpuMs));
+          const shared = median(warm.filter(value => value.row === row && value.name === 'shared').map(value => value.gpuMs));
           const twice = median(controls.filter(value => value.row === row).map(value => value.gpuMs));
-          return { row, originalMedianMs: old, amountMedianMs: candidate, expandedMedianMs: twice,
+          return { row, originalMedianMs: old, sharedMedianMs:shared, amountMedianMs: candidate, amountVsSharedRatio:candidate/shared, expandedMedianMs: twice,
             expandedRatio: twice / old, amountRatio: candidate / old, positiveControlAccepted: twice / old >= 1.5 };
         });
         const positiveControlAccepted = costControls.every(value => value.positiveControlAccepted);

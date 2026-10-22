@@ -30,21 +30,28 @@ export class RenderProfiler {
     this.sample=!this.disposed&&!this.lost&&this.frame%this.every===0;
     this.records=this.records.filter(r=>r.frame>this.frame-this.history);
   }
-  run(name,work) {
+  run(name,work,{gpu=true}={}) {
     if(!this.sample||this.active)return work();
     const gl=this.gl,ext=this.ext;
-    const record={frame:this.frame,name,cpuMs:0,gpuMs:null};this.records.push(record);
+    // CPU-only parents include their child CPU time, but never own a GPU
+    // interval. Their GPU children can therefore be measured independently.
+    const record={frame:this.frame,name,cpuMs:0,gpuMs:null,
+      scope:gpu?'gpu':'cpu',cpuInclusive:true};this.records.push(record);
     let query=null;
-    if(ext&&!gl.isContextLost()&&this.pending.length<this.maxPending
+    if(gpu&&ext&&!gl.isContextLost()&&this.pending.length<this.maxPending
       &&!gl.getQuery(ext.TIME_ELAPSED_EXT,gl.CURRENT_QUERY)) {
       query=gl.createQuery();if(query)gl.beginQuery(ext.TIME_ELAPSED_EXT,query);
     }
-    if(!query)this.skipped++;
-    const started=this.now();this.active=true;
+    if(gpu&&!query)this.skipped++;
+    const started=this.now();if(gpu)this.active=true;
     try {return work();} finally {
-      record.cpuMs=Math.max(0,this.now()-started);this.active=false;
+      record.cpuMs=Math.max(0,this.now()-started);if(gpu)this.active=false;
       if(query&&!gl.isContextLost()) {
-        gl.endQuery(ext.TIME_ELAPSED_EXT);this.pending.push({query,record});
+        gl.endQuery(ext.TIME_ELAPSED_EXT);
+        // work() may synchronously stop profiling. That owner will never poll
+        // again; release its just-ended query instead of reviving pending.
+        if(this.disposed) {if(!gl.isContextLost())gl.deleteQuery(query);}
+        else this.pending.push({query,record});
       }
     }
   }
