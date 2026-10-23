@@ -7,12 +7,23 @@ export class PlanetWeatherStream {
   constructor(planet) {
     this.planet=planet; this.frames=new Map(); this.pending=new Set();
     this.desired=[];this.inFlight=null;this.failedHours=new Set();this.workerFailed=false;
+    this.forecastRequests=new Map();
     this.generations=new WeakMap();this.generation=0;
     this.token=0; this.disposed=false; this.error=null; this.lastUpdate=-Infinity;
     const angularSpeed=Math.abs(planet.weatherField.windRadiansPerHour);
     this.frameHours=.5/2**Math.max(0,Math.ceil(Math.log2(angularSpeed*.5/.05)));
     this.startWorker();
   }
+  get forecastSteps() {
+    let steps=2;for(const requested of this.forecastRequests.values())steps=Math.max(steps,requested);
+    return steps;
+  }
+  retainForecast(owner,steps=3) {
+    if(!owner||!['object','function'].includes(typeof owner)||![2,3].includes(steps))throw Error('Invalid weather forecast lease');
+    if(this.disposed)return false;
+    this.forecastRequests.set(owner,steps);return true;
+  }
+  releaseForecast(owner) {return this.forecastRequests.delete(owner);}
   startWorker() {
     let worker;this.workerFailed=false;
     try {
@@ -89,9 +100,15 @@ export class PlanetWeatherStream {
       this.anchor=a;
       for(const h of this.frames.keys()) if(h<a-FRAME_HOURS || h>b+FRAME_HOURS*2) this.frames.delete(h);
     }
+    // These are upload deduplication witnesses, not owners of expired or
+    // replaced raw forecasts. Replacement can happen within the same anchor.
+    // Keep published texture/atlas bytes intact while a new pair loads.
+    for(const key of ['committedFirst','committedSecond','boundsFirst','boundsSecond']) {
+      const frame=this[key];if(frame&&this.frames.get(frame.hours)!==frame)this[key]=null;
+    }
     // Keep the desired set on the main thread. At most one frame has entered
     // the worker FIFO; a completion re-evaluates this absolute-time bracket.
-    this.desired=[a,b,b+FRAME_HOURS];this.dispatch();
+    this.desired=Array.from({length:this.forecastSteps+1},(_,index)=>a+index*FRAME_HOURS);this.dispatch();
     const first=this.frames.get(a),second=this.frames.get(b);
     this.ready=Boolean(first&&second);
     // A prefetched third frame must not re-upload an unchanged active pair.
@@ -154,6 +171,7 @@ export class PlanetWeatherStream {
   dispose() {
     if(this.disposed) return;this.disposed=true;this.ready=false;this.worker?.terminate();this.frames.clear();this.pending.clear();
     this.desired=[];this.inFlight=null;this.failedHours.clear();
+    this.forecastRequests.clear();
     this.committedFirst=null;this.committedSecond=null;
     this.boundsFirst=null;this.boundsSecond=null;
   }

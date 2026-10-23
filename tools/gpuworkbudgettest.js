@@ -181,6 +181,52 @@ try {
     assert.equal(f.count('createQuery'),before);f.complete();p.poll();p.beginFrame();p.beginFrame();
     assert.equal(p.run(key,grant=>f.work(grant)).granted,1);assert.equal(f.count('createQuery'),before+1);
   });
+  test('one valid stale re-calibration replaces an expired high peak and restores bounded admission',()=>{
+    const f=fixture({budgetMs:6,initialUnitMs:2,maxUnits:12,sampleEvery:1,maxSampleAge:2}),p=f.p,key={};
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1);
+    f.complete({gpuMs:15});p.poll();assert.equal(p.snapshot().stats.observed,1);
+    for(let i=0;i<2;i++) {
+      p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,0,'A fresh 22.5ms safe peak must block a 6ms allowance');
+    }
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1,'Expired cost permits exactly one calibration draw');
+    f.complete({gpuMs:.5});p.poll();assert.equal(p.snapshot().stats.observed,2);
+    p.beginFrame();const next=p.run(key,grant=>f.work(grant));
+    assert.equal(next.granted,8,'A valid 0.5ms x 1.5 safety calibration must replace the expired peak, not refresh it');
+    assert.equal(next.units,8);assert.equal(p.snapshot().frameUnits,8);assert.equal(p.snapshot().remainingMs,0);
+    assert.equal(p.snapshot().records.at(-1).estimatedMs,6);assert.ok(p.snapshot().pending<=2);
+  });
+  test('fresh same-key high cost remains conservative after a cheaper valid sample',()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,sampleEvery:1,maxSampleAge:2}),p=f.p,key={};
+    p.beginFrame();p.run(key,grant=>f.work(grant));f.complete({gpuMs:2});p.poll();
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant,1)).granted,2);
+    f.complete({gpuMs:.25});p.poll();p.beginFrame();
+    const next=p.run(key,grant=>f.work(grant));assert.equal(next.granted,2,'Fresh peak retains the existing conservative decay');
+    assert.ok(p.snapshot().records.at(-1).estimatedMs>5.8);assert.ok(p.snapshot().remainingMs>=0);
+  });
+  for(const gpuMs of [0,-1,NaN,Infinity])test(`invalid stale calibration cannot replace a high peak with cheap work (${gpuMs})`,()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,sampleEvery:1,maxSampleAge:2}),p=f.p,key={};
+    p.beginFrame();p.run(key,grant=>f.work(grant));f.complete({gpuMs:15});p.poll();
+    for(let i=0;i<3;i++)p.beginFrame();
+    assert.equal(p.run(key,grant=>f.work(grant)).granted,1);f.complete({gpuMs});p.poll();
+    assert.equal(p.snapshot().stats.observed,1);assert.equal(p.snapshot().records.at(-1).gpuMs,null);
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1,'Invalid evidence keeps the key in one-draw calibration');
+  });
+  test('disjoint stale calibration cannot authorize a larger batch',()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,sampleEvery:1,maxSampleAge:2}),p=f.p,key={};
+    p.beginFrame();p.run(key,grant=>f.work(grant));f.complete({gpuMs:15});p.poll();
+    for(let i=0;i<3;i++)p.beginFrame();
+    assert.equal(p.run(key,grant=>f.work(grant)).granted,1);f.complete({gpuMs:.01});f.markDisjoint();p.poll();
+    assert.equal(p.snapshot().stats.observed,1);assert.equal(p.snapshot().pending,0);
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1,'Disjoint timing loses trust rather than learning a low price');
+  });
+  test('failed stale calibration cannot publish a cheap replacement',()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,sampleEvery:1,maxSampleAge:2}),p=f.p,key={};
+    p.beginFrame();p.run(key,grant=>f.work(grant));f.complete({gpuMs:15});p.poll();
+    for(let i=0;i<3;i++)p.beginFrame();
+    assert.throws(()=>p.run(key,grant=>{assert.equal(grant,1);f.work(grant);throw Error('calibration callback failed');}),/calibration callback failed/);
+    f.complete({gpuMs:.01});p.poll();assert.equal(p.snapshot().stats.observed,1);
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1);
+  });
   test('same-key history is bounded while identities remain independent',()=>{
     const f=fixture({history:2}),p=f.p,a={},b={};p.beginFrame();p.run(a,grant=>f.work(grant));
     f.complete({gpuMs:.1});p.poll();p.beginFrame();assert.ok(p.run(a,grant=>f.work(grant)).granted>1);

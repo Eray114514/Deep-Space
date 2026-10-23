@@ -80,7 +80,11 @@ export class GpuWorkBudget {
         if(!this.disposed&&measuredEpoch===item.disjointEpoch&&Number.isFinite(gpuMs)&&gpuMs>0) {
           const previous=this.estimates.get(item.key);
           const unitMs=gpuMs/Math.max(1,item.units)*this.safety;
-          this.estimates.set(item.key,{unitMs:Math.max(unitMs,(previous?.unitMs||0)*.98),frame:this.frame});
+          // Recalibration must replace an expired estimate. Carrying its old
+          // peak into the new sample refreshes the age and can deny all work
+          // for another full expiry interval, indefinitely after a lone spike.
+          const retained=previous&&this.frame-previous.frame<=this.maxSampleAge?previous.unitMs*.98:0;
+          this.estimates.set(item.key,{unitMs:Math.max(unitMs,retained),frame:this.frame});
           item.record.gpuMs=gpuMs;this.stats.observed++;
         } else this.stats.discarded++;
       }

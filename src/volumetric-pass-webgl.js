@@ -335,7 +335,8 @@ export class VolumetricPass extends Pass {
       let columns=this.columnMaps.get(planet);
       if(!columns || columns.disposed) {
         columns=new CloudColumnBank(planet,this.columnWork?{producer:'tile',
-          tileRows:this.columnWork.tileRows,footprintBatch:this.columnWork.footprintBatch,deadlineAware:true}:undefined);
+          tileRows:this.columnWork.tileRows,footprintBatch:this.columnWork.footprintBatch,
+          forecastSteps:this.columnWork.forecastSteps,cacheSteps:this.columnWork.cacheSteps,deadlineAware:true}:undefined);
         this.columnMaps.set(planet,columns);
         planet.cloudColumnMap=columns;
       }

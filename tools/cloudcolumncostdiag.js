@@ -44,6 +44,7 @@ const variants = { original, parameters: a, amount, shared:baseAmount,
 for (const [name, body] of Object.entries(variants)) await writeFile(`${out}/${name}-source.js`, body);
 await writeFile(`${out}/original-fixture.json`, fixtureBytes);
 await writeFile(`${out}/verifier.js`,await readFile(new URL(import.meta.url)));
+await writeFile(`${out}/canonical-planet-fixture.js`,await readFile(new URL('./canonical-planet-fixture.js',import.meta.url)));
 await writeFile(`${out}/shader-contract.js`,await readFile(new URL('./columnshadercontracttest.js',import.meta.url)));
 await writeFile(`${out}/shader-contract-fixture.json`,await readFile(new URL('./fixtures/cloud-column-work-original.json',import.meta.url)));
 const reference = { path: fixturePath, fixtureSha256: sha256(fixtureBytes), revision: fixture.revision,
@@ -64,16 +65,12 @@ try {
   await page.goto(`http://127.0.0.1:${port}/column-cost.html?vclouds=1`);
   const result = await page.evaluate(async ({ full }) => {
     const T = await import('three'), { Planet } = await import('/src/planet.js');
-    const { GalaxyCatalog, HOME_SYSTEM_ID } = await import('/src/galaxy-layout.js');
-    const { generateSystemSpec, applySystemBodyTuning } = await import('/src/astronomy.js').then(async module => ({ ...module,
-      applySystemBodyTuning: (await import('/src/world-config.js')).applySystemBodyTuning }));
-    const { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } = await import('/src/world-config.js');
+    const { canonicalHomeBody } = await import('/tools/canonical-planet-fixture.js');
     const { createGameRenderer } = await import('/src/renderer-runtime.js');
-    const seed = getGalaxyConfig(ACTIVE_GALAXY_ID).seed, star = new GalaxyCatalog(seed).getSystem(HOME_SYSTEM_ID);
-    const spec = applySystemBodyTuning(generateSystemSpec(seed, star), id => resolveBodyTuning(ACTIVE_GALAXY_ID, star.id, id)).bodies[0];
+    const { seed, star, spec, tuning, provenance } = canonicalHomeBody();
     const p = new Planet({ seed: spec.seed, name: spec.name, catalogName: spec.catalogName, posUniv: new T.Vector3(),
       type: spec.type, isMoon: spec.isMoon, radius: spec.radius, atmosphere: spec.atmosphere, clouds: spec.clouds,
-      tuning: resolveBodyTuning(ACTIVE_GALAXY_ID, star.id, spec.bodyId), formation: spec.formation, ringSystem: spec.ringSystem });
+      tuning, formation: spec.formation, ringSystem: spec.ringSystem });
     const { renderer: r } = await createGameRenderer({}, { canvas: document.querySelector('#fixture') });
     r.setSize(64, 64);r.info.autoReset = false;
     const gl = r.getContext(), ext = gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -301,7 +298,7 @@ try {
           scope: 'Three complete 1024x512 native dual-MRT cases, each rebuilt old/amount/old/amount with 256 sequential two-row production bakes. All species are enabled; this does not cover every weather/species combination.',
           timingScope: 'Per-batch GPU intervals enclose actual draws and end before final release. Sum includes each map first-use draw; completeMs includes JS query polling waits and construction. Neither is a steady full-map throughput acceptance.' };
       }
-      const result = { mode: full ? 'full-atlas' : 'row-window',
+      const result = { mode: full ? 'full-atlas' : 'row-window', provenance,
         identity: { seed, systemId: star.id, bodyId: spec.bodyId, bodySeed: spec.seed, type: p.type, radius: p.R },
         options: { ...options, height: 512, batchRows: 2 }, rowWindow, fullAtlas, ...checkpoint('Final') };
       return result;

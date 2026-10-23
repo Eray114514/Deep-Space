@@ -212,13 +212,14 @@ export class GameLegacyPipeline {
 
   performanceSnapshot() {return this.profiler?.snapshot()||null;}
 
-  startColumnWork({tileRows=64,footprintBatch=2,...options}={}) {
+  startColumnWork({tileRows=64,footprintBatch=2,forecastSteps=3,cacheSteps=2,...options}={}) {
     if(!this.volumePass)throw Error('Column work requires a volume pass');
     if(this.columnWorkBudget)throw Error('Column work is already enabled');
-    if(!Number.isInteger(tileRows)||tileRows<1||!Number.isInteger(footprintBatch)||footprintBatch<1)throw Error('Invalid column work shape');
+    if(!Number.isInteger(tileRows)||tileRows<1||!Number.isInteger(footprintBatch)||footprintBatch<1
+      ||![2,3].includes(forecastSteps)||![2,3].includes(cacheSteps)||cacheSteps>forecastSteps)throw Error('Invalid column work shape');
     const budget=new GpuWorkBudget(this.renderer,options);
     this.columnWorkBudget=budget;
-    try {this.volumePass.configureColumnWork({budget,tileRows,footprintBatch});}
+    try {this.volumePass.configureColumnWork({budget,tileRows,footprintBatch,forecastSteps,cacheSteps});}
     catch(error) {if(this.columnWorkBudget===budget)this.columnWorkBudget=null;budget.dispose();throw error;}
     return budget;
   }

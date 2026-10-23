@@ -12,18 +12,20 @@ export function setCloudFarCacheEnabled(planet,enabled) {
   }
 }
 
-// Two immutable sampling endpoints and one forecast under construction. A
-// partially baked target is never sampled, including after a clock jump.
+// Immutable current endpoints and a bounded forecast window, with at most one
+// snapshot under construction. Partial targets are never sampled.
 export class CloudColumnBank {
   constructor(planet,{width=1024,rows=2,footprintSamples=64,producer='rows',
-    tileRows=2,footprintBatch=8,workQuanta=1,deadlineAware=false}={}) {
-    if(!['rows','tile'].includes(producer)||!Number.isInteger(workQuanta)||workQuanta<0)throw Error('Invalid column producer');
+    tileRows=2,footprintBatch=8,workQuanta=1,deadlineAware=false,forecastSteps=2,cacheSteps=2}={}) {
+    if(!['rows','tile'].includes(producer)||!Number.isInteger(workQuanta)||workQuanta<0
+      ||![2,3].includes(forecastSteps)||![2,3].includes(cacheSteps)||cacheSteps>forecastSteps)throw Error('Invalid column producer');
     this.planet=planet;this.maps=new Map();this.disposed=false;this.updating=false;this.retiring=false;
     this.width=width;this.rows=rows;this.footprintSamples=footprintSamples;
     // Explicit opt-in until dynamic deadlines and the whole-frame GPU budget
     // are accepted. Default routing and row submissions stay unchanged.
     this.producer=producer;this.tileRows=tileRows;this.footprintBatch=footprintBatch;this.workQuanta=workQuanta;
     this.deadlineAware=deadlineAware&&producer==='tile';this.service=null;this.deferFirst=false;
+    this.forecastSteps=forecastSteps;this.cacheSteps=cacheSteps;this.forecastStream=null;
     this.scratch=producer==='tile'?new CloudColumnScratch(width,tileRows):null;
     this.scratchEpoch=this.scratch?.epoch;
     this.programs={};
@@ -31,10 +33,21 @@ export class CloudColumnBank {
   }
   // Read-only production plan: absolute forecast identity and first use are
   // separate from retirement. No snapshot allocation or GPU submission here.
+  endpointHours(stream=this.planet.weatherStream) {
+    return Array.from({length:this.cacheSteps+1},(_,index)=>stream?.anchor+index*stream?.frameHours).filter(Number.isFinite);
+  }
+  syncForecast(stream) {
+    if(this.forecastStream===stream)return;
+    const previous=this.forecastStream;this.forecastStream=null;previous?.releaseForecast(this);
+    if(!this.disposed&&stream&&!stream.disposed&&this.forecastSteps>2&&stream.retainForecast(this,this.forecastSteps))this.forecastStream=stream;
+  }
   plan() {
     const p=this.planet,stream=p.weatherStream,anchor=stream?.anchor,step=stream?.frameHours;
-    const hours=[anchor,anchor+step,anchor+2*step].filter(Number.isFinite);
+    const hours=this.endpointHours(stream),targetBytes=this.width*this.width/2*12;
     return {anchor,frameHours:step,weatherHours:p.weatherHours,producer:this.producer,
+      forecastSteps:this.forecastSteps,cacheSteps:this.cacheSteps,maxMaps:this.cacheSteps+1,targetCapacityBytes:(this.cacheSteps+1)*targetBytes,
+      allocatedTargetBytes:this.maps.size*targetBytes,
+      snapshotBytes:[...this.maps.values()].reduce((sum,map)=>sum+(map.snapshots||[]).reduce((bytes,texture)=>bytes+(texture.image?.data?.byteLength||0),0),0),
       deadlineAware:this.deadlineAware,deferFirst:this.deferFirst,serviceRate:this.service?.rate??null,
       pair:hours.slice(0,2),jobs:hours.map(hour=>{
         const revision=stream.revisionAt(hour),map=this.maps.get(hour);
@@ -70,6 +83,7 @@ export class CloudColumnBank {
       // Invalidation also runs while a replacement stream is still loading.
       // No retired target may remain bound, even behind a disabled branch.
       this.unbind();
+      this.syncForecast(stream);
       if(this.fieldOwner!==p.weatherField || this.speciesMask!==u.uSpeciesMask.value
         ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch)) {
         this.retireMaps();
@@ -77,13 +91,13 @@ export class CloudColumnBank {
         this.fieldOwner=p.weatherField;this.speciesMask=u.uSpeciesMask.value;
         this.scratchEpoch=this.scratch?.epoch;
       }
-      const a=stream?.anchor,b=a+stream?.frameHours,c=b+stream?.frameHours;
+      const hours=this.endpointHours(stream),[a,b]=hours;
       // Detach before callbacks; a key must never refer to both a retired map
       // and a replacement created by a synchronous resource event.
-      for(const [hours,map] of this.maps)if((hours!==a && hours!==b && hours!==c)
+      for(const [hour,map] of this.maps)if(!hours.includes(hour)
         || !weatherSourcesCurrent(map.weatherSources,stream)||map.invalidated
         ||(this.scratch&&map.contextEpoch!==null&&map.contextEpoch!==this.scratch.epoch)) {
-        this.maps.delete(hours);map.dispose();
+        this.maps.delete(hour);map.dispose();
         if(this.disposed)return;
       }
       if(!stream || stream.disposed||stream!==p.weatherStream||a!==stream.anchor||this.scratch?.lost
@@ -108,13 +122,13 @@ export class CloudColumnBank {
           ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch))return;
       }
       if(!pending&&allowCreate) {
-        const hours=(this.deferFirst?[b,c]:[a,b,c]).find(hours=>Number.isFinite(hours) && !this.maps.has(hours)
-          && stream.frames.has(hours) && stream.revisionAt(hours)!=null);
-        if(hours!==undefined) {
+        const hour=(this.deferFirst?hours.slice(1):hours).find(hour=>!this.maps.has(hour)
+          && stream.frames.has(hour) && stream.revisionAt(hour)!=null);
+        if(hour!==undefined) {
           const MapProducer=this.producer==='tile'?CloudColumnTileMap:CloudColumnMap;
-          pending=new MapProducer(p,{hours,width:this.width,footprintSamples:this.footprintSamples,
+          pending=new MapProducer(p,{hours:hour,width:this.width,footprintSamples:this.footprintSamples,
             programOwner:this.programs,tileRows:this.tileRows,footprintBatch:this.footprintBatch,scratch:this.scratch});
-          this.maps.set(hours,pending);
+          this.maps.set(hour,pending);
         }
       }
       let submission;
@@ -136,6 +150,7 @@ export class CloudColumnBank {
       }
       return submission;
     } finally {
+      if(this.forecastStream&&(this.forecastStream!==this.planet.weatherStream||this.forecastStream.disposed))this.syncForecast(null);
       this.updating=false;
     }
   }
@@ -165,6 +180,7 @@ export class CloudColumnBank {
   }
   dispose() {
     if(this.disposed)return;this.disposed=true;this.unbind();
+    this.syncForecast(null);
     setCloudFarCacheEnabled(this.planet,false);
     const scratch=this.scratch;this.scratch=null;
     this.retireMaps();

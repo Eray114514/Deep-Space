@@ -4,7 +4,7 @@
 // The 48 MiB full-size working pingpong is intentionally not a shipping budget.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import * as THREE from 'three';
 import {CloudColumnMap} from '../src/cloud/cloud-column-map.js';
 import {startServer} from './server.js';
@@ -124,6 +124,8 @@ if(process.argv.includes('--static')) {
   const verifier='tools/cloudcolumnsplitdiag.js';
   const out=`test-results/cloud-column-split/${new Date().toISOString().replace(/[:.]/g,'-')}`;
   await mkdir(out,{recursive:true});
+  await writeFile(`${out}/verifier.js`,await readFile(new URL(import.meta.url)));
+  await writeFile(`${out}/canonical-planet-fixture.js`,await readFile(new URL('./canonical-planet-fixture.js',import.meta.url)));
   const report={status:'running',before:await evidenceFingerprint(verifier),staticContract,errors:[],warnings:[],driverWarnings:[],
     scope:'Four actual homePlanet formal-size two-row windows, two native repetitions per variant. No complete atlas, player image, forecast deadline, or production GPU-budget acceptance.',
     floatingPointRisk:'The original per-footprint arithmetic and serial addition order remain exact text. Cross-draw RGBA32F writes introduce explicit float32 boundaries and a different compiled program; register precision, contraction and loop optimization can still change native bits. Any optical RGBA8 or heights RGBA16F bit difference rejects this candidate.',
@@ -147,9 +149,7 @@ if(process.argv.includes('--static')) {
     await page.goto(`http://127.0.0.1:${port}/column-split.html`);
     report.result=await page.evaluate(async()=>{
       const T=await import('three'),{Planet}=await import('/src/planet.js');
-      const {GalaxyCatalog,HOME_SYSTEM_ID}=await import('/src/galaxy-layout.js');
-      const {generateSystemSpec}=await import('/src/astronomy.js');
-      const {ACTIVE_GALAXY_ID,getGalaxyConfig,resolveBodyTuning,applySystemBodyTuning}=await import('/src/world-config.js');
+      const {canonicalHomeBody}=await import('/tools/canonical-planet-fixture.js');
       const {createGameRenderer}=await import('/src/renderer-runtime.js');
       const {CloudColumnMap}=await import('/src/cloud/cloud-column-map.js');
       const result={options:{width:1024,height:512,heightSamples:128,footprintSamples:64,rows:2,
@@ -202,11 +202,10 @@ if(process.argv.includes('--static')) {
         }
       }
       try {
-        const seed=getGalaxyConfig(ACTIVE_GALAXY_ID).seed,star=new GalaxyCatalog(seed).getSystem(HOME_SYSTEM_ID);
-        const spec=applySystemBodyTuning(generateSystemSpec(seed,star),id=>resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,id)).bodies[0];
+        const {seed,star,spec,tuning,provenance}=canonicalHomeBody();result.provenance=provenance;
         p=new Planet({seed:spec.seed,name:spec.name,catalogName:spec.catalogName,posUniv:new T.Vector3(),
           type:spec.type,isMoon:spec.isMoon,radius:spec.radius,atmosphere:spec.atmosphere,clouds:spec.clouds,
-          tuning:resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,spec.bodyId),formation:spec.formation,ringSystem:spec.ringSystem});
+          tuning,formation:spec.formation,ringSystem:spec.ringSystem});
         ({renderer:r}=await createGameRenderer({},{canvas:document.querySelector('#fixture')}));
         r.setPixelRatio(1);r.setSize(64,64,false);r.info.autoReset=false;
         gl=r.getContext();ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');

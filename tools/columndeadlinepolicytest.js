@@ -10,14 +10,15 @@ const source=(await readFile('src/cloud/cloud-column-bank.js','utf8'))
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 const samplerNames=['uOpticalColumns','uOpticalColumnsNext','uColumnHeights','uColumnHeightsNext'];
 const fixtures=[],results=[];
-function fixture({deadlineAware=true,producer='tile',missing=[]}={}) {
+function fixture({deadlineAware=true,producer='tile',missing=[],forecastSteps=2,cacheSteps=forecastSteps}={}) {
   const F=.03125,records=[];let live=0,maxLive=0,maxDelivered=Infinity,onDispose=null;
   const u={uSpeciesMask:{value:-1},uWeatherMap:{value:{published:true}},uColumnMix:{value:0},
     uColumnsReady:{value:0},uColumnsJointReady:{value:0}};
   for(const name of samplerNames)u[name]={value:u.uWeatherMap.value};
-  const stream={anchor:0,frameHours:F,ready:true,disposed:false,frames:new Map(),
+  const stream={anchor:0,frameHours:F,ready:true,disposed:false,frames:new Map(),forecastRequests:new Map(),
     generations:new WeakMap(),generation:0,revisionAt:PlanetWeatherStream.prototype.revisionAt};
-  for(const hour of [0,F,2*F])if(!missing.includes(hour))stream.frames.set(hour,{hours:hour});
+  Object.setPrototypeOf(stream,PlanetWeatherStream.prototype);
+  for(let index=0;index<=forecastSteps;index++)if(!missing.includes(index*F))stream.frames.set(index*F,{hours:index*F});
   const p={weatherHours:0,weatherField:{},weatherStream:stream,volCloudMat:{uniforms:u},
     volCloudFarMat:{defines:{CLOUD_FAR_CACHE:0}}};
   class FakeScratch {
@@ -59,14 +60,14 @@ function fixture({deadlineAware=true,producer='tile',missing=[]}={}) {
   class FakeRowMap extends FakeMap {constructor(planet,options){super(planet,options,'rows');}}
   const Bank=vm.runInNewContext(`${source}\nCloudColumnBank;`,{CloudColumnMap:FakeRowMap,
     CloudColumnTileMap:FakeTileMap,CloudColumnScratch:FakeScratch,weatherSourcesCurrent,performance});
-  const bank=new Bank(p,{deadlineAware,producer,tileRows:64,footprintBatch:2});p.cloudColumnMap=bank;
+  const bank=new Bank(p,{deadlineAware,producer,tileRows:64,footprintBatch:2,forecastSteps,cacheSteps});p.cloudColumnMap=bank;
   const f={p,u,stream,bank,records,F,
     setMaxDelivered(value){maxDelivered=value;},
     setOnDispose(callback){onDispose=callback;},
     setHours(hours,{fill=true}={}) {
       p.weatherHours=hours;const current=p.weatherStream;current.anchor=Math.floor(hours/F)*F;
       for(const hour of current.frames.keys())if(hour<current.anchor-F||hour>current.anchor+3*F)current.frames.delete(hour);
-      if(fill)for(const hour of [current.anchor,current.anchor+F,current.anchor+2*F])
+      if(fill)for(const hour of bank.endpointHours(current))
         if(!current.frames.has(hour))current.frames.set(hour,{hours:hour});
     },
     tick(delta=0,grant=1,options={}) {
@@ -74,7 +75,7 @@ function fixture({deadlineAware=true,producer='tile',missing=[]}={}) {
       this.check();return result;
     },
     check() {
-      assert.ok(live<=1);assert.ok(bank.maps.size<=3);
+      assert.ok(live<=1);assert.ok(bank.maps.size<=cacheSteps+1);
       for(const map of records)assert.ok(map.disposed||bank.maps.get(map.generation)===map,'No live orphan map');
       if(u.uColumnsReady.value) {
         const a=p.weatherStream.anchor,first=bank.maps.get(a),second=bank.maps.get(a+F);
@@ -206,6 +207,68 @@ for(const change of ['field','species','stream','stream-null','stream-disposed',
     assert.equal(f.records.length,1,'Do not allocate from a stale plan after user resource callbacks');
     assert.equal(f.u.uColumnsReady.value,0);
   });
+
+test('four-endpoint lookahead retains exactly one bounded forecast lease and complete canonical targets',()=>{
+  const f=fixture({forecastSteps:3});assert.equal(f.stream.forecastSteps,2);
+  for(let index=0;index<4;index++)f.tick(0,256);
+  assert.equal(f.stream.forecastSteps,3);assert.equal(f.stream.forecastRequests.size,1);
+  assert.equal(f.bank.maps.size,4);assert.ok([...f.bank.maps.values()].every(map=>map.ready));
+  assert.equal(f.u.uColumnsReady.value,1);const plan=f.bank.plan();
+  assert.deepEqual([...plan.jobs].map(job=>job.hours),[0,f.F,2*f.F,3*f.F]);
+  assert.equal(plan.maxMaps,4);assert.equal(plan.targetCapacityBytes,24*1024*1024);
+  assert.equal(plan.allocatedTargetBytes,plan.targetCapacityBytes);assert.equal(plan.snapshotBytes,0);
+  for(let count=0;count<30;count++)f.tick(0,0,{allowCreate:false});
+  assert.equal(f.records.length,4);assert.equal(f.stream.forecastRequests.size,1);
+  f.bank.dispose();assert.equal(f.stream.forecastSteps,2);assert.equal(f.stream.forecastRequests.size,0);
+});
+
+test('turnover keeps real a/b/c identities and retires one target before allocating the new fourth',()=>{
+  const f=fixture({forecastSteps:3});for(let index=0;index<4;index++)f.tick(0,256);
+  const prior=[...f.bank.maps.values()];f.tick(f.F,0,{allowCreate:false});
+  assert.equal(prior[0].disposed,true);for(const map of prior.slice(1))assert.equal(f.bank.maps.get(map.generation),map);
+  assert.equal(f.u.uColumnsReady.value,1);assert.equal(f.u.uOpticalColumns.value,prior[1].target.textures[0]);
+  assert.equal(f.bank.maps.size,3);f.tick(0,1);assert.equal(f.bank.maps.size,4);
+  assert.equal(f.bank.maps.get(4*f.F).draws,1);assert.equal(f.records.length,5);
+});
+
+test('the fourth future endpoint cannot masquerade as a missing current pair',()=>{
+  const f=fixture({forecastSteps:3,missing:[0,.03125]});
+  f.tick(0,256,{fill:false});f.tick(0,256,{fill:false});
+  assert.ok(f.bank.maps.get(2*f.F).ready&&f.bank.maps.get(3*f.F).ready);
+  assert.equal(f.bank.maps.has(0),false);assert.equal(f.bank.maps.has(f.F),false);assert.equal(f.u.uColumnsReady.value,0);
+});
+
+test('zero admission requests bounded source lead without allocating any GPU snapshot',()=>{
+  const f=fixture({forecastSteps:3});for(let count=0;count<20;count++)f.tick(0,0,{allowCreate:false});
+  assert.equal(f.stream.forecastSteps,3);assert.equal(f.records.length,0);assert.equal(f.bank.plan().allocatedTargetBytes,0);
+  f.bank.dispose();f.bank.update(null);assert.equal(f.stream.forecastSteps,2);assert.equal(f.records.length,0);
+});
+
+test('raw-only lookahead keeps the original three-target GPU capacity and current pair',()=>{
+  const f=fixture({forecastSteps:3,cacheSteps:2});for(let index=0;index<4;index++)f.tick(0,256);
+  assert.equal(f.stream.forecastSteps,3);assert.equal(f.bank.maps.size,3);assert.equal(f.records.length,3);
+  assert.equal(f.bank.maps.has(3*f.F),false);assert.equal(f.bank.plan().targetCapacityBytes,18*1024*1024);
+  assert.equal(f.u.uColumnsReady.value,1);f.tick(f.F,1);
+  assert.equal(f.bank.maps.size,3);assert.equal(f.bank.maps.get(3*f.F).draws,1);
+  assert.equal(f.u.uColumnsReady.value,1);
+});
+
+test('a replacement stream takes the lease only while the bank remains active',()=>{
+  const f=fixture({forecastSteps:3});f.tick(0,1);
+  const next=Object.assign(Object.create(PlanetWeatherStream.prototype),{...f.stream,frames:new Map(f.stream.frames),forecastRequests:new Map()});
+  f.p.weatherStream=next;f.tick(0,0,{allowCreate:false});
+  assert.equal(f.stream.forecastSteps,2);assert.equal(f.stream.forecastRequests.size,0);
+  assert.equal(next.forecastSteps,3);assert.equal(next.forecastRequests.size,1);assert.equal(f.u.uColumnsReady.value,0);
+  f.bank.dispose();assert.equal(next.forecastSteps,2);assert.equal(next.forecastRequests.size,0);
+});
+
+for(const change of ['stream-null','stream-disposed','bank-dispose'])test(`lookahead lease cannot survive cancellation callback ${change}`,()=>{
+  const f=fixture({forecastSteps:3});f.tick();const first=f.bank.maps.get(0);
+  f.setOnDispose(map=>{if(map!==first)return;if(change==='stream-null')f.p.weatherStream=null;
+    else if(change==='stream-disposed')f.stream.disposed=true;else f.bank.dispose();});
+  for(let count=0;count<12&&!first.disposed;count++)f.tick(f.F/20);
+  assert.equal(first.disposed,true);assert.equal(f.stream.forecastRequests.size,0);assert.equal(f.records.length,1);
+});
 
 console.log(JSON.stringify({passed:results.every(result=>result.passed),cases:results.length,results,
   scope:'Pure CPU scheduling contracts: actual Bank logic, real absolute-hour/revision helpers, authored clock and zero-GPU FakeMap/Scratch. No measured service rate, GPU budget, worker latency, cloud output or dynamic performance acceptance.'},null,2));

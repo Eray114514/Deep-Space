@@ -39,7 +39,7 @@ options.quantumWindows=options.tiles.flatMap(({rows,batch})=>[...new Set([0,255,
   .map(row=>({rows,batch,row,stopRow:Math.min(512,row+rows)})));
 const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
 const toolPath='tools/cloudcolumntilediag.js',fixturePath='tools/fixtures/cloud-column-work-original.json';
-const snapshotPaths=[toolPath,fixturePath,'tools/browser.js','tools/server.js','tools/evidence-fingerprint.js',
+const snapshotPaths=[toolPath,fixturePath,'tools/browser.js','tools/server.js','tools/evidence-fingerprint.js','tools/canonical-planet-fixture.js',
   'src/cloud/cloud-column-map.js','src/cloud/cloud-column-tile-map.js',
   'src/cloud/cloud-column-material.js','src/cloud/cloud-column-shader.js'];
 const frozen=new Map(await Promise.all(snapshotPaths.map(async path=>[path,await readFile(new URL(`../${path}`,import.meta.url))])));
@@ -83,9 +83,7 @@ try {
   await page.goto(`http://127.0.0.1:${port}/column-tile.html?vclouds=1`);
   result=await page.evaluate(async options=>{
     const T=await import('three'),{Planet}=await import('/src/planet.js');
-    const {GalaxyCatalog,HOME_SYSTEM_ID}=await import('/src/galaxy-layout.js');
-    const {generateSystemSpec}=await import('/src/astronomy.js');
-    const {ACTIVE_GALAXY_ID,getGalaxyConfig,resolveBodyTuning,applySystemBodyTuning}=await import('/src/world-config.js');
+    const {canonicalHomeBody}=await import('/tools/canonical-planet-fixture.js');
     const {createGameRenderer}=await import('/src/renderer-runtime.js');
     const {OwnedScreenTriangle}=await import('/src/owned-screen-triangle.js');
     const constructors={old:(await import('/src/cloud/tile-original.js')).CloudColumnMap,
@@ -96,11 +94,10 @@ try {
     const hash=async view=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',
       view.buffer.slice(view.byteOffset,view.byteOffset+view.byteLength)))].map(value=>value.toString(16).padStart(2,'0')).join('');
     const textHash=text=>hash(new TextEncoder().encode(text));
-    const seed=getGalaxyConfig(ACTIVE_GALAXY_ID).seed,star=new GalaxyCatalog(seed).getSystem(HOME_SYSTEM_ID);
-    const spec=applySystemBodyTuning(generateSystemSpec(seed,star),id=>resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,id)).bodies[0];
+    const {seed,star,spec,tuning,provenance}=canonicalHomeBody();
     const p=new Planet({seed:spec.seed,name:spec.name,catalogName:spec.catalogName,posUniv:new T.Vector3(),
       type:spec.type,isMoon:spec.isMoon,radius:spec.radius,atmosphere:spec.atmosphere,clouds:spec.clouds,
-      tuning:resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,spec.bodyId),formation:spec.formation,ringSystem:spec.ringSystem});
+      tuning,formation:spec.formation,ringSystem:spec.ringSystem});
     const {renderer:r}=await createGameRenderer({},{canvas:document.querySelector('#fixture')});
     r.setSize(960,480);r.info.autoReset=false;
     const gl=r.getContext(),contextEvents=[];
@@ -126,7 +123,7 @@ try {
     const owners={old:{},native:{},originControl:{}};
     for(const variant of variants)owners[variant.kernel]||={};
     const programIds={},shaders={},cases=[],quantumWindows=[],positiveControls=[];
-    const output={options,gpu,format:{width:1024,height:512,heightSamples:128,footprintSamples:64,
+    const output={options,gpu,provenance,format:{width:1024,height:512,heightSamples:128,footprintSamples:64,
       canonical:['RGBA8','RGBA16F'],scratch:'two local three-attachment targets: RGBA32F, RGBA32F, R32F',
       scratchPayloadFloats:9,scratchStorageChannelsPerTexel:9,
       scratchAttachmentFormats:['RGBA32F','RGBA32F','R32F'],

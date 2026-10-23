@@ -9,6 +9,7 @@ import {evidenceFingerprint} from './evidence-fingerprint.js';
 const verifier='tools/columnworkgputest.js';
 const out=`test-results/column-work-gpu/${new Date().toISOString().replace(/[:.]/g,'-')}`;
 await mkdir(out,{recursive:true});await writeFile(`${out}/verifier.js`,await readFile(verifier));
+await writeFile(`${out}/canonical-planet-fixture.js`,await readFile(new URL('./canonical-planet-fixture.js',import.meta.url)));
 const report={before:await evidenceFingerprint(verifier),errors:[],warnings:[],driverWarnings:[],
   scope:'Real immutable forecast and actual tile-bank lifecycle on a tiny 16x8 canonical target. Not formal throughput, physical cloud rendering, player visual acceptance or a dynamic deadline claim.'};
 const {server,port}=await startServer(0);let browser;
@@ -26,20 +27,17 @@ try {
   await page.goto(`http://127.0.0.1:${port}/column-work.html`);
   report.result=await page.evaluate(async()=>{
     const T=await import('three'),{Planet}=await import('/src/planet.js');
-    const {GalaxyCatalog,HOME_SYSTEM_ID}=await import('/src/galaxy-layout.js');
-    const {generateSystemSpec}=await import('/src/astronomy.js');
-    const {ACTIVE_GALAXY_ID,getGalaxyConfig,resolveBodyTuning,applySystemBodyTuning}=await import('/src/world-config.js');
+    const {canonicalHomeBody}=await import('/tools/canonical-planet-fixture.js');
     const {CloudColumnBank}=await import('/src/cloud/cloud-column-bank.js');
     const {CloudColumnMap}=await import('/src/cloud/cloud-column-map.js');
     const result={checks:[],gl:[],disposedTargets:[],failures:[],contextEvents:[]};
     const check=(condition,label)=>{result.checks.push({label,pass:Boolean(condition)});if(!condition)throw Error(label);};
     let p,r,bank,guard;const references=[];
     try {
-      const seed=getGalaxyConfig(ACTIVE_GALAXY_ID).seed,star=new GalaxyCatalog(seed).getSystem(HOME_SYSTEM_ID);
-      const spec=applySystemBodyTuning(generateSystemSpec(seed,star),id=>resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,id)).bodies[0];
+      const {spec,tuning,provenance}=canonicalHomeBody();result.provenance=provenance;
       p=new Planet({seed:spec.seed,name:spec.name,catalogName:spec.catalogName,posUniv:new T.Vector3(),type:spec.type,
         isMoon:spec.isMoon,radius:spec.radius,atmosphere:spec.atmosphere,clouds:spec.clouds,
-        tuning:resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,spec.bodyId),formation:spec.formation,ringSystem:spec.ringSystem});
+        tuning,formation:spec.formation,ringSystem:spec.ringSystem});
       p.setWeatherTime(0);const stream=p.weatherStream,frameHours=stream.frameHours;
       const deadline=performance.now()+120000;
       while(!(stream.ready&&[0,frameHours,frameHours*2].every(hours=>stream.frames.has(hours)))) {

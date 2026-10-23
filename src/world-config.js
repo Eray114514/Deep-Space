@@ -103,13 +103,15 @@ function finiteParam(params, key) {
   return Number.isFinite(value) ? value : null;
 }
 
-export function resolveBodyTuning({
-  galaxyId = ACTIVE_GALAXY_ID,
-  seed,
-  systemId,
-  bodyId,
-  worldLabParams = null,
-}) {
+export function resolveBodyTuning(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Body tuning requires named options');
+  const {
+    galaxyId = ACTIVE_GALAXY_ID,
+    seed,
+    systemId,
+    bodyId,
+    worldLabParams = null,
+  } = options;
   const galaxy = getGalaxyConfig(galaxyId);
   const authored = seed === galaxy.seed
     ? galaxy.bodyTuning?.[systemId]?.[bodyId] || null

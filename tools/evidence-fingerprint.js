@@ -32,7 +32,7 @@ export async function evidenceFingerprint(verifier) {
   return {
     sourceDigest: await digest(sourceFiles),
     sourceFiles,
-    verifierDigest: await digest([verifier, 'tools/browser.js',
-      'tools/server.js', 'tools/evidence-fingerprint.js']),
+    verifierDigest: await digest([...new Set([verifier, 'tools/browser.js',
+      'tools/server.js', 'tools/evidence-fingerprint.js', 'tools/canonical-planet-fixture.js'])]),
   };
 }

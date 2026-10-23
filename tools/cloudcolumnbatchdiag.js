@@ -38,6 +38,7 @@ const sources = { original: { fixture: 'tools/fixtures/cloud-column-cost-origina
   path: fixture.path, rawSha256: fixture.sha256, rawBytes: fixture.bytes, fixtureRawSha256: sha256(fixtureBytes) },
   installed: { path: 'src/cloud/cloud-column-map.js', rawSha256: sha256(installed), rawBytes: installed.length, candidateKind, shaderContract } };
 await writeFile(`${out}/verifier.js`, verifier);await writeFile(`${out}/original-fixture.json`, fixtureBytes);
+await writeFile(`${out}/canonical-planet-fixture.js`,await readFile(new URL('./canonical-planet-fixture.js',import.meta.url)));
 await writeFile(`${out}/shader-contract.js`,await readFile(new URL('./columnshadercontracttest.js',import.meta.url)));
 await writeFile(`${out}/shader-contract-fixture.json`,await readFile(new URL('./fixtures/cloud-column-work-original.json',import.meta.url)));
 await writeFile(`${out}/original-source.js`, fixture.source);await writeFile(`${out}/installed-source.js`, installed);
@@ -65,19 +66,16 @@ try {
   await page.goto(`http://127.0.0.1:${port}/column-batch.html?vclouds=1`);
   const result = await page.evaluate(async options => {
     const T = await import('three'), { Planet } = await import('/src/planet.js');
-    const { GalaxyCatalog, HOME_SYSTEM_ID } = await import('/src/galaxy-layout.js');
-    const { generateSystemSpec } = await import('/src/astronomy.js');
-    const { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning, applySystemBodyTuning } = await import('/src/world-config.js');
+    const { canonicalHomeBody } = await import('/tools/canonical-planet-fixture.js');
     const { createGameRenderer } = await import('/src/renderer-runtime.js');
     const constructors = { original: (await import('/src/cloud/batch-original.js')).CloudColumnMap,
       installed: (await import('/src/cloud/cloud-column-map.js')).CloudColumnMap };
     const check = (condition, message) => { if (!condition) throw Error(message); };
     const sleep = () => new Promise(resolve => setTimeout(resolve, options.pollMs));
-    const seed = getGalaxyConfig(ACTIVE_GALAXY_ID).seed, star = new GalaxyCatalog(seed).getSystem(HOME_SYSTEM_ID);
-    const spec = applySystemBodyTuning(generateSystemSpec(seed, star), id => resolveBodyTuning(ACTIVE_GALAXY_ID, star.id, id)).bodies[0];
+    const { seed, star, spec, tuning, provenance } = canonicalHomeBody();
     const p = new Planet({ seed: spec.seed, name: spec.name, catalogName: spec.catalogName, posUniv: new T.Vector3(),
       type: spec.type, isMoon: spec.isMoon, radius: spec.radius, atmosphere: spec.atmosphere, clouds: spec.clouds,
-      tuning: resolveBodyTuning(ACTIVE_GALAXY_ID, star.id, spec.bodyId), formation: spec.formation, ringSystem: spec.ringSystem });
+      tuning, formation: spec.formation, ringSystem: spec.ringSystem });
     const { renderer: r } = await createGameRenderer({}, { canvas: document.querySelector('#fixture') });
     r.setSize(900, 450);r.info.autoReset = false;
     const gl = r.getContext(), canvas = r.domElement, contextEvents = [];
@@ -324,7 +322,7 @@ try {
           pending: stream.pending.size, ready: stream.ready, workerStoppedBeforeMeasurements: true };
         await runCase('actual-immutable-forecast-frame', hours);
       }
-      return { gpu, identity: { seed, systemId: star.id, bodyId: spec.bodyId, bodySeed: spec.seed, type: p.type, radius: p.R },
+      return { gpu, provenance, identity: { seed, systemId: star.id, bodyId: spec.bodyId, bodySeed: spec.seed, type: p.type, radius: p.R },
         format, options, cases, forecast, contextEvents, final: checkpoint('Final'), programIds,
         scope: 'Complete formal cloud-column atlas batching and submission fixture; the screenshot displays an atlas, not the player or whole-page performance.',
         timingScope: { whole: 'One non-nested elapsed range from immediately before the first quad draw to immediately after the last. Includes submission gaps and intervening producer state changes, excludes first RT initialization and final cleanup.',
