@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { selectStellarOcclusionVariant } from './stellar-occlusion.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
 import { compilePrograms } from './program-preparation.js';
 import { cloudSurfaceReceiverReady } from './cloud/cloud-surface-shadow-pass.js';
@@ -21,7 +22,8 @@ export function withSurfaceWarmupVariant(source, work) {
   const screen=Number([...materials.values()].some(cloudSurfaceReceiverReady));
   const saved=[];
   try {
-    for(const material of materials.keys()) {
+    for(const [material,owner] of materials) {
+      selectStellarOcclusionVariant(material,owner);
       const original=material.defines,defines=original||{};
       const property=Object.getOwnPropertyDescriptor(defines,screenDefine);
       const changed=!property||property.value!==screen;

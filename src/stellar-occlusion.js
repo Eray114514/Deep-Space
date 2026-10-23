@@ -33,6 +33,17 @@ export function stellarOcclusionUniforms() {
   };
 }
 
+// Select only material topology; no uniform allocation or optical state upload.
+export function selectStellarOcclusionVariant(material, planet) {
+  if (!material) return false;
+  const union = (planet.stellarOccluders?.length || 0) > 1 ? 1 : 0;
+  material.defines ||= {};
+  if (material.defines.STELLAR_UNION_OCCLUSION === union) return false;
+  material.defines.STELLAR_UNION_OCCLUSION = union;
+  material.needsUpdate = true;
+  return true;
+}
+
 export function bindStellarOcclusion(uniforms, planet, material = null) {
   if (!uniforms?.uLocalStarCount) return;
   const sources = planet.stellarLightField?.sources || [];
@@ -47,14 +58,7 @@ export function bindStellarOcclusion(uniforms, planet, material = null) {
   const blockers = planet.stellarOccluders || [];
   uniforms.uLocalOccluderCount.value = blockers.length;
   blockers.forEach((b, i) => uniforms.uLocalOccluders.value[i].set(b.centerLocal.x, b.centerLocal.y, b.centerLocal.z, b.radius));
-  if (material) {
-    const union = blockers.length > 1 ? 1 : 0;
-    material.defines ||= {};
-    if (material.defines.STELLAR_UNION_OCCLUSION !== union) {
-      material.defines.STELLAR_UNION_OCCLUSION = union;
-      material.needsUpdate = true;
-    }
-  }
+  selectStellarOcclusionVariant(material, planet);
 }
 
 export const stellarOcclusionGLSL = /* glsl */`

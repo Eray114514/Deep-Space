@@ -17,6 +17,7 @@ import { createSurfaceWarmupScene } from './surface-warmup.js';
 import { compileRenderVariant, withSurfaceWarmupVariant } from './render-prewarm.js';
 import { compilePrograms } from './program-preparation.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
+import { PresentedFrameStats } from './presented-frame-stats.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
@@ -1235,6 +1236,7 @@ resumeButton.addEventListener('click', (event) => {
 document.getElementById('pause-map-btn').addEventListener('click', async () => {
   if (paused) {
     paused = false;
+    presentedFrames.setPaused(false,performance.now());
     pauseOverlay.classList.add('hidden');
     audio.setPaused(true);
     // Opening the star map from the pause menu should restore BGM (which was
@@ -1374,6 +1376,7 @@ function pauseGame() {
   if (document.body.classList.contains('hero-active')) return;
   cancelTimeWarp();
   paused = true;
+  presentedFrames.setPaused(true,performance.now());
   spaceCtl.enabled = false;
   pauseOverlay.classList.remove('hidden');
   pausePanel.classList.remove('is-acquiring');
@@ -1431,6 +1434,7 @@ async function resumeGame() {
     return false;
   }
   paused = false;
+  presentedFrames.setPaused(false,performance.now());
   spaceCtl.enabled = state === 'space';
   pauseOverlay.classList.add('hidden');
   audio.setPaused(false);
@@ -2269,7 +2273,21 @@ async function prewarmPreparedRiftStructure(token, route, prepared) {
   }
 }
 
-async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
+async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, token) {
+  // Wait before borrowing scene/camera/target state. A paced-out production
+  // call is not a completed destination warm draw.
+  for(;;) {
+    if(!preparedDestinationIsActive(token,route,prepared)||route?.warpRequested)return false;
+    const pacer=nodePipeline.framePacer;
+    if(!pacer)break;
+    const ready=pacer.poll();
+    if(nodePipeline.framePacer!==pacer)continue;
+    if(ready)break;
+    const status=pacer.snapshot();
+    if(status.disposed||status.fault)throw Error('Destination frame pacing unavailable');
+    await new Promise(resolve=>requestAnimationFrame(resolve));
+  }
+  if(!preparedDestinationIsActive(token,route,prepared)||route?.warpRequested)return false;
   const visibility = [];
   const rememberVisibility = (object, visible) => {
     if (!object || visibility.some((state) => state.object === object)) return;
@@ -2322,10 +2340,9 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
     nodePipeline.bindVolumeDepth?.(targetBody);
     renderer.setRenderTarget(surfaceBootstrapTarget);
     renderer.setMRT?.(null);
-    // compileAsync does not exercise the complete TSL RenderPipeline. One real
-    // offscreen production draw creates the MSAA/depth/volume RenderObjects and
-    // uploads their bindings before the player can reach the threshold.
-    nodePipeline.render();
+    // Program linking does not allocate the complete production attachments
+    // or upload every binding. Exercise a real offscreen frame before entry.
+    if(nodePipeline.render()===false)throw Error('Destination warm frame was not submitted');
   } finally {
     // That draw ran the production graph from the destination's arrival pose
     // into a private target with most of the scene masked out. Its pixels are a
@@ -2351,6 +2368,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared) {
       for (const state of visibility) state.object.visible = state.visible;
     }
   }
+  return true;
 }
 
 async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
@@ -2407,7 +2425,7 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
       previewOrigin: route.target.entry,
     });
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
-    await renderPreparedDestinationWarmFrame(targetBody, route, prepared);
+    await renderPreparedDestinationWarmFrame(targetBody, route, prepared, token);
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     warpPreparedRiftWarmState = 'complete';
     warpPreparedRiftWarmError = null;
@@ -3965,31 +3983,16 @@ let dprAcc = 0;
 let adaptiveStage = 0;
 let adaptiveQualityLocked = false;
 let adaptiveStableSince = 0;
-const perfFrameTimes = [];
-let perfLongFrames = 0;
+const presentedFrames = new PresentedFrameStats({initialTime:performance.now()});
 let latestRenderCalls = 0;
 let latestRenderTriangles = 0;
 
 function performanceSnapshot() {
-  if (!perfFrameTimes.length) return { averageFps: 0, low1Fps: 0, longFrames: 0, longFrameRatio: 0,
-    performanceFrames: 0, performanceWindowSeconds: 0, maximumFrameMs: 0 };
-  const sorted = [...perfFrameTimes].sort((a, b) => a - b);
-  const averageMs = perfFrameTimes.reduce((sum, value) => sum + value, 0) / perfFrameTimes.length;
-  const p99Ms = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
-  return {
-    averageFps: Math.round(10000 / averageMs) / 10,
-    low1Fps: Math.round(10000 / Math.max(0.1, p99Ms)) / 10,
-    longFrames: perfLongFrames,
-    longFrameRatio: Math.round(perfLongFrames / perfFrameTimes.length * 10000) / 10000,
-    performanceFrames: perfFrameTimes.length,
-    performanceWindowSeconds: Math.round(perfFrameTimes.reduce((sum,ms)=>sum+ms,0)) / 1000,
-    maximumFrameMs: Math.round(sorted[sorted.length-1]*100) / 100,
-  };
+  return presentedFrames.snapshot();
 }
 
 function resetPerformanceStats() {
-  perfFrameTimes.length = 0;
-  perfLongFrames = 0;
+  presentedFrames.reset(performance.now(),{paused});
   perfEmaMs = 16.7;
   return true;
 }
@@ -4040,30 +4043,11 @@ function frame() {
   // tunnel through terrain. A 100 ms ceiling still gives stable collision at
   // the browser game's supported low-quality floor.
   const dt = clamp(rawDt, 0.0001, 0.1);
-  // Severe stalls are part of player performance. Dropping >=500 ms frames
-  // made a 1 FPS cloud view report a historical average above 100 FPS.
-  if (!paused && realDt > 0 && Number.isFinite(realDt)) {
-    const ms = realDt * 1000;
-    perfFrameTimes.push(ms);
-    if (ms > 50) perfLongFrames++;
-    if (perfFrameTimes.length > 600) {
-      const removed = perfFrameTimes.shift();
-      if (removed > 50) perfLongFrames--;
-    }
-  }
   frameNo++;
-  if (DEV_SERVER) {
-    devFpsElapsed += rawDt;
-    devFpsFrames++;
-    if (devFpsElapsed >= 0.45) {
-      ui.setDevFps(devFpsFrames / devFpsElapsed);
-      devFpsElapsed = 0;
-      devFpsFrames = 0;
-    }
-  }
   // The map owns an opaque full-screen WebGL surface and its own RAF. Rendering
   // the universe underneath doubled GPU work for pixels nobody could see.
   if (starMap?.isOpen) {
+    presentedFrames.suspend(performance.now());
     // Even though the 3D universe is skipped while the star map covers the
     // screen, the BGM director must still run so it can switch to the starmap
     // theme (and back when the map closes).
@@ -4827,14 +4811,13 @@ function frame() {
           waterPending += pendingChunks(p.waterLod);
         }
       }
-      ui.setStats(`${(1 / dt).toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${terrainChunks}/${waterChunks} terrain/water · ${terrainPending}/${waterPending} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
+      ui.setStats(`${performanceSnapshot().averageFps.toFixed(0)} fps · ${info.calls} draws · ${(info.triangles / 1e6).toFixed(2)} Mtri · ${terrainChunks}/${waterChunks} terrain/water · ${terrainPending}/${waterPending} queued · ${activeBolts} bolts · ${renderDpr.toFixed(2)}×`);
     }
   }
 
   // Slow adaptation avoids reallocating render targets during momentary LOD
   // spikes. On a 5080 this stays at the quality ceiling; an iGPU degrades
   // gracefully instead of silently presenting a single-digit frame rate.
-  perfEmaMs += (dt * 1000 - perfEmaMs) * 0.025;
   dprAcc += dt;
   const targetFrameMs = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.2;
   const adaptInterval = perfEmaMs > targetFrameMs * 1.35 ? 1.2 : 3.5;
@@ -4890,16 +4873,27 @@ function frame() {
       gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
         ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
     }
-    nodePipeline.render({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch });
-    if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
-      startupVolumeWarmState = 'submitted';
-      startupVolumeWarmSubmittedFrame = frameNo;
+    const rendered=nodePipeline.render({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch });
+    if(rendered!==false) {
+      // A paced-out RAF is simulation time, not another presented frame.
+      // Keep severe stalls and the full interval across skipped callbacks.
+      const timing=presentedFrames.present(performance.now());
+      if(timing!==null) {
+        if(timing.recorded)perfEmaMs+=(Math.min(timing.activeMs,100)-perfEmaMs)*.025;
+        if(DEV_SERVER) {
+          devFpsElapsed+=timing.elapsedMs/1000;devFpsFrames++;
+          if(devFpsElapsed>=.45) {
+            ui.setDevFps(devFpsFrames/devFpsElapsed);devFpsElapsed=0;devFpsFrames=0;
+          }
+        }
+      }
+      if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
+        startupVolumeWarmState = 'submitted';
+        startupVolumeWarmSubmittedFrame = frameNo;
+      }
+      const info=renderer.info.render;
+      latestRenderCalls=info.calls;latestRenderTriangles=info.triangles;
     }
-  }
-  {
-    const info = renderer.info.render;
-    latestRenderCalls = info.calls;
-    latestRenderTriangles = info.triangles;
   }
   prevNavPos.copy(nav.pos);
   const startupAssetsReady = ship.heroLoadSettled
@@ -5341,6 +5335,7 @@ window.NMS = {
         .filter(([name]) => name.startsWith('tree'))
         .reduce((sum, [, mesh]) => sum + (mesh?.count || 0), 0) : 0,
       ...performanceSnapshot(),
+      renderPacing: nodePipeline.framePacer?.snapshot() || null,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },

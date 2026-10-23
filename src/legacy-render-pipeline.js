@@ -15,6 +15,7 @@ import {CloudLightBank} from './cloud/cloud-light-bank.js';
 import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 import {RenderProfiler} from './render-profiler.js';
 import {GpuWorkBudget} from './gpu-work-budget.js';
+import {GpuFramePacer} from './gpu-frame-pacer.js';
 import {withPreparedShadows} from './render-shadow-state.js';
 import { RenderFrameState } from './render-frame-state.js';
 import { compilePrograms } from './program-preparation.js';
@@ -41,6 +42,7 @@ export class GameLegacyPipeline {
     realisticGrade = false,
   } = {}) {
     this.renderer = renderer;
+    this.framePacer = null;
     this.scene = scene;
     this.camera = camera;
     this.frameState = new RenderFrameState();
@@ -158,34 +160,56 @@ export class GameLegacyPipeline {
   }
 
   render({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
-    const target = this.renderer.getRenderTarget();
-    const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
-    this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
+    const pacer=this.framePacer;
+    if(pacer&&!pacer.beginFrame())return false;
+    let failed=false;
     try {
+      const target = this.renderer.getRenderTarget();
+      const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
+      this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
       try {
-        const body = this.volumePass?.activePlanet;
-        const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
-        if (localEye) this.frameState.localEye(body, localEye.value);
-        const airBody = this.atmospherePass.activePlanet;
-        if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
-        this.profiler?.beginFrame();
-        this.columnWorkBudget?.beginFrame();
-        this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
-        // RenderPass writes readBuffer. Preserve the receiver depth in the other
-        // target during that draw; sampling its own depth attachment is feedback.
-        // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
-        this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
-          this.volumePass?.activePlanet,this.profiler);
-        this.composer.render();
-      } finally {
-        this.renderer.setRenderTarget(target, face, mip);
+        try {
+          const body = this.volumePass?.activePlanet;
+          const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
+          if (localEye) this.frameState.localEye(body, localEye.value);
+          const airBody = this.atmospherePass.activePlanet;
+          if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
+          this.profiler?.beginFrame();
+          this.columnWorkBudget?.beginFrame();
+          this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
+          // RenderPass writes readBuffer. Preserve the receiver depth in the other
+          // target during that draw; sampling its own depth attachment is feedback.
+          // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
+          this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
+            this.volumePass?.activePlanet,this.profiler);
+          this.composer.render();
+        } finally {
+          this.renderer.setRenderTarget(target, face, mip);
+        }
+        this.frameState.commit();
+      } catch (error) {
+        this.frameState.abort();
+        this.volumePass?.resetHistory();
+        throw error;
       }
-      this.frameState.commit();
+      return true;
     } catch (error) {
-      this.frameState.abort();
-      this.volumePass?.resetHistory();
+      failed=true;
       throw error;
+    } finally {
+      // stop/dispose may detach this owner from inside a render callback. The
+      // admitted frame still belongs to the captured owner until its fence.
+      if(pacer)try {pacer.endFrame();} catch(error){if(!failed)throw error;}
     }
+  }
+
+  startFramePacing() {
+    if(this.framePacer)throw Error('Frame pacing is already enabled');
+    const pacer=new GpuFramePacer(this.renderer);this.framePacer=pacer;return pacer;
+  }
+
+  stopFramePacing() {
+    const pacer=this.framePacer;this.framePacer=null;pacer?.dispose();
   }
 
   profilePhase(name,work,options) {return this.profiler?this.profiler.run(name,work,options):work();}
@@ -264,6 +288,7 @@ export class GameLegacyPipeline {
   }
 
   dispose() {
+    this.stopFramePacing();
     this.programPreparation.abort();
     this.stopProfiling();
     this.stopColumnWork();

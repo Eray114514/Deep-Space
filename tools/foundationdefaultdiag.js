@@ -22,10 +22,17 @@ const receiverStartup=process.argv.includes('--receiver-startup');
 const probeFromNavigation=process.argv.includes('--probe-from-navigation');
 const columnWork=process.argv.includes('--column-work');
 const columnDaySide=process.argv.includes('--column-day-side');
+const columnOrbitProfile=process.argv.includes('--column-orbit-profile');
+const columnFrameGate=process.argv.includes('--column-frame-gate');
+const framePacing=process.argv.includes('--frame-pacing');
+const observeAfterBootTimeout=process.argv.includes('--observe-after-boot-timeout');
+const pauseControl=process.argv.includes('--pause-control');
+assert.ok(!pauseControl||framePacing,'Pause control requires explicit frame pacing');
+assert.ok(!framePacing||!columnFrameGate,'Isolate runtime pacing from the diagnostic frame wrapper');
 const orbitArgument=process.argv.slice(2).find(arg=>arg.startsWith('--column-orbit-ms='));
 const columnOrbitMs=orbitArgument?Number(orbitArgument.slice('--column-orbit-ms='.length)):30000;
 assert.ok(Number.isInteger(columnOrbitMs)&&columnOrbitMs>=30000&&columnOrbitMs<=120000,'Column orbit window must be 30000..120000 ms');
-assert.ok(columnWork||!columnDaySide&&!orbitArgument,'Column orbit controls require explicit column work');
+assert.ok(columnWork||!columnDaySide&&!orbitArgument&&!columnOrbitProfile&&!columnFrameGate,'Column orbit controls require explicit column work');
 const parallelNearControl=process.argv.includes('--parallel-near-control');
 const viewLoopControl=process.argv.includes('--view-loop-control');
 const beamLoopControl=process.argv.includes('--beam-loop-control');
@@ -67,6 +74,8 @@ await writeFile(`${out}/verifier.js`,await readFile('tools/foundationdefaultdiag
 const before=await evidenceFingerprint('tools/foundationdefaultdiag.js');
 const admissionHelperBefore=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
 if(columnWork)await writeFile(`${out}/column-admission-probe.js`,await readFile('tools/column-admission-probe.js'));
+const frameGateHelperBefore=columnFrameGate?await evidenceFingerprint('tools/column-frame-gate.js'):null;
+if(columnFrameGate)await writeFile(`${out}/column-frame-gate.js`,await readFile('tools/column-frame-gate.js'));
 const helperBefore=await evidenceFingerprint('tools/foundation-gl-probe.js');
 const bootHelperBefore=await evidenceFingerprint('tools/foundation-boot-probe.js');
 const contextHelperBefore=await evidenceFingerprint('tools/foundation-context-probe.js');
@@ -77,6 +86,7 @@ const errors=[],warnings=[],driverWarnings=[],checkpoints=[],workerEvents=[],net
 const nativeLogs=[];let nativeLogsDropped=0,browserInfo=null;
 let warningDropped=0,driverWarningCount=0,page,cdp,traceStarted=false,report,ownerModesResult=null;
 let parallelNearResult=null;
+let bootDeadline=null;
 let traceState={requested:trace,categories:traceCategories,completed:false};
 async function finishTrace() {
   if(!traceStarted)return;traceStarted=false;
@@ -167,7 +177,16 @@ try {
   if(cloudOverrideBody)await page.route('**/src/clouds-webgl.js',route=>route.fulfill({contentType:'text/javascript',body:cloudOverrideBody}));
   if(legacyLutBody)await page.route('**/src/atmosphere-multiple-scattering.js',route=>route.fulfill({contentType:'text/javascript',body:legacyLutBody}));
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1`);
-  await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
+  try {
+    await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
+    bootDeadline={limitMs:120000,passed:true,readyAtEpochMs:Date.now()};
+  } catch(error) {
+    bootDeadline={limitMs:120000,passed:false,error:String(error),failedAtEpochMs:Date.now()};
+    if(!observeAfterBootTimeout)throw error;
+    console.log(JSON.stringify({bootDeadline,observationOnly:'Continue another bounded window; original boot failure remains an exit failure.'}));
+    await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
+    bootDeadline.observedReadyAtEpochMs=Date.now();
+  }
   if(probeFromNavigation)await page.evaluate(()=>{
     if(!window.__foundationBootProbe?.installed)throw Error('Navigation-time GL probe failed');
     if(window.__foundationContextProbe.idForCanvas(NMS._renderer.domElement)!==1)
@@ -241,6 +260,10 @@ try {
       admission.restore();data.admission=admission.snapshot();
     };
   });
+  if(framePacing)await page.evaluate(()=>{
+    NMS._pipeline.startFramePacing();
+    window.__foundationFramePacingStart={atMs:performance.now(),pacer:NMS._pipeline.framePacer.snapshot()};
+  });
   const checkpoint=async label=>{
     const state=await page.evaluate(label=>{
       performance.mark(`foundation-default-${label}`);window.__foundationGLProbe.mark(label);
@@ -252,16 +275,36 @@ try {
   };
   await checkpoint('boot-before-placement');
   if(columnWork) {
+    if(columnOrbitProfile)await page.evaluate(()=>NMS._pipeline.startProfiling({every:8,history:2000}));
+    if(columnFrameGate)await page.evaluate(async()=>{
+      const {installColumnFrameGate}=await import('/tools/column-frame-gate.js');
+      window.__foundationColumnFrameGate=installColumnFrameGate(NMS._pipeline);
+    });
     await page.evaluate(columnDaySide=>{
       window.__foundationColumnWork.phase='orbit';
       const p=NMS._planet(0),star=p.stellarDirectionsAt(p.weatherHours).slice().sort((a,b)=>b.irradianceFraction-a.irradianceFraction)[0];
       const direction=columnDaySide?star.direction:[.34669147556655305,.07291666666666663,-.9351407276403421];
       window.__foundationColumnWork.orbitCamera={daySide:columnDaySide,hours:p.weatherHours,direction,primaryStar:star};
       NMS.teleport(0,(p.volCloudBand.rOut-p.R+3000000)/p.R,{dir:direction,horizon:false});
+      NMS.resetPerformanceStats();
+      window.__foundationColumnWork.orbitStart={atMs:performance.now(),sequence:NMS._pipeline.frameState.sequence,
+        pacer:NMS._pipeline.framePacer?.snapshot()||null};
     },columnDaySide);
-    await page.waitForTimeout(columnOrbitMs);await checkpoint('column-orbit-complete');
+    await page.waitForTimeout(columnOrbitMs);
+    await page.evaluate(()=>{
+      const data=window.__foundationColumnWork;
+      data.orbitEnd={atMs:performance.now(),sequence:NMS._pipeline.frameState.sequence,
+        pacer:NMS._pipeline.framePacer?.snapshot()||null,stats:NMS.stats()};
+      data.orbitProfile=NMS._pipeline.performanceSnapshot();
+    });
+    await checkpoint('column-orbit-complete');
     await page.screenshot({path:`${out}/column-orbit.png`,timeout:90000});
-    await page.evaluate(()=>{window.__foundationColumnWork.phase='near';});
+    await page.evaluate(()=>{
+      const data=window.__foundationColumnWork;
+      const gate=window.__foundationColumnFrameGate;
+      if(gate){gate.restore();data.frameGate=gate.snapshot();delete window.__foundationColumnFrameGate;}
+      data.phase='near';
+    });
   }
   if(parallelNearControl) {
     parallelNearResult=await page.evaluate(probeCloudProgramPrewarm);
@@ -334,6 +377,47 @@ try {
     profile:NMS._pipeline.performanceSnapshot(),probe:window.__foundationGLProbe.snapshot(),lostEvents:__foundationLost,
     workers:window.__foundationWorkers}));
   await page.screenshot({path:`${out}/player.png`,timeout:90000});
+  if(pauseControl) {
+    // A controlled caller rejection exercises the actual main loop and pause
+    // UI. Native GPU busy proof remains the separate pipeline GPU fixture.
+    await page.evaluate(async()=>{
+      const {PresentedFrameStats}=await import('/src/presented-frame-stats.js');
+      const pipeline=NMS._pipeline,prototype=PresentedFrameStats.prototype;
+      const render=pipeline.render,present=prototype.present,setPaused=prototype.setPaused;
+      const data=window.__foundationPauseControl={kind:'Controlled render(false) caller integration; not native fence/performance evidence',
+        edges:[],rejected:0,restored:false,phase:'reject'};
+      NMS.resetPerformanceStats();
+      const rejected=function(){data.rejected++;return false;};pipeline.render=rejected;
+      const edge=function(value,at){const result=setPaused.call(this,value,at);data.edges.push({paused:value,at});return result;};
+      const sample=function(...args){
+        const result=present.apply(this,args);
+        if(data.phase==='released'&&result&&!data.first) {
+          data.first={...result,stats:this.snapshot(),devFpsBeforeUpdate:document.getElementById('dev-fps')?.textContent};
+          queueMicrotask(()=>{data.first.devFpsAfterUpdate=document.getElementById('dev-fps')?.textContent;});
+        }
+        return result;
+      };
+      prototype.setPaused=edge;prototype.present=sample;
+      window.__foundationPauseRelease=()=>{
+        if(pipeline.render!==rejected)throw Error('Pause render wrapper ownership changed');
+        pipeline.render=render;data.phase='released';
+      };
+      window.__foundationPauseRestore=()=>{
+        if(pipeline.render===rejected)pipeline.render=render;
+        if(prototype.present!==sample||prototype.setPaused!==edge)throw Error('Pause statistics wrapper ownership changed');
+        prototype.present=present;prototype.setPaused=setPaused;data.restored=true;
+      };
+    });
+    try {
+      await page.keyboard.press('Escape');await page.waitForFunction(()=>NMS.stats().paused);
+      await page.waitForTimeout(2000);
+      await page.keyboard.press('Escape');await page.waitForFunction(()=>!NMS.stats().paused);
+      await page.waitForTimeout(100);
+      await page.evaluate(()=>{window.__foundationPauseControl.beforeRelease=NMS.stats();window.__foundationPauseRelease();});
+      await page.waitForFunction(()=>window.__foundationPauseControl.first,{},{timeout:15000});
+    } finally {await page.evaluate(()=>window.__foundationPauseRestore());}
+    await checkpoint('pause-control-complete');
+  }
   if(ownerModes) {
     try {
       await page.evaluate(()=>{
@@ -437,7 +521,14 @@ try {
       window.__foundationColumnWorkRestore();final.columnWork=window.__foundationColumnWork;
       final.columnWork.finalBudget=NMS._pipeline.columnWorkBudget.snapshot();NMS._pipeline.stopColumnWork();
     }
+    if(NMS._pipeline.framePacer) {
+      const pacer=NMS._pipeline.framePacer;
+      final.framePacing={start:window.__foundationFramePacingStart,beforeStop:pacer.snapshot(),stats:NMS.stats()};
+      NMS._pipeline.stopFramePacing();window.__foundationRetiredFramePacer=pacer;
+      final.framePacing.afterStop=pacer.snapshot();
+    }
     final.bootProbe=window.__foundationBootProbe??null;
+    final.pauseControl=window.__foundationPauseControl??null;
     window.__foundationHistoryRestore?.();final.history=window.__foundationHistory??null;
     window.__foundationReceiverStartupRestore?.();final.receiverStartup=window.__foundationReceiverStartup??null;
     final.mainContextId=window.__foundationContextProbe.idForCanvas(NMS._renderer.domElement);
@@ -445,15 +536,21 @@ try {
     final.contexts=window.__foundationContextProbe.snapshot();
     window.__foundationGLProbe.dispose();return final;
   });
+  if(framePacing) {
+    await page.waitForFunction(()=>window.__foundationRetiredFramePacer?.snapshot().released,{},{timeout:15000});
+    finalState.framePacing.retired=await page.evaluate(()=>({pacer:window.__foundationRetiredFramePacer.snapshot(),
+      gl:NMS._renderer.getContext().getError(),lost:NMS._renderer.getContext().isContextLost(),enabled:!!NMS._pipeline.framePacer}));
+  }
   const after=await evidenceFingerprint('tools/foundationdefaultdiag.js'),helperAfter=await evidenceFingerprint('tools/foundation-gl-probe.js');
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
   const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
   const bootHelperAfter=await evidenceFingerprint('tools/foundation-boot-probe.js');
   const admissionHelperAfter=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
+  const frameGateHelperAfter=columnFrameGate?await evidenceFingerprint('tools/column-frame-gate.js'):null;
   report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,nativeLogs,nativeLogsDropped,browserInfo,
-    probeFromNavigation,columnWork,columnDaySide,columnOrbitMs,admissionHelperBefore,admissionHelperAfter,bootHelperBefore,bootHelperAfter,
-    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest,
+    probeFromNavigation,columnWork,columnDaySide,columnOrbitMs,columnOrbitProfile,columnFrameGate,framePacing,observeAfterBootTimeout,pauseControl,bootDeadline,frameGateHelperBefore,frameGateHelperAfter,admissionHelperBefore,admissionHelperAfter,bootHelperBefore,bootHelperAfter,
+    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest&&frameGateHelperBefore?.verifierDigest===frameGateHelperAfter?.verifierDigest,
     boundary:`${columnWork?'Explicit raw3/cache2 column admission plus an additional orbit interval; not default runtime acceptance.':'Default'} 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.`};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
   console.log(JSON.stringify({out,stableSource:report.stableSource,viewLoopControl,cloudOverride,traceState,
@@ -469,7 +566,36 @@ try {
   if(parallelNearControl)assert.equal(parallelNearResult.actualNear.reused,true,'Actual near draw must reuse the prepared program');
   assert.equal(finalState.gl,0,'Post-screenshot/teardown GL error must remain a failure');
   assert.equal(finalState.lost,false);assert.equal(finalState.lostEvents,0);
+  if(framePacing) {
+    const paced=finalState.framePacing;
+    assert.equal(paced.beforeStop.fault,null);assert.ok(paced.beforeStop.pending<=1);
+    assert.ok(paced.beforeStop.stats.submitted>0&&paced.beforeStop.stats.skipped>0);
+    assert.equal(paced.beforeStop.stats.begun,paced.beforeStop.stats.submitted);
+    assert.equal(paced.retired.pacer.released,true);assert.equal(paced.retired.pacer.pending,0);
+    assert.equal(paced.retired.pacer.fault,null);assert.equal(paced.retired.enabled,false);
+    assert.equal(paced.retired.gl,0);assert.equal(paced.retired.lost,false);
+  }
+  if(pauseControl) {
+    const control=finalState.pauseControl;
+    assert.ok(control.restored&&control.rejected>0);assert.equal(control.beforeRelease.performanceFrames,0);
+    assert.deepEqual(control.edges.map(edge=>edge.paused),[true,false]);
+    const pausedMs=control.edges[1].at-control.edges[0].at;
+    assert.ok(pausedMs>=2000&&control.first.recorded);
+    assert.ok(Math.abs(control.first.elapsedMs-control.first.activeMs-pausedMs)<.001,'Active time excludes exact UI pause edges');
+    assert.equal(control.first.stats.performanceFrames,1);
+    assert.equal(control.first.stats.maximumFrameMs,Math.round(control.first.activeMs*100)/100);
+  }
   if(columnWork) {
+    if(columnFrameGate) {
+      assert.ok(finalState.columnWork.frameGate.restored);assert.equal(finalState.columnWork.frameGate.fault,null);
+      assert.equal(finalState.columnWork.frameGate.pending,0);assert.equal(finalState.columnWork.frameGate.peakPending,1);
+      assert.ok(finalState.columnWork.frameGate.rendered>0&&finalState.columnWork.frameGate.skipped>0);
+    }
+    if(framePacing) {
+      const {orbitStart:start,orbitEnd:end}=finalState.columnWork,submitted=end.sequence-start.sequence;
+      assert.ok(submitted>0);assert.equal(end.pacer.stats.submitted-start.pacer.stats.submitted,submitted);
+      assert.equal(end.stats.performanceFrames,Math.min(600,submitted),'FPS samples count actual player submissions');
+    }
     assert.equal(finalState.columnWork.restored,true);
     assert.equal(finalState.columnWork.admission.restored,true);assert.deepEqual(finalState.columnWork.admission.faults,[]);
     assert.ok(finalState.columnWork.records.some(record=>record.phase==='orbit'&&record.plan?.forecastSteps===3&&record.plan.cacheSteps===2),'Actual orbit must execute the opted-in column bank');
@@ -524,14 +650,19 @@ try {
       &&draw.materialVersion===transition.nearVersion&&draw.uploadedVersion===draw.materialVersion&&draw.drawCalls>0
       &&(transition.expected===0||draw.cacheReady===1&&draw.weatherReady&&draw.bankMatchesField)));
   }
+  report.functionalChecksPassed=true;
+  await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));
+  assert.ok(bootDeadline.passed,'Original 120 s boot gate failed; extended observation does not turn it green');
 } catch(error) {
   const state=await page?.evaluate(()=>({stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
     profile:window.NMS?._pipeline?.performanceSnapshot(),probe:window.__foundationGLProbe?.snapshot(),workers:window.__foundationWorkers,
     ownerModes:window.__foundationOwnerModes,history:window.__foundationHistory,receiverStartup:window.__foundationReceiverStartup,parallelPreparation:window.__foundationCloudPrewarm,contexts:window.__foundationContextProbe?.snapshot(),
+    columnWork:window.__foundationColumnWork,frameGate:window.__foundationColumnFrameGate?.snapshot(),framePacing:window.NMS?._pipeline?.framePacer?.snapshot(),pauseControl:window.__foundationPauseControl,
     mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)})).catch(captureError=>({captureError:String(captureError)}));
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
   await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
-    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,nativeLogs,nativeLogsDropped,browserInfo,error:String(error)},null,2));
+    warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,nativeLogs,nativeLogsDropped,browserInfo,
+    framePacing,observeAfterBootTimeout,bootDeadline,error:String(error)},null,2));
   await finishTrace();console.error(JSON.stringify({out,error:String(error)}));throw error;
 } finally {
   try {await browser?.close();}

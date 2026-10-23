@@ -47,6 +47,7 @@ export class CloudColumnBank {
     // draws share the production estimate; cold intervals remain measured.
     this.admissionKeys=new WeakMap();this.nextStartKey={phase:this.footprintSamples<=this.footprintBatch?'initialize-final':'initialize-work'};
     this.productionKey={phase:'production'};this.idleKey={phase:'idle'};
+    this.recoveryPair=null;
   }
   plan() {
     const p=this.planet,stream=p.weatherStream,anchor=stream?.anchor,step=stream?.frameHours;
@@ -56,6 +57,9 @@ export class CloudColumnBank {
       allocatedTargetBytes:this.maps.size*targetBytes,
       snapshotBytes:[...this.maps.values()].reduce((sum,map)=>sum+(map.snapshots||[]).reduce((bytes,texture)=>bytes+(texture.image?.data?.byteLength||0),0),0),
       deadlineAware:this.deadlineAware,deferFirst:this.deferFirst,serviceRate:this.service?.rate??null,
+      recovery:this.recoveryPair?{hours:[this.recoveryPair.first,this.recoveryPair.second],
+        revisions:this.recoveryPair.sources.frames.map(frame=>frame.revision),
+        finishHours:this.recoveryPair.finishHours,feasible:this.recoveryPair.feasible}:null,
       pair:hours.slice(0,2),jobs:hours.map(hour=>{
         const revision=stream.revisionAt(hour),map=this.maps.get(hour);
         const current=this.fieldOwner===p.weatherField&&this.speciesMask===p.volCloudMat.uniforms.uSpeciesMask.value
@@ -72,13 +76,56 @@ export class CloudColumnBank {
     if(!this.deadlineAware)return;
     const hours=this.planet.weatherHours,last=this.service,delta=hours-last?.hours;
     if(!last||last.stream!==stream||!Number.isFinite(delta)||delta<0||delta>stream.frameHours*3) {
-      this.service={stream,hours,lastDraws:0,rate:0,samples:0};return;
+      this.service={stream,hours,lastDraws:0,rate:0,samples:0};this.recoveryPair=null;return;
     }
     if(delta>0) {
       const rate=last.lastDraws/delta;
       last.rate=last.samples?last.rate*.9+rate*.1:rate;last.samples++;
       last.hours=hours;last.lastDraws=0;
     }
+  }
+  selectRecoveryPair(stream,hours,pending) {
+    const now=this.planet.weatherHours,step=stream.frameHours,anchor=stream.anchor;
+    // Planning never expands endpointHours(), which also bounds retirement and
+    // allocation. A raw fourth endpoint may only describe a future pair.
+    if(!Number.isFinite(now)||!Number.isFinite(anchor)||!Number.isFinite(step)||step<=0||anchor+step<=anchor
+      ||now<anchor||now>=anchor+step){this.recoveryPair=null;return null;}
+    const trained=this.service?.samples>=8,rate=this.service?.rate;
+    const known=trained&&Number.isFinite(rate)&&rate>0;
+    const full=Math.ceil((this.width/2)/this.tileRows)*Math.ceil(this.footprintSamples/this.footprintBatch);
+    const remaining=hour=>{
+      const map=this.maps.get(hour);
+      if(!map)return full;
+      if(map.ready)return 0;
+      return Math.ceil((this.width/2-map.row)/this.tileRows)*Math.ceil(this.footprintSamples/this.footprintBatch)
+        -Math.floor((map.footprintCursor||0)/this.footprintBatch);
+    };
+    const candidates=[];
+    for(const first of hours) {
+      const second=first+step,revision=stream.revisionAt(first),next=stream.revisionAt(second);
+      if(revision===null||next===null||!stream.frames.has(first)||!stream.frames.has(second))continue;
+      const firstWork=remaining(first),secondWork=remaining(second);
+      if(!firstWork&&!secondWork)continue;
+      const finishHours=known?Math.max(now+firstWork/rate,second-this.cacheSteps*step)+secondWork/rate:null;
+      candidates.push({first,second,sources:{stream,frames:[{hours:first,revision},{hours:second,revision:next}]},
+        epoch:this.scratch.epoch,finishHours,feasible:known&&finishHours<first+step});
+    }
+    const previous=this.recoveryPair;
+    const current=previous&&previous.epoch===this.scratch.epoch
+      &&weatherSourcesCurrent(previous.sources,stream)
+      ?candidates.find(pair=>pair.first===previous.first&&pair.second===previous.second):null;
+    const contains=pair=>pending&&(pair.first===pending.generation||pair.second===pending.generation);
+    // Keep useful partial work before considering a restart. Only a feasible
+    // alternative can justify cancellation; an unknown/zero rate is not proof
+    // that a partial map should be thrown away.
+    const feasible=candidates.filter(pair=>pair.feasible);
+    const selected=(current?.feasible&&contains(current)?current:null)
+      ||feasible.find(contains)||(current?.feasible?current:null)||feasible[0]||current;
+    if(selected&&current===selected) {
+      previous.finishHours=selected.finishHours;previous.feasible=selected.feasible;
+      this.recoveryPair=previous;
+    } else this.recoveryPair=selected||null;
+    return this.recoveryPair;
   }
   update(renderer,{workQuanta=this.workQuanta,allowCreate=true,admit=null}={}) {
     if(admit!==null&&(typeof admit!=='function'||this.producer!=='tile'))throw Error('Invalid column admission');
@@ -92,6 +139,7 @@ export class CloudColumnBank {
       // No retired target may remain bound, even behind a disabled branch.
       this.unbind();
       this.syncForecast(stream);
+      if(this.disposed)return;
       // The admission callback may observe loss/restoration before the first
       // target exists. Register epochs without initializing GPU resources.
       if(admit)this.scratch.observeRenderer(renderer);
@@ -115,24 +163,24 @@ export class CloudColumnBank {
         ||this.fieldOwner!==p.weatherField||this.speciesMask!==u.uSpeciesMask.value
         ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch))return;
       this.observeService(stream);
-      const plan=this.deadlineAware?this.plan():null;
-      // A missed current endpoint is not a successful forecast. If measured
-      // admission cannot finish the current pair in this bracket, protect the
-      // next pair instead of repeatedly spending its window on obsolete a.
-      this.deferFirst=Boolean(plan&&this.service.samples>=8&&this.service.rate>0
-        &&plan.jobs.slice(0,2).reduce((sum,job)=>sum+job.remainingDraws,0)/this.service.rate>b-p.weatherHours);
       // A real forecast endpoint can bake before the sampling pair is ready.
       // Finish the existing snapshot first, including when an earlier missing
       // endpoint arrives, so there is never more than one generation in flight.
       let pending=[...this.maps.values()].find(map=>!map.ready);
-      if(this.deferFirst&&pending&&pending===this.maps.get(a)) {
-        this.maps.delete(a);pending.dispose();pending=null;
+      const admissionOwner=this.admissionKeys,weatherHours=p.weatherHours;
+      const recovery=this.deadlineAware?this.selectRecoveryPair(stream,hours,pending):null;
+      this.deferFirst=Boolean(recovery&&recovery.first>a);
+      if(pending&&recovery?.feasible&&pending.generation!==recovery.first&&pending.generation!==recovery.second) {
+        this.maps.delete(pending.generation);pending.dispose();pending=null;
         if(this.disposed)return;
         if(stream.disposed||stream!==p.weatherStream||a!==stream.anchor||this.fieldOwner!==p.weatherField
           ||this.speciesMask!==u.uSpeciesMask.value||this.scratch?.lost
-          ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch))return;
+          ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch)||this.admissionKeys!==admissionOwner
+          ||p.weatherHours!==weatherHours)return;
       }
-      const hour=!pending&&allowCreate?(this.deferFirst?hours.slice(1):hours).find(hour=>!this.maps.has(hour)
+      const choices=recovery?[recovery.first,recovery.second]:hours;
+      const validClock=!this.deadlineAware||(p.weatherHours>=a&&p.weatherHours<a+stream.frameHours);
+      const hour=!pending&&allowCreate&&validClock?choices.find(hour=>hours.includes(hour)&&!this.maps.has(hour)
         &&stream.frames.has(hour)&&stream.revisionAt(hour)!=null):undefined;
       const frame=stream.frames.get(hour);
       const phase=pending?.admission?.()||(hour!==undefined?{phase:this.nextStartKey.phase,maxUnits:1}:{phase:'idle',maxUnits:0});
@@ -149,7 +197,8 @@ export class CloudColumnBank {
         if(admit&&(!Number.isInteger(grant)||grant<0||grant>request.maxUnits))throw Error('Invalid column admission grant');
         if(this.disposed||stream.disposed||stream!==p.weatherStream||a!==stream.anchor||this.fieldOwner!==p.weatherField
           ||this.speciesMask!==u.uSpeciesMask.value||this.scratch?.lost
-          ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch))return;
+          ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch)
+          ||(this.deadlineAware&&(!validClock||p.weatherHours!==weatherHours||this.admissionKeys!==admissionOwner)))return;
         if(!pending&&allowCreate&&(!admit||grant>0)&&hour!==undefined&&stream.frames.get(hour)===frame) {
           const MapProducer=this.producer==='tile'?CloudColumnTileMap:CloudColumnMap;
           pending=new MapProducer(p,{hours:hour,width:this.width,footprintSamples:this.footprintSamples,
@@ -168,7 +217,8 @@ export class CloudColumnBank {
       if(this.service&&stream===p.weatherStream&&this.fieldOwner===p.weatherField)this.service.lastDraws+=submission?.draws||0;
       const first=this.maps.get(a),second=this.maps.get(b);
       const current=stream===p.weatherStream&&a===stream.anchor&&!stream.disposed
-        &&this.fieldOwner===p.weatherField&&this.speciesMask===u.uSpeciesMask.value;
+        &&this.fieldOwner===p.weatherField&&this.speciesMask===u.uSpeciesMask.value
+        &&(!this.deadlineAware||(validClock&&p.weatherHours===weatherHours&&this.admissionKeys===admissionOwner));
       const pairCurrent=first&&second&&!first.invalidated&&!second.invalidated
         &&weatherSourcesCurrent(first.weatherSources,stream)&&weatherSourcesCurrent(second.weatherSources,stream)
         &&(!this.scratch||(first.contextEpoch===this.scratch.epoch&&second.contextEpoch===this.scratch.epoch&&!this.scratch.lost));
@@ -181,8 +231,9 @@ export class CloudColumnBank {
       }
       return submission;
     } finally {
-      if(this.forecastStream&&(this.forecastStream!==this.planet.weatherStream||this.forecastStream.disposed))this.syncForecast(null);
-      this.updating=false;
+      try {
+        if(this.forecastStream&&(this.forecastStream!==this.planet.weatherStream||this.forecastStream.disposed))this.syncForecast(null);
+      } finally {this.updating=false;}
     }
   }
   unbind() {
