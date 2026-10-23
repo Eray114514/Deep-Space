@@ -58,9 +58,10 @@ export class WeaponSkyProbe {
     source.minFilter = THREE.LinearFilter;
     source.magFilter = THREE.LinearFilter;
     source.needsUpdate = true;
-    const next = this.generator.fromEquirectangular(source);
+    let next;
+    try { next = this.generator.fromEquirectangular(source); }
+    finally { source.dispose(); }
     next.texture.name = 'weapon-outdoor-sky-pmrem';
-    source.dispose();
     this.target?.dispose();
     this.target = next;
     this.key = key;

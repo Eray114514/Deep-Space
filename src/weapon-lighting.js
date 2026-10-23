@@ -12,6 +12,7 @@ export class WeaponLighting {
     this.origin = new THREE.Vector3();
     this.up = new THREE.Vector3(0, 1, 0);
     this.skyProbe = new WeaponSkyProbe();
+    this.environmentFrame = null;
     this.root = new THREE.Group();
     this.root.name = 'weapon-lighting';
     this.root.visible = false;
@@ -40,7 +41,7 @@ export class WeaponLighting {
     });
   }
 
-  update(radiance, environment = {}, active = false, worldUp = null) {
+  update(radiance, environment = {}, active = false, worldUp = null, { deferEnvironment = false } = {}) {
     this.root.visible = active;
     const day = THREE.MathUtils.clamp(environment.day ?? 1, 0, 1);
     // environment.day already includes eclipse; source.irradiance already
@@ -63,18 +64,29 @@ export class WeaponLighting {
       light.target.position.copy(this.origin);
     }
     this.up.copy(worldUp || this.camera.up).normalize();
-    const outdoor = active && (environment.atmosphere ?? 0) > 0.02 && daylight > 0.02;
+    // Simulation keeps lights and the latest environment current on every RAF.
+    // PMREM generation belongs to the admitted GPU submission, not this clock.
+    this.environmentFrame = { radiance, environment, daylight };
+    const reflectionScale = radiance?.components?.reflections === false ? 0
+      : (radiance?.environmentIntensity ?? 0) * (0.08 + daylight * 0.92);
+    for (const material of this.materials) {
+      material.envMapIntensity = material.userData.weaponEnvironmentIntensity * reflectionScale;
+    }
+    if (!deferEnvironment) this.prepareEnvironment();
+  }
+
+  prepareEnvironment() {
+    if (!this.environmentFrame) return;
+    const { radiance, environment, daylight } = this.environmentFrame;
+    const outdoor = this.root.visible && (environment.atmosphere ?? 0) > 0.02 && daylight > 0.02;
     const outdoorTexture = outdoor
       ? this.skyProbe.update(radiance?.renderer, environment, this.up) : null;
     const texture = outdoorTexture || radiance?.spaceEnvironment || null;
-    const reflectionScale = radiance?.components?.reflections === false ? 0
-      : (radiance?.environmentIntensity ?? 0) * (0.08 + daylight * 0.92);
     for (const material of this.materials) {
       if (material.envMap !== texture) {
         material.envMap = texture;
         material.needsUpdate = true;
       }
-      material.envMapIntensity = material.userData.weaponEnvironmentIntensity * reflectionScale;
     }
   }
 
@@ -82,5 +94,6 @@ export class WeaponLighting {
     this.skyProbe.dispose();
     this.scene.remove(this.root);
     this.materials.clear();
+    this.environmentFrame = null;
   }
 }

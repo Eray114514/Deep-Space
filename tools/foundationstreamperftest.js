@@ -26,7 +26,7 @@ try {
     const {Scatter}=await import('/src/scatter.js'),{Scatter:Reference}=await import('/src/scatter-reference.js');
     const T=NMS._THREE,p=NMS._planet(0),direction=new T.Vector3(...NMS.referenceState().playerLocal).normalize(),Q=p.R/9;
     const fields=[new Reference({grassDensity:.82,grassRadius:45}),new Scatter({grassDensity:.82,grassRadius:45})];
-    const previous=NMS._pipeline.render;NMS._pipeline.render=()=>{};
+    const previous=NMS._pipeline.submitFrame;NMS._pipeline.submitFrame=()=>false;
     const records=[];
     const snapshot=s=>Object.fromEntries(Object.entries(s.meshes).map(([kind])=>[kind,
       {count:s.job.counts[kind],matrix:Array.from(s.staging[kind].matrix.subarray(0,s.job.counts[kind]*16)),
@@ -43,14 +43,14 @@ try {
         if(run>=2)records.push({run,implementation:index?'current':'reference',calls,
           total:calls.reduce((a,b)=>a+b,0),counts:s.job.counts});
       }
-    } finally {fields.forEach(s=>s.clear());NMS._pipeline.render=previous;}
+    } finally {fields.forEach(s=>s.clear());NMS._pipeline.submitFrame=previous;}
     return {records,exact,direction:direction.toArray(),budgetMs:1.8};
   });
   assert.equal(near.exact,true,'The real terrain build changed matrices, colours or counts');
   console.log('Near terrain: exact before/after content across 24 measured rings.');
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&freeze=1&time=9.5&quality=low&vclouds=1&nolock=1`);
   await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:150000});
-  await page.evaluate(()=>{NMS._pipeline.render=()=>{};});
+  await page.evaluate(()=>{NMS._pipeline.submitFrame=()=>false;});
   await page.waitForFunction(()=>NMS._planet(0).weatherStream?.ready,null,{timeout:60000});
   const cloud=await page.evaluate(async()=>{
     const {CloudLightBank}=await import('/src/cloud/cloud-light-bank.js');

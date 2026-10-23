@@ -785,27 +785,57 @@ export class SpatialRift {
     // in the main render graph. The portal is a direct offscreen render, so it
     // must opt into that same layer or the planet is shown bare until crossing.
     const oldLayerMask = this.portalCamera.layers.mask;
-    this.portalCamera.layers.enable(2);
-    this.portalVolumeLayerRendered = this.portalCamera.layers.isEnabled(2);
-    this.textureMatrix.copy(this.biasMatrix)
-      .multiply(this.portalCamera.projectionMatrix)
-      .multiply(this.portalCamera.matrixWorldInverse)
-      .multiply(this.offsetMatrix);
-    this.portalMat.uniforms.uTextureMatrix.value.copy(this.textureMatrix);
     const wasVisible = this.group.visible;
-    this.group.visible = false;
-    beforeRender?.(this.portalCamera);
     const oldTarget = this.renderer.getRenderTarget();
+    const oldFace = this.renderer.getActiveCubeFace(), oldMip = this.renderer.getActiveMipmapLevel();
     const oldXr = this.renderer.xr.enabled;
-    this.renderer.xr.enabled = false;
-    this.renderer.setRenderTarget(this.portalRT);
-    this.renderer.clear();
-    this.renderer.render(this.scene, this.portalCamera);
-    this.renderer.setRenderTarget(oldTarget);
-    this.renderer.xr.enabled = oldXr;
-    this.portalCamera.layers.mask = oldLayerMask;
-    afterRender?.();
-    this.group.visible = wasVisible;
+    const oldAutoClear = this.renderer.autoClear;
+    let entered = false, rendered = false, failed = false, failure;
+    const cleanup = work => {
+      try { work(); } catch (error) { if (!failed) { failed = true; failure = error; } }
+    };
+    this.portalVolumeLayerRendered = false;
+    try {
+      this.portalCamera.layers.enable(2);
+      const volumeLayer = this.portalCamera.layers.isEnabled(2);
+      this.textureMatrix.copy(this.biasMatrix)
+        .multiply(this.portalCamera.projectionMatrix)
+        .multiply(this.portalCamera.matrixWorldInverse)
+        .multiply(this.offsetMatrix);
+      this.portalMat.uniforms.uTextureMatrix.value.copy(this.textureMatrix);
+      this.group.visible = false;
+      // A throwing before hook may already own scene/light state. Its matching
+      // after hook still has to run, without replacing the original exception.
+      entered = true;
+      beforeRender?.(this.portalCamera);
+      this.renderer.xr.enabled = false;
+      this.renderer.setRenderTarget(this.portalRT);
+      this.renderer.clear();
+      this.renderer.render(this.scene, this.portalCamera);
+      // The destination hook can remap the camera AND its volume meshes to a
+      // private layer. Preserve the existing opt-in diagnostic on success.
+      rendered = volumeLayer;
+    } catch (error) {
+      failed = true; failure = error;
+    } finally {
+      cleanup(() => this.renderer.setRenderTarget(oldTarget, oldFace, oldMip));
+      cleanup(() => { this.renderer.xr.enabled = oldXr; });
+      cleanup(() => { this.renderer.autoClear = oldAutoClear; });
+      cleanup(() => { this.portalCamera.layers.mask = oldLayerMask; });
+      if (entered) cleanup(() => afterRender?.());
+      // Keep the normal after-hook view of the restored caller state, then
+      // recover any borrowed state it changed before returning or throwing.
+      cleanup(() => {
+        if (this.renderer.getRenderTarget() !== oldTarget || this.renderer.getActiveCubeFace() !== oldFace
+          || this.renderer.getActiveMipmapLevel() !== oldMip) this.renderer.setRenderTarget(oldTarget, oldFace, oldMip);
+      });
+      cleanup(() => { this.renderer.xr.enabled = oldXr; });
+      cleanup(() => { this.renderer.autoClear = oldAutoClear; });
+      cleanup(() => { this.portalCamera.layers.mask = oldLayerMask; });
+      cleanup(() => { this.group.visible = wasVisible; });
+    }
+    this.portalVolumeLayerRendered = rendered && !failed;
+    if (failed) throw failure;
   }
 
   updateDistortion(pass) {

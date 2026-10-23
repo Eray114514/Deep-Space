@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import {installColumnFrameGate} from './column-frame-gate.js';
 let passed=0;
 const test=work=>{work();passed++;};
-function fixture() {
+function fixture(method='render') {
   const calls=[],fence={};let status=3,lost=false,result={},error=null,throws=false,finalizeError=null;
   const gl={ALREADY_SIGNALED:1,CONDITION_SATISFIED:2,WAIT_FAILED:4,SYNC_GPU_COMMANDS_COMPLETE:8,
     isContextLost:()=>lost,clientWaitSync(...args){calls.push(['poll',...args]);return status;},
     fenceSync(...args){calls.push(['fence',...args]);if(finalizeError)throw finalizeError;return fence;},
     deleteSync(value){calls.push(['delete',value]);}};
   const original=function(...args){calls.push(['render',this,args]);if(throws)throw error;return result;};
-  const pipeline={renderer:{getContext:()=>gl},render:original},gate=installColumnFrameGate(pipeline);
+  const pipeline={renderer:{getContext:()=>gl},[method]:original},gate=installColumnFrameGate(pipeline);
   return {pipeline,original,gl,gate,calls,fence,result,set status(value){status=value;},set lost(value){lost=value;},
     throw(value){throws=true;error=value;},set finalizeError(value){finalizeError=value;}};
 }
@@ -35,4 +35,9 @@ test(()=>{const f=fixture();f.pipeline.render();f.gate.restore();f.gate.restore(
   assert.equal(f.gate.snapshot().pending,0);assert.ok(f.gate.snapshot().restored);assert.equal(f.calls.filter(x=>x[0]==='delete').length,1);});
 test(()=>{const f=fixture(),other=()=>{};f.pipeline.render=other;f.gate.restore();assert.equal(f.pipeline.render,other);
   assert.equal(f.gate.snapshot().restored,false);assert.equal(f.gate.snapshot().fault,'Frame gate restore conflict');});
+test(()=>{const f=fixture('submitFrame'),work=()=>{};
+  f.pipeline.render=()=>assert.fail('New pipelines must gate the shared submission boundary');
+  assert.equal(f.pipeline.submitFrame(work),f.result);assert.equal(f.pipeline.submitFrame(work),false);
+  assert.equal(f.gate.snapshot().method,'submitFrame');assert.equal(f.calls.filter(row=>row[0]==='render').length,1);
+  f.gate.restore();assert.equal(f.pipeline.submitFrame,f.original);assert.equal(f.gate.snapshot().restored,true);});
 console.log(JSON.stringify({passed:true,cases:passed,scope:'Diagnostic frame gate semantics; not runtime or timing acceptance.'}));

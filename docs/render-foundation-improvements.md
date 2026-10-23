@@ -4,7 +4,7 @@
 
 **2026-10-23 重要更正：** 10-21/22 六个独立列诊断工具漏应用正式行星调参，旧“母星”实际为未调参的 286 km 天体，其 1.875 秒预报期限不代表正式 6000 km 母星的 30 秒期限。历史图集等价与成本结果仅对其冻结输入成立；正常游戏页调参正确，冷暂停失败仍有效。独立夹具与完整双星游戏场景也不能混用。修复、防回归和新测量见[输入更正与有界预报](baselines/foundation-column-forecast-2026-10-23/README.md)，该入口优先于下方历史推断。
 
-最新接续：[首次成本身份与地表程序键](baselines/foundation-column-cost-stages-2026-10-23/README.md)。云列阶段准入与地表编译defines所有权已修复；真实双星页95秒仍无可用列缓存，冷等待仍在，不能默认推广或宣布F3完成。
+最新接续：[辅助视图与共同帧提交](baselines/foundation-auxiliary-frame-2026-10-23/README.md)。正常 PMREM/瞄准镜/portal/启动私有 draw 已接共同 scope，并修准入及结束回调重入、异常租约和 scope target 类型；异步 compile/主动上传、目的地 whole-scene 准备、云冷等待与实际整帧预算仍开放。帧/列控制继续显式开启，不据小图或一次窗口推广默认。
 
 ## 目标与判断
 
@@ -618,9 +618,17 @@ bank计划将首次需用`h-F`与退役`h+F`分开，根据实际送出的draw/�
 
 收尾独立审查又修复“暂停期间完全无提交、下一次提交前已恢复”的FPS/EMA边界，按真实UI事件分开壁钟/active间隔，21项CPU和实际Escape往返验证2239ms中排除2051ms暂停、保留188ms长帧。最终`6d714729…`只另改main/统计类，其余175份输入与首版相同；重跑95秒667次提交/400帧ready、实际1050列draw，整体约7.02次提交/秒，显示实际天气相位/服务率仍明显波动。最终原生HDR/自然busy/准备/换源/历史映射、GL/context/退休、全部锁前CPU和smoke通过；原宇宙锁仍暂缓。正式海洋星严格稳态37/47失败，恢复完整旧e65输入的同参复跑也只30/47，不把历史一次47/47或本轮CPU可达性当作持续期限关闭。母星提交口径3/3但未进入稳态，百秒冷等待、近地约1FPS及最终画质继续开放。
 
+## 2026-10-23 续交付：辅助视图共同准入与异常恢复
+
+从 `29fbb0c` 继续。旧控制只覆盖 pipeline，正常 RAF 中持有 M77 就会额外绘制 512² scene，天空 key 改变还会提前生成 PMREM，主 graph 拒绝后这些工作仍能排队。现在 `submitFrame(work)` 统一 PMREM、scope、portal、启动私有 draw 和主 graph 的同步责任；一次性 draw 才发布共同帧，aux-only 不计呈现。模拟/输入/CPU 光照仍逐 RAF 更新，默认没有 native pacer/fence。完整 target/face/mip、状态恢复及原始异常优先覆盖 auxiliary 与 graph；同步 stop 后的结束回调、准入 context/wait 回调重入都有旧红新绿控制，最终 pipeline 49 项、main/光照/scope 36 项、portal 45 项通过。
+
+真实玩家页发现通用 scope target 能显示却不能被 vendor WebGL readback 读取，现改同规格 `WebGLRenderTarget`，保留旧失败。最终 `54374326…` 的无云步行/M77/W/ADS/Escape 页观测 242 次自然忙拒绝、906 次成功主图，拒绝时辅助 callback/原生 draw/新 fence/历史均不推进，成功每帧一次 fence；实际镜内采样非空、GL0、owner 排空、质量不降。小型实际 PMREM/scope/portal native 输出、投影阳性和恢复通过，主图 off/on/off/on 的 current/resolved/final 均逐位零差；它们使用合成源，不冒充完整云物理或玩家画质。完整云页初建/替换/输入/history/暂停/资源通过、GL0，但原120秒boot失败，最大间隔212.1779秒，far/near原生uniform查询200.5498/76.5877秒，近地仍数FPS；不宣称性能完成。完整页、人工中断、源码 epoch 和尚未关闭的冷/整帧门槛见[固定证据](baselines/foundation-auxiliary-frame-2026-10-23/README.md)。
+
+异步 compile/upload 尚未统一，不能把“普通辅助视图已纳入”写成所有 GPU 提交已有 owner。下一步将预热的完整同步租用/提交/恢复片段纳入调度，保留取消/切星责任；同步收窄目的地准备时必须保留持久飞船 WORLD/pass 灯光家族。另已确认 WebGL closed portal 不消费 force，调用 warm helper 不是实际 portal draw 完成的证据。没有改云采样/质量/内容或宇宙锁，也未完成底层、最终画质或另一任务的云艺术断点。
+
 ## 下轮启动条件与具体工作
 
-**当前接续以2026-10-23的[帧排队、期限恢复与首准备](baselines/foundation-frame-pacing-2026-10-23/README.md)为最新入口，行星输入身份仍先核对[前轮更正](baselines/foundation-column-forecast-2026-10-23/README.md)。** 10-21/22 的四组列证据保留冻结输入与失败，同时明确未调参的适用范围，不再据1.875秒夹具安排正式母星的架构。工作块、异步反馈、在途上限、绝对时间发布、期限优先、有界原始预报租约和阶段成本身份已有实现；局部GPU准入仍须显式开启，默认两行生产未切换。先核对实际body半径、天气步长、恒星来源和时间尺度，再在完整页评估持续周转与foreground剩余额度；独立Planet图集/数组等价不替代完整双星天气或Scene HDR。未缓存远云/近云冷等待独立处理。程序准备身份/取消、同步恢复、原生退役、几何/跨bank pool、SCREEN变体及列就绪已有实现，本机KHR后台删除竞态已局部闭环，不重做；旧阶段按其完整源摘要回放。保持实际Scene HDR/物理分支/native重复门槛，不把它串行阻塞其他基础修复。
+**当前接续以2026-10-23的[辅助视图共同帧](baselines/foundation-auxiliary-frame-2026-10-23/README.md)为最新入口，列恢复/期限见[上一轮](baselines/foundation-frame-pacing-2026-10-23/README.md)，行星输入身份仍先核对[前轮更正](baselines/foundation-column-forecast-2026-10-23/README.md)。** 10-21/22 的四组列证据保留冻结输入与失败，同时明确未调参的适用范围，不再据1.875秒夹具安排正式母星的架构。工作块、异步反馈、在途上限、绝对时间发布、期限优先、有界原始预报租约和阶段成本身份已有实现；局部GPU准入仍须显式开启，默认两行生产未切换。先核对实际body半径、天气步长、恒星来源和时间尺度，再在完整页评估持续周转与foreground剩余额度；独立Planet图集/数组等价不替代完整双星天气或Scene HDR。未缓存远云/近云冷等待独立处理。程序准备身份/取消、同步恢复、原生退役、几何/跨bank pool、SCREEN变体及列就绪已有实现，本机KHR后台删除竞态已局部闭环，不重做；旧阶段按其完整源摘要回放。保持实际Scene HDR/物理分支/native重复门槛，不把它串行阻塞其他基础修复。
 
 先读本文、最新固定证据、云断点、`git status`与坐标/介质契约。下面保留历史失败的复现入口，不将旧快照作为当前源码；本机GL1281已闭合的KHR退役路径不重复猜测，若再出现须抓独立证据。底层尚未全部完成；另一任务的云艺术专项等待，基础任务继续覆盖云生产、接口和成本。F2c地形/海面采样、精确快照及近水worker已有实现，不重做；并行推进已证实的生产期限/预算、冷准备及F4消费者：
 

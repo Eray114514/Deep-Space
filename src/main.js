@@ -780,6 +780,7 @@ const RIFT_PORTAL_LAYER = 5;
 let riftPortalClearAlpha = 1;
 let riftPortalFog = null;
 let riftPortalToneMapping = THREE.ACESFilmicToneMapping;
+let riftPortalSceneActive = false;
 let dialAcc = 0;
 // Snow coverage at the player's current foot position, refreshed by the walk
 // dial pass (~7 Hz). Consumed by the music director to switch to the alpine
@@ -2783,6 +2784,11 @@ function beginRiftPortalScene(
   riftPortalVisibility.length = 0;
   riftPortalDepthState.length = 0;
   riftPortalLayerState.length = 0;
+  riftPortalFog = scene.fog;
+  renderer.getClearColor(riftPortalClearColor);
+  riftPortalClearAlpha = renderer.getClearAlpha();
+  riftPortalToneMapping = renderer.toneMapping;
+  riftPortalSceneActive = true;
   hideSystemForRiftPortal(universe.system, previewSystem);
   hideSystemForRiftPortal(universe.fadingSystem, previewSystem);
   for (const object of [
@@ -2795,16 +2801,19 @@ function beginRiftPortalScene(
     hemi,
     ambient,
   ]) addRiftPortalHidden(object);
-  riftPortalFog = scene.fog;
   scene.fog = null;
-  renderer.getClearColor(riftPortalClearColor);
-  riftPortalClearAlpha = renderer.getClearAlpha();
-  riftPortalToneMapping = renderer.toneMapping;
   // Keep the offscreen destination in linear HDR. The visible portal then
   // flows through the same node output transform exactly once, just like
   // the adopted destination on the next frame.
   renderer.toneMapping = THREE.NoToneMapping;
   renderer.setClearColor(0x000006, 1);
+  // Remember authored visibility even for a partially entered/throwing view.
+  for (const object of [riftPortalAmbient,
+    ...(previewSystem?.starViews || []).flatMap(view => [view.group, view.light]),
+    ...[...(previewSystem?.planets || []), ...(previewSystem?.compactObjects || [])].map(body => body.group),
+  ]) {
+    if (object && !riftPortalVisibility.includes(object)) riftPortalVisibility.push(object, object.visible);
+  }
   riftPortalAmbient.visible = true;
   setRiftPreviewVisible(true, previewSystem, targetBodyId);
   // Direct rendering needs an exclusive camera layer so source planets,
@@ -2833,8 +2842,8 @@ function endRiftPortalScene(
   previewSystem = riftPreviewSystem,
   targetBodyId = riftRoute?.arrival?.bodyId || null,
 ) {
-  setRiftPreviewVisible(false, previewSystem, targetBodyId);
-  riftPortalAmbient.visible = false;
+  if (!riftPortalSceneActive) return;
+  riftPortalSceneActive = false;
   for (let i = 0; i < riftPortalLayerState.length; i += 2) {
     riftPortalLayerState[i].layers.mask = riftPortalLayerState[i + 1];
   }
@@ -3262,14 +3271,19 @@ function renderRiftPortal() {
     target.syncAtmoMaterial?.();
     target.syncVolCloudMaterial?.();
   }
-  renderRiftDestinationPortal();
-  // Atmosphere/cloud materials are deliberately shared on WebGPU. Restore the
-  // live source body's state after the offscreen destination draw so the main
-  // scene cannot inherit portal uniforms for one frame.
-  const liveVolumePlanet = volumePass?.activePlanet;
-  liveVolumePlanet?.syncAtmoMaterial?.();
-  liveVolumePlanet?.syncVolCloudMaterial?.();
-  nodePipeline.bindVolumeDepth?.(liveVolumePlanet);
+  let failed = false;
+  try { renderRiftDestinationPortal(); }
+  catch (error) { failed = true;throw error; }
+  finally {
+    // The destination view borrows medium bindings. Return them even if an
+    // offscreen draw throws, before any later main view can consume them.
+    const liveVolumePlanet = volumePass?.activePlanet;
+    try {
+      liveVolumePlanet?.syncAtmoMaterial?.();
+      liveVolumePlanet?.syncVolCloudMaterial?.();
+      nodePipeline.bindVolumeDepth?.(liveVolumePlanet);
+    } catch (error) { if (!failed) throw error; }
+  }
 }
 
 // A warp is a flight, not a teleport: align with the target, spool up, then
@@ -4028,6 +4042,30 @@ function applyAdaptiveStage(stage) {
     // for each 0.05 step; at 1440p Ultra this still renders above native.
     setRenderDpr(Math.min(renderDpr, QUALITY_PROFILE.dprMin));
   }
+}
+
+// The simulation can advance while the previous GPU frame is in flight. Every
+// ordinary auxiliary draw shares the main graph's admission and final fence.
+// Startup may submit only its private warm draw, before the world graph is ready.
+function renderWorldFrame() {
+  let rendered = false;
+  nodePipeline.submitFrame((draw) => {
+    renderer.info.reset();
+    surfaceWeapons.prepareLighting();
+    renderRiftPortal();
+    surfaceWeapons.renderScopeView(renderer);
+    finishSurfaceBootstrap();
+    if (pipelineResizePending && !pipelineResourcesBusy()) sizePost();
+    if (!surfacePipelinesReady || shipPipelineWarmPending) return;
+    bloomPass.enabled = usePost && !QUALITY_LOW;
+    if (gradePass_) {
+      gradePass_.enabled = usePost && !QUALITY_LOW;
+      gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
+        ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
+    }
+    rendered = draw({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch });
+  });
+  return rendered;
 }
 
 function frame() {
@@ -4844,37 +4882,18 @@ function frame() {
   }
 
   if (!FREEZE && !photoMode && !(DEV_SERVER && devWaterWakeFixture?.held)) tickShaders(dt);
-  renderRiftPortal();
   spatialRift.updateDistortion(riftDistortionPass);
-  surfaceWeapons.renderScopeView(renderer);
   if (QUALITY_LOW && !surfacePipelinesReady
     && performance.now() - startupWarmStartedAt >= STARTUP_WARM_BUDGET_MS) {
     releaseStartupPrewarm('low-tier startup deadline exceeded');
   }
-  finishSurfaceBootstrap();
-  if (pipelineResizePending && !pipelineResourcesBusy()) {
-    // Flush once after compilation/handoff. Keeping this outside the render
-    // call ensures no target is rebound for sampling and attachment use in the
-    // same command stream.
-    sizePost();
-  }
-  renderer.info.reset();
   // Skip the actual GPU work while the WebGL context is lost — Three.js
   // no-ops render() anyway, but skipping avoids noise from the post chain
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
-  if (!contextLost && surfacePipelinesReady && !shipPipelineWarmPending) {
-    // The same RenderPipeline executes on WebGPU and WebGL 2. Disabling post
-    // only zeros optional effect uniforms; it never swaps renderer families.
-    bloomPass.enabled = usePost && !QUALITY_LOW;
-    // the grade pass (CA/vignette/grain) shares the post toggle
-    if (gradePass_) {
-      gradePass_.enabled = usePost && !QUALITY_LOW;
-      gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
-        ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
-    }
-    const rendered=nodePipeline.render({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch });
-    if(rendered!==false) {
+  if (!contextLost) {
+    const rendered = renderWorldFrame();
+    if(rendered) {
       // A paced-out RAF is simulation time, not another presented frame.
       // Keep severe stalls and the full interval across skipped callbacks.
       const timing=presentedFrames.present(performance.now());

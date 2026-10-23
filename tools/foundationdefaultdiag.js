@@ -383,11 +383,11 @@ try {
     await page.evaluate(async()=>{
       const {PresentedFrameStats}=await import('/src/presented-frame-stats.js');
       const pipeline=NMS._pipeline,prototype=PresentedFrameStats.prototype;
-      const render=pipeline.render,present=prototype.present,setPaused=prototype.setPaused;
-      const data=window.__foundationPauseControl={kind:'Controlled render(false) caller integration; not native fence/performance evidence',
+      const submitFrame=pipeline.submitFrame,present=prototype.present,setPaused=prototype.setPaused;
+      const data=window.__foundationPauseControl={kind:'Controlled submitFrame(false) caller integration; not native fence/performance evidence',
         edges:[],rejected:0,restored:false,phase:'reject'};
       NMS.resetPerformanceStats();
-      const rejected=function(){data.rejected++;return false;};pipeline.render=rejected;
+      const rejected=function(){data.rejected++;return false;};pipeline.submitFrame=rejected;
       const edge=function(value,at){const result=setPaused.call(this,value,at);data.edges.push({paused:value,at});return result;};
       const sample=function(...args){
         const result=present.apply(this,args);
@@ -399,11 +399,11 @@ try {
       };
       prototype.setPaused=edge;prototype.present=sample;
       window.__foundationPauseRelease=()=>{
-        if(pipeline.render!==rejected)throw Error('Pause render wrapper ownership changed');
-        pipeline.render=render;data.phase='released';
+        if(pipeline.submitFrame!==rejected)throw Error('Pause submission wrapper ownership changed');
+        pipeline.submitFrame=submitFrame;data.phase='released';
       };
       window.__foundationPauseRestore=()=>{
-        if(pipeline.render===rejected)pipeline.render=render;
+        if(pipeline.submitFrame===rejected)pipeline.submitFrame=submitFrame;
         if(prototype.present!==sample||prototype.setPaused!==edge)throw Error('Pause statistics wrapper ownership changed');
         prototype.present=present;prototype.setPaused=setPaused;data.restored=true;
       };

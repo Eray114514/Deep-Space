@@ -54,6 +54,7 @@ function fixture({volume=true,tracking=true}={}) {
       removeEventListener(name,fn){listeners.get(name)?.delete(fn);}},
     getRenderTarget:()=>invoke('target.get',()=>target),getActiveCubeFace:()=>invoke('target.face',()=>face),
     getActiveMipmapLevel:()=>invoke('target.mip',()=>mip),
+    render:(view,viewCamera)=>invoke('aux.draw',()=>{assert.equal(viewCamera,camera);events.push(`aux-view:${view.name}`);}),
     setRenderTarget(value,nextFace=0,nextMip=0){return invoke('target.set',()=>{target=value;face=nextFace;mip=nextMip;},[value,nextFace,nextMip]);}};
   const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(60,1.6,.1,1e9);
   const pipeline=new GameLegacyPipeline(renderer,scene,camera,{volume});
@@ -116,6 +117,10 @@ function test(name,work) {
   try {work();cases.push({name,passed:true});}
   catch(error){cases.push({name,passed:false,error:String(error),actual:error?.actual,expected:error?.expected,stack:error?.stack});}
   finally {for(const f of fixtures.slice(begin)){try {f.cleanup();} catch {}}scheduled.clear();}
+}
+function graphState(f) {
+  const {frame,volume,cloudEye,airEye,cloudLightFrame}=f.workState();
+  return {frame,volume,cloudEye,airEye,cloudLightFrame};
 }
 try {
   test('the actual constructor leaves pacing disabled and ordinary renders return true without native fences',()=>{
@@ -269,15 +274,230 @@ try {
     assert.equal(thrown(()=>p.render()),error);f.restored();assert.equal(p.frameState.pending,false);assert.equal(p.frameState.sequence,0);
     assert.equal(f.count('frame.abort'),1);assert.equal(f.count('volume.reset'),1);assert.equal(f.count('native.fence'),0);
   });
+  // Keep the original 23 contracts above. The synchronous submission capability
+  // adds auxiliary views around the same actual graph; it is not a copied graph.
+  test('the public render entry delegates its exact options through submitFrame once',()=>{
+    const f=fixture(),p=f.pipeline,options={origin:f.nav,context:{explicit:true},timeEpoch:4},originalSubmit=p.submitFrame;
+    let called=0,drawn=0;
+    p.submitFrame=work=>{called++;work(value=>{assert.equal(value,options);drawn++;return true;});return 'delegated';};
+    assert.equal(p.render(options),'delegated');assert.equal(called,1);assert.equal(drawn,1);assert.equal(f.count('frame.begin'),0);
+    p.submitFrame=originalSubmit;
+  });
+  test('one admission covers auxiliary views before and after one actual production graph',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),aux={name:'aux-target'};f.events.length=0;
+    assert.equal(p.submitFrame(draw=>{
+      f.renderer.setRenderTarget(aux,5,6);f.renderer.render({name:'before'},f.camera);
+      assert.equal(draw(),true);assert.equal(f.renderer.getRenderTarget(),aux);
+      assert.equal(f.renderer.getActiveCubeFace(),5);assert.equal(f.renderer.getActiveMipmapLevel(),6);
+      f.renderer.render({name:'after'},f.camera);
+    }),true);f.restored();
+    const order=f.events.filter(name=>name.startsWith('aux-view:')||['pacer.beginFrame','frame.begin','frame.commit','pacer.endFrame','native.fence'].includes(name));
+    assert.deepEqual(order,['pacer.beginFrame','aux-view:before','frame.begin','frame.commit','aux-view:after','pacer.endFrame','native.fence']);
+    assert.equal(f.count('aux.draw'),2);assert.equal(f.count('budget.begin'),1);assert.equal(f.count('profiler.begin'),1);
+    assert.equal(f.count('composer.draw'),1);assert.equal(pacer.snapshot().stats.submitted,1);assert.equal(pacer.snapshot().pending,1);
+  });
+  test('a busy submission does not even enter auxiliary work or consume its draw capability',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();p.render();const before=f.workState();let called=0;
+    assert.equal(p.submitFrame(draw=>{called++;f.renderer.render({name:'forbidden'},f.camera);draw();}),false);
+    assert.equal(called,0);assert.deepEqual(f.workState(),before);assert.equal(f.count('pacer.endFrame'),1);
+    assert.equal(pacer.snapshot().stats.submitted,1);assert.equal(pacer.snapshot().stats.skipped,1);
+  });
+  test('auxiliary-only work is fenced while leaving previous history, budget and profiler untouched',()=>{
+    const f=fixture(),p=f.pipeline;p.render();const before=graphState(f),budget=f.count('budget.begin'),profile=f.count('profiler.begin'),pacer=f.start();
+    assert.equal(p.submitFrame(()=>{f.renderer.setRenderTarget({name:'startup-view'},7,4);f.renderer.render({name:'startup'},f.camera);}),true);
+    f.restored();assert.deepEqual(graphState(f),before);assert.equal(f.count('budget.begin'),budget);assert.equal(f.count('profiler.begin'),profile);
+    assert.equal(f.count('composer.draw'),1);assert.equal(f.count('frame.abort'),0);assert.equal(f.count('volume.reset'),0);
+    assert.equal(pacer.snapshot().stats.begun,1);assert.equal(pacer.snapshot().stats.submitted,1);assert.equal(f.count('native.fence'),1);
+  });
+  test('default auxiliary-only scopes also restore the caller tuple without allocating a native pacer',()=>{
+    const f=fixture(),p=f.pipeline,before=graphState(f);assert.equal(p.submitFrame(()=>{
+      f.renderer.setRenderTarget({name:'default-aux'},6,9);f.renderer.render({name:'default'},f.camera);
+    }),true);f.restored();assert.deepEqual(graphState(f),before);assert.equal(f.count('frame.begin'),0);
+    assert.equal(f.count('budget.begin'),0);assert.equal(f.count('profiler.begin'),0);assert.equal(f.count('native.fence'),0);
+    assert.equal(f.count('native.getContext'),0);assert.equal(p.framePacer,null);
+  });
+  test('auxiliary-only failures preserve already committed player history and still close one fence',()=>{
+    for(const error of [new Error('auxiliary'),null,undefined,false,0]) {
+      const f=fixture(),p=f.pipeline;p.render();const before=graphState(f),pacer=f.start();
+      assert.equal(thrown(()=>p.submitFrame(()=>{
+        f.renderer.setRenderTarget({name:'failed-aux'},4,8);f.renderer.render({name:'failing'},f.camera);throw error;
+      })),error);f.restored();assert.deepEqual(graphState(f),before);assert.equal(f.count('frame.abort'),0);
+      assert.equal(f.count('volume.reset'),0);assert.equal(f.count('pacer.endFrame'),1);assert.equal(pacer.snapshot().pending,1);
+    }
+  });
+  test('an auxiliary exception after graph success preserves that completed graph correspondence',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),error=new Error('post graph auxiliary');
+    assert.equal(thrown(()=>p.submitFrame(draw=>{assert.equal(draw(),true);throw error;})),error);f.restored();
+    assert.equal(p.frameState.sequence,1);assert.equal(p.frameState.valid,true);assert.equal(p.frameState.pending,false);
+    assert.equal(f.count('frame.abort'),0);assert.equal(f.count('volume.reset'),0);assert.equal(pacer.snapshot().pending,1);
+  });
+  test('work exceptions including falsy values outrank outer target restoration and end failures',()=>{
+    for(const error of [new Error('work'),null,undefined,false,0]) {
+      const f=fixture(),p=f.pipeline,pacer=f.start(),restoreError=new Error('outer restore'),endError=new Error('scope end'),before=graphState(f);
+      f.before('native.fence',()=>{throw endError;});assert.equal(thrown(()=>p.submitFrame(()=>{
+        f.renderer.setRenderTarget({name:'aux-target'},4,2);f.after('target.set',()=>{throw restoreError;});throw error;
+      })),error);f.restored();assert.deepEqual(graphState(f),before);assert.equal(f.count('pacer.endFrame'),1);
+      assert.equal(pacer.snapshot().fault,'frame-finalize-failed');assert.equal(pacer.snapshot().pending,1);
+    }
+  });
+  test('an isolated outer target restoration exception surfaces and still fences admitted work',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),error=new Error('restore only'),before=graphState(f);
+    assert.equal(thrown(()=>p.submitFrame(()=>{
+      f.renderer.setRenderTarget({name:'aux-target'},4,2);f.after('target.set',()=>{throw error;});
+    })),error);f.restored();assert.deepEqual(graphState(f),before);assert.equal(pacer.snapshot().pending,1);
+    assert.equal(f.count('pacer.endFrame'),1);assert.equal(f.count('frame.abort'),0);
+  });
+  test('graph failures outrank the inner target restoration exception and final fence exception',()=>{
+    for(const error of [new Error('graph'),null,undefined,false,0]) {
+      const f=fixture(),p=f.pipeline,pacer=f.start(),restoreError=new Error('graph target restore'),endError=new Error('graph end');
+      f.before('native.fence',()=>{throw endError;});f.composerHook=()=>{f.after('target.set',()=>{throw restoreError;});throw error;};
+      assert.equal(thrown(()=>p.submitFrame(draw=>draw())),error);f.restored();assert.equal(f.count('frame.abort'),1);
+      assert.equal(f.count('volume.reset'),1);assert.equal(p.frameState.sequence,0);assert.equal(p.frameState.pending,false);
+      assert.equal(pacer.snapshot().fault,'frame-finalize-failed');assert.equal(pacer.snapshot().pending,1);
+    }
+  });
+  test('invalid work is rejected before native admission, target reads, or history changes',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),before=f.workState(),begins=f.count('pacer.beginFrame');
+    for(const value of [undefined,null,false,0,[],{},'work'])assert.throws(()=>p.submitFrame(value),TypeError);
+    assert.deepEqual(f.workState(),before);assert.equal(f.count('pacer.beginFrame'),begins);assert.equal(f.count('pacer.endFrame'),0);
+    assert.equal(pacer.snapshot().stats.begun,0);
+  });
+  test('thenable work results are rejected synchronously without invoking their asynchronous continuation',()=>{
+    for(const pacing of [false,true]) {
+      const f=fixture(),p=f.pipeline,pacer=pacing?f.start():null,before=graphState(f);let thenCalls=0;
+      assert.throws(()=>p.submitFrame(()=>{f.renderer.setRenderTarget({name:'thenable'},3,5);return {then(){thenCalls++;}};}),TypeError);
+      assert.equal(thenCalls,0);f.restored();assert.deepEqual(graphState(f),before);assert.equal(f.count('frame.begin'),0);
+      assert.equal(f.count('native.fence'),Number(pacing));if(pacer)assert.equal(pacer.snapshot().pending,1);
+    }
+  });
+  test('a throwing then getter is treated as the original work error without publishing history',()=>{
+    for(const error of [null,undefined,false,new Error('then getter')]) {
+      const f=fixture(),p=f.pipeline,pacer=f.start(),before=graphState(f);
+      assert.equal(thrown(()=>p.submitFrame(()=>({get then(){throw error;}}))),error);f.restored();
+      assert.deepEqual(graphState(f),before);assert.equal(pacer.snapshot().pending,1);assert.equal(f.count('frame.abort'),0);
+    }
+  });
+  test('nested submissions and reentrant render throw before a second admission in both default and paced scopes',()=>{
+    for(const pacing of [false,true]) {
+      const f=fixture(),p=f.pipeline,pacer=pacing?f.start():null;let nestedWork=0;
+      assert.equal(p.submitFrame(draw=>{
+        const begins=f.count('pacer.beginFrame'),gets=f.count('target.get');
+        assert.throws(()=>p.submitFrame(()=>nestedWork++),/already active/);assert.throws(()=>p.render(),/already active/);
+        assert.equal(f.count('pacer.beginFrame'),begins);assert.equal(f.count('target.get'),gets);assert.equal(draw(),true);
+      }),true);assert.equal(nestedWork,0);assert.equal(f.count('composer.draw'),1);f.restored();
+      assert.equal(f.count('native.fence'),Number(pacing));if(pacer)assert.equal(pacer.snapshot().stats.skipped,0);
+    }
+  });
+  test('stopping the pacer inside work does not bypass the submission reentry guard',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();assert.equal(p.submitFrame(draw=>{
+      p.stopFramePacing();assert.equal(p.framePacer,null);assert.throws(()=>p.render(),/already active/);assert.equal(draw(),true);
+    }),true);assert.equal(f.count('composer.draw'),1);assert.equal(f.count('pacer.endFrame'),1);
+    assert.equal(pacer.snapshot().disposed,true);assert.equal(pacer.snapshot().pending,1);f.restored();
+  });
+  test('draw is a one-use capability and a second call cannot enter the graph',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();assert.equal(p.submitFrame(draw=>{
+      assert.equal(draw(),true);const before=f.workState();assert.throws(()=>draw(),/already been drawn/);assert.deepEqual(f.workState(),before);
+    }),true);assert.equal(f.count('frame.begin'),1);assert.equal(f.count('frame.commit'),1);
+    assert.equal(f.count('budget.begin'),1);assert.equal(pacer.snapshot().stats.submitted,1);f.restored();
+  });
+  test('a graph failure consumes draw even when work catches that failure and tries again',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),error=new Error('caught graph failure');f.composerHook=()=>{throw error;};
+    assert.equal(p.submitFrame(draw=>{
+      assert.equal(thrown(()=>draw()),error);const begins=f.count('frame.begin');assert.throws(()=>draw(),/already been drawn/);
+      assert.equal(f.count('frame.begin'),begins);
+    }),true);assert.equal(f.count('frame.begin'),1);assert.equal(f.count('frame.abort'),1);
+    assert.equal(p.frameState.sequence,0);assert.equal(pacer.snapshot().pending,1);f.restored();
+  });
+  test('a draw escaping a completed scope cannot mutate history, targets, budgets, or admission',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();let escaped;
+    assert.equal(p.submitFrame(draw=>{escaped=draw;}),true);const before=f.workState();assert.throws(()=>escaped(),/no longer active/);
+    assert.deepEqual(f.workState(),before);assert.equal(f.count('frame.begin'),0);assert.equal(f.count('native.fence'),1);
+    assert.equal(pacer.snapshot().pending,1);f.restored();
+  });
+  test('a capability from an older scope stays expired while a new scope is active',()=>{
+    for(const pacing of [false,true]) {
+      const f=fixture(),p=f.pipeline,pacer=pacing?f.start():null;let old;
+      p.submitFrame(draw=>{old=draw;});if(pacer){f.complete();assert.equal(pacer.poll(),true);}
+      assert.equal(p.submitFrame(draw=>{assert.throws(()=>old(),/no longer active/);assert.equal(draw(),true);}),true);
+      assert.equal(f.count('frame.begin'),1);assert.equal(f.count('frame.commit'),1);assert.equal(f.count('native.fence'),pacing?2:0);f.restored();
+    }
+  });
+  test('draw is already expired during outer target cleanup and native completion-fence callbacks',()=>{
+    const f=fixture(),p=f.pipeline;f.start();let escaped,restoreObserved=0,fenceObserved=0;
+    f.after('native.fence',()=>{assert.throws(()=>escaped(),/no longer active/);fenceObserved++;});
+    assert.equal(p.submitFrame(draw=>{escaped=draw;f.after('target.set',()=>{assert.throws(()=>escaped(),/no longer active/);restoreObserved++;});}),true);
+    assert.equal(restoreObserved,1);assert.equal(fenceObserved,1);assert.equal(f.count('frame.begin'),0);f.restored();
+  });
+  test('a captured end callback after synchronous stop cannot reenter an unpaced production graph',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();let callback=0;
+    f.after('native.fence',()=>{
+      const before=f.workState();assert.equal(p.framePacer,null);assert.throws(()=>p.render(),/already active/);
+      assert.throws(()=>p.submitFrame(()=>assert.fail('nested work ran')),/already active/);assert.deepEqual(f.workState(),before);callback++;
+    });
+    assert.equal(p.submitFrame(()=>p.stopFramePacing()),true);assert.equal(callback,1);f.restored();
+    assert.equal(f.count('frame.begin'),0);assert.equal(f.count('native.fence'),1);assert.equal(pacer.snapshot().pending,1);
+    f.complete();tick();assert.equal(pacer.snapshot().released,true);assert.equal(p.render(),true);assert.equal(f.count('frame.begin'),1);
+  });
+  test('stopping the owner during pending-fence admission cannot reenter an unpaced production graph',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();p.render();const before=f.workState(),ends=f.count('pacer.endFrame');
+    let callbacks=0,nestedResult,nestedError,outerWork=0;
+    f.before('native.wait',()=>{
+      callbacks++;p.stopFramePacing();
+      try {nestedResult=p.render();} catch(error){nestedError=error;}
+    });
+    assert.equal(p.submitFrame(()=>outerWork++),false);assert.equal(callbacks,1);assert.equal(outerWork,0);
+    assert.match(nestedError?.message||'',/already active/,
+      `An incomplete old fence must not allow a stopped-owner nested draw: ${JSON.stringify({nestedResult,
+        extraDraws:f.count('composer.draw')-(before.counts['composer.draw']||0),oldOwner:pacer.snapshot()})}`);
+    assert.deepEqual(f.workState(),before);assert.equal(f.count('pacer.endFrame'),ends);assert.equal(p.frameSubmissionActive,false);
+    assert.equal(p.framePacer,null);assert.equal(pacer.snapshot().disposed,true);assert.equal(pacer.snapshot().pending,1);
+    assert.equal(pacer.snapshot().stats.completed,0);assert.equal(pacer.snapshot().released,false);f.restored();
+    f.complete();tick();assert.equal(pacer.snapshot().released,true);f.start();assert.equal(p.render(),true);
+    assert.equal(f.count('frame.begin'),2);
+  });
+  test('stopping the owner during initial context admission cannot reenter an unpaced production graph',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),before=f.workState();
+    let callbacks=0,nestedResult,nestedError,outerWork=0;
+    f.before('native.context',()=>{
+      callbacks++;p.stopFramePacing();
+      try {nestedResult=p.render();} catch(error){nestedError=error;}
+    });
+    assert.equal(p.submitFrame(()=>outerWork++),false);assert.equal(callbacks,1);assert.equal(outerWork,0);
+    assert.match(nestedError?.message||'',/already active/,
+      `Admission must own the scope before native callbacks can detach pacing: ${JSON.stringify({nestedResult,
+        extraDraws:f.count('composer.draw')-(before.counts['composer.draw']||0),oldOwner:pacer.snapshot()})}`);
+    assert.deepEqual(f.workState(),before);assert.equal(f.count('pacer.endFrame'),0);assert.equal(p.frameSubmissionActive,false);
+    assert.equal(p.framePacer,null);assert.equal(pacer.snapshot().stats.begun,0);assert.equal(pacer.snapshot().released,true);
+    assert.equal(f.count('native.fence'),0);f.restored();f.start();assert.equal(p.render(),true);assert.equal(f.count('frame.begin'),1);
+  });
+  test('auxiliary-only stop still creates exactly one captured-owner fence before asynchronous retirement',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start(),before=graphState(f);assert.equal(p.submitFrame(()=>{
+      f.renderer.render({name:'retiring-aux'},f.camera);p.stopFramePacing();assert.equal(pacer.snapshot().active,true);
+    }),true);f.restored();assert.deepEqual(graphState(f),before);assert.equal(p.framePacer,null);
+    assert.equal(f.count('pacer.endFrame'),1);assert.equal(pacer.snapshot().pending,1);assert.equal(pacer.snapshot().released,false);
+    f.complete();tick();assert.equal(pacer.snapshot().released,true);
+  });
+  test('auxiliary-only pipeline disposal keeps the captured active owner until its final fence',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();assert.equal(p.submitFrame(()=>{
+      f.renderer.render({name:'disposed-aux'},f.camera);p.dispose();assert.equal(pacer.snapshot().active,true);assert.equal(pacer.snapshot().released,false);
+    }),true);f.restored();assert.equal(f.count('frame.begin'),0);assert.equal(f.count('pacer.endFrame'),1);
+    assert.equal(pacer.snapshot().disposed,true);assert.equal(pacer.snapshot().pending,1);f.complete();tick();assert.equal(pacer.snapshot().released,true);
+  });
+  test('an auxiliary context cycle abandons the old scope without publishing a world frame or fencing its new context',()=>{
+    const f=fixture(),p=f.pipeline,pacer=f.start();assert.equal(p.submitFrame(()=>{f.renderer.render({name:'old-epoch'},f.camera);f.lose();f.restore();}),true);
+    f.restored();assert.equal(f.count('frame.begin'),0);assert.equal(f.count('frame.commit'),0);assert.equal(f.count('native.fence'),0);
+    assert.equal(pacer.snapshot().stats.abandoned,1);assert.equal(pacer.snapshot().active,false);assert.equal(pacer.snapshot().pending,0);
+  });
 } finally {
   globalThis.setTimeout=original.setTimeout;globalThis.clearTimeout=original.clearTimeout;
   if(original.matchMedia===undefined)delete globalThis.matchMedia;else globalThis.matchMedia=original.matchMedia;
 }
 const sources=[];
 for(const [path,bytes] of frozen) {
-  const after=await readFile(new URL(`../${path}`,import.meta.url));sources.push({path,bytes:bytes.length,sha256:sha256(bytes),stable:sha256(bytes)===sha256(after)});
+  const after=await readFile(new URL(`../${path}`,import.meta.url));sources.push({path,bytes:bytes.length,sha256:sha256(bytes),
+    afterSha256:sha256(after),stable:sha256(bytes)===sha256(after)});
 }
-const report={kind:'cpu-contracts',scope:'actual pipeline/frame-state/pacer with CPU render doubles; no GPU timing or image claim',
+const report={kind:'cpu-contracts',scope:'actual pipeline/frame-state/pacer with CPU render doubles; original 23 contracts plus synchronous auxiliary/graph capability ownership; no GPU timing or image claim',
   threeRevision:THREE.REVISION,passed:cases.filter(item=>item.passed).length,total:cases.length,sources,cases};
 await writeFile(`${out}/report.json`,`${JSON.stringify(report,null,2)}\n`);console.log(JSON.stringify({out,...report},null,2));
 assert.equal(sources.every(item=>item.stable),true,'Frame-pacing source changed during its contract run');

@@ -260,6 +260,7 @@ export function installFoundationGLProbe(acquiredContext = null) {
   const attachPipeline = () => {
     const pipeline = host.NMS?._pipeline;
     addScope(pipeline, 'render', 'pipeline.render');
+    addScope(pipeline, 'submitFrame', 'pipeline.submitFrame');
     addScope(pipeline, 'updateCloudLighting', 'pipeline.updateCloudLighting');
     addScope(pipeline?.volumePass, 'render', 'volumePass.render');
     addScope(pipeline?.renderPass, 'render', 'sceneRenderPass.render');

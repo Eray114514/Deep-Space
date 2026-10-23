@@ -12,7 +12,9 @@ const verifier = 'tools/renderframepacinggputest.js';
 const directory = `test-results/render-frame-pacing/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const addonInputs = ['node_modules/three/package.json', 'node_modules/three/examples/jsm/postprocessing/SMAAPass.js',
-  'node_modules/three/examples/jsm/postprocessing/Pass.js', 'node_modules/three/examples/jsm/shaders/SMAAShader.js'];
+  'node_modules/three/examples/jsm/postprocessing/Pass.js', 'node_modules/three/examples/jsm/shaders/SMAAShader.js',
+  'node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js', 'node_modules/three/examples/jsm/loaders/GLTFLoader.js',
+  'node_modules/three/examples/jsm/utils/BufferGeometryUtils.js', 'node_modules/three/examples/jsm/utils/SkeletonUtils.js'];
 const addonFingerprint = async () => Promise.all(addonInputs.map(async file => {
   const bytes = await readFile(file);return { path: file, bytes: bytes.length, sha256: sha256(bytes) };
 }));
@@ -20,7 +22,7 @@ await mkdir(`${directory}/inputs`, { recursive: true });
 const verifierBytes = await readFile(new URL(import.meta.url));
 await writeFile(`${directory}/verifier.js`, verifierBytes);
 const report = {
-  scope: 'Actual GameLegacyPipeline, synthetic signed cloud pixels and real constant opaque depth; production temporal resolve/composite, native RGBA16F off/on/off/on, native fence admission and retirement. Not authored physical clouds, column throughput, default-player, latency or frame-rate acceptance.',
+  scope: 'Actual GameLegacyPipeline, synthetic signed cloud pixels and real constant opaque depth; production resolve/composite, native RGBA16F plain off/on then weapon/portal-auxiliary scope off/on, real WeaponLighting/WeaponSkyProbe PMREM, SurfaceWeapons.renderScopeView with a minimal optical rig and SpatialRift.renderPortal with real matrices/cameras plus one synthetic HDR destination plane, native fence admission and retirement. No weapon GLB or rift structure is constructed. Not authored physical clouds, column throughput, default-player, latency or frame-rate acceptance.',
   busyEvidence: 'Only unmodified native clientWaitSync TIMEOUT_EXPIRED followed by render(false) counts. No fake wait status, forced GPU workload or CPU mock is accepted as hardware busy coverage; missing natural coverage fails explicitly.',
   cpuMock: { executed: false, reason: 'This tool accepts native WebGL evidence only. CPU fault/reentry contracts live separately in tools/gpuframepacertest.js.' },
   verifier: { path: `${directory}/verifier.js`, bytes: verifierBytes.length, sha256: sha256(verifierBytes) },
@@ -62,11 +64,18 @@ try {
     const { createGameRenderer } = await import('/src/renderer-runtime.js');
     const { GameLegacyPipeline } = await import('/src/legacy-render-pipeline.js');
     const { VOLUME_LAYER } = await import('/src/volumetric-pass-webgl.js');
-    const result = { checks: [], cases: [], comparisons: [], busy: [], transitions: [], gl: [],
-      shaderErrors: [], contextLosses: [], native: { fences: [], waits: [], deletes: [], forbidden: [] },
+    const { WeaponLighting } = await import('/src/weapon-lighting.js');
+    const { SurfaceWeapons, SURFACE_WEAPONS } = await import('/src/surface-weapons.js');
+    const { SpatialRift } = await import('/src/spatial-rift.js');
+    const result = { checks: [], cases: [], comparisons: [], busy: [], transitions: [], scopes: [], scopeBusy: [], auxiliary: [], gl: [],
+      shaderErrors: [], contextLosses: [], native: { fences: [], waits: [], deletes: [], draws: [], clears: [], forbidden: [] },
       input: { width: 32, height: 32, volumeScale: 1, successfulFramesPerCase: 3,
         maxNaturalBusyTrialsPerTransition: 24, deadlineMs: 10000,
-        depth: .5, source: 'Signed deterministic cloud pixels; fixed HDR opaque source and real depth. No production weather/column workload.' } };
+          depth: .5, source: 'Signed deterministic cloud pixels; fixed HDR opaque source and real depth. No production weather/column workload.',
+          auxiliaries: 'Real WeaponLighting.update(deferEnvironment)/prepareEnvironment and WeaponSkyProbe.fromEquirectangular; actual SurfaceWeapons.prototype.renderScopeView with the authored hasScope definition and a primitive optical rig; actual SpatialRift.prototype.renderPortal with real source/target transforms and a projection-dependent HDR destination. No weapon/rift constructor or GLB.',
+          weaponEnvironment: { atmosphere: 1, skyIrradiance: 1.8, sunset: .15, up: [0, 1, 0], parityDaySequence: [.75, 1, .875] },
+          portal: { destinationTranslation: [0, 0, 8], sourceRotationY: .2, depth: 2, destinationLayer: 2,
+            callerCameraLayer: 5, borrowedXr: true, borrowedAutoClear: false, positiveControlFov: 42 } } };
     const check = (name, condition, details = null) => {
       result.checks.push({ name, pass: Boolean(condition), ...(details ? { details } : {}) });
       if (!condition) throw Error(name);
@@ -79,9 +88,11 @@ try {
       if (value === null || value === undefined) return null;
       if (!ids.has(value)) ids.set(value, ++nextId);return ids.get(value);
     };
-    let renderer, gl, pipeline, cube, geometry, source, base, label = 'setup', nativeMethods, nativeOrder = 0;
+    let renderer, gl, pipeline, cube, geometry, source, base, lighting, scopeRig, scopeTarget, scopeMaterial, equipmentMaterial,
+      portalTarget, portalMaterial, portalGroup,
+      label = 'setup', nativeMethods, nativeOrder = 0;
     const pipelines = [], pacers = [], captures = [], resolveObservations = [], disposedPipelines = new Set();
-    const counts = { draws: 0, queryBegins: 0, queryEnds: 0, fences: 0 };
+    const counts = { draws: 0, queryBegins: 0, queryEnds: 0, fences: 0, auxiliaryCallbacks: 0 };
     const checkpoint = name => {
       const errors = [];for (let i = 0; i < 16; i++) { const value = gl.getError();if (!value) break;errors.push(value); }
       const lost = gl.isContextLost();result.gl.push({ name, errors, lost });
@@ -153,6 +164,10 @@ try {
       };
     };
     const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const graphSnapshot = () => {
+      const state = stateSnapshot();return { frame: state.frame, volume: state.volume, profiler: state.profiler,
+        budget: state.budget, cloudLightFrame: state.cloudLightFrame, composer: state.composer };
+    };
     const awaitReady = async (pacer, name) => {
       const deadline = performance.now() + result.input.deadlineMs;label = `poll:${name}`;
       while (!pacer.poll()) {
@@ -190,7 +205,7 @@ try {
       check('Real hardware WebGL2', renderer.capabilities.isWebGL2 && !/swiftshader|llvmpipe|software/i.test(result.gpu));
       check('Half-float color targets available', Boolean(gl.getExtension('EXT_color_buffer_float')));
       nativeMethods = Object.fromEntries(['fenceSync', 'clientWaitSync', 'deleteSync', 'flush', 'finish', 'waitSync',
-        'drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced', 'beginQuery', 'endQuery'].map(name => [name, gl[name]]));
+        'drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced', 'clear', 'beginQuery', 'endQuery'].map(name => [name, gl[name]]));
       // Forward the real calls and real statuses. None of these wrappers changes
       // scheduling, inserts a flush, fabricates a fence or alters a wait result.
       gl.fenceSync = function(condition, flags) {
@@ -206,8 +221,9 @@ try {
         result.native.forbidden.push({ label, name, args });return nativeMethods[name].apply(this, args);
       };
       for (const name of ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced']) gl[name] = function(...args) {
-        counts.draws++;return nativeMethods[name].apply(this, args);
+        counts.draws++;result.native.draws.push({ order: ++nativeOrder, label, call: name });return nativeMethods[name].apply(this, args);
       };
+      gl.clear = function(mask) { result.native.clears.push({ order: ++nativeOrder, label, mask });return nativeMethods.clear.call(this, mask); };
       gl.beginQuery = function(...args) { counts.queryBegins++;return nativeMethods.beginQuery.apply(this, args); };
       gl.endQuery = function(...args) { counts.queryEnds++;return nativeMethods.endQuery.apply(this, args); };
 
@@ -226,6 +242,159 @@ try {
       const body = { R: 800, posUniv: new T.Vector3(0, 0, -100), frameOrientation: new T.Quaternion(),
         weatherField: {}, volCloudMesh: cloud, volCloudMat: source, volCloudBand: { rOut: 1000 } };
       const otherBody = { ...body, weatherField: {} };
+      scopeTarget = new T.WebGLRenderTarget(32, 32, { type: T.HalfFloatType, depthBuffer: true });
+      scopeTarget.texture.colorSpace = T.NoColorSpace;scopeTarget.texture.name = 'fixture-actual-scope';
+      scopeRig = new T.Group();scopeRig.visible = true;camera.add(scopeRig);scene.add(camera);
+      const modelGroup = new T.Group();scopeRig.add(modelGroup);
+      scopeMaterial = new T.MeshBasicMaterial({ map: scopeTarget.texture, toneMapped: false });
+      const lens = new T.Mesh(geometry, scopeMaterial);modelGroup.add(lens);
+      equipmentMaterial = new T.MeshStandardMaterial({ metalness: .8, roughness: .3 });
+      modelGroup.add(new T.Mesh(geometry, equipmentMaterial));
+      lighting = new WeaponLighting(scene, camera);lighting.register(scopeRig);
+      const scopeIndex = SURFACE_WEAPONS.findIndex(definition => definition.hasScope), models = [];
+      models[scopeIndex] = { group: modelGroup, opticGlass: lens };
+      const scopeObject = { models, index: scopeIndex, rig: scopeRig, scopeTarget, scene, camera,
+        scopeCamera: new T.PerspectiveCamera(4.2, 1, .12, camera.far) };
+      check('Actual authored scope input selected without weapon constructor or GLB', scopeIndex >= 0
+        && SURFACE_WEAPONS[scopeIndex].hasScope && lens.material.map === scopeTarget.texture && scopeRig.visible);
+      // A separate tiny destination keeps the main native pixel controls
+      // unchanged. The actual portal method owns all camera/texture matrices;
+      // its real ShaderMaterial consumes both projectionMatrix and the
+      // uTextureMatrix it publishes, without constructing the rift geometry.
+      const portalScene = new T.Scene(), portalCamera = new T.PerspectiveCamera();portalCamera.layers.set(5);
+      portalGroup = new T.Group();portalGroup.position.set(3, 2, -5);
+      portalGroup.quaternion.setFromAxisAngle(new T.Vector3(0, 1, 0), result.input.portal.sourceRotationY);
+      const portalVisual = new T.Group();portalVisual.position.set(1, 4, -2);portalGroup.add(portalVisual);portalScene.add(portalGroup);
+      const hiddenSentinel = new T.Mesh(geometry, base);hiddenSentinel.layers.set(2);hiddenSentinel.frustumCulled = false;portalVisual.add(hiddenSentinel);
+      portalGroup.updateMatrixWorld(true);
+      const portalAnchor = portalVisual.localToWorld(new T.Vector3(0, 0, -result.input.portal.depth))
+        .add(new T.Vector3(...result.input.portal.destinationTranslation));
+      const portalOffset = new T.Matrix4().makeTranslation(...result.input.portal.destinationTranslation);
+      portalTarget = new T.WebGLRenderTarget(32, 32, { type: T.HalfFloatType, depthBuffer: true, stencilBuffer: false });
+      portalTarget.texture.colorSpace = T.NoColorSpace;portalTarget.texture.name = 'fixture-actual-portal';
+      portalMaterial = new T.ShaderMaterial({ uniforms: { uTextureMatrix: { value: new T.Matrix4() },
+        uDestinationToSource: { value: portalOffset.clone().invert() } },
+      vertexShader: 'varying vec2 vUv;varying vec4 vProjected;uniform mat4 uTextureMatrix;uniform mat4 uDestinationToSource;'
+        + 'void main(){vUv=uv;vec4 world=modelMatrix*vec4(position,1.0);vProjected=uTextureMatrix*uDestinationToSource*world;'
+        + 'gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+      fragmentShader: 'varying vec2 vUv;varying vec4 vProjected;void main(){vec2 projected=vProjected.xy/vProjected.w;'
+        + 'gl_FragColor=vec4(2.5+vUv.x*2.0+.125*projected.x,1.25+vUv.y*1.75+.125*projected.y,.5+vUv.x*.5,1.0);}',
+      depthTest: true, depthWrite: true, blending: T.NoBlending, toneMapped: false });
+      const portalDestination = new T.Mesh(geometry, portalMaterial);portalDestination.scale.set(5, 5, 1);
+      portalDestination.layers.set(2);portalScene.add(portalDestination);
+      const portalObject = { renderer, scene: portalScene, mainCamera: camera, group: portalGroup, visual: portalVisual,
+        portalCamera, portalRT: portalTarget, portalMat: portalMaterial, open: 1, traversed: false, depth: result.input.portal.depth,
+        sourceQuaternion: new T.Quaternion(), targetQuaternion: portalGroup.quaternion.clone(), unitScale: new T.Vector3(1, 1, 1),
+        targetAnchor: portalAnchor, sourceFrameMatrix: new T.Matrix4(), targetFrameMatrix: new T.Matrix4(),
+        inverseSourceMatrix: new T.Matrix4(), offsetMatrix: new T.Matrix4(), frameRotation: new T.Quaternion(), textureMatrix: new T.Matrix4(),
+        biasMatrix: new T.Matrix4().set(.5, 0, 0, .5, 0, .5, 0, .5, 0, 0, .5, .5, 0, 0, 0, 1), portalVolumeLayerRendered: false };
+      const portalObservations = [];
+      portalDestination.onBeforeRender = (actualRenderer, actualScene, actualCamera) => portalObservations.push({
+        order: nativeOrder, label, renderer: actualRenderer === renderer, scene: actualScene === portalScene, camera: actualCamera === portalCamera,
+        target: actualRenderer.getRenderTarget() === portalTarget, xr: actualRenderer.xr.enabled, autoClear: actualRenderer.autoClear,
+        layers: actualCamera.layers.mask, groupVisible: portalGroup.visible, projection: actualCamera.projectionMatrix.toArray(),
+        modelView: new T.Matrix4().multiplyMatrices(actualCamera.matrixWorldInverse, portalDestination.matrixWorld).toArray(),
+        texture: portalMaterial.uniforms.uTextureMatrix.value.toArray(), position: actualCamera.position.toArray() });
+      const matrixClose = (actual, expected, tolerance = 1e-5) => actual?.length === 16 && expected.length === 16
+        && actual.every((value, index) => Number.isFinite(value) && Math.abs(value - expected[index]) <= tolerance * Math.max(1, Math.abs(expected[index])));
+      const updateWeaponEnvironment = day => {
+        const nativeBefore = nativeOrder, before = graphSnapshot();
+        lighting.update({ renderer, sources: [], environmentIntensity: .7,
+          components: { direct: true, indirect: true, reflections: true } },
+        { day, atmosphere: 1, skyIrradiance: 1.8, sunset: .15 }, true, new T.Vector3(0, 1, 0), { deferEnvironment: true });
+        check('Deferred real weapon environment update issues no GPU work or world transaction', nativeOrder === nativeBefore
+          && equal(before, graphSnapshot()));
+      };
+      const renderWeaponEnvironment = name => {
+        const before = graphSnapshot(), caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
+        const oldTarget = lighting.skyProbe.target, start = result.native.draws.length;label = `aux-pmrem:${name}`;
+        lighting.prepareEnvironment();const target = lighting.skyProbe.target;
+        const record = { name, kind: 'WeaponLighting.prepareEnvironment/WeaponSkyProbe.fromEquirectangular', target: id(target),
+          key: lighting.skyProbe.key, rebuilt: target !== oldTarget, nativeDraws: result.native.draws.slice(start),
+          targetRestored: renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip,
+          graphUnchanged: equal(before, graphSnapshot()) };result.auxiliary.push(record);
+        check(`${name}: real weapon PMREM has a registered half-float output`, target && target.texture === equipmentMaterial.envMap
+          && target.texture.name === 'weapon-outdoor-sky-pmrem' && target.texture.type === T.HalfFloatType);
+        check(`${name}: real PMREM rebuild submits native draws`, !record.rebuilt || record.nativeDraws.length > 0);
+        check(`${name}: vendor PMREM preserves complete caller target/face/mip`, record.targetRestored);
+        check(`${name}: real PMREM does not publish a world frame`, record.graphUnchanged);
+      };
+      const renderActualScope = name => {
+        const before = graphSnapshot(), caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
+        const rigVisible = scopeRig.visible, lensVisible = lens.visible, mask = camera.layers.mask,
+          start = result.native.draws.length, clearStart = result.native.clears.length;label = `aux-scope:${name}`;
+        SurfaceWeapons.prototype.renderScopeView.call(scopeObject, renderer);
+        const draws = result.native.draws.slice(start), clears = result.native.clears.slice(clearStart);
+        const record = { name, kind: 'SurfaceWeapons.prototype.renderScopeView', target: id(scopeTarget), draws, clears,
+          visibilityRestored: scopeRig.visible === rigVisible && lens.visible === lensVisible,
+          cameraLayersRestored: camera.layers.mask === mask,
+          targetRestored: renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip,
+          graphUnchanged: equal(before, graphSnapshot()) };result.auxiliary.push(record);
+        check(`${name}: actual scope clears then renders real geometry`, clears.length > 0 && draws.length > 0 && clears[0].order < draws[0].order);
+        check(`${name}: actual scope restores complete target, rig, lens and camera layers`, record.targetRestored && record.visibilityRestored && record.cameraLayersRestored);
+        check(`${name}: actual scope does not publish world history`, record.graphUnchanged);
+      };
+      const renderActualPortal = name => {
+        const before = graphSnapshot(), caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel(),
+          oldXr = renderer.xr.enabled, oldAutoClear = renderer.autoClear, oldLayers = portalCamera.layers.mask, oldVisible = portalGroup.visible,
+          start = result.native.draws.length, clearStart = result.native.clears.length, observationStart = portalObservations.length;
+        let beforeHooks = 0, afterHooks = 0, beforeHookState, afterHookState;
+        const borrowedState = () => ({ target: renderer.getRenderTarget() === caller, face: renderer.getActiveCubeFace(),
+          mip: renderer.getActiveMipmapLevel(), xr: renderer.xr.enabled, autoClear: renderer.autoClear,
+          layers: portalCamera.layers.mask, groupVisible: portalGroup.visible });
+        // Exercise real XR=true/autoClear=false borrowed state. No XR session is
+        // presented. Check the method's restoration before restoring the test's
+        // preparation, so these assignments cannot conceal a portal leak.
+        renderer.xr.enabled = result.input.portal.borrowedXr;renderer.autoClear = result.input.portal.borrowedAutoClear;
+        label = `aux-portal:${name}`;
+        try {
+          SpatialRift.prototype.renderPortal.call(portalObject, {
+            beforeRender: actualCamera => {
+              beforeHooks++;beforeHookState = { ...borrowedState(), camera: actualCamera === portalCamera };
+            },
+            afterRender: () => { afterHooks++;afterHookState = borrowedState(); },
+          });
+          const draws = result.native.draws.slice(start), clears = result.native.clears.slice(clearStart), observations = portalObservations.slice(observationStart),
+            expectedWorld = new T.Matrix4().multiplyMatrices(portalOffset, camera.matrixWorld),
+            expectedProjection = new T.PerspectiveCamera(camera.fov, camera.aspect, camera.near, camera.far).projectionMatrix,
+            expectedTexture = portalObject.biasMatrix.clone().multiply(expectedProjection).multiply(expectedWorld.clone().invert()).multiply(portalOffset),
+            program = renderer.properties.get(portalMaterial).currentProgram?.program;
+          const uploaded = uniform => {
+            const location = program && gl.getUniformLocation(program, uniform), value = location ? gl.getUniform(program, location) : null;
+            return value ? Array.from(value) : null;
+          };
+          const record = { name, kind: 'SpatialRift.prototype.renderPortal', target: id(portalTarget), draws, clears, beforeHooks, afterHooks,
+            beforeHookState, afterHookState, observations, projectionFov: camera.fov, portalVolumeLayerRendered: portalObject.portalVolumeLayerRendered,
+            actualOffset: portalObject.offsetMatrix.toArray(), expectedOffset: portalOffset.toArray(), actualWorld: portalCamera.matrixWorld.toArray(),
+            expectedWorld: expectedWorld.toArray(), expectedProjection: expectedProjection.toArray(), expectedTexture: expectedTexture.toArray(),
+            nativeUniforms: { projection: uploaded('projectionMatrix'), modelView: uploaded('modelViewMatrix'), texture: uploaded('uTextureMatrix'),
+              destinationToSource: uploaded('uDestinationToSource') },
+            targetRestored: renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip,
+            xrRestored: renderer.xr.enabled === result.input.portal.borrowedXr, autoClearRestored: renderer.autoClear === result.input.portal.borrowedAutoClear,
+            layersRestored: portalCamera.layers.mask === oldLayers, groupRestored: portalGroup.visible === oldVisible,
+            graphUnchanged: equal(before, graphSnapshot()) };result.auxiliary.push(record);
+          check(`${name}: actual portal clears then draws exactly its visible destination`, clears.length > 0 && draws.length === 1
+            && clears[0].order < draws[0].order && observations.length === 1 && observations[0].order < draws[0].order);
+          check(`${name}: real portal draw disables XR, enables volume layer and hides its group`, observations.every(row => row.renderer && row.scene
+            && row.camera && row.target && !row.xr && !row.autoClear && row.layers === (oldLayers | (1 << 2)) && !row.groupVisible)
+            && record.portalVolumeLayerRendered);
+          check(`${name}: actual portal hooks observe the production borrow/restore order`, beforeHooks === 1 && afterHooks === 1
+            && beforeHookState.camera && beforeHookState.target && beforeHookState.face === face && beforeHookState.mip === mip
+            && beforeHookState.xr && !beforeHookState.autoClear && beforeHookState.layers === (oldLayers | (1 << 2)) && !beforeHookState.groupVisible
+            && afterHookState.target && afterHookState.face === face && afterHookState.mip === mip && afterHookState.xr
+            && !afterHookState.autoClear && afterHookState.layers === oldLayers && !afterHookState.groupVisible);
+          check(`${name}: actual portal restores complete target, XR, autoClear, layers and group`, record.targetRestored && record.xrRestored
+            && record.autoClearRestored && record.layersRestored && record.groupRestored);
+          check(`${name}: actual portal transports source/target frames and projection`, matrixClose(record.actualOffset, record.expectedOffset, 1e-10)
+            && matrixClose(record.actualWorld, record.expectedWorld, 1e-10) && matrixClose(observations[0].projection, record.expectedProjection, 1e-10)
+            && matrixClose(observations[0].texture, record.expectedTexture, 1e-10));
+          check(`${name}: native destination shader consumes the actual portal camera and texture projections`, matrixClose(record.nativeUniforms.projection,
+            record.expectedProjection) && matrixClose(record.nativeUniforms.modelView, observations[0].modelView)
+            && matrixClose(record.nativeUniforms.texture, record.expectedTexture)
+            && matrixClose(record.nativeUniforms.destinationToSource, portalMaterial.uniforms.uDestinationToSource.value.toArray()));
+          check(`${name}: actual portal does not publish world history`, record.graphUnchanged);
+        } finally { renderer.xr.enabled = oldXr;renderer.autoClear = oldAutoClear; }
+      };
       const makePipeline = () => {
         const value = new GameLegacyPipeline(renderer, scene, camera, { volume: true, volumeScale: 1, bloomEnabled: false });
         pipelines.push(value);value.setSize(32, 32);value.composer.renderToScreen = false;
@@ -242,13 +411,50 @@ try {
         return value;
       };
       pipeline = makePipeline();const volume = pipeline.volumePass;
-      cube = new T.WebGLCubeRenderTarget(8);renderer.setRenderTarget(cube, 3, 0);
+      cube = new T.WebGLCubeRenderTarget(8, { generateMipmaps: true, minFilter: T.LinearMipmapLinearFilter });
+      let callerFace = 3, callerMip = 0;renderer.setRenderTarget(cube, callerFace, callerMip);
       const assertCallerTarget = name => check(`${name}: caller target/face/mip restored`, renderer.getRenderTarget() === cube
-        && renderer.getActiveCubeFace() === 3 && renderer.getActiveMipmapLevel() === 0);
-      const submit = async name => {
+        && renderer.getActiveCubeFace() === callerFace && renderer.getActiveMipmapLevel() === callerMip);
+      const scopedSubmission = (name, { drawGraph = true } = {}) => {
+        const owner = pipeline.framePacer, sequence = pipeline.frameState.sequence, graphBefore = graphSnapshot(),
+          fencesBefore = result.native.fences.length, drawsBefore = result.native.draws.length,
+          clearsBefore = result.native.clears.length, waitsBefore = result.native.waits.length, callbacksBefore = counts.auxiliaryCallbacks;
+        label = `scope-admission:${name}`;
+        const accepted = pipeline.submitFrame(draw => {
+          counts.auxiliaryCallbacks++;renderWeaponEnvironment(name);renderActualScope(name);renderActualPortal(name);
+          if (drawGraph) { label = `scope-graph:${name}`;check(`${name}: actual scope draw capability returns true`, draw(options) === true); }
+          label = `scope-completion:${name}`;
+        });
+        const fences = result.native.fences.slice(fencesBefore), draws = result.native.draws.slice(drawsBefore), clears = result.native.clears.slice(clearsBefore),
+          callbacks = counts.auxiliaryCallbacks - callbacksBefore;
+        const record = { name, mode: drawGraph ? 'actual weapon/portal auxiliaries + graph' : 'actual weapon/portal auxiliaries only',
+          pacing: Boolean(owner), accepted, callbacks, sequenceBefore: sequence, sequenceAfter: pipeline.frameState.sequence,
+          owner: owner?.snapshot() || null, fences, draws, clears, waits: result.native.waits.slice(waitsBefore),
+          graphUnchanged: equal(graphBefore, graphSnapshot()), callerFace, callerMip };result.scopes.push(record);
+        if (!accepted) {
+          check(`${name}: rejected scope executes no auxiliary callback, clear, draw or fence`, callbacks === 0 && !clears.length && !draws.length && !fences.length);
+          return record;
+        }
+        check(`${name}: all auxiliaries share one actual synchronous callback`, callbacks === 1);
+        check(`${name}: one native fence covers the admitted auxiliary/graph scope`, fences.length === Number(Boolean(owner)));
+        check(`${name}: real scope GPU clears/draws precede its sole completion fence`, draws.length > 0 && (!owner
+          || [...clears, ...draws].every(row => row.order < fences[0].order) && fences[0].label === `scope-completion:${name}`));
+        const pmremDraws = draws.filter(row => row.label === `aux-pmrem:${name}`),
+          scopeDraws = draws.filter(row => row.label === `aux-scope:${name}`),
+          portalDraws = draws.filter(row => row.label === `aux-portal:${name}`),
+          graphDraws = draws.filter(row => row.label === `scope-graph:${name}`);
+        check(`${name}: native PMREM, actual scope, portal and graph preserve production submission order`, scopeDraws.length > 0 && portalDraws.length === 1
+          && pmremDraws.every(row => row.order < scopeDraws[0].order)
+          && scopeDraws.every(row => row.order < portalDraws[0].order)
+          && (drawGraph ? graphDraws.length > 0 && portalDraws.every(row => row.order < graphDraws[0].order) : graphDraws.length === 0));
+        if (drawGraph) check(`${name}: world graph publishes exactly once inside scope`, pipeline.frameState.sequence === sequence + 1);
+        else check(`${name}: auxiliary-only scope preserves all history/budget/profiler state`, record.graphUnchanged);
+        assertCallerTarget(name);return record;
+      };
+      const submit = async (name, { scoped = false } = {}) => {
         if (pipeline.framePacer) await awaitReady(pipeline.framePacer, name);
         label = `render:${name}`;const sequence = pipeline.frameState.sequence;
-        const accepted = pipeline.render(options);
+        const accepted = scoped ? scopedSubmission(name).accepted : pipeline.render(options);
         check(`${name}: accepted render returns true`, accepted === true);
         check(`${name}: exactly one frame transaction committed`, pipeline.frameState.sequence === sequence + 1 && !pipeline.frameState.pending);
         assertCallerTarget(name);return resolveObservations.at(-1);
@@ -259,17 +465,30 @@ try {
         origin.set(0, 0, 0);options.timeEpoch = 0;source.uniforms.uShift.value = 0;
         volume.setActivePlanet(body, origin, 0);pipeline.invalidateVolumeHistory(`independent-case-${index}`);
         if (enabled) pacers.push(pipeline.startFramePacing());
-        const first = await submit(`case-${index}-first`);check(`case ${index}: first frame does not reuse history`, first.history === 0);
-        await submit(`case-${index}-second`);const last = await submit(`case-${index}-third`);
+        const scoped = index >= 2;
+        callerFace = scoped ? 4 : 3;callerMip = scoped ? 1 : 0;renderer.setRenderTarget(cube, callerFace, callerMip);
+        const scopeOptions = { scoped };
+        if (scoped) updateWeaponEnvironment(result.input.weaponEnvironment.parityDaySequence[0]);
+        const first = await submit(`case-${index}-first`, scopeOptions);check(`case ${index}: first frame does not reuse history`, first.history === 0);
+        if (scoped) updateWeaponEnvironment(result.input.weaponEnvironment.parityDaySequence[1]);
+        await submit(`case-${index}-second`, scopeOptions);
+        if (scoped) updateWeaponEnvironment(result.input.weaponEnvironment.parityDaySequence[2]);
+        const last = await submit(`case-${index}-third`, scopeOptions);
         check(`case ${index}: true stationary history branch exercised`, last.history === 1 && last.stationary === 1);
         label = `native-readback:case-${index}`;
         const capture = { current: await read(volume.current), resolved: await read(volume.historyRead), final: await read(pipeline.composer.readBuffer) };
         check(`case ${index}: finite occupied signed/HDR native targets`, Object.values(capture).every(item => !item.metadata.nonfinite
           && item.metadata.nonzeroRGB > 1000) && capture.current.metadata.negativeRGB > 0 && capture.final.metadata.hdrRGB > 1000);
-        captures.push(capture);result.cases.push({ index, pacing: enabled, sequence: pipeline.frameState.sequence,
+        captures.push(capture);result.cases.push({ index, pacing: enabled, submission: scoped ? 'actual weapon/portal auxiliary scope' : 'plain render',
+          callerFace, callerMip, sequence: pipeline.frameState.sequence,
           fence: pipeline.framePacer?.snapshot() || null, targets: Object.fromEntries(Object.entries(capture).map(([name, value]) => [name, value.metadata])) });
         checkpoint(`parity case ${index}`);
       }
+      callerFace = 3;callerMip = 0;renderer.setRenderTarget(cube, callerFace, callerMip);
+      check('A paced scope includes real weapon PMREM native draws', result.auxiliary.some(row => row.kind.startsWith('WeaponLighting')
+        && row.name.startsWith('case-3-') && row.rebuilt && row.nativeDraws.length > 0));
+      check('Both repeated native cases include three actual portal renders', [2, 3].every(index => result.auxiliary.filter(row =>
+        row.kind === 'SpatialRift.prototype.renderPortal' && row.name.startsWith(`case-${index}-`) && row.draws.length === 1).length === 3));
       for (const [a, b, name] of [[0, 1, 'off/on'], [0, 2, 'off native repeat'], [1, 3, 'on native repeat'], [2, 3, 'repeat off/on']]) {
         const stages = Object.fromEntries(['current', 'resolved', 'final'].map(stage => [stage, compare(captures[a][stage].bits, captures[b][stage].bits)]));
         result.comparisons.push({ name, stages });check(`${name}: all RGBA16F native bits equal`, Object.values(stages).every(delta => delta.changed === 0));
@@ -347,6 +566,76 @@ try {
       await exerciseBusy('moving', () => { origin.x = 3;camera.position.x = 2;camera.updateMatrixWorld(true); }, 1, 0);
       await exerciseBusy('body', () => {}, 0, 0);
       await exerciseBusy('time', () => { options.timeEpoch = 1; }, 0, 0);
+      // Keep the four original graph-only native TIMEOUT trials unchanged.
+      // This separate trial admits real auxiliary work only after the same
+      // normal predecessor graph fence. No extra busy-making draw is inserted.
+      let scopeTimeoutObserved = false;
+      for (let trial = 0; trial < result.input.maxNaturalBusyTrialsPerTransition && !scopeTimeoutObserved; trial++) {
+        await resetInput(`scope-busy-${trial}`);updateWeaponEnvironment(trial % 2 ? .9375 : .75);
+        const before = stateSnapshot(), ownerBefore = pipeline.framePacer.snapshot(), predecessor = result.native.fences.at(-1)?.id;
+        const record = scopedSubmission(`natural-busy-${trial}`), after = stateSnapshot(), ownerAfter = pipeline.framePacer.snapshot();
+        const timeout = record.waits.some(row => row.id === predecessor && row.status === gl.TIMEOUT_EXPIRED);
+        const observation = { trial, accepted: record.accepted, timeout, predecessor, callbacks: record.callbacks,
+          ownerBefore, ownerAfter, before, after, unchanged: equal(before, after) };result.scopeBusy.push(observation);
+        if (record.accepted) {
+          check('An admitted scope follows a real completed predecessor', !timeout && record.callbacks === 1);
+          continue;
+        }
+        check('Rejected real auxiliary scope is backed by native TIMEOUT', timeout && ownerAfter.pending === 1 && !ownerAfter.fault);
+        check('Native scope TIMEOUT executes zero auxiliary callbacks and changes no work state', record.callbacks === 0 && observation.unchanged);
+        check('Native scope TIMEOUT advances only the skip counter', ownerAfter.stats.skipped === ownerBefore.stats.skipped + 1
+          && ownerAfter.stats.begun === ownerBefore.stats.begun && ownerAfter.stats.submitted === ownerBefore.stats.submitted);
+        scopeTimeoutObserved = true;
+      }
+      check('Real auxiliary submission naturally busy branch observed', scopeTimeoutObserved,
+        { coverage: scopeTimeoutObserved ? 'native TIMEOUT_EXPIRED / auxiliary callback zero' : 'uncovered: every native predecessor already completed' });
+
+      await awaitReady(pipeline.framePacer, 'auxiliary-only');updateWeaponEnvironment(.625);
+      const auxiliaryOnlyBefore = graphSnapshot(), sequenceBeforeAux = pipeline.frameState.sequence;
+      const auxiliaryOnly = scopedSubmission('auxiliary-only', { drawGraph: false });
+      result.auxiliaryOnly = { ...auxiliaryOnly, before: auxiliaryOnlyBefore, after: graphSnapshot() };
+      check('Actual auxiliary-only work admits one fence without advancing world history', auxiliaryOnly.accepted
+        && auxiliaryOnly.fences.length === 1 && pipeline.frameState.sequence === sequenceBeforeAux
+        && equal(result.auxiliaryOnly.before, result.auxiliaryOnly.after));
+      label = 'native-readback:real-weapon-portal-auxiliaries';
+      const pmremNative = await read(lighting.skyProbe.target), scopeNative = await read(scopeTarget), portalNative = await read(portalTarget);
+      result.auxiliaryNative = { pmrem: { ...pmremNative.metadata, nativeBits: Array.from(pmremNative.bits) },
+        scope: { ...scopeNative.metadata, nativeBits: Array.from(scopeNative.bits) },
+        portal: { ...portalNative.metadata, nativeBits: Array.from(portalNative.bits) } };
+      check('Actual weapon PMREM native output is finite occupied HDR', pmremNative.metadata.nonfinite === 0
+        && pmremNative.metadata.nonzeroRGB > 1000 && pmremNative.metadata.hdrRGB > 0);
+      check('Actual scope native output is finite occupied HDR after real clear/render', scopeNative.metadata.nonfinite === 0
+        && scopeNative.metadata.nonzeroRGB > 1000 && scopeNative.metadata.hdrRGB > 1000);
+      check('Actual portal native output is finite occupied HDR after real clear/render', portalNative.metadata.nonfinite === 0
+        && portalNative.metadata.nonzeroRGB > 1000 && portalNative.metadata.hdrRGB > 1000);
+      assertCallerTarget('native real auxiliary readback');checkpoint('actual auxiliaries and auxiliary-only submission');
+      // Isolate a genuine camera projection change in another admitted
+      // auxiliary-only scope. The destination is world-space geometry, so its
+      // native UV gradient must change; merely storing matrices cannot pass.
+      const projectionBefore = graphSnapshot(), originalFov = camera.fov;
+      let narrowedPortal, restoredPortal, narrowedSubmission, restoredSubmission;
+      try {
+        await awaitReady(pipeline.framePacer, 'portal-projection-positive');
+        camera.fov = result.input.portal.positiveControlFov;camera.updateProjectionMatrix();
+        narrowedSubmission = scopedSubmission('portal-projection-positive', { drawGraph: false });
+        check('Native portal projection control is an admitted auxiliary-only frame', narrowedSubmission.accepted && narrowedSubmission.fences.length === 1);
+        label = 'native-readback:portal-projection-positive';narrowedPortal = await read(portalTarget);
+      } finally { camera.fov = originalFov;camera.updateProjectionMatrix(); }
+      await awaitReady(pipeline.framePacer, 'portal-projection-restored');
+      restoredSubmission = scopedSubmission('portal-projection-restored', { drawGraph: false });
+      check('Native portal projection repeat is an admitted auxiliary-only frame', restoredSubmission.accepted && restoredSubmission.fences.length === 1);
+      label = 'native-readback:portal-projection-restored';restoredPortal = await read(portalTarget);
+      result.portalProjectionControl = { baselineFov: originalFov, changedFov: result.input.portal.positiveControlFov,
+        narrowed: { ...narrowedPortal.metadata, nativeBits: Array.from(narrowedPortal.bits), delta: compare(portalNative.bits, narrowedPortal.bits) },
+        restored: { ...restoredPortal.metadata, nativeBits: Array.from(restoredPortal.bits), delta: compare(portalNative.bits, restoredPortal.bits) },
+        graphUnchanged: equal(projectionBefore, graphSnapshot()), submissions: [narrowedSubmission.name, restoredSubmission.name] };
+      check('Actual portal projection FOV change reaches finite native HDR pixels', narrowedPortal.metadata.nonfinite === 0
+        && narrowedPortal.metadata.nonzeroRGB > 1000 && narrowedPortal.metadata.hdrRGB > 1000
+        && result.portalProjectionControl.narrowed.delta.changed > 1000 && result.portalProjectionControl.narrowed.delta.alphaChanged === 0);
+      check('Restored actual portal projection repeats native bits exactly', result.portalProjectionControl.restored.delta.changed === 0
+        && restoredPortal.metadata.nonfinite === 0);
+      check('Native portal projection controls publish no graph history/budget/profiler', result.portalProjectionControl.graphUnchanged);
+      assertCallerTarget('portal projection controls');checkpoint('actual portal projection native positive/repeat');
       check('Actual budget/profiler frames equal admitted instrumented frames', pipeline.columnWorkBudget.frame === pipeline.profiler.frame);
       result.instrumentation = { budget: pipeline.columnWorkBudget.snapshot(),
         profiler: { frame: pipeline.profiler.frame, pending: pipeline.profiler.pending.length, records: pipeline.profiler.records.length,
@@ -412,7 +701,9 @@ try {
           const owner = value.framePacer;value.stopFramePacing();await awaitReleased(owner, 'cleanup-owner');
         }
         for (const owner of pacers) if (!owner.snapshot().released) { owner.dispose();await awaitReleased(owner, 'cleanup-captured'); }
-        renderer?.setRenderTarget(null);cube?.dispose();source?.dispose();base?.dispose();geometry?.dispose();
+        renderer?.setRenderTarget(null);lighting?.dispose();scopeRig?.removeFromParent();scopeTarget?.dispose();
+        portalGroup?.removeFromParent();portalTarget?.dispose();portalMaterial?.dispose();
+        scopeMaterial?.dispose();equipmentMaterial?.dispose();cube?.dispose();source?.dispose();base?.dispose();geometry?.dispose();
         if (renderer) {
           const deadline = performance.now() + result.input.deadlineMs;
           while (renderer.programRetirement.snapshot().pending) {

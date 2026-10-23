@@ -43,6 +43,7 @@ export class GameLegacyPipeline {
   } = {}) {
     this.renderer = renderer;
     this.framePacer = null;
+    this.frameSubmissionActive = false;
     this.scene = scene;
     this.camera = camera;
     this.frameState = new RenderFrameState();
@@ -159,48 +160,91 @@ export class GameLegacyPipeline {
     this.volumePass?.resetHistory();
   }
 
-  render({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
+  // All synchronous views of this renderer share one admission and completion
+  // fence. A startup-only submission may omit draw; it must not publish world
+  // history or count as a presented frame. No scene lease survives this scope.
+  submitFrame(work) {
+    if(typeof work!=='function')throw new TypeError('Frame submission requires synchronous work');
+    if(this.frameSubmissionActive)throw Error('Frame submission is already active');
     const pacer=this.framePacer;
-    if(pacer&&!pacer.beginFrame())return false;
-    let failed=false;
+    let failed=false,active=true,drawn=false,admitted=false;
+    this.frameSubmissionActive=true;
     try {
+      // Admission itself calls native queries, whose observers may stop or
+      // replace the public owner. They cannot reenter an unpaced submission.
+      if(pacer&&!pacer.beginFrame())return false;
+      admitted=true;
       const target = this.renderer.getRenderTarget();
       const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
-      this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
       try {
-        try {
-          const body = this.volumePass?.activePlanet;
-          const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
-          if (localEye) this.frameState.localEye(body, localEye.value);
-          const airBody = this.atmospherePass.activePlanet;
-          if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
-          this.profiler?.beginFrame();
-          this.columnWorkBudget?.beginFrame();
-          this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
-          // RenderPass writes readBuffer. Preserve the receiver depth in the other
-          // target during that draw; sampling its own depth attachment is feedback.
-          // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
-          this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
-            this.volumePass?.activePlanet,this.profiler);
-          this.composer.render();
-        } finally {
-          this.renderer.setRenderTarget(target, face, mip);
-        }
-        this.frameState.commit();
-      } catch (error) {
-        this.frameState.abort();
-        this.volumePass?.resetHistory();
-        throw error;
+        const result=work(options=>{
+          if(!active)throw Error('Frame draw is no longer active');
+          if(drawn)throw Error('Frame has already been drawn');
+          drawn=true;
+          return this.#renderScene(options);
+        });
+        if(result&&typeof result.then==='function')throw new TypeError('Frame submission work must be synchronous');
+      } catch(error) {
+        failed=true;throw error;
+      } finally {
+        active=false;
+        // Auxiliary views must also restore their own visibility and camera
+        // leases. This outer guard preserves the complete caller target tuple.
+        try {this.renderer.setRenderTarget(target,face,mip);}
+        catch(error){if(!failed){failed=true;throw error;}}
       }
       return true;
-    } catch (error) {
-      failed=true;
-      throw error;
+    } catch(error) {
+      failed=true;throw error;
     } finally {
-      // stop/dispose may detach this owner from inside a render callback. The
-      // admitted frame still belongs to the captured owner until its fence.
-      if(pacer)try {pacer.endFrame();} catch(error){if(!failed)throw error;}
+      active=false;
+      // stop/dispose may detach this owner from inside any auxiliary view. Its
+      // submitted work still belongs to the captured owner until this fence.
+      try {
+        if(pacer&&admitted)try {pacer.endFrame();} catch(error){if(!failed)throw error;}
+      } finally {this.frameSubmissionActive=false;}
     }
+  }
+
+  render(options) {
+    return this.submitFrame(draw=>draw(options));
+  }
+
+  // Internal world graph. Only submitFrame's one-use draw capability enters it.
+  #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
+    let failed=false;
+    const target = this.renderer.getRenderTarget();
+    const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
+    this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
+    try {
+      try {
+        const body = this.volumePass?.activePlanet;
+        const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
+        if (localEye) this.frameState.localEye(body, localEye.value);
+        const airBody = this.atmospherePass.activePlanet;
+        if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
+        this.profiler?.beginFrame();
+        this.columnWorkBudget?.beginFrame();
+        this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
+        // RenderPass writes readBuffer. Preserve the receiver depth in the other
+        // target during that draw; sampling its own depth attachment is feedback.
+        // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
+        this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
+          this.volumePass?.activePlanet,this.profiler);
+        this.composer.render();
+      } catch(error) {
+        failed=true;throw error;
+      } finally {
+        try {this.renderer.setRenderTarget(target, face, mip);}
+        catch(error){if(!failed)throw error;}
+      }
+      this.frameState.commit();
+    } catch (error) {
+      this.frameState.abort();
+      this.volumePass?.resetHistory();
+      throw error;
+    }
+    return true;
   }
 
   startFramePacing() {

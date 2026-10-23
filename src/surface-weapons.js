@@ -64,7 +64,7 @@ export class SurfaceWeapons {
     // Keep the source optic's 4.2-degree magnification, but use this game's
     // astronomical far plane so the 400 km sky dome is not clipped to black.
     this.scopeCamera = new THREE.PerspectiveCamera(4.2, 1, 0.01, camera.far);
-    this.scopeTarget = new THREE.RenderTarget(512, 512, {
+    this.scopeTarget = new THREE.WebGLRenderTarget(512, 512, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: true,
@@ -497,7 +497,11 @@ export class SurfaceWeapons {
   }
 
   updateLighting(radiance, environment = {}, worldUp = null) {
-    this.lighting.update(radiance, environment, this.rig.visible, worldUp);
+    this.lighting.update(radiance, environment, this.rig.visible, worldUp, { deferEnvironment: true });
+  }
+
+  prepareLighting() {
+    this.lighting.prepareEnvironment();
   }
 
   update(dt, active, beamDistance = 120, motion = {}) {
@@ -675,16 +679,24 @@ export class SurfaceWeapons {
     this.scopeCamera.updateMatrixWorld(true);
 
     const rigWasVisible = this.rig.visible;
+    const lensWasVisible = lens.visible;
     const previousTarget = renderer.getRenderTarget();
-    lens.visible = false;
-    this.rig.visible = false;
-    renderer.setRenderTarget(this.scopeTarget);
-    renderer.clear();
-    renderer.render(this.scene, this.scopeCamera);
-    renderer.setRenderTarget(previousTarget);
-    this.rig.visible = rigWasVisible;
-    lens.visible = true;
-
+    const previousFace = renderer.getActiveCubeFace(), previousMip = renderer.getActiveMipmapLevel();
+    let failed = false;
+    try {
+      lens.visible = false;
+      this.rig.visible = false;
+      renderer.setRenderTarget(this.scopeTarget);
+      renderer.clear();
+      renderer.render(this.scene, this.scopeCamera);
+    } catch (error) {
+      failed = true;throw error;
+    } finally {
+      this.rig.visible = rigWasVisible;
+      lens.visible = lensWasVisible;
+      try { renderer.setRenderTarget(previousTarget, previousFace, previousMip); }
+      catch (error) { if (!failed) throw error; }
+    }
   }
 
   dispose() {
