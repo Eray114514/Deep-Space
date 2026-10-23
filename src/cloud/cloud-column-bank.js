@@ -26,6 +26,7 @@ export class CloudColumnBank {
     this.producer=producer;this.tileRows=tileRows;this.footprintBatch=footprintBatch;this.workQuanta=workQuanta;
     this.deadlineAware=deadlineAware&&producer==='tile';this.service=null;this.deferFirst=false;
     this.forecastSteps=forecastSteps;this.cacheSteps=cacheSteps;this.forecastStream=null;
+    this.resetAdmission();
     this.scratch=producer==='tile'?new CloudColumnScratch(width,tileRows):null;
     this.scratchEpoch=this.scratch?.epoch;
     this.programs={};
@@ -40,6 +41,12 @@ export class CloudColumnBank {
     if(this.forecastStream===stream)return;
     const previous=this.forecastStream;this.forecastStream=null;previous?.releaseForecast(this);
     if(!this.disposed&&stream&&!stream.disposed&&this.forecastSteps>2&&stream.retainForecast(this,this.forecastSteps))this.forecastStream=stream;
+  }
+  resetAdmission() {
+    // Each immutable source has one-use initialization keys. Only recurring
+    // draws share the production estimate; cold intervals remain measured.
+    this.admissionKeys=new WeakMap();this.nextStartKey={phase:this.footprintSamples<=this.footprintBatch?'initialize-final':'initialize-work'};
+    this.productionKey={phase:'production'};this.idleKey={phase:'idle'};
   }
   plan() {
     const p=this.planet,stream=p.weatherStream,anchor=stream?.anchor,step=stream?.frameHours;
@@ -73,7 +80,8 @@ export class CloudColumnBank {
       last.hours=hours;last.lastDraws=0;
     }
   }
-  update(renderer,{workQuanta=this.workQuanta,allowCreate=true}={}) {
+  update(renderer,{workQuanta=this.workQuanta,allowCreate=true,admit=null}={}) {
+    if(admit!==null&&(typeof admit!=='function'||this.producer!=='tile'))throw Error('Invalid column admission');
     // Resource dispose events are synchronous. Nested updates must not create
     // replacements inside the outer transaction's retirement/iteration.
     if(this.disposed||this.updating||this.retiring)return;
@@ -84,6 +92,9 @@ export class CloudColumnBank {
       // No retired target may remain bound, even behind a disabled branch.
       this.unbind();
       this.syncForecast(stream);
+      // The admission callback may observe loss/restoration before the first
+      // target exists. Register epochs without initializing GPU resources.
+      if(admit)this.scratch.observeRenderer(renderer);
       if(this.fieldOwner!==p.weatherField || this.speciesMask!==u.uSpeciesMask.value
         ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch)) {
         this.retireMaps();
@@ -121,19 +132,39 @@ export class CloudColumnBank {
           ||this.speciesMask!==u.uSpeciesMask.value||this.scratch?.lost
           ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch))return;
       }
-      if(!pending&&allowCreate) {
-        const hour=(this.deferFirst?hours.slice(1):hours).find(hour=>!this.maps.has(hour)
-          && stream.frames.has(hour) && stream.revisionAt(hour)!=null);
-        if(hour!==undefined) {
+      const hour=!pending&&allowCreate?(this.deferFirst?hours.slice(1):hours).find(hour=>!this.maps.has(hour)
+        &&stream.frames.has(hour)&&stream.revisionAt(hour)!=null):undefined;
+      const frame=stream.frames.get(hour);
+      const phase=pending?.admission?.()||(hour!==undefined?{phase:this.nextStartKey.phase,maxUnits:1}:{phase:'idle',maxUnits:0});
+      const keys=pending&&this.admissionKeys.get(pending);
+      const request={...phase,key:phase.phase==='production'?this.productionKey:phase.phase==='idle'?this.idleKey
+        :phase.phase==='initialize-final'?keys?.final||this.nextStartKey:keys?.start||this.nextStartKey};
+      let submission;
+      // Admission stays inside the lifecycle transaction, after cancellations
+      // and before snapshot allocation. A deferred callback cannot spend it.
+      let open=true,called=false;
+      const produce=grant=>{
+        if(!open||called)throw Error('Column admission must submit once synchronously');
+        called=true;
+        if(admit&&(!Number.isInteger(grant)||grant<0||grant>request.maxUnits))throw Error('Invalid column admission grant');
+        if(this.disposed||stream.disposed||stream!==p.weatherStream||a!==stream.anchor||this.fieldOwner!==p.weatherField
+          ||this.speciesMask!==u.uSpeciesMask.value||this.scratch?.lost
+          ||(this.scratch&&this.scratchEpoch!==this.scratch.epoch))return;
+        if(!pending&&allowCreate&&(!admit||grant>0)&&hour!==undefined&&stream.frames.get(hour)===frame) {
           const MapProducer=this.producer==='tile'?CloudColumnTileMap:CloudColumnMap;
           pending=new MapProducer(p,{hours:hour,width:this.width,footprintSamples:this.footprintSamples,
             programOwner:this.programs,tileRows:this.tileRows,footprintBatch:this.footprintBatch,scratch:this.scratch});
-          this.maps.set(hour,pending);
+          this.admissionKeys.set(pending,{start:this.nextStartKey,
+            final:this.nextStartKey.phase==='initialize-final'?this.nextStartKey:{phase:'initialize-final'}});
+          this.nextStartKey={phase:this.nextStartKey.phase};this.maps.set(hour,pending);
         }
-      }
-      let submission;
-      if(this.producer==='tile')submission=pending?.bakeWork(renderer,workQuanta);
-      else pending?.bakeSlice(renderer,this.rows);
+        if(this.producer==='tile')return submission=pending?.bakeWork(renderer,grant);
+        pending?.bakeSlice(renderer,this.rows);
+      };
+      try {
+        const outcome=admit?admit(request,produce):produce(workQuanta);
+        if(outcome&&typeof outcome.then==='function')throw Error('Column admission must be synchronous');
+      } finally {open=false;}
       if(this.service&&stream===p.weatherStream&&this.fieldOwner===p.weatherField)this.service.lastDraws+=submission?.draws||0;
       const first=this.maps.get(a),second=this.maps.get(b);
       const current=stream===p.weatherStream&&a===stream.anchor&&!stream.disposed
@@ -164,7 +195,7 @@ export class CloudColumnBank {
   }
   retireMaps() {
     if(this.retiring)return;
-    this.unbind();
+    this.unbind();this.resetAdmission();
     const maps=[...this.maps.values()],programs=this.programs;
     // A draw can synchronously retire the bank. Its map releases resources
     // after that draw returns and must not hand programs to an abandoned pool.

@@ -36,7 +36,7 @@ export class CloudColumnScratch {
   releaseRetiredTargets() {
     for(const target of this.retiring)target.dispose();this.retiring=[];
   }
-  prepare(renderer) {
+  observeRenderer(renderer) {
     if(this.disposed)throw Error('Disposed column scratch');
     if(this.renderer&&this.renderer!==renderer)throw Error('Column scratch cannot cross renderers');
     if(!this.renderer) {
@@ -44,6 +44,9 @@ export class CloudColumnScratch {
       renderer.domElement.addEventListener('webglcontextlost',this.onLost);
       renderer.domElement.addEventListener('webglcontextrestored',this.onRestored);
     }
+  }
+  prepare(renderer) {
+    this.observeRenderer(renderer);
     const gl=renderer.getContext();
     if(this.lost||gl.isContextLost())throw Error('Column scratch context is lost');
     if(this.initializedEpoch!==this.epoch) {
@@ -102,6 +105,7 @@ export class CloudColumnTileMap {
     this.footprintSamples=footprintSamples;this.generation=hours;this.tileRows=tileRows;this.footprintBatch=footprintBatch;
     this.row=0;this.footprintCursor=0;this.scratchIndex=-1;this.lease=null;
     this.ready=false;this.disposed=false;this.invalidated=false;this.reason=null;
+    this.startedWork=false;this.startedFinal=false;
     this.inWork=false;
     this.renderer=null;this.contextEpoch=null;this.programOwner=programOwner;this.uploadMs=[];
     this.fieldOwner=planet.weatherField;this.speciesMask=planet.volCloudMat.uniforms.uSpeciesMask.value;
@@ -138,6 +142,18 @@ export class CloudColumnTileMap {
     this.invalidated=true;this.reason=reason;
     this.scratch.release(this,this.lease);this.lease=null;this.footprintCursor=0;this.scratchIndex=-1;
   }
+  admission() {
+    // First uploads/program/target use are not recurring integration draws.
+    // Do not let a batch cross the first final-variant use under a warm key.
+    if(this.ready||this.disposed||this.invalidated)return {phase:'idle',maxUnits:0};
+    const untilFinal=Math.ceil((this.footprintSamples-this.footprintCursor)/this.footprintBatch);
+    if(untilFinal>1&&!this.startedWork)return {phase:'initialize-work',maxUnits:1};
+    if(!this.startedFinal) {
+      if(untilFinal===1)return {phase:'initialize-final',maxUnits:1};
+      return {phase:'production',maxUnits:untilFinal-1};
+    }
+    return {phase:'production',maxUnits:Number.MAX_SAFE_INTEGER};
+  }
   bakeWork(renderer,quanta=1) {
     if(!Number.isInteger(quanta)||quanta<0)throw Error('Column work grant must be a nonnegative draw count');
     const result={draws:0,committedRows:0,row:this.row,footprintCursor:this.footprintCursor,
@@ -171,7 +187,10 @@ export class CloudColumnTileMap {
         target.scissor.set(0,final?this.row:0,this.width,rows);target.scissorTest=true;
         renderer.autoClear=false;renderer.setRenderTarget(target);
         this.quad.material=material;this.scratch.beginDraw(this);
-        try {this.quad.render(renderer);result.draws++;}
+        try {
+          this.quad.render(renderer);result.draws++;
+          if(final)this.startedFinal=true;else this.startedWork=true;
+        }
         finally {this.scratch.endDraw(this);}
         if(this.disposed||this.invalidated||!this.sourcesCurrent()||renderer.getContext().isContextLost()) {
           this.invalidate('submission-invalidated');break;

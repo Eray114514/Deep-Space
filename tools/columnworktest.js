@@ -533,6 +533,148 @@ test('absolute production plans distinguish first use from retirement and report
   } finally {bank.dispose();}
 });
 
+test('admission separates first work and first final use without changing sample order',()=>{
+  const f=fixture(),{map}=f.map({width:8,tileRows:2,footprintSamples:5,footprintBatch:2});
+  assert.deepEqual(map.admission(),{phase:'initialize-work',maxUnits:1});f.work(map,0);
+  assert.deepEqual(map.admission(),{phase:'initialize-work',maxUnits:1});f.work(map,1);
+  assert.deepEqual(map.admission(),{phase:'production',maxUnits:1});f.work(map,1);
+  assert.deepEqual(map.admission(),{phase:'initialize-final',maxUnits:1});f.work(map,1);
+  assert.deepEqual(map.admission(),{phase:'production',maxUnits:Number.MAX_SAFE_INTEGER});f.work(map,3);
+  assert.deepEqual(map.admission(),{phase:'idle',maxUnits:0});
+  assert.deepEqual(f.draws.map(draw=>draw.start),[0,2,4,0,2,4]);assert.equal(map.ready,true);
+});
+
+test('a final-only producer has one initialization followed by recurring final work',()=>{
+  const f=fixture(),{map}=f.map({width:8,tileRows:2,footprintSamples:1,footprintBatch:8});
+  assert.deepEqual(map.admission(),{phase:'initialize-final',maxUnits:1});f.work(map,1);
+  assert.deepEqual(map.admission(),{phase:'production',maxUnits:Number.MAX_SAFE_INTEGER});f.work(map,1);
+  assert.equal(map.ready,true);assert.ok(f.draws.every(draw=>draw.final));
+});
+
+test('blocked and throwing first draws never claim a warm initialization',()=>{
+  const f=fixture(),scratch=f.scratch(8,2),a=f.map({width:8,scratch}),b=f.map({width:8,scratch});
+  f.work(a.map,1);const blocked=f.work(b.map,1);assert.equal(blocked.draws,0);
+  assert.deepEqual(b.map.admission(),{phase:'initialize-work',maxUnits:1});a.map.dispose();
+  f.hook=()=>{throw Error('expected first draw');};assert.throws(()=>f.work(b.map,1),/expected first draw/);
+  assert.deepEqual(b.map.admission(),{phase:'initialize-work',maxUnits:1});
+  f.hook=null;f.work(b.map,1);assert.equal(b.map.admission().phase,'production');
+});
+
+function admittedBank(f,options={}) {
+  const bank=new CloudColumnBank(f.planet,{producer:'tile',width:8,tileRows:2,footprintSamples:4,footprintBatch:2,...options});
+  f.scratches.push(bank.scratch);
+  f.renderer.render=mesh=>{
+    const map=[...bank.maps.values()].find(map=>map.material===mesh.material||map.finalMaterial===mesh.material);
+    assert.ok(map,'New snapshot must be bank-owned before any draw');f.track(map);map.quad.render(f.renderer);
+  };
+  return bank;
+}
+
+test('zero phase admission allocates no snapshot and retains the same unspent key',()=>{
+  const f=fixture(),bank=admittedBank(f),requests=[];
+  try {
+    const admit=(request,produce)=>{requests.push(request);return produce(0);};
+    bank.update(f.renderer,{admit});bank.update(f.renderer,{admit});
+    assert.equal(bank.maps.size,0);assert.equal(f.draws.length,0);assert.equal(f.initialized.length,0);
+    assert.equal(requests[0].phase,'initialize-work');assert.equal(requests[0].key,requests[1].key);
+    assert.equal(requests[0].maxUnits,1);
+  } finally {bank.dispose();}
+});
+
+test('each source owns two initialization keys and recurring work shares one estimate',()=>{
+  const f=fixture(),bank=admittedBank(f),requests=[];
+  try {
+    const admit=(request,produce)=>{requests.push(request);return produce(Math.min(3,request.maxUnits));};
+    for(let step=0;step<20&&(!bank.maps.get(2.25)?.ready);step++)bank.update(f.renderer,{admit});
+    assert.equal(bank.maps.size,3);assert.ok([...bank.maps.values()].every(map=>map.ready));
+    const starts=requests.filter(request=>request.phase==='initialize-work'),finals=requests.filter(request=>request.phase==='initialize-final');
+    const recurring=requests.filter(request=>request.phase==='production');
+    assert.equal(starts.length,3);assert.equal(finals.length,3);assert.equal(new Set([...starts,...finals].map(request=>request.key)).size,6);
+    assert.equal(new Set(recurring.map(request=>request.key)).size,1);
+    assert.ok([...starts,...finals].every(request=>request.maxUnits===1&&request.key!==recurring[0].key));
+    assert.equal(f.draws.length,12);assert.equal(f.planet.volCloudMat.uniforms.uColumnsReady.value,1);
+    const idle=bank.update(f.renderer,{admit:(request,produce)=>{
+      assert.deepEqual({phase:request.phase,maxUnits:request.maxUnits},{phase:'idle',maxUnits:0});return produce(0);
+    }});assert.equal(idle,undefined);assert.equal(f.draws.length,12);
+  } finally {bank.dispose();}
+});
+
+test('final-only snapshots also receive one-use initialization keys',()=>{
+  const f=fixture(),bank=admittedBank(f,{footprintSamples:1,footprintBatch:8}),requests=[];
+  try {
+    for(let step=0;step<2;step++)bank.update(f.renderer,{admit:(request,produce)=>{
+      requests.push(request);return produce(Math.min(3,request.maxUnits));
+    }});
+    assert.equal(requests[0].phase,'initialize-final');assert.equal(requests[0].key.phase,'initialize-final');
+    assert.equal(requests[1].phase,'production');assert.notEqual(requests[0].key,requests[1].key);
+    assert.equal(bank.maps.get(.25).ready,true);
+  } finally {bank.dispose();}
+});
+
+test('service and return values use actual producer draws rather than admission metadata',()=>{
+  const f=fixture(),bank=admittedBank(f,{deadlineAware:true});
+  try {
+    const result=bank.update(f.renderer,{admit:(request,produce)=>{produce(1);return {draws:999};}});
+    assert.equal(result.draws,1);assert.equal(bank.service.lastDraws,1);assert.equal(f.draws.length,1);
+  } finally {bank.dispose();}
+});
+
+test('admission cannot submit twice or retain a callback beyond the transaction',()=>{
+  const f=fixture(),bank=admittedBank(f);let retained;
+  try {
+    bank.update(f.renderer,{admit:(request,produce)=>{retained=produce;return produce(0);}});
+    assert.throws(()=>retained(1),/synchronously/);assert.equal(bank.maps.size,0);
+    assert.throws(()=>bank.update(f.renderer,{admit:(request,produce)=>{produce(1);return produce(1);}}),/once/);
+    assert.equal(f.draws.length,1);assert.equal(bank.updating,false);
+  } finally {bank.dispose();}
+});
+
+for(const grant of [-1,.5,Infinity,NaN,2])test(`invalid or over-phase admission is rejected before snapshot creation (${grant})`,()=>{
+  const f=fixture(),bank=admittedBank(f);
+  try {
+    assert.throws(()=>bank.update(f.renderer,{admit:(request,produce)=>produce(grant)}),/grant/);
+    assert.equal(bank.maps.size,0);assert.equal(f.draws.length,0);assert.equal(bank.updating,false);
+  } finally {bank.dispose();}
+});
+
+test('Promise admission is rejected without leaving a live submission callback',()=>{
+  const f=fixture(),bank=admittedBank(f);let retained;
+  try {
+    assert.throws(()=>bank.update(f.renderer,{admit:(request,produce)=>{retained=produce;return Promise.resolve();}}),/synchronous/);
+    assert.throws(()=>retained(1),/synchronously/);assert.equal(bank.maps.size,0);
+  } finally {bank.dispose();}
+});
+
+for(const change of ['field','species','stream','disposed-stream','anchor','frame','context','bank'])
+  test(`phase admission revalidates ${change} after callback entry before allocation`,()=>{
+    const f=fixture(),bank=admittedBank(f);
+    try {
+      bank.update(f.renderer,{admit:(request,produce)=>{
+        if(change==='field')f.planet.weatherField={windRadiansPerHour:0};
+        else if(change==='species')f.planet.volCloudMat.uniforms.uSpeciesMask.value=0;
+        else if(change==='stream')f.planet.weatherStream=null;
+        else if(change==='disposed-stream')f.stream.disposed=true;
+        else if(change==='anchor')f.stream.anchor+=1;
+        else if(change==='frame')f.stream.frames.set(.25,{...f.stream.frames.get(.25)});
+        else if(change==='context'){f.lose();f.restore();}
+        else bank.dispose();
+        return produce(1);
+      }});
+      assert.equal(bank.maps.size,0);assert.equal(f.draws.length,0);assert.equal(f.planet.volCloudMat.uniforms.uColumnsReady.value,0);
+    } finally {bank.dispose();}
+  });
+
+test('source retirement replaces recurring cost keys and keeps old tickets independent',()=>{
+  const f=fixture(),bank=admittedBank(f),keys=[];
+  try {
+    const admit=(request,produce)=>{keys.push(request.key);return produce(1);};
+    bank.update(f.renderer,{admit});bank.update(f.renderer,{admit});bank.update(f.renderer,{admit});
+    const old=keys.at(-1);assert.equal(old.phase,'production');f.planet.weatherField={windRadiansPerHour:0};
+    bank.update(f.renderer,{admit});bank.update(f.renderer,{admit});bank.update(f.renderer,{admit});
+    assert.equal(keys.at(-1).phase,'production');assert.notEqual(keys.at(-1),old);
+  } finally {bank.dispose();}
+});
+
 console.log(JSON.stringify({passed:results.every(result=>result.passed),cases:results.length,results,
   scope:'Pure CPU contracts: actual TileMap/Scratch/material/revision classes, recorded uniforms/targets/rectangles and resource events. No shader execution, actual GPU completion, native parity, throughput or dynamic-budget acceptance.'},null,2));
 assert.equal(results.filter(result=>!result.passed).length,0,'Column work contracts failed; see individual cases above');

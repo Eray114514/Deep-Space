@@ -48,8 +48,10 @@ export function prepareSurfaceAtmosphere(material, planet) {
 export function installSurfaceAtmosphere(material, planet, shader) {
   prepareSurfaceAtmosphere(material, planet);
   Object.assign(shader.uniforms, surfaceMediumUniforms(material, planet));
-  shader.defines ||= {};
-  shader.defines.SURFACE_CLOUD_MEDIUM=Number(hasSurfaceCloudMedium(planet));
+  // Three has already keyed this variant and initially borrows material.defines.
+  // Medium topology also belongs to the consumer's customProgramCacheKey; keep
+  // its compile-only define local instead of changing the next selection key.
+  shader.defines={...shader.defines,SURFACE_CLOUD_MEDIUM:Number(hasSurfaceCloudMedium(planet))};
   const transport = /* glsl */`
     ${cloudAtmosphereGLSL}
     ${stellarOcclusionGLSL}

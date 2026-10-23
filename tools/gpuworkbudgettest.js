@@ -203,6 +203,68 @@ try {
     const next=p.run(key,grant=>f.work(grant));assert.equal(next.granted,2,'Fresh peak retains the existing conservative decay');
     assert.ok(p.snapshot().records.at(-1).estimatedMs>5.8);assert.ok(p.snapshot().remainingMs>=0);
   });
+  // Captured native first-use/production values replay the admission math only;
+  // these CPU controls do not establish a real tile's phase boundary or cost.
+  test('captured first-use spike and later cheap draw on one key retain the blocking fresh peak',()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,maxPending:2,maxInFlightMs:12,sampleEvery:1}),p=f.p,key={};
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1);
+    // Both one-draw submissions precede feedback, as permitted by two fences.
+    p.beginFrame();assert.equal(p.run(key,grant=>f.work(grant)).granted,1);
+    f.complete();f.queries[0].ns=205.087392e6;f.queries[1].ns=.889376e6;p.poll();
+    assert.equal(p.snapshot().stats.observed,2);assert.equal(p.snapshot().pending,0);
+    assert.equal(p.snapshot().records[0].gpuMs,205.087392);assert.equal(p.snapshot().records[1].gpuMs,.889376);
+    for(let frame=0;frame<8;frame++) {
+      p.beginFrame();const blocked=p.run(key,grant=>{assert.equal(grant,0);return f.work(grant);});
+      assert.equal(blocked.granted,0);assert.equal(blocked.reason,'allowance');
+    }
+    assert.equal(f.draws,2);assert.equal(f.count('fenceSync'),2);assert.equal(p.snapshot().stats.observed,2);
+  });
+  test('one-use initialization cost key leaves production independently calibrated within the original limits',()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,maxPending:2,maxInFlightMs:12,sampleEvery:1,safety:1.5}),p=f.p;
+    const initialization={},production={};p.beginFrame();
+    assert.equal(p.run(initialization,grant=>f.work(grant)).granted,1);
+    f.complete({gpuMs:205.087392});p.poll();assert.equal(p.snapshot().pending,0);
+    p.beginFrame();const calibration=p.run(production,grant=>f.work(grant));
+    assert.equal(calibration.granted,1,'A distinct production identity must first calibrate exactly one draw');
+    assert.equal(p.snapshot().records.at(-1).estimatedMs,2,'The cold key cannot set the production estimate');
+    f.complete({gpuMs:.889376});p.poll();p.beginFrame();
+    const safeUnitMs=.889376*1.5,expected=Math.min(12,Math.floor(6/safeUnitMs));
+    assert.equal(expected,4);const warm=p.run(production,grant=>f.work(grant));
+    assert.equal(warm.granted,expected);assert.equal(warm.units,expected);
+    const snapshot=p.snapshot();assert.equal(snapshot.budgetMs,6);assert.equal(snapshot.frameUnits,4);
+    assert.ok(Math.abs(snapshot.records.at(-1).estimatedMs-expected*safeUnitMs)<1e-12);
+    assert.ok(snapshot.remainingMs>=0&&snapshot.remainingMs<safeUnitMs);assert.equal(snapshot.pending,1);
+    assert.equal(p.maxUnits,12);assert.equal(p.maxPending,2);assert.equal(p.safety,1.5);
+    const noRounding=p.run(production,grant=>{assert.equal(grant,0);return f.work(grant);});
+    assert.equal(noRounding.granted,0);assert.equal(f.draws,6);assert.equal(f.count('fenceSync'),3);
+    assert.equal(snapshot.records[0].gpuMs,205.087392);assert.equal(snapshot.records[1].gpuMs,.889376);
+  });
+  test('distinct phase keys share unfinished cold-fence caps credit and native-fault quarantine',()=>{
+    const f=fixture({budgetMs:6,maxUnits:12,maxPending:2,maxInFlightMs:12,sampleEvery:1}),p=f.p;
+    const initialization={},production={};p.beginFrame();p.run(initialization,grant=>f.work(grant));
+    p.beginFrame();assert.equal(p.run(production,grant=>f.work(grant)).granted,1);
+    assert.equal(p.snapshot().pending,2);assert.equal(p.snapshot().stats.completed,0);
+    p.beginFrame();for(let attempt=0;attempt<3;attempt++) {
+      const blocked=p.run({},grant=>{assert.equal(grant,0);return f.work(grant);});
+      assert.equal(blocked.granted,0);assert.equal(blocked.reason,'in-flight-limit');
+    }
+    assert.equal(f.draws,2);assert.equal(f.count('fenceSync'),2);assert.equal(p.snapshot().pending,2);
+
+    const credit=fixture({budgetMs:6,maxUnits:12,maxPending:2,maxInFlightMs:2}),creditBudget=credit.p;
+    creditBudget.beginFrame();creditBudget.run({},grant=>credit.work(grant));creditBudget.beginFrame();
+    const noCredit=creditBudget.run({},grant=>{assert.equal(grant,0);return credit.work(grant);});
+    assert.equal(noCredit.granted,0);assert.equal(noCredit.reason,'allowance');
+    assert.equal(creditBudget.snapshot().pending,1);assert.equal(credit.count('fenceSync'),1);
+
+    const failed=fixture({budgetMs:6,maxUnits:12,maxPending:2,maxInFlightMs:12}),failedBudget=failed.p;
+    failedBudget.beginFrame();failedBudget.run({},grant=>failed.work(grant));
+    failed.complete({status:failed.gl.WAIT_FAILED});failedBudget.poll();failedBudget.beginFrame();
+    const quarantined=failedBudget.run({},grant=>{assert.equal(grant,0);return failed.work(grant);});
+    assert.equal(quarantined.granted,0);assert.equal(quarantined.reason,'fence-wait-failed');
+    assert.equal(failedBudget.snapshot().stats.completed,0);assert.equal(failedBudget.snapshot().pending,1);
+    failedBudget.dispose();assert.equal(failedBudget.snapshot().released,false);
+    assert.throws(()=>failed.createBudget(),/already/);failed.lose();assert.equal(failedBudget.snapshot().released,true);
+  });
   for(const gpuMs of [0,-1,NaN,Infinity])test(`invalid stale calibration cannot replace a high peak with cheap work (${gpuMs})`,()=>{
     const f=fixture({budgetMs:6,maxUnits:12,sampleEvery:1,maxSampleAge:2}),p=f.p,key={};
     p.beginFrame();p.run(key,grant=>f.work(grant));f.complete({gpuMs:15});p.poll();

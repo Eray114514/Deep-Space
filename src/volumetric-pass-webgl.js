@@ -343,8 +343,8 @@ export class VolumetricPass extends Pass {
       // A real immutable endpoint may bake before its forecast partner arrives.
       // The bank alone decides when the complete pair is safe to sample.
       if(this.columnWork) {
-        this.columnWork.budget.run(planet.weatherField,grant=>columns.update(renderer,
-          {workQuanta:grant,allowCreate:grant>0}));
+        columns.update(renderer,{admit:(request,produce)=>this.columnWork.budget.run(request.key,produce,
+          {maxUnits:request.maxUnits}).value});
       } else columns.update(renderer);
       if(this.columnMaps.size>2) {
         const oldest=[...this.columnMaps.keys()].find(p=>p!==planet);

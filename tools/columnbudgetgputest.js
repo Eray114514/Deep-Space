@@ -10,6 +10,7 @@ import {evidenceFingerprint} from './evidence-fingerprint.js';
 const verifier='tools/columnbudgetgputest.js',out=`test-results/column-budget-gpu/${new Date().toISOString().replace(/[:.]/g,'-')}`;
 const deadlineAware=process.argv.includes('--deadline-aware');
 const requireSteady=process.argv.includes('--require-steady');
+const stagedCosts=process.argv.includes('--staged-costs');
 const durationArgument=process.argv.slice(2).find(arg=>arg.startsWith('--duration-ms='));
 const durationMs=durationArgument?Number(durationArgument.slice('--duration-ms='.length)):30000;
 const forecastArgument=process.argv.slice(2).find(arg=>arg.startsWith('--forecast-steps='));
@@ -25,7 +26,7 @@ assert.ok(Number.isInteger(durationMs)&&durationMs>=12000&&durationMs<=120000,'D
 assert.ok([2,3].includes(forecastSteps)&&[2,3].includes(cacheSteps)&&cacheSteps<=forecastSteps,'Bounded forecast/cache steps required');
 assert.ok([30,60].includes(frameHz),'Frame cap must be 30 or 60 Hz');
 assert.ok(['planet-0','planet-1'].includes(bodyId),'Select a curated terrestrial body');
-assert.ok(process.argv.slice(2).every(arg=>['--deadline-aware','--require-steady','--untuned-stress',durationArgument,forecastArgument,cacheArgument,hzArgument,bodyArgument].includes(arg)),'Unsupported argument');
+assert.ok(process.argv.slice(2).every(arg=>['--deadline-aware','--require-steady','--untuned-stress','--staged-costs',durationArgument,forecastArgument,cacheArgument,hzArgument,bodyArgument].includes(arg)),'Unsupported argument');
 await mkdir(out,{recursive:true});await writeFile(`${out}/verifier.js`,await readFile(verifier));
 const fixtureBytes=await readFile('tools/fixtures/weather-stream-b9f6f51.json'),fixture=JSON.parse(fixtureBytes);
 assert.equal(createHash('sha256').update(fixture.source).digest('hex'),fixture.sha256);
@@ -44,7 +45,7 @@ try {
     '<link rel="icon" href="data:,"><script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script><canvas id="fixture"></canvas>'}));
   await page.route('**/src/cloud/weather-reference.js',route=>route.fulfill({contentType:'text/javascript',body:fixture.source}));
   await page.goto(`http://127.0.0.1:${port}/column-budget.html`);
-  result=await page.evaluate(async({deadlineAware,durationMs,forecastSteps,cacheSteps,frameHz,bodyId,untunedStress})=>{
+  result=await page.evaluate(async({deadlineAware,durationMs,forecastSteps,cacheSteps,frameHz,bodyId,untunedStress,stagedCosts})=>{
     const T=await import('three'),{Planet}=await import('/src/planet.js');
     const {CelestialClock}=await import('/src/astronomy.js');
     const {canonicalHomeBody}=await import('/tools/canonical-planet-fixture.js');
@@ -137,7 +138,12 @@ try {
         nextFrame=now+1000/frameHz;
         const elapsed=now-start;clock.update((now-last)/1000,true);last=now;watchWorker(p.weatherStream);p.setWeatherTime(clock.hours);
         budget.beginFrame();r.setRenderTarget(load);quad.render(r);
-        const outcome=budget.run(p.weatherField,grant=>bank.update(r,{workQuanta:grant,allowCreate:grant>0}));
+        let outcome;
+        if(stagedCosts)bank.update(r,{admit:(request,produce)=>{
+          outcome=budget.run(request.key,produce,{maxUnits:request.maxUnits});return outcome.value;
+        }});
+        else outcome=budget.run(p.weatherField,grant=>bank.update(r,{workQuanta:grant,allowCreate:grant>0}));
+        outcome||={granted:0,units:0,reason:'no-current-work'};
         r.setRenderTarget(load);quad.render(r);r.setRenderTarget(null);
         const snapshot=budget.snapshot(),ready=p.volCloudMat.uniforms.uColumnsReady.value===1;
         check(snapshot.pending<=2&&snapshot.frameUnits<=12&&!snapshot.fault,'Bounded real submitted work');
@@ -161,7 +167,7 @@ try {
         timeline.push({elapsedMs:elapsed,hours:clock.hours,anchor:p.weatherStream.anchor,ready,grant:outcome.granted,draws:outcome.units,
           pending:snapshot.pending,workerPending:p.weatherStream.pending.size,raw,plan});
       }
-      const run={durationMs:performance.now()-start,clockElapsedMs:clock.hours*3600/clock.scale*1000,frames,readyFrames,firstReadyMs:firstReady,maxWorkerPending,maxFences,frameCapHz:frameHz,deadlineAware,forecastSteps,cacheSteps,
+      const run={durationMs:performance.now()-start,clockElapsedMs:clock.hours*3600/clock.scale*1000,frames,readyFrames,firstReadyMs:firstReady,maxWorkerPending,maxFences,frameCapHz:frameHz,deadlineAware,forecastSteps,cacheSteps,stagedCosts,
         scale:clock.scale,frameHours:step,forecastRealSeconds:step*3600/clock.scale,budget:budget.snapshot()};
       const anchors=[...new Set(timeline.map(item=>item.anchor))];
       run.turnovers={anchors,transitions:Math.max(0,anchors.length-1),
@@ -243,7 +249,7 @@ try {
     } finally {
       budget?.dispose();bank?.dispose();quad?.material.dispose();quad?.dispose();load?.dispose();p?.dispose();reference?.dispose();r?.dispose();
     }
-  },{deadlineAware,durationMs,forecastSteps,cacheSteps,frameHz,bodyId,untunedStress});
+  },{deadlineAware,durationMs,forecastSteps,cacheSteps,frameHz,bodyId,untunedStress,stagedCosts});
   await page.screenshot({path:`${out}/fixture.png`});
   const after=await evidenceFingerprint(verifier);
   await writeFile(`${out}/report.json`,JSON.stringify({before,after,fixture:{revision:fixture.revision,sha256:fixture.sha256},result,errors,warnings},null,2));

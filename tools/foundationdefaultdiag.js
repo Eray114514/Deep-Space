@@ -21,6 +21,11 @@ const historyTransitions=process.argv.includes('--history-transitions')||history
 const receiverStartup=process.argv.includes('--receiver-startup');
 const probeFromNavigation=process.argv.includes('--probe-from-navigation');
 const columnWork=process.argv.includes('--column-work');
+const columnDaySide=process.argv.includes('--column-day-side');
+const orbitArgument=process.argv.slice(2).find(arg=>arg.startsWith('--column-orbit-ms='));
+const columnOrbitMs=orbitArgument?Number(orbitArgument.slice('--column-orbit-ms='.length)):30000;
+assert.ok(Number.isInteger(columnOrbitMs)&&columnOrbitMs>=30000&&columnOrbitMs<=120000,'Column orbit window must be 30000..120000 ms');
+assert.ok(columnWork||!columnDaySide&&!orbitArgument,'Column orbit controls require explicit column work');
 const parallelNearControl=process.argv.includes('--parallel-near-control');
 const viewLoopControl=process.argv.includes('--view-loop-control');
 const beamLoopControl=process.argv.includes('--beam-loop-control');
@@ -60,6 +65,8 @@ const out=`test-results/foundation-default/${new Date().toISOString().replace(/[
 await mkdir(out,{recursive:true});
 await writeFile(`${out}/verifier.js`,await readFile('tools/foundationdefaultdiag.js'));
 const before=await evidenceFingerprint('tools/foundationdefaultdiag.js');
+const admissionHelperBefore=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
+if(columnWork)await writeFile(`${out}/column-admission-probe.js`,await readFile('tools/column-admission-probe.js'));
 const helperBefore=await evidenceFingerprint('tools/foundation-gl-probe.js');
 const bootHelperBefore=await evidenceFingerprint('tools/foundation-boot-probe.js');
 const contextHelperBefore=await evidenceFingerprint('tools/foundation-context-probe.js');
@@ -211,10 +218,12 @@ try {
     window.__foundationHistoryRestore=()=>{if(object.onBeforeRender===wrapper){object.onBeforeRender=original;data.restored=true;}};
   });
   if(errorsFromBoot)await page.evaluate(()=>{window.__foundationGLProbe.mark('boot-error-attribution');window.__foundationGLProbe.armErrors();});
-  if(columnWork)await page.evaluate(()=>{
+  if(columnWork)await page.evaluate(async()=>{
+    const {installColumnAdmissionProbe}=await import('/tools/column-admission-probe.js');
     const pipeline=NMS._pipeline,pass=pipeline.volumePass,original=pass.updateCloudColumns;
     const data=window.__foundationColumnWork={records:[],dropped:0,restored:false,phase:'boot'};
     pipeline.startColumnWork({budgetMs:6,maxUnits:12,maxPending:2,maxInFlightMs:12,sampleEvery:8});
+    const admission=installColumnAdmissionProbe(pipeline.columnWorkBudget);
     const wrapper=function(...args) {
       const result=original.apply(this,args),budget=pipeline.columnWorkBudget;
       if(data.records.length<4096) {
@@ -229,6 +238,7 @@ try {
     };
     pass.updateCloudColumns=wrapper;window.__foundationColumnWorkRestore=()=>{
       if(pass.updateCloudColumns===wrapper){pass.updateCloudColumns=original;data.restored=true;}
+      admission.restore();data.admission=admission.snapshot();
     };
   });
   const checkpoint=async label=>{
@@ -242,12 +252,14 @@ try {
   };
   await checkpoint('boot-before-placement');
   if(columnWork) {
-    await page.evaluate(()=>{
+    await page.evaluate(columnDaySide=>{
       window.__foundationColumnWork.phase='orbit';
-      const p=NMS._planet(0);NMS.teleport(0,(p.volCloudBand.rOut-p.R+3000000)/p.R,
-        {dir:[.34669147556655305,.07291666666666663,-.9351407276403421],horizon:false});
-    });
-    await page.waitForTimeout(30000);await checkpoint('column-orbit-complete');
+      const p=NMS._planet(0),star=p.stellarDirectionsAt(p.weatherHours).slice().sort((a,b)=>b.irradianceFraction-a.irradianceFraction)[0];
+      const direction=columnDaySide?star.direction:[.34669147556655305,.07291666666666663,-.9351407276403421];
+      window.__foundationColumnWork.orbitCamera={daySide:columnDaySide,hours:p.weatherHours,direction,primaryStar:star};
+      NMS.teleport(0,(p.volCloudBand.rOut-p.R+3000000)/p.R,{dir:direction,horizon:false});
+    },columnDaySide);
+    await page.waitForTimeout(columnOrbitMs);await checkpoint('column-orbit-complete');
     await page.screenshot({path:`${out}/column-orbit.png`,timeout:90000});
     await page.evaluate(()=>{window.__foundationColumnWork.phase='near';});
   }
@@ -437,10 +449,11 @@ try {
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
   const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
   const bootHelperAfter=await evidenceFingerprint('tools/foundation-boot-probe.js');
+  const admissionHelperAfter=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
   report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,nativeLogs,nativeLogsDropped,browserInfo,
-    probeFromNavigation,columnWork,bootHelperBefore,bootHelperAfter,
-    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest,
+    probeFromNavigation,columnWork,columnDaySide,columnOrbitMs,admissionHelperBefore,admissionHelperAfter,bootHelperBefore,bootHelperAfter,
+    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest,
     boundary:`${columnWork?'Explicit raw3/cache2 column admission plus an additional orbit interval; not default runtime acceptance.':'Default'} 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.`};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
   console.log(JSON.stringify({out,stableSource:report.stableSource,viewLoopControl,cloudOverride,traceState,
@@ -458,6 +471,7 @@ try {
   assert.equal(finalState.lost,false);assert.equal(finalState.lostEvents,0);
   if(columnWork) {
     assert.equal(finalState.columnWork.restored,true);
+    assert.equal(finalState.columnWork.admission.restored,true);assert.deepEqual(finalState.columnWork.admission.faults,[]);
     assert.ok(finalState.columnWork.records.some(record=>record.phase==='orbit'&&record.plan?.forecastSteps===3&&record.plan.cacheSteps===2),'Actual orbit must execute the opted-in column bank');
     assert.ok(finalState.columnWork.records.every(record=>!record.budget.fault&&record.budget.pending<=2));
     assert.ok(finalState.columnWork.records.every(record=>!record.plan||record.plan.allocatedTargetBytes<=18*1024*1024));
