@@ -16,6 +16,7 @@ import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 import {RenderProfiler} from './render-profiler.js';
 import {GpuWorkBudget} from './gpu-work-budget.js';
 import {GpuFramePacer} from './gpu-frame-pacer.js';
+import {GpuPreparationQueue} from './gpu-preparation-queue.js';
 import {withPreparedShadows} from './render-shadow-state.js';
 import { RenderFrameState } from './render-frame-state.js';
 import { compilePrograms } from './program-preparation.js';
@@ -44,6 +45,10 @@ export class GameLegacyPipeline {
     this.renderer = renderer;
     this.framePacer = null;
     this.frameSubmissionActive = false;
+    this.preparationTurn = true;
+    this.preparations = new GpuPreparationQueue(renderer, {
+      submit: () => this.#submitFrame(() => {}, true),
+    });
     this.scene = scene;
     this.camera = camera;
     this.frameState = new RenderFrameState();
@@ -164,45 +169,77 @@ export class GameLegacyPipeline {
   // fence. A startup-only submission may omit draw; it must not publish world
   // history or count as a presented frame. No scene lease survives this scope.
   submitFrame(work) {
+    this.preparations.noteForeground();
+    return this.#submitFrame(work);
+  }
+
+  prepare(work, options) {
+    return this.preparations.enqueue(work, options);
+  }
+
+  #submitFrame(work, maintenance = false) {
     if(typeof work!=='function')throw new TypeError('Frame submission requires synchronous work');
     if(this.frameSubmissionActive)throw Error('Frame submission is already active');
     const pacer=this.framePacer;
-    let failed=false,active=true,drawn=false,admitted=false;
+    let failed=false,failure,active=true,drawn=false,admitted=false,preparation=null;
     this.frameSubmissionActive=true;
     try {
       // Admission itself calls native queries, whose observers may stop or
       // replace the public owner. They cannot reenter an unpaced submission.
-      if(pacer&&!pacer.beginFrame())return false;
+      if(pacer&&!pacer.beginFrame()) {
+        const status=pacer.snapshot();
+        if(status.fault||status.disposed)this.preparations.fail(Error(`GPU preparation unavailable: ${status.fault||'disposed owner'}`));
+        return false;
+      }
       admitted=true;
       const target = this.renderer.getRenderTarget();
       const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
       try {
-        const result=work(options=>{
+        const draw=options=>{
           if(!active)throw Error('Frame draw is no longer active');
           if(drawn)throw Error('Frame has already been drawn');
           drawn=true;
           return this.#renderScene(options);
-        });
+        };
+        // A preparation owns the whole synchronous state lease. Alternate it
+        // with foreground work, rather than draining a burst into one frame or
+        // compiling against a private destination's borrowed lighting state.
+        if(this.preparations.hasQueued&&(maintenance||this.preparationTurn)) {
+          preparation=this.preparations.runNext(draw);
+          if(preparation) {
+            this.preparationTurn=false;
+            return maintenance;
+          }
+        }
+        if(maintenance)return false;
+        this.preparationTurn=true;
+        const result=work(draw);
         if(result&&typeof result.then==='function')throw new TypeError('Frame submission work must be synchronous');
       } catch(error) {
-        failed=true;throw error;
+        failed=true;failure=error;throw error;
       } finally {
         active=false;
         // Auxiliary views must also restore their own visibility and camera
         // leases. This outer guard preserves the complete caller target tuple.
         try {this.renderer.setRenderTarget(target,face,mip);}
-        catch(error){if(!failed){failed=true;throw error;}}
+        catch(error){if(!failed){failed=true;failure=error;throw error;}}
       }
       return true;
     } catch(error) {
-      failed=true;throw error;
+      failed=true;failure=error;throw error;
     } finally {
       active=false;
       // stop/dispose may detach this owner from inside any auxiliary view. Its
       // submitted work still belongs to the captured owner until this fence.
       try {
-        if(pacer&&admitted)try {pacer.endFrame();} catch(error){if(!failed)throw error;}
-      } finally {this.frameSubmissionActive=false;}
+        if(pacer&&admitted)try {pacer.endFrame();} catch(error){if(!failed){failed=true;failure=error;throw error;}}
+        if(preparation&&!failed&&pacer?.snapshot().fault) {
+          failed=true;failure=Error('GPU preparation completion fence failed');
+        }
+      } finally {
+        this.frameSubmissionActive=false;
+        this.preparations.finish(preparation,{failed,error:failure});
+      }
     }
   }
 
@@ -320,7 +357,9 @@ export class GameLegacyPipeline {
   }
 
   async compileAsync() {
-    await compilePrograms(this.renderer, this.scene, this.camera, null, {signal:this.programPreparation.signal});
+    const signal=this.programPreparation.signal;
+    await this.prepare(()=>compilePrograms(this.renderer,this.scene,this.camera,null,{signal}),
+      {signal,label:'pipeline-programs'});
   }
 
   releaseCloudLightPrograms() {
@@ -332,6 +371,7 @@ export class GameLegacyPipeline {
   }
 
   dispose() {
+    this.preparations.dispose();
     this.stopFramePacing();
     this.programPreparation.abort();
     this.stopProfiling();

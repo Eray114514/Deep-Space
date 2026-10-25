@@ -22,7 +22,7 @@ await mkdir(`${directory}/inputs`, { recursive: true });
 const verifierBytes = await readFile(new URL(import.meta.url));
 await writeFile(`${directory}/verifier.js`, verifierBytes);
 const report = {
-  scope: 'Actual GameLegacyPipeline, synthetic signed cloud pixels and real constant opaque depth; production resolve/composite, native RGBA16F plain off/on then weapon/portal-auxiliary scope off/on, real WeaponLighting/WeaponSkyProbe PMREM, SurfaceWeapons.renderScopeView with a minimal optical rig and SpatialRift.renderPortal with real matrices/cameras plus one synthetic HDR destination plane, native fence admission and retirement. No weapon GLB or rift structure is constructed. Not authored physical clouds, column throughput, default-player, latency or frame-rate acceptance.',
+  scope: 'Actual GameLegacyPipeline, synthetic signed cloud pixels and real constant opaque depth; production resolve/composite, native RGBA16F plain off/on then weapon/portal-auxiliary scope off/on, real WeaponLighting/WeaponSkyProbe PMREM, SurfaceWeapons.renderScopeView with a minimal optical rig and SpatialRift.renderPortal with real matrices/cameras plus one synthetic HDR destination plane, native fence admission and retirement. Queued real compilePrograms, private preparation draw and player-history recovery share that same owner. No weapon GLB or rift structure is constructed. Not authored physical clouds, column throughput, default-player, latency or frame-rate acceptance.',
   busyEvidence: 'Only unmodified native clientWaitSync TIMEOUT_EXPIRED followed by render(false) counts. No fake wait status, forced GPU workload or CPU mock is accepted as hardware busy coverage; missing natural coverage fails explicitly.',
   cpuMock: { executed: false, reason: 'This tool accepts native WebGL evidence only. CPU fault/reentry contracts live separately in tools/gpuframepacertest.js.' },
   verifier: { path: `${directory}/verifier.js`, bytes: verifierBytes.length, sha256: sha256(verifierBytes) },
@@ -67,6 +67,7 @@ try {
     const { WeaponLighting } = await import('/src/weapon-lighting.js');
     const { SurfaceWeapons, SURFACE_WEAPONS } = await import('/src/surface-weapons.js');
     const { SpatialRift } = await import('/src/spatial-rift.js');
+    const { compilePrograms } = await import('/src/program-preparation.js');
     const result = { checks: [], cases: [], comparisons: [], busy: [], transitions: [], scopes: [], scopeBusy: [], auxiliary: [], gl: [],
       shaderErrors: [], contextLosses: [], native: { fences: [], waits: [], deletes: [], draws: [], clears: [], forbidden: [] },
       input: { width: 32, height: 32, volumeScale: 1, successfulFramesPerCase: 3,
@@ -89,7 +90,7 @@ try {
       if (!ids.has(value)) ids.set(value, ++nextId);return ids.get(value);
     };
     let renderer, gl, pipeline, cube, geometry, source, base, lighting, scopeRig, scopeTarget, scopeMaterial, equipmentMaterial,
-      portalTarget, portalMaterial, portalGroup,
+      portalTarget, portalMaterial, portalGroup, preparationTarget, preparationMaterial,
       label = 'setup', nativeMethods, nativeOrder = 0;
     const pipelines = [], pacers = [], captures = [], resolveObservations = [], disposedPipelines = new Set();
     const counts = { draws: 0, queryBegins: 0, queryEnds: 0, fences: 0, auxiliaryCallbacks: 0 };
@@ -636,6 +637,141 @@ try {
         && restoredPortal.metadata.nonfinite === 0);
       check('Native portal projection controls publish no graph history/budget/profiler', result.portalProjectionControl.graphUnchanged);
       assertCallerTarget('portal projection controls');checkpoint('actual portal projection native positive/repeat');
+
+      // Real renderer compilation is a queued synchronous state lease, whose
+      // Promise is only link readiness. A returned false may mean an admitted
+      // preparation slot; native TIMEOUT proof additionally requires zero work.
+      preparationTarget = new T.WebGLRenderTarget(32, 32, { type: T.HalfFloatType, depthBuffer: true });
+      preparationTarget.texture.colorSpace = T.NoColorSpace;
+      preparationMaterial = new T.ShaderMaterial({ vertexShader, fragmentShader:
+        'varying vec2 vUv;void main(){gl_FragColor=vec4(1.5+vUv.x,.8+vUv.y,.4,1.0);}',
+      depthTest: false, depthWrite: false, blending: T.NoBlending });
+      const preparationScene = new T.Scene(), preparationCamera = camera.clone();
+      preparationScene.add(new T.Mesh(geometry, preparationMaterial));
+      const preparation = result.preparation = { attempts: [], compilations: [], playerCallbacks: 0,
+        scope: 'Actual compilePrograms and actual private world graph with a 32x32 synthetic HDR upload witness; not real destination content or native compile-latency acceptance.' };
+      let queuedCompile, compileCalls = 0, compileOutcome = null, queuedBusyObserved = false;
+      const enqueueCompile = name => {
+        let workCalls = 0;
+        const promise = pipeline.prepare(() => {
+          workCalls++;compileCalls++;
+          const before = graphSnapshot(), caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
+          label = `prepare-compile:${name}`;
+          try {
+            renderer.setRenderTarget(preparationTarget);
+            return compilePrograms(renderer, preparationScene, preparationCamera, null, { timeoutMs: result.input.deadlineMs });
+          } finally {
+            renderer.setRenderTarget(caller, face, mip);label = `prepare-compile-restored:${name}`;
+            const program = renderer.properties.get(preparationMaterial).currentProgram;
+            const record = { name, program: id(program), nativeHandle: id(program?.program),
+              targetRestored: renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip,
+              graphUnchanged: equal(before, graphSnapshot()) };
+            preparation.compilations.push(record);
+            check(`${name}: queued actual compiler captures a native program`, Boolean(record.nativeHandle));
+            check(`${name}: compile target lease restores synchronously before readiness`, record.targetRestored && record.graphUnchanged);
+          }
+        }, { label: name });
+        const observed = promise.then(value => ({ success: true, value }), error => ({ success: false, error: String(error) }));
+        return { observed, calls: () => workCalls };
+      };
+      for (let trial = 0; trial < result.input.maxNaturalBusyTrialsPerTransition && !queuedBusyObserved; trial++) {
+        await submit(`preparation-predecessor-${trial}`);
+        const before = stateSnapshot(), beforeQueue = pipeline.preparations.snapshot(),
+          fence = result.native.fences.at(-1), waitsBefore = result.native.waits.length,
+          fencesBefore = result.native.fences.length, playerBefore = preparation.playerCallbacks;
+        queuedCompile = enqueueCompile(`native-program-${trial}`);
+        check('Enqueuing a real compilation performs no renderer submission', queuedCompile.calls() === 0
+          && result.native.fences.length === fencesBefore && equal(before, stateSnapshot()));
+        label = `prepare-admission:${trial}`;
+        const accepted = pipeline.submitFrame(draw => { preparation.playerCallbacks++;return draw(options); });
+        const after = stateSnapshot(), waits = result.native.waits.slice(waitsBefore),
+          timeout = waits.some(row => row.id === fence.id && row.status === gl.TIMEOUT_EXPIRED);
+        const record = { trial, accepted, timeout, callbacks: queuedCompile.calls(), beforeQueue,
+          afterQueue: pipeline.preparations.snapshot(), waits, fences: result.native.fences.slice(fencesBefore),
+          unchanged: equal(before, after), playerCallbacks: preparation.playerCallbacks - playerBefore };
+        preparation.attempts.push(record);
+        check('Preparation requests never execute the caller player callback in their reserved slot', accepted === false && record.playerCallbacks === 0);
+        if (timeout) {
+          check('Queued preparation native TIMEOUT has no compile, draw, clear, new fence or transaction mutation', record.callbacks === 0
+            && record.fences.length === 0 && record.unchanged && record.afterQueue.queued === 1
+            && record.afterQueue.stats.executed === record.beforeQueue.stats.executed);
+          queuedBusyObserved = true;
+        } else {
+          check('A preparation false after native completion is classified as admitted work rather than busy', record.callbacks === 1
+            && record.fences.length === 1 && record.afterQueue.stats.executed === record.beforeQueue.stats.executed + 1);
+          const outcome = await queuedCompile.observed;check('Actual native program readiness succeeds', outcome.success);
+        }
+      }
+      check('Queued compiler naturally busy native branch observed', queuedBusyObserved,
+        { coverage: queuedBusyObserved ? 'native TIMEOUT_EXPIRED / zero preparation callback' : 'uncovered native busy', trials: result.input.maxNaturalBusyTrialsPerTransition });
+      await awaitReady(pipeline.framePacer, 'queued-compile-admission');
+      if (queuedCompile.calls() === 0) {
+        label = 'prepare-compile:admit';const calls = preparation.playerCallbacks;
+        check('Ready queued compiler consumes only a preparation slot', pipeline.submitFrame(draw => {
+          preparation.playerCallbacks++;return draw(options);
+        }) === false && preparation.playerCallbacks === calls);
+      }
+      check('The queued compiler executes once after native readiness', queuedCompile.calls() === 1);
+      const beforePlayer = pipeline.frameState.sequence;
+      await submit('player-after-queued-compile');
+      check('Unrelated player rendering continues after compiler submission', pipeline.frameState.sequence === beforePlayer + 1);
+      compileOutcome = await queuedCompile.observed;check('Real queued compilePrograms readiness succeeds', compileOutcome.success);
+      const preparedProgram = renderer.properties.get(preparationMaterial).currentProgram;
+      preparation.compile = { calls: compileCalls, program: id(preparedProgram), nativeHandle: id(preparedProgram?.program),
+        queue: pipeline.preparations.snapshot(), resultSceneMatches: compileOutcome.value === preparationScene };
+      check('Native readiness settles the original source and releases the preparation job', preparation.compile.resultSceneMatches
+        && preparation.compile.nativeHandle && preparation.compile.queue.pending === 0);
+      assertCallerTarget('after actual queued compiler');checkpoint('actual queued compile and normal player frame');
+
+      await awaitReady(pipeline.framePacer, 'queued-private-admission');
+      const privateSequence = pipeline.frameState.sequence, privateFences = result.native.fences.length,
+        privateGraphContext = {}, privatePlayerCallbacks = preparation.playerCallbacks;
+      let privateDrawCalls = 0, privateScopeRestored = false;
+      const privateJob = pipeline.prepare(draw => {
+        privateDrawCalls++;const caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel(), shift = source.uniforms.uShift.value;
+        try {
+          label = 'prepare-private:upload-witness';renderer.setRenderTarget(preparationTarget);renderer.clear();renderer.render(preparationScene, preparationCamera);
+          source.uniforms.uShift.value = .125;label = 'prepare-private:production-graph';
+          check('Queued private work receives the actual admitted one-use graph', draw({ ...options, context: privateGraphContext }) === true);
+          return true;
+        } finally {
+          source.uniforms.uShift.value = shift;pipeline.invalidateVolumeHistory('private-preparation-fixture');
+          renderer.setRenderTarget(caller, face, mip);label = 'prepare-private:restored';
+          privateScopeRestored = renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip;
+        }
+      }, { label: 'private-destination-fixture' }).then(value => ({ success: true, value }), error => ({ success: false, error: String(error) }));
+      check('Private preparation enqueue borrows no scene state', privateDrawCalls === 0 && pipeline.frameState.sequence === privateSequence);
+      label = 'prepare-private:admission';
+      const privateAccepted = pipeline.submitFrame(draw => { preparation.playerCallbacks++;return draw(options); });
+      const privateOutcome = await privateJob, privateFencesAfter = result.native.fences.slice(privateFences);
+      preparation.private = { callerAccepted: privateAccepted, workCalls: privateDrawCalls, scopeRestored: privateScopeRestored,
+        sequenceBefore: privateSequence, sequenceAfter: pipeline.frameState.sequence, historyValidAfter: pipeline.frameState.valid,
+        playerCallbacks: preparation.playerCallbacks - privatePlayerCallbacks, outcome: privateOutcome,
+        fences: privateFencesAfter, queue: pipeline.preparations.snapshot() };
+      check('A queued private graph is never counted as the requested player graph', privateAccepted === false
+        && privateDrawCalls === 1 && preparation.private.playerCallbacks === 0 && privateOutcome.success && privateOutcome.value === true);
+      check('Private native graph commits once then invalidates its borrowed history', preparation.private.sequenceAfter === privateSequence + 1
+        && !preparation.private.historyValidAfter && privateScopeRestored);
+      check('One captured native fence follows the entire private upload/graph/restore scope', privateFencesAfter.length === 1
+        && privateFencesAfter[0].label === 'prepare-private:restored');
+      const privateCurrent = await read(volume.current), privateFinal = await read(pipeline.composer.readBuffer), uploadWitness = await read(preparationTarget);
+      preparation.private.native = { current: { ...privateCurrent.metadata, delta: compare(captures[3].current.bits, privateCurrent.bits) },
+        final: { ...privateFinal.metadata, delta: compare(captures[3].final.bits, privateFinal.bits) }, upload: uploadWitness.metadata };
+      check('Queued prepared material is exercised by finite occupied native HDR upload witness', uploadWitness.metadata.nonfinite === 0
+        && uploadWitness.metadata.nonzeroRGB > 1000 && uploadWitness.metadata.hdrRGB > 1000);
+      check('Private source mutation reaches actual native current/final output', privateCurrent.metadata.nonfinite === 0
+        && privateFinal.metadata.nonfinite === 0 && preparation.private.native.current.delta.changed > 900
+        && preparation.private.native.final.delta.changed > 900);
+      const recoveredPlayer = await submit('player-after-private-preparation');
+      check('The first returned player frame rejects private preparation history', recoveredPlayer.history === 0);
+      const recoveredNative = { current: await read(volume.current), resolved: await read(volume.historyRead), final: await read(pipeline.composer.readBuffer) };
+      preparation.recoveredPlayer = Object.fromEntries(Object.entries(recoveredNative).map(([stage, value]) => [stage,
+        { ...value.metadata, delta: compare(captures[3][stage].bits, value.bits) }]));
+      check('Restored player current/resolve/final exactly match independent native baseline after private work', Object.values(preparation.recoveredPlayer)
+        .every(stage => stage.nonfinite === 0 && stage.nonzeroRGB > 1000 && stage.delta.changed === 0));
+      check('Actual queued preparation jobs are all settled with no remaining state lease', pipeline.preparations.snapshot().pending === 0
+        && !pipeline.preparations.snapshot().active && !pipeline.preparations.snapshot().fault);
+      assertCallerTarget('queued private draw and player recovery');checkpoint('queued private native graph and player recovery');
       check('Actual budget/profiler frames equal admitted instrumented frames', pipeline.columnWorkBudget.frame === pipeline.profiler.frame);
       result.instrumentation = { budget: pipeline.columnWorkBudget.snapshot(),
         profiler: { frame: pipeline.profiler.frame, pending: pipeline.profiler.pending.length, records: pipeline.profiler.records.length,
@@ -703,6 +839,7 @@ try {
         for (const owner of pacers) if (!owner.snapshot().released) { owner.dispose();await awaitReleased(owner, 'cleanup-captured'); }
         renderer?.setRenderTarget(null);lighting?.dispose();scopeRig?.removeFromParent();scopeTarget?.dispose();
         portalGroup?.removeFromParent();portalTarget?.dispose();portalMaterial?.dispose();
+        preparationTarget?.dispose();preparationMaterial?.dispose();
         scopeMaterial?.dispose();equipmentMaterial?.dispose();cube?.dispose();source?.dispose();base?.dispose();geometry?.dispose();
         if (renderer) {
           const deadline = performance.now() + result.input.deadlineMs;

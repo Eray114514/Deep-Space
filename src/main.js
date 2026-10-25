@@ -409,35 +409,33 @@ function prewarmSurfacePipelines(planet) {
   // compileAsync gathers programs synchronously, then lets ANGLE finish them
   // through KHR_parallel_shader_compile. Temporarily exposing the real shadow
   // light makes the cached surface variants match the eventual ground pass.
-  const lightWasVisible = sunShadow.visible;
-  const lightIntensity = sunShadow.intensity;
-  const savedTarget = renderer.getRenderTarget();
-  const savedFace = renderer.getActiveCubeFace(), savedMip = renderer.getActiveMipmapLevel();
-  sunShadow.visible = true;
-  sunShadow.intensity = 1e-7;
-  let compilation;
-  try {
-    // The private warm draw and the composer use linear offscreen programs.
-    // A default-framebuffer compile prepares a different output/tone-map key.
-    renderer.setRenderTarget(surfaceBootstrapTarget);
-    compilation = withSurfaceWarmupVariant(surfaceBootstrapGroup,
-      () => compilePrograms(renderer, surfaceBootstrapGroup, camera, scene, {signal:startupCompile.signal}));
-  } catch (error) {
-    surfacePipelinesReady = true;
-    disposeSurfaceBootstrap();
-    console.warn('surface pipeline submission failed', error);
-    return;
-  } finally {
-    renderer.setRenderTarget(savedTarget, savedFace, savedMip);
-    sunShadow.visible = lightWasVisible;
-    sunShadow.intensity = lightIntensity;
-  }
+  const signal = startupCompile.signal;
+  const compilation = nodePipeline.prepare(() => {
+    const lightWasVisible = sunShadow.visible;
+    const lightIntensity = sunShadow.intensity;
+    const savedTarget = renderer.getRenderTarget();
+    const savedFace = renderer.getActiveCubeFace(), savedMip = renderer.getActiveMipmapLevel();
+    sunShadow.visible = true;
+    sunShadow.intensity = 1e-7;
+    try {
+      // The private warm draw and the composer use linear offscreen programs.
+      // A default-framebuffer compile prepares a different output/tone-map key.
+      renderer.setRenderTarget(surfaceBootstrapTarget);
+      return withSurfaceWarmupVariant(surfaceBootstrapGroup,
+        () => compilePrograms(renderer, surfaceBootstrapGroup, camera, scene, {signal}));
+    } finally {
+      renderer.setRenderTarget(savedTarget, savedFace, savedMip);
+      sunShadow.visible = lightWasVisible;
+      sunShadow.intensity = lightIntensity;
+    }
+  }, { signal, label: 'startup-surface', isCurrent: () => !startupPrewarmExpired && !loadingCleared });
 
   // The private render also warms the native depth/distance variants using
   // each representative's production deformation materials and draw hooks.
   compilation.then(() => {
     if (!startupPrewarmExpired) surfaceBootstrapPending = true;
   }).catch((error) => {
+    if (startupPrewarmExpired) return;
     surfacePipelinesReady = true;
     disposeSurfaceBootstrap();
     console.warn('surface pipeline prewarm failed', error);
@@ -445,94 +443,53 @@ function prewarmSurfacePipelines(planet) {
 }
 
 function prewarmLoadedShipPipelines() {
-  if (ship.heroLoadFailed) {
-    shipPipelinesWarmed = true;
-    return;
-  }
-  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending
-    || !surfacePipelinesReady) return;
-  if (startupPrewarmExpired) {
-    shipPipelinesWarmed = true;
-    return;
-  }
+  if (ship.heroLoadFailed) { shipPipelinesWarmed = true;return; }
+  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending || !surfacePipelinesReady) return;
+  if (startupPrewarmExpired) { shipPipelinesWarmed = true;return; }
   shipPipelineWarmPending = true;
   surfacePipelinesReady = false;
-  const textures = new Set();
-  ship.group.traverse((object) => {
-    if (!object.isMesh) return;
-    const materials = Array.isArray(object.material)
-      ? object.material : [object.material];
-    for (const material of materials) {
-      if (!material) continue;
-      for (const slot of [
-        'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
-      ]) {
-        if (material[slot]) textures.add(material[slot]);
-      }
-    }
-  });
-  // Match the light set that ForegroundPass enables later in the same frame.
-  // Starting the compile before these layers were enabled produced a 13-light
-  // variant; the first visible hero frame then needed the real 16-light plus
-  // shadowed-sun family synchronously.
-  configureShipForegroundLightingLayers();
-  // Compile the hull for the FOREGROUND pass first: the hero exists
-  // exclusively on that layer in flight, so the ordinary scene camera never
-  // visits those materials.
-  // Pipeline compilation does not force image upload. Initializing the unique
-  // hull textures here keeps the webp transfers behind the loading veil
-  // instead of clustering them in the pull-back shot.
-  try {
-    if (typeof renderer.initTexture === 'function') {
-      for (const textureValue of textures) renderer.initTexture(textureValue);
-    }
-  } catch (error) {
-    shipPipelineWarmPending = false;
-    surfacePipelinesReady = true;
-    console.warn('ship texture prewarm failed', error);
-    return;
-  }
-  // compileAsync keys WebGL programs by the active framebuffer format. The
-  // live foreground pass draws into the composer's half-float buffer, while
-  // compiling against the default framebuffer only warmed an sRGB variant;
-  // pressing Start then synchronously discovered the real 19 hull programs.
-  const compileLayer = (layer, target) => {
-    const foreground=ship.foregroundOnly,sunVisible=sunShadow.visible;
+  const signal = startupCompile.signal;
+  const options = { signal, label: 'startup-ship', isCurrent: () => !startupPrewarmExpired };
+  const compileLayer = (layer, buffer) => nodePipeline.prepare(() => {
+    // Select the current buffers/light domains after admission, not while a
+    // queued job could still be invalidated by resize or a later simulation.
+    configureShipForegroundLightingLayers();
+    const foreground = ship.foregroundOnly, sunVisible = sunShadow.visible;
     try {
-      if(layer===0){ship.setForegroundOnly(false);sunShadow.visible=true;}
-      return compileRenderVariant(renderer,ship.group,camera,scene,
-        {layer,target,shadowLight:layer===0?sunShadow:null,signal:startupCompile.signal});
-    } finally {
-      ship.setForegroundOnly(foreground);sunShadow.visible=sunVisible;
-    }
+      if (layer === 0) { ship.setForegroundOnly(false);sunShadow.visible = true; }
+      return compileRenderVariant(renderer, ship.group, camera, scene, {
+        layer, target: nodePipeline.composer[buffer], shadowLight: layer === 0 ? sunShadow : null, signal,
+      });
+    } finally { ship.setForegroundOnly(foreground);sunShadow.visible = sunVisible; }
+  }, options);
+  const prepare = async () => {
+    await nodePipeline.prepare(() => {
+      const textures = new Set();
+      ship.group.traverse(object => {
+        if (!object.isMesh) return;
+        for (const material of [object.material].flat()) {
+          for (const slot of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap']) {
+            if (material?.[slot]) textures.add(material[slot]);
+          }
+        }
+      });
+      for (const texture of textures) renderer.initTexture(texture);
+    }, options);
+    await compileLayer(SHIP_FOREGROUND_LAYER, 'readBuffer');
+    if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'readBuffer');
+    // Parked hull/interior need the production WORLD light and HDR families too.
+    await compileLayer(0, 'writeBuffer');
+    if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'writeBuffer');
   };
-  const foregroundCompile = (async () => {
-    await compileLayer(SHIP_FOREGROUND_LAYER, nodePipeline.composer.readBuffer);
-    if (RENDER_LOOK_NEXT) {
-      await compileLayer(SHIP_INTERIOR_LAYER, nodePipeline.composer.readBuffer);
-    }
-  })();
-  foregroundCompile.then(async () => {
-    // Second variant: the hull also renders in the MAIN scene pass whenever
-    // it parks on a planet (setForegroundOnly(false)) — and that pass has a
-    // DIFFERENT light set (sunShadow joins near the surface), so every dress
-    // material compiles a second program family. Compiling it here keeps a
-    // multi-second stall off the first landed frame.
-    try {
-      await compileLayer(0, nodePipeline.composer.writeBuffer);
-      if (RENDER_LOOK_NEXT) {
-        await compileLayer(SHIP_INTERIOR_LAYER, nodePipeline.composer.writeBuffer);
-      }
-    } catch (error) {
-      console.warn('ship main-pass prewarm failed', error);
-    }
-    shipPipelinesWarmed = true;
+  void prepare().then(() => {
+    if (!startupPrewarmExpired) shipPipelinesWarmed = true;
+  }).catch(error => {
+    if (!startupPrewarmExpired) console.warn('ship pipeline prewarm failed', error);
+  }).finally(() => {
+    // Expiry already releases these flags; a late completion never changes the
+    // bootstrap mesh set or returns a saved scene state over a later frame.
     shipPipelineWarmPending = false;
     surfacePipelinesReady = true;
-  }).catch((error) => {
-    shipPipelineWarmPending = false;
-    surfacePipelinesReady = true;
-    console.warn('ship pipeline prewarm failed', error);
   });
 }
 
@@ -2122,22 +2079,25 @@ function takePreparedDestination(route, owner) {
   return prepared;
 }
 
-function primePreparedBodyTextures(body) {
-  for (const texture of [
-    body?.cloudShadowTex,
-    body?.cloudWeatherHiTex,
-    body?.ringMesh?.material?.map,
-  ]) {
-    if (texture) renderer.initTexture(texture);
-  }
+function primePreparedBodyTextures(body, system) {
+  // Read the live texture references only after admission: weather replacement
+  // can dispose an atlas while this upload waits behind the preceding frame.
+  void nodePipeline.prepare(() => {
+    for (const texture of [body?.cloudShadowTex, body?.cloudWeatherHiTex, body?.ringMesh?.material?.map]) {
+      if (texture) renderer.initTexture(texture);
+    }
+  }, { label: 'destination-textures', isCurrent: () => !!system && (
+    universe.system === system || warpPreparedSystem === system || riftPreviewSystem === system
+    || transferredPreparedDestination?.system === system
+  ) }).catch(error => {
+    if (!['obsolete', 'aborted', 'context-lost', 'disposed'].includes(error?.code)) console.warn('Destination texture preparation failed:', error);
+  });
 }
 
-async function prewarmWorldMaterials(body) {
-  const sources = [
-    body?.lod?.roots?.find((root) => root.mesh)?.mesh,
-    body?.waterLod?.roots?.find((root) => root.mesh)?.mesh,
-  ].filter(Boolean);
-  for (const source of sources) {
+async function prewarmWorldMaterials(body, system = universe.system) {
+  for (const kind of ['lod', 'waterLod']) await nodePipeline.prepare(() => {
+    const source = body?.[kind]?.roots?.find(root => root.mesh)?.mesh;
+    if (!source?.material) return;
     const mesh = new THREE.Mesh(source.geometry, source.material);
     mesh.name = 'Deferred world material warmer';
     mesh.userData.lodMorph = source.userData.lodMorph ?? 0;
@@ -2149,116 +2109,123 @@ async function prewarmWorldMaterials(body) {
     mesh.position.set(0, 0, -Math.max(8, camera.near * 4));
     mesh.scale.setScalar(1e-7);
     scene.add(mesh);
-    let compilation;
     try {
-      compilation = compilePrograms(renderer, mesh, camera, scene);
+      return compilePrograms(renderer, mesh, camera, scene);
     } finally {
       scene.remove(mesh);
     }
-    await compilation;
-  }
+  }, { label: 'deferred-world', signal: nodePipeline.programPreparation.signal,
+    isCurrent: () => universe.system === system });
 }
 
-async function uploadPreparedLodMeshes(targetBody, prepared) {
-  const signal = warpCompile.signal;
-  const meshes = [];
-  const collectBuiltMeshes = (lod) => {
-    const visit = (node) => {
-      if (node.mesh) meshes.push(node.mesh);
-      if (node.children) for (const child of node.children) visit(child);
-    };
-    for (const root of lod?.roots || []) visit(root);
-  };
-  collectBuiltMeshes(targetBody?.lod);
-  collectBuiltMeshes(targetBody?.waterLod);
-  if (meshes.length === 0) return;
+function finishDeferredSystemMaterialPreparation(body, system) {
+  deferredSystemBuildActive = false;
+  if (universe.system !== system) return;
+  if (body?.group) body.group.visible = true;
+  systemBuildResumeAt = Math.max(systemBuildResumeAt, performance.now() + 120);
+}
 
-  // Submit the real prepared chunks against destination lighting, then restore
-  // every live transform and flag before readiness can yield to another frame.
-  // Compilation prepares programs; real buffer upload still needs a warm draw.
-  const group = targetBody.group;
-  const groupState = {
-    visible: group.visible,
-    position: group.position.clone(),
-    quaternion: group.quaternion.clone(),
-    scale: group.scale.clone(),
-  };
-  const meshStates = [];
-  targetBody.group.traverse((mesh) => {
-    if (!mesh.material) return;
-    meshStates.push({
-      mesh,
-      visible: mesh.visible,
-      frustumCulled: mesh.frustumCulled,
+async function uploadPreparedLodMeshes(targetBody, prepared, token, route) {
+  const signal = warpCompile.signal;
+  return nodePipeline.prepare(() => {
+    const meshes = [];
+    const collectBuiltMeshes = (lod) => {
+      const visit = (node) => {
+        if (node.mesh) meshes.push(node.mesh);
+        if (node.children) for (const child of node.children) visit(child);
+      };
+      for (const root of lod?.roots || []) visit(root);
+    };
+    collectBuiltMeshes(targetBody?.lod);
+    collectBuiltMeshes(targetBody?.waterLod);
+    if (meshes.length === 0) return;
+
+    // Submit the real prepared chunks against destination lighting, then restore
+    // every live transform and flag before readiness can yield to another frame.
+    // Compilation prepares programs; real buffer upload still needs a warm draw.
+    const group = targetBody.group;
+    const groupState = {
+      visible: group.visible,
+      position: group.position.clone(),
+      quaternion: group.quaternion.clone(),
+      scale: group.scale.clone(),
+    };
+    const meshStates = [];
+    targetBody.group.traverse((mesh) => {
+      if (!mesh.material) return;
+      meshStates.push({
+        mesh,
+        visible: mesh.visible,
+        frustumCulled: mesh.frustumCulled,
+      });
     });
-  });
-  group.visible = true;
-  group.position.set(0, 0, 8);
-  group.quaternion.identity();
-  group.scale.setScalar(1e-8);
-  for (const { mesh } of meshStates) {
-    mesh.visible = true;
-    mesh.frustumCulled = false;
-  }
-  const lightStates = [];
-  const rememberLight = (view, visible) => {
-    if (!view || lightStates.some((state) => state.view === view)) return;
-    lightStates.push({
-      view,
-      groupVisible: view.group.visible,
-      lightVisible: view.light.visible,
-    });
-    view.group.visible = visible;
-    view.light.visible = visible;
-  };
-  for (const view of universe.system?.starViews || []) rememberLight(view, false);
-  for (const view of universe.fadingSystem?.starViews || []) rememberLight(view, false);
-  for (const view of prepared?.starViews || []) rememberLight(view, true);
-  const sourceVisibility = [];
-  for (const system of [universe.system, universe.fadingSystem]) {
-    if (!system || system === prepared) continue;
-    for (const body of [...system.planets, ...system.compactObjects]) {
-      sourceVisibility.push([body.group, body.group.visible]);
-      body.group.visible = false;
+    group.visible = true;
+    group.position.set(0, 0, 8);
+    group.quaternion.identity();
+    group.scale.setScalar(1e-8);
+    for (const { mesh } of meshStates) {
+      mesh.visible = true;
+      mesh.frustumCulled = false;
     }
-  }
-  let compilation;
-  try {
-    // Persistent world objects also need destination light-count variants.
-    compilation = compilePrograms(renderer, scene, camera, null, {signal});
-  } finally {
-    for (const state of lightStates) {
-      state.view.group.visible = state.groupVisible;
-      state.view.light.visible = state.lightVisible;
+    const lightStates = [];
+    const rememberLight = (view, visible) => {
+      if (!view || lightStates.some((state) => state.view === view)) return;
+      lightStates.push({
+        view,
+        groupVisible: view.group.visible,
+        lightVisible: view.light.visible,
+      });
+      view.group.visible = visible;
+      view.light.visible = visible;
+    };
+    for (const view of universe.system?.starViews || []) rememberLight(view, false);
+    for (const view of universe.fadingSystem?.starViews || []) rememberLight(view, false);
+    for (const view of prepared?.starViews || []) rememberLight(view, true);
+    const sourceVisibility = [];
+    for (const system of [universe.system, universe.fadingSystem]) {
+      if (!system || system === prepared) continue;
+      for (const body of [...system.planets, ...system.compactObjects]) {
+        sourceVisibility.push([body.group, body.group.visible]);
+        body.group.visible = false;
+      }
     }
-    for (const [object, visible] of sourceVisibility) object.visible = visible;
-    group.visible = groupState.visible;
-    group.position.copy(groupState.position);
-    group.quaternion.copy(groupState.quaternion);
-    group.scale.copy(groupState.scale);
-    for (const state of meshStates) {
-      state.mesh.visible = state.visible;
-      state.mesh.frustumCulled = state.frustumCulled;
+    let compilation;
+    try {
+      // Persistent world objects also need destination light-count variants.
+      compilation = compilePrograms(renderer, scene, camera, null, {signal});
+    } finally {
+      for (const state of lightStates) {
+        state.view.group.visible = state.groupVisible;
+        state.view.light.visible = state.lightVisible;
+      }
+      for (const [object, visible] of sourceVisibility) object.visible = visible;
+      group.visible = groupState.visible;
+      group.position.copy(groupState.position);
+      group.quaternion.copy(groupState.quaternion);
+      group.scale.copy(groupState.scale);
+      for (const state of meshStates) {
+        state.mesh.visible = state.visible;
+        state.mesh.frustumCulled = state.frustumCulled;
+      }
     }
-  }
-  await compilation;
+    return compilation;
+  }, { signal, label: 'destination-lod', isCurrent: () => preparedDestinationIsActive(token, route, prepared) });
 }
 
 async function prewarmPreparedRiftStructure(token, route, prepared) {
+  if (!preparedDestinationIsActive(token, route, prepared)) return;
   warpPreparedRiftStructureState = 'compiling';
-  const groupVisible = spatialRift.group.visible;
-  const portalVisible = spatialRift.portalSurface.visible;
-  spatialRift.group.visible = true;
-  spatialRift.portalSurface.visible = true;
-  let compilation;
+  const signal = warpCompile.signal;
   try {
-    compilation = compilePrograms(renderer, spatialRift.group, camera, null, {signal:warpCompile.signal});
-    // The render contexts and object traversal are captured synchronously.
-    // Never leave the cold, zero-open structure in the live scene while the
-    // driver finishes its asynchronous pipeline work.
-    spatialRift.group.visible = groupVisible;
-    spatialRift.portalSurface.visible = portalVisible;
-    await compilation;
+    await nodePipeline.prepare(() => {
+      const groupVisible = spatialRift.group.visible, portalVisible = spatialRift.portalSurface.visible;
+      try {
+        spatialRift.group.visible = true;spatialRift.portalSurface.visible = true;
+        return compilePrograms(renderer, spatialRift.group, camera, null, {signal});
+      } finally {
+        spatialRift.group.visible = groupVisible;spatialRift.portalSurface.visible = portalVisible;
+      }
+    }, { signal, label: 'rift-structure', isCurrent: () => preparedDestinationIsActive(token, route, prepared) });
     if (!preparedDestinationIsActive(token, route, prepared)) return;
     warpPreparedRiftStructureState = 'complete';
   } catch (error) {
@@ -2266,114 +2233,106 @@ async function prewarmPreparedRiftStructure(token, route, prepared) {
     warpPreparedRiftStructureState = 'failed';
     warpPreparedRiftWarmError = String(error?.message || error);
     console.error('Spatial-rift structure prewarm failed:', error);
-  } finally {
-    if (!compilation) {
-      spatialRift.group.visible = groupVisible;
-      spatialRift.portalSurface.visible = portalVisible;
-    }
   }
 }
 
 async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, token) {
-  // Wait before borrowing scene/camera/target state. A paced-out production
-  // call is not a completed destination warm draw.
-  for(;;) {
-    if(!preparedDestinationIsActive(token,route,prepared)||route?.warpRequested)return false;
-    const pacer=nodePipeline.framePacer;
-    if(!pacer)break;
-    const ready=pacer.poll();
-    if(nodePipeline.framePacer!==pacer)continue;
-    if(ready)break;
-    const status=pacer.snapshot();
-    if(status.disposed||status.fault)throw Error('Destination frame pacing unavailable');
-    await new Promise(resolve=>requestAnimationFrame(resolve));
-  }
   if(!preparedDestinationIsActive(token,route,prepared)||route?.warpRequested)return false;
-  const visibility = [];
-  const rememberVisibility = (object, visible) => {
-    if (!object || visibility.some((state) => state.object === object)) return;
-    visibility.push({ object, visible: object.visible });
-    object.visible = visible;
-  };
-  for (const system of [universe.system, universe.fadingSystem]) {
-    if (!system || system === prepared) continue;
-    for (const view of system.starViews) {
-      rememberVisibility(view.group, false);
-      rememberVisibility(view.light, false);
-    }
-    for (const body of [...system.planets, ...system.compactObjects]) {
-      rememberVisibility(body.group, false);
-    }
-  }
-  for (const view of prepared.starViews) {
-    rememberVisibility(view.group, true);
-    rememberVisibility(view.light, true);
-  }
-  for (const body of [...prepared.planets, ...prepared.compactObjects]) {
-    rememberVisibility(body.group, body === targetBody);
-  }
-  rememberVisibility(spatialRift.group, false);
-
-  const cameraState = {
-    position: camera.position.clone(),
-    quaternion: camera.quaternion.clone(),
-    fov: camera.fov,
-  };
-  const shadowState = {
-    visible: sunShadow.visible,
-    intensity: sunShadow.intensity,
-  };
-  const previousVolumePlanet = volumePass?.activePlanet || null;
-  const previousAtmospherePlanet = atmospherePass.activePlanet || null;
-  const oldTarget = renderer.getRenderTarget();
-  const oldMrt = renderer.getMRT?.();
-  const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
-
+  const signal = warpCompile.signal;
   try {
-    camera.quaternion.copy(targetQuat);
-    camera.updateMatrixWorld(true);
-    sunShadow.visible = false;
-    sunShadow.intensity = 0;
-    volumePass?.setActivePlanet(targetBody, route.target.entry, 0);
-    nodePipeline.setActiveAtmosphere(targetBody, route.target.entry);
-    targetBody.syncAtmoMaterial?.();
-    targetBody.syncVolCloudMaterial?.();
-    nodePipeline.bindVolumeDepth?.(targetBody);
-    renderer.setRenderTarget(surfaceBootstrapTarget);
-    renderer.setMRT?.(null);
-    // Program linking does not allocate the complete production attachments
-    // or upload every binding. Exercise a real offscreen frame before entry.
-    if(nodePipeline.render()===false)throw Error('Destination warm frame was not submitted');
-  } finally {
-    // That draw ran the production graph from the destination's arrival pose
-    // into a private target with most of the scene masked out. Its pixels are a
-    // valid warm-up for the GPU pipeline and complete nonsense as temporal
-    // history for the frame the player actually sees next.
-    nodePipeline.invalidateVolumeHistory('private-prewarm');
-    try {
-      renderer.setRenderTarget(oldTarget);
-      renderer.setMRT?.(oldMrt);
-      volumePass?.setActivePlanet(previousVolumePlanet, nav.pos, 0);
-      nodePipeline.setActiveAtmosphere(previousAtmospherePlanet, nav.pos);
-      previousVolumePlanet?.syncAtmoMaterial?.();
-      previousVolumePlanet?.syncVolCloudMaterial?.();
-      nodePipeline.bindVolumeDepth?.(previousVolumePlanet);
-    } finally {
-      camera.position.copy(cameraState.position);
-      camera.quaternion.copy(cameraState.quaternion);
-      camera.fov = cameraState.fov;
-      camera.updateProjectionMatrix();
-      camera.updateMatrixWorld(true);
-      sunShadow.visible = shadowState.visible;
-      sunShadow.intensity = shadowState.intensity;
-      for (const state of visibility) state.object.visible = state.visible;
-    }
+    return await nodePipeline.prepare((draw) => {
+      const visibility = [];
+      const rememberVisibility = (object, visible) => {
+        if (!object || visibility.some((state) => state.object === object)) return;
+        visibility.push({ object, visible: object.visible });
+        object.visible = visible;
+      };
+      for (const system of [universe.system, universe.fadingSystem]) {
+        if (!system || system === prepared) continue;
+        for (const view of system.starViews) {
+          rememberVisibility(view.group, false);
+          rememberVisibility(view.light, false);
+        }
+        for (const body of [...system.planets, ...system.compactObjects]) {
+          rememberVisibility(body.group, false);
+        }
+      }
+      for (const view of prepared.starViews) {
+        rememberVisibility(view.group, true);
+        rememberVisibility(view.light, true);
+      }
+      for (const body of [...prepared.planets, ...prepared.compactObjects]) {
+        rememberVisibility(body.group, body === targetBody);
+      }
+      rememberVisibility(spatialRift.group, false);
+
+      const cameraState = {
+        position: camera.position.clone(),
+        quaternion: camera.quaternion.clone(),
+        fov: camera.fov,
+      };
+      const shadowState = {
+        visible: sunShadow.visible,
+        intensity: sunShadow.intensity,
+      };
+      const previousVolumePlanet = volumePass?.activePlanet || null;
+      const previousAtmospherePlanet = atmospherePass.activePlanet || null;
+      const oldTarget = renderer.getRenderTarget();
+      const oldFace = renderer.getActiveCubeFace(), oldMip = renderer.getActiveMipmapLevel();
+      const oldMrt = renderer.getMRT?.();
+      const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
+
+      try {
+        camera.quaternion.copy(targetQuat);
+        camera.updateMatrixWorld(true);
+        sunShadow.visible = false;
+        sunShadow.intensity = 0;
+        volumePass?.setActivePlanet(targetBody, route.target.entry, 0);
+        nodePipeline.setActiveAtmosphere(targetBody, route.target.entry);
+        targetBody.syncAtmoMaterial?.();
+        targetBody.syncVolCloudMaterial?.();
+        nodePipeline.bindVolumeDepth?.(targetBody);
+        renderer.setRenderTarget(surfaceBootstrapTarget);
+        renderer.setMRT?.(null);
+        // Program linking does not allocate the complete production attachments
+        // or upload every binding. Exercise a real offscreen frame before entry.
+        if(draw()===false)throw Error('Destination warm frame was not submitted');
+      } finally {
+        // That draw ran the production graph from the destination's arrival pose
+        // into a private target with most of the scene masked out. Its pixels are a
+        // valid warm-up for the GPU pipeline and complete nonsense as temporal
+        // history for the frame the player actually sees next.
+        nodePipeline.invalidateVolumeHistory('private-prewarm');
+        try {
+          renderer.setRenderTarget(oldTarget, oldFace, oldMip);
+          renderer.setMRT?.(oldMrt);
+          volumePass?.setActivePlanet(previousVolumePlanet, nav.pos, 0);
+          nodePipeline.setActiveAtmosphere(previousAtmospherePlanet, nav.pos);
+          previousVolumePlanet?.syncAtmoMaterial?.();
+          previousVolumePlanet?.syncVolCloudMaterial?.();
+          nodePipeline.bindVolumeDepth?.(previousVolumePlanet);
+        } finally {
+          camera.position.copy(cameraState.position);
+          camera.quaternion.copy(cameraState.quaternion);
+          camera.fov = cameraState.fov;
+          camera.updateProjectionMatrix();
+          camera.updateMatrixWorld(true);
+          sunShadow.visible = shadowState.visible;
+          sunShadow.intensity = shadowState.intensity;
+          for (const state of visibility) state.object.visible = state.visible;
+        }
+      }
+      return true;
+    }, { signal, label: 'destination-private-frame',
+      isCurrent: () => preparedDestinationIsActive(token, route, prepared) && !route?.warpRequested });
+  } catch (error) {
+    if (!preparedDestinationIsActive(token, route, prepared) || route?.warpRequested) return false;
+    throw error;
   }
-  return true;
 }
 
 async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
-  if (route?.warpRequested) return;
+  if (!preparedDestinationIsActive(token, route, prepared) || route?.warpRequested) return;
   if (warpPreparedRiftWarmState === 'compiling'
       || warpPreparedRiftWarmState === 'complete') return;
   if (!targetBody?.group || !route?.target?.entry) {
@@ -2386,52 +2345,48 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
   try {
     await warpPreparedRiftStructurePromise;
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
-    await uploadPreparedLodMeshes(targetBody, prepared);
+    await uploadPreparedLodMeshes(targetBody, prepared, token, route);
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
 
-    prepared.updateCelestial(celestialClock.hours);
-    const cameraOffset = route.target.entry.clone().sub(targetBody.posUniv);
-    targetBody.volumeActive = true;
-    targetBody.volumeBlend = 1;
-    targetBody.update(cameraOffset, 1 / 60, true, 0);
-    if (targetBody.volCloudMesh) targetBody.volCloudMesh.visible = true;
-    universe.relativizeSystem(prepared, route.target.entry);
+    const signal = warpCompile.signal;
+    await nodePipeline.prepare(() => {
+      prepared.updateCelestial(celestialClock.hours);
+      const cameraOffset = route.target.entry.clone().sub(targetBody.posUniv);
+      targetBody.volumeActive = true;
+      targetBody.volumeBlend = 1;
+      targetBody.update(cameraOffset, 1 / 60, true, 0);
+      if (targetBody.volCloudMesh) targetBody.volCloudMesh.visible = true;
+      universe.relativizeSystem(prepared, route.target.entry);
 
-    const sourceQuat = nav.quat.clone();
-    const sourceForward = new THREE.Vector3(0, 0, -1).applyQuaternion(sourceQuat).normalize();
-    const sourcePosition = nav.pos.clone().addScaledVector(sourceForward, RIFT_SPAWN_DISTANCE);
-    const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
-    spatialRift.setTransform(
-      sourcePosition.sub(nav.pos),
-      sourceQuat,
-      new THREE.Vector3(),
-      targetQuat,
-    );
-    if (typeof spatialRift.compilePortalAsync === 'function') {
-      await spatialRift.compilePortalAsync(targetBody.group, {
-        beforeCompile: (portalCamera) =>
-          beginRiftPortalScene(portalCamera, prepared, route.bodyId),
-        afterCompile: () => endRiftPortalScene(prepared, route.bodyId),
+      const sourceQuat = nav.quat.clone();
+      const sourceForward = new THREE.Vector3(0, 0, -1).applyQuaternion(sourceQuat).normalize();
+      const sourcePosition = nav.pos.clone().addScaledVector(sourceForward, RIFT_SPAWN_DISTANCE);
+      const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
+      spatialRift.setTransform(
+        sourcePosition.sub(nav.pos),
+        sourceQuat,
+        new THREE.Vector3(),
+        targetQuat,
+      );
+      // compileAsync captures pipelines, but the first direct portal draw still
+      // has to allocate attachments and execute the complete target-world pass.
+      // Do that once while the passage is hidden so the opening animation never
+      // exposes a cold WebGPU frame.
+      renderRiftDestinationPortal({
+        force: true,
+        previewSystem: prepared,
+        targetBodyId: route.bodyId,
+        previewOrigin: route.target.entry,
       });
-    }
-    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
-    // compileAsync captures pipelines, but the first direct portal draw still
-    // has to allocate attachments and execute the complete target-world pass.
-    // Do that once while the passage is hidden so the opening animation never
-    // exposes a cold WebGPU frame.
-    renderRiftDestinationPortal({
-      force: true,
-      previewSystem: prepared,
-      targetBodyId: route.bodyId,
-      previewOrigin: route.target.entry,
-    });
+    }, { signal, label: 'destination-portal',
+      isCurrent: () => preparedDestinationIsActive(token, route, prepared) && !route.warpRequested });
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     await renderPreparedDestinationWarmFrame(targetBody, route, prepared, token);
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     warpPreparedRiftWarmState = 'complete';
     warpPreparedRiftWarmError = null;
   } catch (error) {
-    if (!preparedDestinationIsActive(token, route, prepared)) return;
+    if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
     warpPreparedRiftWarmState = 'failed';
     warpPreparedRiftWarmError = String(error?.message || error);
     console.error('Destination portal pipeline prewarm failed:', error);
@@ -2439,6 +2394,7 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
 }
 
 function prewarmPreparedLod(targetBody, token, route, prepared) {
+  if (!preparedDestinationIsActive(token, route, prepared)) return;
   // Gas/ice giants expose a countChunks-only LOD facade for diagnostics, not
   // a terrain quadtree. They still need their destination portal prewarmed.
   if (typeof targetBody?.lod?.update !== 'function' || !route?.target?.entry) {
@@ -2537,26 +2493,29 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
           && (!waterStats || (waterStats.pending === 0 && waterStats.activeMorphs === 0));
         stablePasses = ready && signature === previousSignature ? stablePasses + 1 : 0;
         previousSignature = signature;
-          if (stablePasses >= 2) {
-            warpPreparedLodWarmState = 'uploading';
-            uploadPreparedLodMeshes(targetBody, prepared)
-              .then(() => {
-                finish('complete');
-                if (warpPreparedRiftWarmState === 'waiting') {
-                  return prewarmPreparedRiftPortal(targetBody, token, route, prepared);
-                }
-                return null;
-              })
-              .catch((error) => {
-                const message = String(error?.message || error);
-                console.error('Destination terrain GPU upload failed:', error);
-                finish('failed', message);
-                if (preparedDestinationIsActive(token, route, prepared)) {
-                  warpPreparedRiftWarmState = 'failed';
-                  warpPreparedRiftWarmError = message;
-                }
-              });
-            return;
+        if (stablePasses >= 2) {
+          warpPreparedLodWarmState = 'uploading';
+          uploadPreparedLodMeshes(targetBody, prepared, token, route)
+            .then(() => {
+              finish('complete');
+              if (preparedDestinationIsActive(token, route, prepared)
+                  && warpPreparedRiftWarmState === 'waiting') {
+                return prewarmPreparedRiftPortal(targetBody, token, route, prepared);
+              }
+              return null;
+            })
+            .catch((error) => {
+              restorePriority();
+              if (!preparedDestinationIsActive(token, route, prepared)) return;
+              const message = String(error?.message || error);
+              console.error('Destination terrain GPU upload failed:', error);
+              finish('failed', message);
+              if (preparedDestinationIsActive(token, route, prepared)) {
+                warpPreparedRiftWarmState = 'failed';
+                warpPreparedRiftWarmError = message;
+              }
+            });
+          return;
         }
       } while (performance.now() - sliceStartedAt < (QUALITY_LOW ? 5 : 14));
       setTimeout(step, 0);
@@ -2574,43 +2533,45 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
 }
 
 async function prewarmPreparedWater(targetBody, token, route, prepared) {
-  const source = targetBody?.waterLod?.roots?.find((root) => root.mesh)?.mesh || null;
-  if (!source?.material) {
-    warpPreparedWaterWarmState = 'complete';
-    return;
-  }
-
-  const mesh = new THREE.Mesh(source.geometry, source.material);
-  mesh.name = 'Prepared destination water pipeline warmer';
-  mesh.userData.lodMorph = source.userData.lodMorph ?? 0;
-  mesh.layers.mask = source.layers.mask;
-  mesh.frustumCulled = false;
-  mesh.castShadow = source.castShadow;
-  mesh.receiveShadow = source.receiveShadow;
-  mesh.visible = true;
-  // A later masked production frame executes real physical-water fragments.
-  // Keep coverage tiny so the calibration draw cannot visibly alter the route
-  // scene or monopolize fill rate after asynchronous pipeline compilation.
-  mesh.position.set(0, 0, -8);
-  mesh.scale.setScalar(2e-7);
-  scene.add(mesh);
-  warpPreparedWaterWarmMesh = mesh;
-  warpPreparedWaterWarmPlanet = targetBody;
+  if (!preparedDestinationIsActive(token, route, prepared)) return;
+  const signal = warpCompile.signal;
   warpPreparedWaterWarmState = 'compiling';
-
   try {
-    const lightVisibility = new Map([...(universe.system?.starViews || []), ...prepared.starViews]
-      .map(view => [view.light, view.light.visible]));
-    let compilation;
-    try {
-      for (const view of universe.system?.starViews || []) view.light.visible = false;
-      for (const view of prepared.starViews) view.light.visible = true;
-      compilation = compilePrograms(renderer, mesh, camera, scene, {signal:warpCompile.signal});
-    } finally {
-      for (const [light, visible] of lightVisibility) light.visible = visible;
-      mesh.removeFromParent();
-    }
-    await compilation;
+    await nodePipeline.prepare(() => {
+      const source = targetBody?.waterLod?.roots?.find((root) => root.mesh)?.mesh || null;
+      if (!source?.material) return;
+
+      const mesh = new THREE.Mesh(source.geometry, source.material);
+      mesh.name = 'Prepared destination water pipeline warmer';
+      mesh.userData.lodMorph = source.userData.lodMorph ?? 0;
+      mesh.layers.mask = source.layers.mask;
+      mesh.frustumCulled = false;
+      mesh.castShadow = source.castShadow;
+      mesh.receiveShadow = source.receiveShadow;
+      mesh.visible = true;
+      // A later masked production frame executes real physical-water fragments.
+      // Keep coverage tiny so the calibration draw cannot visibly alter the route
+      // scene or monopolize fill rate after asynchronous pipeline compilation.
+      mesh.position.set(0, 0, -8);
+      mesh.scale.setScalar(2e-7);
+      scene.add(mesh);
+      warpPreparedWaterWarmMesh = mesh;
+      warpPreparedWaterWarmPlanet = targetBody;
+      warpPreparedWaterWarmState = 'compiling';
+
+      const lightVisibility = new Map([...(universe.system?.starViews || []), ...prepared.starViews]
+        .map(view => [view.light, view.light.visible]));
+      let compilation;
+      try {
+        for (const view of universe.system?.starViews || []) view.light.visible = false;
+        for (const view of prepared.starViews) view.light.visible = true;
+        compilation = compilePrograms(renderer, mesh, camera, scene, {signal});
+      } finally {
+        for (const [light, visible] of lightVisibility) light.visible = visible;
+        mesh.removeFromParent();
+      }
+      return compilation;
+    }, { signal, label: 'destination-water', isCurrent: () => preparedDestinationIsActive(token, route, prepared) });
     if (!preparedDestinationIsActive(token, route, prepared)) return;
     clearPreparedWaterWarmMesh();
     warpPreparedWaterWarmState = 'complete';
@@ -2660,7 +2621,7 @@ function prepareWarpDestination(route) {
       const previousBodyCount = prepared.planets.length + prepared.compactObjects.length;
       prepared.buildNext();
       const bodies = [...prepared.planets, ...prepared.compactObjects];
-      if (bodies.length > previousBodyCount) primePreparedBodyTextures(bodies.at(-1));
+      if (bodies.length > previousBodyCount) primePreparedBodyTextures(bodies.at(-1), prepared);
       hideBuiltBodies();
       if (route.bodyId && prepared.bodyById.has(route.bodyId)) break;
     } while (!prepared.built && performance.now() - startedAt < 3.5);
@@ -3037,7 +2998,7 @@ function syncRiftDestination() {
         builtBody.appear = 1;
         builtBody.applyAppear?.();
       }
-      primePreparedBodyTextures(builtBody);
+      primePreparedBodyTextures(builtBody, riftPreviewSystem);
     }
     body = riftPreviewSystem.bodyById.get(riftRoute.arrival.bodyId);
   }
@@ -3323,7 +3284,7 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
       const builtBody = bodies.length > previousBodyCount ? bodies.at(-1) : null;
       if (builtBody) {
         builtBody.group.visible = false;
-        primePreparedBodyTextures(builtBody);
+        primePreparedBodyTextures(builtBody, preparedSystem);
       }
     }
     if (k < SPOOL) {
@@ -4365,7 +4326,7 @@ function frame() {
   // selected arrival body has already been prepared; constructing unrelated
   // planets here caused periodic 0.3–1.8 s stops in an otherwise smooth starflow.
   // After arrival, keep each new background body hidden until its opaque world
-  // materials have completed async WebGPU pipeline creation. This prevents the
+  // materials have completed WebGL program preparation. This prevents the
   // first post-arrival draw from synchronously creating another planet pipeline.
   if (state !== 'warp' && performance.now() >= systemBuildResumeAt
       && universe.system && !deferredSystemBuildActive) {
@@ -4383,13 +4344,9 @@ function frame() {
         body = bodies.length > previousBodyCount ? bodies.at(-1) : null;
       }
       if (body?.group) body.group.visible = false;
-      Promise.resolve(prewarmWorldMaterials(body))
-        .catch((error) => console.error('Deferred system material prewarm failed:', error))
-        .finally(() => {
-          if (body?.group && universe.system === system) body.group.visible = true;
-          deferredSystemBuildActive = false;
-          systemBuildResumeAt = performance.now() + 120;
-        });
+      Promise.resolve(prewarmWorldMaterials(body, system))
+        .catch((error) => { if (universe.system === system) console.error('Deferred system material prewarm failed:', error); })
+        .finally(() => finishDeferredSystemMaterialPreparation(body, system));
     }
   }
 
@@ -5355,6 +5312,7 @@ window.NMS = {
         .reduce((sum, [, mesh]) => sum + (mesh?.count || 0), 0) : 0,
       ...performanceSnapshot(),
       renderPacing: nodePipeline.framePacer?.snapshot() || null,
+      renderPreparation: nodePipeline.preparations.snapshot(),
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },

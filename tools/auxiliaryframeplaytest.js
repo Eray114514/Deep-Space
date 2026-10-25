@@ -30,16 +30,20 @@ try {
     const { WeaponLighting } = await import('/src/weapon-lighting.js');
     const pipeline = NMS._pipeline, renderer = NMS._renderer, gl = renderer.getContext();
     const data = window.__auxiliaryObserver = { phase: 'unpaced', records: [], dropped: 0, outsideDraws: 0,
-      draws: 0, fences: 0, scopeCalls: 0, lightingCalls: 0, pmremTargets: 0, restored: false, naturalTimeouts: 0 };
+      draws: 0, maintenanceDraws: 0, fences: 0, scopeCalls: 0, lightingCalls: 0, pmremTargets: 0, restored: false, naturalTimeouts: 0 };
     const restores = [];let submission = null;
     const wrap = (object, name, factory) => {
       const original = object[name], wrapper = factory(original);object[name] = wrapper;
       restores.push(() => { if (object[name] !== wrapper) throw Error(`Observer restore conflict: ${name}`);object[name] = original; });
     };
     const counters = () => ({ draws: data.draws, fences: data.fences, scopeCalls: data.scopeCalls, lightingCalls: data.lightingCalls,
-      timeouts: data.naturalTimeouts, sequence: pipeline.frameState.sequence });
+      timeouts: data.naturalTimeouts, sequence: pipeline.frameState.sequence,
+      preparations: pipeline.preparations.snapshot().stats.executed });
     for (const name of ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced']) wrap(gl, name, original => function(...args) {
-      data.draws++;if (!submission) data.outsideDraws++;return original.apply(this, args);
+      data.draws++;
+      if (!pipeline.frameSubmissionActive) data.outsideDraws++;
+      else if (!submission) data.maintenanceDraws++;
+      return original.apply(this, args);
     });
     wrap(gl, 'fenceSync', original => function(...args) { data.fences++;return original.apply(this, args); });
     wrap(gl, 'clientWaitSync', original => function(...args) {
@@ -88,19 +92,25 @@ try {
   report.retired = await page.evaluate(() => ({ pacing: NMS._pipeline.framePacer, owner: __retiredAuxiliaryPacer.snapshot(),
     gl: NMS._renderer.getContext().getError(), lost: NMS._renderer.getContext().isContextLost() }));
   await page.screenshot({ path: `${out}/resumed-m77.png`, timeout: 90000 });
-  const data = report.result.observer, rejected = data.records.filter(row => row.accepted === false), paced = data.records.filter(row => row.paced && row.accepted);
+  const data = report.result.observer, preparations = data.records.filter(row => row.after.preparations > row.before.preparations),
+    rejected = data.records.filter(row => row.accepted === false && row.after.preparations === row.before.preparations),
+    paced = data.records.filter(row => row.paced && row.accepted);
   assert.equal(data.restored, true);assert.equal(data.dropped, 0);assert.equal(data.outsideDraws, 0);
   assert.ok(data.pmremTargets > 0 && data.draws > 0 && rejected.length > 0 && paced.length > 0);
   assert.ok(rejected.every(row => row.after.draws === row.before.draws && row.after.fences === row.before.fences
     && row.after.scopeCalls === row.before.scopeCalls && row.after.lightingCalls === row.before.lightingCalls
     && row.after.sequence === row.before.sequence && row.after.timeouts > row.before.timeouts));
   assert.ok(paced.every(row => row.after.fences === row.before.fences + 1 && row.after.sequence === row.before.sequence + 1));
+  assert.ok(preparations.every(row => !row.accepted && row.after.preparations === row.before.preparations + 1
+    && row.after.scopeCalls === row.before.scopeCalls && row.after.lightingCalls === row.before.lightingCalls
+    && (!row.paced || row.after.fences === row.before.fences + 1)));
   assert.ok(report.afterInput.pos.some((value, index) => Math.abs(value - report.beforeInput.pos[index]) > .1));
   assert.ok(report.result.scope.litPixels > 0);assert.equal(report.result.gl, 0);assert.equal(report.result.lost, false);
   assert.equal(report.retired.owner.released, true);assert.equal(report.retired.owner.pending, 0);assert.equal(report.retired.owner.fault, null);
   assert.equal(report.retired.pacing, null);assert.equal(report.retired.gl, 0);assert.equal(report.retired.lost, false);
   assert.deepEqual(report.errors, []);assert.deepEqual(report.driverWarnings, []);
-  report.summary = { rejected: rejected.length, paced: paced.length, draws: data.draws, pmremFrames: data.pmremTargets, outsideDraws: data.outsideDraws };
+  report.summary = { rejected: rejected.length, paced: paced.length, preparations: preparations.length,
+    maintenanceDraws: data.maintenanceDraws, draws: data.draws, pmremFrames: data.pmremTargets, outsideDraws: data.outsideDraws };
   report.passed = true;
 } catch (error) {
   report.passed = false;report.error = String(error);process.exitCode = 1;
