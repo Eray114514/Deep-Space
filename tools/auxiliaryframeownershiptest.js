@@ -132,14 +132,15 @@ test(() => {
 });
 
 for (const failBegin of [false, true]) test(() => {
-  const group = () => new THREE.Group(), source = group(), target = group(), extra = group();
+  const group = () => new THREE.Group(), source = group(), target = group(), extra = group(), sourceOrphan = group(), targetOrphan = group();
+  const stationLight = new THREE.PointLight();stationLight.layers.set(2);stationLight.visible = false;targetOrphan.add(stationLight);
   const star = { group: group(), light: new THREE.DirectionalLight() }, planet = { group: target, volCloudMat: { depthTest: true } };
-  const preview = { starViews: [star], planets: [planet], compactObjects: [{ group: extra }] };
-  target.visible = false;extra.visible = true;star.light.visible = false;
+  const preview = { starViews: [star], planets: [planet], compactObjects: [{ group: extra }], artificialSites: [{ parentBody: null, group: targetOrphan }] };
+  target.visible = false;extra.visible = true;star.light.visible = false;targetOrphan.visible = false;
   const clear = new THREE.Color(.1, .2, .3), originalClear = clear.clone(), fog = {};
   let alpha = .4, injected = false;
   const context = { THREE, RIFT_PORTAL_LAYER: 7, scene: { fog }, universe: {
-    system: { starViews: [], planets: [{ group: source }], compactObjects: [] }, fadingSystem: null },
+    system: { starViews: [], planets: [{ group: source }], compactObjects: [], artificialSites: [{ parentBody: null, group: sourceOrphan }] }, fadingSystem: null },
     ship: { group: group() }, weapons: {}, sunShadow: group(), headlamp: group(), skyDome: {}, hemi: group(), ambient: group(),
     riftPortalAmbient: group(), riftPortalVisibility: [], riftPortalDepthState: [], riftPortalLayerState: [],
     riftPortalClearColor: new THREE.Color(), riftPortalClearAlpha: 1, riftPortalFog: null, riftPortalToneMapping: 0,
@@ -149,10 +150,12 @@ for (const failBegin of [false, true]) test(() => {
         if (failBegin && !injected) { injected = true;throw null; } },
     } };
   context.skyDome.mesh = group();context.riftPortalAmbient.visible = false;
-  for (const name of ['addRiftPortalHidden', 'moveToRiftPortalLayer', 'hideSystemForRiftPortal', 'setRiftPreviewVisible']) context[name] = load(name, context);
-  const before = [source, target, extra, star.group, star.light, context.riftPortalAmbient].map(object => ({ object, visible: object.visible, mask: object.layers.mask }));
+  for (const name of ['standaloneSiteGroups', 'addRiftPortalHidden', 'moveToRiftPortalLayer', 'hideSystemForRiftPortal', 'setRiftPreviewVisible']) context[name] = load(name, context);
+  const before = [source, target, extra, sourceOrphan, targetOrphan, stationLight, star.group, star.light, context.riftPortalAmbient].map(object => ({ object, visible: object.visible, mask: object.layers.mask }));
   const begin = load('beginRiftPortalScene', context), end = load('endRiftPortalScene', context), camera = new THREE.PerspectiveCamera();
   if (failBegin) assert.equal(captured(() => begin(camera, preview, null)), null);else begin(camera, preview, null);
+  assert.equal(sourceOrphan.visible, false);
+  if (!failBegin) { assert.equal(targetOrphan.visible, true);assert.equal(targetOrphan.layers.mask, 1 << 7);assert.equal(stationLight.layers.mask, 1 << 7); }
   end(preview, null);end(preview, null);
   for (const row of before) { assert.equal(row.object.visible, row.visible);assert.equal(row.object.layers.mask, row.mask); }
   assert.equal(planet.volCloudMat.depthTest, true);assert.equal(context.scene.fog, fog);

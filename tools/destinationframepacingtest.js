@@ -11,7 +11,8 @@ const out = `test-results/destination-frame-pacing/${new Date().toISOString().re
 await mkdir(out, { recursive: true });await writeFile(`${out}/main.js`, mainBytes);await writeFile(`${out}/verifier.js`, verifierBytes);
 const functions = {}, results = [];
 function load(name, context) {
-  const signature = `async function ${name}(`, start = main.indexOf(signature), end = main.indexOf('\n}', start);
+  const signature = main.includes(`async function ${name}(`) ? `async function ${name}(` : `function ${name}(`;
+  const start = main.indexOf(signature), end = main.indexOf('\n}', start);
   assert.equal(main.split(signature).length - 1, 1, `Unique actual ${name}`);assert.ok(start >= 0 && end > start, name);
   const source = main.slice(start, end + 2);functions[name] = { sha256: sha(source), bytes: Buffer.byteLength(source) };
   return vm.runInNewContext(`(${source})`, context);
@@ -34,8 +35,11 @@ function fixture(options = {}) {
   const targetBody = { group: visible('destination-body', false), posUniv: new THREE.Vector3(),
     syncAtmoMaterial() { events.push('target-atmosphere');fail('target-atmosphere'); }, syncVolCloudMaterial() { events.push('target-volume');fail('target-volume'); }, update() { events.push('target-update'); } };
   const otherBody = { group: visible('destination-other', true) }, oldBody = { group: visible('old-body', true) }, fadeBody = { group: visible('fade-body', false) };
-  const prepared = { starViews: [destinationStar], planets: [targetBody, otherBody], compactObjects: [], updateCelestial() { events.push('celestial'); } };
-  const universeBase = { system: { starViews: [oldStar], planets: [oldBody], compactObjects: [] }, fadingSystem: { starViews: [fadeStar], planets: [fadeBody], compactObjects: [] }, relativizeSystem() {} };
+  const oldOrphan = visible('old-orphan', true), fadeOrphan = visible('fade-orphan', false), destinationOrphan = visible('destination-orphan', false);
+  const prepared = { starViews: [destinationStar], planets: [targetBody, otherBody], compactObjects: [],
+    artificialSites: [{ parentBody: null, group: destinationOrphan }], updateCelestial() { events.push('celestial'); } };
+  const universeBase = { system: { starViews: [oldStar], planets: [oldBody], compactObjects: [], artificialSites: [{ parentBody: null, group: oldOrphan }] },
+    fadingSystem: { starViews: [fadeStar], planets: [fadeBody], compactObjects: [], artificialSites: [{ parentBody: null, group: fadeOrphan }] }, relativizeSystem() {} };
   const universe = new Proxy(universeBase, { get(owner, name) { if (name === 'system' || name === 'fadingSystem') borrow(`universe.${name}`);return owner[name]; } });
   const rawCamera = new THREE.PerspectiveCamera(63, 1.6, .2, 1e6);rawCamera.position.set(1, 2, 3);rawCamera.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), .3);
   const camera = new Proxy(rawCamera, { get(owner, name) { borrow(`camera.${String(name)}`);return Reflect.get(owner, name); }, set(owner, name, value) { borrow(`camera.${String(name)}.write`);return Reflect.set(owner, name, value); } });
@@ -62,6 +66,7 @@ function fixture(options = {}) {
     warpPreparedRiftWarmState: 'idle', warpPreparedRiftWarmError: null, warpPreparedRiftStructurePromise: Promise.resolve(),
     uploadPreparedLodMeshes: async () => {}, celestialClock: { hours: 1 }, RIFT_SPAWN_DISTANCE: 25,
     renderRiftDestinationPortal() { assert.equal(executing, true);events.push('portal');fail('portal'); }, console: { error(...args) { errors.push(args); } } };
+  context.standaloneSiteGroups = load('standaloneSiteGroups', context);
   const warm = load('renderPreparedDestinationWarmFrame', context);context.renderPreparedDestinationWarmFrame = warm;
   const portal = load('prewarmPreparedRiftPortal', context);
   const capture = () => ({ visibility: cells.map(cell => [cell.name, cell.raw]), camera: { position: rawCamera.position.toArray(), quaternion: rawCamera.quaternion.toArray(), fov: rawCamera.fov,
@@ -77,6 +82,8 @@ function fixture(options = {}) {
       assert.equal(target, context.surfaceBootstrapTarget);if (mrt) assert.equal(currentMrt, null);
       assert.equal(atmospherePlanet, targetBody);if (volume) assert.equal(volumePlanet, targetBody);assert.equal(shadowRaw.visible, false);assert.equal(shadowRaw.intensity, 0);
       assert.equal(cells.find(cell => cell.name === 'old-body').raw, false);assert.equal(cells.find(cell => cell.name === 'destination-body').raw, true);assert.equal(cells.find(cell => cell.name === 'destination-other').raw, false);
+      assert.equal(cells.find(cell => cell.name === 'old-orphan').raw, false);assert.equal(cells.find(cell => cell.name === 'fade-orphan').raw, false);
+      assert.equal(cells.find(cell => cell.name === 'destination-orphan').raw, true);
       rawCamera.position.set(91, 92, 93);rawCamera.fov = 17;rawCamera.updateProjectionMatrix();rawCamera.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), .9);shadowRaw.intensity = 44;
       fail('draw');return renderResult;
     };

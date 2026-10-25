@@ -22,9 +22,10 @@ try {
   });
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=0&farflora=0&post=1&freeze=1&buildms=25`);
   await page.waitForFunction(() => window.NMS?.booted, null, { timeout: 120000 });
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
+    const T = await import('three');
     const pipeline = NMS._pipeline, renderer = NMS._renderer, queue = pipeline.preparations;
-    const data = window.__preparationPlayer = { phase: 'cancel', compiles: 0, uploads: 0, draws: 0, outside: [], labels: {}, restored: false };
+    const data = window.__preparationPlayer = { phase: 'cancel', compiles: 0, uploads: 0, draws: 0, outside: [], labels: {}, destinationCompiles: [], restored: false };
     const restores = [], wrap = (object, name, factory) => {
       const original = object[name], wrapper = factory(original);object[name] = wrapper;
       restores.push(() => { if (object[name] !== wrapper) throw Error(`Observer changed: ${name}`);object[name] = original; });
@@ -32,6 +33,26 @@ try {
     for (const [name, counter] of [['compile', 'compiles'], ['initTexture', 'uploads']]) wrap(renderer, name, original => function(...args) {
       data[counter]++;const label = queue.active?.label;
       if (!pipeline.frameSubmissionActive || !label) data.outside.push({ name, phase: data.phase });
+      if (name === 'compile' && label === 'destination-lod') {
+        const [source, compileCamera, lighting] = args, objects = [], lights = [], sourceLights = [];
+        source.traverse(object => { if (object.material) objects.push(object); });
+        source.traverseVisible(object => { if (object.isLight) sourceLights.push(object); });
+        lighting.traverseVisible(object => { if (object.isLight && object.layers.test(compileCamera.layers)) lights.push(object); });
+        const { scene, universe, ship } = NMS._internals, liveLights = new Set();
+        scene.traverse(object => { if (object.isLight) liveLights.add(object); });
+        const within = (object, root) => { for (let node = object; node; node = node.parent) if (node === root) return true;return false; };
+        const prepared = NMS.warpPreparationState().preparedStarId;
+        const forbidden = [universe.system, universe.fadingSystem].filter(system => system && system.star.id !== prepared)
+          .flatMap(system => [...system.planets, ...system.compactObjects, ...system.starViews].map(value => value.group));
+        data.destinationCompiles.push({ phase: data.phase, renderables: objects.length,
+          currentHdr: renderer.getRenderTarget() === pipeline.composer.readBuffer,
+          privateSource: source !== scene, privateLights: lights.every(light => !liveLights.has(light)),
+          sourceLights: sourceLights.length, directions: lights.filter(light => light.isDirectionalLight).length,
+          shadows: lights.filter(light => light.castShadow).length,
+          sourceWorldHits: objects.filter(object => forbidden.some(root => within(object, root))).length,
+          hullObjects: objects.filter(object => within(object, ship.group)).length,
+          separateCabinObjects: ship.separateInterior ? objects.filter(object => within(object, ship.int.group)).length : 0 });
+      }
       return original.apply(this, args);
     });
     wrap(renderer, 'render', original => function(...args) {
@@ -49,7 +70,15 @@ try {
       if (queue.runNext !== held) throw Error('Queue hold ownership changed');queue.runNext = runNext;
     };
     data.hold = { kind: 'Controlled queue hold for actual UI cancellation; not native busy/performance evidence' };
-    pipeline.startFramePacing();data.initialStar = NMS._internals.universe.system.star.id;
+    // Controlled owned-root witness, not authored content or a performance run.
+    // A zero-intensity point still belongs to Three's WORLD light family.
+    const { universe } = NMS._internals, orphan = new T.Group(), beacon = new T.PointLight(0xffffff, 0, 10);
+    orphan.name = 'Preparation player owned source witness';orphan.add(beacon);universe.group.add(orphan);
+    universe.system.artificialSites.push({ site: { id: 'qa-source-orphan', type: 'ring-station' },
+      group: orphan, parentBody: null, posUniv: universe.system.star.pos.clone().add(new T.Vector3(2000, 0, 0)) });
+    window.__preparationSourceOrphan = orphan;
+    data.sourceOrphanWitness = { controlled: true, initiallyVisible: orphan.visible };
+    pipeline.startFramePacing();data.initialStar = universe.system.star.id;
   });
   const choose = async () => {
     const target = await page.evaluate(() => {
@@ -86,13 +115,17 @@ try {
   await page.evaluate(() => { __releasePreparationHold();__preparationPlayer.phase = 'warp'; });
   await page.waitForFunction(() => !NMS.warpPreparationState().preparedStarId);
   report.cancel = await page.evaluate(() => ({ preparation: NMS._pipeline.preparations.snapshot(), star: NMS._internals.universe.system.star.id,
-    original: __preparationPlayer.initialStar }));
+    original: __preparationPlayer.initialStar, sourceOrphanVisible: __preparationSourceOrphan.visible }));
   assert.ok(report.cancelQueued.queued > 0);assert.ok(report.cancel.preparation.stats.cancelled + report.cancel.preparation.stats.obsolete > 0);
   assert.equal(report.cancel.star, report.cancel.original);
+  assert.equal(report.cancel.sourceOrphanVisible, true);
   report.warpTarget = await choose();await page.locator('#route-warp-btn').click();report.step = 'warp-start';
   await page.waitForFunction(() => NMS.state === 'warp', null, { timeout: 120000 });
   await page.screenshot({ path: `${out}/warp.png`, timeout: 90000 });
   await page.waitForFunction(id => NMS.state === 'space' && NMS._internals.universe.system.star.id === id, report.warpTarget.starId, { timeout: 120000 });
+  report.sourceOrphanRetirement = await page.evaluate(() => ({ visible: __preparationSourceOrphan.visible,
+    attached: Boolean(__preparationSourceOrphan.parent) }));
+  assert.ok(!report.sourceOrphanRetirement.visible || !report.sourceOrphanRetirement.attached);
   await page.screenshot({ path: `${out}/warp-arrival.png`, timeout: 90000 });
   await page.evaluate(() => { __preparationPlayer.phase = 'rift'; });
   report.riftTarget = await choose();await page.locator('#route-rift-btn').click();report.step = 'rift-ready';
@@ -122,6 +155,14 @@ try {
   assert.ok(report.result.observer.compiles > 0 && report.result.observer.uploads > 0);
   assert.ok(report.result.observer.labels['destination-private-frame'] > 0);
   assert.deepEqual(report.result.observer.outside, []);assert.equal(report.result.observer.restored, true);
+  const destinationCompiles = report.result.observer.destinationCompiles;
+  assert.equal(destinationCompiles.length, 4);
+  assert.ok(destinationCompiles.every(row => row.renderables > 0 && row.currentHdr && row.privateSource && row.privateLights
+    && row.sourceLights === 0 && row.sourceWorldHits === 0 && row.hullObjects > 0 && row.separateCabinObjects === 0));
+  for (let index = 0; index < destinationCompiles.length; index += 2) {
+    assert.equal(destinationCompiles[index + 1].directions, destinationCompiles[index].directions + 1);
+    assert.equal(destinationCompiles[index + 1].shadows, destinationCompiles[index].shadows + 1);
+  }
   assert.equal(report.result.preparation.pending, 0);assert.equal(report.result.gl, 0);assert.equal(report.result.lost, false);
   assert.equal(report.retired.released, true);assert.equal(report.retired.pending, 0);assert.equal(report.retired.fault, null);
   assert.deepEqual(report.errors, []);assert.deepEqual(report.driverWarnings, []);report.passed = true;

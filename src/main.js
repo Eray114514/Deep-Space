@@ -16,6 +16,7 @@ import { FarFlora } from './farflora.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
 import { compileRenderVariant, withSurfaceWarmupVariant } from './render-prewarm.js';
 import { compilePrograms } from './program-preparation.js';
+import { compileDestinationVariant } from './destination-preparation.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
 import { PresentedFrameStats } from './presented-frame-stats.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
@@ -2125,91 +2126,25 @@ function finishDeferredSystemMaterialPreparation(body, system) {
   systemBuildResumeAt = Math.max(systemBuildResumeAt, performance.now() + 120);
 }
 
-async function uploadPreparedLodMeshes(targetBody, prepared, token, route) {
-  const signal = warpCompile.signal;
-  return nodePipeline.prepare(() => {
-    const meshes = [];
-    const collectBuiltMeshes = (lod) => {
-      const visit = (node) => {
-        if (node.mesh) meshes.push(node.mesh);
-        if (node.children) for (const child of node.children) visit(child);
-      };
-      for (const root of lod?.roots || []) visit(root);
-    };
-    collectBuiltMeshes(targetBody?.lod);
-    collectBuiltMeshes(targetBody?.waterLod);
-    if (meshes.length === 0) return;
+// Unparented stations share Universe.group with every live/prepared system;
+// their owning system must explicitly carry them across visibility boundaries.
+function standaloneSiteGroups(system) {
+  return (system?.artificialSites || []).filter(site => !site.parentBody && site.group).map(site => site.group);
+}
 
-    // Submit the real prepared chunks against destination lighting, then restore
-    // every live transform and flag before readiness can yield to another frame.
-    // Compilation prepares programs; real buffer upload still needs a warm draw.
-    const group = targetBody.group;
-    const groupState = {
-      visible: group.visible,
-      position: group.position.clone(),
-      quaternion: group.quaternion.clone(),
-      scale: group.scale.clone(),
-    };
-    const meshStates = [];
-    targetBody.group.traverse((mesh) => {
-      if (!mesh.material) return;
-      meshStates.push({
-        mesh,
-        visible: mesh.visible,
-        frustumCulled: mesh.frustumCulled,
-      });
-    });
-    group.visible = true;
-    group.position.set(0, 0, 8);
-    group.quaternion.identity();
-    group.scale.setScalar(1e-8);
-    for (const { mesh } of meshStates) {
-      mesh.visible = true;
-      mesh.frustumCulled = false;
-    }
-    const lightStates = [];
-    const rememberLight = (view, visible) => {
-      if (!view || lightStates.some((state) => state.view === view)) return;
-      lightStates.push({
-        view,
-        groupVisible: view.group.visible,
-        lightVisible: view.light.visible,
-      });
-      view.group.visible = visible;
-      view.light.visible = visible;
-    };
-    for (const view of universe.system?.starViews || []) rememberLight(view, false);
-    for (const view of universe.fadingSystem?.starViews || []) rememberLight(view, false);
-    for (const view of prepared?.starViews || []) rememberLight(view, true);
-    const sourceVisibility = [];
-    for (const system of [universe.system, universe.fadingSystem]) {
-      if (!system || system === prepared) continue;
-      for (const body of [...system.planets, ...system.compactObjects]) {
-        sourceVisibility.push([body.group, body.group.visible]);
-        body.group.visible = false;
-      }
-    }
-    let compilation;
-    try {
-      // Persistent world objects also need destination light-count variants.
-      compilation = compilePrograms(renderer, scene, camera, null, {signal});
-    } finally {
-      for (const state of lightStates) {
-        state.view.group.visible = state.groupVisible;
-        state.view.light.visible = state.lightVisible;
-      }
-      for (const [object, visible] of sourceVisibility) object.visible = visible;
-      group.visible = groupState.visible;
-      group.position.copy(groupState.position);
-      group.quaternion.copy(groupState.quaternion);
-      group.scale.copy(groupState.scale);
-      for (const state of meshStates) {
-        state.mesh.visible = state.visible;
-        state.mesh.frustumCulled = state.frustumCulled;
-      }
-    }
-    return compilation;
-  }, { signal, label: 'destination-lod', isCurrent: () => preparedDestinationIsActive(token, route, prepared) });
+async function uploadPreparedLodMeshes(targetBody, prepared, token, route) {
+  if (!targetBody?.group) return;
+  const signal = warpCompile.signal;
+  // WORLD arrival and near-surface shadow lighting have different program keys.
+  // Each family gets its own shared preparation slot and current HDR target.
+  for (const shadows of [false, true]) await nodePipeline.prepare(() =>
+    compileDestinationVariant(renderer, {
+      scene, camera, universeRoot: universe.group, body: targetBody,
+      destination: prepared, ship, shadowLight: sunShadow,
+      target: nodePipeline.composer.readBuffer, shadows,
+      exclude: [surfaceBootstrapGroup],
+    }, { signal }),
+  { signal, label: 'destination-lod', isCurrent: () => preparedDestinationIsActive(token, route, prepared) });
 }
 
 async function prewarmPreparedRiftStructure(token, route, prepared) {
@@ -2256,6 +2191,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, t
         for (const body of [...system.planets, ...system.compactObjects]) {
           rememberVisibility(body.group, false);
         }
+        for (const group of standaloneSiteGroups(system)) rememberVisibility(group, false);
       }
       for (const view of prepared.starViews) {
         rememberVisibility(view.group, true);
@@ -2264,6 +2200,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, t
       for (const body of [...prepared.planets, ...prepared.compactObjects]) {
         rememberVisibility(body.group, body === targetBody);
       }
+      for (const group of standaloneSiteGroups(prepared)) rememberVisibility(group, true);
       rememberVisibility(spatialRift.group, false);
 
       const cameraState = {
@@ -2613,6 +2550,7 @@ function prepareWarpDestination(route) {
     for (const body of [...prepared.planets, ...prepared.compactObjects]) {
       body.group.visible = false;
     }
+    for (const group of standaloneSiteGroups(prepared)) group.visible = false;
   };
   const step = () => {
     if (!preparedDestinationIsActive(token, route, prepared)) return;
@@ -2712,6 +2650,7 @@ function setRiftPreviewVisible(
     // until adoption and appeared as a second giant sphere around the target.
     body.group.visible = visible && (!targetBodyId || body.bodyId === targetBodyId);
   }
+  for (const group of standaloneSiteGroups(previewSystem)) group.visible = visible;
 }
 
 function addRiftPortalHidden(object) {
@@ -2735,6 +2674,7 @@ function hideSystemForRiftPortal(system, previewSystem = riftPreviewSystem) {
     addRiftPortalHidden(view.light);
   }
   for (const body of [...system.planets, ...system.compactObjects]) addRiftPortalHidden(body.group);
+  for (const group of standaloneSiteGroups(system)) addRiftPortalHidden(group);
 }
 
 function beginRiftPortalScene(
@@ -2772,6 +2712,7 @@ function beginRiftPortalScene(
   for (const object of [riftPortalAmbient,
     ...(previewSystem?.starViews || []).flatMap(view => [view.group, view.light]),
     ...[...(previewSystem?.planets || []), ...(previewSystem?.compactObjects || [])].map(body => body.group),
+    ...standaloneSiteGroups(previewSystem),
   ]) {
     if (object && !riftPortalVisibility.includes(object)) riftPortalVisibility.push(object, object.visible);
   }
@@ -2789,6 +2730,7 @@ function beginRiftPortalScene(
     ...(previewSystem?.planets || []),
     ...(previewSystem?.compactObjects || []),
   ]) moveToRiftPortalLayer(body.group);
+  for (const group of standaloneSiteGroups(previewSystem)) moveToRiftPortalLayer(group);
   for (const planet of previewSystem?.planets || []) {
     // A direct target has no separate depth-readable volume pass.
     for (const material of [planet.volCloudMat]) {
@@ -2990,6 +2932,7 @@ function syncRiftDestination() {
     const previousBodyCount = riftPreviewSystem.planets.length
       + riftPreviewSystem.compactObjects.length;
     riftPreviewSystem.buildNext();
+    for (const group of standaloneSiteGroups(riftPreviewSystem)) group.visible = false;
     const bodies = [...riftPreviewSystem.planets, ...riftPreviewSystem.compactObjects];
     const builtBody = bodies.length > previousBodyCount ? bodies.at(-1) : null;
     if (builtBody) {
@@ -3146,11 +3089,13 @@ function updateRiftRoute(dt) {
         ...(retiredRiftSystem?.planets || []),
         ...(retiredRiftSystem?.compactObjects || []),
       ]) body.group.visible = false;
+      for (const group of standaloneSiteGroups(retiredRiftSystem)) group.visible = false;
       destination.updateCelestial(celestialClock.hours);
       for (const view of destination.starViews) {
         view.group.visible = true;
         view.light.visible = true;
       }
+      for (const group of standaloneSiteGroups(destination)) group.visible = true;
       const arrivalBody = destination.bodyById.get(riftRoute.arrival.bodyId) || null;
       deferredSystemWarmQueue.length = 0;
       for (const body of [...destination.planets, ...destination.compactObjects]) {
@@ -3280,6 +3225,7 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
         && !preparedSystem.built) {
       const previousBodyCount = preparedSystem.planets.length + preparedSystem.compactObjects.length;
       preparedSystem.buildNext();
+      for (const group of standaloneSiteGroups(preparedSystem)) group.visible = false;
       const bodies = [...preparedSystem.planets, ...preparedSystem.compactObjects];
       const builtBody = bodies.length > previousBodyCount ? bodies.at(-1) : null;
       if (builtBody) {
@@ -3321,6 +3267,7 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
             view.group.visible = true;
             view.light.visible = true;
           }
+          for (const group of standaloneSiteGroups(preparedSystem)) group.visible = true;
           let revealBodyId = preferBodyId;
           const selectedSpec = revealBodyId
             ? preparedSystem._specs.find((spec) => spec.bodyId === revealBodyId)
@@ -3356,6 +3303,7 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
             ...(retiredRiftSystem?.planets || []),
             ...(retiredRiftSystem?.compactObjects || []),
           ]) body.group.visible = false;
+          for (const group of standaloneSiteGroups(retiredRiftSystem)) group.visible = false;
           preparedSystem = null;
         } else {
           destination = universe.setSystem(star, true);

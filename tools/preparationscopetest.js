@@ -62,14 +62,29 @@ function fixture(fault = 'none') {
   const targetBody = { group, lod: { roots: [{ mesh }] }, waterLod: { roots: [{ mesh }] } };
   const star = visible => ({ light: { visible }, group: { visible } });
   const oldStar = star(false), newStar = star(true), oldBody = new THREE.Group();oldBody.visible = true;
-  const system = { starViews: [oldStar], planets: [{ group: oldBody }], compactObjects: [] }, universe = { system };
-  const prepared = { starViews: [newStar] }, route = { warpRequested: false }, queue = controlledQueue(), readiness = [];
+  const system = { starViews: [oldStar], planets: [{ group: oldBody }], compactObjects: [] }, universe = { system, group: new THREE.Group() };
+  const prepared = { starViews: [newStar] }, route = { warpRequested: false }, queue = controlledQueue(), readiness = [], destinationCaptures = [];
   let seen = 0, active = true;
   const context = { THREE, scene, camera: new THREE.PerspectiveCamera(), renderer: {}, universe,
-    nodePipeline: { prepare: queue.prepare, programPreparation: new AbortController() }, warpCompile: new AbortController(),
+    nodePipeline: { prepare: queue.prepare, programPreparation: new AbortController(), composer: { readBuffer: {} } }, warpCompile: new AbortController(),
+    ship: { group: new THREE.Group() }, sunShadow: { visible: false }, surfaceBootstrapGroup: new THREE.Group(),
     preparedDestinationIsActive(token, passedRoute, passedPrepared) { assert.equal(token, 1);assert.equal(passedRoute, route);assert.equal(passedPrepared, prepared);return active; },
     warpPreparedWaterWarmMesh: null, warpPreparedWaterWarmPlanet: null, warpPreparedWaterWarmState: '', warpPreparedWaterWarmError: null,
     console: { error() {}, warn() {} }, clearPreparedWaterWarmMesh() { context.warpPreparedWaterWarmMesh?.removeFromParent();context.warpPreparedWaterWarmMesh = null; },
+    compileDestinationVariant(renderer, options, preparation) {
+      assert.equal(queue.executing, true, 'Destination selection executes inside the queue callback');
+      assert.equal(renderer, context.renderer);assert.equal(options.scene, scene);assert.equal(options.camera, context.camera);
+      assert.equal(options.universeRoot, universe.group);assert.equal(options.body, targetBody);assert.equal(options.destination, prepared);
+      assert.equal(options.ship, context.ship);assert.equal(options.shadowLight, context.sunShadow);
+      assert.equal(options.target, context.nodePipeline.composer.readBuffer);assert.deepEqual([...options.exclude], [context.surfaceBootstrapGroup]);
+      assert.equal(preparation.signal, context.warpCompile.signal);
+      const roots = ['lod', 'waterLod'].flatMap(kind => targetBody[kind]?.roots || []).map(root => root.mesh).filter(Boolean);
+      destinationCaptures.push({ ...options, bodyGroup: options.body.group, roots });context.onDestinationCapture?.(options);
+      seen++;
+      if (fault === 'sync') throw Error('sync fault');
+      let resolve, reject;const promise = new Promise((yes, no) => { resolve = yes;reject = no; });
+      readiness.push({ resolve, reject, promise, source: options.body, shadows: options.shadows });return promise;
+    },
     compilePrograms(renderer, source, camera, targetScene, options) {
       assert.equal(queue.executing, true, 'Program capture executes inside the queue callback');seen++;
       assert.equal(renderer, context.renderer);assert.equal(camera, context.camera);
@@ -79,8 +94,17 @@ function fixture(fault = 'none') {
       let resolve, reject;const promise = new Promise((yes, no) => { resolve = yes;reject = no; });
       readiness.push({ resolve, reject, promise, source });return promise;
     } };
-  return { context, queue, scene, mesh, group, targetBody, prepared, system, route, oldStar, newStar, oldBody, readiness,
+  context.standaloneSiteGroups = load('standaloneSiteGroups', context);
+  return { context, queue, scene, mesh, group, targetBody, prepared, system, route, oldStar, newStar, oldBody, readiness, destinationCaptures,
     get seen() { return seen; }, cancel() { active = false; }, dispose() { geometry.dispose();material.dispose(); } };
+}
+async function drainReadyPreparations(f) {
+  for (let pass = 0; pass < 8; pass++) {
+    while (f.queue.jobs.length) f.queue.admit();
+    for (const ready of f.readiness) ready.resolve();
+    await microtasks();
+  }
+  assert.equal(f.queue.jobs.length, 0, 'All admitted readiness continuations drained');
 }
 function lodContinuationFixture() {
   const f = fixture(), timers = [];
@@ -105,7 +129,8 @@ function lodContinuationFixture() {
 }
 await test('fulfilled old LOD upload cannot enter portal after a microtask transfers route ownership', async () => {
   const f = lodContinuationFixture();f.start();f.queue.admit();assert.equal(f.readiness.length, 1);
-  f.readiness[0].resolve();queueMicrotask(() => {
+  f.readiness[0].resolve();await microtasks();assert.equal(f.queue.jobs.length, 1);f.queue.admit();assert.equal(f.readiness.length, 2);
+  f.readiness[1].resolve();queueMicrotask(() => {
     f.cancel();f.context.warpPreparedRiftWarmState = 'waiting';f.context.warpPreparedLodWarmState = 'waiting';
   });await microtasks();
   assert.equal(f.context.warpPreparedRiftWarmState, 'waiting');assert.equal(f.context.warpPreparedLodWarmState, 'waiting');
@@ -114,7 +139,8 @@ await test('fulfilled old LOD upload cannot enter portal after a microtask trans
 await test('obsolete LOD upload rejection still returns its CPU priorities without writing a new route', async () => {
   const f = lodContinuationFixture();f.start();f.queue.admit();f.cancel();
   f.context.warpPreparedRiftWarmState = 'waiting';f.context.warpPreparedLodWarmState = 'waiting';f.readiness[0].resolve();await microtasks();
-  f.prioritiesRestored();assert.equal(f.context.warpPreparedRiftWarmState, 'waiting');assert.equal(f.context.warpPreparedLodWarmState, 'waiting');f.dispose();
+  f.prioritiesRestored();assert.equal(f.context.warpPreparedRiftWarmState, 'waiting');assert.equal(f.context.warpPreparedLodWarmState, 'waiting');
+  assert.equal(f.queue.jobs.length, 0);assert.equal(f.destinationCaptures.length, 1);f.dispose();
 });
 for (const name of ['prewarmPreparedRiftStructure', 'prewarmPreparedWater', 'prewarmPreparedRiftPortal', 'prewarmPreparedLod']) await test(`${name} stale entry does not claim the next route's global state`, async () => {
   const f = lodContinuationFixture();f.cancel();
@@ -127,15 +153,24 @@ for (const name of ['prewarmPreparedRiftStructure', 'prewarmPreparedWater', 'pre
   assert.deepEqual(entry, { structure: 'new-structure', water: 'new-water', rift: 'new-rift', lod: 'new-lod', queued: 0, timers: 0 });
   f.prioritiesRestored();f.dispose();
 });
-for (const fault of ['none', 'sync', 'async']) await test(`LOD queued ${fault}: restores its synchronous lease before readiness`, async () => {
+for (const fault of ['none', 'sync', 'async']) await test(`LOD queued ${fault}: neither capture nor readiness borrows the live scene`, async () => {
   const f = fixture(fault), before = f.group.position.clone();
+  let authoredX = 12, authoredVisible = false, authoredOldLight = false;
+  f.context.onDestinationCapture = () => {
+    assert.equal(f.group.position.x, authoredX);assert.equal(f.group.visible, authoredVisible);assert.equal(f.mesh.visible, authoredVisible);
+    assert.equal(f.oldStar.light.visible, authoredOldLight);assert.equal(f.newStar.light.visible, true);assert.equal(f.oldBody.visible, true);
+    assert.equal(f.group.scale.x, 3);assert.equal(f.mesh.frustumCulled, true);assert.equal(f.scene.children.length, 1);
+  };
   const pending = load('uploadPreparedLodMeshes', f.context)(f.targetBody, f.prepared, 1, f.route), settled = pending.catch(error => assert.match(error.message, /fault/));
   assert.equal(f.seen, 0);assert.equal(f.queue.jobs.length, 1);assert.equal(f.group.visible, false);assert.ok(f.group.position.equals(before));
   assert.equal(f.oldStar.light.visible, false);assert.equal(f.oldBody.visible, true);assert.equal(f.queue.jobs[0].options.signal, f.context.warpCompile.signal);
   f.queue.admit();assert.equal(f.seen, 1);assert.equal(f.group.visible, false);assert.ok(f.group.position.equals(before));assert.equal(f.group.scale.x, 3);
   assert.equal(f.mesh.visible, false);assert.equal(f.mesh.frustumCulled, true);assert.equal(f.oldStar.light.visible, false);assert.equal(f.newStar.light.visible, true);assert.equal(f.oldBody.visible, true);
   f.group.position.set(7, 8, 9);f.group.visible = true;f.mesh.visible = true;f.oldStar.light.visible = true;
-  if (fault === 'async') f.readiness[0].reject(Error('async fault'));else f.readiness[0]?.resolve();await settled;
+  authoredX = 7;authoredVisible = true;authoredOldLight = true;
+  if (fault === 'async') f.readiness[0].reject(Error('async fault'));else f.readiness[0]?.resolve();
+  if (fault === 'none') await drainReadyPreparations(f);await settled;
+  assert.equal(f.destinationCaptures.length, fault === 'none' ? 2 : 1);
   assert.equal(f.group.position.x, 7);assert.equal(f.group.visible, true);assert.equal(f.mesh.visible, true);assert.equal(f.oldStar.light.visible, true);f.dispose();
 });
 for (const cancellation of ['token', 'signal']) await test(`LOD ${cancellation} before execution borrows nothing`, async () => {
@@ -146,11 +181,46 @@ for (const cancellation of ['token', 'signal']) await test(`LOD ${cancellation} 
 });
 await test('LOD warp request remains eligible after adoption transfer', async () => {
   const f = fixture();f.route.warpRequested = true;
-  const pending = load('uploadPreparedLodMeshes', f.context)(f.targetBody, f.prepared, 1, f.route);f.queue.admit();assert.equal(f.seen, 1);f.readiness[0].resolve();await pending;f.dispose();
+  const pending = load('uploadPreparedLodMeshes', f.context)(f.targetBody, f.prepared, 1, f.route);f.queue.admit();assert.equal(f.seen, 1);
+  await drainReadyPreparations(f);await pending;assert.deepEqual(f.destinationCaptures.map(capture => capture.shadows), [false, true]);f.dispose();
 });
-await test('LOD selects the built root set at execution', async () => {
+await test('LOD empty roots at execution retain both persistent WORLD preparations without borrowing the body', async () => {
   const f = fixture(), pending = load('uploadPreparedLodMeshes', f.context)(f.targetBody, f.prepared, 1, f.route);
-  f.targetBody.lod.roots = [];f.targetBody.waterLod.roots = [];f.queue.admit();await pending;assert.equal(f.seen, 0);assert.equal(f.group.position.x, 12);f.dispose();
+  f.targetBody.lod.roots = [];f.targetBody.waterLod.roots = [];await drainReadyPreparations(f);await pending;
+  assert.equal(f.seen, 2);assert.equal(f.destinationCaptures.length, 2);assert.ok(f.destinationCaptures.every(capture => capture.roots.length === 0));assert.equal(f.group.position.x, 12);f.dispose();
+});
+await test('LOD without a destination group queues no destination preparation', async () => {
+  const f = fixture(), pending = load('uploadPreparedLodMeshes', f.context)(null, f.prepared, 1, f.route);
+  assert.equal(f.queue.jobs.length, 0);await pending;assert.equal(f.destinationCaptures.length, 0);assert.equal(f.seen, 0);f.dispose();
+});
+await test('LOD captures shadow-off before shadow-on, selecting replacements separately after each admission', async () => {
+  const f = fixture();let currentRoots = [];
+  Object.defineProperty(f.targetBody.lod, 'roots', { get() {
+    assert.equal(f.queue.executing, true, 'Root selection must not run before admission');return currentRoots;
+  }, set(value) { currentRoots = value; } });
+  const pending = load('uploadPreparedLodMeshes', f.context)(f.targetBody, f.prepared, 1, f.route);
+  assert.equal(f.destinationCaptures.length, 0);assert.equal(f.queue.jobs.length, 1);
+  const firstRoot = new THREE.Mesh(f.mesh.geometry, f.mesh.material), secondRoot = new THREE.Mesh(f.mesh.geometry, f.mesh.material);
+  const firstGroup = new THREE.Group(), secondGroup = new THREE.Group();firstGroup.add(firstRoot);secondGroup.add(secondRoot);
+  const firstTarget = {}, secondTarget = {}, secondShip = { group: new THREE.Group() };
+  f.targetBody.group = firstGroup;f.targetBody.lod.roots = [{ mesh: firstRoot }];f.context.nodePipeline.composer.readBuffer = firstTarget;f.queue.admit();
+  assert.equal(f.destinationCaptures.length, 1);assert.equal(f.destinationCaptures[0].shadows, false);
+  assert.equal(f.destinationCaptures[0].roots[0], firstRoot);assert.equal(f.destinationCaptures[0].bodyGroup.children[0], firstRoot);
+  assert.equal(f.destinationCaptures[0].target, firstTarget);assert.equal(f.queue.jobs.length, 0);
+  await microtasks();assert.equal(f.queue.jobs.length, 0, 'Shadow-on must wait for shadow-off readiness');
+  f.readiness[0].resolve();await microtasks();assert.equal(f.queue.jobs.length, 1);
+  f.targetBody.group = secondGroup;f.targetBody.lod.roots = [{ mesh: secondRoot }];f.context.nodePipeline.composer.readBuffer = secondTarget;f.context.ship = secondShip;
+  f.queue.admit();assert.deepEqual(f.destinationCaptures.map(capture => capture.shadows), [false, true]);
+  assert.equal(f.destinationCaptures[1].roots[0], secondRoot);assert.equal(f.destinationCaptures[1].bodyGroup.children[0], secondRoot);
+  assert.equal(f.destinationCaptures[1].target, secondTarget);assert.equal(f.destinationCaptures[1].ship, secondShip);
+  f.readiness[1].resolve();await pending;f.dispose();
+});
+for (const cancellation of ['token', 'signal']) await test(`LOD ${cancellation} cancellation after shadow-off prevents the queued shadow-on capture`, async () => {
+  const f = fixture(), pending = load('uploadPreparedLodMeshes', f.context)(f.targetBody, f.prepared, 1, f.route);
+  const settled = assert.rejects(pending, error => error.code === (cancellation === 'token' ? 'obsolete' : 'aborted'));
+  f.queue.admit();f.readiness[0].resolve();await microtasks();assert.equal(f.queue.jobs.length, 1);
+  if (cancellation === 'token') f.cancel();else f.context.warpCompile.abort();f.queue.admit();await settled;
+  assert.equal(f.destinationCaptures.length, 1);assert.equal(f.destinationCaptures[0].shadows, false);assert.equal(f.seen, 1);f.dispose();
 });
 for (const fault of ['none', 'sync', 'async']) await test(`world queued ${fault}: temporary clone never survives the callback`, async () => {
   const f = fixture(fault), body = { lod: f.targetBody.lod }, pending = load('prewarmWorldMaterials', f.context)(body, f.system);

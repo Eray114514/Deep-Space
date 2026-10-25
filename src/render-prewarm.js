@@ -61,9 +61,16 @@ export function withSurfaceWarmupVariant(source, work) {
 // Three.compileAsync gathers programs synchronously, then polls readiness.
 // Give that synchronous phase its own camera/renderable/light objects. Never
 // retain a lease on live camera layers, mesh flags or framebuffer while awaiting.
+export function createCompileCamera(camera, layer) {
+  // Camera.clone() ignores the recursive argument. copy(..., false) is needed
+  // to avoid cloning attached first-person rigs and their instance buffers.
+  const copy = new camera.constructor().copy(camera, false);
+  copy.layers.set(layer);
+  return copy;
+}
+
 export function compileRenderVariant(renderer,source,camera,scene,{layer,target,shadowLight=null,signal}) {
-  const compileCamera=camera.clone(),group=new THREE.Group(),instances=[];
-  compileCamera.layers.set(layer);
+  const compileCamera=createCompileCamera(camera,layer),group=new THREE.Group(),instances=[];
   source.traverse(object=>{
     if(!(object.isMesh||object.isPoints||object.isLine||object.isSprite)
       || !object.layers.test(compileCamera.layers))return;
