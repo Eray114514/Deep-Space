@@ -9,15 +9,18 @@ import { evidenceFingerprint } from './evidence-fingerprint.js';
 const verifier = 'tools/preparationplaytest.js', out = `test-results/preparation-player/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 await writeFile(`${out}/verifier.js`, await readFile(new URL(import.meta.url)));
-const report = { before: await evidenceFingerprint(verifier), errors: [], driverWarnings: [],
-  scope: 'Actual route UI/cancel/queued Warp/rift/private draw/adoption, Balanced 720p vclouds=0. Passive submission observers; controlled queue hold only for the first cancellation case. No FPS/cloud-art claim.' };
+const report = { before: await evidenceFingerprint(verifier), errors: [], expectedErrors: [], driverWarnings: [],
+  scope: 'Actual route UI/cancel/queued Warp/rift/private draw/adoption, Balanced 720p vclouds=0. Controlled first-cancel queue hold, owned source orphan witness and one WORLD preparation rejection for same-batch retry. No FPS/cloud-art claim.' };
 const { server, port } = await startServer(0);let browser, page;
 try {
   browser = await launchHardwareBrowser({ executablePath: resolveSystemChromePath() || undefined, headless: true });
   report.browserVersion = browser.version();page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   page.on('pageerror', error => report.errors.push(String(error)));
   page.on('console', message => {
-    const text = message.text();if (message.type() === 'error') report.errors.push(text);
+    const text = message.text();if (message.type() === 'error') {
+      if (text.startsWith('Deferred WORLD publication failed:') && text.includes('QA_WORLD_PUBLICATION_REJECTION')) report.expectedErrors.push(text);
+      else report.errors.push(text);
+    }
     if (/GL_INVALID|CONTEXT_LOST|Program object expected|INVALID_(?:ENUM|VALUE|OPERATION)|GL_OUT_OF_MEMORY/i.test(text)) report.driverWarnings.push(text);
   });
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=0&farflora=0&post=1&freeze=1&buildms=25`);
@@ -25,11 +28,31 @@ try {
   await page.evaluate(async () => {
     const T = await import('three');
     const pipeline = NMS._pipeline, renderer = NMS._renderer, queue = pipeline.preparations;
-    const data = window.__preparationPlayer = { phase: 'cancel', compiles: 0, uploads: 0, draws: 0, outside: [], labels: {}, destinationCompiles: [], restored: false };
+    const data = window.__preparationPlayer = { phase: 'cancel', compiles: 0, uploads: 0, draws: 0, outside: [], labels: {}, destinationCompiles: [], publications: [], restored: false };
     const restores = [], wrap = (object, name, factory) => {
       const original = object[name], wrapper = factory(original);object[name] = wrapper;
       restores.push(() => { if (object[name] !== wrapper) throw Error(`Observer changed: ${name}`);object[name] = original; });
     };
+    const { WorldPublication } = await import('/src/world-publication.js');
+    const identifiers = new WeakMap();let nextPublication = 0, injectedPublicationFailure = false;
+    wrap(WorldPublication.prototype, 'publish', original => function(...args) {
+      if (!identifiers.has(this)) identifiers.set(this, ++nextPublication);
+      const id = identifiers.get(this), roots = [...this.visibility], owner = this.system;
+      const record = (committed, failed) => data.publications.push({ id, committed, failed,
+        ownerCurrent: owner === NMS._internals.universe.system, state: this.state, attempts: this.attempts,
+        roots: roots.length, allHidden: roots.every(([root]) => !root.visible),
+        desiredReached: roots.every(([root, visible]) => root.visible === visible) });
+      return original.apply(this, args).then(result => { record(result, false);return result; }, error => {
+        record(false, true);throw error;
+      });
+    });
+    wrap(pipeline, 'prepare', original => function(work, options) {
+      if (options?.label === 'world-publication' && !injectedPublicationFailure) {
+        injectedPublicationFailure = true;data.controlledPublicationFailure = true;
+        return Promise.reject(Object.assign(new Error('QA_WORLD_PUBLICATION_REJECTION'), { code: 'qa-publication' }));
+      }
+      return original.call(this, work, options);
+    });
     for (const [name, counter] of [['compile', 'compiles'], ['initTexture', 'uploads']]) wrap(renderer, name, original => function(...args) {
       data[counter]++;const label = queue.active?.label;
       if (!pipeline.frameSubmissionActive || !label) data.outside.push({ name, phase: data.phase });
@@ -126,6 +149,10 @@ try {
   report.sourceOrphanRetirement = await page.evaluate(() => ({ visible: __preparationSourceOrphan.visible,
     attached: Boolean(__preparationSourceOrphan.parent) }));
   assert.ok(!report.sourceOrphanRetirement.visible || !report.sourceOrphanRetirement.attached);
+  await page.waitForFunction(() => {
+    const rows = __preparationPlayer.publications, failed = rows.find(row => row.failed);
+    return failed?.allHidden && rows.some(row => row.id === failed.id && row.committed && row.desiredReached);
+  }, null, { timeout: 120000 });
   await page.screenshot({ path: `${out}/warp-arrival.png`, timeout: 90000 });
   await page.evaluate(() => { __preparationPlayer.phase = 'rift'; });
   report.riftTarget = await choose();await page.locator('#route-rift-btn').click();report.step = 'rift-ready';
@@ -155,6 +182,10 @@ try {
   assert.ok(report.result.observer.compiles > 0 && report.result.observer.uploads > 0);
   assert.ok(report.result.observer.labels['destination-private-frame'] > 0);
   assert.deepEqual(report.result.observer.outside, []);assert.equal(report.result.observer.restored, true);
+  assert.equal(report.expectedErrors.length, 1);assert.equal(report.result.observer.controlledPublicationFailure, true);
+  const failedPublication = report.result.observer.publications.find(row => row.failed);
+  assert.ok(failedPublication?.allHidden);
+  assert.ok(report.result.observer.publications.some(row => row.id === failedPublication.id && row.committed && row.desiredReached));
   const destinationCompiles = report.result.observer.destinationCompiles;
   assert.equal(destinationCompiles.length, 4);
   assert.ok(destinationCompiles.every(row => row.renderables > 0 && row.currentHdr && row.privateSource && row.privateLights

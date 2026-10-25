@@ -17,27 +17,23 @@ function load(name, context) {
 }
 async function test(name, work) { try { await work();cases.push({ name, passed: true }); } catch (error) { cases.push({ name, passed: false, error: String(error), stack: error.stack }); } }
 const microtasks = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-function deferredFinisher(context) {
-  if (main.includes('function finishDeferredSystemMaterialPreparation(')) return load('finishDeferredSystemMaterialPreparation', context);
-  // Before extraction, execute the actual inline finally body with its captured
-  // body/system bindings; a missing helper is never counted as an old failure.
-  const anchor = main.indexOf('Promise.resolve(prewarmWorldMaterials(body, system))');
-  const start = main.indexOf('.finally(() => {', anchor), open = main.indexOf('{', start), end = main.indexOf('\n        });', open);
-  assert.ok(anchor >= 0 && start >= 0 && end > open, 'Actual deferred finally callback');
-  const source = main.slice(open, end + '\n        }'.length);functions.deferredInlineFinally = { bytes: Buffer.byteLength(source), sha256: hash(source) };
-  return vm.runInNewContext(`(function(body, system) ${source})`, context);
-}
 await test('retired deferred owner releases its global gate without revealing old body or shortening next cooldown', () => {
-  const system = {}, body = { group: { visible: false } }, context = { deferredSystemBuildActive: true, universe: { system: {} }, performance: { now: () => 1000 }, systemBuildResumeAt: 2800 };
-  deferredFinisher(context)(body, system);assert.equal(context.deferredSystemBuildActive, false);assert.equal(body.group.visible, false);assert.equal(context.systemBuildResumeAt, 2800);
+  const system = {}, root = { visible: false }, publication = { system, visibility: new Map([[root, true]]), state: 'failed' };
+  const context = { deferredSystemBuildActive: true, universe: { system: {} }, performance: { now: () => 1000 }, systemBuildResumeAt: 2800 };
+  load('finishDeferredSystemMaterialPreparation', context)(publication, system);
+  assert.equal(context.deferredSystemBuildActive, false);assert.equal(root.visible, false);assert.equal(publication.state, 'failed');assert.equal(context.systemBuildResumeAt, 2800);
 });
-await test('current deferred owner retains a longer handoff cooldown while revealing its body', () => {
-  const system = {}, body = { group: { visible: false } }, context = { deferredSystemBuildActive: true, universe: { system }, performance: { now: () => 1000 }, systemBuildResumeAt: 2800 };
-  deferredFinisher(context)(body, system);assert.equal(context.deferredSystemBuildActive, false);assert.equal(body.group.visible, true);assert.equal(context.systemBuildResumeAt, 2800);
+await test('current deferred owner retains a longer handoff cooldown without publishing failed roots', () => {
+  const system = {}, root = { visible: false }, publication = { system, visibility: new Map([[root, true]]), state: 'failed' };
+  const context = { deferredSystemBuildActive: true, universe: { system }, performance: { now: () => 1000 }, systemBuildResumeAt: 2800 };
+  load('finishDeferredSystemMaterialPreparation', context)(publication, system);
+  assert.equal(context.deferredSystemBuildActive, false);assert.equal(root.visible, false);assert.equal(publication.state, 'failed');assert.equal(context.systemBuildResumeAt, 2800);
 });
 await test('current deferred owner establishes the ordinary 120ms cooldown when no longer delay exists', () => {
-  const system = {}, body = { group: { visible: false } }, context = { deferredSystemBuildActive: true, universe: { system }, performance: { now: () => 1000 }, systemBuildResumeAt: 500 };
-  deferredFinisher(context)(body, system);assert.equal(context.deferredSystemBuildActive, false);assert.equal(body.group.visible, true);assert.equal(context.systemBuildResumeAt, 1120);
+  const system = {}, root = { visible: false }, publication = { system, visibility: new Map([[root, true]]), state: 'pending', attempts: 0 };
+  const context = { deferredSystemBuildActive: true, universe: { system }, performance: { now: () => 1000 }, systemBuildResumeAt: 500 };
+  load('finishDeferredSystemMaterialPreparation', context)(publication, system);
+  assert.equal(context.deferredSystemBuildActive, false);assert.equal(root.visible, false);assert.equal(publication.state, 'pending');assert.equal(context.systemBuildResumeAt, 1120);
 });
 function controlledQueue() {
   const jobs = [];let executing = false;
@@ -222,21 +218,36 @@ for (const cancellation of ['token', 'signal']) await test(`LOD ${cancellation} 
   if (cancellation === 'token') f.cancel();else f.context.warpCompile.abort();f.queue.admit();await settled;
   assert.equal(f.destinationCaptures.length, 1);assert.equal(f.destinationCaptures[0].shadows, false);assert.equal(f.seen, 1);f.dispose();
 });
-for (const fault of ['none', 'sync', 'async']) await test(`world queued ${fault}: temporary clone never survives the callback`, async () => {
-  const f = fixture(fault), body = { lod: f.targetBody.lod }, pending = load('prewarmWorldMaterials', f.context)(body, f.system);
+function worldPublicationFixture(fault = 'none') {
+  const f = fixture(fault), publication = { system: f.system, visibility: new Map([[f.group, true]]) };
+  Object.assign(f.context, { state: 'space', contextLost: false,
+    compileWorldPublicationVariant(renderer, config, options) {
+      assert.equal(config.publication, publication);assert.equal(config.target, f.context.nodePipeline.composer.readBuffer);
+      assert.equal(options.signal, f.context.nodePipeline.programPreparation.signal);
+      const pending = f.context.compilePrograms(renderer, publication, config.camera, config.scene);
+      f.readiness.at(-1).worldCapture = { ...config, children: [...publication.visibility.keys()].flatMap(root => root.children), near: config.camera.near };
+      return pending.then(() => 'WORLD-revision');
+    } });
+  f.context.worldPublicationConfig = load('worldPublicationConfig', f.context);
+  return { ...f, publication, get seen() { return f.seen; }, run() { return load('prepareWorldPublication', f.context)(publication, f.system); } };
+}
+for (const fault of ['none', 'sync', 'async']) await test(`world publication queued ${fault}: no temporary scene object survives capture`, async () => {
+  const f = worldPublicationFixture(fault), pending = f.run();
   const settled = pending.catch(error => assert.match(error.message, /fault/));assert.equal(f.scene.children.length, 1);assert.equal(f.seen, 0);
   f.queue.admit();assert.equal(f.seen, 1);assert.equal(f.scene.children.length, 1);
   if (fault === 'async') f.readiness[0].reject(Error('async fault'));else f.readiness[0]?.resolve();await microtasks();
-  if (fault === 'none') { assert.equal(f.queue.jobs.length, 1);f.queue.admit(); }await settled;assert.equal(f.scene.children[0], f.group);f.dispose();
+  if (fault === 'none') { assert.equal(f.queue.jobs.length, 1);await drainReadyPreparations(f); }await settled;assert.equal(f.scene.children[0], f.group);f.dispose();
 });
-await test('world replacement material/root and camera pose are chosen after waiting', async () => {
-  const f = fixture(), body = { lod: f.targetBody.lod }, pending = load('prewarmWorldMaterials', f.context)(body, f.system);
-  const replacement = new THREE.Mesh(new THREE.SphereGeometry(2), new THREE.MeshBasicMaterial());body.lod.roots = [{ mesh: replacement }];f.context.camera.near = 5;
-  f.queue.admit();const source = f.readiness[0].source;assert.equal(source.geometry, replacement.geometry);assert.equal(source.material, replacement.material);assert.equal(source.position.z, -20);
-  f.readiness[0].resolve();await microtasks();f.queue.admit();await pending;replacement.geometry.dispose();replacement.material.dispose();f.dispose();
+await test('world publication chooses replacement roots, camera and HDR target after waiting', async () => {
+  const f = worldPublicationFixture(), pending = f.run();
+  const replacement = new THREE.Mesh(new THREE.SphereGeometry(2), new THREE.MeshBasicMaterial()), target = {};
+  f.group.clear();f.group.add(replacement);f.context.camera.near = 5;f.context.nodePipeline.composer.readBuffer = target;
+  f.queue.admit();const captured = f.readiness[0].worldCapture;
+  assert.equal(captured.children[0], replacement);assert.equal(captured.near, 5);assert.equal(captured.target, target);assert.equal(captured.shadows, false);
+  await drainReadyPreparations(f);assert.equal(await pending, 'WORLD-revision');replacement.geometry.dispose();replacement.material.dispose();f.dispose();
 });
-await test('system replacement between roots prevents the next stale world compile', async () => {
-  const f = fixture(), pending = load('prewarmWorldMaterials', f.context)(f.targetBody, f.system), settled = assert.rejects(pending, error => error.code === 'obsolete');
+await test('system replacement between publication families prevents the next stale world compile', async () => {
+  const f = worldPublicationFixture(), pending = f.run(), settled = assert.rejects(pending, error => error.code === 'obsolete');
   f.queue.admit();f.readiness[0].resolve();await microtasks();assert.equal(f.queue.jobs.length, 1);f.context.universe.system = {};f.queue.admit();await settled;
   assert.equal(f.seen, 1);assert.equal(f.scene.children.length, 1);f.dispose();
 });

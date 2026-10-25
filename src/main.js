@@ -16,7 +16,8 @@ import { FarFlora } from './farflora.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
 import { compileRenderVariant, withSurfaceWarmupVariant } from './render-prewarm.js';
 import { compilePrograms } from './program-preparation.js';
-import { compileDestinationVariant } from './destination-preparation.js';
+import { compileDestinationVariant, compileWorldPublicationVariant, worldPublicationRevision } from './destination-preparation.js';
+import { captureWorldPublication } from './world-publication.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
 import { PresentedFrameStats } from './presented-frame-stats.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
@@ -701,6 +702,8 @@ let warpRevealCameraOffset = null;
 let warpRevealActive = false;
 let systemBuildResumeAt = 0;
 let deferredSystemBuildActive = false;
+let deferredWorldPublication = null;
+let lastWorldPublicationSnapshot = null;
 const deferredSystemWarmQueue = [];
 let riftRoute = null;
 let riftPreviewSystem = null;
@@ -2095,35 +2098,77 @@ function primePreparedBodyTextures(body, system) {
   });
 }
 
-async function prewarmWorldMaterials(body, system = universe.system) {
-  for (const kind of ['lod', 'waterLod']) await nodePipeline.prepare(() => {
-    const source = body?.[kind]?.roots?.find(root => root.mesh)?.mesh;
-    if (!source?.material) return;
-    const mesh = new THREE.Mesh(source.geometry, source.material);
-    mesh.name = 'Deferred world material warmer';
-    mesh.userData.lodMorph = source.userData.lodMorph ?? 0;
-    mesh.layers.mask = source.layers.mask;
-    mesh.frustumCulled = false;
-    mesh.castShadow = source.castShadow;
-    mesh.receiveShadow = source.receiveShadow;
-    mesh.visible = true;
-    mesh.position.set(0, 0, -Math.max(8, camera.near * 4));
-    mesh.scale.setScalar(1e-7);
-    scene.add(mesh);
-    try {
-      return compilePrograms(renderer, mesh, camera, scene);
-    } finally {
-      scene.remove(mesh);
-    }
-  }, { label: 'deferred-world', signal: nodePipeline.programPreparation.signal,
-    isCurrent: () => universe.system === system });
+function nearestPublishedBody(bodies, position) {
+  let nearestBody = null, distance = Infinity;
+  for (const body of bodies) {
+    if (body.group?.visible === false) continue;
+    const candidate = position.distanceTo(body.posUniv) - body.R;
+    if (candidate < distance) { distance = candidate;nearestBody = body; }
+  }
+  return nearestBody;
 }
 
-function finishDeferredSystemMaterialPreparation(body, system) {
+function worldPublicationConfig(publication) {
+  return { scene, camera, universeRoot: universe.group, ship,
+    target: nodePipeline.composer.readBuffer, shadowLight: sunShadow, publication };
+}
+
+async function prepareWorldPublication(publication, system) {
+  let revision = null;
+  const signal = nodePipeline.programPreparation.signal;
+  for (const shadows of [false, true]) {
+    const observed = await nodePipeline.prepare(() => compileWorldPublicationVariant(renderer,
+      { ...worldPublicationConfig(publication), shadows }, { signal }),
+    { signal, label: 'world-publication', isCurrent: () => universe.system === system && state !== 'warp' && !contextLost });
+    if (revision !== null && observed !== revision) {
+      throw Object.assign(new Error('WORLD dependencies changed between preparation families'), { code: 'publication-stale' });
+    }
+    revision = observed;
+  }
+  return revision;
+}
+
+function finishDeferredSystemMaterialPreparation(publication, system) {
   deferredSystemBuildActive = false;
   if (universe.system !== system) return;
-  if (body?.group) body.group.visible = true;
-  systemBuildResumeAt = Math.max(systemBuildResumeAt, performance.now() + 120);
+  const delay = publication?.state === 'pending' ? Math.min(2000, 120 * 2 ** Math.min(publication.attempts, 4)) : 120;
+  systemBuildResumeAt = Math.max(systemBuildResumeAt, performance.now() + delay);
+}
+
+async function runDeferredSystemPublication(system, body = null) {
+  if (deferredSystemBuildActive) return false;
+  deferredSystemBuildActive = true;
+  let publication;
+  try {
+    if (deferredWorldPublication && deferredWorldPublication.system !== system) {
+      deferredWorldPublication.abandon();deferredWorldPublication = null;
+    }
+    publication = deferredWorldPublication || captureWorldPublication(system,
+      { body, build: body ? null : () => system.buildNext() });
+    deferredWorldPublication = publication;
+    const committed = await publication.publish(() => prepareWorldPublication(publication, system), {
+      isCurrent: () => universe.system === system,
+      canPublish: () => state !== 'warp' && !contextLost,
+      getRevision: () => worldPublicationRevision(renderer, worldPublicationConfig(publication)),
+    });
+    if ((committed || publication.state === 'obsolete') && deferredWorldPublication === publication) deferredWorldPublication = null;
+    if (publication.state === 'build-failed' && universe.system === system) {
+      console.error('Deferred WORLD construction failed:', publication.lastError);
+    }
+    return committed;
+  } catch (error) {
+    if (universe.system === system && !['obsolete', 'aborted', 'context-lost', 'publication-stale'].includes(error?.code)) {
+      const message = `${error?.code || ''}:${String(error?.message || error)}`;
+      if (!publication || publication.reportedError !== message) {
+        if (publication) publication.reportedError = message;
+        console.error('Deferred WORLD publication failed:', error);
+      }
+    }
+    return false;
+  } finally {
+    if (universe.system === system && publication) lastWorldPublicationSnapshot = publication.snapshot();
+    finishDeferredSystemMaterialPreparation(publication, system);
+  }
 }
 
 // Unparented stations share Universe.group with every live/prepared system;
@@ -4049,13 +4094,7 @@ function frame() {
   // nearest body & altitude
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet : null;
   if (state === 'warp' && warpRevealBody) nearest = warpRevealBody;
-  if (!nearest) {
-    let bestD = Infinity;
-    for (const p of universe.planets()) {
-      const d = _v.copy(nav.pos).sub(p.posUniv).length() - p.R;
-      if (d < bestD) { bestD = d; nearest = p; }
-    }
-  }
+  if (!nearest) nearest = nearestPublishedBody(universe.planets(), nav.pos);
   if (nearest) {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearestAlt = nearest.altitudeAt(_v);
@@ -4270,31 +4309,19 @@ function frame() {
 
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
-  // Deferred systems normally materialize one body per frame. During warp the
-  // selected arrival body has already been prepared; constructing unrelated
-  // planets here caused periodic 0.3–1.8 s stops in an otherwise smooth starflow.
-  // After arrival, keep each new background body hidden until its opaque world
-  // materials have completed WebGL program preparation. This prevents the
-  // first post-arrival draw from synchronously creating another planet pipeline.
+  // Building may add a final planet, habitats and sites under existing bodies.
+  // Keep that entire registered batch hidden until its future WORLD is ready.
+  if (deferredWorldPublication && deferredWorldPublication.system !== universe.system) {
+    deferredWorldPublication.abandon();deferredWorldPublication = null;lastWorldPublicationSnapshot = null;
+  }
   if (state !== 'warp' && performance.now() >= systemBuildResumeAt
       && universe.system && !deferredSystemBuildActive) {
     const system = universe.system;
     while (deferredSystemWarmQueue.length
         && deferredSystemWarmQueue[0].system !== system) deferredSystemWarmQueue.shift();
-    const queued = deferredSystemWarmQueue.shift() || null;
-    if (queued || !system.built) {
-      deferredSystemBuildActive = true;
-      let body = queued?.body || null;
-      if (!body) {
-        const previousBodyCount = system.planets.length + system.compactObjects.length;
-        system.buildNext();
-        const bodies = [...system.planets, ...system.compactObjects];
-        body = bodies.length > previousBodyCount ? bodies.at(-1) : null;
-      }
-      if (body?.group) body.group.visible = false;
-      Promise.resolve(prewarmWorldMaterials(body, system))
-        .catch((error) => { if (universe.system === system) console.error('Deferred system material prewarm failed:', error); })
-        .finally(() => finishDeferredSystemMaterialPreparation(body, system));
+    if (deferredWorldPublication?.state !== 'build-failed') {
+      const queued = deferredWorldPublication ? null : deferredSystemWarmQueue.shift();
+      if (deferredWorldPublication || queued || !system.built) void runDeferredSystemPublication(system, queued?.body || null);
     }
   }
 
@@ -5261,6 +5288,7 @@ window.NMS = {
       ...performanceSnapshot(),
       renderPacing: nodePipeline.framePacer?.snapshot() || null,
       renderPreparation: nodePipeline.preparations.snapshot(),
+      worldPublication: deferredWorldPublication?.snapshot() || lastWorldPublicationSnapshot,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
   },
