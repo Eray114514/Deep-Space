@@ -27,6 +27,10 @@ const columnFrameGate=process.argv.includes('--column-frame-gate');
 const framePacing=process.argv.includes('--frame-pacing');
 const observeAfterBootTimeout=process.argv.includes('--observe-after-boot-timeout');
 const pauseControl=process.argv.includes('--pause-control');
+const cloudIdleControl=process.argv.includes('--cloud-idle-control');
+const cloudFlushControl=process.argv.includes('--cloud-flush-control');
+const cloudPrograms=process.argv.includes('--cloud-programs');
+assert.ok((!cloudIdleControl&&!cloudFlushControl)||cloudPrograms,'Cloud submission controls require explicit experimental programs');
 assert.ok(!pauseControl||framePacing,'Pause control requires explicit frame pacing');
 assert.ok(!framePacing||!columnFrameGate,'Isolate runtime pacing from the diagnostic frame wrapper');
 const orbitArgument=process.argv.slice(2).find(arg=>arg.startsWith('--column-orbit-ms='));
@@ -135,6 +139,31 @@ try {
     system:await browserSession.send('SystemInfo.getInfo').catch(error=>({error:String(error)}))};
   await browserSession.detach();
   await page.addInitScript(installFoundationContextProbe);
+  if(cloudFlushControl)await page.addInitScript(()=>{
+    const get=HTMLCanvasElement.prototype.getContext,seen=new WeakSet();
+    HTMLCanvasElement.prototype.getContext=function(...args){
+      const gl=get.apply(this,args);
+      if(gl&&args[0]==='webgl2'&&!seen.has(gl)){
+        seen.add(gl);const link=gl.linkProgram;
+        gl.linkProgram=function(...values){const result=link.apply(this,values);gl.flush();return result;};
+      }return gl;
+    };
+  });
+  if(cloudIdleControl)await page.addInitScript(()=>{
+    // Diagnostic scheduling control, never a quality or shader override.
+    // Preserve RAF handles/cancellation while limiting only the main loop
+    // when its cloud gate cannot submit a world frame.
+    const request=window.requestAnimationFrame.bind(window),cancel=window.cancelAnimationFrame.bind(window),pending=new Map();
+    window.requestAnimationFrame=callback=>{
+      const id=request(time=>{
+        const row=pending.get(id);if(!row)return;
+        if(callback.name==='frame'&&window.NMS?._pipeline.cloudPrograms?.snapshot().blocked) {
+          row.timer=setTimeout(()=>{pending.delete(id);callback(performance.now());},20);
+        }else{pending.delete(id);callback(time);}
+      });pending.set(id,{timer:null});return id;
+    };
+    window.cancelAnimationFrame=id=>{const row=pending.get(id);if(row?.timer!==null)clearTimeout(row?.timer);pending.delete(id);cancel(id);};
+  });
   if(probeFromNavigation)await page.addInitScript(`(${installFoundationBootProbe})(${installFoundationGLProbe})`);
   await page.addInitScript(()=>{
     const records=[];window.__foundationWorkers=records;
@@ -176,7 +205,7 @@ try {
     transferMode:'ReturnAsStream'});traceStarted=true;}
   if(cloudOverrideBody)await page.route('**/src/clouds-webgl.js',route=>route.fulfill({contentType:'text/javascript',body:cloudOverrideBody}));
   if(legacyLutBody)await page.route('**/src/atmosphere-multiple-scattering.js',route=>route.fulfill({contentType:'text/javascript',body:legacyLutBody}));
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1`);
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1${cloudPrograms?'&cloudprograms=1':''}`);
   try {
     await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
     bootDeadline={limitMs:120000,passed:true,readyAtEpochMs:Date.now()};
@@ -320,6 +349,11 @@ try {
     window.__foundationLost=0;NMS._renderer.domElement.addEventListener('webglcontextlost',()=>__foundationLost++);
   });
   await page.waitForFunction(()=>{const n=NMS.waterState(0)?.near;return n?.visible&&!n.pending;},null,{timeout:120000});
+  // A worker completing during a cold draw is not evidence that the temporal
+  // consumer has seen a subsequent settled frame. Keep the same phase until
+  // the existing recovery assertion can actually be observed, before teleport.
+  if(historyTransitions)await page.waitForFunction(()=>window.__foundationHistory?.records.some(
+    row=>row.phase==='initial'&&row.valid===1),null,{timeout:45000});
   await checkpoint('initial-complete');
   if(parallelNearControl)parallelNearResult.actualNear=await page.evaluate(()=>{
     const material=NMS._planet(0).volCloudMat,program=NMS._renderer.properties.get(material).currentProgram;
@@ -336,6 +370,8 @@ try {
     NMS.teleport(0,(p.seaLevel+40)/p.R,{dir:d.toArray(),horizon:true,pitch:0});
   });
   await page.waitForFunction(rebuilds=>{const n=NMS.waterState(0)?.near;return n?.rebuilds>rebuilds&&!n.pending;},initial.near.rebuilds,{timeout:45000});
+  if(historyTransitions)await page.waitForFunction(()=>window.__foundationHistory?.records.some(
+    row=>row.phase==='replacement'&&row.valid===1),null,{timeout:45000});
   await checkpoint('replacement-complete');
   await page.evaluate(armed=>{
     window.__foundationGLProbe.mark(armed?'input-error-attribution':'input-passive');
@@ -547,7 +583,7 @@ try {
   const bootHelperAfter=await evidenceFingerprint('tools/foundation-boot-probe.js');
   const admissionHelperAfter=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
   const frameGateHelperAfter=columnFrameGate?await evidenceFingerprint('tools/column-frame-gate.js'):null;
-  report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
+  report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,cloudPrograms,cloudIdleControl,cloudFlushControl,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,nativeLogs,nativeLogsDropped,browserInfo,
     probeFromNavigation,columnWork,columnDaySide,columnOrbitMs,columnOrbitProfile,columnFrameGate,framePacing,observeAfterBootTimeout,pauseControl,bootDeadline,frameGateHelperBefore,frameGateHelperAfter,admissionHelperBefore,admissionHelperAfter,bootHelperBefore,bootHelperAfter,
     stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest&&frameGateHelperBefore?.verifierDigest===frameGateHelperAfter?.verifierDigest,
@@ -662,7 +698,7 @@ try {
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
   await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,nativeLogs,nativeLogsDropped,browserInfo,
-    framePacing,observeAfterBootTimeout,bootDeadline,error:String(error)},null,2));
+    cloudPrograms,cloudIdleControl,cloudFlushControl,framePacing,observeAfterBootTimeout,bootDeadline,error:String(error)},null,2));
   await finishTrace();console.error(JSON.stringify({out,error:String(error)}));throw error;
 } finally {
   try {await browser?.close();}

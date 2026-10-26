@@ -107,7 +107,7 @@ export function installFoundationGLProbe(acquiredContext = null) {
       args: args.slice(0, 10).map(summarize), stack: stack(),
       deletion: { ...row.deletion } });
   };
-  const track = (name, args, result, callLocation) => {
+  const track = (name, args, result, callLocation, elapsed) => {
     if (name === 'createShader' && result) {
       const id = nextShaderId++;
       shaderIds.set(result, id);
@@ -136,6 +136,25 @@ export function installFoundationGLProbe(acquiredContext = null) {
       if (row && id) {
         if (name === 'attachShader' && !row.shaderIds.includes(id)) row.shaderIds.push(id);
         if (name === 'detachShader') row.shaderIds = row.shaderIds.filter(value => value !== id);
+      }
+    } else if (name === 'linkProgram') {
+      const row = programs.get(resource(args[0], programIds));
+      if (row) {
+        row.linkEpoch = (row.linkEpoch || 0) + 1;row.completionPolls = 0;row.incompletePolls = 0;
+        for (const field of ['firstCompletionQueryAtMs', 'firstCompleteAtMs', 'firstReflectionAtMs',
+          'firstReflectionMs', 'firstReflectionHadCompletion']) delete row[field];
+      }
+    } else if (name === 'getProgramParameter') {
+      const row = programs.get(resource(args[0], programIds));
+      if (row && args[1] === 0x91b1) {
+        row.completionPolls = (row.completionPolls || 0) + 1;
+        row.firstCompletionQueryAtMs ??= callLocation.atMs;
+        if (result === true) row.firstCompleteAtMs ??= callLocation.atMs;
+        if (result === false) row.incompletePolls = (row.incompletePolls || 0) + 1;
+      }
+      if (row && args[1] === 0x8b86 && row.firstReflectionAtMs === undefined) {
+        row.firstReflectionAtMs = callLocation.atMs;row.firstReflectionMs = elapsed;
+        row.firstReflectionHadCompletion = row.firstCompleteAtMs !== undefined;
       }
     } else if (name === 'useProgram') currentProgram = resource(args[0], programIds);
     else if (name === 'deleteShader') {
@@ -205,7 +224,7 @@ export function installFoundationGLProbe(acquiredContext = null) {
             result: summarize(result), deletedUse: Boolean(deletedUse), stack: stack() });
           else dropped.programQueryObservations++;
         }
-        if (!threw) track(name, args, result, callLocation);
+        if (!threw) track(name, args, result, callLocation, elapsed);
         checkError(name, args, result, callLocation, callContext);
       }
       record(kind, name, elapsed, args, callLocation, callContext, threw);

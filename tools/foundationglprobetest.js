@@ -8,6 +8,7 @@ function fixture(extraMethods = 0, early = false) {
   let pendingError = 0;
   let errorCalls = 0;
   let failDraw = false;
+  let complete = true;
   const deletedPrograms = new WeakSet();
   const prototype = {};
   const native = {};
@@ -34,6 +35,7 @@ function fixture(extraMethods = 0, early = false) {
   method('deleteProgram', program => { if (program) deletedPrograms.add(program); });
   method('getProgramParameter', (program, parameter) => {
     if (deletedPrograms.has(program)) { pendingError = 1281; return null; }
+    if (parameter === 0x91b1) return complete;
     if (parameter === 0x8b86) return 0;
     return true;
   });
@@ -65,7 +67,23 @@ function fixture(extraMethods = 0, early = false) {
   const program = gl.createProgram();
   return { gl, native, pipeline, probe, installed, shader, program, originalRender, originalVolume,
     errors: () => errorCalls, setError: value => { pendingError = value; },
-    failDraw: value => { failDraw = value; }, host, sandbox };
+    failDraw: value => { failDraw = value; }, setComplete: value => { complete = value; }, host, sandbox };
+}
+
+{
+  const f = fixture();f.gl.linkProgram(f.program);f.setComplete(false);
+  f.gl.getProgramParameter(f.program, 0x91b1);f.gl.getProgramParameter(f.program, 0x91b1);
+  f.setComplete(true);f.gl.getProgramParameter(f.program, 0x91b1);
+  f.gl.getProgramParameter(f.program, 0x8b86);
+  const row = f.probe.snapshot().programs[0];
+  assert.equal(row.completionPolls, 3);assert.equal(row.incompletePolls, 2);
+  assert.equal(row.firstReflectionHadCompletion, true);assert.equal(row.firstReflectionMs, 0);
+  assert.ok(row.firstCompleteAtMs <= row.firstReflectionAtMs);assert.equal(f.errors(), 0);
+  f.gl.linkProgram(f.program);f.gl.getProgramParameter(f.program, 0x8b86);
+  const relink = f.probe.snapshot().programs[0];
+  assert.equal(relink.linkEpoch, 2);assert.equal(relink.firstReflectionHadCompletion, false);
+  assert.equal(relink.completionPolls, 0);assert.equal(row.firstReflectionHadCompletion, true);
+  f.probe.dispose();
 }
 
 {

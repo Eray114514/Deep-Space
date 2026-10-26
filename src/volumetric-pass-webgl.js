@@ -364,6 +364,48 @@ export class VolumetricPass extends Pass {
     setCloudFarCacheEnabled(planet,cacheOnly);
   }
 
+  // Plan the programs which the unchanged pass can select, before ANY world
+  // pass starts. Column production and retirement stay in render(): either can
+  // change the far-cache flag during this frame, so its closure belongs here.
+  // This is deliberately independent of the previous draw's uCameraLocal.
+  requiredProgramRequests(origin = this.nav) {
+    const requests = [], active = this.activePlanet, activeMesh = active?.volCloudMesh;
+    let activeVisible = false;
+    const append = (mesh, material, cacheVariants) => {
+      if (!material?.isShaderMaterial || material.defines?.CLOUD_FAR_VIEW === undefined) return;
+      requests.push({ mesh, material, cacheVariants: [...new Set(cacheVariants)] });
+    };
+    this.scene.traverseVisible(object => {
+      if (!object.isMesh || !object.layers.isEnabled(VOLUME_LAYER)) return;
+      if (object === activeMesh) { activeVisible = true;return; }
+      for (const material of [object.material].flat()) {
+        // A retiring bank can reset a fading body's CACHE1 before the draw.
+        const cache = Number(material?.defines?.CLOUD_FAR_CACHE || 0);
+        append(object, material, material?.defines?.CLOUD_FAR_VIEW ? [cache, 0] : [cache]);
+      }
+    });
+    if (activeVisible) {
+      // Match updateWorldMatrix(true, false), including manually owned world
+      // matrices, without updating live camera/rig caches on a blocked frame.
+      const chain = [];let node = this.camera;
+      while (node && node.matrixWorldAutoUpdate === true
+          && (node.matrixAutoUpdate || node.matrixWorldNeedsUpdate)) { chain.push(node);node = node.parent; }
+      const world = node ? node.matrixWorld.clone() : new THREE.Matrix4();
+      for (const object of chain.reverse()) world.multiply(object.matrixAutoUpdate
+        ? new THREE.Matrix4().compose(object.position, object.quaternion, object.scale) : object.matrix);
+      const eye = new THREE.Vector3().setFromMatrixPosition(world);
+      const local = new THREE.Vector3().copy(origin).sub(active.posUniv).add(eye);
+      if (active.frameOrientation) local.applyQuaternion(active.frameOrientation.clone().invert());
+      const outer = active.volCloudBand?.rOut || this.radius;
+      const distance = local.length() - outer;
+      const far = Boolean(active.volCloudFarMat && distance > 200000);
+      const cone = minimumCloudRayCone(this.camera.projectionMatrix.elements, this.width, this.height);
+      append(activeMesh, far ? active.volCloudFarMat : active.volCloudMat,
+        far && Math.max(0, distance) * cone > 2400 ? [0, 1] : [0]);
+    }
+    return requests;
+  }
+
   configureColumnWork(policy) {
     const banks=[...this.columnMaps.values()];
     this.columnMaps.clear();this.columnRelease.clear();this.columnWork=policy;

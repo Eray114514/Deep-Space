@@ -35,7 +35,6 @@ import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
-import { VOLUME_LAYER } from './volumetric-pass.js';
 import { SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
@@ -237,17 +236,6 @@ const startupCompile = new AbortController();
 // loading screen.
 const STARTUP_TERRAIN_GRACE_MS = QUALITY_LOW ? 650 : 3500;
 let startupPrewarmExpired = false;
-// The cloud raymarch must reach the real production RenderPipeline once before
-// the loading mask disappears. Building its TSL graph or compiling an isolated
-// PassNode does not create the device pipeline used by the live MRT/depth
-// configuration; the first destination reveal would otherwise pay that cost.
-let startupVolumeWarmState = 'complete';
-let startupVolumeWarmSubmittedFrame = -1;
-// These tiny meshes keep one RenderObject alive for each shared local-volume
-// material. Without them, disposing the departure system drops Three's
-// NodeBuilderState usedTimes to zero and evicts the pipeline before arrival.
-const startupVolumeKeepaliveMeshes = [];
-
 function startupTerrainReady() {
   const planet = universe?.system?.planets?.[0];
   if (!planet || planet.isGasGiant) return true;
@@ -560,6 +548,7 @@ const cloudResourceManager = configureCloudResourceManager({
 });
 const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
+  cloudProgramPreparation: qs.get('cloudprograms') === '1',
   volumeScale: effectiveVolumeScale,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
   bloomStrength: RENDER_LOOK_NEXT ? (IS_TOUCH ? 0.24 : 0.30) : (IS_TOUCH ? 0.35 : 0.5),
@@ -4660,7 +4649,6 @@ function frame() {
         : 0;
     }
   }
-  let startupVolumeWarmDrawRequested = false;
   const localAtmospherePlanet = state === 'warp' && !warpRevealActive
     ? null : nearest;
   nodePipeline.setActiveAtmosphere(localAtmospherePlanet?.isGasGiant
@@ -4668,69 +4656,16 @@ function frame() {
     ? null : localAtmospherePlanet, nav.pos);
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
-    if (startupVolumeWarmState === 'submitted'
-        && frameNo > startupVolumeWarmSubmittedFrame) {
-      // render() returned after the production graph submitted the previous
-      // frame. Restore ordinary nearest-body ownership before the next draw.
-      startupVolumeWarmState = 'complete';
-    }
-    const startupVolumeCandidates = !loadingCleared && startupVolumeWarmState === 'waiting'
-      ? universe.planets() : [];
-    const startupVolumePlanet = startupVolumeCandidates.find((planet) => planet.volCloudMesh
-      && planet.atmoMesh && !planet.isGasGiant
-      && planet.type !== 'artificialHabitat') || null;
-    if (!loadingCleared && startupVolumeWarmState === 'waiting'
-        && universe.system?.built && !startupVolumePlanet) {
-      // A genuinely cloudless opening system has no cloud pipeline to warm.
-      startupVolumeWarmState = 'complete';
-    }
     // The first two thirds of stellar warp are fully covered by starflow. Do
     // not activate a destination volume merely because it is the selected
     // navigation reference: that cold pipeline used to stop the tunnel for up
     // to a second while the planet was still invisible. Engage it only in the
-    // authored braking/reveal window. Startup may override this for one masked
-    // production draw; destination water is precompiled separately because it
-    // belongs to the opaque 4x MSAA world pass, not the local-volume pass.
-    const volumePlanet = startupVolumePlanet
-      || (state === 'warp' && !warpRevealActive ? null : nearest);
+    // authored braking/reveal window. The full graph waits for its required
+    // cloud programs before any pass starts; there is no separate masked draw.
+    const volumePlanet = state === 'warp' && !warpRevealActive ? null : nearest;
     volumePass.setActivePlanet(volumePlanet?.isGasGiant
       || volumePlanet?.type === 'artificialHabitat' ? null : volumePlanet, nav.pos, motion);
     nodePipeline.bindVolumeDepth?.(volumePass.activePlanet);
-    if (startupVolumePlanet?.volCloudMesh) {
-      // Planet.update() correctly hides a distant cloud shell whose
-      // contribution is zero. Visibility is sufficient to compile the live
-      // half-resolution cloud pipeline; uEngage may remain zero, so the masked
-      // warm frame cannot alter the authored scene.
-      startupVolumePlanet.volCloudMesh.visible = true;
-      if (!startupVolumeKeepaliveMeshes.length) {
-        for (const source of [startupVolumePlanet.volCloudMesh]) {
-          if (!source?.material) continue;
-          const keepalive = new THREE.Mesh(
-            new THREE.SphereGeometry(1, 4, 2), source.material);
-          keepalive.name = 'Local volume pipeline keepalive';
-          keepalive.layers.set(VOLUME_LAYER);
-          keepalive.frustumCulled = false;
-          keepalive.visible = true;
-          // Keep the RenderObject participating so Three retains the shared
-          // NodeBuilder/pipeline, but never cover a live pixel. A unit BackSide
-          // sphere at the camera origin enclosed the arrival camera and drew
-          // the active atmosphere across the entire screen after every warp.
-          // Reposition a sub-pixel proxy one metre behind whichever camera is
-          // rendering (main or portal); vertex work keeps the pipeline hot
-          // while clipping produces zero fragments.
-          keepalive.scale.setScalar(1e-7);
-          const behindCamera = new THREE.Vector3();
-          keepalive.onBeforeRender = (_renderer, _scene, renderCamera) => {
-            behindCamera.set(0, 0, 1).applyQuaternion(renderCamera.quaternion)
-              .add(renderCamera.position);
-            keepalive.position.copy(behindCamera);
-          };
-          scene.add(keepalive);
-          startupVolumeKeepaliveMeshes.push(keepalive);
-        }
-      }
-      startupVolumeWarmDrawRequested = true;
-    }
     // Local cloud ownership is exclusive. Refresh the active planet state just
     // before the single volume-layer draw so destination weather and lighting
     // are warm before the warp reveal.
@@ -4823,9 +4758,10 @@ function frame() {
   // no-ops render() anyway, but skipping avoids noise from the post chain
   // trying to read stale render targets. The context-lost HUD hint is
   // surfaced from the listener.
+  let worldRendered = false;
   if (!contextLost) {
-    const rendered = renderWorldFrame();
-    if(rendered) {
+    worldRendered = renderWorldFrame();
+    if(worldRendered) {
       // A paced-out RAF is simulation time, not another presented frame.
       // Keep severe stalls and the full interval across skipped callbacks.
       const timing=presentedFrames.present(performance.now());
@@ -4838,10 +4774,6 @@ function frame() {
           }
         }
       }
-      if (startupVolumeWarmDrawRequested && startupVolumeWarmState === 'waiting') {
-        startupVolumeWarmState = 'submitted';
-        startupVolumeWarmSubmittedFrame = frameNo;
-      }
       const info=renderer.info.render;
       latestRenderCalls=info.calls;latestRenderTriangles=info.triangles;
     }
@@ -4853,6 +4785,7 @@ function frame() {
     >= STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS;
   const startupSystemReady = Boolean(universe.system?.built)
     && pendingChunks() === 0;
+  const cloudPreparation = nodePipeline.cloudPrograms.snapshot();
   // High/Ultra never hands control over with an active opening-planet build
   // queue. The old timeout merely hid the loading screen while hundreds of
   // GPU uploads moved into the hero shot. Performance tier keeps a bounded
@@ -4868,15 +4801,16 @@ function frame() {
     if (surfacePipelinesReady) target += 0.3;
     if (startupAssetsReady) target += 0.2;
     if (terrainReady) target += 0.2;
-    if (startupVolumeWarmState === 'complete') target += 0.15;
+    if (worldRendered) target += 0.15;
     if (loadingProgress < target) {
       loadingProgress += (target - loadingProgress) * Math.min(1, dt * 5);
       if (loadingProgress > target) loadingProgress = target;
     }
     ui.setLoadingProgress(loadingProgress);
+    if (cloudPreparation.failed) ui.setLoading(true, '渲染准备失败，请刷新重试');
   }
   if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady
-    && startupAssetsReady && terrainReady && startupVolumeWarmState === 'complete') {
+    && startupAssetsReady && terrainReady && worldRendered) {
     if (!shipPipelinesWarmed) {
       for (const mesh of surfaceBootstrapMeshes.splice(0)) {
         mesh.removeFromParent();
@@ -4888,17 +4822,15 @@ function frame() {
     ui.setLoadingProgress(1);
     loadingCleared = true;
     ui.setLoading(false);
-  } else if (!loadingCleared
+  } else if (!loadingCleared && !cloudPreparation.blocked
     && performance.now() - startupWarmStartedAt
       > STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS + 3000) {
-    // Safety net: every individual stage has its own timeout, but if some
-    // unforeseen interaction (driver reset, missed rAF, extension blocking
-    // compileAsync) leaves the mask up past the worst-case budget, force it
-    // down so the player is never stranded on the loading screen.
+    // Keep the older escape for unrelated startup stages, but never reveal an
+    // empty canvas while a required cloud program still owns readiness. Its
+    // own deadline/failure remains explicit; it is not a completed world draw.
     console.warn('loading mask forced clear by safety-net timeout');
     if(!surfacePipelinesReady||surfaceBootstrapPending)
       releaseStartupPrewarm('loading mask safety deadline exceeded');
-    startupVolumeWarmState = 'complete';
     loadingProgress = 1;
     ui.setLoadingProgress(1);
     loadingCleared = true;
@@ -5288,6 +5220,7 @@ window.NMS = {
       ...performanceSnapshot(),
       renderPacing: nodePipeline.framePacer?.snapshot() || null,
       renderPreparation: nodePipeline.preparations.snapshot(),
+      cloudPreparation: { enabled: nodePipeline.cloudProgramsEnabled, ...nodePipeline.cloudPrograms.snapshot() },
       worldPublication: deferredWorldPublication?.snapshot() || lastWorldPublicationSnapshot,
       far: farFlora.meshes ? farFlora.meshes[0].count + farFlora.meshes[1].count : 0,
     };
