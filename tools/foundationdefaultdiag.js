@@ -29,8 +29,13 @@ const observeAfterBootTimeout=process.argv.includes('--observe-after-boot-timeou
 const pauseControl=process.argv.includes('--pause-control');
 const cloudIdleControl=process.argv.includes('--cloud-idle-control');
 const cloudFlushControl=process.argv.includes('--cloud-flush-control');
+const cloudShipControl=process.argv.includes('--cloud-ship-control');
+const cloudSimulationControl=process.argv.includes('--cloud-simulation-control');
+const cloudNativeTail=process.argv.includes('--cloud-native-tail');
 const cloudPrograms=process.argv.includes('--cloud-programs');
-assert.ok((!cloudIdleControl&&!cloudFlushControl)||cloudPrograms,'Cloud submission controls require explicit experimental programs');
+assert.ok((!cloudIdleControl&&!cloudFlushControl&&!cloudShipControl&&!cloudSimulationControl)||cloudPrograms,'Cloud submission controls require explicit experimental programs');
+assert.ok([cloudIdleControl,cloudFlushControl,cloudShipControl,cloudSimulationControl].filter(Boolean).length<=1,'One cloud submission control per page');
+assert.ok(!cloudNativeTail||(cloudPrograms&&observeAfterBootTimeout),'Native tail requires the original boot-failure observation mode');
 assert.ok(!pauseControl||framePacing,'Pause control requires explicit frame pacing');
 assert.ok(!framePacing||!columnFrameGate,'Isolate runtime pacing from the diagnostic frame wrapper');
 const orbitArgument=process.argv.slice(2).find(arg=>arg.startsWith('--column-orbit-ms='));
@@ -76,6 +81,26 @@ const out=`test-results/foundation-default/${new Date().toISOString().replace(/[
 await mkdir(out,{recursive:true});
 await writeFile(`${out}/verifier.js`,await readFile('tools/foundationdefaultdiag.js'));
 const before=await evidenceFingerprint('tools/foundationdefaultdiag.js');
+let shipOverrideBody=null,shipOverride=null;
+if(cloudShipControl) {
+  const original=await readFile('src/main.js','utf8');
+  const anchor="  shipPipelineWarmPending = true;\n  surfacePipelinesReady = false;";
+  assert.equal(original.split(anchor).length-1,1,'Exactly one ship startup submission boundary');
+  const guard=`  // Diagnostic-only served control: defer ship preparation while clouds wait.
+  // Original startup expiry still applies; expired prewarm may be skipped.
+  const control = window.__foundationCloudShipControl ||= {deferredCalls:0,firstDeferredAtMs:null,releasedAtMs:null};
+  const clouds = nodePipeline.cloudPrograms.snapshot();
+  if (!clouds.required || clouds.ready !== clouds.required) {
+    control.deferredCalls++;control.firstDeferredAtMs ??= performance.now();return;
+  }
+  control.releasedAtMs ??= performance.now();
+`;
+  shipOverrideBody=original.replace(anchor,guard+anchor);
+  const hash=value=>createHash('sha256').update(value).digest('hex');
+  shipOverride={module:'src/main.js',originalSha256:hash(original),modifiedSha256:hash(shipOverrideBody),
+    boundary:'Served diagnostic guard only. Original startup budget/expiry unchanged; an expired ship prewarm can be skipped, actual game draw is still required. Not production-source or cost-reduction acceptance.'};
+  await writeFile(`${out}/served-main.js.gz`,(await import('node:zlib')).gzipSync(Buffer.from(shipOverrideBody),{level:9}));
+}
 const admissionHelperBefore=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
 if(columnWork)await writeFile(`${out}/column-admission-probe.js`,await readFile('tools/column-admission-probe.js'));
 const frameGateHelperBefore=columnFrameGate?await evidenceFingerprint('tools/column-frame-gate.js'):null;
@@ -164,6 +189,34 @@ try {
     };
     window.cancelAnimationFrame=id=>{const row=pending.get(id);if(row?.timer!==null)clearTimeout(row?.timer);pending.delete(id);cancel(id);};
   });
+  if(cloudSimulationControl)await page.addInitScript(()=>{
+    // Diagnostic only: omit main-loop work while its exact requested cloud
+    // closure is pending. Queue RAFs and native readiness timers keep running.
+    // This also omits new work launched by that loop, so it is not a pure
+    // CPU-contention measurement or an accepted runtime scheduling policy.
+    const request=window.requestAnimationFrame.bind(window),cancel=window.cancelAnimationFrame.bind(window),pending=new Map();
+    const data=window.__foundationCloudSimulationControl={held:0,delivered:0,intervals:[],
+      boundary:'Diagnostic main-loop suspension while cloud closure is pending, including new work normally launched by that loop. Queue/readiness callbacks continue. Not a pure CPU-contention measurement or production policy.'};
+    let waiting=null;
+    window.requestAnimationFrame=callback=>{
+      const token=request(time=>{
+        const row=pending.get(token);if(!row)return;
+        const run=liveTime=>{
+          const state=window.NMS?._pipeline.cloudPrograms?.snapshot();
+          if(callback.name==='frame'&&state?.required>0&&state.ready<state.required&&!state.failed) {
+            data.held++;if(!waiting){waiting={startAtMs:performance.now(),endAtMs:null};data.intervals.push(waiting);}
+            row.live=request(run);return;
+          }
+          if(callback.name==='frame'){
+            if(waiting){waiting.endAtMs=performance.now();waiting=null;}data.delivered++;
+          }
+          pending.delete(token);callback(liveTime);
+        };
+        run(time);
+      });pending.set(token,{live:token});return token;
+    };
+    window.cancelAnimationFrame=token=>{const row=pending.get(token);pending.delete(token);cancel(row?.live??token);};
+  });
   if(probeFromNavigation)await page.addInitScript(`(${installFoundationBootProbe})(${installFoundationGLProbe})`);
   await page.addInitScript(()=>{
     const records=[];window.__foundationWorkers=records;
@@ -205,6 +258,7 @@ try {
     transferMode:'ReturnAsStream'});traceStarted=true;}
   if(cloudOverrideBody)await page.route('**/src/clouds-webgl.js',route=>route.fulfill({contentType:'text/javascript',body:cloudOverrideBody}));
   if(legacyLutBody)await page.route('**/src/atmosphere-multiple-scattering.js',route=>route.fulfill({contentType:'text/javascript',body:legacyLutBody}));
+  if(shipOverrideBody)await page.route('**/src/main.js*',route=>route.fulfill({contentType:'text/javascript',body:shipOverrideBody}));
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1${cloudPrograms?'&cloudprograms=1':''}`);
   try {
     await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
@@ -213,6 +267,43 @@ try {
     bootDeadline={limitMs:120000,passed:false,error:String(error),failedAtEpochMs:Date.now()};
     if(!observeAfterBootTimeout)throw error;
     console.log(JSON.stringify({bootDeadline,observationOnly:'Continue another bounded window; original boot failure remains an exit failure.'}));
+    if(cloudNativeTail)await page.evaluate(()=>{
+      // Additional native polling begins only AFTER the original boot failure.
+      // Production adapter/owner deadlines and failed state remain untouched.
+      const renderer=NMS._renderer,gl=renderer.getContext(),material=NMS._planet(0).volCloudFarMat;
+      const registry=renderer.properties,properties=registry.get(material),ext=gl.getExtension('KHR_parallel_shader_compile');
+      if(!ext||!properties.programs?.size)throw Error('Native tail needs the retained cloud programs');
+      const start=performance.now(),items=[...new Set(properties.programs.values())].map(program=>({program,handle:program.program,
+        row:{programId:program.id,completionPolls:0,incompletePolls:0,firstCompleteAtMs:null,maximumQueryMs:0,released:false}}));
+      const data=window.__foundationCloudNativeTail={startAtMs:start,deadlineMs:120000,endedAtMs:null,endReason:null,
+        rows:items.map(value=>value.row),firstOwnerFailureAtMs:null,ownerAtStart:NMS._pipeline.cloudPrograms.snapshot(),
+        boundary:'Extra 100ms native polls after the original boot failure only; does not retry, relax or complete the production cloud owner.'};
+      let timer=null,stopped=false;
+      const stop=reason=>{if(stopped)return;stopped=true;clearTimeout(timer);data.endedAtMs=performance.now();
+        data.endReason=reason;data.ownerAtEnd=NMS._pipeline.cloudPrograms.snapshot();};
+      window.__foundationCloudNativeTailStop=stop;
+      const check=()=>{
+        try {
+          const now=performance.now();
+          if(gl.isContextLost()){stop('context-lost');return;}
+          if(NMS._pipeline.cloudPrograms.snapshot().failed&&data.firstOwnerFailureAtMs===null)data.firstOwnerFailureAtMs=now;
+          if(renderer.properties!==registry||!registry.has(material)||registry.get(material)!==properties){stop('registry-changed');return;}
+          if(now-start>=data.deadlineMs){stop('diagnostic-deadline');return;}
+          for(const {program,handle,row}of items) {
+            if(row.firstCompleteAtMs!==null||row.released)continue;
+            if(!handle||program.program!==handle){row.released=true;continue;}
+            const begin=performance.now(),complete=gl.getProgramParameter(handle,ext.COMPLETION_STATUS_KHR),ended=performance.now();
+            row.completionPolls++;row.maximumQueryMs=Math.max(row.maximumQueryMs,ended-begin);
+            if(complete===true)row.firstCompleteAtMs=ended;
+            else if(complete===false)row.incompletePolls++;
+            else{data.error='Non-boolean completion status';stop('query-failed');return;}
+          }
+          if(items.every(({row})=>row.firstCompleteAtMs!==null||row.released)){stop('observed-all');return;}
+          timer=setTimeout(check,100);
+        }catch(error){data.error=String(error);stop('observer-error');}
+      };
+      timer=setTimeout(check,0);
+    });
     await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
     bootDeadline.observedReadyAtEpochMs=Date.now();
   }
@@ -564,6 +655,9 @@ try {
       final.framePacing.afterStop=pacer.snapshot();
     }
     final.bootProbe=window.__foundationBootProbe??null;
+    window.__foundationCloudNativeTailStop?.('final-capture');final.cloudNativeTail=window.__foundationCloudNativeTail??null;
+    final.cloudShipControl=window.__foundationCloudShipControl??null;
+    final.cloudSimulationControl=window.__foundationCloudSimulationControl??null;
     final.pauseControl=window.__foundationPauseControl??null;
     window.__foundationHistoryRestore?.();final.history=window.__foundationHistory??null;
     window.__foundationReceiverStartupRestore?.();final.receiverStartup=window.__foundationReceiverStartup??null;
@@ -583,11 +677,11 @@ try {
   const bootHelperAfter=await evidenceFingerprint('tools/foundation-boot-probe.js');
   const admissionHelperAfter=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
   const frameGateHelperAfter=columnFrameGate?await evidenceFingerprint('tools/column-frame-gate.js'):null;
-  report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,cloudPrograms,cloudIdleControl,cloudFlushControl,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
+  report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,cloudPrograms,cloudIdleControl,cloudFlushControl,cloudShipControl,cloudSimulationControl,shipOverride,cloudNativeTail,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,nativeLogs,nativeLogsDropped,browserInfo,
     probeFromNavigation,columnWork,columnDaySide,columnOrbitMs,columnOrbitProfile,columnFrameGate,framePacing,observeAfterBootTimeout,pauseControl,bootDeadline,frameGateHelperBefore,frameGateHelperAfter,admissionHelperBefore,admissionHelperAfter,bootHelperBefore,bootHelperAfter,
     stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest&&frameGateHelperBefore?.verifierDigest===frameGateHelperAfter?.verifierDigest,
-    boundary:`${columnWork?'Explicit raw3/cache2 column admission plus an additional orbit interval; not default runtime acceptance.':'Default'} 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.`};
+    boundary:`${cloudSimulationControl?'Diagnostic main-loop suspension, including its new work; see cloudSimulationControl.':cloudShipControl?'Served ship-preparation scheduling control; see shipOverride.':columnWork?'Explicit raw3/cache2 column admission plus an additional orbit interval; not default runtime acceptance.':'Default'} 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.`};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
   console.log(JSON.stringify({out,stableSource:report.stableSource,viewLoopControl,cloudOverride,traceState,
     errors,warnings: warnings.length,warningDropped,driverWarningCount,maxFrame:state.stats.maximumFrameMs,
@@ -690,15 +784,18 @@ try {
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));
   assert.ok(bootDeadline.passed,'Original 120 s boot gate failed; extended observation does not turn it green');
 } catch(error) {
-  const state=await page?.evaluate(()=>({stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
+  const state=await page?.evaluate(()=>{window.__foundationCloudNativeTailStop?.('failure-capture');return {stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
     profile:window.NMS?._pipeline?.performanceSnapshot(),probe:window.__foundationGLProbe?.snapshot(),workers:window.__foundationWorkers,
     ownerModes:window.__foundationOwnerModes,history:window.__foundationHistory,receiverStartup:window.__foundationReceiverStartup,parallelPreparation:window.__foundationCloudPrewarm,contexts:window.__foundationContextProbe?.snapshot(),
     columnWork:window.__foundationColumnWork,frameGate:window.__foundationColumnFrameGate?.snapshot(),framePacing:window.NMS?._pipeline?.framePacer?.snapshot(),pauseControl:window.__foundationPauseControl,
-    mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)})).catch(captureError=>({captureError:String(captureError)}));
+    cloudShipControl:window.__foundationCloudShipControl,
+    cloudSimulationControl:window.__foundationCloudSimulationControl,
+    cloudNativeTail:window.__foundationCloudNativeTail,
+    mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)};}).catch(captureError=>({captureError:String(captureError)}));
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
   await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,nativeLogs,nativeLogsDropped,browserInfo,
-    cloudPrograms,cloudIdleControl,cloudFlushControl,framePacing,observeAfterBootTimeout,bootDeadline,error:String(error)},null,2));
+    cloudPrograms,cloudIdleControl,cloudFlushControl,cloudShipControl,cloudSimulationControl,shipOverride,cloudNativeTail,framePacing,observeAfterBootTimeout,bootDeadline,error:String(error)},null,2));
   await finishTrace();console.error(JSON.stringify({out,error:String(error)}));throw error;
 } finally {
   try {await browser?.close();}

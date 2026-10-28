@@ -2339,16 +2339,16 @@ async function prewarmPreparedRiftPortal(targetBody, token, route, prepared) {
         new THREE.Vector3(),
         targetQuat,
       );
-      // compileAsync captures pipelines, but the first direct portal draw still
-      // has to allocate attachments and execute the complete target-world pass.
-      // Do that once while the passage is hidden so the opening animation never
-      // exposes a cold WebGPU frame.
-      renderRiftDestinationPortal({
+      // The direct portal has its own camera/layer/output family. Exercise its
+      // actual target while the passage is hidden; the private main graph below
+      // cannot prove that this separate view drew or allocated its attachments.
+      const rendered = renderRiftDestinationPortal({
         force: true,
         previewSystem: prepared,
         targetBodyId: route.bodyId,
         previewOrigin: route.target.entry,
       });
+      if (rendered !== true) throw Error('Destination portal warm frame was not submitted');
     }, { signal, label: 'destination-portal',
       isCurrent: () => preparedDestinationIsActive(token, route, prepared) && !route.warpRequested });
     if (!preparedDestinationIsActive(token, route, prepared) || route.warpRequested) return;
@@ -2803,12 +2803,11 @@ function renderRiftDestinationPortal({
   previewSystem = riftPreviewSystem,
   targetBodyId = riftRoute?.arrival?.bodyId || null,
 } = {}) {
-  spatialRift.renderPortal({
+  return spatialRift.renderPortal({
     force,
     beforeRender: (portalCamera) => {
       beginRiftPortalScene(portalCamera, previewSystem, targetBodyId);
     },
-    renderScene: null,
     afterRender: () => endRiftPortalScene(previewSystem, targetBodyId),
   });
 }

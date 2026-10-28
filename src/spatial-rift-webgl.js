@@ -761,10 +761,15 @@ export class SpatialRift {
     this._updateLivingFilaments(time, visualOpen);
   }
 
-  renderPortal({ beforeRender, afterRender } = {}) {
-    if (this.open < 0.025 || this.traversed) return;
+  renderPortal({ force = false, beforeRender, afterRender } = {}) {
+    this.portalVolumeLayerRendered = false;
+    if (!force && (this.open < 0.025 || this.traversed)) return false;
     this.mainCamera.updateMatrixWorld(true);
     this.group.updateMatrixWorld(true);
+    // A private warm view uses the actual aperture pose, including its closed
+    // squash. Only its surface point enters the unit-scale transfer frame, so
+    // this mapping stays valid without opening/resizing the animated aperture.
+    // The aperture itself is hidden during the destination scene render.
     const sourceSurface = this.visual.localToWorld(_center.set(0, 0, -this.depth));
     this.group.getWorldQuaternion(this.sourceQuaternion);
     this.sourceFrameMatrix.compose(sourceSurface, this.sourceQuaternion, this.unitScale);
@@ -790,14 +795,13 @@ export class SpatialRift {
     const oldFace = this.renderer.getActiveCubeFace(), oldMip = this.renderer.getActiveMipmapLevel();
     const oldXr = this.renderer.xr.enabled;
     const oldAutoClear = this.renderer.autoClear;
-    let entered = false, rendered = false, failed = false, failure;
+    let entered = false, rendered = false, volumeLayer = false, failed = false, failure;
     const cleanup = work => {
       try { work(); } catch (error) { if (!failed) { failed = true; failure = error; } }
     };
-    this.portalVolumeLayerRendered = false;
     try {
       this.portalCamera.layers.enable(2);
-      const volumeLayer = this.portalCamera.layers.isEnabled(2);
+      volumeLayer = this.portalCamera.layers.isEnabled(2);
       this.textureMatrix.copy(this.biasMatrix)
         .multiply(this.portalCamera.projectionMatrix)
         .multiply(this.portalCamera.matrixWorldInverse)
@@ -807,14 +811,13 @@ export class SpatialRift {
       // A throwing before hook may already own scene/light state. Its matching
       // after hook still has to run, without replacing the original exception.
       entered = true;
-      beforeRender?.(this.portalCamera);
-      this.renderer.xr.enabled = false;
-      this.renderer.setRenderTarget(this.portalRT);
-      this.renderer.clear();
-      this.renderer.render(this.scene, this.portalCamera);
-      // The destination hook can remap the camera AND its volume meshes to a
-      // private layer. Preserve the existing opt-in diagnostic on success.
-      rendered = volumeLayer;
+      if (beforeRender?.(this.portalCamera) !== false) {
+        this.renderer.xr.enabled = false;
+        this.renderer.setRenderTarget(this.portalRT);
+        this.renderer.clear();
+        this.renderer.render(this.scene, this.portalCamera);
+        rendered = true;
+      }
     } catch (error) {
       failed = true; failure = error;
     } finally {
@@ -834,8 +837,10 @@ export class SpatialRift {
       cleanup(() => { this.portalCamera.layers.mask = oldLayerMask; });
       cleanup(() => { this.group.visible = wasVisible; });
     }
-    this.portalVolumeLayerRendered = rendered && !failed;
+    // The hook can remap the camera AND volume meshes to a private layer.
+    this.portalVolumeLayerRendered = rendered && volumeLayer && !failed;
     if (failed) throw failure;
+    return rendered;
   }
 
   updateDistortion(pass) {

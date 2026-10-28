@@ -94,7 +94,9 @@
     "test:foundation:flight": "node tools/foundationflightperftest.js",
     "test:destination-prepare:gpu": "node tools/destinationpreparationgputest.js",
     "test:world-publication:gpu": "node tools/worldpublicationgputest.js",
-    "test:cloud-programs": "node tools/cloudprogrampreparationtest.js && node tools/cloudframepreparationtest.js"
+    "test:cloud-programs": "node tools/cloudprogrampreparationtest.js && node tools/cloudframepreparationtest.js",
+    "test:cloud-occlusion:candidate": "node tools/cloudoccludertopologytest.js --candidate",
+    "test:cloud-occlusion:candidate:gpu": "node tools/cloudoccludertopologygputest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

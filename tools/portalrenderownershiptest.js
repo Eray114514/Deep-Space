@@ -25,10 +25,15 @@ if (!requestedRef) {
 const currentBytes = await readFile(new URL(`../${runtime}`, import.meta.url));
 const verifierBytes = await readFile(new URL(import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const prewarmFixtureBytes = await readFile(new URL('fixtures/portal-prewarm-dfc9e5c.json', import.meta.url));
+const prewarmFixture = JSON.parse(prewarmFixtureBytes);
+for (const value of Object.values(prewarmFixture.sources)) assert.equal(hash(value.source), value.sha256);
+const prewarmReference = new Function('_center', `return ({${prewarmFixture.sources.renderPortal.source}}).renderPortal;`)(new THREE.Vector3());
 const directory = `test-results/portal-render-ownership/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(directory, { recursive: true });
 for (const [name, bytes] of [['reference-spatial-rift-webgl.js', originalBytes], ['spatial-rift-webgl.js', currentBytes], ['verifier.js', verifierBytes]])
   await writeFile(`${directory}/${name}`, bytes);
+await writeFile(`${directory}/portal-prewarm-dfc9e5c.json`, prewarmFixtureBytes);
 
 function method(bytes) {
   const source = bytes.toString('utf8'), start = source.indexOf('  renderPortal('), end = source.indexOf('\n  updateDistortion(', start);
@@ -111,10 +116,19 @@ for (const where of ['before', 'draw']) {
   assert.notDeepEqual([f.state().face, f.state().mip], [f.initial.face, f.initial.mip]);
   referenceControls.push({ name: 'Original normal render loses caller cube face/mip', detected: true });
 }
+for (const options of [{ open: 0, traversed: false }, { open: 0, traversed: true }]) {
+  const f = fixture(prewarmReference);Object.assign(f.rift, options);
+  const returned = f.rift.renderPortal({ force: true, beforeRender: () => assert.fail('Old forced closed portal entered its scene lease') });
+  assert.equal(returned, undefined);assert.equal(f.renders, 0);assert.equal(f.events.length, 0);f.restored();
+  referenceControls.push({ name: `dfc9e5c ignores forced private portal render (${JSON.stringify(options)})`, detected: true,
+    returned: 'undefined', renders: f.renders });
+}
 
 for (const options of [{ open: .024 }, { traversed: true }]) test(`no borrowed work on early return ${JSON.stringify(options)}`, () => {
   const f = fixture();Object.assign(f.rift, options);
-  assert.equal(f.rift.renderPortal({ beforeRender: () => assert.fail('before'), afterRender: () => assert.fail('after') }), undefined);
+  f.rift.portalVolumeLayerRendered = true;
+  assert.equal(f.rift.renderPortal({ beforeRender: () => assert.fail('before'), afterRender: () => assert.fail('after') }), false);
+  assert.equal(f.rift.portalVolumeLayerRendered, false, 'A skipped view cannot retain a previous successful draw marker');
   assert.equal(f.events.length, 0);assert.equal(f.renders, 0);f.restored();
 });
 
@@ -125,7 +139,7 @@ for (const xr of [true, false]) for (const autoClear of [true, false]) for (cons
       assert.equal(camera, f.rift.portalCamera);assert.equal(camera.layers.isEnabled(2), true);assert.equal(f.rift.group.visible, false);
     }, afterRender: () => { f.after();assert.equal(f.state().target, f.initial.target);
       assert.equal(f.state().xr, xr);assert.equal(f.state().autoClear, autoClear);assert.equal(f.state().layers, f.initial.layers); } });
-    old.rift.renderPortal();assert.equal(returned, undefined);f.restored();assert.equal(f.renders, 1);assert.equal(f.clears, 1);
+    old.rift.renderPortal();assert.equal(returned, true);f.restored();assert.equal(f.renders, 1);assert.equal(f.clears, 1);
     assert.equal(f.afters, 1);assert.equal(f.rift.portalVolumeLayerRendered, true);assert.deepEqual(f.projected(), old.projected());
     assert.deepEqual(f.events.filter(row => row.name === 'restore-target').map(row => row.args), [[f.initial.target.name, 3, 2]]);
   });
@@ -139,6 +153,47 @@ test('destination hook can remap camera and volume meshes to its private layer',
   f.rift.renderPortal({ beforeRender: camera => { camera.layers.set(5); }, afterRender: () => f.after() });
   assert.equal(f.renders, 1);assert.equal(f.afters, 1);assert.equal(f.rift.portalVolumeLayerRendered, true);f.restored();
 });
+
+for (const traversed of [false, true]) test(`forced hidden portal renders from the actual collapsed aperture without changing animation (${traversed})`, () => {
+  const f = fixture(current.run, { visible: false }), math = fixture(reference.run, { visible: false });
+  for (const value of [f, math]) value.rift.visual.scale.set(.055, .045, .10).multiplyScalar(1.7);
+  Object.assign(f.rift, { open: 0, targetOpen: 0, traversed, animating: false, animElapsed: 17,
+    handoffActive: traversed, handoffFade: traversed ? 1 : 0 });
+  const capture = () => ({ open: f.rift.open, targetOpen: f.rift.targetOpen, traversed: f.rift.traversed,
+    animating: f.rift.animating, animElapsed: f.rift.animElapsed, handoffActive: f.rift.handoffActive,
+    handoffFade: f.rift.handoffFade, visualPosition: f.rift.visual.position.toArray(), visualScale: f.rift.visual.scale.toArray(),
+    visualRotation: f.rift.visual.quaternion.toArray(), mainPosition: f.rift.mainCamera.position.toArray(),
+    mainRotation: f.rift.mainCamera.quaternion.toArray(), mainScale: f.rift.mainCamera.scale.toArray(),
+    fov: f.rift.mainCamera.fov, aspect: f.rift.mainCamera.aspect });
+  const before = capture();
+  assert.equal(f.rift.renderPortal({ force: true, beforeRender: camera => {
+    assert.equal(camera, f.rift.portalCamera);assert.equal(f.rift.group.visible, false);
+    assert.ok(camera.matrixWorld.elements.every(Number.isFinite));
+    assert.ok(camera.projectionMatrix.elements.every(Number.isFinite));
+  }, afterRender: () => f.after() }), true);
+  // The original normal math, at this identical actual aperture pose, is the
+  // oracle. Force does not open/enlarge the animated aperture for a warm view.
+  math.rift.renderPortal();assert.deepEqual(f.projected(), math.projected());
+  assert.deepEqual(capture(), before);assert.equal(f.renders, 1);assert.equal(f.clears, 1);assert.equal(f.afters, 1);f.restored();
+});
+
+test('beforeRender admission false restores its scene lease without clear, draw, or a success marker', () => {
+  const f = fixture();f.rift.portalVolumeLayerRendered = true;
+  assert.equal(f.rift.renderPortal({ beforeRender: () => { f.mutate();return false; }, afterRender: () => f.after() }), false);
+  assert.equal(f.renders, 0);assert.equal(f.clears, 0);assert.equal(f.afters, 1);
+  assert.equal(f.rift.portalVolumeLayerRendered, false);f.restored();
+});
+
+for (const phase of ['before', 'set-portal', 'clear', 'draw', 'after'])
+  for (const failure of throwValues) test(`forced private ${phase} failure preserves original throw and animation (${String(failure)})`, () => {
+    const f = fixture(current.run, { visible: false });Object.assign(f.rift, { open: 0, traversed: true });
+    const callbacks = { force: true, beforeRender: () => { if (phase === 'before') throw failure; },
+      afterRender: () => { f.after();if (phase === 'after') throw failure; } };
+    if (!['before', 'after'].includes(phase)) f.before(phase, () => { throw failure; });
+    const observed = caught(() => f.rift.renderPortal(callbacks));
+    assert.equal(observed.threw, true);assert.equal(observed.value, failure);assert.equal(f.afters, 1);
+    assert.equal(f.rift.open, 0);assert.equal(f.rift.traversed, true);assert.equal(f.rift.portalVolumeLayerRendered, false);f.restored();
+  });
 
 for (const [index, value] of throwValues.entries()) {
   test(`beforeRender failure ${index} runs after exactly once and restores all states`, () => {
@@ -207,12 +262,14 @@ test('XR restore failure does not prevent target/autoClear/layers/after/group re
 
 test('hook promises are not awaited and cannot extend a synchronous render lease', () => {
   const f = fixture(), pending = new Promise(() => {});
-  assert.equal(f.rift.renderPortal({ beforeRender: () => pending, afterRender: () => { f.after();return pending; } }), undefined);
+  assert.equal(f.rift.renderPortal({ beforeRender: () => pending, afterRender: () => { f.after();return pending; } }), true);
   assert.equal(f.afters, 1);assert.equal(f.renders, 1);f.restored();
 });
 
 const report = { scope: 'CPU actual renderPortal method and Three transform math; renderer double. No GPU/browser/native output/performance acceptance.',
   reference: { ref: referenceRef, commit: referenceCommit, sourceSha256: hash(originalBytes), methodSha256: hash(reference.source) },
+  prewarmReference: { ref: prewarmFixture.ref, commit: prewarmFixture.commit, fixtureSha256: hash(prewarmFixtureBytes),
+    methodSha256: prewarmFixture.sources.renderPortal.sha256 },
   current: { path: runtime, sourceSha256: hash(currentBytes), methodSha256: hash(current.source) },
   verifier: { path: verifier, sha256: hash(verifierBytes) }, threeRevision: THREE.REVISION, referenceControls, cases };
 await writeFile(`${directory}/report.json`, JSON.stringify(report, null, 2));

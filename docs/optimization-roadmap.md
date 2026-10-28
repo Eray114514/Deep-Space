@@ -1,6 +1,6 @@
 # 深空优化路线图
 
-更新：2026-10-26。本文维护跨批次目标、依赖和状态；B 的细节只在[云与大气计划](cloud-atmosphere-rewrite.md)维护。已撤销方案、逐轮调参和失败日志回 Git 历史查阅（精简前版本 `294c204`），不再与当前指令并列。仍有效的用户反馈、参考入口与采用决定必须保留链接，不能当作历史噪声删掉。
+更新：2026-10-28。本文维护跨批次目标、依赖和状态；B 的细节只在[云与大气计划](cloud-atmosphere-rewrite.md)维护。已撤销方案、逐轮调参和失败日志回 Git 历史查阅（精简前版本 `294c204`），不再与当前指令并列。仍有效的用户反馈、参考入口与采用决定必须保留链接，不能当作历史噪声删掉。
 
 安排单次任务或切换 agent 时，见[未完成任务难度评估](remaining-work-difficulty.md)：细分难度和前置条件，执行按相互依赖的完整成果分组；不要求逐行停工汇报，也不复制本计划的完成状态。
 
@@ -56,6 +56,8 @@ F3l 继续复用 prepare 已有的 FP32 光学质量，metadata 少一次完整�
 2026-10-25 再续轮将延后文明/天体构建的多根增量与灯光作为同一批发布，修复只准备最后body、漏旧body附属物/兄弟灯点和finally失败仍显露；按发布后WORLD责任准备HDR及阴影off/on，复核owner/revision后原子显露，失败同批重试，隐藏宿主不抢nearest。真实旧main四个负例均红，最终CPU/实际路线重试通过；12个独立原生例24组HDR零差，旧式准备新增4个独立颜色program、候选0，原目的地八例回归通过。默认云功能通过但冷查询仍109.1/53.7秒、最大帧118.2秒；没有性能或目标画质验收。下一步优先云冷依赖、局部灯域/总工作与驻留预算及异步资产发布，完整图/云目的地/真实设备仍开放。详见[发布证据与断点](baselines/foundation-world-publication-2026-10-25/README.md)，F3/B4不代勾完成。
 
 2026-10-26 继续隔离云冷阻塞：实际默认云绕过已有prepare→KHR链，首次draw的uniform反射同步等编译；相同完整native源码在独立context先KHR等待约97/53秒、timer最大约22ms，反射0ms。补齐whole-frame前的near/far/cache及淡出/退役来源闭包、程序owner/取消/完整恢复和首次完成/反射追踪；CPU与小原生HDR通过，但游戏context三轮原120秒启动均失败，限频/flush无效，候选`?cloudprograms=1`默认关闭，未降低画质或提高期限。清理不可达旧volume warm并以实际world绘制推进启动；默认行为和最终回归按[本轮证据](baselines/foundation-cloud-readiness-2026-10-26/README.md)。下一轮优先解释同context交错/lease与raw的差异，再改实际shader复杂度；F3/B4、总体预算和目标画质继续开放。
+
+2026-10-28 修复私有portal预热忽略force、零绘制却complete：真实关闭目标提交39次原生draw后恢复caller状态，113项针对合同、实际取消/跃迁/传送门路线与默认云回归通过。远云多遮挡宏缺口确实漏光，候选CPU/原生光学正确，但完整UNION1 Far CACHE0在原120秒及追加120秒观察内仍未ready，已撤回默认修改，保留候选与失败。相同原生源码raw/真实owner可完成，完整页直到约243秒才见KHR；并发两程序、空闲context数量、延后ship和暂停主循环的简单控制均不足以解释完整页失败。见[固定证据](baselines/foundation-prewarm-correctness-2026-10-28/README.md)。下一轮追前序context工作与shader调用树复杂度，不扩大期限或默认启用未准入路径；F3/B4及目标画质继续开放。
 
 ## 共同目标与边界
 

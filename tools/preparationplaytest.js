@@ -28,12 +28,26 @@ try {
   await page.evaluate(async () => {
     const T = await import('three');
     const pipeline = NMS._pipeline, renderer = NMS._renderer, queue = pipeline.preparations;
-    const data = window.__preparationPlayer = { phase: 'cancel', compiles: 0, uploads: 0, draws: 0, outside: [], labels: {}, destinationCompiles: [], publications: [], restored: false };
+    const data = window.__preparationPlayer = { phase: 'cancel', compiles: 0, uploads: 0, draws: 0, outside: [], labels: {}, destinationCompiles: [], publications: [], privatePortals: [], restored: false };
     const restores = [], wrap = (object, name, factory) => {
       const original = object[name], wrapper = factory(original);object[name] = wrapper;
       restores.push(() => { if (object[name] !== wrapper) throw Error(`Observer changed: ${name}`);object[name] = original; });
     };
     const { WorldPublication } = await import('/src/world-publication.js');
+    const { SpatialRift } = await import('/src/spatial-rift-webgl.js');
+    wrap(SpatialRift.prototype, 'renderPortal', original => function(options) {
+      if (!options?.force) return original.call(this, options);
+      const before = { open: this.open, traversed: this.traversed, visible: this.group.visible,
+        target: renderer.getRenderTarget(), face: renderer.getActiveCubeFace(), mip: renderer.getActiveMipmapLevel(),
+        calls: renderer.info.render.calls, layer: this.portalCamera.layers.mask };
+      const label = queue.active?.label, result = original.call(this, options);
+      data.privatePortals.push({ label, result, open: before.open, traversed: before.traversed, visible: before.visible,
+        nativeDraws: renderer.info.render.calls - before.calls,
+        restored: renderer.getRenderTarget() === before.target && renderer.getActiveCubeFace() === before.face
+          && renderer.getActiveMipmapLevel() === before.mip && this.group.visible === before.visible
+          && this.portalCamera.layers.mask === before.layer && this.open === before.open && this.traversed === before.traversed });
+      return result;
+    });
     const identifiers = new WeakMap();let nextPublication = 0, injectedPublicationFailure = false;
     wrap(WorldPublication.prototype, 'publish', original => function(...args) {
       if (!identifiers.has(this)) identifiers.set(this, ++nextPublication);
@@ -181,6 +195,10 @@ try {
   assert.equal(report.result.star, report.riftTarget.starId);assert.equal(report.result.stats.state, 'space');
   assert.ok(report.result.observer.compiles > 0 && report.result.observer.uploads > 0);
   assert.ok(report.result.observer.labels['destination-private-frame'] > 0);
+  assert.ok(report.result.observer.labels['destination-portal'] > 0);
+  assert.ok(report.result.observer.privatePortals.some(row => row.open < .025), 'Actual hidden portal was warmed');
+  assert.ok(report.result.observer.privatePortals.every(row => row.label === 'destination-portal' && row.result === true
+    && row.nativeDraws > 0 && row.restored), 'Private portal success requires native draws and restored state');
   assert.deepEqual(report.result.observer.outside, []);assert.equal(report.result.observer.restored, true);
   assert.equal(report.expectedErrors.length, 1);assert.equal(report.result.observer.controlledPublicationFailure, true);
   const failedPublication = report.result.observer.publications.find(row => row.failed);
