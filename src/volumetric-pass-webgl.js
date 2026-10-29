@@ -18,6 +18,9 @@ export const VOLUME_LAYER = 2;
 const _clear = new THREE.Color();
 const _savedClear = new THREE.Color();
 const _depthRotation = new THREE.Matrix4();
+// Detach a cloud's enable flag without writing the borrowed atmosphere flag.
+// Shared Near/Far dictionaries can use this immutable disabled value together.
+const _disabledCloudAir = Object.freeze({ value: 0 });
 
 function target(w, h, name, depth = false) {
   const rt = new THREE.WebGLRenderTarget(w, h, {
@@ -478,8 +481,24 @@ export class VolumetricPass extends Pass {
           for (const [name, uniform] of Object.entries(air.material.uniforms)) {
             if (name.startsWith('u') || name === 'tOpticalDepth' || name === 'tMultipleScattering') cloudUniforms['air_' + name] = uniform;
           }
-        } else cloudUniforms.air_uEnabled = { value: 0 };
+        } else cloudUniforms.air_uEnabled = _disabledCloudAir;
       }
+      // A previously active cloud can remain visible while it fades. Its air_
+      // entries may still alias the single AtmospherePass, whose values now
+      // describe another planet. Cloud positions are body-local, so using that
+      // foreign atmosphere would mix coordinate frames. Apply the same no-
+      // matching-owner policy to every cloud this volume draw can submit.
+      const disableForeignAir = material => {
+        const uniforms = material?.uniforms;
+        if (material?.defines?.CLOUD_FAR_VIEW !== undefined && uniforms?.air_uEnabled
+          && uniforms !== cloudUniforms) uniforms.air_uEnabled = _disabledCloudAir;
+      };
+      this.scene.traverseVisible(object => {
+        if (!object.isMesh || !object.layers.isEnabled(VOLUME_LAYER)) return;
+        if (Array.isArray(object.material)) {
+          for (const material of object.material) disableForeignAir(material);
+        } else disableForeignAir(object.material);
+      });
 
       // Render only cloud volume meshes into a half-resolution HDR
       // buffer. Clear alpha is important: discarded rays must stay transparent.
