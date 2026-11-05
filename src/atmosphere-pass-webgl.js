@@ -385,6 +385,10 @@ export class AtmospherePass extends Pass {
     this.activeCache = null;
     this.contextRenderer = null;
     this.material.uniforms.tOpticalDepth.value = null;
+    this.material.uniforms.tMultipleScattering.value = null;
+    this.material.uniforms.uMultipleEnabled.value = 0;
+    this.material.uniforms.uEnabled.value = 0;
+    this.sceneDepthTexture = null;
     this.material.dispose();
     this.quad.dispose();
   }

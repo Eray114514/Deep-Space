@@ -21,6 +21,16 @@ const _depthRotation = new THREE.Matrix4();
 // Detach a cloud's enable flag without writing the borrowed atmosphere flag.
 // Shared Near/Far dictionaries can use this immutable disabled value together.
 const _disabledCloudAir = Object.freeze({ value: 0 });
+const _disabledCloudAirSampler = Object.freeze({ value: null });
+
+function disableCloudAir(uniforms) {
+  uniforms.air_uEnabled = _disabledCloudAir;
+  uniforms.air_uMultipleEnabled = _disabledCloudAir;
+  // Disabled shader branches still have active sampler uniforms. Stop borrowing
+  // the atmosphere owner's textures before Three binds this material for a draw.
+  uniforms.air_tOpticalDepth = _disabledCloudAirSampler;
+  uniforms.air_tMultipleScattering = _disabledCloudAirSampler;
+}
 
 function target(w, h, name, depth = false) {
   const rt = new THREE.WebGLRenderTarget(w, h, {
@@ -453,26 +463,11 @@ export class VolumetricPass extends Pass {
       const depthTexture = this.sceneDepthSource?.sceneDepthTexture
         || readBuffer.depthTexture || null;
       hasDepth = !!depthTexture;
-      const bindSceneDepth = (material) => {
-        const uniforms = material?.uniforms;
-        if (!uniforms?.tSceneDepth) return;
-        uniforms.tSceneDepth.value = depthTexture;
-        uniforms.uDepthReady.value = depthTexture ? 1 : 0;
-        uniforms.uCameraFar.value = this.camera.far;
-        uniforms.uVolumeSize.value.set(this.width, this.height);
-      };
-      bindSceneDepth(this.activePlanet?.volCloudMat);
       const cloudUniforms = this.activePlanet?.volCloudMat?.uniforms;
       const planet=this.activePlanet;
+      // Column/representation selection needs the active eye before the draw
+      // bindings below. Preserve the shared frame state's original calculation.
       if (cloudUniforms?.uCameraLocal) this.frameState.localEye(planet, cloudUniforms.uCameraLocal.value);
-      if(cloudUniforms?.uDepthInvProjection && planet?.volCloudMesh) {
-        this.camera.updateMatrixWorld(true);planet.volCloudMesh.updateWorldMatrix(true,false);
-        _depthRotation.copy(planet.volCloudMesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
-        cloudUniforms.uDepthInvProjection.value.copy(this.camera.projectionMatrixInverse);
-        cloudUniforms.uDepthViewToLocal.value.setFromMatrix4(_depthRotation);
-        cloudUniforms.uOpaqueMinR.value=planet.R-Math.max(1000,(planet.hAmp||0)*2);
-        cloudUniforms.uOpaqueMaxR.value=planet.R+Math.max(1000,(planet.hAmp||0)*2);
-      }
       // The work budget owns sparse GPU intervals inside this CPU parent.
       this.profilePhase('cloud-columns',()=>this.updateCloudColumns(renderer),this.columnWork?{gpu:false}:undefined);
       const air = this.sceneDepthSource;
@@ -481,23 +476,39 @@ export class VolumetricPass extends Pass {
           for (const [name, uniform] of Object.entries(air.material.uniforms)) {
             if (name.startsWith('u') || name === 'tOpticalDepth' || name === 'tMultipleScattering') cloudUniforms['air_' + name] = uniform;
           }
-        } else cloudUniforms.air_uEnabled = _disabledCloudAir;
+        } else disableCloudAir(cloudUniforms);
       }
       // A previously active cloud can remain visible while it fades. Its air_
       // entries may still alias the single AtmospherePass, whose values now
       // describe another planet. Cloud positions are body-local, so using that
       // foreign atmosphere would mix coordinate frames. Apply the same no-
-      // matching-owner policy to every cloud this volume draw can submit.
-      const disableForeignAir = material => {
+      // matching-owner policy to every cloud this volume draw can submit. Depth
+      // and camera reconstruction also belong to the current draw, including
+      // fading clouds whose active body changed before a resize or camera move.
+      this.camera.updateMatrixWorld(true);
+      const bindCloudDraw = (mesh, material) => {
         const uniforms = material?.uniforms;
-        if (material?.defines?.CLOUD_FAR_VIEW !== undefined && uniforms?.air_uEnabled
-          && uniforms !== cloudUniforms) uniforms.air_uEnabled = _disabledCloudAir;
+        if (material?.defines?.CLOUD_FAR_VIEW === undefined || !uniforms) return;
+        if (uniforms.air_uEnabled && uniforms !== cloudUniforms) disableCloudAir(uniforms);
+        if (uniforms.tSceneDepth) {
+          uniforms.tSceneDepth.value = depthTexture;
+          uniforms.uDepthReady.value = depthTexture ? 1 : 0;
+          uniforms.uCameraFar.value = this.camera.far;
+          uniforms.uVolumeSize.value.set(this.width, this.height);
+        }
+        if (uniforms.uDepthInvProjection) {
+          mesh.updateWorldMatrix(true, false);
+          _depthRotation.copy(mesh.matrixWorld).invert().multiply(this.camera.matrixWorld);
+          uniforms.uDepthInvProjection.value.copy(this.camera.projectionMatrixInverse);
+          uniforms.uDepthViewToLocal.value.setFromMatrix4(_depthRotation);
+          if (uniforms !== cloudUniforms) uniforms.uCameraLocal.value.setFromMatrixPosition(_depthRotation);
+        }
       };
       this.scene.traverseVisible(object => {
         if (!object.isMesh || !object.layers.isEnabled(VOLUME_LAYER)) return;
         if (Array.isArray(object.material)) {
-          for (const material of object.material) disableForeignAir(material);
-        } else disableForeignAir(object.material);
+          for (const material of object.material) bindCloudDraw(object, material);
+        } else bindCloudDraw(object, object.material);
       });
 
       // Render only cloud volume meshes into a half-resolution HDR

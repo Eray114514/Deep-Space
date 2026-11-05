@@ -139,8 +139,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uVolumeSize: { value: new THREE.Vector2(1, 1) },
       uDepthInvProjection: { value: new THREE.Matrix4() },
       uDepthViewToLocal: { value: new THREE.Matrix3() },
-      uOpaqueMinR: { value: 0 },
-      uOpaqueMaxR: { value: 0 },
+      // This body's fixed terrain domain is also needed by a fading cloud
+      // which is drawn while another body owns the active volume.
+      uOpaqueMinR: { value: planet.R - Math.max(1000, (planet.hAmp || 0) * 2) },
+      uOpaqueMaxR: { value: planet.R + Math.max(1000, (planet.hAmp || 0) * 2) },
       uSunC: { value: new THREE.Color(1, 0.98, 0.94) },
       uSunEnergy: { value: 1 },
       uStellarRadianceScale: { value: 3.2 },
