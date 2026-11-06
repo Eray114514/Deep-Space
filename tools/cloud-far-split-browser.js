@@ -223,6 +223,9 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
         require(!gl.getParameter(timer.GPU_DISJOINT_EXT),'Valid timer');const ms=gl.getQueryParameter(q,gl.QUERY_RESULT)/1e6;gl.deleteQuery(q);queries.delete(q);return ms;}
       for(let round=0;round<3;round++)result.timing.push({round,referenceMs:await timed('reference'),splitAllThreeDrawsMs:await timed('split')});
     }
+    const {probeCloudSplitOwners}=await import('/tools/cloud-far-split-multi-browser.js');
+    result.multiOwner=await probeCloudSplitOwners({T,renderer,scene,camera,mesh,planet,u,make,split,reference,point,cached,combine,pointDirect,cachedDirect,
+      prepare,tracker,pointRT,cachedRT,floatRT,halfRT,depthRT,columns,heights,allocate,clear,difference,require,image});
     const debug=gl.getExtension('WEBGL_debug_renderer_info');result.gpu=debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null;
     result.scratchBytes=width*height*16*2;result.gl=gl.getError();result.lost=gl.isContextLost();result.passed=true;
   }catch(error){result.failure={message:String(error),stack:error.stack};throw error;

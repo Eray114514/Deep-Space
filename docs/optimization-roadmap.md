@@ -2,7 +2,9 @@
 
 更新：2026-11-06。本文维护跨批次目标、依赖和状态；B 的细节只在[云与大气计划](cloud-atmosphere-rewrite.md)维护。已撤销方案、逐轮调参和失败日志回 Git 历史查阅（精简前版本 `294c204`），不再与当前指令并列。仍有效的用户反馈、参考入口与采用决定必须保留链接，不能当作历史噪声删掉。
 
-2026-11-06 最新基础进展：[远云拆分资源准入](baselines/foundation-cloud-split-routing-2026-11-06/README.md)完成 tools 内 ready0 纯点密度、保守全缓存直出及中间混合路由；补入纹理/所属 RenderTarget 退役和预算拒绝。UNION0 11 例 22 HDR 输出零差，未安装到正式运行时；多 owner 帧事务、完整 UNION1、冷启动和正常游戏预算仍需继续验证。
+2026-11-06 最新基础进展：[远云多 owner 顺序与帧取消](baselines/foundation-cloud-split-owners-2026-11-06/README.md)通过受控多所有者排序、相机／深度／渐隐／resize 和取消检查；最终共 44 HDR 输出逐位一致，反转排序负例有效。原始参考准备约 123 秒仍超原 120 秒门槛；tools 候选尚未接入正式运行时，下一步实际准备队列与 volume-current／history 实验接入，完整 UNION1、正常玩家和 2K 总预算仍开放。
+
+2026-11-06 前轮基础进展：[远云拆分资源准入](baselines/foundation-cloud-split-routing-2026-11-06/README.md)完成 tools 内 ready0 纯点密度、保守全缓存直出及中间混合路由；补入纹理/所属 RenderTarget 退役和预算拒绝。UNION0 11 例 22 HDR 输出零差，未安装到正式运行时；多 owner 帧事务、完整 UNION1、冷启动和正常游戏预算仍需继续验证。
 
 安排单次任务或切换 agent 时，见[未完成任务难度评估](remaining-work-difficulty.md)：细分难度和前置条件，执行按相互依赖的完整成果分组；不要求逐行停工汇报，也不复制本计划的完成状态。
 

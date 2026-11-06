@@ -8,7 +8,7 @@ import {startServer} from './server.js';
 import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
 
-const verifier='tools/cloudfarsplitgputest.js',helpers=['tools/cloud-far-split-routing.js','tools/cloud-far-split-shaders.js','tools/cloud-far-split-browser.js'];
+const verifier='tools/cloudfarsplitgputest.js',helpers=['tools/cloud-far-split-frame.js','tools/cloud-far-split-multi-browser.js','tools/cloud-far-split-routing.js','tools/cloud-far-split-shaders.js','tools/cloud-far-split-browser.js'];
 const args=process.argv.slice(2);assert.ok(args.every(arg=>arg==='--reference-first'||/^--union=[01]$/.test(arg)),'Only --reference-first and --union=0|1 are supported');
 const union=Number(args.find(arg=>arg.startsWith('--union='))?.slice(8)??1),referenceFirst=args.includes('--reference-first');
 const before=await evidenceFingerprint(verifier),hash=b=>createHash('sha256').update(b).digest('hex');
