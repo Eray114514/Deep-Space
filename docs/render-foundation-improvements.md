@@ -4,7 +4,7 @@
 
 **2026-10-23 重要更正：** 10-21/22 六个独立列诊断工具漏应用正式行星调参，旧“母星”实际为未调参的 286 km 天体，其 1.875 秒预报期限不代表正式 6000 km 母星的 30 秒期限。历史图集等价与成本结果仅对其冻结输入成立；正常游戏页调参正确，冷暂停失败仍有效。独立夹具与完整双星游戏场景也不能混用。修复、防回归和新测量见[输入更正与有界预报](baselines/foundation-column-forecast-2026-10-23/README.md)，该入口优先于下方历史推断。
 
-最新接续：[渐隐云当前帧绑定与编译断点](baselines/foundation-cloud-frame-bindings-2026-11-05/README.md)。修复旧云退场时使用过期深度/尺寸/投影/局部眼点，并解除禁用大气的实际 sampler 借用、清理销毁引用；10 帧真实 CPU 正负对照、8 帧原生 GPU 旧新对照及额外退役帧通过，活动输出与重复保持逐位相同。共享前景积分候选曾112秒完成，但 CACHE1 多保留资源，裁剪后 CACHE0 仍超原120秒，未安装。默认云页功能/GL及 smoke 通过，实际云程序查询仍154/84秒、最大帧165秒，截图1 FPS；启动 ready 标记虽通过，也不代称真实首 draw 性能通过。下一步优先完整活跃积分调用组合/编译边界和真实首次绘制期限，随后补球面边缘/多天体连续观感及总体预算；Far 多遮挡缺口、F3/B4与目标画质仍开放，cloudprograms 默认关闭。前轮[大气归属](baselines/foundation-cloud-air-ownership-2026-10-29/README.md)与[传送门修复](baselines/foundation-prewarm-correctness-2026-10-28/README.md)继续有效。
+最新接续：[完整远云程序拆分与首绘制门槛](baselines/foundation-cloud-program-split-2026-11-06/README.md)。合并密度/空气入口仍未稳定解决完整UNION1编译，现推进point/cached各自计算、FP32暂存后按原公式一次over的单body原型。当前生产UNION0完整旧shader对照9例18输出与双方重复全零差，错误透明叠加负例有效；UNION1三个候选程序分别约24秒/11秒/.066秒完成，但完整旧参考两次240秒仍未完成，尚无该分支整核HDR验收。原型仅tools，未ready列资源路由、多body排序/history、全尺寸预算和实际页面尚待接入。新增导航首绘制观察：最终正常页功能/worker/GL通过，boot标记true，但首cloud world约129秒才返回，严格门槛正确失败；首版worker失败与未复现的小控制均保留。下一步优先完整分程序路由/资源/事务候选与UNION1数值参考，不以更多loop微调代替架构处理；Far漏光、F3/B4、总体预算和目标画质仍开放。前轮[渐隐云帧绑定修复](baselines/foundation-cloud-frame-bindings-2026-11-05/README.md)继续有效，cloudprograms仍默认关闭。
 
 ## 目标与判断
 

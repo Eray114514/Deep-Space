@@ -11,6 +11,8 @@ import {evidenceFingerprint} from './evidence-fingerprint.js';
 import {installFoundationGLProbe} from './foundation-gl-probe.js';
 import {installFoundationContextProbe} from './foundation-context-probe.js';
 import {installFoundationBootProbe} from './foundation-boot-probe.js';
+import {installFoundationFirstDrawProbe} from './foundation-first-draw-probe.js';
+import {instrumentFoundationFirstDraw,installFoundationMainResponse} from './foundation-first-draw-route.js';
 import {probeCloudProgramPrewarm} from './cloud-program-prewarm-browser.js';
 
 const trace=process.argv.includes('--trace'),errorsProbe=process.argv.includes('--errors');
@@ -26,6 +28,7 @@ const columnOrbitProfile=process.argv.includes('--column-orbit-profile');
 const columnFrameGate=process.argv.includes('--column-frame-gate');
 const framePacing=process.argv.includes('--frame-pacing');
 const observeAfterBootTimeout=process.argv.includes('--observe-after-boot-timeout');
+const requireFirstDraw=process.argv.includes('--require-first-draw');
 const pauseControl=process.argv.includes('--pause-control');
 const cloudIdleControl=process.argv.includes('--cloud-idle-control');
 const cloudFlushControl=process.argv.includes('--cloud-flush-control');
@@ -109,13 +112,26 @@ const helperBefore=await evidenceFingerprint('tools/foundation-gl-probe.js');
 const bootHelperBefore=await evidenceFingerprint('tools/foundation-boot-probe.js');
 const contextHelperBefore=await evidenceFingerprint('tools/foundation-context-probe.js');
 const warmHelperBefore=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
+const firstDrawHelperBefore=await evidenceFingerprint('tools/foundation-first-draw-probe.js');
+const firstDrawRouteBefore=await evidenceFingerprint('tools/foundation-first-draw-route.js');
+const firstDrawInput=shipOverrideBody??await readFile('src/main.js','utf8');
+const firstDrawMain=instrumentFoundationFirstDraw(firstDrawInput);
+const firstDrawHash=value=>createHash('sha256').update(value).digest('hex');
+const firstDrawOverride={module:'src/main.js',inputSha256:firstDrawHash(firstDrawInput),
+  servedSha256:firstDrawHash(firstDrawMain),insertions:1,afterShipControl:!!shipOverrideBody,
+  transport:'local-http-response',
+  boundary:'One exactly reversible passive attach before the first synchronous frame(); production runtime files unchanged. No quality, shader or scheduling change. This served observation hook is independent of the runtime source fingerprint.'};
+await writeFile(`${out}/first-draw-served-main.js.gz`,(await import('node:zlib')).gzipSync(Buffer.from(firstDrawMain),{level:9}));
+for(const file of ['foundation-first-draw-probe.js','foundation-first-draw-route.js'])await writeFile(`${out}/${file}`,await readFile(`tools/${file}`));
 const {server,port}=await startServer(0);
+const firstDrawResponse=installFoundationMainResponse(server,firstDrawMain);
 let browser;
 const errors=[],warnings=[],driverWarnings=[],checkpoints=[],workerEvents=[],networkFailures=[];
 const nativeLogs=[];let nativeLogsDropped=0,browserInfo=null;
 let warningDropped=0,driverWarningCount=0,page,cdp,traceStarted=false,report,ownerModesResult=null;
 let parallelNearResult=null;
 let bootDeadline=null;
+let firstDrawWait=null;
 let traceState={requested:trace,categories:traceCategories,completed:false};
 async function finishTrace() {
   if(!traceStarted)return;traceStarted=false;
@@ -164,6 +180,7 @@ try {
     system:await browserSession.send('SystemInfo.getInfo').catch(error=>({error:String(error)}))};
   await browserSession.detach();
   await page.addInitScript(installFoundationContextProbe);
+  await page.addInitScript(installFoundationFirstDrawProbe);
   if(cloudFlushControl)await page.addInitScript(()=>{
     const get=HTMLCanvasElement.prototype.getContext,seen=new WeakSet();
     HTMLCanvasElement.prototype.getContext=function(...args){
@@ -258,10 +275,9 @@ try {
     transferMode:'ReturnAsStream'});traceStarted=true;}
   if(cloudOverrideBody)await page.route('**/src/clouds-webgl.js',route=>route.fulfill({contentType:'text/javascript',body:cloudOverrideBody}));
   if(legacyLutBody)await page.route('**/src/atmosphere-multiple-scattering.js',route=>route.fulfill({contentType:'text/javascript',body:legacyLutBody}));
-  if(shipOverrideBody)await page.route('**/src/main.js*',route=>route.fulfill({contentType:'text/javascript',body:shipOverrideBody}));
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1${cloudPrograms?'&cloudprograms=1':''}`);
   try {
-    await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
+    await page.waitForFunction(()=>{const ready=window.NMS?.booted;if(ready)window.__foundationFirstDrawProbe.noteReady();return ready;},null,{timeout:120000});
     bootDeadline={limitMs:120000,passed:true,readyAtEpochMs:Date.now()};
   } catch(error) {
     bootDeadline={limitMs:120000,passed:false,error:String(error),failedAtEpochMs:Date.now()};
@@ -304,8 +320,22 @@ try {
       };
       timer=setTimeout(check,0);
     });
-    await page.waitForFunction(()=>window.NMS?.booted,null,{timeout:120000});
+    await page.waitForFunction(()=>{const ready=window.NMS?.booted;if(ready)window.__foundationFirstDrawProbe.noteReady();return ready;},null,{timeout:120000});
     bootDeadline.observedReadyAtEpochMs=Date.now();
+  }
+  const startupClock=await page.evaluate(()=>({atMs:performance.now(),
+    postCloudTaskAtMs:window.__foundationFirstDrawProbe.snapshot().firstPostCloudTaskAtMs}));
+  firstDrawWait={startedAtMs:startupClock.atMs,remainingMs:Math.max(0,120000-startupClock.atMs),
+    status:startupClock.postCloudTaskAtMs!==null?'already-observed':'navigation-deadline-ended'};
+  if(startupClock.postCloudTaskAtMs===null&&firstDrawWait.remainingMs>0) {
+    try {
+      await page.waitForFunction(()=>window.__foundationFirstDrawProbe.snapshot().firstPostCloudTaskAtMs!==null,
+        null,{timeout:Math.max(1,Math.ceil(firstDrawWait.remainingMs))});
+      firstDrawWait.status='observed';
+    } catch(error) {
+      if(error.name!=='TimeoutError')throw error;
+      firstDrawWait.status='navigation-deadline-ended';firstDrawWait.error=String(error);
+    }
   }
   if(probeFromNavigation)await page.evaluate(()=>{
     if(!window.__foundationBootProbe?.installed)throw Error('Navigation-time GL probe failed');
@@ -393,6 +423,9 @@ try {
     },label);checkpoints.push({label,...state});
     console.log(JSON.stringify({label,gl:state.gl,near:state.near}));
   };
+  // Close this navigation-only observation before any test placement. A later
+  // fixture draw cannot retrospectively satisfy the original startup deadline.
+  await page.evaluate(()=>new Promise(resolve=>setTimeout(()=>resolve(window.__foundationFirstDrawProbe.endStartup()),0)));
   await checkpoint('boot-before-placement');
   if(columnWork) {
     if(columnOrbitProfile)await page.evaluate(()=>NMS._pipeline.startProfiling({every:8,history:2000}));
@@ -664,7 +697,8 @@ try {
     final.mainContextId=window.__foundationContextProbe.idForCanvas(NMS._renderer.domElement);
     window.__foundationContextProbe.dispose();
     final.contexts=window.__foundationContextProbe.snapshot();
-    window.__foundationGLProbe.dispose();return final;
+    window.__foundationGLProbe.dispose();
+    window.__foundationFirstDrawProbe.dispose();final.firstDraw=window.__foundationFirstDrawProbe.snapshot();return final;
   });
   if(framePacing) {
     await page.waitForFunction(()=>window.__foundationRetiredFramePacer?.snapshot().released,{},{timeout:15000});
@@ -675,15 +709,20 @@ try {
   const contextHelperAfter=await evidenceFingerprint('tools/foundation-context-probe.js');
   const warmHelperAfter=await evidenceFingerprint('tools/cloud-program-prewarm-browser.js');
   const bootHelperAfter=await evidenceFingerprint('tools/foundation-boot-probe.js');
+  const firstDrawHelperAfter=await evidenceFingerprint('tools/foundation-first-draw-probe.js');
+  const firstDrawRouteAfter=await evidenceFingerprint('tools/foundation-first-draw-route.js');
   const admissionHelperAfter=columnWork?await evidenceFingerprint('tools/column-admission-probe.js'):null;
   const frameGateHelperAfter=columnFrameGate?await evidenceFingerprint('tools/column-frame-gate.js'):null;
+  firstDrawResponse.restore();
   report={...before,helperBefore,helperAfter,contextHelperBefore,contextHelperAfter,warmHelperBefore,warmHelperAfter,cloudPrograms,cloudIdleControl,cloudFlushControl,cloudShipControl,cloudSimulationControl,shipOverride,cloudNativeTail,parallelNearControl,parallelNearResult,trace,errorsProbe,errorsFromBoot,ownerModes,ownerModesResult,historyTransitions,viewLoopControl,cloudOverride,checkpoints,state,finalState,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,historySweep,receiverStartup,nativeLogs,nativeLogsDropped,browserInfo,
     probeFromNavigation,columnWork,columnDaySide,columnOrbitMs,columnOrbitProfile,columnFrameGate,framePacing,observeAfterBootTimeout,pauseControl,bootDeadline,frameGateHelperBefore,frameGateHelperAfter,admissionHelperBefore,admissionHelperAfter,bootHelperBefore,bootHelperAfter,
-    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest&&frameGateHelperBefore?.verifierDigest===frameGateHelperAfter?.verifierDigest,
+    requireFirstDraw,firstDrawWait,firstDrawOverride,firstDrawResponse:firstDrawResponse.snapshot(),firstDrawDeadline:finalState.firstDraw.deadline,firstDrawHelperBefore,firstDrawHelperAfter,firstDrawRouteBefore,firstDrawRouteAfter,
+    stableSource:before.sourceDigest===after.sourceDigest&&before.verifierDigest===after.verifierDigest&&helperBefore.verifierDigest===helperAfter.verifierDigest&&contextHelperBefore.verifierDigest===contextHelperAfter.verifierDigest&&warmHelperBefore.verifierDigest===warmHelperAfter.verifierDigest&&bootHelperBefore.verifierDigest===bootHelperAfter.verifierDigest&&admissionHelperBefore?.verifierDigest===admissionHelperAfter?.verifierDigest&&frameGateHelperBefore?.verifierDigest===frameGateHelperAfter?.verifierDigest&&firstDrawHelperBefore.verifierDigest===firstDrawHelperAfter.verifierDigest&&firstDrawRouteBefore.verifierDigest===firstDrawRouteAfter.verifierDigest,
     boundary:`${cloudSimulationControl?'Diagnostic main-loop suspension, including its new work; see cloudSimulationControl.':cloudShipControl?'Served ship-preparation scheduling control; see shipOverride.':columnWork?'Explicit raw3/cache2 column admission plus an additional orbit interval; not default runtime acceptance.':'Default'} 720p Balanced clouds, HUD/post, no far flora. Passive GL timing is diagnostic, not FPS acceptance. --errors adds per-call synchronization after replacement; --errors-from-boot starts it at probe installation. Optional --owner-modes adds real clear/production fixture draws after the player snapshot; its 45/180 s gates do not change the original 120/45 s worker gates. First errors and driver warnings remain failures even if later checkpoints are clean.`};
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));await finishTrace();
   console.log(JSON.stringify({out,stableSource:report.stableSource,viewLoopControl,cloudOverride,traceState,
+    bootDeadline,firstDrawDeadline:report.firstDrawDeadline,requireFirstDraw,
     errors,warnings: warnings.length,warningDropped,driverWarningCount,maxFrame:state.stats.maximumFrameMs,
     finalGl:finalState.gl,finalLost:finalState.lost,mainContextId:finalState.mainContextId,
     earlyContexts:finalState.contexts.contexts.length,earlyContextEvents:finalState.contexts.events.length,
@@ -693,6 +732,10 @@ try {
   assert.ok(report.stableSource);assert.deepEqual(errors,[]);assert.ok(checkpoints.every(p=>p.gl===0&&!p.lost));assert.equal(state.lostEvents,0);
   assert.equal(warmHelperBefore.verifierDigest,warmHelperAfter.verifierDigest);
   assert.equal(bootHelperBefore.verifierDigest,bootHelperAfter.verifierDigest);
+  assert.equal(finalState.firstDraw.restored,true,'First-draw probe restores only its own wrappers');
+  assert.deepEqual(finalState.firstDraw.faults,[]);
+  assert.ok(report.firstDrawResponse.restored&&!report.firstDrawResponse.restoreConflict);
+  assert.ok(report.firstDrawResponse.matchedRequests>0,'The observed main module must actually be served');
   if(parallelNearControl)assert.equal(parallelNearResult.actualNear.reused,true,'Actual near draw must reuse the prepared program');
   assert.equal(finalState.gl,0,'Post-screenshot/teardown GL error must remain a failure');
   assert.equal(finalState.lost,false);assert.equal(finalState.lostEvents,0);
@@ -783,21 +826,30 @@ try {
   report.functionalChecksPassed=true;
   await writeFile(`${out}/report.json`,JSON.stringify(report,null,2));
   assert.ok(bootDeadline.passed,'Original 120 s boot gate failed; extended observation does not turn it green');
+  if(requireFirstDraw)assert.ok(report.firstDrawDeadline.passed,
+    'Ready-state actual cloud world submission and next task must both return within 120 s of navigation');
 } catch(error) {
-  const state=await page?.evaluate(()=>{window.__foundationCloudNativeTailStop?.('failure-capture');return {stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
+  const state=await page?.evaluate(()=>{window.__foundationCloudNativeTailStop?.('failure-capture');const captured={stats:window.NMS?.stats?.(),water:window.NMS?.waterState?.(0),
     profile:window.NMS?._pipeline?.performanceSnapshot(),probe:window.__foundationGLProbe?.snapshot(),workers:window.__foundationWorkers,
     ownerModes:window.__foundationOwnerModes,history:window.__foundationHistory,receiverStartup:window.__foundationReceiverStartup,parallelPreparation:window.__foundationCloudPrewarm,contexts:window.__foundationContextProbe?.snapshot(),
     columnWork:window.__foundationColumnWork,frameGate:window.__foundationColumnFrameGate?.snapshot(),framePacing:window.NMS?._pipeline?.framePacer?.snapshot(),pauseControl:window.__foundationPauseControl,
     cloudShipControl:window.__foundationCloudShipControl,
     cloudSimulationControl:window.__foundationCloudSimulationControl,
     cloudNativeTail:window.__foundationCloudNativeTail,
-    mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)};}).catch(captureError=>({captureError:String(captureError)}));
+    mainContextId:window.__foundationContextProbe?.idForCanvas(window.NMS?._renderer?.domElement)};
+    window.NMS?._pipeline?.stopProfiling();window.__foundationColumnFrameGate?.restore();
+    window.__foundationGLProbe?.dispose();window.__foundationFirstDrawProbe?.dispose();
+    captured.firstDraw=window.__foundationFirstDrawProbe?.snapshot();return captured;
+  }).catch(captureError=>({captureError:String(captureError)}));
   await page?.screenshot({path:`${out}/failure-player.png`,timeout:30000}).catch(()=>{});
+  firstDrawResponse.restore();
   await writeFile(`${out}/failure.json`,JSON.stringify({...before,helperBefore,contextHelperBefore,warmHelperBefore,parallelNearControl,parallelNearResult,ownerModes,ownerModesResult,viewLoopControl,cloudOverride,traceState,checkpoints,state,errors,warnings,
     warningDropped,driverWarningCount,driverWarnings,workerEvents,networkFailures,nativeLogs,nativeLogsDropped,browserInfo,
-    cloudPrograms,cloudIdleControl,cloudFlushControl,cloudShipControl,cloudSimulationControl,shipOverride,cloudNativeTail,framePacing,observeAfterBootTimeout,bootDeadline,error:String(error)},null,2));
+    cloudPrograms,cloudIdleControl,cloudFlushControl,cloudShipControl,cloudSimulationControl,shipOverride,cloudNativeTail,framePacing,observeAfterBootTimeout,bootDeadline,
+    requireFirstDraw,firstDrawWait,firstDrawOverride,firstDrawResponse:firstDrawResponse.snapshot(),firstDrawHelperBefore,firstDrawRouteBefore,firstDrawDeadline:state?.firstDraw?.deadline??null,error:String(error)},null,2));
   await finishTrace();console.error(JSON.stringify({out,error:String(error)}));throw error;
 } finally {
+  firstDrawResponse.restore();
   try {await browser?.close();}
   finally {await new Promise(resolve=>server.close(resolve));}
 }
