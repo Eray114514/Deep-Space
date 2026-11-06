@@ -12,6 +12,11 @@ export function cloudFarSplitShaders(source) {
   const replace=body=>source.slice(0,a)+`        #if PRODUCTION_CLOUD_MEDIUM && CLOUD_FAR_VIEW\n        {\n${body}\n        }\n`+source.slice(b);
   const point=replace('          gl_FragColor=cloudFarColumn(dir,t0,t1);\n          return;');
   const cached=replace('          gl_FragColor=cloudCachedColumn(dir,t0,t1);\n          return;');
+  const direct=expression=>replace(`          vec4 column=${expression};
+          if(column.a<0.004)discard;
+          gl_FragColor=column*uEngage;
+          return;`);
+  const pointDirect=direct('cloudFarColumn(dir,t0,t1)'),cachedDirect=direct('cloudCachedColumn(dir,t0,t1)');
   const declarations='      uniform sampler2D uSplitPoint,uSplitCached;\n';
   const mixBody=`          float footprint=rayCone*t0;
           ivec2 pixel=ivec2(gl_FragCoord.xy);
@@ -37,5 +42,5 @@ export function cloudFarSplitShaders(source) {
   const coverage=replace(`          float footprint=rayCone*t0;
           float w=uColumnsReady>0.5?smoothstep(900.0,2400.0,footprint):0.0;
           gl_FragColor=vec4(w,footprint/10000.0,1.0,1.0);return;`);
-  return {point,cached,combine,wrongOver,coverage};
+  return {point,cached,pointDirect,cachedDirect,combine,wrongOver,coverage};
 }

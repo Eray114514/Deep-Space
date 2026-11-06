@@ -8,12 +8,15 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
   const {compilePrograms}=await import('/src/program-preparation.js');
   const {installProgramRetirement}=await import('/src/program-retirement.js');
   const {cloudFarSplitShaders}=await import('/tools/cloud-far-split-shaders.js');
+  const {admitCloudFarSplit,createCloudSplitResourceTracker}=await import('/tools/cloud-far-split-routing.js');
+  const {minimumCloudRayCone}=await import('/src/cloud/cloud-footprint.js');
+  const tracker=createCloudSplitResourceTracker();
   const require=(condition,message)=>{if(!condition)throw Error(message);};
   require(union===0||union===1,'Explicit UNION0 or UNION1 control');
   require(typeof referenceFirst==='boolean','Explicit reference preparation order');
   const width=32,height=24,hdrTolerance=.002,compileLimitMs=120000,referenceLimitMs=240000;
   const renderer=new T.WebGLRenderer({antialias:false});renderer.setSize(width,height);
-  renderer.autoClear=false;
+  renderer.autoClear=false;renderer.info.autoReset=false;
   const gl=renderer.getContext(),retirement=installProgramRetirement(renderer);
   require(gl.getExtension('EXT_color_buffer_float'),'RGBA32F scratch required');
   require(gl.getExtension('KHR_parallel_shader_compile'),'KHR readiness required');
@@ -105,6 +108,7 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     require(high>low+1000,'Distinct low/high cloud decks');
     const columns=texture([.55,.36,Math.log(2.5)/Math.log(129),Math.log(1.8)/Math.log(129)]),heights=texture([low,high,.75,0]);
     u.uOpticalColumns.value=columns;u.uOpticalColumnsNext.value=columns;u.uColumnHeights.value=heights;u.uColumnHeightsNext.value=heights;
+    tracker.observe(columns);tracker.observe(heights);
     u.uColumnMix.value=.375;u.uColumnsJointReady.value=1;
     u.uSunTransport.value=texture([.3,0,0,1],32,1);u.uSunCacheDepth.value=1;u.uSunCacheReady.value=1;
     u.uSunCacheValidA.value.set(1,1,1,1);u.uSunCacheValidB.value.set(1,1,1,1);
@@ -120,10 +124,11 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
       m.uniforms.uSplitPoint={value:pointRT.texture};m.uniforms.uSplitCached={value:cachedRT.texture};m.toneMapped=false;
       materials.push(m);return m;};
     const reference=make(referenceSource),point=make(split.point),cached=make(split.cached),combine=make(split.combine),wrong=make(split.wrongOver),coverage=make(split.coverage);
+    const pointDirect=make(split.pointDirect),cachedDirect=make(split.cachedDirect);
     for(const m of [point,cached,coverage])m.blending=T.NoBlending;
     mesh=new T.Mesh(planet.volCloudMesh.geometry,point);mesh.frustumCulled=false;scene.add(mesh);
     if(referenceFirst){await prepare('reference',reference,referenceLimitMs);createMultipleLut();}
-    for(const [name,m]of [['point',point],['cached',cached],['combine',combine],['wrong-over',wrong],['coverage',coverage]])await prepare(name,m);
+    for(const [name,m]of [['point-direct',pointDirect],['cached-direct',cachedDirect],['point',point],['cached',cached],['combine',combine],['wrong-over',wrong],['coverage',coverage]])await prepare(name,m);
     if(!referenceFirst)await prepare('reference',reference,referenceLimitMs);
     const depthScene=new T.Scene(),depthCamera=new T.Camera(),depthGeometry=new T.PlaneGeometry(2,2);
     const depthMaterial=new T.ShaderMaterial({depthTest:true,depthWrite:true,uniforms:{far:{value:camera.far},distance:{value:600000-(low+high)*.5}},
@@ -132,10 +137,18 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     materials.push(depthMaterial);depthScene.add(new T.Mesh(depthGeometry,depthMaterial));
     clear(depthRT);renderer.render(depthScene,depthCamera);depthGeometry.dispose();
     function draw(material,rt){mesh.material=material;renderer.setRenderTarget(rt);renderer.render(scene,camera);}
-    function render(mode,rt,blend=false){clear(rt,blend?[.08,.13,.21]:[0,0,0],blend?.25:0);
-      reference.blending=combine.blending=wrong.blending=blend?T.NormalBlending:T.NoBlending;
+    function admission(){return admitCloudFarSplit(reference,{tracker,width,height,scratchBytes:width*height*32,
+      minimumFootprint:Math.max(0,camera.position.length()-planet.volCloudBand.rOut)*minimumCloudRayCone(camera.projectionMatrix.elements,width,height)});}
+    function render(mode,rt,blend=false){
+      const plan=mode==='split'?admission():null;plan?.validate();
+      const callsBefore=renderer.info.render.calls;
+      clear(rt,blend?[.08,.13,.21]:[0,0,0],blend?.25:0);
+      reference.blending=combine.blending=wrong.blending=pointDirect.blending=cachedDirect.blending=blend?T.NormalBlending:T.NoBlending;
       if(mode==='reference')draw(reference,rt);
+      else if(plan?.route==='point')draw(pointDirect,rt);
+      else if(plan?.route==='cached')draw(cachedDirect,rt);
       else {clear(pointRT);draw(point,pointRT);clear(cachedRT);draw(cached,cachedRT);draw(mode==='wrong'?wrong:combine,rt);}
+      if(plan)require(renderer.info.render.calls-callsBefore===plan.draws,'Observed split draw count');
       return read(rt);
     }
     const transitionName=`transition-union${union}-gap`;
@@ -149,16 +162,23 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
       {name:'transition-physical-beams',fov:3,ready:1,physical:true},
       {name:'transition-clear-occluders',fov:3,ready:1,clearOccluders:true},
       {name:'transition-single-star',fov:3,ready:1,singleStar:true},
+      {name:'retired-columns-point-fading',fov:3,ready:0,engage:.37},
+      {name:'cached-fading-depth',fov:10,ready:1,engage:.37,depth:true},
     ];
     const positive=new Map();
     for(const config of configs){window.__cloudFarSplit.status=config.name;
       camera.fov=config.fov;camera.updateProjectionMatrix();u.uDepthInvProjection.value.copy(camera.projectionMatrixInverse);
+      u.uOpticalColumns.value=u.uOpticalColumnsNext.value=config.ready?columns:null;
+      u.uColumnHeights.value=u.uColumnHeightsNext.value=config.ready?heights:null;
       u.uColumnsReady.value=config.ready;u.uEngage.value=config.engage??1;u.uDepthReady.value=Number(!!config.depth);u.uSunCacheReady.value=config.physical?0:1;
       u.uLocalOccluderCount.value=u.air_uLocalOccluderCount.value=config.clearOccluders?0:blockers.length;
       u.uSecondarySunEnergy.value=u.air_uSunEnergy1.value=config.singleStar?0:.35;
       clear(floatRT);draw(coverage,floatRT);const mask=read(floatRT).values;
       const weights=mask.filter((_,i)=>i%4===0),covered=mask.filter((_,i)=>i%4===2).filter(v=>v>0).length;
-      const row={...config,covered,weights:{minimum:Math.min(...weights),maximum:Math.max(...weights),transition:weights.filter(w=>w>0&&w<1).length},formats:[]};
+      const plan=admission();
+      const row={...config,route:plan.route,draws:plan.draws,requiredScratchBytes:plan.scratchBytes,covered,weights:{minimum:Math.min(...weights),maximum:Math.max(...weights),transition:weights.filter(w=>w>0&&w<1).length},formats:[]};
+      require(config.ready||plan.route==='point','Unready columns use direct point');
+      if(config.name==='fully-cached-gap')require(plan.route==='cached','Proven cached lower bound');
       require(covered>0,'Visible shell '+config.name);if(config.transition)require(row.weights.transition>0,'Actual intermediate footprint');
       for(const [format,rt,blend]of [['float32',floatRT,false],['half-over',halfRT,true]]){
         const a=render('reference',rt,blend),a2=render('reference',rt,blend),b=render('split',rt,blend),b2=render('split',rt,blend);
@@ -171,6 +191,20 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
       }
       row.gl=gl.getError();row.lost=gl.isContextLost();require(row.gl===0&&!row.lost,'Healthy frame');records.push(row);
     }
+    const stale=admission();u.uColumnMix.value=.5;
+    let staleRejected=false;try{stale.validate();}catch{staleRejected=true;}
+    require(staleRejected,'Interpolation invalidates admission');u.uColumnMix.value=.375;
+    const retired=texture([0,0,0,0]);tracker.observe(retired);
+    const saved=u.uOpticalColumns.value;u.uOpticalColumns.value=retired;
+    const retiredPlan=admission();retired.dispose();
+    let retiredRejected=false;try{retiredPlan.validate();}catch{retiredRejected=true;}
+    require(retiredRejected,'Disposed resource invalidates admission');u.uOpticalColumns.value=saved;
+    const retiredTarget=allocate();tracker.observe(retiredTarget.texture,retiredTarget);
+    u.uOpticalColumns.value=retiredTarget.texture;
+    const ownerPlan=admission();retiredTarget.dispose();
+    let ownerRejected=false;try{ownerPlan.validate();}catch{ownerRejected=true;}
+    require(ownerRejected,'Render target retirement invalidates admission');u.uOpticalColumns.value=saved;
+    result.admissionControls={staleRejected,retiredRejected,ownerRejected,unreadyTexturesWereNull:true};
     const partial=positive.get(transitionName);
     result.controls={occluderEffect:difference(partial,positive.get('transition-clear-occluders')),
       secondaryEffect:difference(partial,positive.get('transition-single-star'))};
@@ -179,7 +213,8 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     require(result.controls.secondaryEffect.maximumError>1e-6,'Actual secondary contributes');
     // Small-work timer only; includes both scratch draws and final combine.
     result.timing=[];
-    if(timer){u.uLocalOccluderCount.value=u.air_uLocalOccluderCount.value=blockers.length;u.uSecondarySunEnergy.value=u.air_uSunEnergy1.value=.35;
+    if(timer){camera.fov=3;camera.updateProjectionMatrix();u.uDepthInvProjection.value.copy(camera.projectionMatrixInverse);
+      u.uEngage.value=1;u.uDepthReady.value=0;u.uLocalOccluderCount.value=u.air_uLocalOccluderCount.value=blockers.length;u.uSecondarySunEnergy.value=u.air_uSunEnergy1.value=.35;
       async function timed(mode){clear(floatRT);const q=gl.createQuery();queries.add(q);gl.beginQuery(timer.TIME_ELAPSED_EXT,q);
         reference.blending=combine.blending=T.NoBlending;
         if(mode==='reference')draw(reference,floatRT);else{clear(pointRT);draw(point,pointRT);clear(cachedRT);draw(cached,cachedRT);draw(combine,floatRT);}
@@ -193,6 +228,7 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
   }catch(error){result.failure={message:String(error),stack:error.stack};throw error;
   }finally{
     for(const q of queries)gl.deleteQuery(q);for(const material of materials)material.dispose();for(const target of targets)target.dispose();for(const tex of textures)tex.dispose();
+    tracker.dispose();
     multiple?.dispose();atmosphere?.dispose();planet?.dispose();renderer.dispose();
     for(let i=0;i<1000&&retirement.snapshot().pending;i++)await new Promise(r=>setTimeout(r,10));
     result.retirement=retirement.snapshot();result.finalGL=gl.getError();result.finalLost=gl.isContextLost();
