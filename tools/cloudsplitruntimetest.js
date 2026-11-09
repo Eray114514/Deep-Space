@@ -8,23 +8,29 @@ import { installFoundationGLProbe } from './foundation-gl-probe.js';
 const verifier = 'tools/cloudsplitruntimetest.js';
 const before = await evidenceFingerprint(verifier);
 const audit = process.argv.includes('--gl-audit');
+const auditRestore = process.argv.includes('--audit-restore');
+const forceRecovery = process.argv.includes('--force-recovery');
+const farStageTiming = process.argv.includes('--far-stage-timing');
 const requireMixed = process.argv.includes('--require-mixed');
 const fixedWeather = process.argv.includes('--fixed-weather');
 const supplyOption = process.argv.find(arg => arg.startsWith('--supply-rows='));
 const supplyRows = supplyOption ? Number(supplyOption.split('=')[1]) : null;
 assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the runtime batch. Pass --supply-rows=0.');
 const runDescent = process.argv.includes('--descent');
-const nearTrace = process.argv.includes('--near-trace');
+const traceDescent = process.argv.includes('--near-trace');
+const nearTrace = traceDescent || auditRestore || forceRecovery;
 const skipResize = process.argv.includes('--skip-resize');
 const nearPairRequested = process.argv.includes('--near-pair');
 const viewport = process.argv.includes('--2k') ? {width:2560,height:1440} : {width:960,height:540};
 assert.ok(!nearPairRequested || runDescent, '--near-pair requires --descent');
+assert.ok(!forceRecovery || runDescent, '--force-recovery requires --descent');
+assert.ok(!audit || !auditRestore, 'Select one mode of native GL error attribution');
 const requireSupply = process.argv.includes('--require-supply');
 assert.ok(!requireSupply || supplyRows !== null && !fixedWeather);
 const out = `test-results/cloud-split-runtime/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
-let browser, page, failure, supply, descent, livePair, nearPair, transition;
+let browser, page, failure, supply, descent, livePair, nearPair, transition, restorationAudit, farStages;
 const errors = [], checkpoints = [];
 async function capture(label) {
   const state = await page.evaluate(label => {
@@ -72,10 +78,17 @@ try {
   await page.waitForFunction(() => window.NMS?._planet(0)?.volCloudBand && NMS._pipeline.volumePass.farSplit,
     null, { timeout: 120000 });
   const initial = await capture('before-orbit-placement');
-  if (nearTrace) await page.evaluate(async () => {
+  if (nearTrace) await page.evaluate(async auditRestore => {
     const { installNearTransitionTrace } = await import('/tools/near-transition-trace.js');
-    window.__nearTransitionTrace = installNearTransitionTrace(NMS);
-  });
+    const { installFoundationGLProbe } = await import('/tools/foundation-gl-probe.js');
+    const onRestore = auditRestore ? () => {
+      // Install in the capture listener, before Three and the game restore.
+      installFoundationGLProbe();
+      window.__foundationGLProbe.mark('context-restore');
+      window.__foundationGLProbe.armErrors();
+    } : undefined;
+    window.__nearTransitionTrace = installNearTransitionTrace(NMS,{onRestore});
+  }, auditRestore);
   if (audit) {
     await page.evaluate(installFoundationGLProbe);
     await page.evaluate(() => { window.__foundationGLProbe.mark('split-orbit');window.__foundationGLProbe.armErrors(); });
@@ -134,6 +147,19 @@ try {
     orbit = await capture('split-mixed');
     await page.screenshot({ path: `${out}/orbit-mixed.png`, timeout: 90000 });
   }
+  if (farStageTiming) {
+    await page.waitForFunction(() => {
+      const pass = NMS._pipeline.volumePass;
+      return pass.farSplit.lastRoute === 'combine' && pass.activePlanet?.volCloudMat.uniforms.uColumnsReady.value === 1;
+    },null,{timeout:120000});
+    farStages = await page.evaluate(async () => {
+      const {measureLiveFarStages} = await import('/tools/cloud-far-stage-timing.js');
+      return measureLiveFarStages(NMS);
+    });
+    console.log(JSON.stringify({farStages}));
+    assert.equal(farStages.gl,0);assert.equal(farStages.lost,false);
+    assert.ok(farStages.rows.every(row => Object.values(row.gpuMs).every(value => value>0)));
+  }
   if (!skipResize) {
     await page.setViewportSize({ width: 1008, height: 576 });
     await page.waitForFunction(({ frames, size }) => {
@@ -153,7 +179,7 @@ try {
     await capture('split-cached');
   }
   if (runDescent) {
-    if (nearTrace) {
+    if (traceDescent) {
       await page.waitForFunction(() => NMS._pipeline.volumePass.farSplit.lastRoute === 'combine', null, { timeout:30000 });
     }
     if (requireSupply) {
@@ -165,7 +191,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(() => {
+    await page.evaluate(forceRecovery => {
       NMS._pipeline.startProfiling({every:1,history:240});
       const planet = NMS._planet(0), THREE = NMS._THREE;
       const coast = NMS.setWade(0, { depth: .9, overview: true });
@@ -176,6 +202,7 @@ try {
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
+      const renderer = NMS._renderer;
       let index = 0, sequence = pipeline.frameState.sequence;
       function place(altitude) {
         const ratio = THREE.MathUtils.smoothstep(altitude,150000,220000)*1.13+.32;
@@ -193,13 +220,19 @@ try {
             history:volume.resolveMaterial.uniforms.uHistoryValid.value });
           sequence = pipeline.frameState.sequence;
           if (++index > count) { state.done = true;return; }
+          if (forceRecovery && !state.forcedLoss && altitude <= 156100) {
+            state.forcedLoss = {altitude, atMs, sequence};
+            renderer.domElement.addEventListener('webglcontextlost',
+              () => setTimeout(() => renderer.forceContextRestore(),100),{once:true});
+            renderer.forceContextLoss();
+          }
           altitude = index === count ? to : from*(to/from)**(index/count);
           place(altitude);
         }
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    });
+    },forceRecovery);
     for (const altitude of [400000,180000,30000,1200]) {
       await page.waitForFunction(target => window.__splitDescent?.rows.at(-1)?.altitude <= target, altitude,
         { timeout:180000, polling:100 });
@@ -243,8 +276,24 @@ try {
 } finally {
   try {
     if (nearTrace && page) try { transition = await page.evaluate(() => window.__nearTransitionTrace?.finish()); } catch {}
+    if (auditRestore && page) try {
+      restorationAudit = await page.evaluate(() => window.__foundationGLProbe?.snapshot());
+    } catch {}
     const after = await evidenceFingerprint(verifier);
-    await writeFile(`${out}/report.json`, JSON.stringify({ before, after, viewport, audit, requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, descent, transition, checkpoints, errors, failure, passed: !failure }, null, 2));
+    const contextEvents = transition?.contextEvents ?? [];
+    if (!failure && auditRestore && restorationAudit?.errorArms.some(arm => arm.preexisting))
+      failure = 'Preexisting GL error at context restoration';
+    if (!failure && forceRecovery) {
+      const events = contextEvents.map(event => event.type);
+      const nextFrames = descent?.rows.filter(row => row.sequence > descent.forcedLoss?.sequence);
+      if (!descent?.forcedLoss || events.join(',') !== 'webglcontextlost,webglcontextrestored'
+        || nextFrames[0]?.history !== 0 || nextFrames[1]?.history !== 1) failure = 'Forced restoration did not rebuild world history';
+    }
+    if (!failure && !forceRecovery && contextEvents.length) failure = 'Continuous context gate failed';
+    await writeFile(`${out}/report.json`, JSON.stringify({ before, after, viewport, audit, auditRestore, forceRecovery,
+      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, descent, transition, restorationAudit,
+      checkpoints, errors, failure, passed: !failure }, null, 2));
     assert.deepEqual(after, before);
+    if (failure) process.exitCode = 1;
   } finally { await browser?.close();server.close(); }
 }

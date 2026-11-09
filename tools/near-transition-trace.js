@@ -1,8 +1,9 @@
 // Passive timing. In particular, never issue extra native reflection queries.
-export function installNearTransitionTrace(game) {
+export function installNearTransitionTrace(game, { onRestore } = {}) {
   const { _pipeline:pipeline, _renderer:renderer } = game;
   const gl = renderer.getContext(), manager = pipeline.cloudPrograms;
   const events = [], restore = [];
+  const contextEvents = [], recentDraws = [];
   const started = performance.now();
   let scope = null, lastGate = null, firstNear = false, firstSweep = false, dropped = 0;
   function add(event) {
@@ -13,6 +14,17 @@ export function installNearTransitionTrace(game) {
     const wrapper = function(...args) { return handler(original,this,args); };
     owner[name] = wrapper;
     restore.push(() => { if (owner[name] === wrapper) { if (own) owner[name] = original;else delete owner[name]; } });
+  }
+  const canvas = renderer.domElement;
+  function recordContext(event) {
+    const restored = event.type === 'webglcontextrestored';
+    contextEvents.push({ type:event.type, at:performance.now(), status:event.statusMessage,
+      sequence:pipeline.frameState.sequence, recentDraws:recentDraws.slice() });
+    if (restored) onRestore?.();
+  }
+  for (const type of ['webglcontextlost','webglcontextrestored']) {
+    canvas.addEventListener(type,recordContext,true);
+    restore.push(() => canvas.removeEventListener(type,recordContext,true));
   }
   for (const name of ['linkProgram','getProgramParameter','getActiveUniform','getUniformLocation','drawElements','drawArrays']) {
     wrap(gl,name,(call,receiver,args) => {
@@ -55,6 +67,8 @@ export function installNearTransitionTrace(game) {
     try { return call.apply(receiver,args); }
     finally {
       const ms = performance.now()-at;
+      recentDraws.push({at,ms,scope});
+      if (recentDraws.length>16) recentDraws.shift();
       if (ms >= 30 || near&&!firstNear) add({ name:'renderBufferDirect',at,ms,scope });
       if (near) firstNear=true;
       if (sweep&&!firstSweep) {
@@ -68,5 +82,5 @@ export function installNearTransitionTrace(game) {
       scope=prior;
     }
   });
-  return { finish() { for (const undo of restore.reverse()) undo();return { started, events, dropped }; } };
+  return { finish() { for (const undo of restore.reverse()) undo();return { started, events, dropped, contextEvents }; } };
 }
