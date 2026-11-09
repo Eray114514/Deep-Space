@@ -259,8 +259,13 @@ export class GameLegacyPipeline {
 
   // Internal world graph. Only submitFrame's one-use draw capability enters it.
   #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
-    if (this.cloudProgramsEnabled && this.volumePass?.enabled && !this.cloudPrograms.ensure({ scene: this.scene, camera: this.camera,
-      target: this.volumePass.current, requests: this.volumePass.requiredProgramRequests(origin, this.volumePass.farSplit) })) return false;
+    if (this.cloudProgramsEnabled && this.volumePass?.enabled) {
+      const volume = this.volumePass, requests = volume.requiredProgramRequests(origin, volume.farSplit);
+      const plan = volume.farSplit?.plan, material = volume.activePlanet?.volCloudMat;
+      const prefetch = plan && material && this.renderer.extensions?.has('KHR_parallel_shader_compile')
+        ? { mesh:plan.mesh, material } : null;
+      if (!this.cloudPrograms.ensure({ scene:this.scene, camera:this.camera, target:volume.current, requests, prefetch })) return false;
+    }
     let failed=false;
     const target = this.renderer.getRenderTarget();
     const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();

@@ -149,6 +149,63 @@ try {
     const f = fixture();f.config.requests.push({ ...f.request, cacheVariants: [1, 0, 1] });f.manager.ensure(f.config);const epoch = f.manager.snapshot().epoch;
     f.config.requests.reverse();f.manager.ensure(f.config);assert.equal(f.manager.snapshot().epoch, epoch);assert.equal(f.manager.snapshot().submitted, 2);
   });
+  await test('prefetch queues after required programs and can be promoted while its native program is pending', async () => {
+    const f = fixture({ variants: [0] }), near = f.material.clone();
+    try {
+      near.defines.CLOUD_FAR_VIEW = 0;
+      f.config.prefetch = { mesh:f.mesh, material:near };
+      assert.equal(f.manager.ensure(f.config), false);
+      assert.equal(f.manager.snapshot().submitted, 2);
+      f.ready = true;f.run();await tick();await microtasks();
+      assert.equal(f.records[0].selected[0].material,f.material);
+      assert.equal(f.manager.ensure(f.config), true);
+      assert.equal(f.manager.snapshot().prefetch.state, 'pending');
+      f.ready = false;f.run();
+      assert.equal(f.manager.ensure(f.config), true);
+      assert.equal(f.mesh.material, f.material);
+      f.config.requests = [{ ...f.config.prefetch, cacheVariants:[0] }];
+      f.config.prefetch = null;
+      assert.equal(f.manager.ensure(f.config), false);
+      assert.equal(f.manager.snapshot().cancelled, 0);
+      assert.equal(f.manager.snapshot().submitted, 2);
+      await f.complete();
+      assert.equal(f.manager.ensure(f.config), true);
+      assert.equal(f.records.filter(row => row.selected[0].material === near).length, 1);
+    } finally { near.dispose(); }
+  });
+  await test('failed prefetch does not block the current frame and can retry when required', async () => {
+    const f = fixture({ variants: [0] }), near = f.material.clone();
+    try {
+      f.manager.ensure(f.config);await f.complete();
+      f.config.prefetch = { mesh:f.mesh, material:near };
+      assert.equal(f.manager.ensure(f.config), true);
+      f.compileError = Error('optional failed');f.run();await microtasks();
+      assert.equal(f.manager.snapshot().failed, false);
+      assert.equal(f.manager.snapshot().blocked, false);
+      assert.equal(f.manager.snapshot().prefetch.state, 'failed');
+      f.compileError = null;
+      f.config.requests = [{ ...f.config.prefetch, cacheVariants:[0] }];f.config.prefetch = null;
+      assert.equal(f.manager.ensure(f.config), false);
+      assert.equal(f.manager.snapshot().submitted, 3);
+      await f.complete();assert.equal(f.manager.ensure(f.config), true);
+    } finally { near.dispose(); }
+  });
+  await test('withdrawing the future source or retiring its target cancels only the applicable leases', async () => {
+    const f = fixture({ variants: [0] }), near = f.material.clone();
+    try {
+      f.manager.ensure(f.config);await f.complete();
+      const prefetch = { mesh:f.mesh, material:near };
+      f.config.prefetch = prefetch;f.manager.ensure(f.config);f.ready=false;f.run();
+      f.config.prefetch = null;assert.equal(f.manager.ensure(f.config), true);
+      assert.equal(f.manager.snapshot().cancelled, 1);
+      assert.equal(f.queue.snapshot().pending, 0);
+      f.config.prefetch = prefetch;assert.equal(f.manager.ensure(f.config), true);f.run();
+      f.hdr.dispose();
+      assert.equal(f.manager.snapshot().cancelled, 2);
+      assert.equal(f.manager.snapshot().ready, 0);
+      assert.equal(f.queue.snapshot().pending, 0);
+    } finally { near.dispose(); }
+  });
   await test('plan change cancels queued and readiness work; late completion cannot mark old closure ready', async () => {
     const f = fixture();f.manager.ensure(f.config);f.run();assert.equal(f.queue.snapshot().waiting, 1);f.material.fragmentShader += '\n// next epoch';
     f.manager.ensure(f.config);await microtasks();assert.equal(f.manager.snapshot().cancelled, 2);assert.equal(f.manager.snapshot().pending, 2);await f.complete();assert.equal(f.manager.ensure(f.config), true);assert.equal(f.manager.snapshot().submitted, 4);

@@ -9,7 +9,9 @@ import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
 
 const verifier='tools/cloudfarsplitgputest.js',helpers=['tools/cloud-far-split-frame.js','tools/cloud-far-split-multi-browser.js','tools/cloud-far-split-routing.js','tools/cloud-far-split-shaders.js','tools/cloud-far-split-browser.js'];
-const args=process.argv.slice(2);assert.ok(args.every(arg=>arg==='--reference-first'||/^--union=[01]$/.test(arg)),'Only --reference-first and --union=0|1 are supported');
+const args=process.argv.slice(2);assert.ok(args.every(arg=>arg==='--near'||arg==='--reference-first'||/^--union=[01]$/.test(arg)),'Only --near, --reference-first and --union=0|1 are supported');
+const near=args.includes('--near');
+if(near)helpers.push('tools/cloud-near-split-shaders.js','tools/cloud-near-split-browser.js');
 const union=Number(args.find(arg=>arg.startsWith('--union='))?.slice(8)??1),referenceFirst=args.includes('--reference-first');
 const before=await evidenceFingerprint(verifier),hash=b=>createHash('sha256').update(b).digest('hex');
 const frozen=new Map(await Promise.all([verifier,...helpers].map(async path=>[path,await readFile(path)])));
@@ -26,7 +28,7 @@ try{
     +'<h2>Full production Far shader split experiment</h2><p>One controlled real Planet; raw FP32 point/cached then the original mix and threshold. Not a normal-player screenshot.</p>'}));
   await page.goto(`http://127.0.0.1:${port}/cloud-far-split.html`);
   console.log(JSON.stringify({out,status:'started',union,referenceFirst,candidateDeadlineMs:120000,referenceNumericalLimitMs:240000}));
-  result=await page.evaluate(async options=>{const {probeCloudFarSplit}=await import('/tools/cloud-far-split-browser.js');return probeCloudFarSplit(options);},{union,referenceFirst});
+  result=await page.evaluate(async options=>{const {probeCloudFarSplit}=await import('/tools/cloud-far-split-browser.js');return probeCloudFarSplit(options);},{union,referenceFirst,near});
   await page.screenshot({path:`${out}/comparison.png`,fullPage:true});
   assert.equal(result.passed,true);assert.equal(result.gl,0);assert.equal(result.finalGL,0);assert.equal(result.lost,false);assert.equal(result.finalLost,false);
   assert.equal(result.retirement.pending,0);assert.deepEqual(result.retirement.faults,[]);assert.deepEqual(errors,[]);

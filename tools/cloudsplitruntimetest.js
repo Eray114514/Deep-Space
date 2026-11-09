@@ -14,12 +14,14 @@ const supplyOption = process.argv.find(arg => arg.startsWith('--supply-rows='));
 const supplyRows = supplyOption ? Number(supplyOption.split('=')[1]) : null;
 assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the runtime batch. Pass --supply-rows=0.');
 const runDescent = process.argv.includes('--descent');
+const nearTrace = process.argv.includes('--near-trace');
+const skipResize = process.argv.includes('--skip-resize');
 const requireSupply = process.argv.includes('--require-supply');
 assert.ok(!requireSupply || supplyRows !== null && !fixedWeather);
 const out = `test-results/cloud-split-runtime/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
-let browser, page, failure, supply, descent, livePair;
+let browser, page, failure, supply, descent, livePair, transition;
 const errors = [], checkpoints = [];
 async function capture(label) {
   const state = await page.evaluate(label => {
@@ -66,6 +68,10 @@ try {
   await page.waitForFunction(() => window.NMS?._planet(0)?.volCloudBand && NMS._pipeline.volumePass.farSplit,
     null, { timeout: 120000 });
   const initial = await capture('before-orbit-placement');
+  if (nearTrace) await page.evaluate(async () => {
+    const { installNearTransitionTrace } = await import('/tools/near-transition-trace.js');
+    window.__nearTransitionTrace = installNearTransitionTrace(NMS);
+  });
   if (audit) {
     await page.evaluate(installFoundationGLProbe);
     await page.evaluate(() => { window.__foundationGLProbe.mark('split-orbit');window.__foundationGLProbe.armErrors(); });
@@ -124,13 +130,15 @@ try {
     orbit = await capture('split-mixed');
     await page.screenshot({ path: `${out}/orbit-mixed.png`, timeout: 90000 });
   }
-  await page.setViewportSize({ width: 1008, height: 576 });
-  await page.waitForFunction(({ frames, size }) => {
-    const pass = NMS._pipeline.volumePass;
-    return pass.farSplit.frames > frames && pass.previousSplitDraw && pass.historyValid
-      && (pass.width !== size[0] || pass.height !== size[1]);
-  }, orbit, { timeout: 120000 });
-  await capture('split-resized');
+  if (!skipResize) {
+    await page.setViewportSize({ width: 1008, height: 576 });
+    await page.waitForFunction(({ frames, size }) => {
+      const pass = NMS._pipeline.volumePass;
+      return pass.farSplit.frames > frames && pass.previousSplitDraw && pass.historyValid
+        && (pass.width !== size[0] || pass.height !== size[1]);
+    }, orbit, { timeout: 120000 });
+    await capture('split-resized');
+  }
   if (requireMixed) {
     await page.evaluate(() => {
       const planet = NMS._planet(0);
@@ -141,6 +149,9 @@ try {
     await capture('split-cached');
   }
   if (runDescent) {
+    if (nearTrace) {
+      await page.waitForFunction(() => NMS._pipeline.volumePass.farSplit.lastRoute === 'combine', null, { timeout:30000 });
+    }
     if (requireSupply) {
       livePair = await page.evaluate(async () => {
         const { compareLiveCloudPayloads } = await import('/tools/cloud-split-live-compare.js');
@@ -209,8 +220,9 @@ try {
   throw error;
 } finally {
   try {
+    if (nearTrace && page) try { transition = await page.evaluate(() => window.__nearTransitionTrace?.finish()); } catch {}
     const after = await evidenceFingerprint(verifier);
-    await writeFile(`${out}/report.json`, JSON.stringify({ before, after, audit, requireMixed, fixedWeather, supplyRows, supply, livePair, descent, checkpoints, errors, failure, passed: !failure }, null, 2));
+    await writeFile(`${out}/report.json`, JSON.stringify({ before, after, audit, requireMixed, fixedWeather, supplyRows, supply, livePair, descent, transition, checkpoints, errors, failure, passed: !failure }, null, 2));
     assert.deepEqual(after, before);
   } finally { await browser?.close();server.close(); }
 }

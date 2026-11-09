@@ -24,7 +24,8 @@ function worldMatrix(object) {
   return matrix;
 }
 
-// This manager submits only the caller's current volume closure. It never
+// This manager submits the current closure and at most one optional future
+// program. The optional program never participates in the draw gate. It never
 // draws, clones uniform/texture/instance data, or queries ready programs again
 // on the normal ensure() path. Native readiness lives inside the shared queue.
 export class CloudProgramPreparation {
@@ -35,7 +36,7 @@ export class CloudProgramPreparation {
     this.entries = new Map();this.required = new Set();this.ids = new WeakMap();this.strings = new Map();this.nextId = 0;
     this.epoch = 0;this.clock = 0;this.submitted = 0;this.reused = 0;this.cancelled = 0;
     this.blocked = false;this.disposed = false;this.lost = false;this.inputFailure = null;
-    this.controller = new AbortController();this.targetEpochs = new WeakMap();this.activeTarget = null;
+    this.prefetchKey = null;this.targetEpochs = new WeakMap();this.activeTarget = null;
     this.onAbort = () => this.dispose();this.onLost = () => { this.lost = true;this.reset('context-lost'); };
     this.onRestored = () => { this.lost = false;this.reset('context-restored'); };
     this.onTargetDispose = () => {
@@ -88,20 +89,22 @@ export class CloudProgramPreparation {
     return entry.programs.length > 0 && entry.programs.every(({ program, handle }) => handle && program.program === handle && present.has(program));
   }
 
-  remove(entry) {
+  remove(entry, reason) {
     if (this.entries.get(entry.key) !== entry) return;
-    if (entry.state === 'pending') { entry.state = 'cancelled';this.cancelled++; }
     entry.material.removeEventListener('dispose', entry.onDispose);this.entries.delete(entry.key);
+    if (entry.state === 'pending') {
+      entry.state = 'cancelled';this.cancelled++;
+      entry.controller.abort(reason);
+    }
   }
 
   cancelPending(reason) {
-    this.controller.abort(reason);this.controller = new AbortController();
-    for (const entry of [...this.entries.values()]) if (entry.state === 'pending') this.remove(entry);
+    for (const entry of [...this.entries.values()]) if (entry.state === 'pending') this.remove(entry, reason);
   }
 
   reset(reason) {
     this.epoch++;this.cancelPending(reason);for (const entry of [...this.entries.values()]) this.remove(entry);
-    this.required.clear();this.plan = null;this.blocked = !this.disposed;
+    this.required.clear();this.prefetchKey = null;this.plan = null;this.blocked = !this.disposed;
   }
 
   compile(config, request, variant, signal) {
@@ -153,12 +156,17 @@ export class CloudProgramPreparation {
     } catch (cause) { pending.catch(() => {});throw cause; }
   }
 
-  schedule(key, config, request, variant) {
-    const epoch = this.epoch, signal = this.controller.signal;
-    const entry = { key, material: request.material, variant, state: 'pending', used: ++this.clock, error: null };
-    entry.onDispose = () => { this.remove(entry);this.plan = null;this.blocked = true; };
+  schedule(key, config, request, variant, speculative = false) {
+    const controller = new AbortController(), { signal } = controller;
+    const entry = { key, material: request.material, variant, state: 'pending', used: ++this.clock, error: null,
+      controller, speculative };
+    entry.onDispose = () => {
+      this.remove(entry, 'material-disposed');
+      if (this.required.has(key)) this.blocked = true;
+    };
     entry.material.addEventListener('dispose', entry.onDispose);this.entries.set(key, entry);this.submitted++;
-    const current = () => !this.disposed && !this.lost && !signal.aborted && epoch === this.epoch && this.required.has(key) && this.entries.get(key) === entry;
+    const current = () => !this.disposed && !this.lost && !signal.aborted
+      && (this.required.has(key) || this.prefetchKey === key) && this.entries.get(key) === entry;
     let work;
     try { work = this.prepare(() => {
       if (!current()) throw failure('obsolete', 'Cloud preparation owner changed');
@@ -172,7 +180,8 @@ export class CloudProgramPreparation {
       Object.assign(entry, result, { state: 'ready' });
       if (!this.valid(entry)) throw failure('program-invalid', 'Prepared cloud program registry or native handle changed');
     }).catch(error => {
-      if (!current()) return;entry.state = 'failed';entry.error = diagnostic(error);this.blocked = true;
+      if (!current()) return;entry.state = 'failed';entry.error = diagnostic(error);
+      if (this.required.has(key)) this.blocked = true;
     });
   }
 
@@ -183,7 +192,9 @@ export class CloudProgramPreparation {
       // No native calls or renderer capabilities needed on ordinary no-cloud
       // frames (including lightweight CPU pipeline fixtures).
       if (!config.requests.length) {
-        if (this.required.size) { this.epoch++;this.cancelPending('empty-plan');this.required.clear();this.plan = null; }
+        if (this.required.size || this.prefetchKey) {
+          this.epoch++;this.cancelPending('empty-plan');this.required.clear();this.prefetchKey = null;this.plan = null;
+        }
         const idle = [...this.entries.values()].sort((a, b) => b.used - a.used);
         for (const entry of idle.slice(this.maxIdleEntries)) this.remove(entry);
         this.inputFailure = null;this.blocked = this.lost;return !this.blocked;
@@ -197,7 +208,18 @@ export class CloudProgramPreparation {
         for (const variant of new Set(request.cacheVariants)) descriptions.set(this.key(config, request, variant), { request, variant });
       }
       const plan = JSON.stringify([...descriptions.keys()].sort());
-      if (plan !== this.plan) { this.epoch++;this.cancelPending('plan-changed');this.plan = plan;this.required = new Set(descriptions.keys()); }
+      const request = config.prefetch;
+      let prefetchKey = null;
+      if (request?.mesh?.geometry && request.material?.isShaderMaterial) {
+        try { prefetchKey = this.key(config, request, 0); } catch { /* Optional source may not be usable. */ }
+        if (descriptions.has(prefetchKey)) prefetchKey = null;
+      }
+      if (plan !== this.plan || prefetchKey !== this.prefetchKey) {
+        this.epoch++;this.plan = plan;this.required = new Set(descriptions.keys());this.prefetchKey = prefetchKey;
+        for (const entry of this.entries.values()) {
+          if (entry.state === 'pending' && !this.required.has(entry.key) && entry.key !== prefetchKey) this.remove(entry, 'plan-changed');
+        }
+      }
       if (this.activeTarget !== config.target) {
         this.activeTarget?.removeEventListener?.('dispose', this.onTargetDispose);this.activeTarget = config.target;
         this.activeTarget.addEventListener?.('dispose', this.onTargetDispose);
@@ -205,24 +227,37 @@ export class CloudProgramPreparation {
       this.inputFailure = null;
       for (const [key, { request, variant }] of descriptions) {
         let entry = this.entries.get(key);
-        if (entry?.state === 'ready' && !this.valid(entry)) { this.remove(entry);entry = null; }
-        if (!entry) this.schedule(key, config, request, variant);else { entry.used = ++this.clock;this.reused++; }
+        if (entry && (entry.state === 'ready' && !this.valid(entry) || entry.state === 'failed' && entry.speculative)) {
+          this.remove(entry);entry = null;
+        }
+        if (!entry) this.schedule(key, config, request, variant);
+        else { entry.used = ++this.clock;entry.speculative = false;this.reused++; }
       }
-      const idle = [...this.entries.values()].filter(entry => !this.required.has(entry.key)).sort((a, b) => b.used - a.used);
+      this.blocked = [...this.required].some(key => !this.valid(this.entries.get(key) || {}));
+      // Submit after all current jobs have entered the FIFO. The future
+      // program can compile during the current closure's readiness wait.
+      if (prefetchKey) {
+        const entry = this.entries.get(prefetchKey);
+        if (entry?.state === 'ready' && !this.valid(entry)) this.remove(entry);
+        if (!this.entries.has(prefetchKey)) this.schedule(prefetchKey, config, request, 0, true);
+      }
+      const idle = [...this.entries.values()].filter(entry => !this.required.has(entry.key) && entry.key !== prefetchKey).sort((a, b) => b.used - a.used);
       for (const entry of idle.slice(this.maxIdleEntries)) this.remove(entry);
-      this.blocked = [...this.required].some(key => !this.valid(this.entries.get(key) || {}));return !this.blocked;
+      return !this.blocked;
     } catch (error) {
-      this.epoch++;this.cancelPending('invalid-plan');this.required.clear();this.plan = null;
+      this.epoch++;this.cancelPending('invalid-plan');this.required.clear();this.prefetchKey = null;this.plan = null;
       this.inputFailure = diagnostic(error);this.blocked = true;return false;
     }
   }
 
   snapshot() {
     const entries = [...this.required].map(key => this.entries.get(key)).filter(Boolean), failures = entries.filter(entry => entry.state === 'failed').map(entry => ({ variant: entry.variant, ...entry.error }));
+    const prefetch = this.entries.get(this.prefetchKey);
     if (this.inputFailure) failures.push(this.inputFailure);
     return { epoch: this.epoch, blocked: this.blocked, failed: failures.length > 0, failureCount: failures.length, failures,
       required: this.required.size, ready: entries.filter(entry => this.valid(entry)).length, pending: entries.filter(entry => entry.state === 'pending').length,
-      cached: this.entries.size, submitted: this.submitted, reused: this.reused, cancelled: this.cancelled, disposed: this.disposed, contextLost: this.lost };
+      cached: this.entries.size, submitted: this.submitted, reused: this.reused, cancelled: this.cancelled, disposed: this.disposed, contextLost: this.lost,
+      ...(prefetch ? { prefetch: { state:prefetch.state, error:prefetch.error } } : {}) };
   }
 
   dispose() {

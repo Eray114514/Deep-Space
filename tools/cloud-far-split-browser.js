@@ -1,5 +1,5 @@
 // Single real-body numerical prototype, intentionally outside the runtime.
-export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
+export async function probeCloudFarSplit({union=1,referenceFirst=false,near=false}={}) {
   const T=await import('three');
   const {Planet,setVolumetricCloudsEnabled}=await import('/src/planet.js');
   const {sampleProductionMedium}=await import('/src/cloud/production-shape.js');
@@ -48,12 +48,14 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     if(a[i]!==b[i])changed++;maximumError=Math.max(maximumError,Math.abs(a[i]-b[i]));}return {changed,maximumError};};
   const clear=(rt,color=[0,0,0],alpha=0)=>{renderer.setRenderTarget(rt);renderer.setClearColor(new T.Color(...color),alpha);renderer.clear(true,true,false);};
   let mesh;
-  async function prepare(name,material,limit=compileLimitMs){
-    window.__cloudFarSplit.status='compile '+name;mesh.material=material;renderer.setRenderTarget(pointRT);
+  async function prepare(name,material,limit=compileLimitMs,target=pointRT){
+    window.__cloudFarSplit.status='compile '+name;mesh.material=material;renderer.setRenderTarget(target);
     const begin=performance.now();await compilePrograms(renderer,mesh,camera,scene,{timeoutMs:limit});
-    const durationMs=performance.now()-begin,program=renderer.properties.get(material).currentProgram.program;
+    const parallelMs=performance.now()-begin,handle=renderer.properties.get(material).currentProgram,program=handle.program;
     const linked=gl.getProgramParameter(program,gl.LINK_STATUS),uniforms=gl.getProgramParameter(program,gl.ACTIVE_UNIFORMS);
-    require(linked,'Linked '+name);const row={name,durationMs,limit,originalDeadlinePassed:durationMs<compileLimitMs,linked,uniforms};preparations.push(row);
+    if (near) handle.getUniforms();
+    const durationMs=near?performance.now()-begin:parallelMs;
+    require(linked,'Linked '+name);const row={name,durationMs,parallelMs,limit,originalDeadlinePassed:durationMs<compileLimitMs,linked,uniforms};preparations.push(row);
     if(name!=='reference')require(row.originalDeadlinePassed,'Candidate original 120s deadline '+name);
   }
   const pointRT=allocate(),cachedRT=allocate(),floatRT=allocate(),halfRT=allocate(T.HalfFloatType),depthRT=allocate(T.HalfFloatType,true);
@@ -117,6 +119,15 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     result.fixture={radius:planet.R,band:{...planet.volCloudBand},camera:camera.position.toArray(),sources,
       blockers:blockers.map(b=>[...b.centerLocal.toArray(),b.radius]),columns:[.55,.36,1.5,.8],heights:[low,high],jointOpacity:.75,
       lightCache:'Controlled constant .3 optical depth for all four fields; one case forces the unchanged physical beam fallback.'};
+    if (near) {
+      if (referenceFirst) createMultipleLut();
+      const { probeCloudNearSplit }=await import('/tools/cloud-near-split-browser.js');
+      mesh=new T.Mesh(planet.volCloudMesh.geometry);mesh.frustumCulled=false;scene.add(mesh);
+      await probeCloudNearSplit({T,gl,renderer,scene,camera,mesh,planet,u,radial,tangent,union,referenceFirst,
+        targets,materials,result,prepare,require,clear,read,difference,image,floatRT,halfRT,width,height,referenceLimitMs});
+      result.gl=gl.getError();result.lost=gl.isContextLost();result.passed=true;
+      return result;
+    }
     const referenceSource=planet.volCloudFarMat.fragmentShader,split=cloudFarSplitShaders(referenceSource);
     result.sources={reference:referenceSource,...split};
     const make=source=>{const m=planet.volCloudFarMat.clone();m.fragmentShader=source;m.uniforms={...u};
