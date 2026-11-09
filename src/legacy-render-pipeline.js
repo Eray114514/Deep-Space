@@ -12,6 +12,7 @@ import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js'
 import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
 import {CloudLightBank} from './cloud/cloud-light-bank.js';
+import { prepareCloudSunPrograms } from './cloud/cloud-sun-programs.js';
 import {CloudSurfaceShadowPass} from './cloud/cloud-surface-shadow-pass.js';
 import {RenderProfiler} from './render-profiler.js';
 import {GpuWorkBudget} from './gpu-work-budget.js';
@@ -265,6 +266,7 @@ export class GameLegacyPipeline {
       const prefetch = plan && material && this.renderer.extensions?.has('KHR_parallel_shader_compile')
         ? { mesh:plan.mesh, material } : null;
       if (!this.cloudPrograms.ensure({ scene:this.scene, camera:this.camera, target:volume.current, requests, prefetch })) return false;
+      if (prefetch) this.prefetchCloudLightingPrograms();
     }
     let failed=false;
     const target = this.renderer.getRenderTarget();
@@ -374,6 +376,23 @@ export class GameLegacyPipeline {
     }
   }
 
+  prefetchCloudLightingPrograms() {
+    if (this.cloudLightPreparation || this.cloudLightPrograms.sweep) return;
+    const controller = new AbortController(), {signal} = controller;
+    const job = {controller,state:'pending'};
+    this.cloudLightPreparation = job;
+    this.prepare(() => prepareCloudSunPrograms(this.renderer,signal), {signal,label:'cloud-light-cache-programs'}).then(programs => {
+      for (const [key,material] of Object.entries(programs)) {
+        if (signal.aborted || this.cloudLightPrograms[key]) material.dispose();
+        else this.cloudLightPrograms[key] = material;
+      }
+      if (!signal.aborted) job.state = 'ready';
+    }).catch(error => {
+      if (!signal.aborted) { job.state = 'failed';job.error = String(error); }
+      controller.abort();
+    });
+  }
+
   async compileAsync() {
     const signal=this.programPreparation.signal;
     await this.prepare(()=>compilePrograms(this.renderer,this.scene,this.camera,null,{signal}),
@@ -384,6 +403,7 @@ export class GameLegacyPipeline {
     // These two empty-uniform material leases retain only the stable sweep/R8
     // copy programs across bank, weather and body replacement. They are never
     // drawn with another snapshot's data. Epoch/context teardown owns release.
+    this.cloudLightPreparation?.controller.abort();this.cloudLightPreparation=null;
     for(const material of Object.values(this.cloudLightPrograms))material.dispose();
     this.cloudLightPrograms={};
   }

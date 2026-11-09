@@ -4,7 +4,7 @@ export function installNearTransitionTrace(game) {
   const gl = renderer.getContext(), manager = pipeline.cloudPrograms;
   const events = [], restore = [];
   const started = performance.now();
-  let scope = null, lastGate = null, firstNear = false, dropped = 0;
+  let scope = null, lastGate = null, firstNear = false, firstSweep = false, dropped = 0;
   function add(event) {
     if (events.length < 512) events.push(event);else dropped++;
   }
@@ -51,11 +51,20 @@ export function installNearTransitionTrace(game) {
     const at = performance.now(), prior = scope;
     scope = { phase:near?'near-draw':'draw',material:material.id, materialName:material.name || null,
       objectName:args[4].name || null, pass:prior?.phase ?? null };
+    const sweep = prior?.phase === 'cloud-cache' && material.uniforms?.uCacheBoundary;
     try { return call.apply(receiver,args); }
     finally {
       const ms = performance.now()-at;
       if (ms >= 30 || near&&!firstNear) add({ name:'renderBufferDirect',at,ms,scope });
       if (near) firstNear=true;
+      if (sweep&&!firstSweep) {
+        const lease=pipeline.cloudLightPrograms.sweep;
+        const active=renderer.properties.get(material).currentProgram;
+        const prepared=lease&&renderer.properties.get(lease).currentProgram;
+        add({name:'first-light-sweep',at,ms,scope,preparedProgramReused:!!prepared&&prepared===active,
+          preparation:pipeline.cloudLightPreparation?.state});
+        firstSweep=true;
+      }
       scope=prior;
     }
   });

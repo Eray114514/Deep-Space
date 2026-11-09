@@ -1,4 +1,5 @@
 import { BufferGeometry, Float32BufferAttribute, Mesh, OrthographicCamera } from 'three';
+import { compilePrograms } from './program-preparation.js';
 
 const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
@@ -13,6 +14,7 @@ export class OwnedScreenTriangle {
     this._mesh = new Mesh(geometry, material);
   }
   render(renderer) { renderer.render(this._mesh, camera); }
+  prepare(renderer, options) { return compilePrograms(renderer, this._mesh, camera, null, options); }
   dispose() { this._mesh.geometry.dispose(); }
   get material() { return this._mesh.material; }
   set material(value) { this._mesh.material = value; }
