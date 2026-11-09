@@ -12,11 +12,15 @@ const auditRestore = process.argv.includes('--audit-restore');
 const forceRecovery = process.argv.includes('--force-recovery');
 const farStageTiming = process.argv.includes('--far-stage-timing');
 const comparePoint = process.argv.includes('--compare-point');
+const pointReuse = process.argv.includes('--point-reuse');
+const pointReusePaths = process.argv.includes('--point-reuse-paths');
+assert.ok(!pointReusePaths || pointReuse,'--point-reuse-paths requires --point-reuse');
 const splitMoments = process.argv.includes('--point-moments');
 const splitBeams = process.argv.includes('--point-beams');
 const emptyBounds = process.argv.includes('--point-empty-bounds');
 const nativeCounts = process.argv.includes('--point-native-counts');
-const pointModes = [splitMoments,splitBeams,emptyBounds,nativeCounts].filter(Boolean).length;
+const solarTail = process.argv.includes('--point-solar-tail');
+const pointModes = [splitMoments,splitBeams,emptyBounds,nativeCounts,solarTail].filter(Boolean).length;
 assert.ok(!pointModes || comparePoint && pointModes===1,
   'Select one point diagnostic mode with --compare-point');
 const requireMixed = process.argv.includes('--require-mixed');
@@ -38,7 +42,7 @@ assert.ok(!requireSupply || supplyRows !== null && !fixedWeather);
 const out = `test-results/cloud-split-runtime/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
-let browser, page, failure, supply, descent, livePair, nearPair, transition, restorationAudit, farStages, farPoint;
+let browser, page, failure, supply, descent, livePair, nearPair, transition, restorationAudit, farStages, farPoint, reuse;
 const errors = [], checkpoints = [];
 async function capture(label) {
   const state = await page.evaluate(label => {
@@ -155,7 +159,7 @@ try {
     orbit = await capture('split-mixed');
     await page.screenshot({ path: `${out}/orbit-mixed.png`, timeout: 90000 });
   }
-  if (farStageTiming || comparePoint) {
+  if (farStageTiming || comparePoint || pointReuse) {
     await page.waitForFunction(() => {
       const pass = NMS._pipeline.volumePass;
       return pass.farSplit.lastRoute === 'combine' && pass.activePlanet?.volCloudMat.uniforms.uColumnsReady.value === 1;
@@ -174,10 +178,20 @@ try {
     farPoint = await page.evaluate(async mode => {
       const {compareFarPoint} = await import('/tools/cloud-far-point-compare.js');
       return compareFarPoint(NMS,mode);
-    },splitMoments ? 'moments' : splitBeams ? 'beams' : emptyBounds ? 'bounds' : nativeCounts ? 'native-counts' : 'shared');
+    },splitMoments ? 'moments' : splitBeams ? 'beams' : emptyBounds ? 'bounds'
+      : nativeCounts ? 'native-counts' : solarTail ? 'solar-tail' : 'shared');
     console.log(JSON.stringify({farPoint}));
     assert.equal(farPoint.gl,0);assert.equal(farPoint.lost,false);
     assert.ok(farPoint.rows.every(row => Object.values(row.gpuMs).every(value => value>0)));
+  }
+  if (pointReuse) {
+    reuse = await page.evaluate(async perPath => {
+      const {measureFarPointReuse} = await import('/tools/cloud-far-point-reuse.js');
+      return measureFarPointReuse(NMS,perPath);
+    },pointReusePaths);
+    console.log(JSON.stringify({reuse}));
+    assert.equal(reuse.gl,0);assert.equal(reuse.lost,false);
+    assert.ok(reuse.timing.every(row=>Object.values(row.gpuMs).every(value=>value>0)));
   }
   if (!skipResize) {
     await page.setViewportSize({ width: 1008, height: 576 });
@@ -291,6 +305,7 @@ try {
     if (page && runDescent && !descent) try { descent = await page.evaluate(() => window.__splitDescent); } catch {}
   if (page && nearPairRequested && !nearPair) try { nearPair = await page.evaluate(() => window.__nearLivePair); } catch {}
   if (page && comparePoint && !farPoint) try { farPoint = await page.evaluate(() => window.__farPointCompare); } catch {}
+  if (page && pointReuse && !reuse) try { reuse = await page.evaluate(() => window.__farPointReuse); } catch {}
   if (page) try { await capture('failure'); } catch {}
   throw error;
 } finally {
@@ -311,7 +326,7 @@ try {
     }
     if (!failure && !forceRecovery && contextEvents.length) failure = 'Continuous context gate failed';
     await writeFile(`${out}/report.json`, JSON.stringify({ before, after, viewport, audit, auditRestore, forceRecovery,
-      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, farPoint, descent, transition, restorationAudit,
+      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, farPoint, reuse, descent, transition, restorationAudit,
       checkpoints, errors, failure, passed: !failure }, null, 2));
     assert.deepEqual(after, before);
     if (failure) process.exitCode = 1;

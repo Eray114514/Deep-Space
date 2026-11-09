@@ -6,6 +6,7 @@ import { farPointVariants } from './cloud-far-point-variants.js';
 import { farPointMomentShaders } from './cloud-far-point-moments.js';
 import { farPointBeamShader } from './cloud-far-point-beams.js';
 import { farPointEmptyBoundsShader, pointEmptyBounds } from './cloud-far-point-empty-bounds.js';
+import { farPointSolarTailShader } from './cloud-far-point-solar-tail.js';
 
 // The density-only arm is intentionally not a color reference. Read the
 // original and equivalent candidate both before and after Far composition.
@@ -18,20 +19,30 @@ export async function compareFarPoint(game, mode = 'shared') {
   const width = current.width, height = current.height;
   const splitMoments = mode === 'moments', splitBeams = mode === 'beams', emptyBounds = mode === 'bounds';
   const nativeCounts = mode === 'native-counts';
+  const solarTail = mode === 'solar-tail';
   const {density,shared} = farPointVariants(original.fragmentShader);
   const momentSources = splitMoments && farPointMomentShaders(original.fragmentShader,density);
-  const sources = nativeCounts ? {} : splitMoments ? momentSources : splitBeams ? {beams:farPointBeamShader(original.fragmentShader)}
+  const sources = nativeCounts ? {} : solarTail ? {tail:farPointSolarTailShader(original.fragmentShader)}
+    : splitMoments ? momentSources : splitBeams ? {beams:farPointBeamShader(original.fragmentShader)}
     : emptyBounds ? {bounds:farPointEmptyBoundsShader(original.fragmentShader),clone:original.fragmentShader}
     : {density,shared};
   const momentTarget = splitMoments ? new T.WebGLRenderTarget(width,height,{
     format:T.RGFormat,type:T.FloatType,depthBuffer:false,minFilter:T.NearestFilter,magFilter:T.NearestFilter,
   }) : null;
-  const candidate = nativeCounts ? null : splitMoments ? 'moments+light' : splitBeams ? 'all-beams' : emptyBounds ? 'bounds' : 'shared';
+  const privateTarget = type => new T.WebGLRenderTarget(width,height,{
+    type,depthBuffer:false,minFilter:T.NearestFilter,magFilter:T.NearestFilter,
+  });
+  const tailPoint = solarTail ? privateTarget(T.FloatType) : null;
+  const tailHdr = solarTail ? privateTarget(T.HalfFloatType) : null;
+  const candidate = nativeCounts ? null : solarTail ? 'tail-capped' : splitMoments ? 'moments+light'
+    : splitBeams ? 'all-beams' : emptyBounds ? 'bounds' : 'shared';
+  const tailBudget = 1/4096;
   const beamMasks = {'all-beams':15,solar:3,radial:12,'no-beams':0};
   const pathCounts = {'no-beams':0,solar:2,'solar+above':3};
   const source = new T.Group(), variants = {original}, queries = [];
   const observation = window.__farPointCompare = {dimensions:[width,height], mode,candidate,
-    scratchBytes:momentTarget ? width*height*8 : 0, rows:[]};
+    scratchBytes:momentTarget ? width*height*8 : solarTail ? width*height*24 : 0, rows:[]};
+  if (solarTail) observation.tailFrames = [];
   const profile = pass.profilePhase;
   let hook, deadline, boundsTexture, boundsSource, boundsVersion;
   try {
@@ -47,11 +58,12 @@ export async function compareFarPoint(game, mode = 'shared') {
     if (momentTarget) variants.light.uniforms.tPointMoments = {value:momentTarget.texture};
     if (splitBeams) variants.beams.uniforms.uPointBeamMask = {value:15};
     if (emptyBounds) variants.bounds.uniforms.tPointEmptyBounds = {value:null};
+    if (solarTail) variants.tail.uniforms.uPointSolarTail = {value:0};
     const at = performance.now();
     if (source.children.length) await pipeline.prepare(() => {
       const target = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
       try {
-        renderer.setRenderTarget(split.scratch[0]);
+        renderer.setRenderTarget(tailPoint || split.scratch[0]);
         return compilePrograms(renderer,source,createCompileCamera(camera,VOLUME_LAYER),scene);
       } finally { renderer.setRenderTarget(target,face,mip); }
     },{label:'compare-far-point'});
@@ -127,6 +139,9 @@ export async function compareFarPoint(game, mode = 'shared') {
         if (arm === candidate && momentTarget) {
           submitPoint(variants.moments,momentTarget);
           submitPoint(variants.light,target);
+        } else if (solarTail && arm !== 'original') {
+          variants.tail.uniforms.uPointSolarTail.value = arm === 'tail-zero' ? 0 : tailBudget;
+          submitPoint(variants.tail,target);
         } else if (splitBeams && arm !== 'original') {
           variants.beams.uniforms.uPointBeamMask.value = beamMasks[arm];
           submitPoint(variants.beams,target);
@@ -157,6 +172,49 @@ export async function compareFarPoint(game, mode = 'shared') {
       } finally { Object.assign(split,{frames,lastRoute,materials}); }
     }
 
+    function composeTail() {
+      const combine = split.materials.combine, uniform = combine.uniforms.uSplitPoint;
+      const saved = uniform.value, previous = mesh.material, autoClear = renderer.autoClear;
+      try {
+        uniform.value = tailPoint.texture;
+        renderer.autoClear = false;
+        renderer.setRenderTarget(tailHdr);
+        renderer.clear(true,false,false);
+        mesh.material = combine;
+        combine.uniformsNeedUpdate = true;
+        renderer.render(scene,camera);
+      } finally {
+        uniform.value = saved;
+        combine.uniformsNeedUpdate = true;
+        mesh.material = previous;
+        renderer.autoClear = autoClear;
+        renderer.setRenderTarget(current);
+      }
+      return read(tailHdr,Uint16Array);
+    }
+
+    function tailParity(pointTarget) {
+      const half = T.DataUtils.fromHalfFloat;
+      const productionPoint = read(pointTarget,Float32Array), production = read(current,Uint16Array);
+      drawPoint('original',tailPoint,false);
+      const repeat = difference(productionPoint,read(tailPoint,Float32Array));
+      const composeRepeat = difference(production,composeTail(),half);
+      drawPoint('tail-zero',tailPoint,false);
+      const first = difference(productionPoint,read(tailPoint,Float32Array));
+      drawPoint('tail-zero',tailPoint,false);
+      const reference = read(tailPoint,Float32Array), referenceHdr = composeTail();
+      drawPoint('tail-capped',tailPoint,false);
+      const capped = read(tailPoint,Float32Array), cappedHdr = composeTail();
+      const untouchedPoint = difference(productionPoint,read(pointTarget,Float32Array));
+      const untouchedHdr = difference(production,read(current,Uint16Array),half);
+      if (repeat.changed || composeRepeat.changed || untouchedPoint.changed || untouchedHdr.changed)
+        throw Error('Far solar-tail oracle or private target isolation failed');
+      return {frame:pass.frame,hours:owner.weatherHours,budget:tailBudget,first,repeat,composeRepeat,untouchedPoint,untouchedHdr,
+        warm:difference(productionPoint,reference),warmHdr:difference(production,referenceHdr,half),
+        relativePoint:difference(reference,capped),relativeHdr:difference(referenceHdr,cappedHdr,half),
+        actualPoint:difference(productionPoint,capped),actualHdr:difference(production,cappedHdr,half)};
+    }
+
     await new Promise((resolve,reject) => {
       deadline = setTimeout(() => reject(Error('Far point comparison did not receive matched frames')),45000);
       hook = function(name,work,options) {
@@ -167,6 +225,15 @@ export async function compareFarPoint(game, mode = 'shared') {
           if (pass.current !== current || split.materials.point !== original || split.plan.mesh !== mesh
             || owner.volCloudMat.uniforms.uColumnsReady.value !== 1) throw Error('Far point comparison inputs changed');
           const point = split.scratch[0];
+          if (solarTail && observation.tailFrames.length<3) {
+            const row = tailParity(point);
+            observation.tailFrames.push(row);
+            observation.parity = row;
+            if (row.warm.changed || row.warmHdr.changed || row.actualPoint.alphaChanged || row.actualHdr.alphaChanged
+              || !(row.actualPoint.maximumError<=.002) || !(row.actualHdr.maximumError<=.002))
+              observation.candidateRejected = true;
+            return result;
+          }
           if (emptyBounds) updateBounds();
           if (!observation.parity) {
             const half = T.DataUtils.fromHalfFloat;
@@ -214,12 +281,13 @@ export async function compareFarPoint(game, mode = 'shared') {
           }
           const index = observation.rows.length;
           const densityArm = splitMoments ? 'moments' : 'density';
-          const order = nativeCounts ? ['original','solar','solar+above','no-beams']
+          const order = solarTail ? ['original','tail-zero',candidate]
+            : nativeCounts ? ['original','solar','solar+above','no-beams']
             : splitBeams ? ['original',candidate,'solar','radial','no-beams']
             : emptyBounds ? ['original',candidate,'solar','solar+above','no-beams'] : ['original',densityArm,candidate];
           if (index%2) order.reverse();
           const row = {frame:pass.frame,hours:owner.weatherHours,order,queries:{}};
-          for (const arm of order) row.queries[arm] = drawPoint(arm,point,true);
+          for (const arm of order) row.queries[arm] = drawPoint(arm,tailPoint || point,true);
           observation.rows.push(row);
           if (observation.rows.length === 5) resolve();
         } catch(error) { reject(error); }
@@ -246,6 +314,7 @@ export async function compareFarPoint(game, mode = 'shared') {
     if (!native.isContextLost()) for (const query of queries) native.deleteQuery(query);
     for (const [name,material] of Object.entries(variants)) if (name !== 'original') material.dispose();
     momentTarget?.dispose();
+    tailPoint?.dispose();tailHdr?.dispose();
     boundsTexture?.dispose();
   }
 }
