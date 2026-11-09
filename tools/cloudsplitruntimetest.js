@@ -20,7 +20,10 @@ const splitBeams = process.argv.includes('--point-beams');
 const emptyBounds = process.argv.includes('--point-empty-bounds');
 const nativeCounts = process.argv.includes('--point-native-counts');
 const solarTail = process.argv.includes('--point-solar-tail');
-const pointModes = [splitMoments,splitBeams,emptyBounds,nativeCounts,solarTail].filter(Boolean).length;
+const radial = process.argv.includes('--point-radial');
+const radialEdge = process.argv.includes('--point-radial-edge');
+const advection = process.argv.includes('--point-advection');
+const pointModes = [splitMoments,splitBeams,emptyBounds,nativeCounts,solarTail,radial,radialEdge,advection].filter(Boolean).length;
 assert.ok(!pointModes || comparePoint && pointModes===1,
   'Select one point diagnostic mode with --compare-point');
 const requireMixed = process.argv.includes('--require-mixed');
@@ -179,7 +182,8 @@ try {
       const {compareFarPoint} = await import('/tools/cloud-far-point-compare.js');
       return compareFarPoint(NMS,mode);
     },splitMoments ? 'moments' : splitBeams ? 'beams' : emptyBounds ? 'bounds'
-      : nativeCounts ? 'native-counts' : solarTail ? 'solar-tail' : 'shared');
+      : nativeCounts ? 'native-counts' : solarTail ? 'solar-tail' : radialEdge ? 'radial-edge'
+      : radial ? 'radial' : advection ? 'advection' : 'shared');
     console.log(JSON.stringify({farPoint}));
     assert.equal(farPoint.gl,0);assert.equal(farPoint.lost,false);
     assert.ok(farPoint.rows.every(row => Object.values(row.gpuMs).every(value => value>0)));
