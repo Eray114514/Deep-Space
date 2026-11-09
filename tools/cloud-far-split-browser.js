@@ -137,8 +137,9 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     materials.push(depthMaterial);depthScene.add(new T.Mesh(depthGeometry,depthMaterial));
     clear(depthRT);renderer.render(depthScene,depthCamera);depthGeometry.dispose();
     function draw(material,rt){mesh.material=material;renderer.setRenderTarget(rt);renderer.render(scene,camera);}
+    let forceMixed=false;
     function admission(){return admitCloudFarSplit(reference,{tracker,width,height,scratchBytes:width*height*32,
-      minimumFootprint:Math.max(0,camera.position.length()-planet.volCloudBand.rOut)*minimumCloudRayCone(camera.projectionMatrix.elements,width,height)});}
+      minimumFootprint:forceMixed?0:Math.max(0,camera.position.length()-planet.volCloudBand.rOut)*minimumCloudRayCone(camera.projectionMatrix.elements,width,height)});}
     function render(mode,rt,blend=false){
       const plan=mode==='split'?admission():null;plan?.validate();
       const callsBefore=renderer.info.render.calls;
@@ -157,6 +158,7 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
       {name:'ready-resolved-point',fov:1,ready:1},
       {name:transitionName,fov:3,ready:1,transition:true},
       {name:'fully-cached-gap',fov:10,ready:1},
+      {name:'cached-pixels-in-mixed-route',fov:10,ready:1,forceMixed:true},
       {name:'transition-depth-cutoff',fov:3,ready:1,depth:true},
       {name:'transition-fading',fov:3,ready:1,engage:.37},
       {name:'transition-physical-beams',fov:3,ready:1,physical:true},
@@ -167,6 +169,7 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
     ];
     const positive=new Map();
     for(const config of configs){window.__cloudFarSplit.status=config.name;
+      forceMixed=!!config.forceMixed;
       camera.fov=config.fov;camera.updateProjectionMatrix();u.uDepthInvProjection.value.copy(camera.projectionMatrixInverse);
       u.uOpticalColumns.value=u.uOpticalColumnsNext.value=config.ready?columns:null;
       u.uColumnHeights.value=u.uColumnHeightsNext.value=config.ready?heights:null;
@@ -186,6 +189,12 @@ export async function probeCloudFarSplit({union=1,referenceFirst=false}={}) {
         const comparison=difference(a.values,b.values);require(comparison.maximumError<=hdrTolerance,'Original HDR tolerance '+config.name+' '+format);
         row.formats.push({format,comparison,nativeChanged:difference(a.raw,b.raw).changed,reference:a.raw,candidate:b.raw,repeatChanged:0});
         if(format==='float32'){positive.set(config.name,a.values);require(a.values.some((v,i)=>i%4===3&&v>.004),'Nonempty cloud alpha '+config.name);
+          if(config.forceMixed||config.name==='ready-resolved-point'){
+            const skipPoint=!!config.forceMixed,payload=read(skipPoint?pointRT:cachedRT).values;
+            require(plan.route==='mixed'&&weights.every(w=>w===Number(skipPoint)),'All pixels use one input in forced payload test');
+            row.maskedPayload=skipPoint?'point':'cached';
+            require(payload.every(v=>v===0),'Unused payload remains clear '+row.maskedPayload);
+          }
           if(config.transition){const negative=render('wrong',rt,false);row.wrongOver=difference(a.values,negative.values);
             require(row.wrongOver.maximumError>hdrTolerance,'Incorrect over negative must fail original gate');image(config.name+' reference',a.values);image(config.name+' split',b.values);image('Incorrect sequential over negative',negative.values);}}
       }

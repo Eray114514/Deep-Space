@@ -10,8 +10,14 @@ export function cloudFarSplitShaders(source) {
   if(source.split(start).length!==2||source.split(end).length!==2)throw Error('Complete production Far dispatch required');
   const a=source.indexOf(start),b=source.indexOf(end,a);if(b<=a)throw Error('Far dispatch bounds');
   const replace=body=>source.slice(0,a)+`        #if PRODUCTION_CLOUD_MEDIUM && CLOUD_FAR_VIEW\n        {\n${body}\n        }\n`+source.slice(b);
-  const point=replace('          gl_FragColor=cloudFarColumn(dir,t0,t1);\n          return;');
-  const cached=replace('          gl_FragColor=cloudCachedColumn(dir,t0,t1);\n          return;');
+  // The combine stage never reads these payloads outside their support.
+  // Keep the decision after the shared ray derivatives and depth clipping.
+  const point=replace(`          if(uColumnsReady>0.5 && rayCone*t0>2400.0)discard;
+          gl_FragColor=cloudFarColumn(dir,t0,t1);
+          return;`);
+  const cached=replace(`          if(uColumnsReady<=0.5 || rayCone*t0<=900.0)discard;
+          gl_FragColor=cloudCachedColumn(dir,t0,t1);
+          return;`);
   const direct=expression=>replace(`          vec4 column=${expression};
           if(column.a<0.004)discard;
           gl_FragColor=column*uEngage;

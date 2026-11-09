@@ -354,6 +354,10 @@ export class VolumetricPass extends Pass {
         this.columnMaps.set(planet,columns);
         planet.cloudColumnMap=columns;
       }
+      // The split experiment needs a completed pair before its cheaper cached
+      // path can run. Use the measured larger slice only for admitted split
+      // frames. Explicit GPU-budgeted tile production owns its own granularity.
+      if (this.farSplit && !this.columnWork) columns.rows = this.farSplit.plan?.mesh === mesh ? 16 : 2;
       // A real immutable endpoint may bake before its forecast partner arrives.
       // The bank alone decides when the complete pair is safe to sample.
       if(this.columnWork) {
