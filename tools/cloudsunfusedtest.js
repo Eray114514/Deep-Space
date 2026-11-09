@@ -125,6 +125,7 @@ try {
     return {results,gl:gl.getError(),lost:gl.isContextLost(),retirement:retirement.snapshot()};
   });
   assert.equal(result.gl,0);assert.equal(result.lost,false);assert.deepEqual(errors,[]);
+  assert.ok(result.results.every(row=>row.bytes.changed===0 && row.bytes.nonzero>0), 'Fused R8 atlas differs');
   console.log(JSON.stringify({out,...result}));
 } catch(error) {
   failure=String(error);if(page)try {result=await page.evaluate(()=>window.__sunFused);}catch{}

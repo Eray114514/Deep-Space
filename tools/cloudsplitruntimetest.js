@@ -16,12 +16,15 @@ assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the 
 const runDescent = process.argv.includes('--descent');
 const nearTrace = process.argv.includes('--near-trace');
 const skipResize = process.argv.includes('--skip-resize');
+const nearPairRequested = process.argv.includes('--near-pair');
+const viewport = process.argv.includes('--2k') ? {width:2560,height:1440} : {width:960,height:540};
+assert.ok(!nearPairRequested || runDescent, '--near-pair requires --descent');
 const requireSupply = process.argv.includes('--require-supply');
 assert.ok(!requireSupply || supplyRows !== null && !fixedWeather);
 const out = `test-results/cloud-split-runtime/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
-let browser, page, failure, supply, descent, livePair, transition;
+let browser, page, failure, supply, descent, livePair, nearPair, transition;
 const errors = [], checkpoints = [];
 async function capture(label) {
   const state = await page.evaluate(label => {
@@ -54,13 +57,14 @@ async function capture(label) {
       splitPublished: pass?.previousSplitDraw, size: pass && [pass.width, pass.height],
       scratch: split?.scratch?.map(target => [target.width, target.height]) ?? null,
       firstError: window.__foundationGLProbe?.snapshot().firstError,
+      lightPreparation:pipeline?.cloudLightPreparation?.state,
       active: pass?.activePlanet?.name, eye: pass?.activePlanet?.volCloudMat?.uniforms.uCameraLocal.value.length() };
   }, label);
   checkpoints.push({ label, ...state });console.log(JSON.stringify({ label, ...state }));return state;
 }
 try {
   browser = await launchHardwareBrowser({ executablePath: resolveSystemChromePath() || undefined });
-  page = await browser.newPage({ viewport: { width: 960, height: 540 } });
+  page = await browser.newPage({ viewport });
   page.on('pageerror', error => errors.push(String(error)));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   console.log(JSON.stringify({ out, started: true }));
@@ -162,6 +166,7 @@ try {
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
     await page.evaluate(() => {
+      NMS._pipeline.startProfiling({every:1,history:240});
       const planet = NMS._planet(0), THREE = NMS._THREE;
       const coast = NMS.setWade(0, { depth: .9, overview: true });
       if (!coast?.direction || !coast?.landward) throw Error('Continuous descent coast unavailable');
@@ -200,10 +205,26 @@ try {
         { timeout:180000, polling:100 });
       await page.screenshot({ path:`${out}/descent-${altitude}.png`, timeout:90000 });
     }
-    descent = await page.evaluate(() => window.__splitDescent);
+    descent = await page.evaluate(() => ({...window.__splitDescent, profile:NMS._pipeline.performanceSnapshot()}));
     assert.ok(descent.done && descent.rows.some(row => row.route === 'near'));
     const end = await capture('descent-low-flight');
     assert.equal(end.gl,0);assert.equal(end.lost,false);assert.equal(end.ready.failed,false);
+  }
+  if (nearPairRequested) {
+    nearPair = await page.evaluate(async () => {
+      NMS._pipeline.stopProfiling();
+      const { compareLiveNearCloud } = await import('/tools/cloud-near-live-compare.js');
+      return compareLiveNearCloud(NMS);
+    });
+    console.log(JSON.stringify({ nearPair }));
+    assert.equal(nearPair.gl,0);assert.equal(nearPair.lost,false);assert.equal(nearPair.disjoint,false);
+    for (const {altitude,rows} of nearPair.poses) {
+      const parity = rows[0];
+      assert.ok(parity.cloudPixels > 0 && parity.maximumError <= .002 && parity.alphaChanged === 0,
+        JSON.stringify({altitude,parity}));
+      assert.ok(rows.every(row => row.depthReady === 1 && row.sunCacheReady === 1));
+      assert.ok(rows.slice(1).every(row => row.gpuMs.original > 0 && row.gpuMs.split > 0));
+    }
   }
   for (const state of checkpoints.slice(1)) {
     assert.equal(state.gl,0);assert.equal(state.lost,false);assert.equal(state.ready.failed,false);
@@ -215,14 +236,15 @@ try {
   assert.deepEqual(errors, []);
 } catch (error) {
   failure = String(error);
-  if (page && runDescent) try { descent = await page.evaluate(() => window.__splitDescent); } catch {}
+    if (page && runDescent && !descent) try { descent = await page.evaluate(() => window.__splitDescent); } catch {}
+  if (page && nearPairRequested && !nearPair) try { nearPair = await page.evaluate(() => window.__nearLivePair); } catch {}
   if (page) try { await capture('failure'); } catch {}
   throw error;
 } finally {
   try {
     if (nearTrace && page) try { transition = await page.evaluate(() => window.__nearTransitionTrace?.finish()); } catch {}
     const after = await evidenceFingerprint(verifier);
-    await writeFile(`${out}/report.json`, JSON.stringify({ before, after, audit, requireMixed, fixedWeather, supplyRows, supply, livePair, descent, transition, checkpoints, errors, failure, passed: !failure }, null, 2));
+    await writeFile(`${out}/report.json`, JSON.stringify({ before, after, viewport, audit, requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, descent, transition, checkpoints, errors, failure, passed: !failure }, null, 2));
     assert.deepEqual(after, before);
   } finally { await browser?.close();server.close(); }
 }
