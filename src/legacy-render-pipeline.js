@@ -35,6 +35,7 @@ export class GameLegacyPipeline {
   constructor(renderer, scene, camera, {
     volume = false,
     cloudProgramPreparation = false,
+    cloudFarSplit = false,
     volumeScale = 0.67,
     bloomEnabled = true,
     bloomStrength = 0.5,
@@ -55,7 +56,7 @@ export class GameLegacyPipeline {
     this.camera = camera;
     this.frameState = new RenderFrameState();
     this.programPreparation = new AbortController();
-    this.cloudProgramsEnabled = cloudProgramPreparation;
+    this.cloudProgramsEnabled = cloudProgramPreparation || cloudFarSplit;
     this.cloudPrograms = new CloudProgramPreparation(renderer, {
       prepare: (work, options) => this.prepare(work, options), signal: this.programPreparation.signal,
     });
@@ -104,6 +105,7 @@ export class GameLegacyPipeline {
 
     this.volumePass = volume ? new VolumetricPass(scene, camera, { scale: volumeScale, frameState: this.frameState }) : null;
     if (this.volumePass) {
+      if (cloudFarSplit) this.volumePass.enableFarSplit(renderer);
       this.volumePass.sceneDepthSource = this.atmospherePass;
       this.composer.addPass(this.volumePass);
     }
@@ -258,7 +260,7 @@ export class GameLegacyPipeline {
   // Internal world graph. Only submitFrame's one-use draw capability enters it.
   #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
     if (this.cloudProgramsEnabled && this.volumePass?.enabled && !this.cloudPrograms.ensure({ scene: this.scene, camera: this.camera,
-      target: this.volumePass.current, requests: this.volumePass.requiredProgramRequests(origin) })) return false;
+      target: this.volumePass.current, requests: this.volumePass.requiredProgramRequests(origin, this.volumePass.farSplit) })) return false;
     let failed=false;
     const target = this.renderer.getRenderTarget();
     const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
@@ -282,6 +284,7 @@ export class GameLegacyPipeline {
       } catch(error) {
         failed=true;throw error;
       } finally {
+        if (this.volumePass?.farSplit) this.volumePass.farSplit.plan = null;
         try {this.renderer.setRenderTarget(target, face, mip);}
         catch(error){if(!failed)throw error;}
       }

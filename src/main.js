@@ -549,6 +549,7 @@ const cloudResourceManager = configureCloudResourceManager({
 const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
   cloudProgramPreparation: qs.get('cloudprograms') === '1',
+  cloudFarSplit: qs.get('cloudsplit') === '1',
   volumeScale: effectiveVolumeScale,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
   bloomStrength: RENDER_LOOK_NEXT ? (IS_TOUCH ? 0.24 : 0.30) : (IS_TOUCH ? 0.35 : 0.5),

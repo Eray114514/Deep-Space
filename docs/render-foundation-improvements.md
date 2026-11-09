@@ -1,10 +1,12 @@
 # 渲染基础改进与交接
 
-更新：2026-11-06。本文维护基础问题、施工顺序和每轮交付边界，供长期任务继续执行。全局画质目标与批次状态见[优化路线图](optimization-roadmap.md)；云、大气、天气与统一时域的规格和进度仍只在[B 计划](cloud-atmosphere-rewrite.md)维护。
+更新：2026-11-09。本文维护基础问题、施工顺序和每轮交付边界，供长期任务继续执行。全局画质目标与批次状态见[优化路线图](optimization-roadmap.md)；云、大气、天气与统一时域的规格和进度仍只在[B 计划](cloud-atmosphere-rewrite.md)维护。
 
 **2026-10-23 重要更正：** 10-21/22 六个独立列诊断工具漏应用正式行星调参，旧“母星”实际为未调参的 286 km 天体，其 1.875 秒预报期限不代表正式 6000 km 母星的 30 秒期限。历史图集等价与成本结果仅对其冻结输入成立；正常游戏页调参正确，冷暂停失败仍有效。独立夹具与完整双星游戏场景也不能混用。修复、防回归和新测量见[输入更正与有界预报](baselines/foundation-column-forecast-2026-10-23/README.md)，该入口优先于下方历史推断。
 
-最新接续：[远云多所有者顺序与可取消帧](baselines/foundation-cloud-split-owners-2026-11-06/README.md)。tools 候选按原 Three 透明顺序逐 owner 完成拆分计算，捕获相机、深度、灯光、列资源及准备状态，失效或取消时不发布 staging。双 owner 11 例 22 输出连同原单 owner 22 输出全部逐位一致；反转顺序最大差 .2075，真实中途取消保住旧输出。纠正远距离排序必须用未除 w 的 clip z，并有 Vector3 负例。最终原参考准备 123.075 秒，仍未通过原 120 秒门槛；未改正式 runtime。下一步进入实际准备队列／volume-current 的显式实验接入和 history 事务，避免把诊断全状态扫描搬进热路径。
+最新接续：[远云拆分接入实际体积帧](baselines/foundation-cloud-split-runtime-2026-11-09/README.md)。`?cloudsplit=1` 复用真实准备队列与历史交换，当前限单个可见远云。修复了编译后替换 uniform 字典导致的原生 draw 1282。真实轨道场景在自然天气下完成点密度与历史复用，240 秒内列路由仍未就绪。固定天气与 16 行烘焙诊断通过真实端点发布、三条路由与 resize，四个检查点有非空 HDR 且 GL 0。下一步量化自然天气供给并与原路径做同输入画质、成本和冷启动对照。
+
+上一轮：[远云多所有者顺序与可取消帧](baselines/foundation-cloud-split-owners-2026-11-06/README.md)。tools 候选按原 Three 透明顺序逐 owner 完成拆分计算，捕获相机、深度、灯光、列资源及准备状态，失效或取消时不发布 staging。双 owner 11 例 22 输出连同原单 owner 22 输出全部逐位一致；反转顺序最大差 .2075，真实中途取消保住旧输出。纠正远距离排序必须用未除 w 的 clip z，并有 Vector3 负例。最终原参考准备 123.075 秒，仍未通过原 120 秒门槛；未改正式 runtime。下一步进入实际准备队列／volume-current 的显式实验接入和 history 事务，避免把诊断全状态扫描搬进热路径。
 
 上一轮：[远云拆分资源准入与直出路径](baselines/foundation-cloud-split-routing-2026-11-06/README.md)。tools 候选现按真实 ready 和保守 footprint 选择一次 point、一次 cached 或完整三遍混合；null 列资源不再触发 cached 绘制，列绑定、插值、纹理及所属 RenderTarget 退役会作废准入，预算不足明确拒绝。最终 UNION0 11 例 22 输出与双方重复全零差，实测绘制次数和错误 over 负例通过。尚未接入正式游戏、尚无驻留显存或正常玩家性能改善声明；下一步为多 owner 有序绘制和完整帧事务，UNION1 参考、冷首帧和 2K 预算继续开放。
 

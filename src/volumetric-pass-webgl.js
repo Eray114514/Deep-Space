@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { CloudColumnBank, setCloudFarCacheEnabled } from './cloud/cloud-column-bank.js';
 import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
+import { CloudFarSplitPass } from './cloud/cloud-far-split-pass.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 import { RenderFrameState } from './render-frame-state.js';
 import { volumeHistoryGLSL } from './volume-history-glsl.js';
@@ -381,7 +382,12 @@ export class VolumetricPass extends Pass {
   // pass starts. Column production and retirement stay in render(): either can
   // change the far-cache flag during this frame, so its closure belongs here.
   // This is deliberately independent of the previous draw's uCameraLocal.
-  requiredProgramRequests(origin = this.nav) {
+  enableFarSplit(renderer) {
+    this.farSplit ??= new CloudFarSplitPass(renderer);
+  }
+
+  requiredProgramRequests(origin = this.nav, split = null) {
+    if (split) split.plan = null;
     const requests = [], active = this.activePlanet, activeMesh = active?.volCloudMesh;
     let activeVisible = false;
     const append = (mesh, material, cacheVariants) => {
@@ -416,6 +422,9 @@ export class VolumetricPass extends Pass {
       append(activeMesh, far ? active.volCloudFarMat : active.volCloudMat,
         far && Math.max(0, distance) * cone > 2400 ? [0, 1] : [0]);
     }
+    if (split && requests.length === 1 && requests[0].mesh === activeMesh) {
+      return split.requests(this.scene, requests[0], this.current) ?? requests;
+    }
     return requests;
   }
 
@@ -429,7 +438,10 @@ export class VolumetricPass extends Pass {
 
   setSize(width, height) {
     const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
-    if(nextWidth!==this.width||nextHeight!==this.height)this.lightBatch?.releaseScratch();
+    if(nextWidth!==this.width||nextHeight!==this.height) {
+      this.lightBatch?.releaseScratch();
+      this.farSplit?.releaseScratch();
+    }
     this.width=nextWidth;this.height=nextHeight;
     this.current.setSize(this.width, this.height);
     resizeVolumeHistoryTarget(this.historyA,this.width,this.height);
@@ -453,7 +465,7 @@ export class VolumetricPass extends Pass {
 
     // Keep scalar copies: nested draws can reuse the module scratch color.
     const oldClearR = _savedClear.r, oldClearG = _savedClear.g, oldClearB = _savedClear.b;
-    let completed = false, restored = false, volumeMaterial, hasDepth = false;
+    let completed = false, restored = false, volumeMaterial, hasDepth = false, splitDraw = false;
     try {
       if (ownFrame) this.frameState.begin(this.camera, this.nav, { context: this.scene, body: this.activePlanet });
       // The opaque scene was rendered into readBuffer immediately before this
@@ -519,7 +531,8 @@ export class VolumetricPass extends Pass {
       renderer.setRenderTarget(this.current);
       this.profilePhase('volume-current',()=>{
         renderer.clear(true, false, false);
-        if(!this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
+        splitDraw = this.farSplit?.render(this.scene, this.camera, this.current, this.columnMaps.get(planet)) ?? false;
+        if(!splitDraw && !this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
       });
 
       this.camera.layers.mask = oldMask;
@@ -538,7 +551,8 @@ export class VolumetricPass extends Pass {
       const correspondence = this.frameState.mapBody();
       volumeMaterial = this.activePlanet?.volCloudMesh.material;
       const sameRepresentation = volumeMaterial === this.previousVolumeMaterial
-        && volumeMaterial?.version === this.previousVolumeVersion && this.radius === this.previousRadius;
+        && volumeMaterial?.version === this.previousVolumeVersion && this.radius === this.previousRadius
+        && splitDraw === this.previousSplitDraw;
       const precedingFrame = this.historySequence + 1 === this.frameState.sequence;
       u.uHistoryValid.value = this.historyValid && correspondence && sameRepresentation && precedingFrame ? 1 : 0;
       u.uStationaryHistory.value = this.frameState.stationaryBodyView() ? 1 : 0;
@@ -585,6 +599,7 @@ export class VolumetricPass extends Pass {
     this.historyValid = !!this.activePlanet && hasDepth;
     this.historySequence = this.frameState.sequence;
     this.previousVolumeMaterial = volumeMaterial;
+    this.previousSplitDraw = splitDraw;
     this.previousVolumeVersion = volumeMaterial?.version;
     this.previousRadius = this.radius;
     const swap = this.historyRead;
@@ -595,6 +610,7 @@ export class VolumetricPass extends Pass {
   }
 
   releaseTargets() {
+    this.farSplit?.dispose();
     this.releaseLightBatches();
     for(const columns of this.columnMaps.values())columns.dispose();
     this.columnMaps.clear();this.columnRelease.clear();
