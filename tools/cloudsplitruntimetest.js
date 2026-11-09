@@ -11,6 +11,14 @@ const audit = process.argv.includes('--gl-audit');
 const auditRestore = process.argv.includes('--audit-restore');
 const forceRecovery = process.argv.includes('--force-recovery');
 const farStageTiming = process.argv.includes('--far-stage-timing');
+const comparePoint = process.argv.includes('--compare-point');
+const splitMoments = process.argv.includes('--point-moments');
+const splitBeams = process.argv.includes('--point-beams');
+const emptyBounds = process.argv.includes('--point-empty-bounds');
+const nativeCounts = process.argv.includes('--point-native-counts');
+const pointModes = [splitMoments,splitBeams,emptyBounds,nativeCounts].filter(Boolean).length;
+assert.ok(!pointModes || comparePoint && pointModes===1,
+  'Select one point diagnostic mode with --compare-point');
 const requireMixed = process.argv.includes('--require-mixed');
 const fixedWeather = process.argv.includes('--fixed-weather');
 const supplyOption = process.argv.find(arg => arg.startsWith('--supply-rows='));
@@ -30,7 +38,7 @@ assert.ok(!requireSupply || supplyRows !== null && !fixedWeather);
 const out = `test-results/cloud-split-runtime/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
-let browser, page, failure, supply, descent, livePair, nearPair, transition, restorationAudit, farStages;
+let browser, page, failure, supply, descent, livePair, nearPair, transition, restorationAudit, farStages, farPoint;
 const errors = [], checkpoints = [];
 async function capture(label) {
   const state = await page.evaluate(label => {
@@ -147,11 +155,13 @@ try {
     orbit = await capture('split-mixed');
     await page.screenshot({ path: `${out}/orbit-mixed.png`, timeout: 90000 });
   }
-  if (farStageTiming) {
+  if (farStageTiming || comparePoint) {
     await page.waitForFunction(() => {
       const pass = NMS._pipeline.volumePass;
       return pass.farSplit.lastRoute === 'combine' && pass.activePlanet?.volCloudMat.uniforms.uColumnsReady.value === 1;
     },null,{timeout:120000});
+  }
+  if (farStageTiming) {
     farStages = await page.evaluate(async () => {
       const {measureLiveFarStages} = await import('/tools/cloud-far-stage-timing.js');
       return measureLiveFarStages(NMS);
@@ -159,6 +169,15 @@ try {
     console.log(JSON.stringify({farStages}));
     assert.equal(farStages.gl,0);assert.equal(farStages.lost,false);
     assert.ok(farStages.rows.every(row => Object.values(row.gpuMs).every(value => value>0)));
+  }
+  if (comparePoint) {
+    farPoint = await page.evaluate(async mode => {
+      const {compareFarPoint} = await import('/tools/cloud-far-point-compare.js');
+      return compareFarPoint(NMS,mode);
+    },splitMoments ? 'moments' : splitBeams ? 'beams' : emptyBounds ? 'bounds' : nativeCounts ? 'native-counts' : 'shared');
+    console.log(JSON.stringify({farPoint}));
+    assert.equal(farPoint.gl,0);assert.equal(farPoint.lost,false);
+    assert.ok(farPoint.rows.every(row => Object.values(row.gpuMs).every(value => value>0)));
   }
   if (!skipResize) {
     await page.setViewportSize({ width: 1008, height: 576 });
@@ -271,6 +290,7 @@ try {
   failure = String(error);
     if (page && runDescent && !descent) try { descent = await page.evaluate(() => window.__splitDescent); } catch {}
   if (page && nearPairRequested && !nearPair) try { nearPair = await page.evaluate(() => window.__nearLivePair); } catch {}
+  if (page && comparePoint && !farPoint) try { farPoint = await page.evaluate(() => window.__farPointCompare); } catch {}
   if (page) try { await capture('failure'); } catch {}
   throw error;
 } finally {
@@ -291,7 +311,7 @@ try {
     }
     if (!failure && !forceRecovery && contextEvents.length) failure = 'Continuous context gate failed';
     await writeFile(`${out}/report.json`, JSON.stringify({ before, after, viewport, audit, auditRestore, forceRecovery,
-      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, descent, transition, restorationAudit,
+      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, farPoint, descent, transition, restorationAudit,
       checkpoints, errors, failure, passed: !failure }, null, 2));
     assert.deepEqual(after, before);
     if (failure) process.exitCode = 1;
