@@ -13,6 +13,10 @@ const forceRecovery = process.argv.includes('--force-recovery');
 const farStageTiming = process.argv.includes('--far-stage-timing');
 const farLightSupport = process.argv.includes('--far-light-support');
 const farLightTile = process.argv.includes('--far-light-tile');
+const spacingArg = process.argv.find(arg=>arg.startsWith('--far-light-spacing='));
+const farLightSpacing = spacingArg ? Number(spacingArg.split('=')[1]) : 200;
+assert.ok(!spacingArg || farLightTile && [100,200].includes(farLightSpacing),
+  '--far-light-spacing accepts 100 or 200 with --far-light-tile');
 const comparePoint = process.argv.includes('--compare-point');
 const pointReuse = process.argv.includes('--point-reuse');
 const pointReusePaths = process.argv.includes('--point-reuse-paths');
@@ -35,9 +39,13 @@ const supplyOption = process.argv.find(arg => arg.startsWith('--supply-rows='));
 const supplyRows = supplyOption ? Number(supplyOption.split('=')[1]) : null;
 assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the runtime batch. Pass --supply-rows=0.');
 const runDescent = process.argv.includes('--descent');
+const dayDescent = process.argv.includes('--day-descent');
 const pacedDescent = process.argv.includes('--paced-descent');
 const nearTiles = process.argv.includes('--near-tiles');
 const nearScaleCap = process.argv.includes('--near-scale-cap');
+const nearBinsArg = process.argv.find(arg=>arg.startsWith('--near-bins='));
+const nearBins = nearBinsArg ? Number(nearBinsArg.split('=')[1]) : 16;
+const compareNearBins = process.argv.includes('--compare-near-bins');
 const traceDescent = process.argv.includes('--near-trace');
 const nearTrace = traceDescent || auditRestore || forceRecovery || pacedDescent;
 const skipResize = process.argv.includes('--skip-resize');
@@ -45,9 +53,14 @@ const nearPairRequested = process.argv.includes('--near-pair');
 const viewport = process.argv.includes('--2k') ? {width:2560,height:1440} : {width:960,height:540};
 assert.ok(!nearPairRequested || runDescent, '--near-pair requires --descent');
 assert.ok(!pacedDescent || runDescent, '--paced-descent requires --descent');
+assert.ok(!dayDescent || runDescent && !fixedWeather,'--day-descent requires natural weather and --descent');
 assert.ok(!nearTiles || pacedDescent, '--near-tiles requires --paced-descent');
 assert.ok(!nearScaleCap || pacedDescent && viewport.width===2560 && !nearTiles,
   '--near-scale-cap requires paced 2K descent without banding');
+assert.ok(!nearBinsArg || dayDescent && nearScaleCap && [4,8].includes(nearBins),
+  '--near-bins accepts 4 or 8 for the daytime 2K scale experiment');
+assert.ok(!compareNearBins || dayDescent && pacedDescent && viewport.width===960 && !nearTiles,
+  '--compare-near-bins requires paced 960×540 daytime descent');
 assert.ok(!forceRecovery || runDescent, '--force-recovery requires --descent');
 assert.ok(!audit || !auditRestore, 'Select one mode of native GL error attribution');
 const requireSupply = process.argv.includes('--require-supply');
@@ -118,11 +131,13 @@ try {
     await page.evaluate(installFoundationGLProbe);
     await page.evaluate(() => { window.__foundationGLProbe.mark('split-orbit');window.__foundationGLProbe.armErrors(); });
   }
-  await page.evaluate(({fixedWeather,supplyRows}) => {
+  await page.evaluate(({fixedWeather,supplyRows,farLightTile}) => {
     const planet = NMS._planet(0);
-    const star = planet.stellarDirectionsAt(planet.weatherHours).sort((a,b) => b.irradianceFraction-a.irradianceFraction)[0];
     NMS.setAdaptiveQualityLocked();
     if (fixedWeather) NMS.setTimeFrozen();
+    if (farLightTile) NMS.setTime(0);
+    const star = planet.stellarDirectionsAt(farLightTile?0:planet.weatherHours)
+      .sort((a,b) => b.irradianceFraction-a.irradianceFraction)[0];
     if (supplyRows !== null) {
       const pass = NMS._pipeline.volumePass, update = pass.updateCloudColumns;
       const records = [];
@@ -141,7 +156,7 @@ try {
       };
     }
     NMS.teleport(0, (planet.volCloudBand.rOut-planet.R+600000)/planet.R, { dir: star.direction, horizon: false });
-  }, {fixedWeather,supplyRows});
+  }, {fixedWeather,supplyRows,farLightTile});
   await page.waitForFunction(previous => {
     const pipeline = NMS._pipeline, pass = pipeline.volumePass;
     return pass.farSplit.frames > previous + 1 && pass.previousSplitDraw && pass.historyValid
@@ -187,10 +202,10 @@ try {
     assert.equal(lightSupport.gl,0);assert.equal(lightSupport.lost,false);
   }
   if (farLightTile) {
-    lightTile = await page.evaluate(async () => {
+    lightTile = await page.evaluate(async spacing => {
       const {measureFarLightTile} = await import('/tools/cloud-far-light-tile.js');
-      return measureFarLightTile(NMS);
-    });
+      return measureFarLightTile(NMS,spacing);
+    },farLightSpacing);
     console.log(JSON.stringify({lightTile}));
     assert.equal(lightTile.gl,0);assert.equal(lightTile.lost,false);
   }
@@ -255,7 +270,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,compareNearBins}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -267,9 +282,26 @@ try {
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
+      if(dayDescent) {
+        const start=NMS.time().hours, period=planet.rotationPeriodHours;
+        let best=null;
+        for(let sample=0;sample<=360;sample++) {
+          const hours=start+period*sample/360;
+          const star=planet.stellarDirectionsAt(hours).sort((a,b)=>b.irradianceFraction-a.irradianceFraction)[0];
+          const cosine=landmark.dot(new THREE.Vector3(...star.direction));
+          if(!best||cosine>best.cosine)best={hours,cosine};
+        }
+        if(!(best?.cosine>.5))throw Error('No daylight window for descent');
+        NMS.setTime(best.hours);
+        state.daylight=best;
+      }
       if (nearTiles) {
         const {installNearVolumeTiles} = await import('/tools/near-volume-tiles.js');
         state.tiles = installNearVolumeTiles(NMS,{verify:verifyTiles});
+      }
+      if(compareNearBins) {
+        const {observeNearQuadrature} = await import('/tools/near-cloud-quadrature.js');
+        window.__nearQuadrature = observeNearQuadrature(NMS);
       }
       const renderer = NMS._renderer;
       let index = 0, sequence = pipeline.frameState.sequence;
@@ -279,6 +311,7 @@ try {
           const previous=[volume.width,volume.height];
           pipeline.setVolumeScale(.30);volume.setSize(width,height);
           state.scaleCap={altitude,previous,volume:[volume.width,volume.height],scene:[width,height]};
+          planet.volCloudMat.uniforms.uLightQuadratureSteps.value=nearBins;
         }
         const ratio = THREE.MathUtils.smoothstep(altitude,150000,220000)*1.13+.32;
         const direction = landmark.clone().addScaledVector(land,-Math.max(3200,altitude*ratio)/planet.R).normalize();
@@ -289,11 +322,16 @@ try {
       place(altitude);
       function observe(atMs) {
         if (pipeline.frameState.sequence !== sequence) {
+          if(compareNearBins && altitude<=230000 && !window.__nearQuadrature.done) {
+            requestAnimationFrame(observe);return;
+          }
           const far = planet.volCloudMesh.material === planet.volCloudFarMat;
           state.rows.push({ altitude, atMs, sequence:pipeline.frameState.sequence,
             route:volume.previousSplitDraw?volume.farSplit.lastRoute:far?'far-legacy':'near',
             history:volume.resolveMaterial.uniforms.uHistoryValid.value,
-            lightCache:planet.volCloudMat.uniforms.uSunCacheReady.value });
+            lightCache:planet.volCloudMat.uniforms.uSunCacheReady.value,
+            lightBins:planet.volCloudMat.uniforms.uLightQuadratureSteps.value,
+            sunCosine:dayDescent?landmark.dot(planet.sunDirLocal):undefined });
           sequence = pipeline.frameState.sequence;
           if (++index > count) { state.done = true;return; }
           if (forceRecovery && !state.forcedLoss && altitude <= 156100) {
@@ -308,7 +346,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,compareNearBins});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
@@ -318,9 +356,11 @@ try {
         'WebGL context lost during continuous descent');
       await page.screenshot({ path:`${out}/descent-${altitude}.png`, timeout:90000 });
     }
-    descent = await page.evaluate(() => ({...window.__splitDescent, profile:NMS._pipeline.performanceSnapshot(),
-      pacing:NMS._pipeline.framePacer?.snapshot()}));
+    descent = await page.evaluate(async compareNearBins => ({...window.__splitDescent,
+      quadrature:compareNearBins?await window.__nearQuadrature.finish():undefined,
+      profile:NMS._pipeline.performanceSnapshot(),pacing:NMS._pipeline.framePacer?.snapshot()}),compareNearBins);
     assert.ok(descent.done && descent.rows.some(row => row.route === 'near'));
+    if(dayDescent) assert.ok(descent.rows.every(row=>row.sunCosine>.5),'Descent left the daylight window');
     if (pacedDescent) assert.ok(descent.pacing.stats.completed>=60 && !descent.pacing.fault, JSON.stringify(descent.pacing));
     if (nearTiles) assert.ok(descent.tiles.frames>0 && descent.tiles.maxBands>1);
     if (nearScaleCap) assert.deepEqual(descent.scaleCap.volume,[768,432]);
@@ -359,6 +399,7 @@ try {
   if (page && nearPairRequested && !nearPair) try { nearPair = await page.evaluate(() => window.__nearLivePair); } catch {}
   if (page && comparePoint && !farPoint) try { farPoint = await page.evaluate(() => window.__farPointCompare); } catch {}
   if (page && pointReuse && !reuse) try { reuse = await page.evaluate(() => window.__farPointReuse); } catch {}
+  if (page && farLightTile && !lightTile) try { lightTile = await page.evaluate(() => window.__farLightTile); } catch {}
   if (page) try { await capture('failure'); } catch {}
   throw error;
 } finally {

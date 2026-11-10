@@ -1,5 +1,6 @@
 import { CloudSunCache } from '../src/cloud/cloud-sun-cache.js';
 import { readGpuDisjointEpoch } from '../src/gpu-query-state.js';
+import { directFarLightGrid, compareFarLightGrid } from './cloud-far-light-grid.js';
 
 // Frozen live orbit only. Bind a single world-space tile at both endpoints
 // of the actual point material, then restore every binding before history.
@@ -11,14 +12,29 @@ export async function measureFarLightTile(game, spacing=200) {
   if (!timer || !planet.weatherStream.ready || planet.cloudLightBank || material.uniforms.uSunCacheReady.value)
     throw Error('Expected a live uncached orbit with weather and GPU timers');
   const uniforms=material.uniforms, hours=planet.weatherHours;
-  const anchor=uniforms.uCameraLocal.value.clone().normalize().multiplyScalar(planet.R+5200);
-  const cache=new CloudSunCache(planet,anchor,{size:64,depth:128,spacing,programOwner:pipeline.cloudLightPrograms});
+  // The flight camera can settle differently across boots. Anchor both
+  // lattices in the same body-local coordinates at the frozen weather hour.
+  const star=planet.stellarDirectionsAt(hours).sort((a,b)=>b.irradianceFraction-a.irradianceFraction)[0];
+  const anchor=new T.Vector3(...star.direction).normalize().multiplyScalar(planet.R+5200);
+  // Hold the physical support fixed when refining the horizontal lattice.
+  const size=12800/spacing;
+  const cache=new CloudSunCache(planet,anchor,{size,depth:128,spacing,programOwner:pipeline.cloudLightPrograms});
+  const observation=window.__farLightTile={hours,anchor:anchor.toArray(),
+    basis:cache.frames.map(frame=>frame.toArray()),spacing,rejectedControls:[]};
   const current=pass.current, {width,height}=current;
   const target=new T.WebGLRenderTarget(width,height,{type:T.FloatType,depthBuffer:false});
   const hdr=new T.WebGLRenderTarget(width,height,{type:T.HalfFloatType,depthBuffer:false});
   const profile=pass.profilePhase, queries=[], submissions=[];
   let deadline,hook,pacer;
   const epoch=readGpuDisjointEpoch(native,timer);
+  function prepare(work,label) {
+    return pipeline.prepare(()=>{
+      checkInputs();
+      const saved=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
+      try {return work();}
+      finally {renderer.setRenderTarget(saved,face,mip);}
+    },{label});
+  }
 
   function timed(work) {
     if(native.getQuery(timer.TIME_ELAPSED_EXT,native.CURRENT_QUERY)) throw Error('Overlapping tile GPU timer');
@@ -87,30 +103,29 @@ export async function measureFarLightTile(game, spacing=200) {
 
   try {
     if(!pipeline.framePacer)pacer=pipeline.startFramePacing();
+    const directGrid=await directFarLightGrid(T,renderer,cache,prepare);
     while(!cache.ready) {
       const at=performance.now();
-      const query=await pipeline.prepare(()=>{
-        checkInputs();
-        return timed(()=>cache.bakeSlice(renderer,{boundaryRows:64,slices:16}));
-      },{label:'far-light-tile'});
+      const query=await prepare(()=>timed(()=>cache.bakeSlice(renderer,{boundaryRows:64,slices:16})),'far-light-tile');
       submissions.push({waitMs:performance.now()-at,query});
       if(submissions.length>64) throw Error('Far tile bake made no progress');
     }
+    const grid=observation.grid=await compareFarLightGrid(T,renderer,cache,directGrid,prepare);
+    const arms=['control',...grid.filter(field=>field.available).map(field=>field.field),'all'];
+    const margins=new T.Vector4().fromArray(cache.interiorMargins);
     const comparison=await new Promise((resolve,reject)=>{
+      const rows=[];
       deadline=setTimeout(()=>reject(Error('No live frozen Far tile frame')),30000);
       hook=function(name,work,options) {
         const result=profile.call(this,name,work,options);
         if(name!=='volume-current'||split.lastRoute!=='combine'||split.plan?.mesh!==mesh)return result;
-        pass.profilePhase=profile;
         try {
           checkInputs();
           const point=split.scratch[0], original=read(point), originalHdr=read(current,Uint16Array);
           const half=T.DataUtils.fromHalfFloat;
-          const control=difference(original,renderPoint({})), controlHdr=difference(originalHdr,compose(),half);
-          if(control.changedPixels||controlHdr.changedPixels)throw Error('Far tile original control changed');
-          const valid=new T.Vector4().fromArray(cache.available.map(Number));
-          const margins=new T.Vector4().fromArray(cache.interiorMargins);
-          const tiled=renderPoint({
+          const arm=arms[rows.length];
+          const valid=new T.Vector4().fromArray(grid.map(field=>Number(field.available&&(arm==='all'||field.field===arm))));
+          const tiled=renderPoint(arm==='control'?{}:{
             uSunTransport:cache.target.texture,uSunCacheReady:1,uSunCacheDepth:cache.depth,
             uSunCacheMix:0,uSunCacheOffsets:new T.Vector2(),uSunCacheEncoded:0,
             uSunCacheMatrixA:cache.transforms,uSunCacheMatrixB:cache.transforms,
@@ -119,9 +134,18 @@ export async function measureFarLightTile(game, spacing=200) {
           const error=difference(original,tiled), errorHdr=difference(originalHdr,compose(),half);
           const untouched=difference(original,read(point)), untouchedHdr=difference(originalHdr,read(current,Uint16Array),half);
           if(untouched.changedPixels||untouchedHdr.changedPixels)throw Error('Far tile modified a published target');
-          if(!error.changedPixels)throw Error('Far lighting tile had no visible effect');
-          resolve({frame:pass.frame,control,controlHdr,error,errorHdr,untouched,untouchedHdr});
-        } catch(error) { reject(error); }
+          if(arm==='control'&&(error.changedPixels||errorHdr.changedPixels)) {
+            observation.rejectedControls.push({frame:pass.frame,error,errorHdr});
+            if(observation.rejectedControls.length===3)throw Error('Far tile original control changed on three frames');
+            return result;
+          }
+          if(arm==='all'&&!error.changedPixels)throw Error('Far lighting tile had no visible effect');
+          rows.push({arm,frame:pass.frame,error,errorHdr,untouched,untouchedHdr});
+          if(rows.length===arms.length) {
+            pass.profilePhase=profile;
+            resolve(rows);
+          }
+        } catch(error) {pass.profilePhase=profile;reject(error);}
         return result;
       };
       pass.profilePhase=hook;
@@ -132,7 +156,7 @@ export async function measureFarLightTile(game, spacing=200) {
       await new Promise(resolve=>setTimeout(resolve,20));
     }
     if(readGpuDisjointEpoch(native,timer)!==epoch)throw Error('Far lighting tile became disjoint');
-    return {...comparison,hours,dimensions:[width,height],anchor:anchor.toArray(),available:cache.available,
+    return {...observation,comparison,dimensions:[width,height],available:cache.available,
       extentMeters:[cache.size*spacing,cache.size*spacing,cache.depth*cache.verticalSpacing],
       tileBytes:cache.target.width*cache.target.height*2,
       batches:submissions.map(({waitMs,query})=>({waitMs,gpuMs:native.getQueryParameter(query,native.QUERY_RESULT)/1e6})),
