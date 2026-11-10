@@ -55,12 +55,17 @@ const compareNearBins = process.argv.includes('--compare-near-bins');
 const compareNearPaths = process.argv.includes('--compare-near-paths');
 const compareNearResidual = process.argv.includes('--compare-near-residual');
 const compareNearTraversal = process.argv.includes('--compare-near-traversal');
+const replayOption = process.argv.find(arg=>arg.startsWith('--compare-near-replay='));
+const nearReplay = replayOption ? replayOption.split('=')[1] : null;
+assert.ok(!replayOption||['prefix','blocks'].includes(nearReplay),'Choose prefix or blocks for near replay');
+const nearEmptyRuns = process.argv.includes('--compare-near-empty-runs=r16')?'r16'
+  :process.argv.includes('--compare-near-empty-runs')?'rg16':null;
 const nearTraversalCache = process.argv.includes('--near-traversal-cache');
-assert.ok(!nearTraversalCache||compareNearTraversal,'--near-traversal-cache requires --compare-near-traversal');
-assert.ok([compareNearBins,compareNearPaths,compareNearResidual,compareNearTraversal].filter(Boolean).length<=1,
+assert.ok(!nearTraversalCache||compareNearTraversal||nearReplay||nearEmptyRuns,'--near-traversal-cache requires a traversal comparison');
+assert.ok([compareNearBins,compareNearPaths,compareNearResidual,compareNearTraversal,nearReplay,nearEmptyRuns].filter(Boolean).length<=1,
   'Select one near workload probe');
 const nearWorkProbe=compareNearBins?'bins':compareNearPaths?'paths':compareNearResidual?'residual'
-  :compareNearTraversal?'traversal':null;
+  :compareNearTraversal?'traversal':nearReplay?'replay':nearEmptyRuns?'empty-runs':null;
 const traceDescent = process.argv.includes('--near-trace');
 const nearTrace = traceDescent || auditRestore || forceRecovery || pacedDescent;
 const skipResize = process.argv.includes('--skip-resize');
@@ -285,7 +290,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -315,10 +320,10 @@ try {
         const {installNearVolumeTiles} = await import('/tools/near-volume-tiles.js');
         state.tiles = installNearVolumeTiles(NMS,{verify:verifyTiles});
       }
-      if(nearWorkProbe==='residual'||nearWorkProbe==='traversal') {
+      if(['residual','traversal','replay','empty-runs'].includes(nearWorkProbe)) {
         const {observeNearResidual} = await import('/tools/near-cloud-residual.js');
         window.__nearQuadrature = await observeNearResidual(NMS,{traversal:nearWorkProbe==='traversal',
-          maximumAltitude:probeAltitude,cloudyCache:nearTraversalCache});
+          replay:nearReplay,emptyRuns:nearEmptyRuns,maximumAltitude:probeAltitude,cloudyCache:nearTraversalCache});
       } else if(nearWorkProbe) {
         const {observeNearQuadrature} = await import('/tools/near-cloud-quadrature.js');
         window.__nearQuadrature = observeNearQuadrature(NMS,{paths:nearWorkProbe==='paths'});
@@ -375,7 +380,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
@@ -389,8 +394,10 @@ try {
       quadrature:nearWorkProbe?await window.__nearQuadrature.finish():undefined,
       profile:NMS._pipeline.performanceSnapshot(),pacing:NMS._pipeline.framePacer?.snapshot()}),nearWorkProbe);
     assert.ok(descent.done && descent.rows.some(row => row.route === 'near'));
-    if(nearWorkProbe==='traversal') {
+    if(nearWorkProbe==='traversal'||nearReplay==='prefix') {
       assert.ok(descent.quadrature.rows.every(row=>row.error.changed===0),'Near traversal changed the native HDR');
+      if(nearReplay==='prefix') assert.ok(descent.quadrature.rows.every(row=>row.error.nonempty>0),
+        'Near prefix probe needs occupied cloud');
       if(nearTraversalCache) assert.ok(descent.quadrature.rows.every(row=>row.cacheReady===1&&row.error.nonempty>0),
         'Near traversal cache probe needs occupied cloud with bound lighting');
     }

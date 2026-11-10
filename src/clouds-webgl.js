@@ -888,9 +888,13 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         float anchors[32];
         int bins=clamp(uLightQuadratureSteps,4,32);
         float totalOpacity=0.0;
+        // Before the first positive extinction, every density cell leaves T at
+        // one. Resume at the original step and distance to preserve the grid.
+        int firstDensityStep=-1;
+        float firstDensityDistance=0.0;
         for(int pass=0;pass<2;pass++) {
-          relativeDistance=0.0;T=1.0;int bin=0;
-          for(int i=0;i<STEPS;i++) {
+          relativeDistance=pass==1?firstDensityDistance:0.0;T=1.0;int bin=0;
+          for(int i=pass==1?max(0,firstDensityStep):0;i<STEPS;i++) {
             if(relativeDistance>=seg)break;
             float cellLength=min(dt,seg-relativeDistance),cellStart=t0+relativeDistance;
             vec3 position=uCameraLocal+dir*cellStart;
@@ -912,6 +916,10 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
               }
             }
             float ext=cloudExtinctionAt(uCameraLocal+dir*(cellStart+cellLength*jitter),sigma);
+            if(pass==0 && firstDensityStep<0 && ext>0.0) {
+              firstDensityStep=i;
+              firstDensityDistance=relativeDistance;
+            }
             float nextT=T*exp(-ext*cellLength);
             if(pass==1 && ext>0.0) {
               for(int b=bin;b<bins;b++) {

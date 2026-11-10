@@ -2,6 +2,8 @@ import { compilePrograms } from '../src/program-preparation.js';
 import { createCompileCamera } from '../src/render-prewarm.js';
 import { VOLUME_LAYER } from '../src/render-layers.js';
 import { readGpuDisjointEpoch } from '../src/gpu-query-state.js';
+import { nearReplayShader } from './near-cloud-replay.js';
+import { createEmptyRunProbe, emptyRunShader } from './near-cloud-empty-runs.js';
 
 const runtimeOpacityExit=`          if(pass==0) {
             totalOpacity=1.0-T;
@@ -59,7 +61,7 @@ function difference(a,b,half) {
   return {changed,alpha,maximum,nonempty};
 }
 
-export async function observeNearResidual(game,{traversal=false,maximumAltitude=230000,cloudyCache=false}={}) {
+export async function observeNearResidual(game,{traversal=false,replay=null,emptyRuns=null,maximumAltitude=230000,cloudyCache=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, owner=pass.activePlanet, mesh=owner.volCloudMesh, original=owner.volCloudMat;
   const gl=renderer.getContext(), timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -69,15 +71,18 @@ export async function observeNearResidual(game,{traversal=false,maximumAltitude=
   const optimized=fragment.includes(runtimeOpacityExit)&&fragment.includes(runtimeQuantileExit);
   const baseline=fragment.replace(runtimeOpacityExit,'          if(pass==0)totalOpacity=1.0-T;')
     .replace(runtimeQuantileExit,'');
-  if(traversal&&!optimized)throw Error('Near traversal probe requires the runtime early exits');
-  material.fragmentShader=traversal?baseline:residualShader(baseline);
+  if((traversal||replay)&&!optimized)throw Error('Near traversal probe requires the runtime early exits');
+  material.fragmentShader=emptyRuns?emptyRunShader(fragment,emptyRuns):replay?nearReplayShader(fragment,replay)
+    :traversal?baseline:residualShader(baseline);
+  const emptyRunProbe=emptyRuns?createEmptyRunProbe(T,gl,emptyRuns):null;
   Object.assign(material.uniforms,original.uniforms,{uNearResidualMode:{value:0},uNearTraversalMask:{value:0}});
   const target=new T.WebGLRenderTarget(pass.width,pass.height,{type:T.HalfFloatType,depthBuffer:false});
   const proxy=new T.Mesh(mesh.geometry,material);
   proxy.layers.set(VOLUME_LAYER);
   const camera=createCompileCamera(pass.camera,VOLUME_LAYER), half=T.DataUtils.fromHalfFloat;
   const profile=pass.profilePhase, queries=[], rows=[];
-  const arms=traversal?[
+  const directComparison=traversal||replay||emptyRuns;
+  const arms=directComparison?[
     {name:'zero-1'},{name:'zero-2'},{name:'zero-3'},{name:'zero-4'},
     {name:'full-1',full:true},{name:'full-2',full:true},{name:'full-3',full:true},
   ]:[
@@ -110,6 +115,10 @@ export async function observeNearResidual(game,{traversal=false,maximumAltitude=
       Object.assign(uniforms,original.uniforms);
       uniforms.uNearResidualMode.value=mode;
       uniforms.uNearTraversalMask.value=mask;
+      if(emptyRunProbe) {
+        emptyRunProbe.bind(uniforms);
+        renderer.initTexture(uniforms.uBandCandidates.value);
+      }
     }
     const previous=mesh.material, saved=renderer.getRenderTarget(),auto=renderer.autoClear;
     const face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
@@ -135,7 +144,7 @@ export async function observeNearResidual(game,{traversal=false,maximumAltitude=
     const matching=name==='volume-current'&&mesh.material===original&&pass.activePlanet===owner
       &&eyeAltitude<=maximumAltitude&&!failure&&rows.length<arms.length
       &&(!cloudyCache||original.uniforms.uSunCacheReady.value===1);
-    const measure=matching&&traversal&&arms[rows.length].full;
+    const measure=matching&&directComparison&&arms[rows.length].full;
     let liveQuery,result;
     const render=renderer.render;
     if(measure)renderer.render=function(scene,camera) {
@@ -153,7 +162,7 @@ export async function observeNearResidual(game,{traversal=false,maximumAltitude=
         throw Error('Near residual frame lost its original draw contract');
       const published=read(current);
       const reference=arm.full?{pixels:published,query:liveQuery}:draw(original);
-      const variantReference=!traversal&&!arm.full&&!arm.native?draw(material):null;
+      const variantReference=!directComparison&&!arm.full&&!arm.native?draw(material):null;
       const candidate=draw(arm.native?original:material,{mode:arm.mode,mask:arm.mask,paths:arm.full?4:0});
       const untouched=difference(published,read(current),half);
       if(untouched.changed)throw Error('Near residual probe changed the published target');
@@ -196,13 +205,13 @@ export async function observeNearResidual(game,{traversal=false,maximumAltitude=
         }
         if(readGpuDisjointEpoch(gl,timer)!==epoch)throw Error('Near residual timer became disjoint');
         const ms=query=>query?gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6:null;
-        return {prepareMs,optimized,traversal,cloudyCache,dimensions:[target.width,target.height],
+        return {prepareMs,optimized,traversal,replay,emptyRuns:emptyRunProbe?.stats(),cloudyCache,dimensions:[target.width,target.height],
           rows:rows.map(({referenceQuery,candidateQuery,variantQuery,...row})=>({...row,
             referenceGpuMs:ms(referenceQuery),variantGpuMs:ms(variantQuery),gpuMs:ms(candidateQuery)}))};
       } finally {
         if(pass.profilePhase===hook)pass.profilePhase=profile;
         if(!gl.isContextLost())for(const query of queries)gl.deleteQuery(query);
-        target.dispose();material.dispose();
+        target.dispose();material.dispose();emptyRunProbe?.dispose();
       }
     },
   };
