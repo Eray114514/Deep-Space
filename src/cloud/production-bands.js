@@ -30,6 +30,30 @@ export function buildProductionBands(sample,width=128,terrain=null,{spin=0,angul
   return {data,width,height,layers,bounds,candidates};
 }
 export const CANDIDATE_WIDTH=64,CANDIDATE_HEIGHT=32,CANDIDATE_LAYERS=64,CANDIDATE_METERS=500;
+export const CANDIDATE_EMPTY_TAG=0x8000;
+
+// GPU words keep occupied masks unchanged. Empty cells store the neighbouring
+// occupied layer indices plus one, so zero still means no neighbour.
+// Encode only after merging raw forecast masks. Tagged words cannot be ORed.
+export function encodeCandidateEmptyRuns(masks) {
+  const plane=CANDIDATE_WIDTH*CANDIDATE_HEIGHT;
+  if(!(masks instanceof Uint16Array)||masks.length!==plane*CANDIDATE_LAYERS
+    ||masks.some(mask=>(mask&0xc000)!==0))throw Error('Expected raw production cloud candidate masks');
+  const last=new Uint8Array(plane);
+  for(let z=0;z<CANDIDATE_LAYERS;z++)for(let cell=0;cell<plane;cell++) {
+    const i=z*plane+cell;
+    if(masks[i])last[cell]=z+1;
+    else masks[i]=CANDIDATE_EMPTY_TAG|last[cell];
+  }
+  last.fill(0);
+  for(let z=CANDIDATE_LAYERS-1;z>=0;z--)for(let cell=0;cell<plane;cell++) {
+    const i=z*plane+cell;
+    if(masks[i]&CANDIDATE_EMPTY_TAG)masks[i]|=last[cell]<<7;
+    else last[cell]=z+1;
+  }
+  return masks;
+}
+
 export function regionalSurfaceBounds(terrain,spin,angularGuard) {
   if(!Number.isFinite(spin)||!Number.isFinite(angularGuard)||angularGuard<0)
     throw new RangeError('Terrain support needs finite rotation and nonnegative guard');

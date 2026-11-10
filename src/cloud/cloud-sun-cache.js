@@ -63,6 +63,7 @@ export class CloudSunCache {
     const source=planet.volCloudMat.uniforms;
     const uniforms={};
     for(const [name,uniform] of Object.entries(source)) {
+      if(name==='uNearBandCandidates')continue; // The raw sweep never borrows the view's derived grid.
       const value=uniform.value;
       uniforms[name]={value:value?.isTexture?value:value?.clone?value.clone():value};
     }

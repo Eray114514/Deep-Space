@@ -78,9 +78,13 @@ function portalFixture(fault) {
   const source = system('source'), fading = system('fading'), destination = system('destination', false);
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera();scene.fog = new THREE.Fog(0x123456, 1, 100);
   destination.child.visible = false;destination.child.layers.set(2);const expected = Error('portal ownership fault');
+  const near = new THREE.ShaderMaterial(), direct = new THREE.ShaderMaterial();
+  const cloud = new THREE.Mesh(new THREE.BufferGeometry(), near);
+  destination.body.group.add(cloud);
+  Object.assign(destination.body, { volCloudMesh: cloud, volCloudMat: near, getDirectCloudMaterial: () => direct });
   let clear = new THREE.Color(0x123456), alpha = .4;
   const context = helpers({ THREE, scene, universe: { system: source, fadingSystem: fading },
-    riftPortalVisibility: [], riftPortalDepthState: [], riftPortalLayerState: [], riftPortalClearColor: new THREE.Color(), riftPortalSceneActive: false,
+    riftPortalVisibility: [], riftPortalCloudState: [], riftPortalLayerState: [], riftPortalClearColor: new THREE.Color(), riftPortalSceneActive: false,
     ship: { group: group(true) }, weapons: { glowMesh: group(true), coreMesh: group(false) }, sunShadow: group(true), headlamp: group(false),
     skyDome: { mesh: group(true) }, hemi: group(true), ambient: group(false), riftPortalAmbient: group(false), RIFT_PORTAL_LAYER: 5,
     renderer: { toneMapping: THREE.ACESFilmicToneMapping, getClearColor(out) { return out.copy(clear); }, getClearAlpha: () => alpha,
@@ -95,6 +99,7 @@ function portalFixture(fault) {
       assert.equal(source.orphan.visible, false);assert.equal(fading.orphan.visible, false);assert.equal(destination.orphan.visible, true);
       assert.equal(destination.orphan.layers.mask, 1 << 5);assert.equal(destination.child.layers.mask, 1 << 5);
       assert.equal(destination.body.group.visible, true);assert.equal(destination.other.group.visible, false);
+      assert.equal(cloud.material, direct);assert.equal(direct.depthTest, false);assert.equal(near.depthTest, true);
       if (fault === 'draw') throw expected;
     } finally { options.afterRender(); }
   } };
@@ -107,6 +112,7 @@ function portalFixture(fault) {
     assert.equal(context.riftPortalSceneActive, false);assert.equal(context.renderer.toneMapping, THREE.ACESFilmicToneMapping);
     assert.equal(scene.fog.color.getHex(), 0x123456);assert.equal(clear.getHex(), 0x123456);assert.equal(alpha, .4);
     assert.equal(context.riftPortalVisibility.length, 0);assert.equal(context.riftPortalLayerState.length, 0);
+    assert.equal(cloud.material, near);assert.equal(direct.depthTest, true);assert.equal(context.riftPortalCloudState.length, 0);
   } };
 }
 for (const fault of [null, 'draw', 'partial-layer']) await test(`portal owns standalone visibility/layers and restores after ${fault || 'success'}`, () => {

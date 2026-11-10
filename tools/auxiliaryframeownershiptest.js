@@ -142,7 +142,7 @@ for (const failBegin of [false, true]) test(() => {
   const context = { THREE, RIFT_PORTAL_LAYER: 7, scene: { fog }, universe: {
     system: { starViews: [], planets: [{ group: source }], compactObjects: [], artificialSites: [{ parentBody: null, group: sourceOrphan }] }, fadingSystem: null },
     ship: { group: group() }, weapons: {}, sunShadow: group(), headlamp: group(), skyDome: {}, hemi: group(), ambient: group(),
-    riftPortalAmbient: group(), riftPortalVisibility: [], riftPortalDepthState: [], riftPortalLayerState: [],
+    riftPortalAmbient: group(), riftPortalVisibility: [], riftPortalCloudState: [], riftPortalLayerState: [],
     riftPortalClearColor: new THREE.Color(), riftPortalClearAlpha: 1, riftPortalFog: null, riftPortalToneMapping: 0,
     riftPortalSceneActive: false, renderer: {
       toneMapping: THREE.ACESFilmicToneMapping, getClearColor: color => color.copy(clear), getClearAlpha: () => alpha,

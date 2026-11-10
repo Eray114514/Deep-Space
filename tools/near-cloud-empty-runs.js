@@ -1,3 +1,5 @@
+import { nearProductionCloudGLSL, productionCloudGLSL } from '../src/cloud/production-medium-glsl.js';
+
 // Keep the species mask intact. The second channel records the nearest
 // occupied layer on each side, using layer + 1 so zero means no neighbour.
 export function packEmptyRuns(masks,width,height,depth,packed,last) {
@@ -23,6 +25,10 @@ export function packEmptyRuns(masks,width,height,depth,packed,last) {
 }
 
 export function emptyRunShader(source,layout) {
+  if(source.includes(nearProductionCloudGLSL)) {
+    source=source.replace(nearProductionCloudGLSL,productionCloudGLSL);
+    if(layout==='r16')return source;
+  }
   const start=source.indexOf('    if(texelFetch(uBandCandidates,ivec3(cell,layer),0).r!=0u)return 0.0;');
   const end=source.indexOf('    float distance=min(radius-below,above-radius);',start);
   if(start<0||end<0||!source.slice(start,end).includes('int index=layer+k;'))

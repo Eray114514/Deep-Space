@@ -134,12 +134,15 @@ function integratedPortalFixture({ old = false, traversed = false, portalFault =
   context.headlamp = new THREE.Group();context.skyDome = { mesh: new THREE.Group() };
   context.hemi = new THREE.Group();context.ambient = new THREE.Group();context.riftPortalAmbient = new THREE.Group();
   context.riftPortalAmbient.visible = false;
-  context.riftPortalVisibility = [];context.riftPortalDepthState = [];context.riftPortalLayerState = [];
+  context.riftPortalVisibility = [];context.riftPortalCloudState = [];context.riftPortalLayerState = [];
   context.riftPortalClearColor = new THREE.Color();context.riftPortalSceneActive = false;
   f.targetBody.bodyId = f.route.bodyId;
   f.prepared.planets[1].bodyId = 'destination-other';
   f.targetBody.volCloudMat = new THREE.ShaderMaterial({ depthTest: true });
+  const directCloud = f.targetBody.volCloudMat.clone();
   const targetMesh = new THREE.Mesh(new THREE.BoxGeometry(), f.targetBody.volCloudMat);
+  f.targetBody.volCloudMesh = targetMesh;
+  f.targetBody.getDirectCloudMaterial = () => directCloud;
   targetMesh.layers.set(2);f.targetBody.group.add(targetMesh);
   for (const system of [f.rawUniverse.system, f.rawUniverse.fadingSystem, f.prepared]) {
     for (const view of system.starViews) scene.add(view.group, view.light);
@@ -161,7 +164,8 @@ function integratedPortalFixture({ old = false, traversed = false, portalFault =
     assert.equal(rift.group.visible, false);assert.equal(f.targetBody.group.visible, true);
     assert.equal(f.prepared.planets[1].group.visible, false);
     assert.equal(context.universe.system.planets[0].group.visible, false);
-    assert.equal(targetMesh.layers.mask, 1 << 7);assert.equal(f.targetBody.volCloudMat.depthTest, false);
+    assert.equal(targetMesh.layers.mask, 1 << 7);assert.equal(targetMesh.material, directCloud);
+    assert.equal(directCloud.depthTest, false);assert.equal(f.targetBody.volCloudMat.depthTest, true);
     assert.equal(scene.fog, null);assert.equal(renderer.toneMapping, THREE.NoToneMapping);
     if (portalFault) throw portalFault;
   };
@@ -170,12 +174,13 @@ function integratedPortalFixture({ old = false, traversed = false, portalFault =
     portal() { return run(f.targetBody, 4, f.route, f.prepared); },
     portalRestored() {
       for (const [object, mask] of layerState) assert.equal(object.layers.mask, mask);
+      assert.equal(targetMesh.material, f.targetBody.volCloudMat);assert.equal(directCloud.depthTest, true);
       assert.equal(f.targetBody.volCloudMat.depthTest, true);assert.equal(scene.fog, fog);
       assert.equal(renderer.toneMapping, THREE.ACESFilmicToneMapping);assert.equal(renderer.xr.enabled, true);assert.equal(renderer.autoClear, false);
       assert.equal(color.getHex(), new THREE.Color(.1, .2, .3).getHex());assert.equal(alpha, .4);
       assert.equal(context.riftPortalSceneActive, false);assert.equal(rift.open, 0);assert.equal(rift.traversed, traversed);assert.equal(rift.group.visible, false);
     },
-    dispose() { rift.dispose();targetMesh.geometry.dispose();f.targetBody.volCloudMat.dispose(); },
+    dispose() { rift.dispose();targetMesh.geometry.dispose();f.targetBody.volCloudMat.dispose();directCloud.dispose(); },
   };
 }
 

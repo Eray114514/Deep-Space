@@ -10,6 +10,8 @@ import * as THREE from 'three';
 import * as currentPlanets from '../src/planet.js';
 import { AtmospherePass as CurrentAtmospherePass } from '../src/atmosphere-pass-webgl.js';
 import { VolumetricPass as CurrentVolumetricPass, VOLUME_LAYER } from '../src/volumetric-pass-webgl.js';
+import { CANDIDATE_WIDTH, CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from '../src/cloud/production-bands.js';
+import { nearProductionCloudGLSL, productionCloudGLSL } from '../src/cloud/production-medium-glsl.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
 
 const verifier = 'tools/cloudfadingresourcetest.js';
@@ -230,6 +232,47 @@ function sampleUpload(label, uniforms) {
 let result, error, airDisposed = false;
 try {
   const a = makePlanet('A', -7e6, 6e6, 0), b = makePlanet('B', 7e6, 5e6, .6);
+  if (!reference) {
+    const near = a.volCloudMat, direct = a.getDirectCloudMaterial();
+    assert.equal(a.getDirectCloudMaterial(), direct);
+    assert.equal(direct.uniforms, near.uniforms);
+    assert.equal(direct.fragmentShader, a.volCloudFarMat.fragmentShader);
+    assert.ok(direct.fragmentShader.includes(productionCloudGLSL));
+    assert.ok(near.fragmentShader.includes(nearProductionCloudGLSL));
+    const uniforms = near.uniforms, rawBinding = uniforms.uBandCandidates, ready = uniforms.uCandidatesReady;
+    const savedRaw = rawBinding.value, savedReady = ready.value;
+    const plane = CANDIDATE_WIDTH * CANDIDATE_HEIGHT;
+    const data = new Uint16Array(plane * CANDIDATE_LAYERS);
+    const raw = new THREE.DataArrayTexture(data, CANDIDATE_WIDTH, CANDIDATE_HEIGHT, CANDIDATE_LAYERS);
+    try {
+      rawBinding.value = raw;
+      ready.value = 1;
+      data[plane] = 4;
+      const used = new Set();
+      volume.bindNearCandidates(uniforms, used);
+      const derived = uniforms.uNearBandCandidates.value, version = derived.version;
+      assert.equal(derived.image.data[0], 0x8100);
+      assert.equal(data[0], 0);
+      volume.bindNearCandidates(uniforms, used);
+      assert.equal(derived.version, version);
+      data[plane] = 0;
+      raw.needsUpdate = true;
+      volume.bindNearCandidates(uniforms, used);
+      assert.equal(uniforms.uNearBandCandidates.value, derived);
+      assert.equal(derived.version, version + 1);
+      assert.equal(derived.image.data[0], 0x8000);
+      track(derived, 'near candidate grid');
+      volume.releaseNearCandidates(used);
+      assert.equal(resources.get(derived).disposeEvents, 0);
+      volume.releaseNearCandidates(new Set());
+      assert.equal(resources.get(derived).disposeEvents, 1);
+      assert.equal(uniforms.uNearBandCandidates.value, null);
+    } finally {
+      rawBinding.value = savedRaw;
+      ready.value = savedReady;
+      raw.dispose();
+    }
+  }
   if (!reference) for (const planet of [a, b]) {
     assert.equal(planet.volCloudMat.uniforms.uOpaqueMinR.value, planet.R - Math.max(1000, planet.hAmp * 2));
     assert.equal(planet.volCloudMat.uniforms.uOpaqueMaxR.value, planet.R + Math.max(1000, planet.hAmp * 2));

@@ -725,8 +725,8 @@ const riftInverse = new THREE.Quaternion();
 const riftAssistQuat = new THREE.Quaternion();
 const riftPortalClearColor = new THREE.Color();
 const riftPortalVisibility = [];
-const riftPortalDepthState = [];
 const riftPortalLayerState = [];
+const riftPortalCloudState = [];
 const RIFT_PORTAL_LAYER = 5;
 let riftPortalClearAlpha = 1;
 let riftPortalFog = null;
@@ -2718,8 +2718,8 @@ function beginRiftPortalScene(
   targetBodyId = riftRoute?.arrival?.bodyId || null,
 ) {
   riftPortalVisibility.length = 0;
-  riftPortalDepthState.length = 0;
   riftPortalLayerState.length = 0;
+  riftPortalCloudState.length = 0;
   riftPortalFog = scene.fog;
   renderer.getClearColor(riftPortalClearColor);
   riftPortalClearAlpha = renderer.getClearAlpha();
@@ -2768,11 +2768,12 @@ function beginRiftPortalScene(
   for (const group of standaloneSiteGroups(previewSystem)) moveToRiftPortalLayer(group);
   for (const planet of previewSystem?.planets || []) {
     // A direct target has no separate depth-readable volume pass.
-    for (const material of [planet.volCloudMat]) {
-      if (!material || riftPortalDepthState.includes(material)) continue;
-      riftPortalDepthState.push(material, material.depthTest);
-      material.depthTest = false;
-    }
+    const mesh = planet.volCloudMesh;
+    if (!mesh?.visible || !planet.group.visible || mesh.material !== planet.volCloudMat) continue;
+    const material = planet.getDirectCloudMaterial();
+    riftPortalCloudState.push({ mesh, previous: mesh.material, material, depthTest: material.depthTest });
+    mesh.material = material;
+    material.depthTest = false;
   }
 }
 
@@ -2786,10 +2787,11 @@ function endRiftPortalScene(
     riftPortalLayerState[i].layers.mask = riftPortalLayerState[i + 1];
   }
   riftPortalLayerState.length = 0;
-  for (let i = 0; i < riftPortalDepthState.length; i += 2) {
-    riftPortalDepthState[i].depthTest = riftPortalDepthState[i + 1];
+  for (const { mesh, previous, material, depthTest } of riftPortalCloudState) {
+    mesh.material = previous;
+    material.depthTest = depthTest;
   }
-  riftPortalDepthState.length = 0;
+  riftPortalCloudState.length = 0;
   for (let i = 0; i < riftPortalVisibility.length; i += 2) {
     riftPortalVisibility[i].visible = riftPortalVisibility[i + 1];
   }

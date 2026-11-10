@@ -3,7 +3,7 @@ import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionUniforms, bindStellarOcclusion, stellarOcclusionGLSL } from './stellar-occlusion.js';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
-import { productionCloudGLSL } from './cloud/production-medium-glsl.js';
+import { nearProductionCloudGLSL, productionCloudGLSL } from './cloud/production-medium-glsl.js';
 import { buildCloudScatteringTable } from './cloud/cloud-scattering-lut.js';
 import { productionSpeciesParameters, PRODUCTION_SHAPE_VERSION } from './cloud/production-shape.js';
 import { cloudBeamGLSL } from './cloud/cloud-beam-glsl.js';
@@ -79,7 +79,7 @@ function stormCenters(offX, offY, offZ) {
 }
 
 export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
-  weatherMapHi, { quality = 'ultra', steps = 124 } = {}) {
+  weatherMapHi, { quality = 'ultra', steps = 124, nearEmptyRuns = false } = {}) {
   const thick = band.rOut - band.rIn;
   const qualityValue = quality === 'performance' || quality === 'low' ? 0
     : quality === 'balanced' ? 0.55 : 1;
@@ -104,6 +104,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uBandBounds: { value: planet.cloudBoundsTex || null },
       uCandidateLayers: { value: 64 },
       uBandCandidates: { value: planet.cloudCandidatesTex || null },
+      ...(nearEmptyRuns ? {uNearBandCandidates: {value:null}} : {}),
       uCandidatesReady: { value: planet.cloudCandidatesTex ? 1 : 0 },
       uBandsReady: { value: planet.cloudSpeciesTex ? 1 : 0 },
       uSpeciesMask: { value: -1 },
@@ -328,7 +329,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         return forwardDistance / forwardCos;
       }
 
-      ${productionCloudGLSL}
+      ${nearEmptyRuns ? nearProductionCloudGLSL : productionCloudGLSL}
       ${cloudLightCacheGLSL}
 
       vec2 cloudLayersAt(vec3 local) {

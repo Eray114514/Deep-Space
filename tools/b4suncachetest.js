@@ -34,7 +34,9 @@ try {
     const candidates=new THREE.DataArrayTexture(new Uint16Array([65535]),1,1,1);
     candidates.format=THREE.RedIntegerFormat;candidates.type=THREE.UnsignedShortType;candidates.internalFormat='R16UI';candidates.needsUpdate=true;
     const p={R,weatherHours:0,weatherField:{surfaceRangeMeters:1},cloudSpeciesTex:bands,cloudBoundsTex:bounds,cloudCandidatesTex:candidates};
-    p.volCloudMat=makeCloudVolumeMaterial(p,{rIn:R,rOut:R+2000,localWeather:true,ox:0,oy:0,oz:0,cov0:.3,cov1:.7},atlas,atlas,atlas);
+    p.volCloudMat=makeCloudVolumeMaterial(p,{rIn:R,rOut:R+2000,localWeather:true,ox:0,oy:0,oz:0,cov0:.3,cov1:.7},
+      atlas,atlas,atlas,{nearEmptyRuns:true});
+    p.volCloudMat.uniforms.uNearBandCandidates.value=candidates;
     const noise=new THREE.Data3DTexture(new Uint8Array([128,128]),1,1,1);noise.format=THREE.RGFormat;noise.needsUpdate=true;
     p.volCloudMat.uniforms.uNoise3.value=noise;p.volCloudMat.uniforms.uSunDir.value.set(0,1,0);
     p.volCloudMat.uniforms.uSecondarySunDir.value.set(Math.sqrt(1-.4*.4),.4,0);
@@ -52,6 +54,7 @@ try {
       // oblique light. Its remaining incoming extinction cannot be omitted.
       const cache=new CloudSunCache(p,new THREE.Vector3(0,R+1300,0),{size:16,depth:16,spacing,
         target:shared,tileOffset:generation*64});
+      if(Object.hasOwn(cache.material.uniforms,'uNearBandCandidates'))throw Error('Solar snapshot retained the near view grid');
       let calls=0;while(!cache.ready) {cache.bakeSlice(renderer,{boundaryRows:4,slices:2});if(++calls>100)throw Error('Cache stalled');}
       const gl=renderer.getContext(),restored={target:renderer.getRenderTarget()===saved,
         viewport:Array.from(gl.getParameter(gl.VIEWPORT)),scissor:Array.from(gl.getParameter(gl.SCISSOR_BOX)),scissorTest:gl.isEnabled(gl.SCISSOR_TEST)};

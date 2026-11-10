@@ -77,7 +77,9 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
   if((traversal||replay)&&!optimized)throw Error('Near traversal probe requires the runtime early exits');
   material.fragmentShader=emptyRuns?emptyRunShader(fragment,emptyRuns):replay?nearReplayShader(fragment,replay)
     :traversal?baseline:residualShader(baseline);
-  const emptyRunProbe=emptyRuns?createEmptyRunProbe(T,gl,emptyRuns):null;
+  const productionPacked=Boolean(original.uniforms.uNearBandCandidates);
+  const legacyScan=productionPacked&&emptyRuns==='r16';
+  const emptyRunProbe=emptyRuns&&!legacyScan?createEmptyRunProbe(T,gl,emptyRuns):null;
   Object.assign(material.uniforms,original.uniforms,{uNearResidualMode:{value:0},uNearTraversalMask:{value:0}});
   const counter=cachePair||cacheSupport?new T.ShaderMaterial().copy(Object.assign(Object.create(original),{uniforms:{}})):null;
   if(counter) {
@@ -264,14 +266,15 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
           throw Error('Near cache pair changed production state');
         const publishedControl=difference(published,cachedReference.pixels,half);
         const controlPassed=!publishedControl.changed&&publishedControl.nonempty===counts.rays;
-        rows.push({arm:arm.name,frame:pass.frame,eyeAltitude,counts,control,order,publishedControl,controlPassed,
+        const reportOrder=legacyScan?order.map(key=>key.replace('-native','-production-r16').replace('-packed','-legacy-scan')):order;
+        rows.push({arm:arm.name,frame:pass.frame,eyeAltitude,counts,control,order:reportOrder,publishedControl,controlPassed,
           cachedError:difference(cachedReference.pixels,cached.pixels,half),
           uncachedError:difference(uncachedReference.pixels,uncachedCandidate.pixels,half),
           cacheDifference:difference(published,uncachedReference.pixels,half),
           liveQuery,referenceQuery:cachedReference.query,candidateQuery:cached.query,
           uncachedReferenceQuery:uncachedReference.query,uncachedCandidateQuery:uncachedCandidate.query});
         if(!controlPassed)
-          throw Error(`Near cache pair lost its native control after overrides ${JSON.stringify({order,publishedControl,counts})}`);
+          throw Error(`Near cache pair lost its native control after overrides ${JSON.stringify({order:reportOrder,publishedControl,counts})}`);
         return result;
       }
       const reference=arm.full?{pixels:published,query:liveQuery}:draw(original);
@@ -306,7 +309,8 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
     pass.profilePhase=hook;
   } catch(error) {material.dispose();target.dispose();counter?.dispose();throw error;}
   const prepareMs=performance.now()-start;
-  const report=ms=>({prepareMs,optimized,traversal,replay,emptyRuns:emptyRunProbe?.stats(),
+  const report=ms=>({prepareMs,optimized,traversal,replay,
+    emptyRuns:legacyScan?{production:'r16',layout:'legacy-scan'}:emptyRunProbe?.stats(),
     cloudyCache,cachePair,cacheSupport,cacheNative,dimensions:[target.width,target.height],
     rows:rows.map(({referenceQuery,candidateQuery,variantQuery,uncachedReferenceQuery,uncachedCandidateQuery,liveQuery,cacheSamples,...row})=>({...row,
       referenceGpuMs:ms(referenceQuery),variantGpuMs:ms(variantQuery),gpuMs:ms(candidateQuery),

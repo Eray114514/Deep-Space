@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import {CLOUD_SPECIES} from '../src/cloud/cloud-species.js';
 import {productionBandBounds,productionBandCandidates,CANDIDATE_WIDTH,CANDIDATE_HEIGHT,
-  CANDIDATE_LAYERS,CANDIDATE_METERS,productionStorageLayers,packProductionAcceleration,PRODUCTION_PARAMETER_LAYERS} from '../src/cloud/production-bands.js';
+  CANDIDATE_LAYERS,CANDIDATE_METERS,CANDIDATE_EMPTY_TAG,encodeCandidateEmptyRuns,
+  productionStorageLayers,packProductionAcceleration,PRODUCTION_PARAMETER_LAYERS} from '../src/cloud/production-bands.js';
 const width=128,height=64,stride=width*height*4;
 const data=new Float32Array(stride*CLOUD_SPECIES.length);
 for(let species=0;species<CLOUD_SPECIES.length;species++)for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
@@ -39,6 +40,17 @@ for(let i=0;i<50000;i++) {
 }
 assert.ok(checked>100000 && absentGeometry>10000);
 console.log('PASS conservative interpolated cloud acceleration:',{checked,absentGeometry});
+const encoded=encodeCandidateEmptyRuns(candidates.slice());
+const plane=CANDIDATE_WIDTH*CANDIDATE_HEIGHT;
+for(let z=0;z<CANDIDATE_LAYERS;z++)for(let cell=0;cell<plane;cell++) {
+  const index=z*plane+cell,word=encoded[index];
+  if(candidates[index]) {assert.equal(word,candidates[index]);continue;}
+  let lower=z-1,upper=z+1;
+  while(lower>=0&&!candidates[lower*plane+cell])lower--;
+  while(upper<CANDIDATE_LAYERS&&!candidates[upper*plane+cell])upper++;
+  assert.equal(word,CANDIDATE_EMPTY_TAG|(lower+1)|((upper===CANDIDATE_LAYERS?0:upper+1)<<7));
+}
+assert.throws(()=>encodeCandidateEmptyRuns(encoded),/raw production cloud candidate masks/);
 // Float32 carries every sixteen-bit mask exactly. Packed slices must remain
 // outside the interpolated genus range and preserve every radial/angular cell.
 for(const size of [64,128,256]) {

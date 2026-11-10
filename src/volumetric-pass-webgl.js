@@ -10,6 +10,7 @@ import { CloudColumnBank, setCloudFarCacheEnabled } from './cloud/cloud-column-b
 import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
 import { CloudFarSplitPass } from './cloud/cloud-far-split-pass.js';
+import { encodeCandidateEmptyRuns } from './cloud/production-bands.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 import { RenderFrameState } from './render-frame-state.js';
 import { volumeHistoryGLSL } from './volume-history-glsl.js';
@@ -68,6 +69,7 @@ export class VolumetricPass extends Pass {
     this.frameState = frameState || new RenderFrameState();
     this.profiler = null; // Borrowed from the pipeline only while profiling.
     this.columnWork = null; // Optional measured work admission; ordinary rows remain the baseline.
+    this.nearCandidateGrids = new Map();
     this.width = 1;
     this.height = 1;
     this.current = target(1, 1, 'volume.current');
@@ -438,6 +440,34 @@ export class VolumetricPass extends Pass {
     for(const bank of banks)bank.dispose();
   }
 
+  bindNearCandidates(uniforms, used) {
+    const raw=uniforms.uBandCandidates.value, binding=uniforms.uNearBandCandidates;
+    if(!raw || uniforms.uCandidatesReady.value<.5) {binding.value=null;return;}
+    let grid=this.nearCandidateGrids.get(raw);
+    if(!grid) {
+      const {data,width,height,depth}=raw.image;
+      const texture=new THREE.DataArrayTexture(new Uint16Array(data.length),width,height,depth);
+      texture.format=raw.format;texture.type=raw.type;texture.internalFormat=raw.internalFormat;
+      this.nearCandidateGrids.set(raw,grid={texture,binding,version:-1});
+    }
+    if(grid.version!==raw.version) {
+      grid.texture.image.data.set(raw.image.data);
+      encodeCandidateEmptyRuns(grid.texture.image.data);
+      grid.texture.needsUpdate=true;
+      grid.version=raw.version;
+    }
+    binding.value=grid.texture;
+    used.add(raw);
+  }
+
+  releaseNearCandidates(used) {
+    for(const [raw,{texture,binding}] of this.nearCandidateGrids) {
+      if(used?.has(raw))continue;
+      if(binding.value===texture)binding.value=null;
+      texture.dispose();this.nearCandidateGrids.delete(raw);
+    }
+  }
+
   profilePhase(name,work,options) {return this.profiler?this.profiler.run(name,work,options):work();}
 
   setSize(width, height) {
@@ -502,10 +532,13 @@ export class VolumetricPass extends Pass {
       // and camera reconstruction also belong to the current draw, including
       // fading clouds whose active body changed before a resize or camera move.
       this.camera.updateMatrixWorld(true);
+      const nearCandidatesUsed=new Set();
       const bindCloudDraw = (mesh, material) => {
         const uniforms = material?.uniforms;
         if (material?.defines?.CLOUD_FAR_VIEW === undefined || !uniforms) return;
         if (uniforms.air_uEnabled && uniforms !== cloudUniforms) disableCloudAir(uniforms);
+        if (material.defines.CLOUD_FAR_VIEW===0 && uniforms.uNearBandCandidates)
+          this.bindNearCandidates(uniforms,nearCandidatesUsed);
         if (uniforms.tSceneDepth) {
           uniforms.tSceneDepth.value = depthTexture;
           uniforms.uDepthReady.value = depthTexture ? 1 : 0;
@@ -526,6 +559,7 @@ export class VolumetricPass extends Pass {
           for (const material of object.material) bindCloudDraw(object, material);
         } else bindCloudDraw(object, object.material);
       });
+      this.releaseNearCandidates(nearCandidatesUsed);
 
       // Render only cloud volume meshes into a half-resolution HDR
       // buffer. Clear alpha is important: discarded rays must stay transparent.
@@ -616,6 +650,7 @@ export class VolumetricPass extends Pass {
   releaseTargets() {
     this.farSplit?.dispose();
     this.releaseLightBatches();
+    this.releaseNearCandidates();
     for(const columns of this.columnMaps.values())columns.dispose();
     this.columnMaps.clear();this.columnRelease.clear();
     this.current.dispose();

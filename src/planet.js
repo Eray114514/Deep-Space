@@ -26,6 +26,7 @@ import { createPlanetWeatherField } from './cloud/planet-weather.js';
 import { PlanetWeatherStream } from './cloud/planet-weather-stream.js';
 import { buildProductionBands, CANDIDATE_WIDTH, CANDIDATE_HEIGHT, CANDIDATE_LAYERS } from './cloud/production-bands.js';
 import { sampleProductionMedium } from './cloud/production-shape.js';
+import { nearProductionCloudGLSL, productionCloudGLSL } from './cloud/production-medium-glsl.js';
 import { CLOUD_TROPOSPHERE_TOP_METERS } from './cloud/cloud-species.js';
 import { VOLUME_LAYER } from './volumetric-pass.js';
 import { WORLD_LAYER } from './render-layers.js';
@@ -984,10 +985,11 @@ export class Planet extends TerrainHeightField {
         this.volCloudMat = makeCloudVolumeMaterial(
           this, band, detailTexture(), this.cloudShadowTex,
           this.cloudWeatherHiTex,
-          volumetricCloudProfile);
+          {...volumetricCloudProfile,nearEmptyRuns:true});
         this.volCloudUniforms ||= this.volCloudMat.uniforms;
         this.volCloudBand ||= band;
         this.volCloudFarMat=this.volCloudMat.clone();
+        this.volCloudFarMat.fragmentShader=this.volCloudMat.fragmentShader.replace(nearProductionCloudGLSL,productionCloudGLSL);
         this.volCloudFarMat.defines.CLOUD_FAR_VIEW=1;
         this.volCloudFarMat.uniforms=this.volCloudMat.uniforms;
         this.volCloudUniforms.uAmbC.value
@@ -1199,6 +1201,24 @@ export class Planet extends TerrainHeightField {
 
   setStellarField(field) {
     return this.setStellarLights(field);
+  }
+
+  getDirectCloudMaterial() {
+    const near = this.volCloudMat;
+    if (!near) return null;
+    // Direct views bypass the volume pass and use the original candidate mask.
+    if (!this.volCloudDirectMat) {
+      this.volCloudDirectMat = near.clone();
+      this.volCloudDirectMat.uniforms = near.uniforms;
+      this.volCloudDirectMat.fragmentShader = near.fragmentShader.replace(nearProductionCloudGLSL, productionCloudGLSL);
+    }
+    const direct = this.volCloudDirectMat;
+    if (this.volCloudDirectVersion !== near.version) {
+      this.volCloudDirectVersion = near.version;
+      direct.defines = { ...near.defines };
+      direct.needsUpdate = true;
+    }
+    return direct;
   }
 
   setWeatherTime(hours) {
@@ -1789,6 +1809,7 @@ export class Planet extends TerrainHeightField {
     this.cloudCandidatesTex?.dispose();
     this.volCloudMat?.dispose();
     this.volCloudFarMat?.dispose();
+    this.volCloudDirectMat?.dispose();
     if (this.cloudShadowTex2) this.cloudShadowTex2.dispose();
     if (this.flora) {
       for (const k in this.flora) if (this.flora[k] && this.flora[k].dispose) this.flora[k].dispose();
