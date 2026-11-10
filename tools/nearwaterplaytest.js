@@ -12,18 +12,20 @@ const caps = process.env.NEAR_WATER_FPS ? [Number(process.env.NEAR_WATER_FPS)] :
 const volumeClouds=process.env.NEAR_WATER_VCLOUDS!=='0';
 const reference=process.env.NEAR_WATER_REFERENCE||null;
 const browserChoice=process.env.NEAR_WATER_BROWSER||'bundled';
+const viewport=process.argv.includes('--2k')?{width:2560,height:1440}:{width:1920,height:1080};
+const quality=viewport.width===2560?'balanced':'ultra';
 assert.ok(caps.every((fps) => [30, 60].includes(fps)));
 await mkdir(out, { recursive: true });
 const fingerprint = await evidenceFingerprint('tools/nearwaterplaytest.js');
 const { server, port } = await startServer(0);
 const browser = await launchHardwareBrowser({ headless: true,
   executablePath:browserChoice==='system'?resolveSystemChromePath()||undefined:undefined });
-const evidence = { ...fingerprint, volumeClouds, reference, browserChoice, boundary: 'Normal HUD/post and real flight inputs after initial QA pose. '
+const evidence = { ...fingerprint, volumeClouds, reference, browserChoice, viewport, quality, boundary: 'Normal HUD/post and real flight inputs after initial QA pose. '
   + 'CPU reconstruction of committed mesh attributes is not GPU raster/depth readback. '
   + 'RAF cap limits maximum presentation rate; actual frame times and speeds are measured, never assumed.', runs: [] };
 try {
   for (const fps of caps) {
-    const context = await browser.newContext({ viewport: { width: 1920, height: 1080 },
+    const context = await browser.newContext({ viewport,
       recordVideo: { dir: out, size: { width: 1920, height: 1080 } } });
     const page = await context.newPage();
     if(reference) {
@@ -71,7 +73,8 @@ try {
           if (!requests.size && scheduled != null) { nativeCancel(scheduled); scheduled = null; }
         };
       }, fps);
-      await page.goto(`http://127.0.0.1:${port}/?quality=ultra&nohero=1&nolock=1&post=1&vclouds=${Number(volumeClouds)}&farflora=1`);
+      await page.goto(`http://127.0.0.1:${port}/?quality=${quality}&nohero=1&nolock=1&post=1&vclouds=${Number(volumeClouds)}&farflora=1`,
+        {waitUntil:'commit'});
       await page.waitForFunction(() => window.NMS?.booted, null, { timeout: 120000 });
       await page.evaluate(() => {
         const p = NMS._planet(0);
@@ -97,6 +100,7 @@ try {
         nav.vel.copy(initialForward).multiplyScalar(150);
         const initialLocalForward = p.worldOffsetToLocal(initialForward).normalize();
         window.__nearSample = () => {
+          if(NMS._renderer.getContext().isContextLost())throw Error('Near-water traversal lost its WebGL context');
           const samplingStarted = performance.now();
           const { camera, spaceCtl } = NMS._internals;
           const patch = p.nearWaterPatch, mesh = patch.mesh;
@@ -271,6 +275,7 @@ try {
       }
       await page.screenshot({ path: `${out}/${fps}-stopped-player.png` });
       const state = await page.evaluate(() => ({ stats: NMS.stats(), water: NMS.waterState(0),
+        drawingBuffer: [NMS._renderer.domElement.width, NMS._renderer.domElement.height],
         gl: NMS._renderer.getContext().getError(), contextLost: NMS._renderer.getContext().isContextLost(),
         frameIntervals: window.__nearFrameIntervals }));
       const moving = samples.filter((v) => v.phase !== 'stop');
@@ -286,6 +291,7 @@ try {
         actualFps: 1000 / (state.frameIntervals.reduce((a, b) => a + b, 0) / state.frameIntervals.length),
       };
       const gates = { noErrors: errors.length === 0, webgl2: state.stats.rendererBackend === 'webgl2',
+        native2K: viewport.width !== 2560 || state.drawingBuffer[0] === viewport.width && state.drawingBuffer[1] === viewport.height,
         glClean: state.gl === 0, contextAlive: !state.contextLost,
         actualLowFlight: samples.every((v) => v.altitude > 0 && v.altitude < 100),
         targetSpeedExercised: measurements.targetSpeedCoverage >= 0.8,
@@ -301,6 +307,9 @@ try {
       let failureState = null;
       try {
         failureState = await page.evaluate(() => ({ stats: window.NMS?.stats?.(),
+          drawingBuffer: window.NMS && [NMS._renderer.domElement.width, NMS._renderer.domElement.height],
+          contextLost: window.NMS?._renderer.getContext().isContextLost(),
+          warmup: window.NMS?.surfaceWarmupState(),
           water: window.NMS?.waterState?.(0), sample: window.__nearSample?.() }));
       } catch (captureError) { failureState = { captureError: String(captureError) }; }
       await page.screenshot({ path: `${out}/${fps}-failure-player.png` }).catch(() => {});

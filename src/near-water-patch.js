@@ -98,6 +98,8 @@ export class NearWaterPatch {
     this.worker = null;
     this.workerToken = 0;
     this.workerError = null;
+    this.workerUnavailable = false;
+    this.workerTimedOut = false;
     this.disposed = false;
     this.lastWorkerCpuMs = 0;
     this.lastWorkerWallMs = 0;
@@ -125,7 +127,7 @@ export class NearWaterPatch {
 
   _begin(direction) {
     if (this.disposed) return;
-    if (!this.worker && this.workerFactory && !this.workerError && this.planet.createTerrainSnapshot) {
+    if (!this.worker && this.workerFactory && !this.workerUnavailable && this.planet.createTerrainSnapshot) {
       try {
         const worker = this.workerFactory();
         this.worker = worker;
@@ -133,6 +135,14 @@ export class NearWaterPatch {
           if (this.disposed || this.worker !== worker || !this.build?.worker
             || data.token !== this.workerToken) return;
           if (data.error) { this._workerFailed(data.error); return; }
+          if (Number.isInteger(data.progress) && data.progress >= 0 && data.progress <= this.cells) {
+            if (!this.build.ready && data.progress > this.build.workerProgress) {
+              this.build.workerProgress = data.progress;
+              this.build.workerLastCheck = performance.now();
+              this.build.workerObservedMs = 0;
+            }
+            return;
+          }
           const count = (this.cells+1)**2;
           if (!WATER_GEOMETRY_ATTRIBUTES.every(key => data.attributes?.[key] instanceof Float32Array
             && data.attributes[key].length === count * (['depth', 'waterCell', 'depthDelta'].includes(key) ? 1 : 3))) {
@@ -143,6 +153,8 @@ export class NearWaterPatch {
           Object.assign(this.build, data.attributes, { ready: true });
           this.lastWorkerCpuMs = data.cpuMs;
           this.lastWorkerWallMs = data.wallMs;
+          this.workerError = null;
+          this.workerTimedOut = false;
         };
         worker.onerror = event => { if (this.worker === worker) this._workerFailed(event.message); };
         worker.onmessageerror = () => { if (this.worker === worker) this._workerFailed('Near-water message decoding failed'); };
@@ -152,6 +164,7 @@ export class NearWaterPatch {
     this.build = createWaterGeometryJob(direction, this.cells, this.planet.seaRadius, !this.worker);
     if (this.worker) {
       this.build.worker = true;
+      this.build.workerProgress = -1;
       this.build.workerLastCheck = performance.now();
       this.build.workerObservedMs = 0;
       this.workerToken++;
@@ -168,8 +181,9 @@ export class NearWaterPatch {
     this.worker = null;
   }
 
-  _workerFailed(error) {
+  _workerFailed(error, retry = false) {
     this.workerError = String(error);
+    this.workerUnavailable = !retry;
     this._stopWorker();
     if (this.build?.worker) {
       const job = this.build;
@@ -191,7 +205,9 @@ export class NearWaterPatch {
       job.workerObservedMs += Math.min(250, Math.max(0, now-job.workerLastCheck));
       job.workerLastCheck = now;
       if (job.workerObservedMs > 30000) {
-        this._workerFailed('Near-water worker exceeded 30 s of observed frame wait');
+        const retry = !this.workerTimedOut;
+        this.workerTimedOut = true;
+        this._workerFailed('Near-water worker exceeded 30 s of observed frame wait', retry);
         return;
       }
       return;
@@ -319,6 +335,7 @@ export class NearWaterPatch {
       lastCommitMs: this.lastCommitMs,
       worker: !!this.worker,
       workerReady: !!this.build?.ready,
+      workerProgress: this.build?.workerProgress ?? null,
       workerError: this.workerError,
       lastWorkerCpuMs: this.lastWorkerCpuMs,
       lastWorkerWallMs: this.lastWorkerWallMs,
