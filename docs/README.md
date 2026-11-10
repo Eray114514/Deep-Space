@@ -3,8 +3,9 @@
 | 文档 | 负责内容 |
 |---|---|
 | [优化路线图](optimization-roadmap.md) | 全局目标、批次依赖、A 验收基线和 C/D/E/R 后续 |
-| [渲染基础改进与交接](render-foundation-improvements.md) | 云暂停期间的底层施工；近/远植被局部精度、shader 所有权已修复，下一步整帧预算与材质采样 |
-| [未完成任务难度评估](remaining-work-difficulty.md) | 小阶段拆分、难度、前置条件与 agent 交接建议；进度仍以各原计划为准 |
+| [渲染基础改进与交接](render-foundation-improvements.md) | 当前底层状态、实测与接续入口 |
+| [未完成任务难度评估](remaining-work-difficulty.md) | 底层与后续专项的任务分组、难度和模型分配建议 |
+| [渲染基线与历史证据](baselines/README.md) | 当前证据入口、历史快照恢复和底层完工时的清理规则 |
 | [云与大气计划](cloud-atmosphere-rewrite.md) | B 唯一规格、进度和返工顺序 |
 | [阶段 4 云演进](cloud-phase4-volume-march.md) | B 的天气接线、云种/形态、采样实施清单 |
 | [B4 天气接线契约](cloud-weather-contract.md) | 首族、可执行坐标/地形查询、内容/时间语义和消费者迁移位置 |
