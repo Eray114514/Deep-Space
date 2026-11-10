@@ -726,6 +726,7 @@ try {
       await awaitReady(pipeline.framePacer, 'queued-private-admission');
       const privateSequence = pipeline.frameState.sequence, privateFences = result.native.fences.length,
         privateGraphContext = {}, privatePlayerCallbacks = preparation.playerCallbacks;
+      const previousPlayerFrame = frameSnapshot(pipeline.frameState.previous);
       let privateDrawCalls = 0, privateScopeRestored = false;
       const privateJob = pipeline.prepare(draw => {
         privateDrawCalls++;const caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel(), shift = source.uniforms.uShift.value;
@@ -735,7 +736,7 @@ try {
           check('Queued private work receives the actual admitted one-use graph', draw({ ...options, context: privateGraphContext }) === true);
           return true;
         } finally {
-          source.uniforms.uShift.value = shift;pipeline.invalidateVolumeHistory('private-preparation-fixture');
+          source.uniforms.uShift.value = shift;
           renderer.setRenderTarget(caller, face, mip);label = 'prepare-private:restored';
           privateScopeRestored = renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip;
         }
@@ -746,12 +747,16 @@ try {
       const privateOutcome = await privateJob, privateFencesAfter = result.native.fences.slice(privateFences);
       preparation.private = { callerAccepted: privateAccepted, workCalls: privateDrawCalls, scopeRestored: privateScopeRestored,
         sequenceBefore: privateSequence, sequenceAfter: pipeline.frameState.sequence, historyValidAfter: pipeline.frameState.valid,
+        previousPlayerPreserved: equal(previousPlayerFrame, frameSnapshot(pipeline.frameState.previous)),
+        historyReason: pipeline.frameState.reason, volumeHistoryValidAfter: volume.historyValid,
         playerCallbacks: preparation.playerCallbacks - privatePlayerCallbacks, outcome: privateOutcome,
         fences: privateFencesAfter, queue: pipeline.preparations.snapshot() };
       check('A queued private graph is never counted as the requested player graph', privateAccepted === false
         && privateDrawCalls === 1 && preparation.private.playerCallbacks === 0 && privateOutcome.success && privateOutcome.value === true);
-      check('Private native graph commits once then invalidates its borrowed history', preparation.private.sequenceAfter === privateSequence + 1
-        && !preparation.private.historyValidAfter && privateScopeRestored);
+      check('Private native graph preserves the player snapshot and invalidates its borrowed history',
+        preparation.private.sequenceAfter === privateSequence && preparation.private.previousPlayerPreserved
+        && preparation.private.historyReason === 'private-prewarm' && !preparation.private.historyValidAfter
+        && !preparation.private.volumeHistoryValidAfter && privateScopeRestored);
       check('One captured native fence follows the entire private upload/graph/restore scope', privateFencesAfter.length === 1
         && privateFencesAfter[0].label === 'prepare-private:restored');
       const privateCurrent = await read(volume.current), privateFinal = await read(pipeline.composer.readBuffer), uploadWitness = await read(preparationTarget);
@@ -764,6 +769,7 @@ try {
         && preparation.private.native.final.delta.changed > 900);
       const recoveredPlayer = await submit('player-after-private-preparation');
       check('The first returned player frame rejects private preparation history', recoveredPlayer.history === 0);
+      check('Only the recovered player frame advances the player sequence', pipeline.frameState.sequence === privateSequence + 1);
       const recoveredNative = { current: await read(volume.current), resolved: await read(volume.historyRead), final: await read(pipeline.composer.readBuffer) };
       preparation.recoveredPlayer = Object.fromEntries(Object.entries(recoveredNative).map(([stage, value]) => [stage,
         { ...value.metadata, delta: compare(captures[3][stage].bits, value.bits) }]));
