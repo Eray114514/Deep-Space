@@ -106,13 +106,17 @@ try {
   });
   await test('private preparation graph uses the admitted one-use draw without publishing a caller frame', async () => {
     const f = fixture(), p = f.pipeline, pacer = p.startFramePacing(), privateTarget = {}, privateOrigin = new THREE.Vector3(7, 8, 9);let escaped;
+    const playerOrigin = new THREE.Vector3(2, 3, 4);
+    assert.equal(p.render({ origin: playerOrigin, context: f.scene }),true);f.complete();
     const job = observe(p.prepare(draw => {
       escaped = draw;f.renderer.setRenderTarget(privateTarget);
-      try { assert.equal(draw({ origin: privateOrigin, context: 'private' }), true);return 'prepared'; }
-      finally { p.invalidateVolumeHistory('private-preparation'); }
+      assert.equal(draw({ origin: privateOrigin, context: 'private' }), true);return 'prepared';
     }));
     let playerCalls = 0;assert.equal(p.submitFrame(() => { playerCalls++; }), false);assert.equal(playerCalls, 0);assert.equal(p.frameState.sequence, 1);
-    assert.equal(p.frameState.valid, false);assert.equal(pacer.snapshot().stats.submitted, 1);f.restored();await job.done;
+    assert.equal(p.frameState.valid, false);assert.equal(p.frameState.pending, false);
+    assert.equal(p.frameState.reason, 'private-prewarm');assert.ok(p.frameState.previous.origin.equals(playerOrigin));
+    assert.equal(p.frameState.previous.context,f.scene);
+    assert.equal(pacer.snapshot().stats.submitted, 2);f.restored();await job.done;
     assert.equal(job.value, 'prepared');assert.match(String(caught(() => escaped())), /no longer active/);
     f.complete();assert.equal(p.render(), true);assert.equal(p.frameState.sequence, 2);assert.equal(p.frameState.previous.context, f.scene);f.restored();
   });

@@ -42,6 +42,19 @@ begin();frame.commit();body.weatherField = {};
 assert.equal(begin(), true);assert.equal(frame.mapBody(), false, 'Changed medium cannot reuse the old cloud history');
 frame.commit();assert.equal(begin(), true);assert.equal(frame.mapBody(), true);frame.commit();
 
+const weatherOwner={};
+body.cloudWeatherPublication={owner:weatherOwner,first:1,second:2};
+begin();assert.equal(frame.mapBody(),false,'First forecast publication retires the initial cloud history');frame.commit();
+begin();assert.equal(frame.mapBody(),true);frame.commit();
+body.cloudWeatherPublication={owner:weatherOwner,first:2,second:3};
+begin();assert.equal(frame.mapBody(),true,'A normal rollover keeps its common endpoint');frame.commit();
+body.cloudWeatherPublication={owner:weatherOwner,first:2,second:4};
+begin();assert.equal(frame.mapBody(),false,'A same-bracket replacement invalidates correspondence');frame.commit();
+body.cloudWeatherPublication={owner:{},first:4,second:5};
+begin();assert.equal(frame.mapBody(),false,'A restarted stream cannot match recycled revision numbers');frame.commit();
+delete body.cloudWeatherPublication;
+begin();frame.commit();
+
 // Independent local-point oracle: make each frame's render position directly
 // from the known local point and its pose, without using the tested mapping.
 let maximumError = 0, oldMaximumError = 0, cases = 0;

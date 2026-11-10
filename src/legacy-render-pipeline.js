@@ -204,11 +204,11 @@ export class GameLegacyPipeline {
       const target = this.renderer.getRenderTarget();
       const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
       try {
-        const draw=options=>{
+        const draw=(options,privateFrame)=>{
           if(!active)throw Error('Frame draw is no longer active');
           if(drawn)throw Error('Frame has already been drawn');
           drawn=true;
-          const rendered=this.#renderScene(options);
+          const rendered=this.#renderScene(options,privateFrame);
           if(rendered===false)worldBlocked=true;
           return rendered;
         };
@@ -216,7 +216,7 @@ export class GameLegacyPipeline {
         // with foreground work, rather than draining a burst into one frame or
         // compiling against a private destination's borrowed lighting state.
         if(this.preparations.hasQueued&&(maintenance||this.preparationTurn)) {
-          preparation=this.preparations.runNext(draw);
+          preparation=this.preparations.runNext(options=>draw(options,true));
           if(preparation) {
             this.preparationTurn=false;
             return maintenance;
@@ -224,7 +224,7 @@ export class GameLegacyPipeline {
         }
         if(maintenance)return false;
         this.preparationTurn=true;
-        const result=work(draw);
+        const result=work(options=>draw(options,false));
         if(result&&typeof result.then==='function')throw new TypeError('Frame submission work must be synchronous');
       } catch(error) {
         failed=true;failure=error;throw error;
@@ -259,7 +259,7 @@ export class GameLegacyPipeline {
   }
 
   // Internal world graph. Only submitFrame's one-use draw capability enters it.
-  #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}) {
+  #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}, privateFrame) {
     if (this.cloudProgramsEnabled && this.volumePass?.enabled) {
       const volume = this.volumePass, requests = volume.requiredProgramRequests(origin, volume.farSplit);
       const plan = volume.farSplit?.plan, material = volume.activePlanet?.volCloudMat;
@@ -295,7 +295,12 @@ export class GameLegacyPipeline {
         try {this.renderer.setRenderTarget(target, face, mip);}
         catch(error){if(!failed)throw error;}
       }
-      this.frameState.commit();
+      if(privateFrame) {
+        // The private graph may overwrite a history attachment, but its pose
+        // and sampling phase must never become the previous player frame.
+        this.frameState.abort('private-prewarm');
+        this.volumePass?.resetHistory();
+      } else this.frameState.commit();
     } catch (error) {
       this.frameState.abort();
       this.volumePass?.resetHistory();

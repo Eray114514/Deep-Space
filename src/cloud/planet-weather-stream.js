@@ -9,6 +9,7 @@ export class PlanetWeatherStream {
     this.desired=[];this.inFlight=null;this.failedHours=new Set();this.workerFailed=false;
     this.forecastRequests=new Map();
     this.generations=new WeakMap();this.generation=0;
+    this.publicationOwner={};
     this.token=0; this.disposed=false; this.error=null; this.lastUpdate=-Infinity;
     const angularSpeed=Math.abs(planet.weatherField.windRadiansPerHour);
     this.frameHours=.5/2**Math.max(0,Math.ceil(Math.log2(angularSpeed*.5/.05)));
@@ -165,6 +166,10 @@ export class PlanetWeatherStream {
       atlas.hours=hours; texture.needsUpdate=true;
     }
     p.weatherField.bindAtlases(p.cloudShadowTex.userData.weatherAtlas,p.cloudWeatherHiTex.userData.weatherAtlas);
+    if(first!==this.committedFirst||second!==this.committedSecond) {
+      // Temporal consumers keep identities, never references to worker arrays.
+      p.cloudWeatherPublication={owner:this.publicationOwner,first:this.revisionAt(a),second:this.revisionAt(b)};
+    }
     this.committedFirst=first;this.committedSecond=second;
     this.revision=`${p.weatherField.namespace}:${a}:${b}`;
   }

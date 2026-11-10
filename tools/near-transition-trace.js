@@ -6,6 +6,7 @@ export function installNearTransitionTrace(game, { onRestore } = {}) {
   const contextEvents = [], recentDraws = [];
   const started = performance.now();
   let scope = null, lastGate = null, firstNear = false, firstSweep = false, dropped = 0;
+  const phases={draws:0,mismatches:0,seen:[]};
   function add(event) {
     if (events.length < 512) events.push(event);else dropped++;
   }
@@ -61,6 +62,12 @@ export function installNearTransitionTrace(game, { onRestore } = {}) {
   wrap(renderer,'renderBufferDirect',(call,receiver,args) => {
     const material = args[3], near = material === pipeline.volumePass.activePlanet?.volCloudMat;
     const at = performance.now(), prior = scope;
+    if(near&&prior?.phase==='volume-current') {
+      const phase=material.uniforms.uFrame.value;
+      phases.draws++;
+      if(phase!==pipeline.frameState.sequence%16)phases.mismatches++;
+      if(!phases.seen.includes(phase))phases.seen.push(phase);
+    }
     scope = { phase:near?'near-draw':'draw',material:material.id, materialName:material.name || null,
       objectName:args[4].name || null, pass:prior?.phase ?? null };
     const sweep = prior?.phase === 'cloud-cache' && material.uniforms?.uCacheBoundary;
@@ -82,5 +89,5 @@ export function installNearTransitionTrace(game, { onRestore } = {}) {
       scope=prior;
     }
   });
-  return { finish() { for (const undo of restore.reverse()) undo();return { started, events, dropped, contextEvents }; } };
+  return { finish() { for (const undo of restore.reverse()) undo();return { started, events, dropped, contextEvents, phases }; } };
 }

@@ -9,8 +9,16 @@ function snapshot() {
     viewProjection: new THREE.Matrix4(),
     bodyPosition: new THREE.Vector3(),
     bodyOrientation: new THREE.Quaternion(),
-    context: null, timeEpoch: null, body: null, medium: null, near: 0, far: 0,
+    context: null, timeEpoch: null, body: null, medium: null, weather: null, near: 0, far: 0,
   };
+}
+
+function continuousWeather(current,previous) {
+  if(current===previous)return true;
+  // A natural forecast rollover shares the actual endpoint object identity
+  // represented by its revision. A replacement at the same hour does not.
+  return Boolean(current&&previous&&current.owner===previous.owner
+    &&(current.first===previous.second||current.second===previous.first));
 }
 
 // One transaction per view/context, shared by the pipeline's temporal consumers.
@@ -52,6 +60,7 @@ export class RenderFrameState {
     c.context = context;c.timeEpoch = timeEpoch;c.body = body;
     c.near = camera.near;c.far = camera.far;
     c.medium = body?.weatherField || null;
+    c.weather = body?.cloudWeatherPublication || null;
     c.bodyPosition.copy(body?.posUniv || c.origin);
     if (body?.frameOrientation) c.bodyOrientation.copy(body.frameOrientation);
     else c.bodyOrientation.identity();
@@ -73,6 +82,7 @@ export class RenderFrameState {
   mapBody() {
     const c = this.current, p = this.previous;
     if (!this.pending || !this.valid || c.body !== p.body || c.medium !== p.medium) return false;
+    if(!continuousWeather(c.weather,p.weather))return false;
     if (c.bodyOrientation.equals(p.bodyOrientation)) this.rotation.identity();
     else {
       this._rotation.copy(c.bodyOrientation).invert().premultiply(p.bodyOrientation);
@@ -95,6 +105,7 @@ export class RenderFrameState {
   stationaryBodyView() {
     const c = this.current, p = this.previous;
     return this.pending && this.valid && c.body === p.body && c.medium === p.medium
+      && continuousWeather(c.weather,p.weather)
       && c.origin.equals(p.origin) && c.bodyPosition.equals(p.bodyPosition)
       && c.bodyOrientation.equals(p.bodyOrientation) && c.cameraWorld.equals(p.cameraWorld)
       && c.projection.equals(p.projection);

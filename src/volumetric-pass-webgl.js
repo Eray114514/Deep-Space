@@ -533,12 +533,15 @@ export class VolumetricPass extends Pass {
       // fading clouds whose active body changed before a resize or camera move.
       this.camera.updateMatrixWorld(true);
       const nearCandidatesUsed=new Set();
+      const phase=this.frameState.sequence%16;
       const bindCloudDraw = (mesh, material) => {
         const uniforms = material?.uniforms;
         if (material?.defines?.CLOUD_FAR_VIEW === undefined || !uniforms) return;
         if (uniforms.air_uEnabled && uniforms !== cloudUniforms) disableCloudAir(uniforms);
-        if (material.defines.CLOUD_FAR_VIEW===0 && uniforms.uNearBandCandidates)
-          this.bindNearCandidates(uniforms,nearCandidatesUsed);
+        if (material.defines.CLOUD_FAR_VIEW===0) {
+          if(uniforms.uFrame)uniforms.uFrame.value=phase;
+          if(uniforms.uNearBandCandidates)this.bindNearCandidates(uniforms,nearCandidatesUsed);
+        }
         if (uniforms.tSceneDepth) {
           uniforms.tSceneDepth.value = depthTexture;
           uniforms.uDepthReady.value = depthTexture ? 1 : 0;

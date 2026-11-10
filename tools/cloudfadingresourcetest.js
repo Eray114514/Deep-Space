@@ -102,6 +102,7 @@ function observation(planet, material) {
   const expectedPoint = opaquePosition(expectedEye, camera.projectionMatrixInverse, expectedRotation, [.4, .6], 1.5e7);
   return { planet: planet.name, active: planet === volume.activePlanet,
     engage: uniforms.uEngage.value, airEnabled: uniforms.air_uEnabled.value,
+    phase:uniforms.uFrame.value,expectedPhase:volume.frameState.sequence%16,
     family: material === planet.volCloudFarMat ? 'far' : 'near', layerMask: camera.layers.mask,
     depth: textureRecord(uniforms.tSceneDepth.value), expectedDepth: textureRecord(frame.depth),
     depthMatches: uniforms.tSceneDepth.value === frame.depth,
@@ -178,6 +179,7 @@ function draw(name, active, nav, input, atmosphericOutput, renderAtmosphere = tr
   if (!reference) for (const record of frame.draws) {
     const planet = planets.find(value => value.name === record.planet), uniforms = planet.volCloudMat.uniforms;
     assert.equal(planet.volCloudFarMat.uniforms, uniforms, 'Near/Far share the same stable dictionary');
+    if(record.family==='near')assert.equal(record.phase,record.expectedPhase);
     assert.ok(record.depthMatches, `Current depth mismatch for ${record.planet}: ${name}`);
     assert.equal(record.depthReady, record.expectedDepthReady);
     assert.deepEqual(record.volumeSize, record.expectedVolumeSize);assert.equal(record.far, record.expectedFar);

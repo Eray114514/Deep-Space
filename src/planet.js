@@ -1325,6 +1325,7 @@ export class Planet extends TerrainHeightField {
 
   setWeatherFixture(name = null) {
     this.weatherStream?.dispose(); this.weatherStream = null;
+    this.cloudWeatherPublication = null;
     this.cloudColumnMap?.dispose(); this.cloudColumnMap = null;
     this.cloudSpeciesTex?.dispose();
     this.cloudBoundsTex?.dispose();

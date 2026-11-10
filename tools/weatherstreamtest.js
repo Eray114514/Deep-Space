@@ -37,6 +37,7 @@ try {
   stream.update(p.weatherHours);
   stream.worker.deliver(frame(0));assert.equal(stream.ready,false);
   stream.worker.deliver(frame(.5));assert.equal(stream.ready,true);
+  const initialPublication=p.cloudWeatherPublication;
   const firstVersions=versions();assert.equal(windBinds,1);assert.equal(atlasBinds,1);
   const initialBands=p.cloudSpeciesTex.image.data.slice();
   assert.equal(initialBands[3],.875);
@@ -45,14 +46,21 @@ try {
   stream.worker.deliver(frame(1));
   stream.update(p.weatherHours,true);
   assert.deepEqual(versions(),firstVersions,'Prefetch or duplicate force dirtied the active textures');
+  assert.equal(p.cloudWeatherPublication,initialPublication);
   assert.equal(windBinds,1);assert.equal(atlasBinds,1);
   assert.deepEqual(p.cloudSpeciesTex.image.data,initialBands);
   // A changed frame at the same hour must commit; timestamps alone are not
   // an identity. Time changes and bracket turnover must also keep working.
   stream.worker.deliver(frame(.5,2));assert.equal(windBinds,2);
+  const replacement=p.cloudWeatherPublication;
+  assert.equal(replacement.owner,initialPublication.owner);
+  assert.equal(replacement.first,initialPublication.first);
+  assert.notEqual(replacement.second,initialPublication.second);
   assert.equal(p.cloudSpeciesTex.image.data[3],initialBands[3]+1);
   p.weatherHours=.375;stream.update(p.weatherHours,true);assert.equal(windBinds,3);
+  assert.equal(p.cloudWeatherPublication,replacement);
   p.weatherHours=.5;stream.update(p.weatherHours,true);assert.equal(windBinds,4);
+  assert.equal(p.cloudWeatherPublication.first,replacement.second);
   assert.equal(p.cloudSpeciesTex.image.data[3],frame(.5,2).bands[3]);
   stream.dispose();assert.equal(stream.worker.terminated,true);
   assert.equal(stream.committedFirst,null);assert.equal(stream.committedSecond,null);

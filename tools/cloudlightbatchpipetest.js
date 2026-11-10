@@ -58,11 +58,17 @@ try {
       if(trace&&state.inBatch)state.draws.push({phase:state.phase,material:state.drawMaterial,cpuMs:performance.now()-started});
       checkDraw('renderer.render');return result;};
     r.clear=function(...args){const result=rawClear.apply(this,args);checkDraw('renderer.clear');return result;};
-    state.restoreRenderer=()=>{r.render=rawRender;r.clear=rawClear;gl.linkProgram=rawLink;vp.renderLightBatches=rawBatch;traceRestores.forEach(restore=>restore());};
+    const profilePhase=vp.profilePhase;
+    state.restoreRenderer=()=>{r.render=rawRender;r.clear=rawClear;gl.linkProgram=rawLink;vp.renderLightBatches=rawBatch;
+      vp.profilePhase=profilePhase;traceRestores.forEach(restore=>restore());};
     vp.setLightBatchesEnabled(true,{budgetBytes:8*1024*1024});
+    vp.profilePhase=function(name,work,options) {
+      if(name==='volume-current'&&forcedJitter!==undefined&&state.phase==='initial')
+        NMS._planet(0).volCloudMat.uniforms.uFrame.value=Number(forcedJitter);
+      return profilePhase.call(this,name,work,options);
+    };
     vp.render=function(...args) {
       const state=window._batchPipe,gl=r.getContext();
-      if(forcedJitter!==undefined&&state.phase==='initial')NMS._planet(0).volCloudMat.uniforms.uFrame.value=Number(forcedJitter);
       const check=where=>{const code=gl.getError();if(code)state.glErrors.push({phase:state.phase,where,code});};
       check('before-volume');const result=original.apply(this,args);check('after-volume');
       if(!this.lightBatchStatus.submitted) {state.records.push({phase:state.phase,reason:this.lightBatchStatus.reason});return result;}
