@@ -6,7 +6,7 @@ import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ForegroundPass } from './foreground-pass.js';
-import { VolumetricPass } from './volumetric-pass-webgl.js';
+import { VolumetricPass, lightBatchNoLongerPrepared } from './volumetric-pass-webgl.js';
 import { AtmospherePass } from './atmosphere-pass-webgl.js';
 import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
 import { gradePass } from './halcyon/gfx/grade.js';
@@ -260,20 +260,29 @@ export class GameLegacyPipeline {
 
   // Internal world graph. Only submitFrame's one-use draw capability enters it.
   #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}, privateFrame) {
+    let batchOnly=false;
     if (this.cloudProgramsEnabled && this.volumePass?.enabled) {
       const volume = this.volumePass, requests = volume.requiredProgramRequests(origin, volume.farSplit);
       const plan = volume.farSplit?.plan, material = volume.activePlanet?.volCloudMat;
-      const prefetch = plan && material && this.renderer.extensions?.has('KHR_parallel_shader_compile')
-        ? { mesh:plan.mesh, material } : null;
-      if (!this.cloudPrograms.ensure({ scene:this.scene, camera:this.camera, target:volume.current, requests, prefetch })) return false;
-      if (prefetch) this.prefetchCloudLightingPrograms();
+      const canPrefetch = plan && material && this.renderer.extensions?.has('KHR_parallel_shader_compile');
+      const batchState=volume.lightBatchPrefetch?.state;
+      const wantsBatch=!privateFrame&&volume.lightBatchesEnabled&&!this.requireDirectCloudPreparation
+        &&batchState!=='unavailable'&&batchState!=='failed';
+      const prefetch = canPrefetch&&!wantsBatch ? { mesh:plan.mesh, material } : null;
+      batchOnly=wantsBatch&&volume.usesPreparedLightBatch(requests);
+      if (!this.cloudPrograms.ensure({ scene:this.scene, camera:this.camera, target:volume.current,
+        requests:batchOnly?[]:requests, prefetch })) return false;
+      if (canPrefetch) this.prefetchCloudLightingPrograms();
     }
+    if(!privateFrame&&this.volumePass?.enabled&&this.volumePass.lightBatchesEnabled)
+      this.volumePass.prefetchLightBatches(this.renderer,origin,(work,options)=>this.prepare(work,options));
     let failed=false;
     const target = this.renderer.getRenderTarget();
     const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
     this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
     try {
       try {
+        if(batchOnly)this.volumePass.requirePreparedLightBatch=true;
         const body = this.volumePass?.activePlanet;
         const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
         if (localEye) this.frameState.localEye(body, localEye.value);
@@ -291,6 +300,7 @@ export class GameLegacyPipeline {
       } catch(error) {
         failed=true;throw error;
       } finally {
+        if(batchOnly)this.volumePass.requirePreparedLightBatch=false;
         if (this.volumePass?.farSplit) this.volumePass.farSplit.plan = null;
         try {this.renderer.setRenderTarget(target, face, mip);}
         catch(error){if(!failed)throw error;}
@@ -300,10 +310,17 @@ export class GameLegacyPipeline {
         // and sampling phase must never become the previous player frame.
         this.frameState.abort('private-prewarm');
         this.volumePass?.resetHistory();
-      } else this.frameState.commit();
+      } else {
+        this.frameState.commit();
+        this.requireDirectCloudPreparation=false;
+      }
     } catch (error) {
       this.frameState.abort();
       this.volumePass?.resetHistory();
+      if(error===lightBatchNoLongerPrepared) {
+        this.requireDirectCloudPreparation=true;
+        return false;
+      }
       throw error;
     }
     return true;

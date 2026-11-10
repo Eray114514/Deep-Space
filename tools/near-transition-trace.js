@@ -60,7 +60,8 @@ export function installNearTransitionTrace(game, { onRestore } = {}) {
     try { return call.apply(receiver,args); } finally { scope = prior; }
   });
   wrap(renderer,'renderBufferDirect',(call,receiver,args) => {
-    const material = args[3], near = material === pipeline.volumePass.activePlanet?.volCloudMat;
+    const material = args[3], volume = pipeline.volumePass;
+    const near = material === volume.activePlanet?.volCloudMat || material === volume.lightBatch?.prepare;
     const at = performance.now(), prior = scope;
     if(near&&prior?.phase==='volume-current') {
       const phase=material.uniforms.uFrame.value;

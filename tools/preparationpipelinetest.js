@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as THREE from 'three';
 import { GameLegacyPipeline } from '../src/legacy-render-pipeline.js';
+import { lightBatchNoLongerPrepared } from '../src/volumetric-pass-webgl.js';
 
 const files = ['src/legacy-render-pipeline.js', 'src/gpu-preparation-queue.js', 'src/gpu-frame-pacer.js',
   'src/render-frame-state.js', 'src/program-preparation.js', 'tools/preparationpipelinetest.js'];
@@ -124,6 +125,35 @@ try {
     const f = fixture(), p = f.pipeline, pacer = p.startFramePacing();let calls = 0;
     const job = observe(p.prepare(() => ++calls));assert.equal(calls, 0);frameTick();await job.done;
     assert.equal(job.value, 1);assert.equal(p.frameState.sequence, 0);assert.equal(pacer.snapshot().stats.submitted, 1);assert.equal(f.syncs.length, 1);f.restored();
+  });
+  await test('prepared batch skips the direct gate and a late route change requires the direct gate before publication', () => {
+    const f=fixture(),p=f.pipeline,requests=[{}],seen=[];
+    let directReady=false;
+    Object.assign(p.volumePass,{enabled:true,lightBatchesEnabled:true,
+      requiredProgramRequests:()=>requests,usesPreparedLightBatch:()=>true,prefetchLightBatches(){}});
+    p.cloudProgramsEnabled=true;
+    p.cloudPrograms.ensure=config=>{
+      seen.push(config.requests);
+      return !config.requests.length||directReady;
+    };
+    f.hook('graph',()=>{
+      assert.equal(p.volumePass.requirePreparedLightBatch,true);
+      throw lightBatchNoLongerPrepared;
+    });
+    assert.equal(p.render(),false);
+    assert.equal(p.frameState.sequence,0);
+    assert.equal(p.frameState.pending,false);
+    assert.equal(p.volumePass.requirePreparedLightBatch,false);
+    f.restored();
+    assert.equal(p.render(),false);
+    assert.equal(p.frameState.sequence,0);
+    directReady=true;
+    assert.equal(p.render(),true);
+    assert.equal(p.frameState.sequence,1);
+    assert.equal(p.render(),true);
+    assert.equal(p.frameState.sequence,2);
+    assert.deepEqual(seen,[[],requests,requests,[]]);
+    f.restored();
   });
   await test('maintenance lets active foreground attempts run first rather than adding a second submission', async () => {
     const f = fixture(), p = f.pipeline;p.render();const job = observe(p.prepare(() => 'ready'));

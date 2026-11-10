@@ -6,6 +6,7 @@ const fullscreen=/* glsl */`
   varying vec3 vDirection,vViewDirection;
   void main(){vDirection=vec3(0,1,0);vViewDirection=vec3(0,0,-1);gl_Position=vec4(position.xy,0,1);}
 `;
+const programSignature=material=>JSON.stringify(Object.keys(material.defines).sort().map(name=>[name,material.defines[name]]));
 
 // Owns one synchronous command sequence and scratch pages, never prior-frame
 // light data. Render never reads back, waits, or schedules asynchronous work;
@@ -35,9 +36,8 @@ export class CloudLightBatchRenderer {
     const plan=planCloudLightBatches({...options,legacyRadiance:this.legacyRadiance});
     // One bounded program family, keyed by every source property used below.
     // Owner identity and texture sizes are uniform data, not shader variants.
-    const signature=JSON.stringify(Object.keys(material.defines).sort().map(name=>[name,material.defines[name]]));
-    if(this.fragment!==material.fragmentShader||this.vertex!==material.vertexShader||this.signature!==signature
-      ||this.side!==material.side||this.premultipliedAlpha!==material.premultipliedAlpha) {
+    const signature=programSignature(material);
+    if(!this.matchesProgramSource(material,signature)) {
       this.cancelPreparation?.();
       this.releaseScratch();this.materials.forEach(shader=>shader.dispose());this.materials=[];
       this.fragment=material.fragmentShader;this.vertex=material.vertexShader;this.signature=signature;
@@ -58,6 +58,11 @@ export class CloudLightBatchRenderer {
       Object.assign(shader.uniforms,material.uniforms,this.page);
     }
     this.source=material;
+  }
+
+  matchesProgramSource(material,signature=programSignature(material)) {
+    return this.fragment===material.fragmentShader&&this.vertex===material.vertexShader&&this.signature===signature
+      &&this.side===material.side&&this.premultipliedAlpha===material.premultipliedAlpha;
   }
 
   createTargets({width,height,tilesX,tilesY,metadata,light,beamBytes}) {

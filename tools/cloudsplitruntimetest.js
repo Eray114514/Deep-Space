@@ -45,11 +45,15 @@ const supplyOption = process.argv.find(arg => arg.startsWith('--supply-rows='));
 const supplyRows = supplyOption ? Number(supplyOption.split('=')[1]) : null;
 assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the runtime batch. Pass --supply-rows=0.');
 const runDescent = process.argv.includes('--descent');
+const nearBatches=process.argv.includes('--near-batches');
 const stagedNearFrame = process.argv.includes('--staged-near-frame');
 const stagedMode=process.argv.find(arg=>arg.startsWith('--staged-near-mode='))?.split('=')[1]??'scissor';
 const stagedFreezeDepth=process.argv.includes('--staged-near-freeze-depth');
+const stagedPrimeBatch=process.argv.includes('--staged-near-prime-batch');
+const stagedMicroBatch=process.argv.includes('--staged-near-micro-batch');
 assert.ok(!stagedNearFrame||!runDescent,'Staged near frame uses a single frozen pose');
 assert.ok(['scissor','fragment','batch'].includes(stagedMode),'Unknown staged near mode');
+assert.ok(!(stagedPrimeBatch||stagedMicroBatch)||stagedNearFrame&&stagedMode==='batch','First-use proof requires a staged batch');
 const dayDescent = process.argv.includes('--day-descent');
 const pacedDescent = process.argv.includes('--paced-descent');
 const nearTiles = process.argv.includes('--near-tiles');
@@ -109,6 +113,8 @@ assert.ok(!dayDescent || runDescent && !fixedWeather,'--day-descent requires nat
 assert.ok(!nearTiles || pacedDescent, '--near-tiles requires --paced-descent');
 assert.ok(!nearScaleCap || pacedDescent && viewport.width===2560 && !nearTiles,
   '--near-scale-cap requires paced 2K descent without banding');
+assert.ok(!nearBatches||runDescent&&dayDescent&&pacedDescent&&!nearTiles&&!nearScaleCap&&!nearWorkProbe,
+  '--near-batches requires an unscaled paced daytime descent without another probe');
 assert.ok(!nearBinsArg || dayDescent && nearScaleCap && [4,8].includes(nearBins),
   '--near-bins accepts 4 or 8 for the daytime 2K scale experiment');
 assert.ok(!nearWorkProbe || dayDescent && pacedDescent && viewport.width===960 && !nearTiles,
@@ -312,7 +318,8 @@ try {
     const result=await page.evaluate(async options=>{
       const {verifyStagedNearFrame}=await import('/tools/staged-near-frame.js');
       return verifyStagedNearFrame(NMS,options);
-    },{compareWhole:viewport.width<1000,mode:stagedMode,freezeDepth:stagedFreezeDepth});
+    },{compareWhole:viewport.width<1000,mode:stagedMode,freezeDepth:stagedFreezeDepth,
+      primeBatch:stagedPrimeBatch,microBatch:stagedMicroBatch});
     staged=result;
     console.log(JSON.stringify({staged}));
     assert.ok(result.passed,'Staged near frame changed native HDR');
@@ -331,7 +338,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearBatches,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -340,6 +347,7 @@ try {
       const land = new THREE.Vector3(...coast.landward);
       const landmark = new THREE.Vector3(...coast.direction).addScaledVector(land, 2000/planet.R).normalize();
       const pipeline = NMS._pipeline, volume = pipeline.volumePass;
+      if(nearBatches)volume.setLightBatchesEnabled(true,{budgetBytes:32*1024*1024});
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
@@ -408,6 +416,11 @@ try {
             history:volume.resolveMaterial.uniforms.uHistoryValid.value,
             lightCache:planet.volCloudMat.uniforms.uSunCacheReady.value,
             lightBins:planet.volCloudMat.uniforms.uLightQuadratureSteps.value,
+            batch:nearBatches?{prefetch:volume.lightBatchPrefetch?.state,
+              submitted:!far&&volume.lightBatchStatus.submitted,
+              reason:far?null:volume.lightBatchStatus.reason,
+              residentBytes:volume.lightBatch?.plan.residentBytes,
+              submissions:volume.lightBatch?.submissions??0}:undefined,
             sunCosine:dayDescent?landmark.dot(planet.sunDirLocal):undefined });
           if(cachePose&&!cachePose.finished) {
             cachePose.finished=true;
@@ -427,7 +440,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearBatches,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
@@ -441,6 +454,11 @@ try {
       quadrature:nearWorkProbe?await window.__nearQuadrature.finish():undefined,
       profile:NMS._pipeline.performanceSnapshot(),pacing:NMS._pipeline.framePacer?.snapshot()}),nearWorkProbe);
     assert.ok(descent.done && descent.rows.some(row => row.route === 'near'));
+    if(nearBatches) {
+      assert.ok(descent.rows.some(row=>row.route!=='near'&&row.batch.prefetch==='ready'),'Batch programs were not ready before the near transition');
+      assert.ok(descent.rows.filter(row=>row.route==='near').every(row=>row.batch.submitted&&row.lightBins===16),
+        'The actual near view used a fallback or changed the production quadrature');
+    }
     if(nearWorkProbe==='traversal'||nearReplay==='prefix') {
       assert.ok(descent.quadrature.rows.every(row=>row.error.changed===0),'Near traversal changed the native HDR');
       if(nearReplay==='prefix') assert.ok(descent.quadrature.rows.every(row=>row.error.nonempty>0),

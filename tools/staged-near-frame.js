@@ -14,7 +14,7 @@ ${start}`).replace(ray,`${ray}
 
 // Freeze one real draw at the first near-cloud pose. Preparation jobs retire
 // one scissor band each, without publishing partial volume or changing bins.
-export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false}={}) {
+export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, gl=renderer.getContext();
   const timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -137,6 +137,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     async function drawPartition(bands,program=material,batched=false) {
       const first=queries.length, stride=Math.ceil(height/(bands*2))*2;
       const started=performance.now();
+      const cpuMs=[];
       let previousCompleted;
       for(let y=0;y<height;y+=stride) {
         await pipeline.prepare(()=>{
@@ -163,12 +164,16 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
             }
             renderer.setRenderTarget(target);
             const query=gl.createQuery();queries.push(query);gl.beginQuery(timer.TIME_ELAPSED_EXT,query);
+            const submitStarted=performance.now();
             try {
               if(batched) {
                 if(!batch.render(renderer,snapshot.camera,snapshot.mesh,target))throw Error('Frozen cloud batch did not submit');
               } else render.call(renderer,snapshot.scene,snapshot.camera);
             }
-            finally {if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);}
+            finally {
+              cpuMs.push(performance.now()-submitStarted);
+              if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);
+            }
             if(gl.getError()!==gl.NO_ERROR)throw Error('Staged near band generated a WebGL error');
           } finally {
             target.scissorTest=false;renderer.autoClear=auto;
@@ -189,7 +194,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       let programLabel='unmodified';
       if(batched)programLabel='batch';
       else if(program.uniforms.uStagedBand)programLabel='fragment';
-      cases.push({bands,program:programLabel,submissions:gpuMs.length,gpuMs,wallMs:performance.now()-started});
+      cases.push({bands,program:programLabel,submissions:gpuMs.length,gpuMs,cpuMs,wallMs:performance.now()-started});
       return pixels;
     }
     const half=T.DataUtils.fromHalfFloat;
@@ -205,7 +210,8 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       }
       return {changed,alpha,nonempty,maximum,nonfinite};
     }
-    let comparisons, preparationMs;
+    let comparisons, preparationMs, micro;
+    const primed=[];
     if(mode==='batch') {
       batch=new CloudLightBatchRenderer(material,{width,height,budgetBytes:32*1024*1024,
         maxTextureSize:renderer.capabilities.maxTextureSize});
@@ -216,6 +222,47 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
         {label:'frozen-cloud-batch-programs'});
       preparationMs=performance.now()-start;
       if(!ready)throw Error('Frozen cloud batch preparation: '+batch.preparationError);
+      if(primeBatch)for(const stage of batch.materials) {
+        await pipeline.prepare(()=>{
+          const program=renderer.properties.get(stage).currentProgram;
+          if(!program?.program||gl.isContextLost())throw Error('Frozen program was retired before reflection');
+          const started=performance.now();
+          program.getUniforms();
+          primed.push({stage:stage.name,cpuMs:performance.now()-started});
+        },{label:'frozen-cloud-batch-reflection'});
+      }
+      if(microBatch) {
+        const started=performance.now();
+        let query, submitted;
+        await pipeline.prepare(()=>{
+          const tileCount=batch.plan.tileCount;
+          const raw=renderer.render;
+          renderer.render=function(scene,camera) {
+            const target=this.getRenderTarget(), oldScissor=target.scissor.clone(), oldTest=target.scissorTest;
+            try {
+              target.scissor.set(0,0,Math.min(16,target.width),Math.min(16,target.height));
+              target.scissorTest=true;this.setRenderTarget(target);
+              return raw.call(this,scene,camera);
+            } finally {target.scissor.copy(oldScissor);target.scissorTest=oldTest;this.setRenderTarget(target);}
+          };
+          batch.plan.tileCount=1;
+          snapshot.mesh.material=material;
+          query=gl.createQuery();queries.push(query);gl.beginQuery(timer.TIME_ELAPSED_EXT,query);
+          const submitStarted=performance.now();
+          try {
+            if(!batch.render(renderer,snapshot.camera,snapshot.mesh,target))throw Error('Micro batch did not submit');
+          } finally {
+            submitted=performance.now()-submitStarted;
+            if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);
+            renderer.render=raw;batch.plan.tileCount=tileCount;
+          }
+          if(gl.getError()!==gl.NO_ERROR)throw Error('Micro batch generated a WebGL error');
+        },{label:'frozen-cloud-batch-micro-draw'});
+        await pipeline.prepare(()=>{
+          if(!gl.getQueryParameter(query,gl.QUERY_RESULT_AVAILABLE))throw Error('Micro batch retirement proof unavailable');
+          micro={cpuMs:submitted,gpuMs:gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6,wallMs:performance.now()-started};
+        },{label:'frozen-cloud-batch-micro-retired'});
+      }
       const second=await drawPartition(1,material,true);
       const firstRepeat=await drawPartition(bands,reference), secondRepeat=await drawPartition(1,material,true);
       comparisons={batch:compare(first,second),firstControl:compare(first,firstRepeat),
@@ -230,7 +277,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     }
     if(gl.isContextLost()||gl.getError()!==gl.NO_ERROR||readGpuDisjointEpoch(gl,timer)!==epoch||!sameInputs())
       throw Error('Staged GPU proof lost its input or measurement epoch');
-    return {...input,history:undefined,sunCosine:best.cosine,mode,cases,comparisons,preparationMs,batch:batch?.plan,
+    return {...input,history:undefined,sunCosine:best.cosine,mode,cases,comparisons,preparationMs,primed,micro,batch:batch?.plan,
       passed:Object.entries(comparisons).every(([key,row])=>!row.nonfinite&&row.nonempty>0
         &&(key==='batch'?row.alpha===0&&row.maximum<=.002:row.changed===0))};
   } finally {

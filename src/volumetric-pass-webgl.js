@@ -16,6 +16,7 @@ import { RenderFrameState } from './render-frame-state.js';
 import { volumeHistoryGLSL } from './volume-history-glsl.js';
 
 export const VOLUME_LAYER = 2;
+export const lightBatchNoLongerPrepared = Symbol('light-batch-no-longer-prepared');
 
 const _clear = new THREE.Color();
 const _savedClear = new THREE.Color();
@@ -251,6 +252,7 @@ export class VolumetricPass extends Pass {
   }
 
   setActivePlanet(planet, nav, motion = 0) {
+    if(this.activePlanet!==planet)this.lightBatchPrefetch=null;
     if (!planet?.volCloudMesh) {
       if(this.activePlanet)this.columnRelease.set(this.activePlanet,this.frame+2);
       this.activePlanet = null;
@@ -291,6 +293,7 @@ export class VolumetricPass extends Pass {
       &&Object.keys(next).every(name=>next[name]===this.lightBatchOptions[name]))return;
     this.lightBatchesEnabled=!!enabled;
     this.lightBatchOptions=next;
+    this.lightBatchPrefetch=null;
     if(!enabled)this.releaseLightBatches();
     else this.lightBatch?.releaseScratch();
     this.lightBatchStatus={reason:enabled?'pending':'disabled',submitted:false};
@@ -298,36 +301,92 @@ export class VolumetricPass extends Pass {
   }
 
   releaseLightBatches() {
+    this.lightBatchPrefetch=null;
     this.lightBatch?.dispose();this.lightBatch=null;
   }
 
-  renderLightBatches(renderer) {
-    const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=mesh?.material;
-    const refuse=reason=>{
-      if(reason==='disabled')this.releaseLightBatches();else this.lightBatch?.releaseScratch();
-      this.lightBatchStatus={reason,submitted:false};return false;
-    };
-    if(!this.lightBatchesEnabled)return refuse('disabled');
+  configureLightBatch(renderer,material) {
+    const gl=renderer.getContext();
+    if(gl.getParameter(gl.MAX_DRAW_BUFFERS)<4||!gl.getExtension('EXT_color_buffer_float'))return null;
+    const options={...this.lightBatchOptions,width:this.width,height:this.height,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)};
+    if(!this.lightBatch)this.lightBatch=new CloudLightBatchRenderer(material,options);
+    else this.lightBatch.configure(material,options);
+    return this.lightBatch;
+  }
+
+  prefetchLightBatches(renderer,origin,prepare) {
+    if(!this.lightBatchesEnabled)return;
+    const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=planet?.volCloudMat;
+    const distance=planet&&origin?origin.distanceTo(planet.posUniv)-this.radius:Infinity;
+    if(distance>800000||!mesh?.visible||material?.defines.PRODUCTION_CLOUD_MEDIUM!==1
+      ||material.uniforms.uLightQuadratureSteps.value!==16) {
+      if(this.lightBatchPrefetch) {
+        this.lightBatchPrefetch=null;
+        this.lightBatch?.releaseScratch();
+      }
+      return;
+    }
+    if(distance<=200000)return;
+    if(this.lightBatchPrefetch?.planet===planet&&this.lightBatchPrefetch.material===material)return;
+    const claim={planet,material,state:'queued'};
+    this.lightBatchPrefetch=claim;
+    const current=()=>this.lightBatchesEnabled&&this.lightBatchPrefetch===claim
+      &&this.activePlanet===planet&&planet.volCloudMat===material;
+    prepare(()=>{
+      claim.state='preparing';
+      const batch=this.configureLightBatch(renderer,material);
+      if(!batch||batch.plan.direct)return false;
+      return batch.programsReady||batch.prepareAsync(renderer,this.camera,mesh,this.current);
+    },{isCurrent:current,label:'near-cloud-batch-prefetch'}).then(ready=>{
+      if(current())claim.state=ready?'ready':'unavailable';
+    }).catch(error=>{
+      if(current()) {claim.state='failed';claim.error=String(error);}
+    });
+  }
+
+  lightBatchRefusal(planet,mesh,material) {
+    if(!this.lightBatchesEnabled)return 'disabled';
     if(!mesh?.visible||material!==planet.volCloudMat||material.defines.PRODUCTION_CLOUD_MEDIUM!==1
-      ||material.defines.CLOUD_FAR_VIEW||material.uniforms.uLightQuadratureSteps.value!==16)return refuse('representation');
+      ||material.defines.CLOUD_FAR_VIEW||material.uniforms.uLightQuadratureSteps.value!==16)return 'representation';
     if(mesh.onBeforeRender!==THREE.Object3D.prototype.onBeforeRender
       ||mesh.onAfterRender!==THREE.Object3D.prototype.onAfterRender
       ||material.onBeforeRender!==THREE.Material.prototype.onBeforeRender
       ||material.onBeforeCompile!==THREE.Material.prototype.onBeforeCompile
       ||this.scene.onBeforeRender!==THREE.Object3D.prototype.onBeforeRender
-      ||this.scene.onAfterRender!==THREE.Object3D.prototype.onAfterRender)return refuse('custom-render-callback');
+      ||this.scene.onAfterRender!==THREE.Object3D.prototype.onAfterRender)return 'custom-render-callback';
     let owners=0,foreign=false;
     this.scene.traverseVisible(object=>{
-      if(!(object.isMesh||object.isLine||object.isPoints||object.isSprite)||!object.layers.test(this.camera.layers))return;
+      if(!(object.isMesh||object.isLine||object.isPoints||object.isSprite)||!object.layers.isEnabled(VOLUME_LAYER))return;
       owners++;if(object!==mesh)foreign=true;
     });
-    if(owners!==1||foreign)return refuse('multiple-volume-owners');
-    const gl=renderer.getContext();
-    if(gl.getParameter(gl.MAX_DRAW_BUFFERS)<4||!gl.getExtension('EXT_color_buffer_float'))return refuse('capabilities');
-    const options={...this.lightBatchOptions,width:this.width,height:this.height,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)};
-    if(!this.lightBatch) {
-      this.lightBatch=new CloudLightBatchRenderer(material,options);
-    } else this.lightBatch.configure(material,options);
+    return owners!==1||foreign?'multiple-volume-owners':null;
+  }
+
+  usesPreparedLightBatch(requests) {
+    if(requests.length!==1||!this.lightBatchesEnabled)return false;
+    const {mesh,material}=requests[0], planet=this.activePlanet;
+    return Boolean(planet&&mesh===planet.volCloudMesh&&material===planet.volCloudMat
+      &&this.hasPreparedLightBatch(mesh,material)&&!this.lightBatchRefusal(planet,mesh,material));
+  }
+
+  hasPreparedLightBatch(mesh,material) {
+    const batch=this.lightBatch;
+    return batch?.programsReady&&batch.source===material&&batch.mesh.geometry===mesh.geometry
+      &&batch.targets.length>0&&batch.plan.width===this.width&&batch.plan.height===this.height
+      &&batch.matchesProgramSource(material);
+  }
+
+  renderLightBatches(renderer) {
+    const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=mesh?.material;
+    const refuse=reason=>{
+      if(reason==='disabled')this.releaseLightBatches();
+      else if(reason!=='representation'||this.lightBatchPrefetch?.planet!==planet)this.lightBatch?.releaseScratch();
+      this.lightBatchStatus={reason,submitted:false};return false;
+    };
+    const refusal=this.lightBatchRefusal(planet,mesh,material);
+    if(refusal)return refuse(refusal);
+    if(this.requirePreparedLightBatch&&!this.hasPreparedLightBatch(mesh,material))return false;
+    if(!this.configureLightBatch(renderer,material))return refuse('capabilities');
     if(!this.lightBatch.plan.direct&&!this.lightBatch.programsReady) {
       if(!this.lightBatch.preparationError)this.lightBatch.prepareAsync(renderer,this.camera,mesh,this.current);
       this.lightBatchStatus={reason:this.lightBatch.preparationError?'preparation-error':'preparing',submitted:false,
@@ -473,6 +532,7 @@ export class VolumetricPass extends Pass {
   setSize(width, height) {
     const nextWidth=Math.max(1,Math.round(width*this.scale)),nextHeight=Math.max(1,Math.round(height*this.scale));
     if(nextWidth!==this.width||nextHeight!==this.height) {
+      this.lightBatchPrefetch=null;
       this.lightBatch?.releaseScratch();
       this.farSplit?.releaseScratch();
     }
@@ -573,7 +633,10 @@ export class VolumetricPass extends Pass {
       this.profilePhase('volume-current',()=>{
         renderer.clear(true, false, false);
         splitDraw = this.farSplit?.render(this.scene, this.camera, this.current, this.columnMaps.get(planet)) ?? false;
-        if(!splitDraw && !this.renderLightBatches(renderer))renderer.render(this.scene, this.camera);
+        if(!splitDraw && !this.renderLightBatches(renderer)) {
+          if(this.requirePreparedLightBatch)throw lightBatchNoLongerPrepared;
+          renderer.render(this.scene, this.camera);
+        }
       });
 
       this.camera.layers.mask = oldMask;
