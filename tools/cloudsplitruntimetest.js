@@ -61,11 +61,15 @@ assert.ok(!replayOption||['prefix','blocks'].includes(nearReplay),'Choose prefix
 const nearEmptyRuns = process.argv.includes('--compare-near-empty-runs=r16')?'r16'
   :process.argv.includes('--compare-near-empty-runs')?'rg16':null;
 const nearTraversalCache = process.argv.includes('--near-traversal-cache');
-assert.ok(!nearTraversalCache||compareNearTraversal||nearReplay||nearEmptyRuns,'--near-traversal-cache requires a traversal comparison');
-assert.ok([compareNearBins,compareNearPaths,compareNearResidual,compareNearTraversal,nearReplay,nearEmptyRuns].filter(Boolean).length<=1,
+const nearCachePair = process.argv.includes('--near-cache-pair');
+const nearCacheSupport = process.argv.includes('--near-cache-support');
+assert.ok(!nearCachePair||nearTraversalCache&&nearEmptyRuns==='r16','--near-cache-pair requires R16 empty runs and --near-traversal-cache');
+assert.ok(!nearCacheSupport||nearTraversalCache,'--near-cache-support requires --near-traversal-cache');
+assert.ok(!nearTraversalCache||compareNearTraversal||nearReplay||nearEmptyRuns||nearCacheSupport,'--near-traversal-cache requires a traversal comparison');
+assert.ok([compareNearBins,compareNearPaths,compareNearResidual,compareNearTraversal,nearReplay,nearEmptyRuns,nearCacheSupport].filter(Boolean).length<=1,
   'Select one near workload probe');
 const nearWorkProbe=compareNearBins?'bins':compareNearPaths?'paths':compareNearResidual?'residual'
-  :compareNearTraversal?'traversal':nearReplay?'replay':nearEmptyRuns?'empty-runs':null;
+  :compareNearTraversal?'traversal':nearReplay?'replay':nearEmptyRuns?'empty-runs':nearCacheSupport?'cache-support':null;
 const traceDescent = process.argv.includes('--near-trace');
 const nearTrace = traceDescent || auditRestore || forceRecovery || pacedDescent;
 const skipResize = process.argv.includes('--skip-resize');
@@ -290,7 +294,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -320,10 +324,11 @@ try {
         const {installNearVolumeTiles} = await import('/tools/near-volume-tiles.js');
         state.tiles = installNearVolumeTiles(NMS,{verify:verifyTiles});
       }
-      if(['residual','traversal','replay','empty-runs'].includes(nearWorkProbe)) {
+      if(['residual','traversal','replay','empty-runs','cache-support'].includes(nearWorkProbe)) {
         const {observeNearResidual} = await import('/tools/near-cloud-residual.js');
         window.__nearQuadrature = await observeNearResidual(NMS,{traversal:nearWorkProbe==='traversal',
-          replay:nearReplay,emptyRuns:nearEmptyRuns,maximumAltitude:probeAltitude,cloudyCache:nearTraversalCache});
+          replay:nearReplay,emptyRuns:nearEmptyRuns,maximumAltitude:probeAltitude,cloudyCache:nearTraversalCache,
+          cachePair:nearCachePair,cacheSupport:nearWorkProbe==='cache-support'});
       } else if(nearWorkProbe) {
         const {observeNearQuadrature} = await import('/tools/near-cloud-quadrature.js');
         window.__nearQuadrature = observeNearQuadrature(NMS,{paths:nearWorkProbe==='paths'});
@@ -380,7 +385,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target

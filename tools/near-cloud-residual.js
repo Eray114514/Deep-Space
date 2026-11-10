@@ -4,6 +4,8 @@ import { VOLUME_LAYER } from '../src/render-layers.js';
 import { readGpuDisjointEpoch } from '../src/gpu-query-state.js';
 import { nearReplayShader } from './near-cloud-replay.js';
 import { createEmptyRunProbe, emptyRunShader } from './near-cloud-empty-runs.js';
+import { nearCacheCountsShader, sumNearCacheCounts } from './near-cloud-cache-counts.js';
+import { nearAnchorSupportShader, nearAnchorSupportSummary } from './near-cloud-anchor-support.js';
 
 const runtimeOpacityExit=`          if(pass==0) {
             totalOpacity=1.0-T;
@@ -61,7 +63,7 @@ function difference(a,b,half) {
   return {changed,alpha,maximum,nonempty};
 }
 
-export async function observeNearResidual(game,{traversal=false,replay=null,emptyRuns=null,maximumAltitude=230000,cloudyCache=false}={}) {
+export async function observeNearResidual(game,{traversal=false,replay=null,emptyRuns=null,maximumAltitude=230000,cloudyCache=false,cachePair=false,cacheSupport=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, owner=pass.activePlanet, mesh=owner.volCloudMesh, original=owner.volCloudMat;
   const gl=renderer.getContext(), timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -76,13 +78,22 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
     :traversal?baseline:residualShader(baseline);
   const emptyRunProbe=emptyRuns?createEmptyRunProbe(T,gl,emptyRuns):null;
   Object.assign(material.uniforms,original.uniforms,{uNearResidualMode:{value:0},uNearTraversalMask:{value:0}});
+  const counter=cachePair||cacheSupport?new T.ShaderMaterial().copy(Object.assign(Object.create(original),{uniforms:{}})):null;
+  if(counter) {
+    counter.fragmentShader=cacheSupport?nearAnchorSupportShader(fragment):nearCacheCountsShader(fragment);
+    counter.blending=T.NoBlending;
+    Object.assign(counter.uniforms,original.uniforms);
+  }
   const target=new T.WebGLRenderTarget(pass.width,pass.height,{type:T.HalfFloatType,depthBuffer:false});
   const proxy=new T.Mesh(mesh.geometry,material);
   proxy.layers.set(VOLUME_LAYER);
   const camera=createCompileCamera(pass.camera,VOLUME_LAYER), half=T.DataUtils.fromHalfFloat;
   const profile=pass.profilePhase, queries=[], rows=[];
   const directComparison=traversal||replay||emptyRuns;
-  const arms=directComparison?[
+  const arms=cacheSupport?[{name:'anchor-support'}]:cachePair?[
+    {name:'cache-pair-1',full:true},{name:'cache-pair-2',full:true},
+    {name:'cache-pair-3',full:true},{name:'cache-pair-4',full:true},
+  ]:directComparison?[
     {name:'zero-1'},{name:'zero-2'},{name:'zero-3'},{name:'zero-4'},
     {name:'full-1',full:true},{name:'full-2',full:true},{name:'full-3',full:true},
   ]:[
@@ -109,9 +120,10 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
     finally {if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);}
     return query;
   }
-  function draw(pointMaterial,{mode=0,mask=0,paths=0}={}) {
+  function draw(pointMaterial,{mode=0,mask=0,paths=0,cache,measure=true}={}) {
     const uniforms=pointMaterial.uniforms;
-    if(pointMaterial!==original) {
+    if(pointMaterial===counter)Object.assign(uniforms,original.uniforms);
+    if(pointMaterial===material) {
       Object.assign(uniforms,original.uniforms);
       uniforms.uNearResidualMode.value=mode;
       uniforms.uNearTraversalMask.value=mask;
@@ -123,14 +135,18 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
     const previous=mesh.material, saved=renderer.getRenderTarget(),auto=renderer.autoClear;
     const face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
     const count=uniforms.uLightPathCount, oldCount=count.value;
+    const ready=uniforms.uSunCacheReady, oldReady=ready.value;
     try {
+      if(cache!==undefined)ready.value=cache;
       count.value=paths;pointMaterial.uniformsNeedUpdate=true;
       mesh.material=pointMaterial;renderer.autoClear=false;
       renderer.setRenderTarget(target);renderer.clear(true,false,false);
-      const query=time(()=>renderer.render(pass.scene,pass.camera));
+      const render=()=>renderer.render(pass.scene,pass.camera);
+      const query=measure?time(render):null;
+      if(!measure)render();
       return {query,pixels:read(target)};
     } finally {
-      count.value=oldCount;pointMaterial.uniformsNeedUpdate=true;
+      count.value=oldCount;ready.value=oldReady;pointMaterial.uniformsNeedUpdate=true;
       mesh.material=previous;renderer.autoClear=auto;renderer.setRenderTarget(saved,face,mip);
     }
   }
@@ -161,6 +177,44 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
         ||original.uniforms.uLightPathCount.value!==4||original.uniforms.uLightQuadratureSteps.value!==16)
         throw Error('Near residual frame lost its original draw contract');
       const published=read(current);
+      if(cacheSupport) {
+        const support=nearAnchorSupportSummary(draw(counter,{paths:4,measure:false}).pixels,half,owner);
+        const control=difference(published,read(current),half);
+        if(control.changed||control.nonempty!==support.occupiedRays)
+          throw Error(`Near anchor support lost its native mask count ${JSON.stringify({control,support})}`);
+        rows.push({arm:arm.name,eyeAltitude,frame:pass.frame,support,control});
+        return result;
+      }
+      if(cachePair) {
+        if(!liveQuery)throw Error('Missing production cache-pair GPU query');
+        const controlPixels=draw(original,{paths:4,measure:false}).pixels;
+        const preflight=difference(published,controlPixels,half);
+        if(preflight.changed)throw Error(`Near cache native preflight drift before any overrides ${JSON.stringify(preflight)}`);
+        const order=[['cached-native','cached-packed','raw-packed','raw-native'],
+          ['cached-packed','cached-native','raw-native','raw-packed'],
+          ['raw-native','raw-packed','cached-packed','cached-native'],
+          ['raw-packed','raw-native','cached-native','cached-packed']][rows.length];
+        const samples=new Map(order.map(key=>[key,draw(key.endsWith('native')?original:material,
+          {paths:4,cache:Number(key.startsWith('cached'))})]));
+        const cachedReference=samples.get('cached-native'),cached=samples.get('cached-packed');
+        const uncachedReference=samples.get('raw-native'),uncachedCandidate=samples.get('raw-packed');
+        const counts=sumNearCacheCounts(draw(counter,{paths:4,measure:false}).pixels,half);
+        const control=!rows.length?sumNearCacheCounts(draw(counter,{paths:4,cache:0,measure:false}).pixels,half):null;
+        if(control&&(control.rays!==counts.rays||control.hits.some((hit,field)=>hit||control.misses[field]!==counts.hits[field]+counts.misses[field])))
+          throw Error('Near cache count did not conserve queries with cache off');
+        if(difference(published,read(current),half).changed||original.uniforms.uSunCacheReady.value!==1)
+          throw Error('Near cache pair changed production state');
+        const publishedControl=difference(published,cachedReference.pixels,half);
+        if(publishedControl.changed||publishedControl.nonempty!==counts.rays)
+          throw Error(`Near cache pair lost its native control after overrides ${JSON.stringify({order,publishedControl,counts})}`);
+        rows.push({arm:arm.name,frame:pass.frame,eyeAltitude,counts,control,order,publishedControl,
+          cachedError:difference(cachedReference.pixels,cached.pixels,half),
+          uncachedError:difference(uncachedReference.pixels,uncachedCandidate.pixels,half),
+          cacheDifference:difference(published,uncachedReference.pixels,half),
+          liveQuery,referenceQuery:cachedReference.query,candidateQuery:cached.query,
+          uncachedReferenceQuery:uncachedReference.query,uncachedCandidateQuery:uncachedCandidate.query});
+        return result;
+      }
       const reference=arm.full?{pixels:published,query:liveQuery}:draw(original);
       const variantReference=!directComparison&&!arm.full&&!arm.native?draw(material):null;
       const candidate=draw(arm.native?original:material,{mode:arm.mode,mask:arm.mask,paths:arm.full?4:0});
@@ -182,15 +236,16 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
   }
   const start=performance.now();
   try {
-    await pipeline.prepare(()=>{
+    for(const program of cacheSupport?[counter]:counter?[material,counter]:[material])await pipeline.prepare(()=>{
       const previous=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
+      proxy.material=program;
       renderer.setRenderTarget(target);
       try {return compilePrograms(renderer,proxy,camera,pass.scene);}
       finally {renderer.setRenderTarget(previous,face,mip);}
-    },{label:'near-residual'});
+    },{label:program===counter?'near-cache-counts':'near-residual'});
     epoch=readGpuDisjointEpoch(gl,timer);
     pass.profilePhase=hook;
-  } catch(error) {material.dispose();target.dispose();throw error;}
+  } catch(error) {material.dispose();target.dispose();counter?.dispose();throw error;}
   const prepareMs=performance.now()-start;
   return {
     get done() {return rows.length===arms.length||Boolean(failure);},
@@ -205,13 +260,14 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
         }
         if(readGpuDisjointEpoch(gl,timer)!==epoch)throw Error('Near residual timer became disjoint');
         const ms=query=>query?gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6:null;
-        return {prepareMs,optimized,traversal,replay,emptyRuns:emptyRunProbe?.stats(),cloudyCache,dimensions:[target.width,target.height],
-          rows:rows.map(({referenceQuery,candidateQuery,variantQuery,...row})=>({...row,
-            referenceGpuMs:ms(referenceQuery),variantGpuMs:ms(variantQuery),gpuMs:ms(candidateQuery)}))};
+        return {prepareMs,optimized,traversal,replay,emptyRuns:emptyRunProbe?.stats(),cloudyCache,cachePair,cacheSupport,dimensions:[target.width,target.height],
+          rows:rows.map(({referenceQuery,candidateQuery,variantQuery,uncachedReferenceQuery,uncachedCandidateQuery,liveQuery,...row})=>({...row,
+            referenceGpuMs:ms(referenceQuery),variantGpuMs:ms(variantQuery),gpuMs:ms(candidateQuery),
+            ...(cachePair?{liveGpuMs:ms(liveQuery),uncachedReferenceGpuMs:ms(uncachedReferenceQuery),uncachedGpuMs:ms(uncachedCandidateQuery)}:{})}))};
       } finally {
         if(pass.profilePhase===hook)pass.profilePhase=profile;
         if(!gl.isContextLost())for(const query of queries)gl.deleteQuery(query);
-        target.dispose();material.dispose();emptyRunProbe?.dispose();
+        target.dispose();material.dispose();counter?.dispose();emptyRunProbe?.dispose();
       }
     },
   };
