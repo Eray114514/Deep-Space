@@ -13,6 +13,10 @@ const forceRecovery = process.argv.includes('--force-recovery');
 const farStageTiming = process.argv.includes('--far-stage-timing');
 const farLightSupport = process.argv.includes('--far-light-support');
 const farLightTile = process.argv.includes('--far-light-tile');
+const farLightRepresentation = process.argv.includes('--far-light-representation');
+const farLightEncoded = process.argv.includes('--far-light-encoded');
+assert.ok(!farLightEncoded||farLightRepresentation,'--far-light-encoded requires --far-light-representation');
+assert.ok(!farLightRepresentation||farLightTile,'--far-light-representation requires --far-light-tile');
 const spacingArg = process.argv.find(arg=>arg.startsWith('--far-light-spacing='));
 const farLightSpacing = spacingArg ? Number(spacingArg.split('=')[1]) : 200;
 assert.ok(!spacingArg || farLightTile && [100,200].includes(farLightSpacing),
@@ -46,6 +50,9 @@ const nearScaleCap = process.argv.includes('--near-scale-cap');
 const nearBinsArg = process.argv.find(arg=>arg.startsWith('--near-bins='));
 const nearBins = nearBinsArg ? Number(nearBinsArg.split('=')[1]) : 16;
 const compareNearBins = process.argv.includes('--compare-near-bins');
+const compareNearPaths = process.argv.includes('--compare-near-paths');
+assert.ok(!(compareNearBins&&compareNearPaths),'Select one near workload probe');
+const nearWorkProbe=compareNearBins?'bins':compareNearPaths?'paths':null;
 const traceDescent = process.argv.includes('--near-trace');
 const nearTrace = traceDescent || auditRestore || forceRecovery || pacedDescent;
 const skipResize = process.argv.includes('--skip-resize');
@@ -59,8 +66,8 @@ assert.ok(!nearScaleCap || pacedDescent && viewport.width===2560 && !nearTiles,
   '--near-scale-cap requires paced 2K descent without banding');
 assert.ok(!nearBinsArg || dayDescent && nearScaleCap && [4,8].includes(nearBins),
   '--near-bins accepts 4 or 8 for the daytime 2K scale experiment');
-assert.ok(!compareNearBins || dayDescent && pacedDescent && viewport.width===960 && !nearTiles,
-  '--compare-near-bins requires paced 960×540 daytime descent');
+assert.ok(!nearWorkProbe || dayDescent && pacedDescent && viewport.width===960 && !nearTiles,
+  'Near workload probe requires paced 960×540 daytime descent');
 assert.ok(!forceRecovery || runDescent, '--force-recovery requires --descent');
 assert.ok(!audit || !auditRestore, 'Select one mode of native GL error attribution');
 const requireSupply = process.argv.includes('--require-supply');
@@ -202,10 +209,10 @@ try {
     assert.equal(lightSupport.gl,0);assert.equal(lightSupport.lost,false);
   }
   if (farLightTile) {
-    lightTile = await page.evaluate(async spacing => {
+    lightTile = await page.evaluate(async ({spacing,representation,encoded}) => {
       const {measureFarLightTile} = await import('/tools/cloud-far-light-tile.js');
-      return measureFarLightTile(NMS,spacing);
-    },farLightSpacing);
+      return measureFarLightTile(NMS,spacing,representation,encoded);
+    },{spacing:farLightSpacing,representation:farLightRepresentation,encoded:farLightEncoded});
     console.log(JSON.stringify({lightTile}));
     assert.equal(lightTile.gl,0);assert.equal(lightTile.lost,false);
   }
@@ -270,7 +277,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,compareNearBins}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -299,9 +306,9 @@ try {
         const {installNearVolumeTiles} = await import('/tools/near-volume-tiles.js');
         state.tiles = installNearVolumeTiles(NMS,{verify:verifyTiles});
       }
-      if(compareNearBins) {
+      if(nearWorkProbe) {
         const {observeNearQuadrature} = await import('/tools/near-cloud-quadrature.js');
-        window.__nearQuadrature = observeNearQuadrature(NMS);
+        window.__nearQuadrature = observeNearQuadrature(NMS,{paths:nearWorkProbe==='paths'});
       }
       const renderer = NMS._renderer;
       let index = 0, sequence = pipeline.frameState.sequence;
@@ -322,7 +329,7 @@ try {
       place(altitude);
       function observe(atMs) {
         if (pipeline.frameState.sequence !== sequence) {
-          if(compareNearBins && altitude<=230000 && !window.__nearQuadrature.done) {
+          if(nearWorkProbe && altitude<=230000 && !window.__nearQuadrature.done) {
             requestAnimationFrame(observe);return;
           }
           const far = planet.volCloudMesh.material === planet.volCloudFarMat;
@@ -346,7 +353,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,compareNearBins});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
@@ -356,9 +363,9 @@ try {
         'WebGL context lost during continuous descent');
       await page.screenshot({ path:`${out}/descent-${altitude}.png`, timeout:90000 });
     }
-    descent = await page.evaluate(async compareNearBins => ({...window.__splitDescent,
-      quadrature:compareNearBins?await window.__nearQuadrature.finish():undefined,
-      profile:NMS._pipeline.performanceSnapshot(),pacing:NMS._pipeline.framePacer?.snapshot()}),compareNearBins);
+    descent = await page.evaluate(async nearWorkProbe => ({...window.__splitDescent,
+      quadrature:nearWorkProbe?await window.__nearQuadrature.finish():undefined,
+      profile:NMS._pipeline.performanceSnapshot(),pacing:NMS._pipeline.framePacer?.snapshot()}),nearWorkProbe);
     assert.ok(descent.done && descent.rows.some(row => row.route === 'near'));
     if(dayDescent) assert.ok(descent.rows.every(row=>row.sunCosine>.5),'Descent left the daylight window');
     if (pacedDescent) assert.ok(descent.pacing.stats.completed>=60 && !descent.pacing.fault, JSON.stringify(descent.pacing));

@@ -1,6 +1,7 @@
 import { OwnedScreenTriangle } from '../src/owned-screen-triangle.js';
 import { createCloudSunSweepMaterial } from '../src/cloud/cloud-sun-programs.js';
 import { cloudSunCacheSamplingGLSL } from '../src/cloud/cloud-sun-cache.js';
+import { compareLightRepresentations, interpolateLightMidpoints } from './cloud-light-representation.js';
 
 const span=10;
 const names=['primary','secondary','outward','inward'];
@@ -57,20 +58,6 @@ export async function directFarLightGrid(T,renderer,cache,prepare) {
   } finally {quad.dispose();material.dispose();target.dispose();}
 }
 
-function interpolatedMidpoints(nodes) {
-  const values=[];
-  for(let k=1;k<span-2;k++)for(let y=0;y<span-1;y++)for(let x=0;x<span-1;x++) {
-    const plane=(layer)=>{
-      const a=(layer*span+y)*span+x;
-      return (nodes[a]+nodes[a+1]+nodes[a+span]+nodes[a+span+1])*.25;
-    };
-    const a=plane(k-1),b=plane(k),c=plane(k+1),d=plane(k+2),delta=c-b;
-    const tangent=slope=>Math.abs(delta)<.000001?0:Math.max(0,Math.min(3,slope/delta))*delta;
-    values.push(Math.max(0,(b+c)*.5+(tangent((c-a)*.5)-tangent((d-b)*.5))*.125));
-  }
-  return values;
-}
-
 function errorStats(a,b) {
   if(a.length!==b.length||!a.length)throw Error('Unmatched optical depth grid');
   const errors=[],transmission=[];
@@ -88,7 +75,7 @@ function errorStats(a,b) {
   return {samples:a.length,nonzero,tau:summary(errors),transmission:summary(transmission)};
 }
 
-export async function compareFarLightGrid(T,renderer,cache,{grid,fields},prepare) {
+export async function compareFarLightGrid(T,renderer,cache,{grid,fields},prepare,consumerMaterial) {
   if(!renderer.extensions.has('OES_texture_float_linear'))
     throw Error('Direct optical-depth atlas requires linear Float32 sampling');
   const pointCount=grid.nodes.length+grid.midpoints.length;
@@ -138,14 +125,17 @@ export async function compareFarLightGrid(T,renderer,cache,{grid,fields},prepare
       renderer.readRenderTargetPixels(target,0,0,width,height,output);
       return output;
     }),'far-light-grid-sampled');
-    return fields.map((direct,field)=>{
+    const swept=fields.map((_,field)=>{
+      const values=points.map((_,i)=>pixels[4*i+field]);
+      return {nodes:values.slice(0,grid.nodes.length),midpoints:values.slice(grid.nodes.length)};
+    });
+    const rows=fields.map((direct,field)=>{
       if(!direct)return {field:names[field],available:false};
-      const sampled=points.map((_,i)=>pixels[4*i+field]);
-      const nodes=sampled.slice(0,grid.nodes.length),midpoints=sampled.slice(grid.nodes.length);
+      const {nodes,midpoints}=swept[field];
       const exactSampled=points.map((_,i)=>exactPixels[4*i+field]);
       const exactNodes=exactSampled.slice(0,grid.nodes.length),exactMidpoints=exactSampled.slice(grid.nodes.length);
       const nodeControl=errorStats(direct.nodes,exactNodes);
-      const lookupControl=errorStats(interpolatedMidpoints(direct.nodes),exactMidpoints);
+      const lookupControl=errorStats(interpolateLightMidpoints(direct.nodes,span),exactMidpoints);
       if(nodeControl.tau.max!==0||lookupControl.tau.max>.002)
         throw Error(`Exact grid lookup control failed for ${names[field]}: ${JSON.stringify({nodeControl,lookupControl})}`);
       const common=grid.midpoints.map(p=>[p.x,p.y].every(axis=>{
@@ -159,7 +149,10 @@ export async function compareFarLightGrid(T,renderer,cache,{grid,fields},prepare
         combinedAtMidpoints:errorStats(direct.midpoints,midpoints),
         common:{interpolation:commonError(direct.midpoints,exactMidpoints),
           combined:commonError(direct.midpoints,midpoints)},
-        storedLookup:errorStats(interpolatedMidpoints(nodes),midpoints),nodeControl,lookupControl};
+        storedLookup:errorStats(interpolateLightMidpoints(nodes,span),midpoints),nodeControl,lookupControl};
     });
+    const representations=consumerMaterial&&await compareLightRepresentations(T,renderer,cache,{grid,fields},
+      span,swept,consumerMaterial,prepare);
+    return {rows,representations};
   } finally {target.dispose();quad.dispose();material.dispose();positions.dispose();exactAtlas.dispose();}
 }

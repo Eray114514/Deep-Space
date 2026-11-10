@@ -2,12 +2,14 @@ import { readGpuDisjointEpoch } from '../src/gpu-query-state.js';
 
 // Same material and native program. One private draw per live 16-bin frame,
 // then restore the count before the volume history consumes the public HDR.
-export function observeNearQuadrature(game) {
+export function observeNearQuadrature(game,{paths=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, profile=pass.profilePhase, gl=renderer.getContext();
   const timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
   if(!timer)throw Error('Quadrature probe requires GPU timing');
-  const epoch=readGpuDisjointEpoch(gl,timer), arms=[16,8,4], rows=[];
+  const epoch=readGpuDisjointEpoch(gl,timer), arms=paths?[4,0,2,3]:[16,8,4], rows=[];
+  const knob=paths?'uLightPathCount':'uLightQuadratureSteps';
+  const referenceCount=arms[0];
   const queries=[];
   let scratch, failure;
   function time(work) {
@@ -23,7 +25,7 @@ export function observeNearQuadrature(game) {
     const planet=pass.activePlanet, mesh=planet?.volCloudMesh, current=pass.current;
     if(name!=='volume-current'||!mesh||mesh.material!==planet.volCloudMat||rows.length===arms.length||failure)
       return profile.call(this,name,work,options);
-    const material=mesh.material, uniforms=material.uniforms, bins=arms[rows.length];
+    const material=mesh.material, uniforms=material.uniforms, count=arms[rows.length];
     const render=renderer.render;
     let original, result;
     renderer.render=function(scene,camera) {
@@ -34,7 +36,8 @@ export function observeNearQuadrature(game) {
     try {result=work();}
     finally {renderer.render=render;}
     try {
-      if(!original||!pass.farSplit.soleOwner(pass.scene,mesh)||uniforms.uLightQuadratureSteps.value!==16)
+      if(!original||!pass.farSplit.soleOwner(pass.scene,mesh)||uniforms.uLightQuadratureSteps.value!==16
+        ||uniforms.uLightPathCount.value!==4)
         throw Error('Expected original single-owner near quadrature draw');
       scratch??=new T.WebGLRenderTarget(current.width,current.height,{type:T.HalfFloatType,depthBuffer:false});
       if(scratch.width!==current.width||scratch.height!==current.height)throw Error('Quadrature target changed');
@@ -48,16 +51,17 @@ export function observeNearQuadrature(game) {
       const face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
       let candidate;
       try {
-        uniforms.uLightQuadratureSteps.value=bins;material.uniformsNeedUpdate=true;
+        uniforms[knob].value=count;material.uniformsNeedUpdate=true;
         renderer.setRenderTarget(scratch);renderer.autoClear=false;renderer.clear(true,false,false);
         candidate=time(()=>render.call(renderer,pass.scene,pass.camera));
       } finally {
-        uniforms.uLightQuadratureSteps.value=16;material.uniformsNeedUpdate=true;
+        uniforms[knob].value=referenceCount;material.uniformsNeedUpdate=true;
         renderer.setRenderTarget(saved,face,mip);renderer.autoClear=auto;
       }
       if(renderer.properties.get(material).currentProgram!==program)throw Error('Quadrature count changed native program');
       const pixels=read(scratch), published=read(current), half=T.DataUtils.fromHalfFloat;
-      const row={bins,frame:pass.frame,cacheReady:uniforms.uSunCacheReady.value,dimensions:[current.width,current.height],
+      const row={[paths?'paths':'bins']:count,frame:pass.frame,cacheReady:uniforms.uSunCacheReady.value,
+        dimensions:[current.width,current.height],
         queries:{original,candidate},changed:0,alphaChanged:0,maxRgb:0,pixelsOverRgbGate:0,cloudPixels:0};
       for(let i=0;i<pixels.length;i+=4) {
         if(published[i]!==reference[i]||published[i+1]!==reference[i+1]
@@ -71,7 +75,8 @@ export function observeNearQuadrature(game) {
         if(error>.002)row.pixelsOverRgbGate++;
         row.maxRgb=Math.max(row.maxRgb,error);
       }
-      if(!row.cloudPixels||bins===16&&(row.changed||row.alphaChanged))throw Error('Near quadrature control failed');
+      if(!row.cloudPixels||count===referenceCount&&(row.changed||row.alphaChanged))
+        throw Error('Near quadrature control failed');
       rows.push(row);
     } catch(error) {failure=error;}
     return result;
