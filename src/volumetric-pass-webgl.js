@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { CloudColumnBank, setCloudFarCacheEnabled } from './cloud/cloud-column-bank.js';
 import {minimumCloudRayCone} from './cloud/cloud-footprint.js';
 import {CloudLightBatchRenderer} from './cloud/cloud-light-batch-renderer.js';
+import {planCloudLightBatches} from './cloud/cloud-light-batch-layout.js';
 import { CloudFarSplitPass } from './cloud/cloud-far-split-pass.js';
 import { encodeCandidateEmptyRuns } from './cloud/production-bands.js';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
@@ -92,7 +93,7 @@ export class VolumetricPass extends Pass {
     this.columnMaps=new Map();
     this.columnRelease=new Map();
     this.lightBatchesEnabled=false;
-    this.lightBatchOptions={budgetBytes:64*1024*1024,maxBatchTiles:128};
+    this.lightBatchOptions={budgetBytes:64*1024*1024,maxBatchTiles:128,fusedDensity:false};
     this.lightBatch=null;
     this.lightBatchStatus={reason:'disabled',submitted:false};
 
@@ -285,16 +286,19 @@ export class VolumetricPass extends Pass {
   setLightBatchesEnabled(enabled,options={}) {
     const next={...this.lightBatchOptions};
     for(const [name,value] of Object.entries(options)) {
-      if(!['budgetBytes','maxBatchTiles'].includes(name))throw Error('Unknown cloud batch option: '+name);
-      if(!Number.isSafeInteger(value)||value<(name==='budgetBytes'?0:1))throw Error('Invalid cloud batch option: '+name);
+      if(!Object.hasOwn(next,name))throw Error('Unknown cloud batch option: '+name);
+      const valid=name==='fusedDensity'?typeof value==='boolean'
+        :Number.isSafeInteger(value)&&value>=(name==='budgetBytes'?0:1);
+      if(!valid)throw Error('Invalid cloud batch option: '+name);
       next[name]=value;
     }
     if(!!enabled===this.lightBatchesEnabled&&(enabled||!this.lightBatch)
       &&Object.keys(next).every(name=>next[name]===this.lightBatchOptions[name]))return;
+    const modeChanged=next.fusedDensity!==this.lightBatchOptions.fusedDensity;
     this.lightBatchesEnabled=!!enabled;
     this.lightBatchOptions=next;
     this.lightBatchPrefetch=null;
-    if(!enabled)this.releaseLightBatches();
+    if(!enabled||modeChanged)this.releaseLightBatches();
     else this.lightBatch?.releaseScratch();
     this.lightBatchStatus={reason:enabled?'pending':'disabled',submitted:false};
     this.historyValid=false;
@@ -307,8 +311,15 @@ export class VolumetricPass extends Pass {
 
   configureLightBatch(renderer,material) {
     const gl=renderer.getContext();
-    if(gl.getParameter(gl.MAX_DRAW_BUFFERS)<4||!gl.getExtension('EXT_color_buffer_float'))return null;
+    const drawBuffers=gl.getParameter(gl.MAX_DRAW_BUFFERS);
+    if(drawBuffers<4||!gl.getExtension('EXT_color_buffer_float'))return null;
     const options={...this.lightBatchOptions,width:this.width,height:this.height,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)};
+    options.fusedDensity=options.fusedDensity&&drawBuffers>=5&&gl.getParameter(gl.MAX_COLOR_ATTACHMENTS)>=5
+      &&!planCloudLightBatches(options).direct;
+    if(this.lightBatch&&this.lightBatch.fusedDensity!==options.fusedDensity) {
+      this.lightBatch.dispose();
+      this.lightBatch=null;
+    }
     if(!this.lightBatch)this.lightBatch=new CloudLightBatchRenderer(material,options);
     else this.lightBatch.configure(material,options);
     return this.lightBatch;

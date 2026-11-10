@@ -2,10 +2,12 @@ import {CloudLightBatchRenderer} from '../src/cloud/cloud-light-batch-renderer.j
 import {cloudLightBatchShaders} from '../src/cloud/cloud-light-batch-glsl.js';
 import {previousCloudPreparation} from './cloud-light-preparation-reference.js';
 
-export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false,comparePreparation=false,compareLayout=false}={}) {
+export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false,comparePreparation=false,compareLayout=false,compareFused=false}={}) {
   const T=NMS._THREE,r=NMS._renderer,camera=NMS._internals.camera,vp=NMS._pipeline.volumePass,p=vp.activePlanet;
   const production=p.volCloudMat,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
   if(!ext)throw Error('Actual hardware GPU timer required');
+  if(compareFused&&Math.min(gl.getParameter(gl.MAX_DRAW_BUFFERS),gl.getParameter(gl.MAX_COLOR_ATTACHMENTS))<5)
+    throw Error('Fused density proof needs five draw buffers');
   const width=vp.width,height=vp.height,request=window.requestAnimationFrame,cancel=window.cancelAnimationFrame,pending=new Map();let id=-1;
   window.requestAnimationFrame=callback=>{const key=id--;pending.set(key,callback);return key;};
   window.cancelAnimationFrame=key=>{if(!pending.delete(key))cancel.call(window,key);};
@@ -64,9 +66,10 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
   try {
     camera.layers.set(2);r.autoClear=false;r.setClearColor(0,0);
     batches=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,
-      legacyRadiance:comparePreparation,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
+      legacyRadiance:comparePreparation,fusedDensity:compareFused,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
+    if(compareFused&&batches.plan.direct)throw Error('Fused density does not fit the requested GPU budget');
     let previousMetadata=null,previousPreparation=null;
-    if((compareMetadata||comparePreparation||compareLayout)&&!batches.plan.direct) {
+    if((compareMetadata||comparePreparation||compareLayout||compareFused)&&!batches.plan.direct) {
       previous=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,
         legacyRadiance:comparePreparation||compareLayout,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
       if(previous.plan.direct)throw Error('Comparison layout does not fit the requested GPU budget');
@@ -87,7 +90,7 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
       const native=new Uint16Array(width*height*4);r.readRenderTargetPixels(output,0,0,width,height,native);
       let nativeRepeatChanged=0;if(nativeExpected[index])for(let i=0;i<native.length;i++)if(native[i]!==nativeExpected[index][i])nativeRepeatChanged++;
       nativeExpected[index]||=native;pixelsExpected[index]||=pixels();
-      const control=compareLayout?'previous-layout':comparePreparation?'previous-preparation':'previous-metadata';
+      const control=compareFused?'split-density':compareLayout?'previous-layout':comparePreparation?'previous-preparation':'previous-metadata';
       records.push({round,implementation:index===2?control:index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
       console.log('Page: '+JSON.stringify(records.at(-1)));
     }

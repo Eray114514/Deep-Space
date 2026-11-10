@@ -14,7 +14,7 @@ ${start}`).replace(ray,`${ray}
 
 // Freeze one real draw at the first near-cloud pose. Preparation jobs retire
 // one scissor band each, without publishing partial volume or changing bins.
-export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false,splitMicroBatch=false}={}) {
+export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false,splitMicroBatch=false,fusedDensity=false,splitReference=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, gl=renderer.getContext();
   const timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -22,7 +22,8 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
   const owner=pipeline.framePacer??pipeline.startFramePacing();
   const originalSubmit=pipeline.submitFrame, profile=pass.profilePhase;
   const halted={}, queries=[];
-  let input,target,microTarget,depthCopy,material,comparisonMaterial,batch,probeBatch,snapshot,captureError,armed=false,blocked=false;
+  let input,target,microTarget,depthCopy,material,comparisonMaterial,batch,referenceBatch,probeBatch,snapshot,captureError,armed=false,blocked=false;
+  const trace=label=>{if(fusedDensity)console.log('Staged cloud: '+label);};
   let resolveCapture;
   const captured=new Promise(resolve=>{resolveCapture=resolve;});
   function submit(work) {
@@ -72,7 +73,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
         }
         material.fragmentShader=stagedNearClipShader(material.fragmentShader);
         material.uniforms.uStagedBand={value:new T.Vector2()};
-      } else if(mode==='batch'&&!compareWhole) {
+      } else if(mode==='batch'&&!compareWhole&&!splitReference) {
         comparisonMaterial=new T.ShaderMaterial().copy(Object.assign(Object.create(mesh.material),{uniforms:{}}));
         comparisonMaterial.fragmentShader=stagedNearClipShader(material.fragmentShader);
         comparisonMaterial.uniforms={...material.uniforms,uStagedBand:{value:new T.Vector2()}};
@@ -114,11 +115,11 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     const cosine=landmark.dot(new T.Vector3(...star.direction));
     if(!best||cosine>best.cosine)best={hours,cosine};
   }
-  const noCapture=setTimeout(()=>resolveCapture(),90000);
+  const noCapture=setTimeout(()=>resolveCapture(),fusedDensity?120000:90000);
   try {
     game.setTime(best.hours);game.setTimeFrozen();
     game.teleport(0,.12,{dir:coast.direction});
-    const deadline=performance.now()+30000;
+    const deadline=performance.now()+(fusedDensity?60000:30000);
     while(!planet.weatherStream?.ready) {
       if(gl.isContextLost()||performance.now()>deadline)throw Error('Staged weather bracket did not become ready');
       await new Promise(resolve=>setTimeout(resolve,30));
@@ -129,12 +130,13 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     await captured;
     if(captureError)throw captureError;
     if(!input||best.cosine<=.5||!input.depth)throw Error('Expected a lit near draw with live opaque depth');
+    trace('captured');
     const [width,height]=input.size, epoch=readGpuDisjointEpoch(gl,timer);
     target=new T.WebGLRenderTarget(width,height,{type:T.HalfFloatType,depthBuffer:false});
     const render=renderer.render, cases=[];
     const sameInputs=()=>pipeline.frameState.sequence===input.sequence&&pass.historyRead===input.history
       &&[...snapshot.textures].every(([texture,version])=>texture.version===version);
-    async function drawPartition(bands,program=material,batched=false) {
+    async function drawPartition(bands,program=material,executor=null) {
       const first=queries.length, stride=Math.ceil(height/(bands*2))*2;
       const started=performance.now();
       const cpuMs=[];
@@ -159,15 +161,15 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
             if(clip) {
               clip.value.set(y,top);
               program.uniformsNeedUpdate=true;
-            } else if(!batched) {
+            } else if(!executor) {
               target.scissorTest=true;target.scissor.set(0,y,width,top-y);
             }
             renderer.setRenderTarget(target);
             const query=gl.createQuery();queries.push(query);gl.beginQuery(timer.TIME_ELAPSED_EXT,query);
             const submitStarted=performance.now();
             try {
-              if(batched) {
-                if(!batch.render(renderer,snapshot.camera,snapshot.mesh,target))throw Error('Frozen cloud batch did not submit');
+              if(executor) {
+                if(!executor.render(renderer,snapshot.camera,snapshot.mesh,target))throw Error('Frozen cloud batch did not submit');
               } else render.call(renderer,snapshot.scene,snapshot.camera);
             }
             finally {
@@ -192,7 +194,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
         return gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6;
       });
       let programLabel='unmodified';
-      if(batched)programLabel='batch';
+      if(executor)programLabel=executor===referenceBatch?'split-density':'batch';
       else if(program.uniforms.uStagedBand)programLabel='fragment';
       cases.push({bands,program:programLabel,submissions:gpuMs.length,gpuMs,cpuMs,wallMs:performance.now()-started});
       return pixels;
@@ -210,18 +212,29 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       }
       return {changed,alpha,nonempty,maximum,nonfinite};
     }
-    let comparisons, preparationMs, micro, repeatAgainstReference;
+    let comparisons, preparationMs, micro, repeatAgainstReference, rayControl;
     const primed=[];
     if(mode==='batch') {
-      const layout={width,height,budgetBytes:32*1024*1024,maxTextureSize:renderer.capabilities.maxTextureSize};
+      if(fusedDensity&&Math.min(gl.getParameter(gl.MAX_DRAW_BUFFERS),gl.getParameter(gl.MAX_COLOR_ATTACHMENTS))<5)
+        throw Error('Fused density proof needs five draw buffers');
+      const layout={width,height,budgetBytes:32*1024*1024,maxTextureSize:renderer.capabilities.maxTextureSize,fusedDensity};
       batch=new CloudLightBatchRenderer(material,layout);
-      const reference=comparisonMaterial??material, bands=compareWhole?1:16;
-      const first=await drawPartition(bands,reference);
+      if(splitReference) {
+        referenceBatch=new CloudLightBatchRenderer(material,{...layout,fusedDensity:false});
+        const ready=await pipeline.prepare(()=>referenceBatch.prepareAsync(renderer,snapshot.camera,snapshot.mesh,target),
+          {label:'frozen-cloud-split-reference-programs'});
+        if(!ready)throw Error('Frozen split reference preparation: '+referenceBatch.preparationError);
+      }
+      const reference=comparisonMaterial??material, bands=compareWhole||referenceBatch?1:16;
+      trace('reference-submit');
+      const first=await drawPartition(bands,reference,referenceBatch);
+      trace('reference-retired');
       const start=performance.now();
       const ready=await pipeline.prepare(()=>batch.prepareAsync(renderer,snapshot.camera,snapshot.mesh,target),
         {label:'frozen-cloud-batch-programs'});
       preparationMs=performance.now()-start;
       if(!ready)throw Error('Frozen cloud batch preparation: '+batch.preparationError);
+      trace('programs-ready');
       if(primeBatch)for(const stage of batch.materials) {
         await pipeline.prepare(()=>{
           const program=renderer.properties.get(stage).currentProgram;
@@ -297,11 +310,37 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
           },{label:'frozen-cloud-batch-micro-release'});
         } else micro=await microDraw(null);
       }
-      const second=await drawPartition(1,material,true);
-      const firstRepeat=await drawPartition(bands,reference), secondRepeat=await drawPartition(1,material,true);
-      comparisons={batch:compare(first,second),firstControl:compare(first,firstRepeat),
+      const second=await drawPartition(1,material,batch);
+      trace('candidate-retired');
+      const batchComparison=compare(first,second);
+      trace(JSON.stringify({firstPair:batchComparison,reference:cases[0],candidate:cases[1],preparationMs}));
+      const firstRepeat=await drawPartition(bands,reference,referenceBatch);
+      trace('reference-repeat-retired');
+      const secondRepeat=await drawPartition(1,material,batch);
+      trace('candidate-repeat-retired');
+      comparisons={batch:batchComparison,firstControl:compare(first,firstRepeat),
         secondControl:compare(second,secondRepeat)};
       repeatAgainstReference=compare(first,secondRepeat);
+      if(referenceBatch) {
+        const splitRay=new Float32Array(first.length), fusedRay=new Float32Array(first.length);
+        await pipeline.prepare(()=>{
+          renderer.readRenderTargetPixels(referenceBatch.frame,0,0,width,height,splitRay);
+          renderer.readRenderTargetPixels(batch.rays,0,0,width,height,fusedRay);
+        },{label:'frozen-cloud-ray-inputs'});
+        const changed=[0,0,0,0],maximum=[0,0,0,0];
+        for(let i=0;i<first.length;i+=4)if(first[i+3]>0)for(let c=0;c<4;c++) {
+          const delta=Math.abs(splitRay[i+c]-fusedRay[i+c]);
+          if(delta)changed[c]++;
+          maximum[c]=Math.max(maximum[c],delta);
+        }
+        const ownRay=batch.page.tPageRay.value;
+        let borrowed;
+        try {
+          batch.page.tPageRay.value=referenceBatch.frame.textures[0];
+          borrowed=await drawPartition(1,material,batch);
+        } finally {batch.page.tPageRay.value=ownRay;}
+        rayControl={changed,maximum,borrowed:compare(first,borrowed)};
+      }
     } else {
       const firstBands=compareWhole?1:16, secondBands=compareWhole?16:24;
       const first=await drawPartition(firstBands), second=await drawPartition(secondBands);
@@ -313,7 +352,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     if(gl.isContextLost()||gl.getError()!==gl.NO_ERROR||readGpuDisjointEpoch(gl,timer)!==epoch||!sameInputs())
       throw Error('Staged GPU proof lost its input or measurement epoch');
     return {...input,history:undefined,sunCosine:best.cosine,mode,cases,comparisons,repeatAgainstReference,
-      preparationMs,primed,micro,batch:batch?.plan,
+      preparationMs,primed,micro,rayControl,batch:batch?.plan,referenceBatch:referenceBatch?.plan,
       passed:Object.entries(comparisons).every(([key,row])=>!row.nonfinite&&row.nonempty>0
         &&(key==='batch'?row.alpha===0&&row.maximum<=.002:row.changed===0))};
   } finally {
@@ -321,7 +360,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     try {game.teleport(0,.12,{dir:coast.direction});}
     finally {pipeline.submitFrame=originalSubmit;}
     if(!gl.isContextLost())for(const query of queries)gl.deleteQuery(query);
-    batch?.dispose();probeBatch?.dispose();target?.dispose();microTarget?.dispose();depthCopy?.dispose();
+    batch?.dispose();referenceBatch?.dispose();probeBatch?.dispose();target?.dispose();microTarget?.dispose();depthCopy?.dispose();
     material?.dispose();comparisonMaterial?.dispose();
   }
 }

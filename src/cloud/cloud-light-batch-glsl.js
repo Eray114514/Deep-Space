@@ -22,6 +22,10 @@ const compactDeclarations=declarations
   .replace('tPageCached,tPageMask,','')
   .replace('int(round(texelFetch(tPageMask,pixel,0).r*255.0))',
     'texelFetch(tPageOpacity,pixel,0).r>0.0?15:0');
+const stripeDeclarations=compactDeclarations
+  .replace('  int pageMask','  uniform int uPageRow;\n  ivec2 stripePixel(ivec2 pixel){return pixel-ivec2(0,uPageRow);}\n  int pageMask')
+  .replace('texelFetch(tPageOpacity,pixel,0).r','texelFetch(tPageOpacity,stripePixel(pixel),0).r')
+  .replace('ivec2 cell=pageMetadataPixel(slot,pixel);','ivec2 cell=stripePixel(pixel);');
 
 // Instanced rectangles remove empty tiles before the heavy fragment kernels.
 // PAGE_MODE 0: anchors, 1: four light fields, 2: original output pixel tiles.
@@ -30,6 +34,9 @@ export const cloudLightBatchVertex=/* glsl */`
   uniform ivec2 uPageSize;
   uniform vec2 uPageAtlasSize;
   uniform int uPageTilesX,uPageMetaColumns,uPageLightColumns,uBatchStart,uBatchCount;
+  #ifdef PAGE_STRIPE
+    uniform int uPageRow;
+  #endif
   varying vec3 vDirection,vViewDirection;
   void main(){
     vDirection=vec3(0,1,0);vViewDirection=vec3(0,0,-1);
@@ -41,8 +48,12 @@ export const cloudLightBatchVertex=/* glsl */`
     #endif
     int tile=uBatchStart+meta;
     ivec2 original=ivec2(tile%uPageTilesX,tile/uPageTilesX);
-    bool valid=meta<uBatchCount&&all(lessThan(original,textureSize(tPageTileMask,0)));
-    int mask=valid?int(round(texelFetch(tPageTileMask,original,0).r*255.0)):0;
+    ivec2 maskTile=original;
+    #ifdef PAGE_STRIPE
+      maskTile.y-=uPageRow/16;
+    #endif
+    bool valid=meta<uBatchCount&&all(lessThan(maskTile,textureSize(tPageTileMask,0)));
+    int mask=valid?int(round(texelFetch(tPageTileMask,maskTile,0).r*255.0)):0;
     #if PAGE_MODE == 1
       valid=valid&&(mask&(1<<field))!=0;
       vec2 cell=vec2(slot%uPageLightColumns,slot/uPageLightColumns)*vec2(16,256);
@@ -92,9 +103,30 @@ function opacityPreparation(source,legacyRadiance) {
   return replace(source,'for(int pass=0;pass<2;pass++) {','for(int pass=0;pass<1;pass++) {');
 }
 
-export function cloudLightBatchShaders(source,{legacyRadiance=false}={}) {
+function fusedPreparation(source) {
+  const start=source.indexOf('        vec3 correction=vec3(0);'),end=source.indexOf('        #else',start);
+  if(start<0||end<0)throw Error('Cloud fused preparation boundary changed');
+  const output=/* glsl */`
+    queryOpacity=vec4(totalOpacity);
+    page0=vec4(anchors[0],anchors[1],anchors[2],anchors[3]);
+    page1=vec4(anchors[4],anchors[5],anchors[6],anchors[7]);
+    page2=vec4(anchors[8],anchors[9],anchors[10],anchors[11]);
+    page3=vec4(anchors[12],anchors[13],anchors[14],anchors[15]);
+  `;
+  source=source.slice(0,start)+output+source.slice(end);
+  source=replace(source,
+    'layout(location=0) out vec4 queryRay;layout(location=1) out vec4 queryCached;layout(location=2) out vec4 queryMask;layout(location=3) out vec4 queryOpacity;',
+    'layout(location=0) out vec4 queryOpacity;layout(location=1) out vec4 page0;layout(location=2) out vec4 page1;layout(location=3) out vec4 page2;layout(location=4) out vec4 page3;vec4 queryCached;');
+  source=replace(source,'vec3 dir = normalize(vDirection);',
+    'ivec2 pixel=ivec2(gl_FragCoord.xy);\n        if(pixel.y>=textureSize(tPageRay,0).y)discard;\n        vec4 ray=texelFetch(tPageRay,pixel,0);\n        if(dot(ray.xyz,ray.xyz)<.5)discard;\n        vec3 dir=ray.xyz;');
+  source=replace(source,'queryOpaqueLimit=sceneRayLimit();t1=min(t1,queryOpaqueLimit);','t1=min(t1,ray.w);');
+  return 'uniform sampler2D tPageRay;uniform int uPageRow;\n'+source.replaceAll('gl_FragCoord','(gl_FragCoord+vec4(0,float(uPageRow),0,0))');
+}
+
+export function cloudLightBatchShaders(source,{legacyRadiance=false,fusedDensity=false}={}) {
   const shared=cloudLightPageShaders(source);
-  const adapt=shader=>replace(shader,lightPageDeclarations,legacyRadiance?declarations:compactDeclarations);
+  const pageDeclarations=fusedDensity?stripeDeclarations:legacyRadiance?declarations:compactDeclarations;
+  const adapt=shader=>replace(shader,lightPageDeclarations,pageDeclarations);
   let metadata=adapt(shared.metadata);
   // Preparation already owns the FP32 ray opacity. Reuse that CDF mass
   // instead of traversing the same density a third time in every batch.
@@ -112,6 +144,17 @@ export function cloudLightBatchShaders(source,{legacyRadiance=false}={}) {
   // Composition reads that complete FP32 page instead of querying the cache
   // again or relying on matching cache branches in two compiled programs.
   compose=replace(compose,'bool cached=cloudCachedLight(local,path,pathDepth);','bool cached=false;');
-  return {prepare:opacityPreparation(shared.prepare,legacyRadiance),metadata,beams,compose,reduce:adapt(shared.reduce),
+  let reduce=adapt(shared.reduce);
+  if(fusedDensity) {
+    compose=replace(compose,'texelFetch(tPageOpacity,pixel,0).r','texelFetch(tPageOpacity,stripePixel(pixel),0).r');
+    reduce=replace(reduce,'ivec2(gl_FragCoord.xy);int mask=0;',
+      'ivec2(gl_FragCoord.xy)+ivec2(0,uPageRow/16);int mask=0;');
+    reduce=replace(reduce,'for(int y=0;y<16;y++)','for(int y=0;y<16 && mask!=15;y++)');
+  }
+  const ray=fusedDensity?source.slice(0,source.lastIndexOf('void main()'))+
+    'void main(){gl_FragColor=vec4(normalize(vDirection),sceneRayLimit());}':null;
+  return {prepare:fusedDensity?fusedPreparation(shared.prepare):opacityPreparation(shared.prepare,legacyRadiance),
+    metadata,beams,compose,reduce,
+    ...(ray?{ray}:{}),
     ...(legacyRadiance?{base:adapt(shared.base),badCached:adapt(shared.badCached)}:{}),badFields:shared.badFields};
 }

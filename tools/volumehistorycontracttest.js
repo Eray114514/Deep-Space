@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {VolumetricPass,VOLUME_LAYER} from '../src/volumetric-pass-webgl.js';
+import {makeCloudVolumeMaterial} from '../src/clouds-webgl.js';
 const pass=new VolumetricPass(new THREE.Scene(),new THREE.PerspectiveCamera(),{scale:.46});
 try {
   pass.setSize(1280,720);
@@ -18,9 +19,27 @@ try {
   assert.equal(pass.historyValid,false);
   assert.throws(()=>pass.setLightBatchesEnabled(true,{width:1}),/Unknown/);
   assert.throws(()=>pass.setLightBatchesEnabled(true,{budgetBytes:NaN}),/Invalid/);
+  assert.throws(()=>pass.setLightBatchesEnabled(true,{fusedDensity:1}),/Invalid/);
   assert.equal(pass.lightBatchesEnabled,false);assert.equal(released,1,'Invalid options must not mutate the executor');
   pass.setLightBatchesEnabled(true,{budgetBytes:1024});assert.equal(disposed,0);assert.equal(released,2);
   pass.setLightBatchesEnabled(false);assert.equal(disposed,1);assert.equal(pass.lightBatch,null);
+  const cloud=makeCloudVolumeMaterial({R:6000000},
+    {rIn:6000000,rOut:6040000,localWeather:true,ox:0,oy:0,oz:0},null,null,null);
+  cloud.uniforms.uLightQuadratureSteps.value=16;
+  const renderer=(drawBuffers,colorAttachments)=>({getContext:()=>({
+    MAX_DRAW_BUFFERS:1,MAX_COLOR_ATTACHMENTS:2,MAX_TEXTURE_SIZE:3,
+    getParameter:key=>[0,drawBuffers,colorAttachments,16384][key],getExtension:()=>true,
+  })});
+  try {
+    pass.setLightBatchesEnabled(true,{budgetBytes:32*1024*1024,fusedDensity:true});
+    const fallback=pass.configureLightBatch(renderer(8,4),cloud);
+    assert.equal(fallback.fusedDensity,false);assert.equal(fallback.plan.direct,false);
+    const fused=pass.configureLightBatch(renderer(8,8),cloud);
+    assert.equal(fallback.disposed,true);assert.equal(fused.fusedDensity,true);
+    assert.ok(fused.plan.stripe);
+    pass.setLightBatchesEnabled(true,{fusedDensity:false});
+    assert.equal(fused.disposed,true);assert.equal(pass.lightBatch,null);
+  } finally {cloud.dispose();}
   const jobs=[];
   const schedule=(work,options)=>new Promise(resolve=>jobs.push({work,options,resolve}));
   const planet={posUniv:new THREE.Vector3(),volCloudMesh:{visible:true},volCloudBand:{rOut:6000000},

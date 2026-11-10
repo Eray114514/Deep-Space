@@ -15,6 +15,7 @@ export class CloudLightBatchRenderer {
   constructor(material,options) {
     this.disposed=false;
     this.legacyRadiance=options.legacyRadiance===true;
+    this.fusedDensity=options.fusedDensity===true;
     this.submissions=0;
     this.targets=[];
     this.materials=[];
@@ -26,6 +27,7 @@ export class CloudLightBatchRenderer {
     if(this.legacyRadiance) {
       this.page.tPageCached={value:null};this.page.tPageMask={value:null};
     }
+    if(this.fusedDensity)this.page.uPageRow={value:0};
     this.configure(material,options);
   }
 
@@ -33,7 +35,7 @@ export class CloudLightBatchRenderer {
     if(this.disposed)throw Error('Cloud batch executor disposed');
     if(material.defines.PRODUCTION_CLOUD_MEDIUM!==1||material.defines.CLOUD_FAR_VIEW
       ||material.uniforms.uLightQuadratureSteps.value!==16)throw Error('Cloud batches require production near 16-anchor transport');
-    const plan=planCloudLightBatches({...options,legacyRadiance:this.legacyRadiance});
+    const plan=planCloudLightBatches({...options,legacyRadiance:this.legacyRadiance,fusedDensity:this.fusedDensity});
     // One bounded program family, keyed by every source property used below.
     // Owner identity and texture sizes are uniform data, not shader variants.
     const signature=programSignature(material);
@@ -44,7 +46,7 @@ export class CloudLightBatchRenderer {
       this.side=material.side;this.premultipliedAlpha=material.premultipliedAlpha;
       this.programEpoch=(this.programEpoch||0)+1;this.preparation=null;this.programsReady=false;this.preparationError=null;
     }
-    const layoutKey=JSON.stringify([plan.width,plan.height,plan.beamBytes,plan.metadata,plan.light]);
+    const layoutKey=JSON.stringify([plan.width,plan.height,plan.beamBytes,plan.metadata,plan.stripe,plan.light]);
     if(plan.direct||layoutKey!==this.layoutKey)this.releaseScratch();
     this.plan=plan;
     if(plan.direct)return;
@@ -65,46 +67,50 @@ export class CloudLightBatchRenderer {
       &&this.side===material.side&&this.premultipliedAlpha===material.premultipliedAlpha;
   }
 
-  createTargets({width,height,tilesX,tilesY,metadata,light,beamBytes}) {
+  createTargets({width,height,tilesX,tilesY,metadata,light,beamBytes,stripe}) {
     const target=(w,h,extra={})=>{
       const rt=new THREE.WebGLRenderTarget(w,h,{type:THREE.FloatType,depthBuffer:false,
         minFilter:THREE.NearestFilter,magFilter:THREE.NearestFilter,...extra});
       this.targets.push(rt);return rt;
     };
-    this.frame=target(width,height,{count:this.legacyRadiance?4:2});
-    const opacity=this.frame.textures[this.legacyRadiance?3:1];opacity.format=THREE.RedFormat;
+    this.frame=target(width,stripe?.height??height,{count:stripe?5:this.legacyRadiance?4:2});
+    const opacity=this.frame.textures[stripe?0:this.legacyRadiance?3:1];
+    opacity.format=THREE.RedFormat;
+    this.rays=stripe?target(width,height):null;
     if(this.legacyRadiance) {
       const [,cached,mask]=this.frame.textures;
       cached.type=THREE.HalfFloatType;
       mask.type=THREE.UnsignedByteType;mask.format=THREE.RedFormat;
       this.page.tPageCached.value=cached;this.page.tPageMask.value=mask;
     }
-    this.tileMask=target(tilesX,tilesY,{type:THREE.UnsignedByteType,
+    this.tileMask=target(tilesX,stripe?.rows??tilesY,{type:THREE.UnsignedByteType,
       format:this.legacyRadiance?THREE.RGBAFormat:THREE.RedFormat});
-    this.metadata=target(metadata.width,metadata.height,{count:4});
+    if(metadata)this.metadata=target(metadata.width,metadata.height,{count:4});
     this.light=target(light.width,light.height,{format:THREE.RedFormat,type:beamBytes===2?THREE.HalfFloatType:THREE.FloatType});
     this.page.uPageSize.value.set(width,height);this.page.uPageTilesX.value=tilesX;
-    this.page.uPageMetaColumns.value=metadata.columns;this.page.uPageLightColumns.value=light.columns;
-    Object.entries({tPageRay:this.frame.textures[0],tPageOpacity:opacity,tPageTileMask:this.tileMask.texture,
-      tPage0:this.metadata.textures[0],tPage1:this.metadata.textures[1],
-      tPage2:this.metadata.textures[2],tPage3:this.metadata.textures[3],tPageLight:this.light.texture})
+    this.page.uPageMetaColumns.value=metadata?.columns??0;this.page.uPageLightColumns.value=light.columns;
+    const [page0,page1,page2,page3]=stripe?this.frame.textures.slice(1):this.metadata.textures;
+    Object.entries({tPageRay:this.rays?.texture??this.frame.textures[0],tPageOpacity:opacity,tPageTileMask:this.tileMask.texture,
+      tPage0:page0,tPage1:page1,tPage2:page2,tPage3:page3,tPageLight:this.light.texture})
       .forEach(([name,texture])=>{this.page[name].value=texture;});
   }
 
   createPrograms(material) {
-    const shaders=cloudLightBatchShaders(material.fragmentShader,{legacyRadiance:this.legacyRadiance});
-    const make=(name,mode=-1,mrt=false)=>{
+    const shaders=cloudLightBatchShaders(material.fragmentShader,{legacyRadiance:this.legacyRadiance,fusedDensity:this.fusedDensity});
+    const make=(name,mode=-1,mrt=false,mesh=false)=>{
       const m=new THREE.ShaderMaterial({uniforms:{...material.uniforms,...this.page},
-        defines:{...material.defines,...(mode>=0?{PAGE_MODE:mode}:{})},
-        vertexShader:name==='prepare'?material.vertexShader:mode>=0?cloudLightBatchVertex:fullscreen,
+        defines:{...material.defines,...(mode>=0?{PAGE_MODE:mode}:{}),...(this.fusedDensity?{PAGE_STRIPE:1}:{})},
+        vertexShader:mesh?material.vertexShader:mode>=0?cloudLightBatchVertex:fullscreen,
         fragmentShader:shaders[name],glslVersion:mrt?THREE.GLSL3:null,
         depthTest:false,depthWrite:false,blending:THREE.NoBlending,
-        side:name==='prepare'?material.side:THREE.DoubleSide,premultipliedAlpha:material.premultipliedAlpha});
+        side:mesh?material.side:THREE.DoubleSide,premultipliedAlpha:material.premultipliedAlpha});
       m.name='cloud-batch-'+name;this.materials.push(m);return m;
     };
-    this.prepare=make('prepare',-1,true);this.reduce=make('reduce');
+    this.ray=this.fusedDensity?make('ray',-1,false,true):null;
+    this.prepare=make('prepare',-1,true,!this.fusedDensity);this.reduce=make('reduce');
     this.base=this.legacyRadiance?make('base'):null;
-    this.metadataMaterial=make('metadata',0,true);this.lightMaterial=make('beams',1);this.compose=make('compose',2);
+    this.metadataMaterial=this.fusedDensity?null:make('metadata',0,true);
+    this.lightMaterial=make('beams',1);this.compose=make('compose',2);
     if(this.quadGeometry)return;
     this.quadGeometry=new THREE.PlaneGeometry(2,2);
     this.tileGeometry=new THREE.InstancedBufferGeometry();
@@ -119,7 +125,7 @@ export class CloudLightBatchRenderer {
 
   releaseScratch() {
     this.targets.forEach(target=>target.dispose());this.targets=[];
-    this.frame=this.tileMask=this.metadata=this.light=null;this.layoutKey=null;this.source=null;
+    this.frame=this.rays=this.tileMask=this.metadata=this.light=null;this.layoutKey=null;this.source=null;
     for(const [name,uniform] of Object.entries(this.page))if(name.startsWith('tPage'))uniform.value=null;
     // Keep programs without retaining old planets, textures or borrowed meshes.
     for(const material of this.materials)for(const name of Object.keys(material.uniforms))
@@ -134,14 +140,15 @@ export class CloudLightBatchRenderer {
     if(!parallel) {this.preparationError='Parallel shader compile unavailable';return Promise.resolve(false);}
     const epoch=this.programEpoch,compileCamera=camera.clone(),programs=[];
     compileCamera.layers.set(2);
-    sourceMesh.updateWorldMatrix(true,false);this.mesh.geometry=sourceMesh.geometry;this.mesh.material=this.prepare;
+    sourceMesh.updateWorldMatrix(true,false);this.mesh.geometry=sourceMesh.geometry;this.mesh.material=this.ray??this.prepare;
     this.mesh.matrix.copy(sourceMesh.matrixWorld);this.scene.updateMatrixWorld(true);
     const saved=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
     try {
       // Capture the exact framebuffer/program variants synchronously. All
       // renderer state is restored before polling; no player state crosses await.
-      for(const [target,material,kind] of [[this.frame,this.prepare,'mesh'],[this.tileMask,this.reduce,'quad'],
-        ...(this.base?[[output,this.base,'quad']]:[]),[this.metadata,this.metadataMaterial,'tiles'],
+      for(const [target,material,kind] of [...(this.rays?[[this.rays,this.ray,'mesh']]:[]),
+        [this.frame,this.prepare,this.rays?'quad':'mesh'],[this.tileMask,this.reduce,'quad'],
+        ...(this.base?[[output,this.base,'quad']]:[]),...(this.metadata?[[this.metadata,this.metadataMaterial,'tiles']]:[]),
         [this.light,this.lightMaterial,'tiles'],[output,this.compose,'tiles']]) {
         renderer.setRenderTarget(target);
         if(kind==='quad')this.quad.material=material;
@@ -176,7 +183,7 @@ export class CloudLightBatchRenderer {
 
   render(renderer,camera,sourceMesh,output) {
     if(this.disposed||this.plan.direct||!this.targets.length)return false;
-    const {width,height,batchTiles,tileCount}=this.plan;
+    const {width,height,batchTiles,tileCount,tilesX,stripe}=this.plan;
     if(output.width!==width||output.height!==height)throw Error('Cloud batch target size changed');
     if(sourceMesh.material!==this.source||this.source.uniforms.uLightQuadratureSteps.value!==16)
       throw Error('Cloud batch source owner changed');
@@ -187,7 +194,7 @@ export class CloudLightBatchRenderer {
       material.uniformsNeedUpdate=true;
     }
     sourceMesh.updateWorldMatrix(true,false);
-    this.mesh.geometry=sourceMesh.geometry;this.mesh.material=this.prepare;
+    this.mesh.geometry=sourceMesh.geometry;this.mesh.material=this.ray??this.prepare;
     this.mesh.matrix.copy(sourceMesh.matrixWorld);this.scene.updateMatrixWorld(true);
     const saved=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
     const auto=renderer.autoClear,color=renderer.getClearColor(new THREE.Color()),alpha=renderer.getClearAlpha();
@@ -202,13 +209,19 @@ export class CloudLightBatchRenderer {
     };
     try {
       renderer.autoClear=false;renderer.setClearColor(0,0);
-      draw(this.frame,this.prepare,'mesh');draw(this.tileMask,this.reduce);
+      if(this.rays)draw(this.rays,this.ray,'mesh');
+      if(!stripe) {
+        draw(this.frame,this.prepare,'mesh');draw(this.tileMask,this.reduce);
+      }
       if(this.base)draw(output,this.base);
       else {renderer.setRenderTarget(output);renderer.clear(true,false,false);}
       for(let start=0;start<tileCount;start+=batchTiles) {
         const count=Math.min(batchTiles,tileCount-start);
         this.page.uBatchStart.value=start;this.page.uBatchCount.value=count;
-        draw(this.metadata,this.metadataMaterial,'tiles',true,count);
+        if(stripe) {
+          this.page.uPageRow.value=start/tilesX*16;
+          draw(this.frame,this.prepare);draw(this.tileMask,this.reduce);
+        } else draw(this.metadata,this.metadataMaterial,'tiles',true,count);
         draw(this.light,this.lightMaterial,'tiles',true,count*4);
         draw(output,this.compose,'tiles',false,count);
       }

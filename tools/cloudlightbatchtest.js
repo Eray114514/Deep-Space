@@ -5,7 +5,7 @@ import {mkdir,writeFile} from 'node:fs/promises';
 import {startServer} from './server.js';
 import {launchHardwareBrowser,resolveSystemChromePath} from './browser.js';
 import {evidenceFingerprint} from './evidence-fingerprint.js';
-assert.ok(process.argv.slice(2).every(arg=>['--half','--paired','--paired-prepare','--paired-layout'].includes(arg)
+assert.ok(process.argv.slice(2).every(arg=>['--half','--paired','--paired-prepare','--paired-layout','--paired-fused'].includes(arg)
   ||['--case=','--budget=','--jitter='].some(prefix=>arg.startsWith(prefix))),'Unknown cloud batch option');
 
 const caseName=process.argv.find(arg=>arg.startsWith('--case='))?.slice(7)||'lowflight';
@@ -18,8 +18,9 @@ const jitterFrame=Number(process.argv.find(arg=>arg.startsWith('--jitter='))?.sl
 const compareMetadata=process.argv.includes('--paired');
 const comparePreparation=process.argv.includes('--paired-prepare');
 const compareLayout=process.argv.includes('--paired-layout');
-assert.ok([compareMetadata,comparePreparation,compareLayout].filter(Boolean).length<=1,'Choose one batch comparison');
-const out=`test-results/cloud-light-batch/${caseName}-${budgetMiB}-${beamBytes}-${jitterFrame}${compareMetadata?'-paired':''}${comparePreparation?'-prepare':''}${compareLayout?'-layout':''}`,before=await evidenceFingerprint('tools/cloudlightbatchtest.js');
+const compareFused=process.argv.includes('--paired-fused');
+assert.ok([compareMetadata,comparePreparation,compareLayout,compareFused].filter(Boolean).length<=1,'Choose one batch comparison');
+const out=`test-results/cloud-light-batch/${caseName}-${budgetMiB}-${beamBytes}-${jitterFrame}${compareMetadata?'-paired':''}${comparePreparation?'-prepare':''}${compareLayout?'-layout':''}${compareFused?'-fused':''}`,before=await evidenceFingerprint('tools/cloudlightbatchtest.js');
 const dependencies=['tools/cloud-light-batch-browser.js','tools/cloud-light-preparation-reference.js'];
 const helperBefore=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
 const {server,port}=await startServer(0);let browser;
@@ -29,8 +30,9 @@ try {
   const page=await browser.newPage({viewport});
   page.on('pageerror',e=>errors.push(String(e)));
   page.on('console',m=>{if(m.type()==='error')errors.push(m.text());else if(m.text().startsWith('Page:'))console.log(m.text());});
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&freeze=1&time=9.5&scene=lowflight&alt=400&planet=0&bias=meadow&quality=${quality}&vclouds=1&post=1`);
-  await page.waitForFunction(()=>NMS?.booted,null,{timeout:180000});
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&freeze=1&time=9.5&scene=lowflight&alt=400&planet=0&bias=meadow&quality=${quality}&vclouds=1&post=1`,
+    {waitUntil:'commit'});
+  await page.waitForFunction(()=>globalThis.NMS?.booted,null,{timeout:180000});
   await page.evaluate(()=>NMS.setAdaptiveQualityLocked(true));
   if(caseName==='near-cloud')await page.evaluate(()=>NMS.setAtmosphereAltitude(0,3000,
     {dir:[-.7817630820403421,.6181640625,.08197362619941498],pitch:-1.1}));
@@ -60,7 +62,7 @@ try {
   assert.equal(player.volume.representation,'near-volume','Prototype must exercise the actually selected near representation');
   const result=await page.evaluate(async options=>{
     const {probeLightBatches}=await import('/tools/cloud-light-batch-browser.js');return probeLightBatches(options);
-  },{budgetBytes:budgetMiB*1024*1024,beamBytes,jitterFrame,compareMetadata,comparePreparation,compareLayout}).catch(error=>{console.error(errors.map(e=>e.slice(0,5000)));throw error;});
+  },{budgetBytes:budgetMiB*1024*1024,beamBytes,jitterFrame,compareMetadata,comparePreparation,compareLayout,compareFused}).catch(error=>{console.error(errors.map(e=>e.slice(0,5000)));throw error;});
   assert.equal(result.forbiddenCalls,0,'No readback/wait may occur in batch submission');
   const after=await evidenceFingerprint('tools/cloudlightbatchtest.js');
   const helperAfter=await Promise.all(dependencies.map(file=>evidenceFingerprint(file)));
