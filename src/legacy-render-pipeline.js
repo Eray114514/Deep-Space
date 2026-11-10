@@ -292,6 +292,10 @@ export class GameLegacyPipeline {
         if (airBody) this.frameState.localEye(airBody, this.atmospherePass.material.uniforms.uCameraLocal.value);
         this.profiler?.beginFrame();
         this.columnWorkBudget?.beginFrame();
+        // Opaque surface materials borrow the same transport as the later
+        // atmosphere and volume passes, including the first frame of a body.
+        if (this.atmospherePass.enabled && airBody)
+          this.atmospherePass.prepareTransport(this.renderer, this.profiler);
         this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
         // RenderPass writes readBuffer. Preserve the receiver depth in the other
         // target during that draw; sampling its own depth attachment is feedback.

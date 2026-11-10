@@ -71,6 +71,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
       }`,
   });
   const quad = new FullScreenQuad(material), previous = renderer.getRenderTarget();
+  const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
   // FullScreenQuad normally shares one geometry with every post pass. A
   // transient LUT bake must not dispose that shared geometry after each bake.
   quad._mesh.geometry = quad._mesh.geometry.clone();
@@ -80,7 +81,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
   } catch (error) {
     target.dispose(); throw error;
   } finally {
-    renderer.setRenderTarget(previous); renderer.setScissorTest(scissor);
+    renderer.setRenderTarget(previous, face, mip); renderer.setScissorTest(scissor);
     material.dispose(); quad.dispose();
   }
   return target;

@@ -27,6 +27,7 @@ try {
     const { CloudSurfaceShadowPass } = await import('/src/cloud/cloud-surface-shadow-pass.js');
     const { CloudSurfaceShadowPass: Original } = await import('/src/cloud/receiver-startup-reference.js');
     const { surfaceCloudOwner } = await import('/src/cloud/surface-clouds.js');
+    const { GameLegacyPipeline } = await import('/src/legacy-render-pipeline.js');
     const r = new T.WebGLRenderer({ canvas: document.querySelector('#fixture'), logarithmicDepthBuffer: true });
     r.setSize(64, 64);r.setClearColor(0x15202b, 1);
     const p = new Planet({ seed: 'receiver-startup-physical', name: 'Receiver fixture', posUniv: new T.Vector3(),
@@ -97,7 +98,55 @@ try {
       receiverDifference: changed(initial, referencePixels), repeatDifference: changed(initial, repeat), offscreen,
       colorDifference: changed(firstColor, referenceColor), finite: initial.every(Number.isFinite), gl: gl.getError(), lost: gl.isContextLost(),
       scope: 'Actual cold terrain/water materials, constructor production field, physical beams with cache disabled and no worker/time advancement. Old receiver is the pending negative control; forced old eligibility is the same-snapshot physical oracle. No full cloud volume or performance acceptance.' };
-    current.dispose();old.dispose();opaque.dispose();color.dispose();p.dispose();return result;
+    current.dispose();old.dispose();opaque.dispose();color.dispose();
+
+    const pipeline = new GameLegacyPipeline(r, scene, camera, { bloomEnabled: false });
+    pipeline.setSize(64, 64);
+    for (const pass of pipeline.composer.passes)
+      pass.enabled = pass === pipeline.renderPass || pass === pipeline.atmospherePass;
+    const activeAir = pipeline.atmospherePass.material.uniforms;
+    const observedAir = [];
+    const airTarget = new T.WebGLCubeRenderTarget(16);
+    const prepareAir = pipeline.atmospherePass.prepareTransport;
+    let restoredSubresource = false;
+    pipeline.atmospherePass.prepareTransport = function (...args) {
+      const cold = activeAir.uMultipleEnabled.value === 0;
+      const result = prepareAir.apply(this, args);
+      if (cold) restoredSubresource = r.getRenderTarget() === airTarget
+        && r.getActiveCubeFace() === 3 && r.getActiveMipmapLevel() === 0 && r.getScissorTest();
+      return result;
+    };
+    const drawTerrain = terrain.onBeforeRender;
+    terrain.onBeforeRender = function (...args) {
+      drawTerrain.apply(this, args);
+      const medium = this.userData.surfaceMedium;
+      observedAir.push({ enabled: medium.air_uMultipleEnabled.value, texture: medium.air_tMultipleScattering.value });
+    };
+    try {
+      const origin = new T.Vector3();
+      pipeline.setActiveAtmosphere(p, origin);
+      const beforeFrame = activeAir.uMultipleEnabled.value;
+      r.setRenderTarget(airTarget, 3, 0);
+      r.setScissorTest(true);
+      pipeline.render({ origin });
+      r.setRenderTarget(null);
+      r.setScissorTest(false);
+      const firstDraws = observedAir.splice(0);
+      const texture = activeAir.tMultipleScattering.value;
+      pipeline.render({ origin });
+      const secondDraws = observedAir.splice(0);
+      pipeline.setActiveAtmosphere(null, origin);
+      const detached = activeAir.uMultipleEnabled.value === 0 && activeAir.tMultipleScattering.value === null
+        && activeAir.tOpticalDepth.value === null && !p.atmosphereTransportUniforms;
+      pipeline.setActiveAtmosphere(p, origin);
+      const reused = activeAir.tMultipleScattering.value === texture;
+      const summarize = draws => ({ count: draws.length,
+        enabled: draws.every(row => row.enabled === 1), shared: draws.every(row => row.texture === texture) });
+      result.air = { beforeFrame, first: summarize(firstDraws), second: summarize(secondDraws),
+        nativeTexture: Boolean(texture && r.properties.get(texture).__webglTexture), restoredSubresource, detached, reused,
+        gl: gl.getError(), lost: gl.isContextLost() };
+      return result;
+    } finally { r.setRenderTarget(null);airTarget.dispose();pipeline.dispose();p.dispose(); }
   });
   await page.screenshot({ path: `${out}/fixture.png` });
   const after = await evidenceFingerprint('tools/receiverstartupgputest.js');
@@ -110,6 +159,11 @@ try {
   assert.ok(result.transmission.every(x => x.minimum < .98 && x.minimum >= 0 && x.maximum <= 1));
   assert.equal(result.receiverDifference, 0);assert.equal(result.repeatDifference, 0);assert.equal(result.colorDifference, 0);
   assert.deepEqual(result.offscreen, { viewport: [64, 64], target: [64, 64], colorDifference: 0 });
+  assert.equal(result.air.beforeFrame, 0);
+  for (const frame of [result.air.first, result.air.second])
+    assert.ok(frame.count >= 2 && frame.enabled && frame.shared, JSON.stringify(result.air));
+  assert.ok(result.air.nativeTexture && result.air.restoredSubresource && result.air.detached && result.air.reused);
+  assert.equal(result.air.gl, 0);assert.equal(result.air.lost, false);
   console.log(JSON.stringify({ out, result, passed: true }));
 } catch (error) {
   await writeFile(`${out}/failure.json`, JSON.stringify({ before, errors, error: String(error), stack: error.stack }, null, 2));throw error;

@@ -32,9 +32,14 @@ if(!candidateControl) {
   const sharedImport="import { FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';";
   const ownedImport="import { OwnedScreenTriangle as FullScreenQuad } from './owned-screen-triangle.js';";
   assert.equal(candidate.split(sharedImport).length-1,1);
-  const installed=candidate.replace(sharedImport,ownedImport);
+  const installed=candidate.replace(sharedImport,ownedImport)
+    .replace('const quad = new FullScreenQuad(material), previous = renderer.getRenderTarget();',
+      'const quad = new FullScreenQuad(material), previous = renderer.getRenderTarget();\n'
+      +'  const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();')
+    .replace('renderer.setRenderTarget(previous); renderer.setScissorTest(scissor);',
+      'renderer.setRenderTarget(previous, face, mip); renderer.setScissorTest(scissor);');
   assert.equal(current.toString().replaceAll('\r\n','\n'),installed.replaceAll('\r\n','\n'),
-    'Production must contain only the verified loop change and explicit geometry-ownership import');
+    'Production must contain only the verified loop change, geometry ownership and render-target restoration');
   candidate=current.toString();
 }
 const sources={reference,module:'src/atmosphere-multiple-scattering.js',originalSha256:sha(original),

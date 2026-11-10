@@ -251,7 +251,15 @@ export class AtmospherePass extends Pass {
     this.activePlanet = planet?.atmoMesh ? planet : null;
     this.material.uniforms.uEnabled.value
       = this.activePlanet && this.visualEnabled ? 1 : 0;
-    if (!this.activePlanet) return;
+    if (!this.activePlanet) {
+      this.activeCache = null;
+      this.lutTexture = null;
+      this.profileState = null;
+      this.material.uniforms.tOpticalDepth.value = null;
+      this.material.uniforms.tMultipleScattering.value = null;
+      this.material.uniforms.uMultipleEnabled.value = 0;
+      return;
+    }
     this.activePlanet.atmoMesh.visible = false;
     this.profileState = atmosphereRenderProfile(this.activePlanet);
     const cacheKey = JSON.stringify(this.profileState.profile);
@@ -332,7 +340,8 @@ export class AtmospherePass extends Pass {
     }
   }
 
-  render(renderer, writeBuffer, readBuffer) {
+  prepareTransport(renderer, profiler = null) {
+    if (!this.activePlanet || !this.activeCache) return;
     const uniforms = this.material.uniforms;
     if (!this.contextRenderer) {
       this.contextRenderer = renderer;
@@ -349,11 +358,17 @@ export class AtmospherePass extends Pass {
       };
       renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     }
-    if (this.activePlanet && this.activeCache) {
-      this.activeCache.multiple ||= createMultipleScatteringLut(renderer, uniforms);
-      uniforms.tMultipleScattering.value = this.activeCache.multiple.texture;
-      uniforms.uMultipleEnabled.value = 1;
+    if (!this.activeCache.multiple) {
+      const bake = () => createMultipleScatteringLut(renderer, uniforms);
+      this.activeCache.multiple = profiler ? profiler.run('air-transport', bake) : bake();
     }
+    uniforms.tMultipleScattering.value = this.activeCache.multiple.texture;
+    uniforms.uMultipleEnabled.value = 1;
+  }
+
+  render(renderer, writeBuffer, readBuffer) {
+    this.prepareTransport(renderer);
+    const uniforms = this.material.uniforms;
     // Copy opaque logarithmic depth along with colour. The following volume
     // composite writes back into the original target: retaining its original
     // depth for sampling there would create a WebGL framebuffer feedback loop.
