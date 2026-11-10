@@ -14,7 +14,7 @@ ${start}`).replace(ray,`${ray}
 
 // Freeze one real draw at the first near-cloud pose. Preparation jobs retire
 // one scissor band each, without publishing partial volume or changing bins.
-export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false,splitMicroBatch=false,fusedDensity=false,splitReference=false}={}) {
+export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false,splitMicroBatch=false,fusedDensity=false,splitReference=false,retirePhases=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, gl=renderer.getContext();
   const timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -87,7 +87,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       privateCamera.layers.set(VOLUME_LAYER);privateCamera.updateMatrixWorld(true);
       const textures=new Map();
       for(const {value} of Object.values(material.uniforms))
-        if(value?.isTexture)textures.set(value,value.version);
+        if(value?.isTexture)textures.set(value,[value.version,value.source.version]);
       snapshot={scene:privateScene,mesh:privateMesh,camera:privateCamera,textures};
       input={size:[pass.width,pass.height],altitude:u.uCameraLocal.value.length()-planet.R,
         phase:u.uFrame.value,bins:u.uLightQuadratureSteps.value,paths:u.uLightPathCount.value,
@@ -135,8 +135,54 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     target=new T.WebGLRenderTarget(width,height,{type:T.HalfFloatType,depthBuffer:false});
     const render=renderer.render, cases=[];
     const sameInputs=()=>pipeline.frameState.sequence===input.sequence&&pass.historyRead===input.history
-      &&[...snapshot.textures].every(([texture,version])=>texture.version===version);
+      &&[...snapshot.textures].every(([texture,[version,sourceVersion]])=>texture.version===version
+        &&texture.source.version===sourceVersion);
+    async function drawRetiredBatch(executor,program) {
+      const name=executor===referenceBatch?'split-density':'batch';
+      const started=performance.now(), rows=[];
+      let pending, completed;
+      function checkRetirement() {
+        if(!sameInputs()||gl.isContextLost())throw Error('Staged phase inputs changed');
+        if(!pending)return;
+        if(owner.snapshot().stats.completed<=completed||!gl.getQueryParameter(pending.query,gl.QUERY_RESULT_AVAILABLE))
+          throw Error('Previous cloud phase did not retire');
+        const {query,at,...row}=pending;
+        rows.push({...row,wallMs:performance.now()-at,gpuMs:gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6});
+        pending=null;
+      }
+      try {
+        for(const phase of executor.phases()) {
+          await pipeline.prepare(()=>{
+            checkRetirement();
+            completed=owner.snapshot().stats.completed;
+            const query=gl.createQuery();queries.push(query);
+            const at=performance.now();
+            pending={...phase,query,at};
+            snapshot.mesh.material=program;
+            gl.beginQuery(timer.TIME_ELAPSED_EXT,query);
+            try {
+              if(!executor.render(renderer,snapshot.camera,snapshot.mesh,target,phase))
+                throw Error('Frozen cloud phase did not submit');
+            } finally {
+              pending.cpuMs=performance.now()-at;
+              if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);
+            }
+          },{label:'frozen-cloud-'+phase.stage});
+        }
+        const pixels=new Uint16Array(width*height*4);
+        await pipeline.prepare(()=>{
+          checkRetirement();
+          renderer.readRenderTargetPixels(target,0,0,width,height,pixels);
+        },{label:'staged-near-readback'});
+        cases.push({program:name,submissions:rows.length,phases:rows,wallMs:performance.now()-started});
+        return pixels;
+      } catch(error) {
+        trace(JSON.stringify({phaseFailure:name,pending:pending&&{stage:pending.stage,start:pending.start},retired:rows}));
+        throw error;
+      }
+    }
     async function drawPartition(bands,program=material,executor=null) {
+      if(executor&&retirePhases)return drawRetiredBatch(executor,program);
       const first=queries.length, stride=Math.ceil(height/(bands*2))*2;
       const started=performance.now();
       const cpuMs=[];
@@ -202,6 +248,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     const half=T.DataUtils.fromHalfFloat;
     function compare(a,b) {
       let changed=0,alpha=0,nonempty=0,maximum=0,nonfinite=0;
+      const differences=retirePhases?[]:undefined;
       for(let i=0;i<a.length;i++) {
         const x=half(a[i]),y=half(b[i]);
         nonfinite+=Number(!Number.isFinite(x)||!Number.isFinite(y));
@@ -209,8 +256,12 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
         if(a[i]===b[i])continue;
         changed++;alpha+=Number(i%4===3);
         maximum=Math.max(maximum,Math.abs(x-y));
+        if(differences&&differences.length<24) {
+          const pixel=Math.floor(i/4);
+          differences.push({x:pixel%width,y:Math.floor(pixel/width),channel:i%4,reference:x,observed:y});
+        }
       }
-      return {changed,alpha,nonempty,maximum,nonfinite};
+      return {changed,alpha,nonempty,maximum,nonfinite,differences};
     }
     let comparisons, preparationMs, micro, repeatAgainstReference, rayControl;
     const primed=[];

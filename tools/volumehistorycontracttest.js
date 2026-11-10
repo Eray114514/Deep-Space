@@ -30,13 +30,36 @@ try {
     MAX_DRAW_BUFFERS:1,MAX_COLOR_ATTACHMENTS:2,MAX_TEXTURE_SIZE:3,
     getParameter:key=>[0,drawBuffers,colorAttachments,16384][key],getExtension:()=>true,
   })});
+  function verifyRetiredPhases(executor) {
+    const {width,height}=executor.plan;
+    const output={width,height}, scratch=[...executor.targets,output], calls=[];
+    const camera=new THREE.PerspectiveCamera(),mesh=new THREE.Mesh(new THREE.BufferGeometry(),cloud);
+    let target=null,flushes=0;
+    const driver={autoClear:true,getRenderTarget:()=>target,getActiveCubeFace:()=>0,getActiveMipmapLevel:()=>0,
+      getContext:()=>({flush:()=>{flushes++;}}),
+      getClearColor:color=>color.set(0),getClearAlpha:()=>1,setClearColor(){},setRenderTarget:value=>{target=value;},
+      clear:()=>calls.push(['clear',scratch.indexOf(target)]),
+      render:scene=>calls.push([scene.children[0].material.name,scratch.indexOf(target),
+        scene.children[0].geometry.instanceCount??null])};
+    try {
+      assert.equal(executor.render(driver,camera,mesh,output),true);
+      const whole=calls.splice(0);
+      for(const phase of executor.phases())assert.equal(executor.render(driver,camera,mesh,output,phase),true);
+      assert.deepEqual(calls,whole,'Retired phases must preserve draw and clear order');
+      assert.equal(executor.submissions,2,'A partial frame must count only after its last phase');
+      assert.equal(flushes,executor.fusedDensity?executor.plan.batches:0,'Only whole fused frames flush stripes');
+      assert.equal(target,null);assert.equal(driver.autoClear,true);
+    } finally {mesh.geometry.dispose();}
+  }
   try {
     pass.setLightBatchesEnabled(true,{budgetBytes:32*1024*1024,fusedDensity:true});
     const fallback=pass.configureLightBatch(renderer(8,4),cloud);
     assert.equal(fallback.fusedDensity,false);assert.equal(fallback.plan.direct,false);
+    verifyRetiredPhases(fallback);
     const fused=pass.configureLightBatch(renderer(8,8),cloud);
     assert.equal(fallback.disposed,true);assert.equal(fused.fusedDensity,true);
     assert.ok(fused.plan.stripe);
+    verifyRetiredPhases(fused);
     pass.setLightBatchesEnabled(true,{fusedDensity:false});
     assert.equal(fused.disposed,true);assert.equal(pass.lightBatch,null);
   } finally {cloud.dispose();}

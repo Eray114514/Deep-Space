@@ -53,6 +53,8 @@ const fusedBatchTilesArg=process.argv.find(arg=>arg.startsWith('--fused-batch-ti
 const fusedBatchTiles=fusedBatchTilesArg?Number(fusedBatchTilesArg.split('=')[1]):192;
 assert.ok(!fusedBatchTilesArg||nearBatchesFused&&Number.isSafeInteger(fusedBatchTiles)&&fusedBatchTiles>0,
   'A fused tile cap requires --near-batches-fused and a positive integer');
+const verifyFusedFlushes=process.argv.includes('--verify-fused-flushes');
+assert.ok(!verifyFusedFlushes||nearBatchesFused,'Checking stripe flushes requires fused batches');
 const stagedMode=process.argv.find(arg=>arg.startsWith('--staged-near-mode='))?.split('=')[1]??'scissor';
 const stagedFreezeDepth=process.argv.includes('--staged-near-freeze-depth');
 const stagedPrimeBatch=process.argv.includes('--staged-near-prime-batch');
@@ -61,6 +63,7 @@ const stagedSplitMicroBatch=process.argv.includes('--staged-near-split-micro-bat
 const stagedFusedDensity=process.argv.includes('--staged-near-fused-density');
 const stagedBandedReference=process.argv.includes('--staged-near-banded-reference');
 const stagedSplitReference=process.argv.includes('--staged-near-split-reference');
+const stagedRetirePhases=process.argv.includes('--staged-near-retire-phases');
 assert.ok(!stagedNearFrame||!runDescent,'Staged near frame uses a single frozen pose');
 assert.ok(['scissor','fragment','batch'].includes(stagedMode),'Unknown staged near mode');
 assert.ok(!(stagedPrimeBatch||stagedMicroBatch||stagedSplitMicroBatch)||stagedNearFrame&&stagedMode==='batch','First-use proof requires a staged batch');
@@ -68,6 +71,8 @@ assert.ok(!(stagedMicroBatch&&stagedSplitMicroBatch),'Choose one micro batch sub
 assert.ok(!stagedFusedDensity||stagedNearFrame&&stagedMode==='batch','Fused density requires a staged batch');
 assert.ok(!stagedBandedReference||stagedNearFrame&&stagedMode==='batch','Banded reference requires a staged batch');
 assert.ok(!stagedSplitReference||stagedFusedDensity&&!stagedBandedReference,'Split reference requires fused density');
+assert.ok(!stagedRetirePhases||stagedSplitReference&&!stagedMicroBatch&&!stagedSplitMicroBatch,
+  'Retired phases require a split-density reference and no micro batch');
 const dayDescent = process.argv.includes('--day-descent');
 const pacedDescent = process.argv.includes('--paced-descent');
 const nearTiles = process.argv.includes('--near-tiles');
@@ -191,7 +196,8 @@ try {
     }
   });
   console.log(JSON.stringify({ out, started: true }));
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1&cloudsplit=1`);
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=1&farflora=0&post=1&cloudsplit=1`,
+    {waitUntil:'commit'});
   await page.waitForFunction(() => window.NMS?._planet(0)?.volCloudBand && NMS._pipeline.volumePass.farSplit,
     null, { timeout: 120000 });
   const initial = await capture('before-orbit-placement');
@@ -210,11 +216,13 @@ try {
     await page.evaluate(installFoundationGLProbe);
     await page.evaluate(() => { window.__foundationGLProbe.mark('split-orbit');window.__foundationGLProbe.armErrors(); });
   }
-  await page.evaluate(({fixedWeather,supplyRows,farLightTile}) => {
+  await page.evaluate(({fixedWeather,supplyRows,farLightTile,nearBatches,nearBatchesFused,fusedBatchTiles}) => {
     const planet = NMS._planet(0);
     NMS.setAdaptiveQualityLocked();
     if (fixedWeather) NMS.setTimeFrozen();
     if (farLightTile) NMS.setTime(0);
+    if(nearBatches)NMS._pipeline.volumePass.setLightBatchesEnabled(true,{budgetBytes:32*1024*1024,
+      ...(nearBatchesFused?{fusedDensity:true,maxBatchTiles:fusedBatchTiles}:{})});
     const star = planet.stellarDirectionsAt(farLightTile?0:planet.weatherHours)
       .sort((a,b) => b.irradianceFraction-a.irradianceFraction)[0];
     if (supplyRows !== null) {
@@ -235,7 +243,7 @@ try {
       };
     }
     NMS.teleport(0, (planet.volCloudBand.rOut-planet.R+600000)/planet.R, { dir: star.direction, horizon: false });
-  }, {fixedWeather,supplyRows,farLightTile});
+  }, {fixedWeather,supplyRows,farLightTile,nearBatches,nearBatchesFused,fusedBatchTiles});
   await page.waitForFunction(previous => {
     const pipeline = NMS._pipeline, pass = pipeline.volumePass;
     return pass.farSplit.frames > previous + 1 && pass.previousSplitDraw && pass.historyValid
@@ -341,7 +349,7 @@ try {
       return verifyStagedNearFrame(NMS,options);
     },{compareWhole:viewport.width<1000&&!stagedBandedReference,mode:stagedMode,freezeDepth:stagedFreezeDepth,
       primeBatch:stagedPrimeBatch,microBatch:stagedMicroBatch,splitMicroBatch:stagedSplitMicroBatch,
-      fusedDensity:stagedFusedDensity,splitReference:stagedSplitReference});
+      fusedDensity:stagedFusedDensity,splitReference:stagedSplitReference,retirePhases:stagedRetirePhases});
     staged=result;
     console.log(JSON.stringify({staged}));
     assert.ok(result.passed,'Staged near frame changed native HDR');
@@ -360,7 +368,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearBatches,nearBatchesFused,fusedBatchTiles,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearBatches,verifyFusedFlushes,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -369,11 +377,22 @@ try {
       const land = new THREE.Vector3(...coast.landward);
       const landmark = new THREE.Vector3(...coast.direction).addScaledVector(land, 2000/planet.R).normalize();
       const pipeline = NMS._pipeline, volume = pipeline.volumePass;
-      if(nearBatches)volume.setLightBatchesEnabled(true,{budgetBytes:32*1024*1024,
-        ...(nearBatchesFused?{fusedDensity:true,maxBatchTiles:fusedBatchTiles}:{})});
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
+      if(verifyFusedFlushes) {
+        const submit=volume.renderLightBatches;
+        state.batchFlushes=0;
+        volume.renderLightBatches=function(renderer) {
+          const gl=renderer.getContext(),flush=gl.flush;
+          gl.flush=function() {
+            state.batchFlushes++;
+            return flush.call(this);
+          };
+          try {return submit.call(this,renderer);}
+          finally {gl.flush=flush;}
+        };
+      }
       const probeAltitude=nearCoverageAt??(nearTraversalCache?200000:230000);
       if(dayDescent) {
         const start=NMS.time().hours, period=planet.rotationPeriodHours;
@@ -445,6 +464,8 @@ try {
               residentBytes:volume.lightBatch?.plan.residentBytes,
               fusedDensity:volume.lightBatch?.fusedDensity,
               stripeRows:volume.lightBatch?.plan.stripe?.rows,
+              stripes:volume.lightBatch?.plan.stripe?volume.lightBatch.plan.batches:undefined,
+              flushes:state.batchFlushes,
               submissions:volume.lightBatch?.submissions??0}:undefined,
             sunCosine:dayDescent?landmark.dot(planet.sunDirLocal):undefined });
           if(cachePose&&!cachePose.finished) {
@@ -465,7 +486,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearBatches,nearBatchesFused,fusedBatchTiles,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearBatches,verifyFusedFlushes,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
@@ -485,6 +506,9 @@ try {
         'The actual near view used a fallback or changed the production quadrature');
       if(nearBatchesFused)assert.ok(descent.rows.filter(row=>row.route==='near').every(row=>row.batch.fusedDensity),
         'The actual near view did not use fused density');
+      if(verifyFusedFlushes)assert.ok(descent.rows.filter(row=>row.route==='near').every(({batch})=>
+        batch.stripes>0&&batch.flushes===batch.stripes*batch.submissions),
+        'Each completed fused stripe must flush exactly once');
     }
     if(nearWorkProbe==='traversal'||nearReplay==='prefix') {
       assert.ok(descent.quadrature.rows.every(row=>row.error.changed===0),'Near traversal changed the native HDR');

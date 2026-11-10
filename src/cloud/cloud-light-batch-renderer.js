@@ -181,9 +181,29 @@ export class CloudLightBatchRenderer {
     return this.preparation;
   }
 
-  render(renderer,camera,sourceMesh,output) {
+  // A private, frozen frame can retire individual commands without changing
+  // its draw order or allocating a second set of pages. Partial output stays
+  // with the caller until all phases have completed.
+  *phases() {
+    const {stripe,batchTiles,tileCount}=this.plan;
+    if(stripe)yield {stage:'ray'};
+    else {
+      yield {stage:'prepare'};
+      yield {stage:'mask'};
+    }
+    yield {stage:'clear'};
+    for(let start=0;start<tileCount;start+=batchTiles) {
+      yield {stage:stripe?'density':'metadata',start};
+      if(stripe)yield {stage:'mask',start};
+      yield {stage:'beams',start};
+      yield {stage:'compose',start};
+    }
+  }
+
+  render(renderer,camera,sourceMesh,output,phase=null) {
     if(this.disposed||this.plan.direct||!this.targets.length)return false;
     const {width,height,batchTiles,tileCount,tilesX,stripe}=this.plan;
+    const stream=stripe&&!phase?renderer.getContext():null;
     if(output.width!==width||output.height!==height)throw Error('Cloud batch target size changed');
     if(sourceMesh.material!==this.source||this.source.uniforms.uLightQuadratureSteps.value!==16)
       throw Error('Cloud batch source owner changed');
@@ -209,23 +229,35 @@ export class CloudLightBatchRenderer {
     };
     try {
       renderer.autoClear=false;renderer.setClearColor(0,0);
-      if(this.rays)draw(this.rays,this.ray,'mesh');
-      if(!stripe) {
-        draw(this.frame,this.prepare,'mesh');draw(this.tileMask,this.reduce);
+      const stage=phase?.stage;
+      if(this.rays&&(!phase||stage==='ray'))draw(this.rays,this.ray,'mesh');
+      if(!stripe&&phase?.start===undefined) {
+        if(!phase||stage==='prepare')draw(this.frame,this.prepare,'mesh');
+        if(!phase||stage==='mask')draw(this.tileMask,this.reduce);
       }
-      if(this.base)draw(output,this.base);
-      else {renderer.setRenderTarget(output);renderer.clear(true,false,false);}
-      for(let start=0;start<tileCount;start+=batchTiles) {
+      if(!phase||stage==='clear') {
+        if(this.base)draw(output,this.base);
+        else {renderer.setRenderTarget(output);renderer.clear(true,false,false);}
+      }
+      const first=phase?phase.start??tileCount:0;
+      const end=phase?Math.min(first+batchTiles,tileCount):tileCount;
+      for(let start=first;start<end;start+=batchTiles) {
         const count=Math.min(batchTiles,tileCount-start);
         this.page.uBatchStart.value=start;this.page.uBatchCount.value=count;
         if(stripe) {
           this.page.uPageRow.value=start/tilesX*16;
-          draw(this.frame,this.prepare);draw(this.tileMask,this.reduce);
-        } else draw(this.metadata,this.metadataMaterial,'tiles',true,count);
-        draw(this.light,this.lightMaterial,'tiles',true,count*4);
-        draw(output,this.compose,'tiles',false,count);
+          if(!phase||stage==='density')draw(this.frame,this.prepare);
+          if(!phase||stage==='mask')draw(this.tileMask,this.reduce);
+        } else if(!phase||stage==='metadata')draw(this.metadata,this.metadataMaterial,'tiles',true,count);
+        if(!phase||stage==='beams')draw(this.light,this.lightMaterial,'tiles',true,count*4);
+        if(!phase||stage==='compose') {
+          draw(output,this.compose,'tiles',false,count);
+          // Release the completed stripe to the GPU command stream before
+          // building the next one. The frame still publishes as a whole.
+          stream?.flush();
+        }
       }
-      this.submissions++;
+      if(!phase||(stage==='compose'&&end===tileCount))this.submissions++;
       return true;
     } finally {
       renderer.autoClear=auto;renderer.setClearColor(color,alpha);renderer.setRenderTarget(saved,face,mip);
