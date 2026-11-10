@@ -57,11 +57,12 @@ export function timeNearIndexedDraw(renderer,target,time,render) {
   return query;
 }
 
-export function compareNearNativeDraw({renderer,current,backup,blit,read,compare,render,time,cacheOrder}) {
+export function compareNearNativeDraw({renderer,current,backup,blit,read,compare,render,time,cacheOrder,placement}) {
   const gl=renderer.getContext(),draw=gl.drawElements,ids=new Map();
   const framebuffer=renderer.properties.get(current).__webglFramebuffer;
   let published,initial,nativeDelta,nativeState,rebuilt,drawCount=0,rebuiltCount=0;
   const cacheSamples=[];
+  let placementSamples;
   function insideTarget() {return gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)===framebuffer;}
   gl.drawElements=function(...args) {
     if(!insideTarget())return draw.apply(this,args);
@@ -89,6 +90,18 @@ export function compareNearNativeDraw({renderer,current,backup,blit,read,compare
           }
         } finally {if(!gl.isContextLost())gl.uniform1f(ready,1);}
       }
+      if(placement) {
+        let forcedFallback;
+        placementSamples=replayNativePlacement({renderer,placement,gl,run:(name,timed=false)=>{
+          renderer.clear(true,false,false);
+          const work=()=>draw.apply(this,args);
+          const query=timed?time(work):(work(),null);
+          const pixels=read(current);
+          if(name==='validity-only')forcedFallback=pixels;
+          return {name,query,error:compare(published,pixels),
+            forcedError:forcedFallback?compare(forcedFallback,pixels):undefined};
+        }});
+      }
     } finally {if(!gl.isContextLost())blit(backup,current);}
   };
   try {render();}
@@ -111,5 +124,78 @@ export function compareNearNativeDraw({renderer,current,backup,blit,read,compare
   const restored=compare(published,read(current));
   if(rebuiltCount!==1||restored.changed)throw Error('Near renderer repeat could not restore its published target');
   return {nativeDelta,rebuiltDelta,restored,nativeState:snapshotDelta(initial,nativeState),
-    rebuiltState:snapshotDelta(initial,rebuilt),cacheSamples};
+    rebuiltState:snapshotDelta(initial,rebuilt),cacheSamples,placementSamples};
+}
+
+// Replay on the production VAO, program and target, preserving the renderer's
+// own uniform/texture caches by restoring every native value before returning.
+function replayNativePlacement({renderer,placement,gl,run}) {
+  const {bank,uniforms}=placement, program=gl.getParameter(gl.CURRENT_PROGRAM);
+  const location=name=>{
+    const handle=gl.getUniformLocation(program,name);
+    if(handle===null)throw Error('Missing native cache uniform: '+name);
+    return handle;
+  };
+  const entries=[];
+  const register=(name,setter,value)=>{
+    const handle=location(name);
+    const saved=gl.getUniform(program,handle);
+    const set=data=>setter(handle,data);
+    const entry={set,saved,value};
+    entries.push(entry);return entry;
+  };
+  for(const key of ['Depth','Mix','Encoded']) {
+    const name='uSunCache'+key;
+    register(name,(loc,value)=>gl.uniform1f(loc,value),uniforms[name].value);
+  }
+  register('uSunCacheOffsets',(loc,value)=>gl.uniform2fv(loc,value),uniforms.uSunCacheOffsets.value.toArray());
+  const valid=[];
+  for(const suffix of ['A','B']) {
+    const matrix='uSunCacheMatrix'+suffix, margin='uSunCacheMargin'+suffix, validity='uSunCacheValid'+suffix;
+    // Restore each reflected matrix individually, including fields that were
+    // not geometrically available in the production cache.
+    uniforms[matrix].value.forEach((value,index)=>register(`${matrix}[${index}]`,
+      (loc,data)=>gl.uniformMatrix4fv(loc,false,data),value.elements));
+    register(margin,(loc,value)=>gl.uniform4fv(loc,value),uniforms[margin].value.toArray());
+    valid.push(register(validity,(loc,value)=>gl.uniform4fv(loc,value),uniforms[validity].value.toArray()));
+  }
+  if(gl.getUniform(program,location('uSunCacheReady'))!==1||uniforms.uSunCacheReady.value!==1)
+    throw Error('Native placement requires both cache pairs to be ready');
+  const atlas=renderer.properties.get(bank.target.texture).__webglTexture;
+  if(!atlas)throw Error('Focused cache has no native atlas');
+  const unit=gl.TEXTURE0+gl.getUniform(program,location('uSunTransport'));
+  const active=gl.getParameter(gl.ACTIVE_TEXTURE), samples=[];
+  gl.activeTexture(unit);
+  const original=gl.getParameter(gl.TEXTURE_BINDING_2D);
+  const bind=texture=>{
+    gl.activeTexture(unit);gl.bindTexture(gl.TEXTURE_2D,texture);gl.activeTexture(active);
+  };
+  gl.activeTexture(active);
+  const off=[0,0,0,0];
+  try {
+    samples.push(run('reference',true));
+    bind(atlas);
+    samples.push(run('texture-only'));
+    bind(original);
+    for(const entry of valid)entry.set(off);
+    samples.push(run('validity-only'));
+    bind(atlas);
+    for(const entry of entries)entry.set(valid.includes(entry)?off:entry.value);
+    samples.push(run('focus-fallback',true));
+    for(const entry of valid)entry.set(entry.value);
+    samples.push(run('focus-full',true));
+    for(let field=0;field<4;field++) {
+      for(const entry of valid)entry.set(entry.value.map((value,index)=>index===field?value:0));
+      samples.push(run('focus-field-'+field));
+    }
+    for(const entry of valid)entry.set(off);
+    samples.push(run('fallback-repeat'));
+  } finally {
+    if(!gl.isContextLost()) {
+      for(const entry of entries)entry.set(entry.saved);
+      bind(original);
+    }
+  }
+  samples.push(run('restored-reference'));
+  return samples;
 }
