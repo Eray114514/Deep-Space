@@ -6,6 +6,7 @@ import { nearReplayShader } from './near-cloud-replay.js';
 import { createEmptyRunProbe, emptyRunShader } from './near-cloud-empty-runs.js';
 import { nearCacheCountsShader, sumNearCacheCounts } from './near-cloud-cache-counts.js';
 import { nearAnchorSupportShader, nearAnchorSupportSummary } from './near-cloud-anchor-support.js';
+import { createFocusedNearCache, nearCacheCoverageShader, summarizeNearCoverage } from './near-cloud-cache-coverage.js';
 import { compareNearNativeDraw, timeNearIndexedDraw } from './near-cloud-native-repeat.js';
 
 const runtimeOpacityExit=`          if(pass==0) {
@@ -64,7 +65,7 @@ function difference(a,b,half) {
   return {changed,alpha,maximum,nonempty};
 }
 
-export async function observeNearResidual(game,{traversal=false,replay=null,emptyRuns=null,maximumAltitude=230000,cloudyCache=false,cachePair=false,cacheSupport=false,cacheNative=false,cacheNativeToggle=false}={}) {
+export async function observeNearResidual(game,{traversal=false,replay=null,emptyRuns=null,maximumAltitude=230000,cloudyCache=false,cachePair=false,cacheSupport=false,cacheCoverage=false,cachePlacement=false,cacheNative=false,cacheNativeToggle=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, owner=pass.activePlanet, mesh=owner.volCloudMesh, original=owner.volCloudMat;
   const gl=renderer.getContext(), timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -83,11 +84,13 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
   Object.assign(material.uniforms,original.uniforms,{uNearResidualMode:{value:0},uNearTraversalMask:{value:0}});
   const counter=cachePair||cacheSupport?new T.ShaderMaterial().copy(Object.assign(Object.create(original),{uniforms:{}})):null;
   if(counter) {
-    counter.fragmentShader=cacheSupport?nearAnchorSupportShader(fragment):nearCacheCountsShader(fragment);
+    counter.fragmentShader=cacheCoverage?nearCacheCoverageShader(fragment)
+      :cacheSupport?nearAnchorSupportShader(fragment):nearCacheCountsShader(fragment);
     counter.blending=T.NoBlending;
     Object.assign(counter.uniforms,original.uniforms);
+    if(cacheCoverage)counter.uniforms.uNearCoverageMode={value:0};
   }
-  const target=new T.WebGLRenderTarget(pass.width,pass.height,{type:T.HalfFloatType,depthBuffer:false});
+  const target=new T.WebGLRenderTarget(pass.width,pass.height,{type:cacheCoverage?T.FloatType:T.HalfFloatType,depthBuffer:false});
   const proxy=new T.Mesh(mesh.geometry,material);
   proxy.layers.set(VOLUME_LAYER);
   const camera=createCompileCamera(pass.camera,VOLUME_LAYER), half=T.DataUtils.fromHalfFloat;
@@ -155,9 +158,45 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
     }
   }
   function read(source) {
-    const pixels=new Uint16Array(source.width*source.height*4);
+    const size=source.width*source.height*4;
+    const pixels=source.texture.type===T.FloatType?new Float32Array(size):new Uint16Array(size);
     renderer.readRenderTargetPixels(source,0,0,source.width,source.height,pixels);
     return pixels;
+  }
+  function comparePlacement(coverage,published) {
+    const {bank,uniforms}=createFocusedNearCache(owner,coverage.focus);
+    const output=new T.WebGLRenderTarget(target.width,target.height,{type:T.HalfFloatType,depthBuffer:false});
+    const alternate=new T.ShaderMaterial().copy(Object.assign(Object.create(original),{uniforms:{}}));
+    const counts=new T.ShaderMaterial().copy(Object.assign(Object.create(counter),{uniforms:{}}));
+    Object.assign(alternate.uniforms,original.uniforms,uniforms);
+    Object.assign(counts.uniforms,original.uniforms,uniforms,{uNearCoverageMode:{value:6}});
+    try {
+      const baseline=draw(original,{paths:4,output});
+      const control=difference(published,baseline.pixels,half);
+      const begin=performance.now();
+      const bakeQuery=time(()=>bank.update(renderer));
+      const bakeCpuMs=performance.now()-begin;
+      if(uniforms.uSunCacheReady.value!==1)throw Error('Focused cache failed to publish both endpoints');
+      const candidate=draw(alternate,{paths:4,output});
+      const counted=sumNearCacheCounts(draw(counts,{paths:4,measure:false}).pixels,value=>value);
+      if(counted.rays!==coverage.occupied||counted.hits.some((hit,i)=>hit+counted.misses[i]!==coverage.requests[i]))
+        throw Error('Focused cache changed the light-query population');
+      const error=difference(baseline.pixels,candidate.pixels,half);
+      const available=[uniforms.uSunCacheValidA.value,uniforms.uSunCacheValidB.value];
+      const saved=available.map(value=>value.toArray());
+      const fields=[];
+      for(let field=0;field<4;field++) {
+        available.forEach((value,index)=>value.set(0,0,0,0).setComponent(field,saved[index][field]));
+        const isolated=draw(alternate,{paths:4,measure:false,output});
+        fields.push({field,hits:counted.hits[field],error:difference(baseline.pixels,isolated.pixels,half)});
+      }
+      available.forEach(value=>value.set(0,0,0,0));
+      const fallback=draw(alternate,{paths:4,measure:false,output});
+      const fallbackControl=difference(baseline.pixels,fallback.pixels,half);
+      return {control,fallbackControl,error,admitted:!control.changed&&!fallbackControl.changed&&!error.alpha&&error.maximum<=.002,
+        counted,fields,bakeQuery,bakeCpuMs,referenceQuery:baseline.query,candidateQuery:candidate.query,
+        centerAltitude:bank.center.length()-owner.R,spacing:bank.spacing,atlasBytes:bank.target.width*bank.target.height};
+    } finally {bank.dispose();output.dispose();alternate.dispose();counts.dispose();}
   }
   function blit(source,destination) {
     const readBuffer=gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
@@ -222,6 +261,21 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
         return result;
       }
       const published=read(current);
+      if(cacheCoverage) {
+        const readMode=mode=>{
+          counter.uniforms.uNearCoverageMode.value=mode;
+          return draw(counter,{paths:4,measure:false}).pixels;
+        };
+        const groups=[0,1,2,3].map(readMode);
+        const coverage=summarizeNearCoverage({groups,rays:readMode(4),masks:readMode(5),counts:readMode(6),
+          published,half,uniforms:original.uniforms,T});
+        const placement=cachePlacement?comparePlacement(coverage,published):undefined;
+        const control=difference(published,read(current),half);
+        if(control.changed||control.nonempty!==coverage.occupied)
+          throw Error('Near coverage changed the published target');
+        rows.push({arm:'cache-coverage',eyeAltitude,frame:pass.frame,coverage,placement,control});
+        return result;
+      }
       if(cacheSupport) {
         const support=nearAnchorSupportSummary(draw(counter,{paths:4,measure:false}).pixels,half,owner);
         const control=difference(published,read(current),half);
@@ -312,8 +366,9 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
   const report=ms=>({prepareMs,optimized,traversal,replay,
     emptyRuns:legacyScan?{production:'r16',layout:'legacy-scan'}:emptyRunProbe?.stats(),
     cloudyCache,cachePair,cacheSupport,cacheNative,dimensions:[target.width,target.height],
-    rows:rows.map(({referenceQuery,candidateQuery,variantQuery,uncachedReferenceQuery,uncachedCandidateQuery,liveQuery,cacheSamples,...row})=>({...row,
+    rows:rows.map(({referenceQuery,candidateQuery,variantQuery,uncachedReferenceQuery,uncachedCandidateQuery,liveQuery,cacheSamples,placement,...row})=>({...row,
       referenceGpuMs:ms(referenceQuery),variantGpuMs:ms(variantQuery),gpuMs:ms(candidateQuery),
+      ...(placement?{placement:placementReport(placement,ms)}:{}),
       ...(cacheSamples?.length?{cacheSamples:cacheSamples.map(({query,...sample})=>({...sample,gpuMs:ms(query)}))}:{}),
       ...(cachePair?{liveGpuMs:ms(liveQuery),uncachedReferenceGpuMs:ms(uncachedReferenceQuery),uncachedGpuMs:ms(uncachedCandidateQuery)}:{})}))});
   return {
@@ -343,4 +398,8 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
       }
     },
   };
+}
+
+function placementReport({bakeQuery,referenceQuery,candidateQuery,...placement},ms) {
+  return {...placement,bakeGpuMs:ms(bakeQuery),referenceGpuMs:ms(referenceQuery),candidateGpuMs:ms(candidateQuery)};
 }

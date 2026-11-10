@@ -63,6 +63,13 @@ const nearEmptyRuns = process.argv.includes('--compare-near-empty-runs=r16')?'r1
 const nearTraversalCache = process.argv.includes('--near-traversal-cache');
 const nearCachePair = process.argv.includes('--near-cache-pair');
 const nearCacheSupport = process.argv.includes('--near-cache-support');
+const nearCoverageOption=process.argv.find(arg=>arg.startsWith('--near-cache-coverage='));
+const nearCoverageAt=nearCoverageOption?Number(nearCoverageOption.split('=')[1]):null;
+const nearCachePlacement=process.argv.includes('--near-cache-placement');
+assert.ok(!nearCoverageOption||nearCacheSupport&&Number.isFinite(nearCoverageAt)&&nearCoverageAt>=1500&&nearCoverageAt<=200000,
+  '--near-cache-coverage requires --near-cache-support and a probe altitude from 1500 to 200000 metres');
+assert.ok(!nearCachePlacement||nearCoverageAt!==null&&nearCoverageAt<=20000,
+  '--near-cache-placement requires a near cache coverage probe at or below 20000 metres');
 const nearCacheNative = process.argv.includes('--near-cache-native-repeat');
 const nearCacheNativeToggle=process.argv.includes('--near-cache-native-toggle');
 const nearCacheNativePrewarm=process.argv.includes('--near-cache-native-prewarm');
@@ -302,7 +309,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -314,7 +321,7 @@ try {
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
-      const probeAltitude=nearTraversalCache?200000:230000;
+      const probeAltitude=nearCoverageAt??(nearTraversalCache?200000:230000);
       if(dayDescent) {
         const start=NMS.time().hours, period=planet.rotationPeriodHours;
         let best=null;
@@ -338,7 +345,8 @@ try {
         window.__nearQuadrature = await observeNearResidual(NMS,{traversal:nearWorkProbe==='traversal',
           replay:nearReplay,emptyRuns:nearCacheNativePrewarm?'r16':nearEmptyRuns,
           maximumAltitude:probeAltitude,cloudyCache:nearTraversalCache,cachePair:nearCachePair,
-          cacheSupport:nearWorkProbe==='cache-support',cacheNative:nearWorkProbe==='cache-native',cacheNativeToggle:nearCacheNativeToggle});
+          cacheSupport:nearWorkProbe==='cache-support',cacheCoverage:nearCoverageAt!==null,
+          cachePlacement:nearCachePlacement,cacheNative:nearWorkProbe==='cache-native',cacheNativeToggle:nearCacheNativeToggle});
       } else if(nearWorkProbe) {
         const {observeNearQuadrature} = await import('/tools/near-cloud-quadrature.js');
         window.__nearQuadrature = observeNearQuadrature(NMS,{paths:nearWorkProbe==='paths'});
@@ -395,7 +403,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCacheNativeToggle,nearCacheNativePrewarm});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearCacheNativeToggle,nearCacheNativePrewarm});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
