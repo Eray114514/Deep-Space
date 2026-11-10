@@ -77,6 +77,13 @@ try {
     p.weatherStream.ready = true;old.render(r, opaque, p);const referencePixels = read(old.target);
     r.setRenderTarget(color);r.render(scene, camera);const referenceColor = read(color);
     p.weatherStream.ready = false;current.render(r, opaque, null);const repeat = read(current.target);
+    // The offscreen scene still uses the same 64×64 opaque attachment even
+    // when the renderer's visible drawing buffer changes size.
+    r.setSize(96, 80);
+    current.render(r, opaque, null);
+    const offscreen = { viewport: current.viewport.toArray(),
+      target: [current.target.width, current.target.height], colorDifference: changed(initial, read(current.target)) };
+    r.setSize(64, 64);
     r.setRenderTarget(null);r.render(scene, camera);
     const gl = r.getContext(), program = r.properties.get(current.material).currentProgram;
     const gpuCacheReady = gl.getUniform(program.program, gl.getUniformLocation(program.program, 'uSunCacheReady'));
@@ -87,7 +94,7 @@ try {
     const result = { ownership, bindings, oldPendingRejected, currentPendingReady, inputUnchanged: input() === firstInput,
       weatherHours: p.weatherHours, hasWorker: !!p.weatherStream.worker, gpuCacheReady,
       occupied: occupied.length, transmission: transmission.map(values => ({ minimum: Math.min(...values), maximum: Math.max(...values) })),
-      receiverDifference: changed(initial, referencePixels), repeatDifference: changed(initial, repeat),
+      receiverDifference: changed(initial, referencePixels), repeatDifference: changed(initial, repeat), offscreen,
       colorDifference: changed(firstColor, referenceColor), finite: initial.every(Number.isFinite), gl: gl.getError(), lost: gl.isContextLost(),
       scope: 'Actual cold terrain/water materials, constructor production field, physical beams with cache disabled and no worker/time advancement. Old receiver is the pending negative control; forced old eligibility is the same-snapshot physical oracle. No full cloud volume or performance acceptance.' };
     current.dispose();old.dispose();opaque.dispose();color.dispose();p.dispose();return result;
@@ -102,6 +109,7 @@ try {
   assert.equal(result.hasWorker, false);assert.equal(result.gpuCacheReady, 0);assert.ok(result.occupied > 100);
   assert.ok(result.transmission.every(x => x.minimum < .98 && x.minimum >= 0 && x.maximum <= 1));
   assert.equal(result.receiverDifference, 0);assert.equal(result.repeatDifference, 0);assert.equal(result.colorDifference, 0);
+  assert.deepEqual(result.offscreen, { viewport: [64, 64], target: [64, 64], colorDifference: 0 });
   console.log(JSON.stringify({ out, result, passed: true }));
 } catch (error) {
   await writeFile(`${out}/failure.json`, JSON.stringify({ before, errors, error: String(error), stack: error.stack }, null, 2));throw error;

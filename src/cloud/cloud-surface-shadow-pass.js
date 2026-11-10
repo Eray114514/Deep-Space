@@ -4,7 +4,7 @@ import {productionCloudGLSL} from './production-medium-glsl.js';
 import {weatherAtlasGLSL} from './weather-atlas.js';
 import {cloudBeamGLSL} from './cloud-beam-glsl.js';
 import {cloudLightCacheGLSL} from './cloud-light-cache-glsl.js';
-import {setCloudSurfacePreparation, surfaceCloudOwner} from './surface-clouds.js';
+import {withCloudSurfacePreparation, surfaceCloudOwner} from './surface-clouds.js';
 
 // Forecast readiness owns cache endpoints, not the currently published field.
 // Before a forecast bracket is ready, the receiver can integrate that field's
@@ -92,18 +92,18 @@ export class CloudSurfaceShadowPass {
     this.scene.traverseVisible(object=>{
       for(const material of [object.material].flat())add(surfaceCloudOwner(material));
     });
-    if(!bodies.size)return;
-    const size=renderer.getDrawingBufferSize(this.viewport);
+    if(!bodies.size||!opaque?.depthTexture)return;
+    // This depth belongs to a composer attachment. Canvas dimensions can
+    // change independently while an offscreen view or resize is in flight.
+    const size=this.viewport.set(opaque.width,opaque.height);
     const width=Math.max(1,Math.ceil(size.x*this.scale)),height=Math.max(1,Math.ceil(size.y*this.scale));
     if(this.target.width!==width||this.target.height!==height)this.target.setSize(width,height);
     const saved=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
     const auto=renderer.autoClear;
     try {
-      setCloudSurfacePreparation(true);
       renderer.setRenderTarget(opaque);renderer.autoClear=true;
-      const depth=()=>renderer.render(this.scene,this.camera);
+      const depth=()=>withCloudSurfacePreparation(true,()=>renderer.render(this.scene,this.camera));
       if(profiler)profiler.run('cloud-receiver-depth',depth);else depth();
-      setCloudSurfacePreparation(false);
       // One depth owner and one transport image for every actual receiver.
       // Remote bodies otherwise retained the enormous point-density kernel in
       // every PBR fragment, including late-depth-rejected fragments.
@@ -138,7 +138,6 @@ export class CloudSurfaceShadowPass {
       this.renderer=renderer;renderer.cloudSurfaceReceiver=this;
       if(planet)planet.cloudSurfaceShadowCache=this;
     } finally {
-      setCloudSurfacePreparation(false);
       renderer.setRenderTarget(saved,face,mip);renderer.autoClear=auto;
     }
   }
