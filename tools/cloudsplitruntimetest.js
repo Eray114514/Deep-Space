@@ -15,6 +15,8 @@ const farLightSupport = process.argv.includes('--far-light-support');
 const farLightTile = process.argv.includes('--far-light-tile');
 const farLightRepresentation = process.argv.includes('--far-light-representation');
 const farLightEncoded = process.argv.includes('--far-light-encoded');
+const farLightGate = process.argv.includes('--far-light-gate');
+assert.ok(!farLightGate||farLightTile&&!farLightEncoded,'--far-light-gate requires a depth tile');
 assert.ok(!farLightEncoded||farLightRepresentation,'--far-light-encoded requires --far-light-representation');
 assert.ok(!farLightRepresentation||farLightTile,'--far-light-representation requires --far-light-tile');
 const spacingArg = process.argv.find(arg=>arg.startsWith('--far-light-spacing='));
@@ -51,8 +53,14 @@ const nearBinsArg = process.argv.find(arg=>arg.startsWith('--near-bins='));
 const nearBins = nearBinsArg ? Number(nearBinsArg.split('=')[1]) : 16;
 const compareNearBins = process.argv.includes('--compare-near-bins');
 const compareNearPaths = process.argv.includes('--compare-near-paths');
-assert.ok(!(compareNearBins&&compareNearPaths),'Select one near workload probe');
-const nearWorkProbe=compareNearBins?'bins':compareNearPaths?'paths':null;
+const compareNearResidual = process.argv.includes('--compare-near-residual');
+const compareNearTraversal = process.argv.includes('--compare-near-traversal');
+const nearTraversalCache = process.argv.includes('--near-traversal-cache');
+assert.ok(!nearTraversalCache||compareNearTraversal,'--near-traversal-cache requires --compare-near-traversal');
+assert.ok([compareNearBins,compareNearPaths,compareNearResidual,compareNearTraversal].filter(Boolean).length<=1,
+  'Select one near workload probe');
+const nearWorkProbe=compareNearBins?'bins':compareNearPaths?'paths':compareNearResidual?'residual'
+  :compareNearTraversal?'traversal':null;
 const traceDescent = process.argv.includes('--near-trace');
 const nearTrace = traceDescent || auditRestore || forceRecovery || pacedDescent;
 const skipResize = process.argv.includes('--skip-resize');
@@ -209,10 +217,10 @@ try {
     assert.equal(lightSupport.gl,0);assert.equal(lightSupport.lost,false);
   }
   if (farLightTile) {
-    lightTile = await page.evaluate(async ({spacing,representation,encoded}) => {
+    lightTile = await page.evaluate(async ({spacing,representation,encoded,gate}) => {
       const {measureFarLightTile} = await import('/tools/cloud-far-light-tile.js');
-      return measureFarLightTile(NMS,spacing,representation,encoded);
-    },{spacing:farLightSpacing,representation:farLightRepresentation,encoded:farLightEncoded});
+      return measureFarLightTile(NMS,spacing,representation,encoded,gate);
+    },{spacing:farLightSpacing,representation:farLightRepresentation,encoded:farLightEncoded,gate:farLightGate});
     console.log(JSON.stringify({lightTile}));
     assert.equal(lightTile.gl,0);assert.equal(lightTile.lost,false);
   }
@@ -277,7 +285,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -289,6 +297,7 @@ try {
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
+      const probeAltitude=nearTraversalCache?200000:230000;
       if(dayDescent) {
         const start=NMS.time().hours, period=planet.rotationPeriodHours;
         let best=null;
@@ -306,13 +315,21 @@ try {
         const {installNearVolumeTiles} = await import('/tools/near-volume-tiles.js');
         state.tiles = installNearVolumeTiles(NMS,{verify:verifyTiles});
       }
-      if(nearWorkProbe) {
+      if(nearWorkProbe==='residual'||nearWorkProbe==='traversal') {
+        const {observeNearResidual} = await import('/tools/near-cloud-residual.js');
+        window.__nearQuadrature = await observeNearResidual(NMS,{traversal:nearWorkProbe==='traversal',
+          maximumAltitude:probeAltitude,cloudyCache:nearTraversalCache});
+      } else if(nearWorkProbe) {
         const {observeNearQuadrature} = await import('/tools/near-cloud-quadrature.js');
         window.__nearQuadrature = observeNearQuadrature(NMS,{paths:nearWorkProbe==='paths'});
       }
       const renderer = NMS._renderer;
       let index = 0, sequence = pipeline.frameState.sequence;
       function place(altitude) {
+        if(nearTraversalCache && altitude<=probeAltitude && !state.cacheProbePose) {
+          state.cacheProbePose={hours:NMS.time().hours,altitude};
+          NMS.setTimeFrozen();
+        }
         if (nearScaleCap && !state.scaleCap && altitude<=230000) {
           const {width,height}=pipeline.composer.readBuffer;
           const previous=[volume.width,volume.height];
@@ -329,16 +346,21 @@ try {
       place(altitude);
       function observe(atMs) {
         if (pipeline.frameState.sequence !== sequence) {
-          if(nearWorkProbe && altitude<=230000 && !window.__nearQuadrature.done) {
+          if(nearWorkProbe && altitude<=probeAltitude && !window.__nearQuadrature.done) {
             requestAnimationFrame(observe);return;
           }
           const far = planet.volCloudMesh.material === planet.volCloudFarMat;
+          const cachePose=state.cacheProbePose;
           state.rows.push({ altitude, atMs, sequence:pipeline.frameState.sequence,
             route:volume.previousSplitDraw?volume.farSplit.lastRoute:far?'far-legacy':'near',
             history:volume.resolveMaterial.uniforms.uHistoryValid.value,
             lightCache:planet.volCloudMat.uniforms.uSunCacheReady.value,
             lightBins:planet.volCloudMat.uniforms.uLightQuadratureSteps.value,
             sunCosine:dayDescent?landmark.dot(planet.sunDirLocal):undefined });
+          if(cachePose&&!cachePose.finished) {
+            cachePose.finished=true;
+            NMS.setTimeFrozen(false);
+          }
           sequence = pipeline.frameState.sequence;
           if (++index > count) { state.done = true;return; }
           if (forceRecovery && !state.forcedLoss && altitude <= 156100) {
@@ -353,7 +375,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearWorkProbe,nearTraversalCache});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
@@ -367,6 +389,11 @@ try {
       quadrature:nearWorkProbe?await window.__nearQuadrature.finish():undefined,
       profile:NMS._pipeline.performanceSnapshot(),pacing:NMS._pipeline.framePacer?.snapshot()}),nearWorkProbe);
     assert.ok(descent.done && descent.rows.some(row => row.route === 'near'));
+    if(nearWorkProbe==='traversal') {
+      assert.ok(descent.quadrature.rows.every(row=>row.error.changed===0),'Near traversal changed the native HDR');
+      if(nearTraversalCache) assert.ok(descent.quadrature.rows.every(row=>row.cacheReady===1&&row.error.nonempty>0),
+        'Near traversal cache probe needs occupied cloud with bound lighting');
+    }
     if(dayDescent) assert.ok(descent.rows.every(row=>row.sunCosine>.5),'Descent left the daylight window');
     if (pacedDescent) assert.ok(descent.pacing.stats.completed>=60 && !descent.pacing.fault, JSON.stringify(descent.pacing));
     if (nearTiles) assert.ok(descent.tiles.frames>0 && descent.tiles.maxBands>1);

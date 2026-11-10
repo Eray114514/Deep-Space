@@ -2,10 +2,11 @@ import { CloudSunCache } from '../src/cloud/cloud-sun-cache.js';
 import { readGpuDisjointEpoch } from '../src/gpu-query-state.js';
 import { directFarLightGrid, compareFarLightGrid } from './cloud-far-light-grid.js';
 import { createEncodedFarLight } from './cloud-far-light-encoded.js';
+import { makeFarLightGate, summarizeFarLightGate } from './cloud-far-light-gate.js';
 
 // Frozen live orbit only. Bind a single world-space tile at both endpoints
 // of the actual point material, then restore every binding before history.
-export async function measureFarLightTile(game, spacing=200, representation=false, encodedOutput=false) {
+export async function measureFarLightTile(game, spacing=200, representation=false, encodedOutput=false, gateOutput=false) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, split=pass.farSplit, planet=pass.activePlanet;
   const mesh=planet.volCloudMesh, material=split.materials.point;
@@ -26,7 +27,7 @@ export async function measureFarLightTile(game, spacing=200, representation=fals
   const target=new T.WebGLRenderTarget(width,height,{type:T.FloatType,depthBuffer:false});
   const hdr=new T.WebGLRenderTarget(width,height,{type:T.HalfFloatType,depthBuffer:false});
   const profile=pass.profilePhase, queries=[], submissions=[];
-  let deadline,hook,pacer,encoded,encodeQuery;
+  let deadline,hook,pacer,encoded,encodeQuery,gate;
   const epoch=readGpuDisjointEpoch(native,timer);
   function prepare(work,label) {
     return pipeline.prepare(()=>{
@@ -116,6 +117,15 @@ export async function measureFarLightTile(game, spacing=200, representation=fals
     const grid=observation.grid=measured.rows;
     if(representation)observation.representations=measured.representations;
     let arms=['control',...grid.filter(field=>field.available).map(field=>field.field),'all'];
+    if(gateOutput) {
+      gate=makeFarLightGate(T,material,mesh,pass);
+      await prepare(()=>{
+        renderer.setRenderTarget(target);
+        return gate.compile(renderer);
+      },'far-light-gate-program');
+      observation.gates=[];
+      arms=grid.filter(field=>field.available).map(field=>field.field);
+    }
     if(encodedOutput) {
       encoded=createEncodedFarLight(T,cache,material,mesh,pass.camera,pass.scene);
       const at=performance.now();
@@ -143,7 +153,7 @@ export async function measureFarLightTile(game, spacing=200, representation=fals
               throw Error(`Far tile ${arm} ${kind} changed on three frames`);
           }
           let referenceQuery;
-          if(encodedOutput) {
+          if(encodedOutput||gateOutput) {
             referenceQuery=renderPoint({},material);
             const reference=difference(original,read(target)), referenceHdr=difference(originalHdr,compose(),half);
             if(reference.changedPixels||referenceHdr.changedPixels) {
@@ -167,7 +177,14 @@ export async function measureFarLightTile(game, spacing=200, representation=fals
           if(useEncoded)bindings.uEncodedRadialReady=radial;
           const query=renderPoint(bindings,useEncoded?encoded.material:material);
           const tiled=read(target);
-          const error=difference(original,tiled), errorHdr=difference(originalHdr,compose(),half);
+          const composed=compose();
+          const error=difference(original,tiled), errorHdr=difference(originalHdr,composed,half);
+          if(gate) {
+            const field=grid.findIndex(entry=>entry.field===arm);
+            renderPoint({...bindings,uGateField:field},gate.material);
+            observation.gates.push({arm,frame:pass.frame,alphaChanged:errorHdr.alphaChanged,
+              ...summarizeFarLightGate(field,read(target),original,originalHdr,composed,half)});
+          }
           const untouched=difference(original,read(point)), untouchedHdr=difference(originalHdr,read(current,Uint16Array),half);
           if(untouched.changedPixels||untouchedHdr.changedPixels)throw Error('Far tile modified a published target');
           if(control&&(error.changedPixels||errorHdr.changedPixels)) {
@@ -204,6 +221,6 @@ export async function measureFarLightTile(game, spacing=200, representation=fals
     if(pass.profilePhase===hook)pass.profilePhase=profile;
     if(pacer&&pipeline.framePacer===pacer)pipeline.stopFramePacing();
     if(!native.isContextLost())for(const query of queries)native.deleteQuery(query);
-    encoded?.dispose();target.dispose();hdr.dispose();cache.dispose();
+    gate?.dispose();encoded?.dispose();target.dispose();hdr.dispose();cache.dispose();
   }
 }

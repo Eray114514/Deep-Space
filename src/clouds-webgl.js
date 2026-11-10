@@ -921,10 +921,14 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
                 anchors[b]=cellStart+clamp(within,0.0,cellLength);bin=b+1;
               }
             }
+            if(pass==1 && bin>=bins)break;
             T=nextT;relativeDistance+=cellLength;
             if(T<0.0002)break;
           }
-          if(pass==0)totalOpacity=1.0-T;
+          if(pass==0) {
+            totalOpacity=1.0-T;
+            if(totalOpacity*uEngage<0.004)discard;
+          }
         }
         float alpha=totalOpacity*uEngage;
         if(alpha<0.004)discard;
