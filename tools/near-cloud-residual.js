@@ -309,7 +309,8 @@ export async function observeNearResidual(game,{traversal=false,replay=null,empt
           const {bank,uniforms}=stagedPlacement;
           if(placementR16)uniforms.uSunCacheEncoded.value=0;
           const cpuMs=performance.now()-start;
-          const visibleOptics=placementOptics?measureNearVisibleOptics(T,renderer,original,uniforms,{groups,rays}):undefined;
+          const visibleOptics=placementOptics?measureNearVisibleOptics(T,renderer,original,uniforms,{groups,rays},
+            referenceBank.maps.get(0)):undefined;
           if(uniforms.uSunCacheReady.value!==1||difference(published,read(current),half).changed)
             throw Error('Native placement setup failed to publish privately');
           placementSetup={coverage,query,cpuMs,visibleOptics,

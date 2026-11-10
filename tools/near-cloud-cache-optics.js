@@ -2,6 +2,7 @@ import { OwnedScreenTriangle } from '../src/owned-screen-triangle.js';
 import { cloudSunCacheSamplingGLSL } from '../src/cloud/cloud-sun-cache.js';
 import { directFarLightGrid } from './cloud-far-light-grid.js';
 import { interpolateLightMidpoints } from './cloud-light-representation.js';
+import { measureNearNeighbors } from './near-cloud-cache-neighbors.js';
 
 const logDepth=Math.log(129);
 const encode=tau=>Math.log1p(tau)/logDepth;
@@ -86,7 +87,7 @@ export async function measureNearCacheOptics(T,renderer,reference,baked,prepare)
 
 // Stratify by the visible ray order and sample the front, middle, and back
 // of each selected ray. Reconstruct the exact shader position on the GPU.
-export function measureNearVisibleOptics(T,renderer,source,uniforms,{groups,rays}) {
+export function measureNearVisibleOptics(T,renderer,source,uniforms,{groups,rays},reference) {
   const occupied=[];
   for(let i=0;i<rays.length;i+=4)if(rays[i+3]===1)occupied.push(i);
   if(!occupied.length)throw Error('No visible near lighting samples');
@@ -133,7 +134,7 @@ export function measureNearVisibleOptics(T,renderer,source,uniforms,{groups,rays
     const pixels=new Float32Array(width*4*4);
     renderer.readRenderTargetPixels(target,0,0,width,4,pixels);
     const fields=Array.from({length:4},(_,field)=>{
-      const direct=[],cached=[];
+      const direct=[],cached=[],ranked=[];
       let requested=0,worst=null;
       for(let i=0;i<width;i++) {
         const index=(field*width+i)*4;
@@ -144,13 +145,19 @@ export function measureNearVisibleOptics(T,renderer,source,uniforms,{groups,rays
         if(!hit)continue;
         direct.push(a);cached.push(b);
         const transmission=Math.abs(Math.exp(-a)-Math.exp(-b));
+        if(field>=2)ranked.push({field,sample:i,transmission});
         if(!worst||transmission>worst.transmission)worst={direct:a,cached:b,transmission,bin:bins[i%bins.length]};
       }
-      return {field,requested,hit:direct.length,worst,error:direct.length?errors(direct,cached):null};
+      ranked.sort((a,b)=>b.transmission-a.transmission);
+      return {field,requested,hit:direct.length,worst,error:direct.length?errors(direct,cached):null,
+        selected:ranked.slice(0,8)};
     });
     if(fields[2].requested!==width||fields[3].requested!==width||!fields.some(row=>row.hit>0))
       throw Error('Visible optical probe missed the actual query population');
-    return {sampledRays:raysToSample,bins,cacheMix:uniforms.uSunCacheMix.value,fields};
+    const selected=fields.flatMap(field=>field.selected);
+    const neighbors=reference?measureNearNeighbors(T,renderer,source,uniforms,reference,inputs,selected):undefined;
+    return {sampledRays:raysToSample,bins,cacheMix:uniforms.uSunCacheMix.value,
+      fields:fields.map(({selected,...field})=>field),neighbors};
   } finally {
     renderer.setRenderTarget(saved,face,mip);
     target.dispose();quad.dispose();material.dispose();samples.dispose();

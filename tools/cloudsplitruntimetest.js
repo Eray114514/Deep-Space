@@ -95,8 +95,10 @@ const traceDescent = process.argv.includes('--near-trace');
 const nearTrace = traceDescent || auditRestore || forceRecovery || pacedDescent;
 const skipResize = process.argv.includes('--skip-resize');
 const nearPairRequested = process.argv.includes('--near-pair');
+const verifyWeatherHistory=process.argv.includes('--verify-weather-history');
 const viewport = process.argv.includes('--2k') ? {width:2560,height:1440} : {width:960,height:540};
 assert.ok(!nearPairRequested || runDescent, '--near-pair requires --descent');
+assert.ok(!verifyWeatherHistory||runDescent,'--verify-weather-history requires --descent');
 assert.ok(!pacedDescent || runDescent, '--paced-descent requires --descent');
 assert.ok(!dayDescent || runDescent && !fixedWeather,'--day-descent requires natural weather and --descent');
 assert.ok(!nearTiles || pacedDescent, '--near-tiles requires --paced-descent');
@@ -438,6 +440,18 @@ try {
     if (nearScaleCap) assert.deepEqual(descent.scaleCap.volume,[768,432]);
     const end = await capture('descent-low-flight');
     assert.equal(end.gl,0);assert.equal(end.lost,false);assert.equal(end.ready.failed,false);
+    if(verifyWeatherHistory) {
+      await page.waitForFunction(()=>{
+        const pass=NMS._pipeline.volumePass, body=pass.activePlanet;
+        return body?.weatherStream?.committedSecond&&body.cloudWeatherPublication
+          &&pass.resolveMaterial.uniforms.uHistoryValid.value===1;
+      },null,{timeout:60000});
+      descent.weatherHistory=await page.evaluate(async()=>{
+        const {verifyVolumeWeatherPublication}=await import('/tools/volume-weather-publication-browser.js');
+        return verifyVolumeWeatherPublication(NMS);
+      });
+      assert.equal((await capture('weather-history-replacement')).gl,0);
+    }
   }
   if (nearPairRequested) {
     nearPair = await page.evaluate(async () => {
@@ -458,7 +472,7 @@ try {
   for (const state of checkpoints.slice(1)) {
     assert.equal(state.gl,0);assert.equal(state.lost,false);assert.equal(state.ready.failed,false);
     assert.ok(!state.firstError, JSON.stringify(state.firstError));
-    if (state.label !== 'descent-low-flight')
+    if (state.label !== 'descent-low-flight'&&state.label!=='weather-history-replacement')
       assert.ok(state.hdr?.cloudPixels > 0 && state.hdr?.maxAlpha > 0 && state.hdr?.stableUniforms, JSON.stringify(state.hdr));
     if (state.splitPublished && state.route === 'combine') assert.deepEqual(state.scratch, [state.size, state.size]);
   }
@@ -483,6 +497,8 @@ try {
     } catch {}
     const after = await evidenceFingerprint(verifier);
     const contextEvents = transition?.contextEvents ?? [];
+    if(!failure&&nearTrace&&runDescent&&(!transition?.phases?.draws||transition.phases.mismatches))
+      failure='Actual near draws did not follow the committed cloud sample sequence';
     if (!failure && auditRestore && restorationAudit?.errorArms.some(arm => arm.preexisting))
       failure = 'Preexisting GL error at context restoration';
     if (!failure && forceRecovery) {
