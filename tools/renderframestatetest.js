@@ -106,5 +106,55 @@ const clock = new CelestialClock('frame-state-control', { persist: false, initia
 clock.update(.1);clock.update(.1, false);assert.equal(clock.epoch, 0);
 clock.set(clock.hours);assert.equal(clock.epoch, 1);
 clock.advance(-2);assert.equal(clock.epoch, 2);
+
+const rigid = new RenderFrameState();
+const scene = new THREE.Scene();
+const carrier = new THREE.Group();
+const hull = new THREE.Group();
+scene.add(carrier);carrier.add(hull);
+carrier.position.set(4, 6, -80);
+hull.position.set(1, -.5, 2);
+const worldPass = {}, foregroundPass = {}, rigidContext = {};
+const tracked = new Map([[hull, worldPass]]);
+const currentClip = new THREE.Matrix4(), previousClip = new THREE.Matrix4();
+const hullPoint = new THREE.Vector3(.3, -.9, 1.2);
+const rigidCamera = new THREE.PerspectiveCamera(60, 1.6, .12, 1.2e11);
+const rigidOrigin = new THREE.Vector3(1e15, -1e15, 1e15);
+const startRigid = (objects = tracked, context = rigidContext) => {
+  rigid.begin(rigidCamera, rigidOrigin, { context });
+  if (objects) rigid.captureRigidObjects(objects, scene);
+  return rigid.rigidProjection(hull, currentClip, previousClip);
+};
+const screenPoint = () => hull.localToWorld(hullPoint.clone()).project(rigidCamera);
+assert.equal(startRigid(), false);
+const initialHullScreen = screenPoint();
+rigid.commit();
+// Translate the floating origin while the parent, ship and camera also move.
+const rebase = new THREE.Vector3(12, -8, 16);
+rigidOrigin.add(rebase);carrier.position.sub(rebase);rigidCamera.position.sub(rebase);
+carrier.rotateY(.11);hull.position.x += 6;hull.rotateZ(.2);rigidCamera.rotateY(-.04);
+assert.equal(startRigid(), true);
+const movedHullScreen = screenPoint();
+assert.ok(hullPoint.clone().applyMatrix4(currentClip).distanceTo(movedHullScreen) < 1e-12);
+assert.ok(hullPoint.clone().applyMatrix4(previousClip).distanceTo(initialHullScreen) < 1e-12);
+assert.ok(movedHullScreen.distanceTo(initialHullScreen) > .01);
+rigid.commit();
+for (const [hide, show] of [
+  [() => carrier.visible = false, () => carrier.visible = true],
+  [() => scene.remove(carrier), () => scene.add(carrier)],
+]) {
+  hide();assert.equal(startRigid(), false);rigid.commit();
+  show();assert.equal(startRigid(), false);rigid.commit();
+  assert.equal(startRigid(), true);rigid.commit();
+}
+tracked.set(hull, foregroundPass);
+assert.equal(startRigid(), false);rigid.commit();
+assert.equal(startRigid(), true);rigid.commit();
+assert.equal(startRigid(null), false);rigid.commit();
+assert.equal(startRigid(), false);rigid.commit();
+assert.equal(startRigid(), true);rigid.abort();
+assert.equal(startRigid(), false);rigid.commit();
+assert.equal(startRigid(tracked, {}), false);rigid.commit();
+assert.equal(rigid.rigidProjection(hull, currentClip, previousClip), false);
 console.log(JSON.stringify({ passed: true, cases, maximumError, oldMaximumError,
-  controls: 'Committed snapshots, failed/mid-frame invalidation, context/time/projection, medium identity, 360 independent rigid mappings, clock continuity' }));
+  controls: 'Committed snapshots, failed/mid-frame invalidation, context/time/projection, medium identity, 360 independent body mappings, rigid object origin/visibility/pass ownership, clock continuity' }));

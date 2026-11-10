@@ -3994,6 +3994,7 @@ function applyAdaptiveStage(stage) {
 // The simulation can advance while the previous GPU frame is in flight. Every
 // ordinary auxiliary draw shares the main graph's admission and final fence.
 // Startup may submit only its private warm draw, before the world graph is ready.
+const rigidWorldObjects = new Map();
 function renderWorldFrame() {
   let rendered = false;
   nodePipeline.submitFrame((draw) => {
@@ -4010,7 +4011,9 @@ function renderWorldFrame() {
       gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
         ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
     }
-    rendered = draw({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch });
+    rigidWorldObjects.set(ship.group, ship.foregroundOnly ? foregroundPass : nodePipeline.renderPass);
+    rendered = draw({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch,
+      rigidObjects: rigidWorldObjects });
   });
   return rendered;
 }

@@ -259,7 +259,8 @@ export class GameLegacyPipeline {
   }
 
   // Internal world graph. Only submitFrame's one-use draw capability enters it.
-  #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene, timeEpoch = null } = {}, privateFrame) {
+  #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene,
+    timeEpoch = null, rigidObjects = null } = {}, privateFrame) {
     let batchOnly=false;
     if (this.cloudProgramsEnabled && this.volumePass?.enabled) {
       const volume = this.volumePass, requests = volume.requiredProgramRequests(origin, volume.farSplit);
@@ -282,6 +283,7 @@ export class GameLegacyPipeline {
     this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
     try {
       try {
+        if (!privateFrame && rigidObjects) this.frameState.captureRigidObjects(rigidObjects, this.scene);
         if(batchOnly)this.volumePass.requirePreparedLightBatch=true;
         const body = this.volumePass?.activePlanet;
         const localEye = body?.volCloudMat?.uniforms.uCameraLocal;

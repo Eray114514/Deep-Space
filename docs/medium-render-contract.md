@@ -60,7 +60,9 @@ B5 实际表示：设云区间前空气为 `(Lf,Tf)`，区间内联合空气/云
 
 刚体对应为 `previousPoint = (previousRotation * inverse(currentRotation)) * currentPoint + delta`，delta 由两个原点相对各自行星中心的 CPU 双精度差构造；上传前不把宇宙绝对平移写进 float。积分与重投影均从真实镜头而非 nav 发射：空气、云、云照明支持和屏幕云影接收体使用真实局部眼点。地表材质眼点是每个材质自己的值，复用 `SurfaceViewFrame` 计算实际 draw camera 的局部位置，不改写共享天气 uniform；支持独立相机依次绑定。
 
-这修正当前刚体/视点对应。球壳代表位置仍是近似；没有新增云占用深度、天气平流补偿、逐物体 motion、曝光适配或完整 TAA。opaque/history depth 仍是对数不透明深度，不能解释为云深度。下一步在此接口上增加共同抖动/天气时间映射和几何运动消费者，成套替换局部反馈，禁止再叠一个独立累积器。[帧接口固定证据](baselines/foundation-frame-state-2026-10-20/README.md)包含独立坐标参考、真实 resolve、介质偏移和正常玩家检查。
+球壳代表位置仍是近似，opaque/history depth 保存对数不透明深度。云占用深度、天气平流、曝光适配和统一 TAA 继续在同一帧接口上接入。[帧接口固定证据](baselines/foundation-frame-state-2026-10-20/README.md)包含独立坐标参考、真实 resolve、介质偏移和正常玩家检查。
+
+正式帧可为已注册的刚体根节点提供当前和上一帧的局部坐标到裁剪空间矩阵。使用各自帧的浮动原点及真实相机，在 CPU 双精度下先合成 view × model。仅连续提交、节点可见且通道所有者相同的帧建立对应。飞船根节点在主图注册，随前景飞行和停泊世界通道切换。几何运动缓冲、变形、逐片元可见性与反遮挡由后续消费者完成。[飞船投影证据](baselines/foundation-batch-admission-2026-11-10/README.md#飞船运动云影深度与-2k-复验)
 
 ### v1.3：局部历史过滤
 

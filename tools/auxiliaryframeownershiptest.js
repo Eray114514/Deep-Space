@@ -33,13 +33,17 @@ function worldFixture({ busy = false, ready = true, shipPending = false, bootstr
     bloomPass: { enabled: false }, gradePass_: { enabled: false, uniforms: { uTime: { value: -1 } } },
     usePost: true, QUALITY_LOW: false, DEV_SERVER: true, devWaterWakeFixture: null, clock: { elapsedTime: 12 },
     nav: { pos: {} }, universe: { system: {} }, celestialClock: { epoch: 5 },
+    ship: { group: {}, foregroundOnly: true }, foregroundPass: {}, rigidWorldObjects: new Map(),
   };
-  context.nodePipeline = { submitFrame(work) {
+  context.nodePipeline = { renderPass: {}, submitFrame(work) {
     if (busy) return false;
     events.push('admitted');
     work(options => {
       events.push('graph');assert.equal(options.origin, context.nav.pos);
-      assert.equal(options.context, context.universe.system);assert.equal(options.timeEpoch, 5);return true;
+      assert.equal(options.context, context.universe.system);assert.equal(options.timeEpoch, 5);
+      assert.equal(options.rigidObjects.get(context.ship.group), context.ship.foregroundOnly
+        ? context.foregroundPass : context.nodePipeline.renderPass);
+      return true;
     });
     events.push('fence');return true;
   } };
@@ -53,6 +57,7 @@ test(() => {
   const f = worldFixture();assert.equal(f.run(), true);
   assert.deepEqual(f.events, ['admitted', 'reset', 'lighting', 'portal', 'scope', 'bootstrap', 'resize', 'graph', 'fence']);
   assert.equal(f.context.gradePass_.uniforms.uTime.value, 12);
+  f.context.ship.foregroundOnly = false;assert.equal(f.run(), true);
 });
 test(() => {
   const f = worldFixture({ ready: false, bootstrapReady: true });assert.equal(f.run(), true);

@@ -7,8 +7,11 @@ function snapshot() {
     projection: new THREE.Matrix4(),
     inverseProjection: new THREE.Matrix4(),
     viewProjection: new THREE.Matrix4(),
+    view: new THREE.Matrix4(),
     bodyPosition: new THREE.Vector3(),
     bodyOrientation: new THREE.Quaternion(),
+    rigidObjects: new WeakMap(),
+    rigidCapture: 0,
     context: null, timeEpoch: null, body: null, medium: null, weather: null, near: 0, far: 0,
   };
 }
@@ -56,7 +59,9 @@ export class RenderFrameState {
     c.cameraWorld.copy(camera.matrixWorld);
     c.projection.copy(camera.projectionMatrix);
     c.inverseProjection.copy(camera.projectionMatrixInverse);
+    c.view.copy(camera.matrixWorldInverse);
     c.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    c.rigidCapture++;
     c.context = context;c.timeEpoch = timeEpoch;c.body = body;
     c.near = camera.near;c.far = camera.far;
     c.medium = body?.weatherField || null;
@@ -74,6 +79,39 @@ export class RenderFrameState {
     this.pending = true;
     this._beginEpoch = this.epoch;
     return this.valid;
+  }
+
+  captureRigidObjects(objects, scene) {
+    if (!this.pending) throw new Error('No render frame pending');
+    const current = this.current;
+    for (const [object, owner] of objects) {
+      let node = object;
+      while (node && node !== scene && node.visible) node = node.parent;
+      if (node !== scene || !scene.visible) continue;
+      object.updateWorldMatrix(true, false);
+      let record = current.rigidObjects.get(object);
+      if (!record) {
+        record = { clipFromLocal: new THREE.Matrix4() };
+        current.rigidObjects.set(object, record);
+      }
+      // Compose in CPU doubles before the shader sees the small view-relative
+      // translation. Each object's matrix already belongs to this render origin.
+      this._matrix.multiplyMatrices(current.view, object.matrixWorld);
+      record.clipFromLocal.multiplyMatrices(current.projection, this._matrix);
+      record.capture = current.rigidCapture;
+      record.owner = owner;
+    }
+  }
+
+  rigidProjection(object, currentClipFromLocal, previousClipFromLocal) {
+    if (!this.pending || !this.valid) return false;
+    const current = this.current.rigidObjects.get(object);
+    const previous = this.previous.rigidObjects.get(object);
+    if (!current || !previous || current.capture !== this.current.rigidCapture
+      || previous.capture !== this.previous.rigidCapture || current.owner !== previous.owner) return false;
+    currentClipFromLocal.copy(current.clipFromLocal);
+    previousClipFromLocal.copy(previous.clipFromLocal);
+    return true;
   }
 
   // Map a current render-space point on a rigid body into the previous render

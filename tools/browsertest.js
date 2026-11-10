@@ -76,11 +76,38 @@ try {
     { timeout: 10000 },
   );
   const quatBefore = await page.evaluate('NMS._internals.nav.quat.toArray()');
+  await page.evaluate(() => {
+    const pipeline = NMS._pipeline, frame = pipeline.frameState;
+    const { camera, ship } = NMS._internals;
+    const T = NMS._THREE, point = new T.Vector3(.4, -.2, .7);
+    const current = new T.Matrix4(), previous = new T.Matrix4();
+    const pass = pipeline.foregroundPass, render = pass.render;
+    const result = window.__rigidSmoke = { samples: 0, error: 0, movement: 0 };
+    let last;
+    pass.render = function (...args) {
+      if (ship.foregroundOnly && frame.rigidProjection(ship.group, current, previous)) {
+        const expected = ship.group.localToWorld(point.clone()).project(camera);
+        const observed = point.clone().applyMatrix4(current);
+        result.samples++;
+        result.error = Math.max(result.error, expected.distanceTo(observed));
+        if (last?.sequence === frame.sequence - 1)
+          result.error = Math.max(result.error, last.point.distanceTo(point.clone().applyMatrix4(previous)));
+        result.movement = Math.max(result.movement, observed.distanceTo(point.clone().applyMatrix4(previous)));
+        last = { sequence: frame.sequence, point: expected };
+      }
+      return render.apply(this, args);
+    };
+    NMS.shipViewDebug.setViewMode('chase');
+  });
   await page.mouse.move(780, 420);
   await page.waitForTimeout(100);
   const quatAfter = await page.evaluate('NMS._internals.nav.quat.toArray()');
   const cameraMoved = quatAfter.some((value, index) => Math.abs(value - quatBefore[index]) > 1e-5);
   check(cameraMoved, 'pointer lock relays mouse motion to camera');
+  await page.waitForFunction(() => window.__rigidSmoke.samples >= 3 && window.__rigidSmoke.movement > 1e-5,
+    null, { timeout: 10000 });
+  const rigid = await page.evaluate(() => window.__rigidSmoke);
+  check(rigid.error < 1e-10, `foreground ship preserves actual current and previous local-to-screen projections (${JSON.stringify(rigid)})`);
 
   // 5. Escape opens the pause surface — the UI pipeline.
   await page.keyboard.press('Escape');
