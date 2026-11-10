@@ -55,4 +55,6 @@ InstancedMesh 链）。停牌原因见 `docs/optimization-roadmap.md` 2026-08-15
 TSL/NodeMaterial 生态成熟且出现 WebGL 无法承载的需求时，由用户重新决策（从 git
 历史恢复），届时一次只迁一个子系统。
 
+用户明确要求在当前任务调用 Claude 协作时，才读取并应用 [模型协作约定](docs/model-collaboration.md)。
+
 * 项目正在进行全量重构，暂时不需要考虑宇宙锁（详情参考docs/optimization-roadmap.md）。确认重构完成后按用户要求进行重筛选，然后删除此注释。此前的任何任务都不需要考虑宇宙锁。
