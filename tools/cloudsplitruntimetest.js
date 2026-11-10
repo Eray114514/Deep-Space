@@ -45,6 +45,11 @@ const supplyOption = process.argv.find(arg => arg.startsWith('--supply-rows='));
 const supplyRows = supplyOption ? Number(supplyOption.split('=')[1]) : null;
 assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the runtime batch. Pass --supply-rows=0.');
 const runDescent = process.argv.includes('--descent');
+const stagedNearFrame = process.argv.includes('--staged-near-frame');
+const stagedMode=process.argv.find(arg=>arg.startsWith('--staged-near-mode='))?.split('=')[1]??'scissor';
+const stagedFreezeDepth=process.argv.includes('--staged-near-freeze-depth');
+assert.ok(!stagedNearFrame||!runDescent,'Staged near frame uses a single frozen pose');
+assert.ok(['scissor','fragment','batch'].includes(stagedMode),'Unknown staged near mode');
 const dayDescent = process.argv.includes('--day-descent');
 const pacedDescent = process.argv.includes('--paced-descent');
 const nearTiles = process.argv.includes('--near-tiles');
@@ -115,7 +120,7 @@ assert.ok(!requireSupply || supplyRows !== null && !fixedWeather);
 const out = `test-results/cloud-split-runtime/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
-let browser, page, failure, supply, descent, livePair, nearPair, transition, restorationAudit, farStages, farPoint, reuse, lightSupport, lightTile;
+let browser, page, failure, supply, descent, staged, livePair, nearPair, transition, restorationAudit, farStages, farPoint, reuse, lightSupport, lightTile;
 const errors = [], checkpoints = [];
 async function capture(label) {
   const state = await page.evaluate(label => {
@@ -302,6 +307,15 @@ try {
     });
     await page.waitForFunction(() => NMS._pipeline.volumePass.farSplit.lastRoute === 'cachedDirect', null, { timeout: 120000 });
     await capture('split-cached');
+  }
+  if(stagedNearFrame) {
+    const result=await page.evaluate(async options=>{
+      const {verifyStagedNearFrame}=await import('/tools/staged-near-frame.js');
+      return verifyStagedNearFrame(NMS,options);
+    },{compareWhole:viewport.width<1000,mode:stagedMode,freezeDepth:stagedFreezeDepth});
+    staged=result;
+    console.log(JSON.stringify({staged}));
+    assert.ok(result.passed,'Staged near frame changed native HDR');
   }
   if (runDescent) {
     if (traceDescent) {
@@ -509,7 +523,7 @@ try {
     }
     if (!failure && !forceRecovery && contextEvents.length) failure = 'Continuous context gate failed';
     await writeFile(`${out}/report.json`, JSON.stringify({ before, after, viewport, audit, auditRestore, forceRecovery, pacedDescent, nearTiles, nearScaleCap,
-      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, farPoint, reuse, lightSupport, lightTile, descent, transition, restorationAudit,
+      requireMixed, fixedWeather, supplyRows, supply, livePair, nearPair, farStages, farPoint, reuse, lightSupport, lightTile, descent, staged, transition, restorationAudit,
       checkpoints, errors, failure, passed: !failure }, null, 2));
     assert.deepEqual(after, before);
     if (failure) process.exitCode = 1;

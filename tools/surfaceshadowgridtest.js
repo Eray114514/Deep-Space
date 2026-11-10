@@ -33,8 +33,13 @@ console.log(JSON.stringify({passed:true,cases,maximumPhaseError,previousDrift}))
 function sample(snapped,move,radius) {
   const map=light.shadow.mapSize, camera=light.shadow.camera;
   const origin=new Vector3().copy(body).add(localReceiver).add(new Vector3(3+move,8,12-move*.63));
-  if(snapped)grid.update(light,origin,body,radius,map.x);
-  else {
+  if(snapped) {
+    grid.update(light,origin,body,radius,map.x);
+    assert.ok(Math.abs(camera.right-camera.left-2*radius)<1e-10);
+    assert.ok(Math.abs(camera.top-camera.bottom-2*radius)<1e-10);
+    assert.ok(Math.abs(camera.left+radius)<=radius/map.x+1e-9);
+    assert.ok(Math.abs(camera.bottom+radius)<=radius/map.y+1e-9);
+  } else {
     camera.left=camera.bottom=-radius;camera.right=camera.top=radius;
     camera.updateProjectionMatrix();
   }
