@@ -26,13 +26,13 @@ async function digest(files) {
 // Every acceptance report uses the same complete runtime source set. A short
 // hand-picked list omitted planet/near-patch/settings changes and different
 // verifier filenames made otherwise identical builds appear incomparable.
-export async function evidenceFingerprint(verifier) {
+export async function evidenceFingerprint(...verifiers) {
   const sourceFiles = [...await modules('src/'), ...await modules('vendor/'),
     'index.html', 'style.css', 'package.json'].sort();
   return {
     sourceDigest: await digest(sourceFiles),
     sourceFiles,
-    verifierDigest: await digest([...new Set([verifier, 'tools/browser.js',
+    verifierDigest: await digest([...new Set([...verifiers, 'tools/browser.js',
       'tools/server.js', 'tools/evidence-fingerprint.js', 'tools/canonical-planet-fixture.js'])]),
   };
 }

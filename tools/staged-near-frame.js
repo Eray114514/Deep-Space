@@ -14,7 +14,7 @@ ${start}`).replace(ray,`${ray}
 
 // Freeze one real draw at the first near-cloud pose. Preparation jobs retire
 // one scissor band each, without publishing partial volume or changing bins.
-export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false}={}) {
+export async function verifyStagedNearFrame(game,{compareWhole=false,mode='scissor',freezeDepth=false,primeBatch=false,microBatch=false,splitMicroBatch=false}={}) {
   const { _pipeline:pipeline,_renderer:renderer,_THREE:T }=game;
   const pass=pipeline.volumePass, gl=renderer.getContext();
   const timer=gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -22,7 +22,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
   const owner=pipeline.framePacer??pipeline.startFramePacing();
   const originalSubmit=pipeline.submitFrame, profile=pass.profilePhase;
   const halted={}, queries=[];
-  let input,target,depthCopy,material,comparisonMaterial,batch,snapshot,captureError,armed=false,blocked=false;
+  let input,target,microTarget,depthCopy,material,comparisonMaterial,batch,probeBatch,snapshot,captureError,armed=false,blocked=false;
   let resolveCapture;
   const captured=new Promise(resolve=>{resolveCapture=resolve;});
   function submit(work) {
@@ -210,11 +210,11 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       }
       return {changed,alpha,nonempty,maximum,nonfinite};
     }
-    let comparisons, preparationMs, micro;
+    let comparisons, preparationMs, micro, repeatAgainstReference;
     const primed=[];
     if(mode==='batch') {
-      batch=new CloudLightBatchRenderer(material,{width,height,budgetBytes:32*1024*1024,
-        maxTextureSize:renderer.capabilities.maxTextureSize});
+      const layout={width,height,budgetBytes:32*1024*1024,maxTextureSize:renderer.capabilities.maxTextureSize};
+      batch=new CloudLightBatchRenderer(material,layout);
       const reference=comparisonMaterial??material, bands=compareWhole?1:16;
       const first=await drawPartition(bands,reference);
       const start=performance.now();
@@ -231,42 +231,77 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
           primed.push({stage:stage.name,cpuMs:performance.now()-started});
         },{label:'frozen-cloud-batch-reflection'});
       }
-      if(microBatch) {
-        const started=performance.now();
-        let query, submitted;
-        await pipeline.prepare(()=>{
-          const tileCount=batch.plan.tileCount;
-          const raw=renderer.render;
-          renderer.render=function(scene,camera) {
-            const target=this.getRenderTarget(), oldScissor=target.scissor.clone(), oldTest=target.scissorTest;
+      if(microBatch||splitMicroBatch) {
+        if(splitMicroBatch) {
+          microTarget=target.clone();
+          probeBatch=new CloudLightBatchRenderer(material,layout);
+        }
+        const executor=probeBatch??batch;
+        async function microDraw(selected) {
+          const started=performance.now(), names=[];
+          let query, submitted, completedBefore;
+          await pipeline.prepare(()=>{
+            if(!sameInputs())throw Error('Micro batch inputs changed before submission');
+            completedBefore=owner.snapshot().stats.completed;
+            const tileCount=executor.plan.tileCount;
+            const raw=renderer.render, clear=renderer.clear;
+            let ordinal=0;
+            const admitted=()=>selected===null||selected===ordinal;
+            renderer.clear=function(...args) {
+              if(admitted())return clear.apply(this,args);
+            };
+            renderer.render=function(scene,camera) {
+              const enabled=admitted();
+              ordinal++;
+              if(!enabled)return;
+              names.push(scene.children[0]?.material?.name);
+              const target=this.getRenderTarget(), oldScissor=target.scissor.clone(), oldTest=target.scissorTest;
+              try {
+                target.scissor.set(0,0,Math.min(16,target.width),Math.min(16,target.height));
+                target.scissorTest=true;this.setRenderTarget(target);
+                return raw.call(this,scene,camera);
+              } finally {target.scissor.copy(oldScissor);target.scissorTest=oldTest;this.setRenderTarget(target);}
+            };
+            executor.plan.tileCount=1;
+            snapshot.mesh.material=material;
+            query=gl.createQuery();queries.push(query);gl.beginQuery(timer.TIME_ELAPSED_EXT,query);
+            const submitStarted=performance.now();
             try {
-              target.scissor.set(0,0,Math.min(16,target.width),Math.min(16,target.height));
-              target.scissorTest=true;this.setRenderTarget(target);
-              return raw.call(this,scene,camera);
-            } finally {target.scissor.copy(oldScissor);target.scissorTest=oldTest;this.setRenderTarget(target);}
-          };
-          batch.plan.tileCount=1;
-          snapshot.mesh.material=material;
-          query=gl.createQuery();queries.push(query);gl.beginQuery(timer.TIME_ELAPSED_EXT,query);
-          const submitStarted=performance.now();
-          try {
-            if(!batch.render(renderer,snapshot.camera,snapshot.mesh,target))throw Error('Micro batch did not submit');
-          } finally {
-            submitted=performance.now()-submitStarted;
-            if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);
-            renderer.render=raw;batch.plan.tileCount=tileCount;
-          }
-          if(gl.getError()!==gl.NO_ERROR)throw Error('Micro batch generated a WebGL error');
-        },{label:'frozen-cloud-batch-micro-draw'});
-        await pipeline.prepare(()=>{
-          if(!gl.getQueryParameter(query,gl.QUERY_RESULT_AVAILABLE))throw Error('Micro batch retirement proof unavailable');
-          micro={cpuMs:submitted,gpuMs:gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6,wallMs:performance.now()-started};
-        },{label:'frozen-cloud-batch-micro-retired'});
+              if(!executor.render(renderer,snapshot.camera,snapshot.mesh,microTarget??target)||ordinal!==executor.materials.length
+                ||names.length!==(selected===null?ordinal:1))throw Error('Micro batch stage count changed');
+            } finally {
+              submitted=performance.now()-submitStarted;
+              if(!gl.isContextLost())gl.endQuery(timer.TIME_ELAPSED_EXT);
+              renderer.render=raw;renderer.clear=clear;executor.plan.tileCount=tileCount;
+            }
+            if(gl.getError()!==gl.NO_ERROR)throw Error('Micro batch generated a WebGL error');
+          },{label:'frozen-cloud-batch-micro-draw'});
+          return pipeline.prepare(()=>{
+            if(owner.snapshot().stats.completed<=completedBefore||!gl.getQueryParameter(query,gl.QUERY_RESULT_AVAILABLE))
+              throw Error('Micro batch retirement proof unavailable');
+            return {stages:names,cpuMs:submitted,gpuMs:gl.getQueryParameter(query,gl.QUERY_RESULT)/1e6,wallMs:performance.now()-started};
+          },{label:'frozen-cloud-batch-micro-retired'});
+        }
+        if(splitMicroBatch) {
+          micro={cold:[],warm:[]};
+          for(const samples of [micro.cold,micro.warm])
+            for(let stage=0;stage<executor.materials.length;stage++)samples.push(await microDraw(stage));
+          // The probe shares linked GPU programs with the parity draw, but
+          // owns its materials, geometry state, and scratch attachments.
+          await pipeline.prepare(()=>{
+            const program=shader=>renderer.properties.get(shader).currentProgram?.program;
+            micro.sharedPrograms=batch.materials.every((shader,i)=>program(shader)&&program(shader)===program(probeBatch.materials[i]));
+            if(!micro.sharedPrograms)throw Error('Micro batch used different native programs');
+            probeBatch.dispose();probeBatch=null;
+            microTarget.dispose();microTarget=null;
+          },{label:'frozen-cloud-batch-micro-release'});
+        } else micro=await microDraw(null);
       }
       const second=await drawPartition(1,material,true);
       const firstRepeat=await drawPartition(bands,reference), secondRepeat=await drawPartition(1,material,true);
       comparisons={batch:compare(first,second),firstControl:compare(first,firstRepeat),
         secondControl:compare(second,secondRepeat)};
+      repeatAgainstReference=compare(first,secondRepeat);
     } else {
       const firstBands=compareWhole?1:16, secondBands=compareWhole?16:24;
       const first=await drawPartition(firstBands), second=await drawPartition(secondBands);
@@ -277,7 +312,8 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     }
     if(gl.isContextLost()||gl.getError()!==gl.NO_ERROR||readGpuDisjointEpoch(gl,timer)!==epoch||!sameInputs())
       throw Error('Staged GPU proof lost its input or measurement epoch');
-    return {...input,history:undefined,sunCosine:best.cosine,mode,cases,comparisons,preparationMs,primed,micro,batch:batch?.plan,
+    return {...input,history:undefined,sunCosine:best.cosine,mode,cases,comparisons,repeatAgainstReference,
+      preparationMs,primed,micro,batch:batch?.plan,
       passed:Object.entries(comparisons).every(([key,row])=>!row.nonfinite&&row.nonempty>0
         &&(key==='batch'?row.alpha===0&&row.maximum<=.002:row.changed===0))};
   } finally {
@@ -285,6 +321,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
     try {game.teleport(0,.12,{dir:coast.direction});}
     finally {pipeline.submitFrame=originalSubmit;}
     if(!gl.isContextLost())for(const query of queries)gl.deleteQuery(query);
-    batch?.dispose();target?.dispose();depthCopy?.dispose();material?.dispose();comparisonMaterial?.dispose();
+    batch?.dispose();probeBatch?.dispose();target?.dispose();microTarget?.dispose();depthCopy?.dispose();
+    material?.dispose();comparisonMaterial?.dispose();
   }
 }

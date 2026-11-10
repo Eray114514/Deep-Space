@@ -674,7 +674,7 @@ bank计划将首次需用`h-F`与退役`h+F`分开，根据实际送出的draw/�
 
 ## 下轮启动条件与具体工作
 
-**当前接续见[白天 2K 分批照明与绘制准入](baselines/foundation-batch-admission-2026-11-10/README.md)。** 原尺寸白天路线已验证分批选路和上下文稳定。下一步分解首次命令的 GPU 服务等待，复测原尺寸 2K 动态 HDR 和持续帧预算。仅反射不能消除首用等待，单 tile 预热仍承担约 4.54 秒。继续按[光学质量与照明拆分](baselines/foundation-light-prepare-2026-10-15/README.md)的实际 Scene 门槛复验，保留深度和原生重复控制。若再验证空间缓存，需识别[径向光学陡变](baselines/foundation-frame-weather-phase-2026-11-10/README.md)、保留直接回退，并计入烘焙、上传和驻留。跨帧运动和跨尺度遮挡继续推进。任务拆分与模型分配见[难度评估](remaining-work-difficulty.md#当前底层任务的模型分配)。底层验收后进行[证据和工具综合清理](baselines/README.md#后续收纳与完工清理)。
+**当前接续见[白天 2K 分批照明与绘制准入](baselines/foundation-batch-admission-2026-11-10/README.md)。** 原尺寸白天路线已验证分批选路和上下文稳定。冷首用等待集中在两种密度遍历的首次绘制，单独执行时各约 2.3 秒，复用首个非空采样点后仍各超过 2 秒。下一步验证能否合并密度程序的执行，或用可控的准备期限覆盖等待。合并需要保住逐像素光学质量和 16 个分位的原生精度，同时限制分位元数据的峰值驻留。继续按[光学质量与照明拆分](baselines/foundation-light-prepare-2026-10-15/README.md)的实际 Scene 门槛复验，保留独立深度和原生重复控制，补原尺寸 2K 动态 HDR 和持续帧预算。若再验证空间缓存，需识别[径向光学陡变](baselines/foundation-frame-weather-phase-2026-11-10/README.md)、保留直接回退，并计入烘焙、上传和驻留。跨帧运动和跨尺度遮挡继续推进。任务拆分与模型分配见[难度评估](remaining-work-difficulty.md#当前底层任务的模型分配)。底层验收后进行[证据和工具综合清理](baselines/README.md#后续收纳与完工清理)。
 
 早期列恢复与期限、辅助视图所有权和输入校准仍可分别查阅[帧队列](baselines/foundation-frame-pacing-2026-10-23/README.md)、[辅助视图](baselines/foundation-auxiliary-frame-2026-10-23/README.md)和[输入更正](baselines/foundation-column-forecast-2026-10-23/README.md)。10-21/22 的四组列证据保留冻结输入与失败，同时明确未调参的适用范围，不再据1.875秒夹具安排正式母星的架构。工作块、异步反馈、在途上限、绝对时间发布、期限优先、有界原始预报租约和阶段成本身份已有实现；局部GPU准入仍须显式开启，默认两行生产未切换。先核对实际body半径、天气步长、恒星来源和时间尺度，再在完整页评估持续周转与foreground剩余额度；独立Planet图集/数组等价不替代完整双星天气或Scene HDR。未缓存远云/近云冷等待独立处理。程序准备身份/取消、同步恢复、原生退役、几何/跨bank pool、SCREEN变体及列就绪已有实现，本机KHR后台删除竞态已局部闭环，不重做；旧阶段按其完整源摘要回放。保持实际Scene HDR/物理分支/native重复门槛，不把它串行阻塞其他基础修复。
 

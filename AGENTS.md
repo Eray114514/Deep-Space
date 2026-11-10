@@ -39,6 +39,8 @@ Tests are layered by cost. For every code change run `npm test` (pure-Node contr
 
 Use concise Conventional Commit-style subjects, e.g. `feat: add pulse recharge` or `fix: stabilize planetary flight horizon`. Keep commits focused. Pull requests should state the player-visible impact, identify affected systems, link any issue, and include screenshots or captures for visual/UI changes. Mention verification commands and avoid bundling unrelated working-tree changes.
 
+涉及优化任务范围、难度或验收状态的变化，应在同一轮交付中同步更新 `docs/remaining-work-difficulty.md`。该文档只列待办，整项验收后删除条目，部分验收后只留余项。完成记录归原路线图和证据目录。
+
 ## 渲染后端
 
 **[2026-08-15 用户决策] WebGL 2 是唯一画质与架构基准。** 运行时材质、体积效果和

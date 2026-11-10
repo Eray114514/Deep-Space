@@ -5,8 +5,10 @@ import { launchHardwareBrowser, resolveSystemChromePath } from './browser.js';
 import { evidenceFingerprint } from './evidence-fingerprint.js';
 import { installFoundationGLProbe } from './foundation-gl-probe.js';
 
-const verifier = 'tools/cloudsplitruntimetest.js';
-const before = await evidenceFingerprint(verifier);
+const stagedNearFrame = process.argv.includes('--staged-near-frame');
+const verifiers = ['tools/cloudsplitruntimetest.js'];
+if (stagedNearFrame) verifiers.push('tools/staged-near-frame.js');
+const before = await evidenceFingerprint(...verifiers);
 const audit = process.argv.includes('--gl-audit');
 const auditRestore = process.argv.includes('--audit-restore');
 const forceRecovery = process.argv.includes('--force-recovery');
@@ -46,14 +48,15 @@ const supplyRows = supplyOption ? Number(supplyOption.split('=')[1]) : null;
 assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the runtime batch. Pass --supply-rows=0.');
 const runDescent = process.argv.includes('--descent');
 const nearBatches=process.argv.includes('--near-batches');
-const stagedNearFrame = process.argv.includes('--staged-near-frame');
 const stagedMode=process.argv.find(arg=>arg.startsWith('--staged-near-mode='))?.split('=')[1]??'scissor';
 const stagedFreezeDepth=process.argv.includes('--staged-near-freeze-depth');
 const stagedPrimeBatch=process.argv.includes('--staged-near-prime-batch');
 const stagedMicroBatch=process.argv.includes('--staged-near-micro-batch');
+const stagedSplitMicroBatch=process.argv.includes('--staged-near-split-micro-batch');
 assert.ok(!stagedNearFrame||!runDescent,'Staged near frame uses a single frozen pose');
 assert.ok(['scissor','fragment','batch'].includes(stagedMode),'Unknown staged near mode');
-assert.ok(!(stagedPrimeBatch||stagedMicroBatch)||stagedNearFrame&&stagedMode==='batch','First-use proof requires a staged batch');
+assert.ok(!(stagedPrimeBatch||stagedMicroBatch||stagedSplitMicroBatch)||stagedNearFrame&&stagedMode==='batch','First-use proof requires a staged batch');
+assert.ok(!(stagedMicroBatch&&stagedSplitMicroBatch),'Choose one micro batch submission mode');
 const dayDescent = process.argv.includes('--day-descent');
 const pacedDescent = process.argv.includes('--paced-descent');
 const nearTiles = process.argv.includes('--near-tiles');
@@ -319,7 +322,7 @@ try {
       const {verifyStagedNearFrame}=await import('/tools/staged-near-frame.js');
       return verifyStagedNearFrame(NMS,options);
     },{compareWhole:viewport.width<1000,mode:stagedMode,freezeDepth:stagedFreezeDepth,
-      primeBatch:stagedPrimeBatch,microBatch:stagedMicroBatch});
+      primeBatch:stagedPrimeBatch,microBatch:stagedMicroBatch,splitMicroBatch:stagedSplitMicroBatch});
     staged=result;
     console.log(JSON.stringify({staged}));
     assert.ok(result.passed,'Staged near frame changed native HDR');
@@ -527,7 +530,7 @@ try {
     if (auditRestore && page) try {
       restorationAudit = await page.evaluate(() => window.__foundationGLProbe?.snapshot());
     } catch {}
-    const after = await evidenceFingerprint(verifier);
+    const after = await evidenceFingerprint(...verifiers);
     const contextEvents = transition?.contextEvents ?? [];
     if(!failure&&nearTrace&&runDescent&&(!transition?.phases?.draws||transition.phases.mismatches))
       failure='Actual near draws did not follow the committed cloud sample sequence';
