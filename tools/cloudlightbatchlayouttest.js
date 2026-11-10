@@ -31,5 +31,7 @@ for(const [width,height,maxBatchTiles] of [[1178,662,128],[589,331,128],[17,33,1
 }
 assert.equal(planCloudLightBatches({width:1178,height:662,maxBatchTiles:73,fusedDensity:true}).direct,true);
 assert.equal(planCloudLightBatches({width:1178,height:662,budgetBytes:1024*1024,fusedDensity:true}).direct,true);
+assert.equal(planCloudLightBatches({width:1,height:Number.MAX_SAFE_INTEGER,
+  maxBatchTiles:Number.MAX_SAFE_INTEGER,fusedDensity:true}).direct,true);
 assert.throws(()=>planCloudLightBatches({width:1,height:1,maxBatchTiles:0}));
 console.log('PASS all pixels/fields covered exactly once, reused padded atlases bounded, device limits and direct original path.');

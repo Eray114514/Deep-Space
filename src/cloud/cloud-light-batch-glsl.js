@@ -151,8 +151,11 @@ export function cloudLightBatchShaders(source,{legacyRadiance=false,fusedDensity
       'ivec2(gl_FragCoord.xy)+ivec2(0,uPageRow/16);int mask=0;');
     reduce=replace(reduce,'for(int y=0;y<16;y++)','for(int y=0;y<16 && mask!=15;y++)');
   }
-  const ray=fusedDensity?source.slice(0,source.lastIndexOf('void main()'))+
-    'void main(){gl_FragColor=vec4(normalize(vDirection),sceneRayLimit());}':null;
+  const rayEnd=source.indexOf('        #if PRODUCTION_CLOUD_MEDIUM && CLOUD_FAR_VIEW',source.lastIndexOf('void main()'));
+  if(fusedDensity&&rayEnd<0)throw Error('Cloud ray preparation boundary changed');
+  const ray=fusedDensity?replace(source.slice(0,rayEnd),'t1 = min(t1, sceneRayLimit());',
+    'float opaqueLimit=sceneRayLimit();t1=min(t1,opaqueLimit);')+
+    'gl_FragColor=vec4(dir,opaqueLimit);\n}':null;
   return {prepare:fusedDensity?fusedPreparation(shared.prepare):opacityPreparation(shared.prepare,legacyRadiance),
     metadata,beams,compose,reduce,
     ...(ray?{ray}:{}),

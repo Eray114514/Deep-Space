@@ -218,7 +218,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       if(fusedDensity&&Math.min(gl.getParameter(gl.MAX_DRAW_BUFFERS),gl.getParameter(gl.MAX_COLOR_ATTACHMENTS))<5)
         throw Error('Fused density proof needs five draw buffers');
       const layout={width,height,budgetBytes:32*1024*1024,maxTextureSize:renderer.capabilities.maxTextureSize,fusedDensity};
-      batch=new CloudLightBatchRenderer(material,layout);
+      batch=new CloudLightBatchRenderer(material,{...layout,maxBatchTiles:fusedDensity&&width>=1000?192:128});
       if(splitReference) {
         referenceBatch=new CloudLightBatchRenderer(material,{...layout,fusedDensity:false});
         const ready=await pipeline.prepare(()=>referenceBatch.prepareAsync(renderer,snapshot.camera,snapshot.mesh,target),
@@ -247,7 +247,7 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
       if(microBatch||splitMicroBatch) {
         if(splitMicroBatch) {
           microTarget=target.clone();
-          probeBatch=new CloudLightBatchRenderer(material,layout);
+          probeBatch=new CloudLightBatchRenderer(material,{...layout,maxBatchTiles:batch.plan.batchTiles});
         }
         const executor=probeBatch??batch;
         async function microDraw(selected) {

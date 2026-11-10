@@ -49,6 +49,10 @@ assert.ok(supplyRows === null || supplyRows === 0, 'Supply observation uses the 
 const runDescent = process.argv.includes('--descent');
 const nearBatchesFused=process.argv.includes('--near-batches-fused');
 const nearBatches=nearBatchesFused||process.argv.includes('--near-batches');
+const fusedBatchTilesArg=process.argv.find(arg=>arg.startsWith('--fused-batch-tiles='));
+const fusedBatchTiles=fusedBatchTilesArg?Number(fusedBatchTilesArg.split('=')[1]):192;
+assert.ok(!fusedBatchTilesArg||nearBatchesFused&&Number.isSafeInteger(fusedBatchTiles)&&fusedBatchTiles>0,
+  'A fused tile cap requires --near-batches-fused and a positive integer');
 const stagedMode=process.argv.find(arg=>arg.startsWith('--staged-near-mode='))?.split('=')[1]??'scissor';
 const stagedFreezeDepth=process.argv.includes('--staged-near-freeze-depth');
 const stagedPrimeBatch=process.argv.includes('--staged-near-prime-batch');
@@ -356,7 +360,7 @@ try {
       assert.equal(livePair.gl,0);
       assert.ok(livePair.pairs[0].maximumError <= .002, 'Actual volume HDR parity with the unmasked split');
     }
-    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearBatches,nearBatchesFused,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
+    await page.evaluate(async ({forceRecovery,pacedDescent,nearTiles,verifyTiles,nearScaleCap,dayDescent,nearBins,nearBatches,nearBatchesFused,fusedBatchTiles,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm}) => {
       NMS._pipeline.startProfiling({every:1,history:240});
       if (pacedDescent) NMS._pipeline.startFramePacing();
       const planet = NMS._planet(0), THREE = NMS._THREE;
@@ -366,7 +370,7 @@ try {
       const landmark = new THREE.Vector3(...coast.direction).addScaledVector(land, 2000/planet.R).normalize();
       const pipeline = NMS._pipeline, volume = pipeline.volumePass;
       if(nearBatches)volume.setLightBatchesEnabled(true,{budgetBytes:32*1024*1024,
-        ...(nearBatchesFused?{fusedDensity:true,maxBatchTiles:192}:{})});
+        ...(nearBatchesFused?{fusedDensity:true,maxBatchTiles:fusedBatchTiles}:{})});
       const from = 600000, to = 1200, count = 60;
       NMS.teleport(0, from/planet.R, { dir:coast.direction });
       const state = window.__splitDescent = { startedAt:performance.now(), rows:[], done:false, coast };
@@ -440,6 +444,7 @@ try {
               reason:far?null:volume.lightBatchStatus.reason,
               residentBytes:volume.lightBatch?.plan.residentBytes,
               fusedDensity:volume.lightBatch?.fusedDensity,
+              stripeRows:volume.lightBatch?.plan.stripe?.rows,
               submissions:volume.lightBatch?.submissions??0}:undefined,
             sunCosine:dayDescent?landmark.dot(planet.sunDirLocal):undefined });
           if(cachePose&&!cachePose.finished) {
@@ -460,7 +465,7 @@ try {
         requestAnimationFrame(observe);
       }
       requestAnimationFrame(observe);
-    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearBatches,nearBatchesFused,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm});
+    },{forceRecovery,pacedDescent,nearTiles,verifyTiles:viewport.width<1000,nearScaleCap,dayDescent,nearBins,nearBatches,nearBatchesFused,fusedBatchTiles,nearWorkProbe,nearTraversalCache,nearReplay,nearEmptyRuns,nearCachePair,nearCacheHour,nearCoverageAt,nearCachePlacement,nearNativePlacement,nearPlacementOptics,nearPlacementR16,nearCacheNativeToggle,nearCacheNativePrewarm});
     for (const altitude of [400000,180000,30000,1200]) {
       const stopOnLoss = !forceRecovery && !auditRestore;
       await page.waitForFunction(({target,stopOnLoss}) => window.__splitDescent?.rows.at(-1)?.altitude <= target
