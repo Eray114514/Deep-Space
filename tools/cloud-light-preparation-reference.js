@@ -11,6 +11,12 @@ export function previousCloudPreparation(shaders,source) {
 
 export async function installPreviousPreparationReference() {
   const {CloudLightBatchRenderer}=await import('/src/cloud/cloud-light-batch-renderer.js');
+  const configure=CloudLightBatchRenderer.prototype.configure;
+  CloudLightBatchRenderer.prototype.configure=function(material,options) {
+    this.legacyRadiance=true;
+    this.page.tPageCached??={value:null};this.page.tPageMask??={value:null};
+    return configure.call(this,material,options);
+  };
   const create=CloudLightBatchRenderer.prototype.createPrograms;
   CloudLightBatchRenderer.prototype.createPrograms=function(material) {
     create.call(this,material);

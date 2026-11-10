@@ -18,6 +18,10 @@ const declarations=/* glsl */`
     return texelFetch(tPageLight,cell,0).r;
   }
 `;
+const compactDeclarations=declarations
+  .replace('tPageCached,tPageMask,','')
+  .replace('int(round(texelFetch(tPageMask,pixel,0).r*255.0))',
+    'texelFetch(tPageOpacity,pixel,0).r>0.0?15:0');
 
 // Instanced rectangles remove empty tiles before the heavy fragment kernels.
 // PAGE_MODE 0: anchors, 1: four light fields, 2: original output pixel tiles.
@@ -63,15 +67,21 @@ function replace(source,from,to) {
   return source.replace(from,to);
 }
 
-function opacityPreparation(source) {
+function opacityPreparation(source,legacyRadiance) {
   // A prepared ray owns only visibility and optical mass. Cached and missing
   // light paths both compose once, after anchors and complete beams exist.
   const start=source.indexOf('        vec3 correction=vec3(0);'),end=source.indexOf('        #else',start);
   if(start<0||end<0)throw Error('Cloud preparation correction boundary changed');
-  source=source.slice(0,start)+`
+  const output=legacyRadiance?`
     queryRay=vec4(dir,queryOpaqueLimit);queryCached=vec4(0);
     queryMask=vec4(15.0/255.0);queryOpacity=vec4(totalOpacity);
-  `+source.slice(end);
+  `:`
+    queryRay=vec4(dir,queryOpaqueLimit);queryOpacity=vec4(totalOpacity);
+  `;
+  source=source.slice(0,start)+output+source.slice(end);
+  if(!legacyRadiance)source=replace(source,
+    'layout(location=1) out vec4 queryCached;layout(location=2) out vec4 queryMask;layout(location=3) out vec4 queryOpacity;',
+    'layout(location=1) out vec4 queryOpacity;vec4 queryCached;');
   const anchorStart=source.indexOf('            if(pass==1 && ext>0.0) {');
   if(anchorStart<0)throw Error('Cloud preparation quantile boundary changed');
   let depth=1,anchorEnd=source.indexOf('{',anchorStart)+1;
@@ -82,9 +92,9 @@ function opacityPreparation(source) {
   return replace(source,'for(int pass=0;pass<2;pass++) {','for(int pass=0;pass<1;pass++) {');
 }
 
-export function cloudLightBatchShaders(source) {
+export function cloudLightBatchShaders(source,{legacyRadiance=false}={}) {
   const shared=cloudLightPageShaders(source);
-  const adapt=shader=>replace(shader,lightPageDeclarations,declarations);
+  const adapt=shader=>replace(shader,lightPageDeclarations,legacyRadiance?declarations:compactDeclarations);
   let metadata=adapt(shared.metadata);
   // Preparation already owns the FP32 ray opacity. Reuse that CDF mass
   // instead of traversing the same density a third time in every batch.
@@ -102,6 +112,6 @@ export function cloudLightBatchShaders(source) {
   // Composition reads that complete FP32 page instead of querying the cache
   // again or relying on matching cache branches in two compiled programs.
   compose=replace(compose,'bool cached=cloudCachedLight(local,path,pathDepth);','bool cached=false;');
-  return {prepare:opacityPreparation(shared.prepare),metadata,beams,compose,base:adapt(shared.base),reduce:adapt(shared.reduce),
-    badCached:adapt(shared.badCached),badFields:shared.badFields};
+  return {prepare:opacityPreparation(shared.prepare,legacyRadiance),metadata,beams,compose,reduce:adapt(shared.reduce),
+    ...(legacyRadiance?{base:adapt(shared.base),badCached:adapt(shared.badCached)}:{}),badFields:shared.badFields};
 }

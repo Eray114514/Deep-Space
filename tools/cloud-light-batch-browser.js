@@ -2,7 +2,7 @@ import {CloudLightBatchRenderer} from '../src/cloud/cloud-light-batch-renderer.j
 import {cloudLightBatchShaders} from '../src/cloud/cloud-light-batch-glsl.js';
 import {previousCloudPreparation} from './cloud-light-preparation-reference.js';
 
-export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false,comparePreparation=false}={}) {
+export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,rounds=7,jitterFrame=0,compareMetadata=false,comparePreparation=false,compareLayout=false}={}) {
   const T=NMS._THREE,r=NMS._renderer,camera=NMS._internals.camera,vp=NMS._pipeline.volumePass,p=vp.activePlanet;
   const production=p.volCloudMat,gl=r.getContext(),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
   if(!ext)throw Error('Actual hardware GPU timer required');
@@ -63,10 +63,13 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
   };
   try {
     camera.layers.set(2);r.autoClear=false;r.setClearColor(0,0);
-    batches=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
+    batches=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,
+      legacyRadiance:comparePreparation,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
     let previousMetadata=null,previousPreparation=null;
-    if((compareMetadata||comparePreparation)&&!batches.plan.direct) {
-      previous=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
+    if((compareMetadata||comparePreparation||compareLayout)&&!batches.plan.direct) {
+      previous=new CloudLightBatchRenderer(original,{width,height,budgetBytes,beamBytes,
+        legacyRadiance:comparePreparation||compareLayout,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)});
+      if(previous.plan.direct)throw Error('Comparison layout does not fit the requested GPU budget');
       const from='float totalOpacity=texelFetch(tPageOpacity,ivec2(queryPixel.xy),0).r;';
       if(!previous.metadataMaterial.fragmentShader.includes(from))throw Error('Metadata reference boundary changed');
       if(compareMetadata)previous.metadataMaterial.fragmentShader=previous.metadataMaterial.fragmentShader.replace(from,'float totalOpacity=0.0;')
@@ -84,7 +87,8 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
       const native=new Uint16Array(width*height*4);r.readRenderTargetPixels(output,0,0,width,height,native);
       let nativeRepeatChanged=0;if(nativeExpected[index])for(let i=0;i<native.length;i++)if(native[i]!==nativeExpected[index][i])nativeRepeatChanged++;
       nativeExpected[index]||=native;pixelsExpected[index]||=pixels();
-      records.push({round,implementation:index===2?(comparePreparation?'previous-preparation':'previous-metadata'):index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
+      const control=compareLayout?'previous-layout':comparePreparation?'previous-preparation':'previous-metadata';
+      records.push({round,implementation:index===2?control:index?'batched':'production',...timing,drawCalls:calls,nativeRepeatChanged});
       console.log('Page: '+JSON.stringify(records.at(-1)));
     }
     const compare=data=>{const channels=[0,0,0,0];let maximumError=0;
@@ -103,7 +107,7 @@ export async function probeLightBatches({budgetBytes=64*1024*1024,beamBytes=4,ro
     drawOriginal(badFields);const badFieldsControl=compare(pixels());
     const info=gl.getExtension('WEBGL_debug_renderer_info');
     return {width,height,budgetBytes,beamBytes,jitterFrame,records,plan:batches.plan,comparison:compare(pixelsExpected[1]),
-      previousPreparation,previousMetadata,previousComparison:previous?compare(pixelsExpected[2]):null,
+      previousPreparation,previousMetadata,previousPlan:previous?.plan,previousComparison:previous?compare(pixelsExpected[2]):null,
       forbiddenCalls,badCachedControl,badFieldsControl,occupied:Array.from(pixelsExpected[0]).filter((v,i)=>i%4===3&&v>.004).length,
       inputsChanged:inputState()!==firstInputs,inputs:JSON.parse(firstInputs),gl:gl.getError(),gpu:info?gl.getParameter(info.UNMASKED_RENDERER_WEBGL):null,
       scope:'One complete same-frame command sequence, GPU mask clips empty tile/field rectangles, fixed pages reused for every batch. No readback or wait inside submission. Timers/readbacks only outside the kernel. Static private scene, not continuous or whole-frame acceptance.'};

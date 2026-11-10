@@ -1,13 +1,13 @@
 // All four fields have slots; the GPU mask clips unused tile/field instances.
 // Reusing these pages in order bounds memory without reading a mask on CPU.
 export function planCloudLightBatches({width,height,budgetBytes=64*1024*1024,
-  beamBytes=4,maxBatchTiles=128,maxTextureSize=16384}) {
+  beamBytes=4,maxBatchTiles=128,maxTextureSize=16384,legacyRadiance=false}) {
   for(const value of [width,height,maxBatchTiles,maxTextureSize])
     if(!Number.isSafeInteger(value)||value<1)throw Error('Invalid cloud batch dimensions');
   if(!Number.isSafeInteger(budgetBytes)||budgetBytes<0||![2,4].includes(beamBytes))
     throw Error('Invalid cloud batch budget');
   const tilesX=Math.ceil(width/16),tilesY=Math.ceil(height/16),tileCount=tilesX*tilesY;
-  const baseBytes=width*height*29+tileCount*4;
+  const baseBytes=legacyRadiance?width*height*29+tileCount*4:width*height*20+tileCount;
   const slots=(count,height)=>{
     const columns=Math.min(64,count,Math.floor(maxTextureSize/16));
     if(!columns)return null;

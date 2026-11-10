@@ -91,6 +91,7 @@ try {
   assert.equal(before.sourceDigest,after.sourceDigest);assert.equal(before.verifierDigest,after.verifierDigest);
   assert.deepEqual(errors,[]);assert.equal(result.gl,0);assert.equal(result.disjoint,false);
   assert.equal(result.status.reason,'same-frame');assert.ok(result.submissions.filter(record=>record.submitted).length>10);
-  assert.equal(result.compiledShaders.find(record=>record.name==='cloud-batch-prepare').shaders.some(shader=>shader.includes('queryMask=vec4(15.0/255.0)')),!previousPrepare);
+  const prepare=result.compiledShaders.find(record=>record.name==='cloud-batch-prepare').shaders.join('\n');
+  assert.equal(prepare.includes('layout(location=1) out vec4 queryOpacity;'),!previousPrepare);
   console.log(`PASS passive activation, whole-page RAF cadence and outside-kernel GPU timers: ${out}`);
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}

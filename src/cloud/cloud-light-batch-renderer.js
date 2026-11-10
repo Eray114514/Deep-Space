@@ -13,14 +13,18 @@ const fullscreen=/* glsl */`
 export class CloudLightBatchRenderer {
   constructor(material,options) {
     this.disposed=false;
+    this.legacyRadiance=options.legacyRadiance===true;
     this.submissions=0;
     this.targets=[];
     this.materials=[];
     this.page={uPageSize:{value:new THREE.Vector2()},uPageTilesX:{value:0},
       uPageMetaColumns:{value:0},uPageLightColumns:{value:0},
       uBatchStart:{value:0},uBatchCount:{value:0},uPageAtlasSize:{value:new THREE.Vector2()}};
-    for(const name of ['tPageRay','tPageCached','tPageMask','tPageOpacity','tPageTileMask',
+    for(const name of ['tPageRay','tPageOpacity','tPageTileMask',
       'tPage0','tPage1','tPage2','tPage3','tPageLight'])this.page[name]={value:null};
+    if(this.legacyRadiance) {
+      this.page.tPageCached={value:null};this.page.tPageMask={value:null};
+    }
     this.configure(material,options);
   }
 
@@ -28,7 +32,7 @@ export class CloudLightBatchRenderer {
     if(this.disposed)throw Error('Cloud batch executor disposed');
     if(material.defines.PRODUCTION_CLOUD_MEDIUM!==1||material.defines.CLOUD_FAR_VIEW
       ||material.uniforms.uLightQuadratureSteps.value!==16)throw Error('Cloud batches require production near 16-anchor transport');
-    const plan=planCloudLightBatches(options);
+    const plan=planCloudLightBatches({...options,legacyRadiance:this.legacyRadiance});
     // One bounded program family, keyed by every source property used below.
     // Owner identity and texture sizes are uniform data, not shader variants.
     const signature=JSON.stringify(Object.keys(material.defines).sort().map(name=>[name,material.defines[name]]));
@@ -62,24 +66,28 @@ export class CloudLightBatchRenderer {
         minFilter:THREE.NearestFilter,magFilter:THREE.NearestFilter,...extra});
       this.targets.push(rt);return rt;
     };
-    this.frame=target(width,height,{count:4});
-    this.frame.textures[1].type=THREE.HalfFloatType;
-    this.frame.textures[2].type=THREE.UnsignedByteType;this.frame.textures[2].format=THREE.RedFormat;
-    this.frame.textures[3].format=THREE.RedFormat;
-    this.tileMask=target(tilesX,tilesY,{type:THREE.UnsignedByteType});
+    this.frame=target(width,height,{count:this.legacyRadiance?4:2});
+    const opacity=this.frame.textures[this.legacyRadiance?3:1];opacity.format=THREE.RedFormat;
+    if(this.legacyRadiance) {
+      const [,cached,mask]=this.frame.textures;
+      cached.type=THREE.HalfFloatType;
+      mask.type=THREE.UnsignedByteType;mask.format=THREE.RedFormat;
+      this.page.tPageCached.value=cached;this.page.tPageMask.value=mask;
+    }
+    this.tileMask=target(tilesX,tilesY,{type:THREE.UnsignedByteType,
+      format:this.legacyRadiance?THREE.RGBAFormat:THREE.RedFormat});
     this.metadata=target(metadata.width,metadata.height,{count:4});
     this.light=target(light.width,light.height,{format:THREE.RedFormat,type:beamBytes===2?THREE.HalfFloatType:THREE.FloatType});
     this.page.uPageSize.value.set(width,height);this.page.uPageTilesX.value=tilesX;
     this.page.uPageMetaColumns.value=metadata.columns;this.page.uPageLightColumns.value=light.columns;
-    Object.entries({tPageRay:this.frame.textures[0],tPageCached:this.frame.textures[1],
-      tPageMask:this.frame.textures[2],tPageOpacity:this.frame.textures[3],tPageTileMask:this.tileMask.texture,
+    Object.entries({tPageRay:this.frame.textures[0],tPageOpacity:opacity,tPageTileMask:this.tileMask.texture,
       tPage0:this.metadata.textures[0],tPage1:this.metadata.textures[1],
       tPage2:this.metadata.textures[2],tPage3:this.metadata.textures[3],tPageLight:this.light.texture})
       .forEach(([name,texture])=>{this.page[name].value=texture;});
   }
 
   createPrograms(material) {
-    const shaders=cloudLightBatchShaders(material.fragmentShader);
+    const shaders=cloudLightBatchShaders(material.fragmentShader,{legacyRadiance:this.legacyRadiance});
     const make=(name,mode=-1,mrt=false)=>{
       const m=new THREE.ShaderMaterial({uniforms:{...material.uniforms,...this.page},
         defines:{...material.defines,...(mode>=0?{PAGE_MODE:mode}:{})},
@@ -89,7 +97,8 @@ export class CloudLightBatchRenderer {
         side:name==='prepare'?material.side:THREE.DoubleSide,premultipliedAlpha:material.premultipliedAlpha});
       m.name='cloud-batch-'+name;this.materials.push(m);return m;
     };
-    this.prepare=make('prepare',-1,true);this.reduce=make('reduce');this.base=make('base');
+    this.prepare=make('prepare',-1,true);this.reduce=make('reduce');
+    this.base=this.legacyRadiance?make('base'):null;
     this.metadataMaterial=make('metadata',0,true);this.lightMaterial=make('beams',1);this.compose=make('compose',2);
     if(this.quadGeometry)return;
     this.quadGeometry=new THREE.PlaneGeometry(2,2);
@@ -127,7 +136,7 @@ export class CloudLightBatchRenderer {
       // Capture the exact framebuffer/program variants synchronously. All
       // renderer state is restored before polling; no player state crosses await.
       for(const [target,material,kind] of [[this.frame,this.prepare,'mesh'],[this.tileMask,this.reduce,'quad'],
-        [output,this.base,'quad'],[this.metadata,this.metadataMaterial,'tiles'],
+        ...(this.base?[[output,this.base,'quad']]:[]),[this.metadata,this.metadataMaterial,'tiles'],
         [this.light,this.lightMaterial,'tiles'],[output,this.compose,'tiles']]) {
         renderer.setRenderTarget(target);
         if(kind==='quad')this.quad.material=material;
@@ -189,7 +198,8 @@ export class CloudLightBatchRenderer {
     try {
       renderer.autoClear=false;renderer.setClearColor(0,0);
       draw(this.frame,this.prepare,'mesh');draw(this.tileMask,this.reduce);
-      draw(output,this.base);
+      if(this.base)draw(output,this.base);
+      else {renderer.setRenderTarget(output);renderer.clear(true,false,false);}
       for(let start=0;start<tileCount;start+=batchTiles) {
         const count=Math.min(batchTiles,tileCount-start);
         this.page.uBatchStart.value=start;this.page.uBatchCount.value=count;
