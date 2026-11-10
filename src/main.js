@@ -42,6 +42,7 @@ import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
 import { GameLegacyPipeline } from './legacy-render-pipeline.js';
+import { SurfaceShadowGrid } from './surface-shadow-grid.js';
 import { isLowPowerGpu, rendererParamsForSettings, resolveGraphicsSettings,
   resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
 import { createEnvironmentState, updateEnvironmentState } from './environment-state.js';
@@ -203,6 +204,7 @@ scene.add(ambient, hemi, headlamp);
 // near a surface the (shadowless) point sun crossfades into this
 // shadow-casting directional light that follows the camera
 const sunShadow = new THREE.DirectionalLight(0xffffff, 0);
+const surfaceShadowGrid = new SurfaceShadowGrid();
 sunShadow.castShadow = true;
 sunShadow.visible = false;
 const SHADOW_MAP = QUALITY_PROFILE.shadowMap;
@@ -4476,6 +4478,8 @@ function frame() {
     sunShadow.color.copy(sysLight.color);
     sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
     sunShadow.target.position.set(0, 0, 0);
+    surfaceShadowGrid.update(sunShadow, nav.pos, nearest.posUniv,
+      effectiveShadowDistance, renderer.capabilities.maxTextureSize);
     sysLight.intensity *= 1 - shadowBlend;
     if (universe.fadingSystem) universe.fadingSystem.sunLight.intensity *= 1 - shadowBlend;
   }
