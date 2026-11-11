@@ -10,6 +10,7 @@ import { evidenceFingerprint } from './evidence-fingerprint.js';
 const out = `test-results/near-water-player/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 const caps = process.env.NEAR_WATER_FPS ? [Number(process.env.NEAR_WATER_FPS)] : [60, 30];
 const volumeClouds=process.env.NEAR_WATER_VCLOUDS!=='0';
+const cloudSplit=process.argv.includes('--cloudsplit');
 const reference=process.env.NEAR_WATER_REFERENCE||null;
 const browserChoice=process.env.NEAR_WATER_BROWSER||'bundled';
 const viewport=process.argv.includes('--2k')?{width:2560,height:1440}:{width:1920,height:1080};
@@ -20,7 +21,7 @@ const fingerprint = await evidenceFingerprint('tools/nearwaterplaytest.js');
 const { server, port } = await startServer(0);
 const browser = await launchHardwareBrowser({ headless: true,
   executablePath:browserChoice==='system'?resolveSystemChromePath()||undefined:undefined });
-const evidence = { ...fingerprint, volumeClouds, reference, browserChoice, viewport, quality, boundary: 'Normal HUD/post and real flight inputs after initial QA pose. '
+const evidence = { ...fingerprint, volumeClouds, cloudSplit, reference, browserChoice, viewport, quality, boundary: 'Normal HUD/post and real flight inputs after initial QA pose. '
   + 'CPU reconstruction of committed mesh attributes is not GPU raster/depth readback. '
   + 'RAF cap limits maximum presentation rate; actual frame times and speeds are measured, never assumed.', runs: [] };
 try {
@@ -37,6 +38,7 @@ try {
       await page.route('**/src/near-water-patch.js',route=>route.fulfill({contentType:'text/javascript',body:source}));
     }
     const errors = [];
+    const checkpoints = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     try {
@@ -73,11 +75,14 @@ try {
           if (!requests.size && scheduled != null) { nativeCancel(scheduled); scheduled = null; }
         };
       }, fps);
-      await page.goto(`http://127.0.0.1:${port}/?quality=${quality}&nohero=1&nolock=1&post=1&vclouds=${Number(volumeClouds)}&farflora=1`,
-        {waitUntil:'commit'});
+      const url = new URL(`http://127.0.0.1:${port}/?quality=${quality}&nohero=1&nolock=1&post=1&vclouds=${Number(volumeClouds)}&farflora=1`);
+      if (cloudSplit) url.searchParams.set('cloudsplit', '1');
+      await page.goto(url.href, { waitUntil: 'commit' });
       await page.waitForFunction(() => window.NMS?.booted, null, { timeout: 120000 });
-      await page.evaluate(() => {
+      checkpoints.push({ stage: 'boot', atMs: await page.evaluate(() => performance.now()) });
+      const placement = await page.evaluate(() => {
         const p = NMS._planet(0);
+        const beforeSequence = NMS._pipeline.frameState.sequence;
         // Accelerate only the unmeasured initial QA placement. Restore the
         // production build budget before any real-input traversal samples.
         NMS.setBuildBudget(80);
@@ -85,11 +90,20 @@ try {
           { dir: [0.34669147556655305, 0.07291666666666663, -0.9351407276403421], horizon: true, pitch: 0 });
         NMS.setLocalSunAltitude(0, 32);
         NMS.shipViewDebug.setViewMode('chase');
+        return { atMs: performance.now(), beforeSequence };
       });
+      checkpoints.push({ stage: 'near-water-placement', ...placement });
       await page.waitForFunction(() => {
         const water = NMS.waterState(0);
         return water?.near?.visible && !water.near.pending && water.global.pending === 0;
       }, null, { timeout: 180000 });
+      checkpoints.push({ stage: 'near-water-ready', atMs: await page.evaluate(() => performance.now()) });
+      const remainingPlacementMs = await page.evaluate(start => 180000 - (performance.now() - start), placement.atMs);
+      assert.ok(remainingPlacementMs > 0, 'No time remains for a presented near-water frame');
+      await page.waitForFunction(sequence => NMS._pipeline.frameState.sequence > sequence,
+        placement.beforeSequence, { timeout: remainingPlacementMs });
+      checkpoints.push(await page.evaluate(() => ({ stage: 'near-water-presented', atMs: performance.now(),
+        sequence: NMS._pipeline.frameState.sequence })));
       await page.evaluate(async () => {
         NMS.setBuildBudget(0);
         const { oceanSeconds } = await import('/src/ocean-clock.js');
@@ -108,6 +122,7 @@ try {
           const direction = local.clone().normalize();
           const center = patch.centerDirection;
           const result = { time: performance.now(), state: NMS.state, speed: nav.vel.length(),
+            renderSequence: NMS._pipeline.frameState.sequence,
             altitude: local.length() - p.seaRadius, position: local.toArray(),
             actualTurnDeg: initialLocalForward.angleTo(p.worldOffsetToLocal(
               new T.Vector3(0, 0, -1).applyQuaternion(nav.quat)).normalize()) * 180 / Math.PI,
@@ -280,6 +295,10 @@ try {
         frameIntervals: window.__nearFrameIntervals }));
       const moving = samples.filter((v) => v.phase !== 'stop');
       const nearSamples = samples.flatMap((v) => v.samples).filter((v) => v.wet);
+      const presentedByPhase = Object.fromEntries(['straight', 'turn', 'stop'].map(phase => {
+        const phaseSamples = samples.filter(sample => sample.phase === phase);
+        return [phase, phaseSamples.at(-1).renderSequence - phaseSamples[0].renderSequence];
+      }));
       const measurements = {
         speedMin: Math.min(...moving.map((v) => v.speed)), speedMax: Math.max(...moving.map((v) => v.speed)),
         targetSpeedCoverage: moving.filter((v) => v.speed >= 130 && v.speed <= 170).length / moving.length,
@@ -288,11 +307,15 @@ try {
         maxCell: Math.max(...nearSamples.map((v) => v.footprint)),
         maxCpuHeightErrorMeters: Math.max(...nearSamples.map((v) => Math.abs(v.errorMeters))),
         stoppedSpeed: samples.at(-1).speed,
-        actualFps: 1000 / (state.frameIntervals.reduce((a, b) => a + b, 0) / state.frameIntervals.length),
+        rafFps: 1000 / (state.frameIntervals.reduce((a, b) => a + b, 0) / state.frameIntervals.length),
+        presentedFps: 1000 * (samples.at(-1).renderSequence - samples[0].renderSequence)
+          / (samples.at(-1).time - samples[0].time),
+        presentedByPhase,
       };
       const gates = { noErrors: errors.length === 0, webgl2: state.stats.rendererBackend === 'webgl2',
         native2K: viewport.width !== 2560 || state.drawingBuffer[0] === viewport.width && state.drawingBuffer[1] === viewport.height,
         glClean: state.gl === 0, contextAlive: !state.contextLost,
+        presentedWhileFlying: Object.values(presentedByPhase).every(count => count > 0),
         actualLowFlight: samples.every((v) => v.altitude > 0 && v.altitude < 100),
         targetSpeedExercised: measurements.targetSpeedCoverage >= 0.8,
         actualTurnExercised: measurements.maximumTurnDeg >= 70 && measurements.maximumTurnDeg <= 120,
@@ -300,7 +323,7 @@ try {
         recentered: samples.at(-1).patch.rebuilds > samples[0].patch.rebuilds,
         coreCoverage: measurements.maxAnchor + 100 <= samples.at(-1).patch.coreRadius,
         cpuContactError: measurements.maxCpuHeightErrorMeters < 0.02 };
-      evidence.runs.push({ fps, measurements, gates, samples, inputs, state, errors });
+      evidence.runs.push({ fps, measurements, gates, samples, inputs, state, checkpoints, errors });
       await writeFile(`${out}/report.json`, JSON.stringify(evidence, null, 2));
       console.log(JSON.stringify({ fps, measurements, gates }));
     } catch (error) {
@@ -313,7 +336,7 @@ try {
           water: window.NMS?.waterState?.(0), sample: window.__nearSample?.() }));
       } catch (captureError) { failureState = { captureError: String(captureError) }; }
       await page.screenshot({ path: `${out}/${fps}-failure-player.png` }).catch(() => {});
-      evidence.failure = { fps, error: String(error), stack: error.stack, state: failureState, errors };
+      evidence.failure = { fps, error: String(error), stack: error.stack, state: failureState, checkpoints, errors };
       await writeFile(`${out}/report.json`, JSON.stringify(evidence, null, 2));
       throw error;
     } finally { await context.close(); }
