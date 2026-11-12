@@ -83,6 +83,8 @@ const cloudFieldGLSL = /* glsl */`
   // octaves smaller than the step are faded out instead of being sampled as
   // noise: gFarSmall drops the 2-3 km cumulus, gFarWide the 9 km cells.
   float gFarSmall = 0.0, gFarWide = 0.0;
+  // Height of the last sampled column's cloud top within the layer (0..1).
+  float gCrown = 0.0;
 
   // lod 0: light march / shadow / far field. 1: view march. 2: near camera.
   float cloudDensity(vec3 p, float cover, int lod, float near, float lift) {
@@ -113,7 +115,8 @@ const cloudFieldGLSL = /* glsl */`
     float top = mix(0.42, 1.0, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
     // Every small cumulus is its own dome and carries finer bumps: seen from
     // above the deck is a relief of lit tops and shaded gaps, not a flat sheet.
-    if (fine > 0.0) top *= 1.0 - fine * (0.34 * (1.0 - small) + 0.2 * (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g));
+    if (fine > 0.0) top *= 1.0 - fine * (0.22 * (1.0 - small) + 0.12 * (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g));
+    gCrown = top;
     float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.45, h);
     float d = sat(remap(base * profile, 1.0 - cov, 1.0, 0.0, 1.0));
     if (d <= 0.0) return 0.0;
@@ -125,7 +128,7 @@ const cloudFieldGLSL = /* glsl */`
       d = sat((d - e) / (1.0 - e));
     }
     // Thin rims fade out instead of ending in a hard outline.
-    return pow(d, 1.35) * cov * 1.3;
+    return pow(d, 1.15) * cov * 1.3;
   }`;
 
 const shadowLookupGLSL = /* glsl */`
@@ -317,9 +320,10 @@ const marchShader = /* glsl */`
           float near = sat(1.0 - t / 28000.0);
           // Fade octaves the growing step can no longer resolve.
           // (by step length along grazing rays, by distance when looking down from orbit)
-          gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(80000.0, 220000.0, t));
-          gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(300000.0, 700000.0, t));
+          gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(150000.0, 500000.0, t));
+          gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(1500000.0, 4000000.0, t));
           float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near, weather.y);
+          float crown = gCrown;
           if (d > 0.002) {
             if (tFront < 0.0) tFront = t;
             float h = sat((length(p) - uShellBase - weather.y) / uShellDepth);
@@ -346,7 +350,12 @@ const marchShader = /* glsl */`
             vec3 ambient = irradiance * mix(vec3(0.012, 0.017, 0.028), vec3(0.045, 0.062, 0.095), h)
               * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
             // Bases sit in their own shadow; tops catch the sun.
-            vec3 source = (sun * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h)) + ambient) * uCloudTint;
+            // Troughs between domes are hemmed in by their neighbours: less sun
+            // and sky reaches them. This is what lets the deck read as relief
+            // from straight above, where the light march alone sees no shadow.
+            float open = mix(0.74, 1.0, smoothstep(0.25, 0.8, crown));
+            open = mix(open, 1.0, 0.5 * smoothstep(100000.0, 400000.0, t));
+            vec3 source = (sun * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h)) + ambient) * open * uCloudTint;
             float Ti = exp(-d * uExtinction * dt);
             float w = T * (1.0 - Ti);
             L += w * source; weighted += w * t; weight += w;
@@ -437,7 +446,7 @@ const compositeShader = /* glsl */`
       vec2 o = uCloudTexel * 1.1;
       vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
         + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
-      cloud = mix(cloud, blurred, far * 0.5);
+      cloud = mix(cloud, blurred, far * 0.15);
     }
     float coverage = 1.0, shade = 1.0;
     float sceneDepth = texture2D(tSceneDepth, vUv).x;
@@ -446,8 +455,12 @@ const compositeShader = /* glsl */`
       vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
       vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
-      vec2 aux = texture2D(tCloudAux, vUv).xy * 1000.0;
-      coverage = smoothstep(aux.x, max(aux.y, aux.x + 1.0), distance);
+      vec3 aux = texture2D(tCloudAux, vUv).xyz * 1000.0;
+      // Terrain inside a cloud is swallowed gradually: opacity grows from the
+      // cloud's front face over its optical depth, with at least ~600 m of
+      // fog so a ridge never cuts a cloud along a hard line.
+      float depthScale = max(aux.z - aux.x, 600.0);
+      coverage = distance <= aux.x ? 0.0 : 1.0 - exp(-2.2 * (distance - aux.x) / depthScale);
       if (uShadowOn > 0.5) {
         // Surfaces under the clouds lose their direct sun to the cloud column.
         vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
@@ -474,6 +487,7 @@ export class LiteCloudPass extends Pass {
     this.activePlanet = null;
     this.visualEnabled = true;
     this.shadowsEnabled = true;
+    this.terrainLift = false;
     this.enabled = false;
     this.needsSwap = true;
     this.frame = 0;
@@ -630,7 +644,10 @@ export class LiteCloudPass extends Pass {
         const floor = next.hasLiquid && Number.isFinite(next.seaLevel) ? Math.max(next.seaLevel, 0) : 0;
         const base = floor + THREE.MathUtils.clamp((next.hAmp || 0) * 0.25, 1500, 3500);
         // Over high ground the base lifts with the regional surface altitude.
-        const synoptic = Boolean(next.weatherField?.synoptic && next.cloudWeatherHiTex);
+        // Off by default. Real clouds sit below summits; what read as clipping was
+        // the hard intersection, which the composite now softens. With the lift on,
+        // regions of high regional altitude also lost their clouds entirely.
+        const synoptic = this.terrainLift && Boolean(next.weatherField?.synoptic && next.cloudWeatherHiTex);
         const highest = synoptic ? Number(next.weatherField.surfaceBoundsMeters?.[1]) || 0 : 0;
         const maxLift = synoptic ? THREE.MathUtils.clamp(highest + 1300 - base, 0, 9000) : 0;
         u.uLiftOn.value = synoptic ? 1 : 0;
