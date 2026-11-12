@@ -5,9 +5,15 @@
 // far/near split programs) as the default. The whole feature is this pass and
 // a 64^3 noise volume: no baking, no per-planet GPU caches, no warm-up.
 //
+// Per frame it draws three things:
+//   1. a sun-aligned cloud shadow map (transmittance of the whole cloud column),
+//   2. the low-resolution march: cumulus shell + cirrus sheet + the sunlight
+//      that cloud shadows remove from the air below (light shafts),
+//   3. a full-resolution composite that also shades opaque surfaces with (1).
+//
 // Inputs it shares with the rest of the frame, so every consumer agrees:
-//   - planet.cloudShadowTex: the weather coverage atlas that terrain and water
-//     already sample for cloud shadows (same uCloudMat spin).
+//   - planet.cloudShadowTex: the weather coverage atlas (same uCloudMat spin
+//     the terrain and water use).
 //   - AtmospherePass uniforms: camera/planet frame, suns, optical-depth LUT.
 // Units are metres in the planet-local frame.
 import * as THREE from 'three';
@@ -16,26 +22,24 @@ import { atmosphereTransportGLSL, atmosphereUniformGLSL } from '../atmosphere-tr
 import { weatherAtlasGLSL } from './weather-atlas.js';
 import { liteCloudNoiseTexture } from './lite-cloud-noise.js';
 
+const SHADOW_SIZE = 1024;
 const _matrix = new THREE.Matrix4();
 const _quaternion = new THREE.Quaternion();
+const _sun = new THREE.Vector3();
+const _ground = new THREE.Vector3();
 
 const vertexShader = /* glsl */`
   varying vec2 vUv;
   void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
-const marchShader = /* glsl */`
-  precision highp float;
+// The cloud field: coverage and density. Shared by the view march and the
+// shadow map so a cloud and its shadow are the same object.
+const cloudFieldGLSL = /* glsl */`
   precision highp sampler3D;
-  #define VIEW_STEPS 8
   uniform sampler3D uNoise;
   uniform sampler2D uCloudTex;
   uniform mat3 uCloudMat;
-  uniform float uSynoptic, uShellBase, uShellTop, uFrame, uExtinction, uScatterGain;
-  uniform vec3 uCloudTint;
-  ${atmosphereUniformGLSL}
-  varying vec2 vUv;
-  layout(location = 1) out highp vec4 gAux;
-  ${atmosphereTransportGLSL}
+  uniform float uSynoptic, uShellBase, uShellTop;
   ${weatherAtlasGLSL}
 
   float sat(float x) { return clamp(x, 0.0, 1.0); }
@@ -66,7 +70,12 @@ const marchShader = /* glsl */`
     return c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime));
   }
 
-  // lod 0: light march / far field. 1: view march. 2: view march near camera.
+  // Distance fades set by the view march. A step grows with distance, so
+  // octaves smaller than the step are faded out instead of being sampled as
+  // noise: gFarSmall drops the 2-3 km cumulus, gFarWide the 9 km cells.
+  float gFarSmall = 0.0, gFarWide = 0.0;
+
+  // lod 0: light march / shadow / far field. 1: view march. 2: near camera.
   float cloudDensity(vec3 p, float cover, int lod, float near) {
     float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
     if (h < 0.0 || h > 1.0) return 0.0;
@@ -78,32 +87,93 @@ const marchShader = /* glsl */`
     float base = textureLod(uNoise, q / 27000.0, 0.0).r;
     float wide = textureLod(uNoise, q.yzx / 63000.0 + 0.5, 0.0).r;
     float thick = textureLod(uNoise, q.zxy / 149000.0 + 0.37, 0.0).b;
-    // Beyond ~170 km single cells are a few pixels: lean on the wider octave
-    // so the far field reads as soft sheets, not confetti.
+    float fine = lod > 0 ? 1.0 - gFarSmall : 0.0;
     if (lod > 0) {
       // Break every ~9 km cell into 2-3 km cumulus. Seen from the ground a
       // sky needs many small clouds receding to the horizon; a few huge
       // blobs overhead read as a ceiling.
       float small = textureLod(uNoise, q.zxy / 8300.0 + 0.29, 0.0).r;
-      base = base * 0.46 + wide * 0.2 + small * 0.34;
+      float nearField = base * 0.46 + wide * 0.2 + small * 0.34;
+      float midField = base * 0.7 + wide * 0.3;
+      base = mix(mix(midField, nearField, fine), base * 0.35 + wide * 0.65, gFarWide);
     } else base = base * 0.35 + wide * 0.65;
     base = sat((base - 0.22) / 0.6);
-    // Stratocumulus profile: rounded base, cloud-top height driven by the
-    // slow thickness field and by each cell (cell cores bulge upward).
+    // Cumulus profile: flat base, cloud-top height driven by the slow
+    // thickness field and by each cell (cell cores tower upward).
     float top = mix(0.42, 1.0, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
-    if (lod > 0) top *= 0.82 + 0.18 * textureLod(uNoise, q / 7300.0, 0.0).g;   // cauliflower tops
-    float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.7, h);   // flat base, full body
+    if (fine > 0.0) top *= 1.0 - 0.18 * fine * (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g);   // cauliflower tops
+    float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.7, h);
     float d = sat(remap(base * profile, 1.0 - cov, 1.0, 0.0, 1.0));
     if (d <= 0.0) return 0.0;
-    if (lod > 0) {
+    if (fine > 0.0) {
       // Erode only where the cloud is already thin; cores stay solid.
       float e = (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g) * 0.34 * (1.0 - d);
       if (lod > 1) e += (1.0 - textureLod(uNoise, q.zxy / 1900.0 + 0.13, 0.0).g) * 0.26 * near * (1.0 - d);
-      e = min(e, 0.9);
+      e = min(e * fine, 0.9);
       d = sat((d - e) / (1.0 - e));
     }
     return d * cov * 1.25;
-  }
+  }`;
+
+const shadowLookupGLSL = /* glsl */`
+  uniform sampler2D tShadow;
+  uniform vec3 uShadowX, uShadowY;
+  uniform vec2 uShadowCenter;
+  uniform float uShadowExtent, uShadowOn;
+  // Transmittance of the cloud column between a point below the clouds and the sun.
+  float cloudShadowAt(vec3 p) {
+    vec2 uv = (vec2(dot(p, uShadowX), dot(p, uShadowY)) - uShadowCenter) / uShadowExtent * 0.5 + 0.5;
+    vec2 edge = smoothstep(vec2(0.0), vec2(0.06), uv) * smoothstep(vec2(0.0), vec2(0.06), 1.0 - uv);
+    return mix(1.0, texture2D(tShadow, uv).r, edge.x * edge.y);
+  }`;
+
+// One texel = one sun ray. The map lives on the plane through the planet
+// centre perpendicular to the sun, so any point along a ray shares its texel.
+const shadowShader = /* glsl */`
+  precision highp float;
+  ${cloudFieldGLSL}
+  uniform vec3 uSunDirection0, uShadowX, uShadowY;
+  uniform vec2 uShadowCenter;
+  uniform float uShadowExtent, uExtinction;
+  varying vec2 vUv;
+  void main() {
+    vec3 sun = normalize(uSunDirection0);
+    vec2 xy = uShadowCenter + (vUv * 2.0 - 1.0) * uShadowExtent;
+    vec3 origin = uShadowX * xy.x + uShadowY * xy.y;
+    float transmittance = 1.0;
+    vec2 top = shellHits(origin, sun, uShellTop);
+    if (top.y > top.x) {
+      vec2 base = shellHits(origin, sun, uShellBase);
+      float s0 = base.y > base.x ? base.y : top.x, s1 = top.y;
+      if (s1 > s0) {
+        float c0 = coverageAt(origin + sun * mix(s0, s1, 0.2));
+        float c1 = coverageAt(origin + sun * mix(s0, s1, 0.8));
+        if (max(c0, c1) > 0.03) {
+          float ds = (s1 - s0) / 12.0, tau = 0.0;
+          for (int i = 0; i < 12; i++) {
+            float k = (float(i) + 0.5) / 12.0;
+            tau += cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(c0, c1, k), 0, 0.0) * ds;
+          }
+          transmittance = exp(-tau * uExtinction);
+        }
+      }
+    }
+    gl_FragColor = vec4(transmittance, 0.0, 0.0, 1.0);
+  }`;
+
+const marchShader = /* glsl */`
+  precision highp float;
+  #define VIEW_STEPS 8
+  uniform sampler2D tSceneDepth;
+  uniform float uFrame, uExtinction, uScatterGain, uShaftStrength;
+  uniform vec3 uCloudTint;
+  ${atmosphereUniformGLSL}
+  varying vec2 vUv;
+  layout(location = 1) out highp vec4 gAux;
+  layout(location = 2) out highp vec4 gShaft;
+  ${atmosphereTransportGLSL}
+  ${cloudFieldGLSL}
+  ${shadowLookupGLSL}
 
   float hgPhase(float mu, float g) {
     float g2 = g * g;
@@ -125,19 +195,49 @@ const marchShader = /* glsl */`
   void main() {
     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
     gAux = vec4(1e9, 1e9, 0.0, 1.0);
+    gShaft = vec4(0.0);
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
     vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
     vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
     vec3 ro = uCameraLocal;
     float r0 = length(ro);
-    bool ground = shellHits(ro, rd, uGroundR - 3000.0).x > 0.0;
+    vec2 groundHit = shellHits(ro, rd, uGroundR - 3000.0);
+    bool ground = groundHit.x > 0.0;
     vec3 sunDirection = normalize(uSunDirection0);
     vec3 irradiance = uSunColor0 * uSunEnergy0 * uRadianceScale;
     float mu = dot(rd, sunDirection);
     vec3 sunDirection1 = normalize(uSunDirection1);
     vec3 irradiance1 = uSunColor1 * uSunEnergy1 * uRadianceScale;
     float mu1 = dot(rd, sunDirection1);
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.61803);
+    vec2 outer = shellHits(ro, rd, uShellTop), inner = shellHits(ro, rd, uShellBase);
+
+    // ---- Light shafts. The atmosphere pass lit all the air as if the sky
+    // were clear. Below the clouds, take back the primary sun's single
+    // scattering wherever the air sits in a cloud shadow.
+    if (uShadowOn > 0.5 && r0 < uShellBase) {
+      float tMax = min(inner.y, 90000.0);
+      float sceneDepth = texture2D(tSceneDepth, vUv).x;
+      if (sceneDepth < 0.999999) tMax = min(tMax, (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005));
+      else if (ground) tMax = min(tMax, groundHit.x);
+      vec3 loss = vec3(0.0), through = vec3(1.0);
+      float previous = 0.0, phaseR = 3.0 / (16.0 * PI) * (1.0 + mu * mu), phaseM = hgPhase(mu, 0.8);
+      float sj = fract(jitter + 0.37);
+      for (int i = 0; i < 16; i++) {
+        float x = (float(i) + sj) / 16.0;
+        float t = tMax * x * x;                      // dense near the camera
+        float dt = t - previous; previous = t;
+        vec3 p = ro + rd * t;
+        float altitude = max(length(p) - uGroundR, 0.0);
+        float rayleigh = exp(-altitude / uRayleighScaleHeight) * uDensityScale;
+        float mie = exp(-altitude / uMieScaleHeight) * uDensityScale;
+        vec3 source = (uBetaRayleigh * rayleigh * phaseR + uBetaMieScatter * mie * phaseM) * sunAt(p, sunDirection) * irradiance;
+        loss += through * source * (1.0 - cloudShadowAt(p)) * dt;
+        through *= exp(-(uBetaRayleigh * rayleigh + uBetaMieExtinction * mie) * dt);
+      }
+      gShaft = vec4(loss * uShaftStrength, 1.0);
+    }
 
     // ---- High cirrus: one thin sheet well above the cumulus layer. It costs
     // a handful of fetches and gives the sky a second, clearly higher storey.
@@ -153,7 +253,7 @@ const marchShader = /* glsl */`
       float patches = smoothstep(0.5, 0.8, textureLod(uNoise, q.zxy / 230000.0 + 0.2, 0.0).b);
       if (patches > 0.0) {
         float warp = textureLod(uNoise, q / 41000.0, 0.0).b;
-        vec3 streak = q * vec3(1.0 / 16000.0, 1.0 / 16000.0, 1.0 / 90000.0) + warp * 0.9;
+        vec3 streak = q * vec3(1.0 / 16000.0, 1.0 / 16000.0, 1.0 / 90000.0) + warp * 0.22;
         float fibre = textureLod(uNoise, streak, 0.0).g * 0.6 + textureLod(uNoise, streak * 2.7 + 0.4, 0.0).r * 0.4;
         // Past ~60 km single fibres are sub-pixel and would sparkle; let the
         // sheet dissolve instead (cirrus is a near-sky layer in this pass).
@@ -161,9 +261,10 @@ const marchShader = /* glsl */`
         float a = smoothstep(0.52, 0.86, fibre) * patches * 0.36;
         // A thin sheet thickens toward the horizon with the slant path.
         float slant = max(abs(dot(rd, p / length(p))), 0.16);
-        cirrusA = (1.0 - pow(1.0 - a, 1.0 / slant)) * (1.0 - smoothstep(350000.0, 900000.0, cirrusT) * 0.6);
+        cirrusA = 1.0 - pow(1.0 - a, 1.0 / slant);
         float day = smoothstep(-0.12, 0.12, dot(p / length(p), sunDirection));
         cirrusL = (irradiance * sunAt(p, sunDirection) * mix(hgPhase(mu, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
+          + irradiance1 * sunAt(p, sunDirection1) * mix(hgPhase(mu1, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
           + irradiance * vec3(0.045, 0.062, 0.095) * (0.25 + 0.75 * day)) * uCloudTint;
       }
     }
@@ -172,7 +273,6 @@ const marchShader = /* glsl */`
     float T = 1.0, weight = 0.0, weighted = 0.0, tFront = -1.0, tBack = 0.0;
     vec3 L = vec3(0.0);
     float t0 = -1.0, t1 = -1.0;
-    vec2 outer = shellHits(ro, rd, uShellTop), inner = shellHits(ro, rd, uShellBase);
     if (r0 > uShellTop) { if (outer.y > 0.0) { t0 = max(outer.x, 0.0); t1 = inner.x > 0.0 ? inner.x : outer.y; } }
     else if (r0 > uShellBase) { t0 = 0.0; t1 = inner.x > 0.0 ? inner.x : outer.y; }
     else if (!ground) { t0 = inner.y; t1 = outer.y; }
@@ -190,7 +290,6 @@ const marchShader = /* glsl */`
       if (coverMax >= 0.03) {
         vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
         vec3 sunFar = sunAt(ro + rd * t1, sunDirection);
-        float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.61803);
         float dmin = max(min(min(50.0 + 0.004 * t0, span / 90.0), 300.0), 20.0);
         float t = t0 + dmin * jitter;
         tBack = t0;
@@ -202,7 +301,11 @@ const marchShader = /* glsl */`
           int cell = int(min(floor(s), 3.0));
           float cov = mix(cover[cell], cover[cell + 1], s - float(cell));
           float near = sat(1.0 - t / 28000.0);
-          float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, t > 170000.0 ? 0 : near > 0.0 ? 2 : 1, near);
+          // Fade octaves the growing step can no longer resolve.
+          // (by step length along grazing rays, by distance when looking down from orbit)
+          gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(40000.0, 130000.0, t));
+          gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(300000.0, 700000.0, t));
+          float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near);
           if (d > 0.002) {
             if (tFront < 0.0) tFront = t;
             float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
@@ -213,28 +316,23 @@ const marchShader = /* glsl */`
             tau *= uExtinction;
             // Multi-scattering octaves: each order loses extinction and
             // anisotropy. Gives silver linings and keeps thick cores from going black.
-            float scatter = 0.0, a = 1.0;
+            float scatter = 0.0, scatter1 = 0.0, a = 1.0;
             for (int k = 0; k < 4; k++) {
-              scatter += a * exp(-tau * a) * mix(hgPhase(mu, 0.82 * a), hgPhase(mu, -0.25 * a), 0.28);
+              float e = a * exp(-tau * a);
+              scatter += e * mix(hgPhase(mu, 0.82 * a), hgPhase(mu, -0.25 * a), 0.28);
+              scatter1 += e * mix(hgPhase(mu1, 0.82 * a), hgPhase(mu1, -0.25 * a), 0.28);
               a *= 0.48;
             }
-            scatter *= mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15);
-            vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span));
-            if (uSunEnergy1 > 0.001) {
-              // The companion star reuses the primary's optical depth (they are
-              // rarely far apart in the sky) with its own phase and horizon.
-              float scatter1 = 0.0, a1 = 1.0;
-              for (int k = 0; k < 4; k++) {
-                scatter1 += a1 * exp(-tau * a1) * mix(hgPhase(mu1, 0.82 * a1), hgPhase(mu1, -0.25 * a1), 0.28);
-                a1 *= 0.48;
-              }
-              sun += irradiance1 * sunAt(p, sunDirection1) * scatter1 / max(scatter, 1e-4);
-            }
+            float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15);
+            // The companion star reuses the primary's optical depth (they are
+            // rarely far apart in the sky) with its own phase and horizon.
+            vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span)) * scatter * powder;
+            if (uSunEnergy1 > 0.001) sun += irradiance1 * sunAt(p, sunDirection1) * scatter1 * powder;
             float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection));
             vec3 ambient = irradiance * mix(vec3(0.012, 0.017, 0.028), vec3(0.045, 0.062, 0.095), h)
               * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
             // Bases sit in their own shadow; tops catch the sun.
-            vec3 source = (sun * scatter * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h)) + ambient) * uCloudTint;
+            vec3 source = (sun * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h)) + ambient) * uCloudTint;
             float Ti = exp(-d * uExtinction * dt);
             float w = T * (1.0 - Ti);
             L += w * source; weighted += w * t; weight += w;
@@ -269,14 +367,26 @@ const marchShader = /* glsl */`
 
 const compositeShader = /* glsl */`
   precision highp float;
-  uniform sampler2D tBase, tSceneDepth, tCloud, tCloudAux;
-  uniform mat4 uInvProjection;
-  uniform float uCameraFar;
+  uniform sampler2D tBase, tSceneDepth, tCloud, tCloudAux, tShaft;
+  uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal;
+  uniform vec3 uCameraLocal, uSunDirection0;
+  uniform float uCameraFar, uShellBase, uShadowFloor;
+  uniform vec2 uCloudTexel;
+  ${shadowLookupGLSL}
   varying vec2 vUv;
   void main() {
     vec4 base = texture2D(tBase, vUv);
     vec4 cloud = texture2D(tCloud, vUv);
-    float coverage = 1.0;
+    // Distant clouds are sampled by long jittered steps; a small tent filter
+    // there trades invisible detail for a clean horizon.
+    float far = smoothstep(15000.0, 70000.0, texture2D(tCloudAux, vUv).x);
+    if (far > 0.0) {
+      vec2 o = uCloudTexel * 1.1;
+      vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
+        + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
+      cloud = mix(cloud, blurred, far);
+    }
+    float coverage = 1.0, shade = 1.0;
     float sceneDepth = texture2D(tSceneDepth, vUv).x;
     if (sceneDepth < 0.999999) {
       // Opaque geometry: keep the fraction of the cloud column in front of it.
@@ -284,10 +394,20 @@ const compositeShader = /* glsl */`
       vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
       vec2 aux = texture2D(tCloudAux, vUv).xy;
-      float front = aux.x, back = aux.y;
-      coverage = smoothstep(front, max(back, front + 1.0), distance);
+      coverage = smoothstep(aux.x, max(aux.y, aux.x + 1.0), distance);
+      if (uShadowOn > 0.5) {
+        // Surfaces under the clouds lose their direct sun to the cloud column.
+        vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
+        vec3 p = uCameraLocal + normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz) * distance;
+        float r = length(p);
+        if (r < uShellBase + 150.0) {
+          float day = smoothstep(0.0, 0.14, dot(p / r, normalize(uSunDirection0)));
+          shade = mix(1.0, mix(uShadowFloor, 1.0, cloudShadowAt(p)), day);
+        }
+      }
     }
-    gl_FragColor = vec4(base.rgb * mix(1.0, cloud.a, coverage) + cloud.rgb * coverage, base.a);
+    vec3 color = base.rgb * shade * mix(1.0, cloud.a, coverage) + cloud.rgb * coverage;
+    gl_FragColor = vec4(max(color - texture2D(tShaft, vUv).rgb, vec3(0.0)), base.a);
   }`;
 
 export class LiteCloudPass extends Pass {
@@ -299,55 +419,94 @@ export class LiteCloudPass extends Pass {
     this.maxPixels = maxPixels;
     this.activePlanet = null;
     this.visualEnabled = true;
+    this.shadowsEnabled = true;
     this.enabled = false;
     this.needsSwap = true;
     this.frame = 0;
     this.animateJitter = false;
     this.target = new THREE.WebGLRenderTarget(1, 1, {
-      count: 2, type: THREE.HalfFloatType, depthBuffer: false,
+      count: 3, type: THREE.HalfFloatType, depthBuffer: false,
       minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
     });
     this.target.textures[0].name = 'lite-cloud.radiance';
     this.target.textures[1].name = 'lite-cloud.depth-range';
+    this.target.textures[2].name = 'lite-cloud.shaft-loss';
     // Metres need float32: half float quantised 200 km distances into ~2 km
     // steps, which drew contour rings wherever terrain crossed the cloud layer.
     this.target.textures[1].type = THREE.FloatType;
     this.target.textures[1].minFilter = this.target.textures[1].magFilter = THREE.NearestFilter;
+    this.shadowTarget = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, {
+      depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    });
+    this.shadowTarget.texture.name = 'lite-cloud.shadow';
+
+    const air = atmospherePass.material.uniforms;
+    const field = {
+      uNoise: { value: null },
+      uCloudTex: { value: null },
+      uCloudMat: { value: new THREE.Matrix3() },
+      uSynoptic: { value: 0 },
+      uShellBase: { value: 1 },
+      uShellTop: { value: 2 },
+    };
+    const shadow = {
+      tShadow: { value: this.shadowTarget.texture },
+      uShadowX: { value: new THREE.Vector3(1, 0, 0) },
+      uShadowY: { value: new THREE.Vector3(0, 0, 1) },
+      uShadowCenter: { value: new THREE.Vector2() },
+      uShadowExtent: { value: 1 },
+      uShadowOn: { value: 0 },
+    };
+    const extinction = { value: 0.0026 };
     // Share the atmosphere pass's uniform objects: one camera/planet/sun state.
     this.marchMaterial = new THREE.ShaderMaterial({
       name: 'Lite cloud march',
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
       defines: { MARCH_STEPS: steps },
       uniforms: {
-        ...atmospherePass.material.uniforms,
-        uNoise: { value: null },
-        uCloudTex: { value: null },
-        uCloudMat: { value: new THREE.Matrix3() },
-        uSynoptic: { value: 0 },
-        uShellBase: { value: 1 },
-        uShellTop: { value: 2 },
+        ...air, ...field, ...shadow,
         uFrame: { value: 0 },
-        uExtinction: { value: 0.0026 },
+        uExtinction: extinction,
         // The four scattering octaves stand in for the many orders a thick cloud
         // really has; this gain restores a bright (albedo ~0.8) sunlit deck
         // against Lambert surfaces lit by the same irradiance.
         uScatterGain: { value: 3.6 },
+        uShaftStrength: { value: 0.9 },
         uCloudTint: { value: new THREE.Color(1, 1, 1) },
       },
       vertexShader, fragmentShader: marchShader,
+    });
+    this.shadowMaterial = new THREE.ShaderMaterial({
+      name: 'Lite cloud shadow map',
+      depthTest: false, depthWrite: false, blending: THREE.NoBlending,
+      uniforms: {
+        ...field,
+        uSunDirection0: air.uSunDirection0,
+        uShadowX: shadow.uShadowX, uShadowY: shadow.uShadowY,
+        uShadowCenter: shadow.uShadowCenter, uShadowExtent: shadow.uShadowExtent,
+        uExtinction: extinction,
+      },
+      vertexShader, fragmentShader: shadowShader,
     });
     this.compositeMaterial = new THREE.ShaderMaterial({
       name: 'Lite cloud composite',
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
       uniforms: {
+        ...shadow,
         tBase: { value: null }, tSceneDepth: { value: null },
         tCloud: { value: this.target.textures[0] }, tCloudAux: { value: this.target.textures[1] },
-        uInvProjection: this.marchMaterial.uniforms.uInvProjection,
-        uCameraFar: this.marchMaterial.uniforms.uCameraFar,
+        tShaft: { value: this.target.textures[2] },
+        uInvProjection: air.uInvProjection, uCameraWorld: air.uCameraWorld, uWorldToLocal: air.uWorldToLocal,
+        uCameraLocal: air.uCameraLocal, uSunDirection0: air.uSunDirection0, uCameraFar: air.uCameraFar,
+        uShellBase: field.uShellBase,
+        // Sky and bounce light left under a fully opaque cloud.
+        uShadowFloor: { value: 0.4 },
+        uCloudTexel: { value: new THREE.Vector2(1, 1) },
       },
       vertexShader, fragmentShader: compositeShader,
     });
     this.marchQuad = new FullScreenQuad(this.marchMaterial);
+    this.shadowQuad = new FullScreenQuad(this.shadowMaterial);
     this.compositeQuad = new FullScreenQuad(this.compositeMaterial);
   }
 
@@ -371,7 +530,7 @@ export class LiteCloudPass extends Pass {
   setActivePlanet(planet) {
     const next = LiteCloudPass.supports(planet) ? planet : null;
     if (next !== this.activePlanet) {
-      if (this.activePlanet) this.activePlanet.liteCloudActive = false;
+      if (this.activePlanet) { this.activePlanet.liteCloudActive = false; this.#atlasShadows(this.activePlanet, true); }
       this.activePlanet = next;
       if (next) {
         const u = this.marchMaterial.uniforms;
@@ -395,6 +554,37 @@ export class LiteCloudPass extends Pass {
     if (planet) planet.liteCloudActive = this.enabled;
   }
 
+  // The terrain and water shaders darken themselves with the coarse weather
+  // atlas. While this pass shades surfaces with real cloud shadows, that
+  // weather-scale term would double up, so it is switched off and restored.
+  #atlasShadows(planet, on) {
+    const terrain = planet.terrainMaterial?.userData.shader?.uniforms.uCloudK;
+    if (terrain) terrain.value = on ? 0.42 : 0;
+    const water = planet.liquidMat?.userData.shader?.uniforms.uCloudK;
+    if (water) water.value = on ? 0.72 : 0;
+  }
+
+  #renderShadowMap(renderer, planet) {
+    const u = this.marchMaterial.uniforms;
+    _sun.copy(u.uSunDirection0.value).normalize();
+    const x = u.uShadowX.value, y = u.uShadowY.value;
+    x.set(0, 1, 0); if (Math.abs(_sun.y) > 0.92) x.set(1, 0, 0);
+    x.cross(_sun).normalize();
+    y.crossVectors(_sun, x).normalize();
+    const camera = u.uCameraLocal.value;
+    const altitude = Math.max(0, camera.length() - planet.R);
+    // Cover what the camera can see; quantise the size so it does not breathe.
+    const wanted = Math.max(25000, altitude * 3 + 25000);
+    const extent = Math.min(planet.R * 1.15, 25000 * 2 ** (Math.ceil(Math.log2(wanted / 25000) * 2) / 2));
+    const texel = 2 * extent / SHADOW_SIZE;
+    _ground.copy(camera).setLength(planet.R);
+    // Snap to whole texels: a sliding map would make shadow edges crawl.
+    u.uShadowCenter.value.set(Math.round(_ground.dot(x) / texel) * texel, Math.round(_ground.dot(y) / texel) * texel);
+    u.uShadowExtent.value = extent;
+    renderer.setRenderTarget(this.shadowTarget);
+    this.shadowQuad.render(renderer);
+  }
+
   render(renderer, writeBuffer, readBuffer) {
     const planet = this.activePlanet;
     const u = this.marchMaterial.uniforms;
@@ -403,6 +593,10 @@ export class LiteCloudPass extends Pass {
     _matrix.makeRotationFromQuaternion(_quaternion.copy(planet.cloudMesh.quaternion).invert());
     u.uCloudMat.value.setFromMatrix4(_matrix);
     u.uFrame.value = this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
+
+    u.uShadowOn.value = this.shadowsEnabled ? 1 : 0;
+    this.#atlasShadows(planet, !this.shadowsEnabled);
+    if (this.shadowsEnabled) this.#renderShadowMap(renderer, planet);
 
     const pixels = readBuffer.width * readBuffer.height;
     const scale = Math.min(this.scale, Math.sqrt(this.maxPixels / Math.max(1, pixels)));
@@ -414,21 +608,25 @@ export class LiteCloudPass extends Pass {
     this.marchQuad.render(renderer);
 
     const c = this.compositeMaterial.uniforms;
+    c.uCloudTexel.value.set(1 / width, 1 / height);
     c.tBase.value = readBuffer.texture;
     c.tSceneDepth.value = this.atmospherePass.sceneDepthTexture || readBuffer.depthTexture || null;
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
     this.compositeQuad.render(renderer);
   }
 
-  releaseTargets() { this.target.dispose(); }
+  releaseTargets() { this.target.dispose(); this.shadowTarget.dispose(); }
 
   dispose() {
-    if (this.activePlanet) this.activePlanet.liteCloudActive = false;
+    if (this.activePlanet) { this.activePlanet.liteCloudActive = false; this.#atlasShadows(this.activePlanet, true); }
     this.activePlanet = null;
     this.target.dispose();
+    this.shadowTarget.dispose();
     this.marchMaterial.dispose();
+    this.shadowMaterial.dispose();
     this.compositeMaterial.dispose();
     this.marchQuad.dispose();
+    this.shadowQuad.dispose();
     this.compositeQuad.dispose();
   }
 }
