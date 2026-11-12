@@ -850,15 +850,49 @@ export class SystemView {
     return records;
   }
 
+  _visualPlanetRadius(body) {
+    if (body.type === 'blackHole') return 2.7;
+    const isGiant = body.type === 'gasGiant' || body.type === 'iceGiant';
+    const maxVis = isGiant ? 2.35 : 1.98;
+    return THREE.MathUtils.clamp(0.42 + Math.sqrt(body.radius / 250_000) * 0.85, 0.82, maxVis);
+  }
+
+  _moonOrbitExtent(moon, parentRadius, parentBodyRadius) {
+    const scaleRef = Math.max((parentBodyRadius || 0) * 3.6, 1.3e6);
+    return parentRadius + 0.65 + Math.min(1.4, (moon.orbit / scaleRef) * 1.15);
+  }
+
   _buildOrbits(preview, timeHours, anisotropy, rand) {
     const primaries = preview.bodies.filter((body) => !body.isMoon);
+    const moons = preview.bodies.filter((body) => body.isMoon);
     const maxOrbit = Math.max(...primaries.map((body) => body.orbit), 1);
     const bodyMeshes = new Map();
+
+    // Compute non-overlapping visual orbit radii so enlarged rocky worlds
+    // (such as the 1,200 km homeworld + its 3.6R moon) never intersect an
+    // adjacent neighbour's sphere or moon track in the compressed chart.
+    const starClearance = (this.starRecords || []).reduce(
+      (maxR, s) => Math.max(maxR, (s.orbitRadius || 0) + (s.radius || 2.5) * 1.45), 4.5);
+    let minNextInner = starClearance + 1.2;
+    const plannedOrbitRadii = primaries.map((body) => {
+      if (body.type === 'blackHole') return 0;
+      const baseOrbit = 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
+      const visR = this._visualPlanetRadius(body);
+      const childMoons = moons.filter((m) => m.parentSpec === body);
+      const envelope = childMoons.reduce(
+        (ext, m) => Math.max(ext, this._moonOrbitExtent(m, visR, body.radius) + 0.25),
+        body.ringSystem?.present ? visR * 2.15 : visR,
+      );
+      const orbitR = Math.max(baseOrbit, minNextInner + envelope);
+      minNextInner = orbitR + envelope + 1.15;
+      return orbitR;
+    });
+
     primaries.forEach((body, i) => this._buildPrimaryBody(body, i, {
-      maxOrbit, timeHours, anisotropy, rand, bodyMeshes,
+      maxOrbit, plannedOrbitRadius: plannedOrbitRadii[i], timeHours, anisotropy, rand, bodyMeshes,
     }));
     // moons ride their parent's group so the whole system stays coherent
-    for (const moon of preview.bodies.filter((b) => b.isMoon)) {
+    for (const moon of moons) {
       const parent = bodyMeshes.get(moon.parentSpec);
       if (!parent) continue;
       this._buildMoon(moon, parent, { timeHours, anisotropy });
@@ -870,9 +904,10 @@ export class SystemView {
   // bodies short-circuit with `return` after assembling the compact-object
   // visual — the planet branch below only runs for non-black-hole primaries.
   _buildPrimaryBody(body, i, ctx) {
-    const { maxOrbit, timeHours, anisotropy, rand, bodyMeshes } = ctx;
+    const { maxOrbit, plannedOrbitRadius, timeHours, anisotropy, rand, bodyMeshes } = ctx;
     const isBlackHole = body.type === 'blackHole';
-    const orbitRadius = isBlackHole ? 0 : 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
+    const orbitRadius = isBlackHole ? 0
+      : (plannedOrbitRadius ?? (9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36));
     const k = isBlackHole ? 0 : orbitRadius / body.orbitSpec.renderRadius;
     // true elliptical track, sampled from the same ephemeris the game uses
     if (!isBlackHole) {
@@ -891,12 +926,9 @@ export class SystemView {
       this.world.add(line);
     }
 
-    // Preserve the authored size hierarchy in the compressed system chart.
-    // The former hard cap made a 900 km planet only ~9% larger than its old
-    // 286 km version, so the numeric scale correction was visually invisible.
-    const visualRadius = isBlackHole
-      ? 2.7
-      : THREE.MathUtils.clamp(0.42 + Math.sqrt(body.radius / 250_000) * 0.9, 0.82, 2.35);
+    // Preserve the authored size hierarchy in the compressed system chart
+    // while keeping terrestrial super-Earths distinct from gas giants.
+    const visualRadius = this._visualPlanetRadius(body);
     const group = new THREE.Group();
     const pos = orbitalPosition(body.orbitSpec, timeHours, new THREE.Vector3());
     group.position.set(pos.x * k, pos.y * k + ORBIT_PLANE_Y, pos.z * k);
@@ -1048,7 +1080,7 @@ export class SystemView {
   // the whole system stays coherent as the primary moves along its ephemeris.
   _buildMoon(moon, parent, ctx) {
     const { timeHours, anisotropy } = ctx;
-    const moonOrbit = parent.radius + 0.85 + Math.min(1.9, moon.orbit / 1.3e6);
+    const moonOrbit = this._moonOrbitExtent(moon, parent.radius, parent.body?.radius);
     const km = moonOrbit / moon.orbitSpec.renderRadius;
     const moonSize = 0.1 + Math.min(0.2, moon.radius / 300_000 * 0.2);
     const pivot = new THREE.Group();

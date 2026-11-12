@@ -126,7 +126,7 @@ export class VolumetricPass extends Pass {
         uExternalTaaActive: { value: 0 },
         uWeatherAdvectValid: { value: 0 },
         uWeatherWindDeltaRad: { value: 0 },
-        uBodyRadius: { value: 6000000 },
+        uBodyRadius: { value: 1200000 },
         uCurBodyInv: { value: new THREE.Matrix3() },
         uPrevBodyRot: { value: new THREE.Matrix3() },
         uCurBodyCenter: { value: new THREE.Vector3() },
@@ -741,7 +741,7 @@ export class VolumetricPass extends Pass {
       u.uWeatherAdvectValid.value = weatherAdvect ? 1 : 0;
       if (weatherAdvect && this.activePlanet) {
         u.uWeatherWindDeltaRad.value = this.frameState.weatherWindDeltaRad;
-        u.uBodyRadius.value = this.activePlanet.R || 6000000;
+        u.uBodyRadius.value = this.activePlanet.R || 1200000;
         u.uCurBodyInv.value.copy(this.frameState.curBodyInv);
         u.uPrevBodyRot.value.copy(this.frameState.prevBodyRot);
         u.uCurBodyCenter.value.copy(this.frameState.curBodyCenter);

@@ -1731,6 +1731,7 @@ function parkShipNear(planet, landDir) {
     }
     if (best && bestScore < 1.4) break;            // flat enough, stop early
   }
+  const dryFound = Boolean(best);
   if (!best) {   // everything around is wet/steep — keep the ship reachable
     cand.copy(up).addScaledVector(e1, 22 / planet.R).normalize();
     best = cand.clone();
@@ -1746,7 +1747,7 @@ function parkShipNear(planet, landDir) {
   const parkedWorldQuat = planet.frameOrientation.clone().multiply(parkedLocalQuat);
   ship.parkedPlanet = planet; ship.parkedLocal = padLocal; ship.parkedLocalQuat = parkedLocalQuat;
   ship.setParked(padUniv, parkedWorldQuat);
-  return { padLocal, padUniv, parkedLocalQuat, parkedWorldQuat };
+  return { padLocal, padUniv, parkedLocalQuat, parkedWorldQuat, dryFound };
 }
 
 function tryLand() {
@@ -1757,9 +1758,19 @@ function tryLand() {
   const startLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
   const dirLocal = startLocal.clone().normalize();
   const ground = planet.surfaceRadius(dirLocal);
-  const endLocal = dirLocal.clone().multiplyScalar(ground + 1.7);
   if (!window.NMS_NOLOCK && pointerLockInput) renderer.domElement.requestPointerLock();
   const landing = parkShipNear(planet, dirLocal);
+  const endLocal = dirLocal.clone().multiplyScalar(ground + 1.7);
+  // If the ship was hovering just off a shoreline (wet directly underneath)
+  // while parkShipNear found a dry coastal pad nearby, step the player onto
+  // dry ground beside the ramp instead of dropping them underwater off the beach.
+  if (planet.hasLiquid && planet.liquid !== 'ice' && ground < planet.seaRadius + 0.5 && landing.dryFound) {
+    const exitShipLocal = new THREE.Vector3(0, 0, ship.def.dims.rampTopZ + 3.2)
+      .applyQuaternion(landing.parkedLocalQuat);
+    const shoreDir = landing.padLocal.clone().add(exitShipLocal).normalize();
+    const shoreGround = Math.max(planet.surfaceRadius(shoreDir), planet.seaRadius + 0.2);
+    endLocal.copy(shoreDir).multiplyScalar(shoreGround + 1.7);
+  }
   const upLocal = landing.padLocal.clone().normalize();
   const forwardLocal = new THREE.Vector3(0, 0, -1)
     .applyQuaternion(landing.parkedLocalQuat).normalize();
@@ -4456,9 +4467,11 @@ function frame() {
   // land prompt
   const canLand = state === 'space' && nearest && !nearest.isGasGiant && nearest.landable !== false
     && nearestAlt < 420 && nav.vel.length() < 4000;
-  ui.showLand(!!canLand, nearest && nearest.hasLiquid && nearest.liquid !== 'ice' &&
-    waterSurfaceHeight < 2
-    ? 'DIVE — walk the seabed' : 'LAND — walk the surface (L)');
+  const overOpenWater = Boolean(canLand && nearest.hasLiquid && nearest.liquid !== 'ice'
+    && (waterSurfaceHeight < 2
+      || (nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius) < nearestAlt - 1.5));
+  ui.showLand(!!canLand, overOpenWater
+    ? 'DIVE — walk the seabed (L)' : 'LAND — walk the surface (L)');
 
   if (state === 'walk') {
     const shipDist = parkedShipDistance();

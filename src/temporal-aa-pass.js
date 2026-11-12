@@ -92,10 +92,10 @@ export class TemporalAAPass extends Pass {
         uPrevBodyRot: { value: new THREE.Matrix3() },
         uCurBodyCenter: { value: new THREE.Vector3() },
         uPrevBodyCenter: { value: new THREE.Vector3() },
-        uBodyRadius: { value: 6000000 },
+        uBodyRadius: { value: 1200000 },
         uWeatherWindDeltaRad: { value: 0 },
         uOceanDeformValid: { value: 0 },
-        uSeaRadius: { value: 6000000 },
+        uSeaRadius: { value: 1200000 },
         uOceanHeight: { value: 0 },
         uOceanNorm: { value: 1 },
         uOceanModes: { value: zeroModes },
@@ -550,7 +550,7 @@ export class TemporalAAPass extends Pass {
         mu.uPrevBodyRot.value.copy(fs.prevBodyRot);
         mu.uCurBodyCenter.value.copy(fs.curBodyCenter);
         mu.uPrevBodyCenter.value.copy(fs.prevBodyCenter);
-        mu.uBodyRadius.value = body.R || 6000000;
+        mu.uBodyRadius.value = body.R || 1200000;
         mu.uWeatherWindDeltaRad.value = fs.weatherWindDeltaRad;
       }
 

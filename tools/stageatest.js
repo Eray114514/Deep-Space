@@ -59,15 +59,15 @@ const home = new Planet({
 });
 
 try {
-  assert.equal(home.R, 6000000, 'authored home radius must own the rendered scale');
-  assert.equal(homeBody.radius, 6000000,
-    'the tuned astronomy dossier must expose the 6,000 km radius to system preview consumers');
+  assert.equal(home.R, 1200000, 'authored home radius must own the rendered scale');
+  assert.equal(homeBody.radius, 1200000,
+    'the tuned astronomy dossier must expose the 1,200 km radius to system preview consumers');
   assert.equal(resolveBodyTuning({
     galaxyId: galaxy.id,
     seed: galaxy.seed,
     systemId: homeSystem.systemId,
     bodyId: 'planet-0-moon-0',
-  }).orbitRadiusMeters, 21600000);
+  }).orbitRadiusMeters, 4320000);
 
   const directions = fibonacciDirections(6000);
   const heights = directions.map((direction) => home.height(direction, home.fullMaxFreq));
@@ -163,8 +163,8 @@ try {
   const globalWaterCell = (Math.PI / 2) * home.R
     / (home.waterLod.planet.gridCellsAtLevel(home.waterLod.planet.maxLevel)
       * (2 ** home.waterLod.planet.maxLevel));
-  assert.ok(globalWaterCell >= 130 && globalWaterCell <= 160,
-    `global ocean must hand off to the 88 m near-patch edge without visible depth facets, got ${globalWaterCell.toFixed(1)} m cells`);
+  assert.ok(globalWaterCell >= 80 && globalWaterCell <= 160,
+    `global ocean must hand off to the 88 m near-patch edge without visible depth facets or redundant inner rings, got ${globalWaterCell.toFixed(1)} m cells`);
 
   assert.equal(skirtDropForMorph(0), 0.08);
   assert.ok(Math.abs(skirtDropForMorph(100) - 112.04) < 1e-9);
@@ -193,6 +193,11 @@ try {
   try {
     assert.equal(ocean.type, 'ocean', 'home-system planet-1 is the curated ocean category');
     assert.equal(ocean.R, 560000);
+    const oceanGlobalWaterCell = (Math.PI / 2) * ocean.R
+      / (ocean.waterLod.planet.gridCellsAtLevel(ocean.waterLod.planet.maxLevel)
+        * (2 ** ocean.waterLod.planet.maxLevel));
+    assert.ok(oceanGlobalWaterCell >= 80 && oceanGlobalWaterCell <= 160,
+      `pelagic world global ocean must also hand off cleanly to the 88 m near-patch edge, got ${oceanGlobalWaterCell.toFixed(1)} m cells`);
     assert.ok(ocean.waterStyle.swell >= home.waterStyle.swell * 2,
       'curated pelagic world must carry a visibly rough storm sea-state');
     const oceanHeights = directions.map((direction) =>

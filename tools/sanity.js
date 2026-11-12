@@ -178,6 +178,8 @@ for (const type of Object.keys(TYPES)) {
     // dropout reads as churn.
     const scatter = new Scatter({ streamBudgetMs: Infinity, grassRadius: 70 });
     const m4 = new THREE.Matrix4();
+    const cellKey = (kind, x, y, z) =>
+      `${kind}:${Math.round(x * 50)},${Math.round(y * 50)},${Math.round(z * 50)}`;
     const grab = () => {
       const map = new Map();
       const cnt = {};
@@ -186,11 +188,13 @@ for (const type of Object.keys(TYPES)) {
         cnt[kind] = im.count;
         for (let i = 0; i < im.count; i++) {
           im.getMatrixAt(i, m4);
-          const x = m4.elements[12], y = m4.elements[13], z = m4.elements[14];
+          const x = m4.elements[12] + im.position.x;
+          const y = m4.elements[13] + im.position.y;
+          const z = m4.elements[14] + im.position.z;
           // Grass deliberately migrates between near/mid/far geometry pools.
           // Its world-space candidate is the identity; the LOD pool is not.
           const stableKind = kind.startsWith('grass') ? 'grass' : kind;
-          map.set(stableKind + ':' + x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3), [x, y, z]);
+          map.set(cellKey(stableKind, x, y, z), [stableKind, x, y, z]);
         }
       }
       return { map, cnt };
@@ -230,12 +234,24 @@ for (const type of Object.keys(TYPES)) {
       for (const k in cur.cnt) peaks[k] = Math.max(peaks[k] || 0, cur.cnt[k]);
       if (prev) {
         let miss = 0, tot = 0;
-        for (const [k, pos] of prev.map) {
-          const da = Math.hypot(pos[0] - prevCam.x, pos[1] - prevCam.y, pos[2] - prevCam.z);
-          const db = Math.hypot(pos[0] - cam.x, pos[1] - cam.y, pos[2] - cam.z);
+        for (const [k, [stableKind, px, py, pz]] of prev.map) {
+          const da = Math.hypot(px - prevCam.x, py - prevCam.y, pz - prevCam.z);
+          const db = Math.hypot(px - cam.x, py - cam.y, pz - cam.z);
           if (da > 45 || db > 45) continue;       // safely inside both ranges
           tot++;
-          if (!cur.map.has(k)) miss++;
+          let found = cur.map.has(k);
+          if (!found) {
+            const cx = Math.round(px * 50), cy = Math.round(py * 50), cz = Math.round(pz * 50);
+            for (let dz = -1; dz <= 1 && !found; dz++) {
+              for (let dy = -1; dy <= 1 && !found; dy++) {
+                for (let dx = -1; dx <= 1 && !found; dx++) {
+                  const cand = cur.map.get(`${stableKind}:${cx + dx},${cy + dy},${cz + dz}`);
+                  if (cand && Math.hypot(cand[1] - px, cand[2] - py, cand[3] - pz) < 0.005) found = true;
+                }
+              }
+            }
+          }
+          if (!found) miss++;
         }
         totChecked += tot;
         if (tot > 0) worstKept = Math.min(worstKept, 1 - miss / tot);

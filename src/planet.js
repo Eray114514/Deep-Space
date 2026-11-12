@@ -246,9 +246,8 @@ export class Planet extends TerrainHeightField {
     this.canonicalGridCells = canonicalGridCells;
     const rootCell = (Math.PI / 2) * this.R / canonicalGridCells;
     // Aim at the authored metre-scale canonical ground spacing, with a level
-    // 16 safety ceiling on full-size worlds. The 6,000 km homeworld therefore
-    // retains a ~6 m deterministic content sample instead of pretending that
-    // sub-metre geometry is practical across an entire procedural globe.
+    // 16 safety ceiling on large worlds (1.2 m on the 1,200 km homeworld,
+    // 6 m on an Earth-scale 6,000 km body).
     this.canonicalMaxLevel = clamp(Math.ceil(Math.log2(rootCell / 1.5)), 4, 16);
     this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
@@ -296,34 +295,34 @@ export class Planet extends TerrainHeightField {
     // Radial skirts turn the shared edge into a shaded wall and recreate the
     // black ink line they were meant to conceal.
     this.faceBoundarySkirts = false;
-    // The low-power tier targets a 0.5-DPR 3D buffer. One fewer finest level
-    // matches that screen-space resolution (≈3 m cells) instead of spending
-    // four times the triangles on sub-pixel relief.
-    this.maxLevel = Math.max(3, this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2));
-    // Full-disk review at 2K resolves roughly 6–12 km per pixel on the curated
-    // homeworld. Level four keeps the coast/limb below that footprint while
-    // lower tiers retain their cheaper grouping through lowTierGrouping.
+    // Bound rendered geometry by both the canonical sampling cap and a
+    // physical vertex-spacing target (~3.6 m high-tier, ~7.2 m low-tier).
+    // On the 1,200 km homeworld this stops at level 13 (3.6 m) instead of
+    // spending 4x the walk-mode triangles on 1.8 m cells inside PBR texture range.
+    const terrainFineRootCell = (Math.PI / 2) * this.R
+      / (lowTierGrouping ? this.gridCells : this.gridCells * 2);
+    const terrainTargetCell = lowTierGrouping ? 7.2 : 3.6;
+    this.maxLevel = Math.max(3, Math.min(
+      this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2),
+      Math.ceil(Math.log2(terrainFineRootCell / terrainTargetCell)),
+    ));
+    // Full-disk review at 2K resolves roughly 2–12 km per pixel across curated
+    // worlds. Level four keeps the coast/limb below that footprint (~1.84 km on
+    // the 1,200 km homeworld) while lower tiers retain cheaper grouping.
     this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 3 : 4);
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
-    // Keep the metre-scale centre patch, but do not refine an oversized disc
-    // around it. At 800 m the former radius produced ~1,900 visible terrain
-    // chunks / 17 M triangles even though most were outside the 62-degree
-    // view. A narrower error ring retains level 14 directly under and ahead
-    // of the camera while shedding most off-axis work. The 0.45 high-tier
-    // scale still overlaps adjacent levels generously enough for geomorphing;
-    // it only removes detail whose projected footprint is already sub-pixel.
-    // Keep the 9 m centre ladder, but bound the finest off-axis ring to the
-    // actual 62-degree flight view. A 0.45 footprint retained hundreds of
-    // 64×64 chunks behind the chase camera at 800 m; 0.38 preserves overlap
-    // for turns and geomorphs while removing geometry that cannot contribute
-    // a visible pixel in the normal player frame.
+    // Keep the 3.6–9 m centre ladder, while bounding off-axis near-field rings
+    // (< ~110 m cells) to the 62-degree flight view. Scaling the mid-altitude
+    // cutoff by physical cell size (~110 m: level 8 on 1,200 km, level 10 on
+    // 6,000 km) prevents refining hundreds of 64×64 chunks behind the chase camera.
     const lodScreenScale = lowTierGrouping ? 0.25 : 0.38;
     const midAltitudeScreenScale = lowTierGrouping ? lodScreenScale : 0.62;
+    const midAltitudeMaxLevel = Math.max(3, Math.floor(Math.log2(terrainFineRootCell / 110)));
     this.lodDistanceScale = (canonicalGridCells / this.gridCells) * lodScreenScale;
     this.lodDistanceScaleAtLevel = (lvl) => (canonicalGridCells / this.gridCellsAtLevel(lvl))
-      * (lvl <= 10 ? midAltitudeScreenScale : lodScreenScale);
+      * (lvl <= midAltitudeMaxLevel ? midAltitudeScreenScale : lodScreenScale);
     this.lodLevelForCanonical = (canonicalLevel) => {
       for (let level = 0; level <= this.maxLevel; level++) {
         const effective = level + Math.log2(this.gridCellsAtLevel(level) / canonicalGridCells);
@@ -738,15 +737,18 @@ export class Planet extends TerrainHeightField {
       const waterGroupFactor = 4;
       const waterGridCells = waterCanonicalGrid * waterGroupFactor;
       const waterGridCellsAtLevel = () => waterGridCells;
-      const waterCanonicalMaxLevel = Math.min(this.canonicalMaxLevel - 3, 11);
-      // The near clipmap owns metre-scale wave geometry across the player's
-      // immediate neighbourhood. The closed shell still has to reach roughly
-      // the patch's 88 m edge spacing before hand-off: stopping two rings
-      // earlier exposed the patch as a rectangular bathymetry/normal island.
+      // Calibrate the global ocean shell by physical cell spacing (~80–155 m)
+      // rather than a fixed level integer so every planet radius (1,200 km
+      // homeworld -> level 8 / 115 m, 560 km ocean world -> level 7 / 107 m,
+      // 6,000 km -> level 10 / 144 m) hands off cleanly to NearWaterPatch's
+      // ~88 m outer graded ring without subdividing discarded inner chunks.
+      const waterRootCell = (Math.PI / 2) * this.R / waterGridCells;
+      const waterMaxLevel = clamp(Math.ceil(Math.log2(waterRootCell / 155)), 2, 10);
+      const waterCanonicalMaxLevel = waterMaxLevel + 1;
       const waterScreenScale = lowTierGrouping ? 0.2 : 0.25;
       const waterMidAltitudeScreenScale = lowTierGrouping ? waterScreenScale : 0.42;
       this.waterLod = new ChunkedLOD({
-        // At the finest ~29 m cells the spherical chord sag is sub-millimetre.
+        // At ~110 m cells the spherical chord sag is a few millimetres.
         // A 2.5 m skirt was vastly larger than the gap and exposed dark walls
         // whenever the water was translucent. Dense adjacent shells therefore
         // meet directly; the coast overlap handles the independent land edge.
@@ -762,20 +764,16 @@ export class Planet extends TerrainHeightField {
         maxCellPixels: 3.35,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
-        // The closed globe owns only the optical far field. A camera-following
-        // 32 m patch below resolves gravity-wave displacement locally, so
-        // Refinement remains view-dependent, but two additional near rings
-        // make the global shell and graded patch agree before ownership moves.
-        maxLevel: Math.max(2, waterCanonicalMaxLevel - 1),
+        maxLevel: waterMaxLevel,
         orbitLevelCap: 3,
         orbitPrewarmRadiusRatio: 1.75,
-        // A smooth water sphere does not need terrain's two extra 136 km
+        // A smooth water sphere does not need terrain's two extra
         // approach levels. Add curvature detail only as its kilometre-scale
         // cells become resolvable, while spectral waves remain shader-driven.
         orbitApproachLevelThresholds: [1.12, 1.06, 1.025],
         lodDistanceScale: (waterCanonicalGrid / waterGridCells) * waterScreenScale,
         lodDistanceScaleAtLevel: (lvl) => (waterCanonicalGrid / waterGridCellsAtLevel(lvl))
-          * (lvl <= 9 ? waterMidAltitudeScreenScale : waterScreenScale),
+          * (lvl < waterMaxLevel ? waterMidAltitudeScreenScale : waterScreenScale),
         lodLevelForCanonical: (canonicalLevel) => {
           for (let level = 0; level <= waterCanonicalMaxLevel; level++) {
             const effective = level + Math.log2(waterGridCellsAtLevel(level) / waterCanonicalGrid);
