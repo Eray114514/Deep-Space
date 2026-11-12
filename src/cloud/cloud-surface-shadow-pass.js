@@ -101,9 +101,22 @@ export class CloudSurfaceShadowPass {
     const saved=renderer.getRenderTarget(),face=renderer.getActiveCubeFace(),mip=renderer.getActiveMipmapLevel();
     const auto=renderer.autoClear;
     try {
-      renderer.setRenderTarget(opaque);renderer.autoClear=true;
-      const depth=()=>withCloudSurfacePreparation(true,()=>renderer.render(this.scene,this.camera));
-      if(profiler)profiler.run('cloud-receiver-depth',depth);else depth();
+      const hiddenForDepth=[];
+      this.scene.traverseVisible(object=>{
+        if(object.isPoints||object.isSprite||object.isLine) {
+          hiddenForDepth.push(object);object.visible=false;return;
+        }
+        if(object.isMesh&&object.material&&!Array.isArray(object.material)&&object.material.depthWrite===false) {
+          hiddenForDepth.push(object);object.visible=false;
+        }
+      });
+      try {
+        renderer.setRenderTarget(opaque);renderer.autoClear=true;
+        const depth=()=>withCloudSurfacePreparation(true,()=>renderer.render(this.scene,this.camera));
+        if(profiler)profiler.run('cloud-receiver-depth',depth);else depth();
+      } finally {
+        for(const object of hiddenForDepth)object.visible=true;
+      }
       // One depth owner and one transport image for every actual receiver.
       // Remote bodies otherwise retained the enormous point-density kernel in
       // every PBR fragment, including late-depth-rejected fragments.
@@ -128,6 +141,47 @@ export class CloudSurfaceShadowPass {
         u.tOpaqueDepth={value:opaque.depthTexture};u.uCameraFar={value:this.camera.far};
         u.uReceiverBound={value:body.R+Math.max(1000,(body.hAmp||0)*4)};
         u.uReceiverId={value:receiverId};this.receiverIds.set(body,receiverId++);
+        // Project the conservative receiver sphere to bound fragment work to
+        // pixels that can actually belong to this body, skipping off-screen bodies.
+        const boundR=u.uReceiverBound.value;
+        const eyeLocal=u.uCameraLocal.value;
+        const distSq=eyeLocal.lengthSq();
+        let scissorBox=null;
+        if(distSq>boundR*boundR*1.0001) {
+          const viewCenter=new THREE.Vector3().setFromMatrixPosition(body.volCloudMesh.matrixWorld)
+            .applyMatrix4(this.camera.matrixWorldInverse);
+          const dist=Math.sqrt(distSq);
+          if(viewCenter.z-boundR>=0)continue;
+          if(-viewCenter.z>boundR) {
+            const proj=this.camera.projectionMatrix.elements;
+            const sinAlpha=boundR/dist,cosAlpha=Math.sqrt(Math.max(1e-8,1-sinAlpha*sinAlpha));
+            const tanHalfX=1/Math.max(Math.abs(proj[0]),1e-6),tanHalfY=1/Math.max(Math.abs(proj[5]),1e-6);
+            const depthZ=Math.max(-viewCenter.z,1e-6);
+            // Conservative screen-space bounding box of a perspective-projected sphere
+            const cx=viewCenter.x/depthZ,cy=viewCenter.y/depthZ;
+            const radX=boundR/(Math.max(depthZ*cosAlpha-boundR*sinAlpha,1e-4));
+            if(depthZ*cosAlpha>boundR*sinAlpha*1.02 && Number.isFinite(radX)) {
+              const minNdcX=(cx-radX)/tanHalfX,maxNdcX=(cx+radX)/tanHalfX;
+              const minNdcY=(cy-radX)/tanHalfY,maxNdcY=(cy+radX)/tanHalfY;
+              if(maxNdcX<-1||minNdcX>1||maxNdcY<-1||minNdcY>1)continue;
+              const x0=Math.max(0,Math.floor((minNdcX*0.5+0.5)*width)-1);
+              const y0=Math.max(0,Math.floor((minNdcY*0.5+0.5)*height)-1);
+              const x1=Math.min(width,Math.ceil((maxNdcX*0.5+0.5)*width)+1);
+              const y1=Math.min(height,Math.ceil((maxNdcY*0.5+0.5)*height)+1);
+              if(!Number.isFinite(x0)||!Number.isFinite(y0)||!Number.isFinite(x1)||!Number.isFinite(y1))scissorBox=null;
+              else if(x1<=x0||y1<=y0)continue;
+              else if(x0>0||y0>0||x1<width||y1<height)scissorBox=[x0,y0,x1-x0,y1-y0];
+            }
+          }
+        }
+        if(scissorBox) {
+          this.target.scissor.set(scissorBox[0],scissorBox[1],scissorBox[2],scissorBox[3]);
+          this.target.scissorTest=true;
+        } else {
+          this.target.scissor.set(0,0,width,height);
+          this.target.scissorTest=false;
+        }
+        renderer.setRenderTarget(this.target);
         // Uniform objects change between bodies even when the shader program
         // is shared. ShaderMaterial must explicitly upload each receiver.
         this.material.uniformsNeedUpdate=true;
@@ -138,6 +192,7 @@ export class CloudSurfaceShadowPass {
       this.renderer=renderer;renderer.cloudSurfaceReceiver=this;
       if(planet)planet.cloudSurfaceShadowCache=this;
     } finally {
+      this.target.scissorTest=false;this.target.scissor.set(0,0,this.target.width,this.target.height);
       renderer.setRenderTarget(saved,face,mip);renderer.autoClear=auto;
     }
   }

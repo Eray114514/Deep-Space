@@ -8,22 +8,39 @@ function cloudAnchor(planet,position) {
   const cameraHeight=position.length()-planet.R;
   let bottom=Infinity,top=-Infinity;
   const outer=planet.volCloudBand.rOut-planet.R;
-  for(let i=0;i<64;i++) {
-    const height=surface+(outer-surface)*(i+.5)/64;
-    const medium=sampleProductionMedium(planet,radial.clone().multiplyScalar(planet.R+height));
-    if(medium.extinctionPerMeter>.0003){bottom=Math.min(bottom,height);top=Math.max(top,height);}
+  const scanDirection=dir=>{
+    for(let i=0;i<64;i++) {
+      const height=surface+(outer-surface)*(i+.5)/64;
+      const medium=sampleProductionMedium(planet,dir.clone().multiplyScalar(planet.R+height));
+      if(medium.extinctionPerMeter>.0003){bottom=Math.min(bottom,height);top=Math.max(top,height);}
+    }
+  };
+  scanDirection(radial);
+  if(top<bottom && cameraHeight>outer*0.35) {
+    const ref=Math.abs(radial.y)<0.9?new THREE.Vector3(0,1,0):new THREE.Vector3(1,0,0);
+    const tangent=new THREE.Vector3().crossVectors(ref,radial).normalize();
+    const bitangent=new THREE.Vector3().crossVectors(radial,tangent).normalize();
+    for(const offset of [0.002,-0.002]) {
+      scanDirection(radial.clone().addScaledVector(tangent,offset).normalize());
+      scanDirection(radial.clone().addScaledVector(bitangent,offset).normalize());
+      if(top>=bottom)break;
+    }
   }
-  const preferred=top>=bottom && cameraHeight>top?(bottom+top)*.5:cameraHeight;
-  const height=Math.max(surface+3000,preferred);
+  const maxAnchorHeight=Math.max(surface+3000,outer-3200);
+  const fallbackHeight=Math.min(cameraHeight,maxAnchorHeight);
+  const preferred=top>=bottom && cameraHeight>top?(bottom+top)*.5:fallbackHeight;
+  const height=Math.min(maxAnchorHeight,Math.max(surface+3000,preferred));
+  const horizontalSpan=cameraHeight>height?(cameraHeight-height)*1.4
+    :(height-cameraHeight>1500?23040:12800);
   return {center:radial.multiplyScalar(planet.R+height),cameraHeight,
-    spacing:Math.max(100,Math.min(400,(cameraHeight-height)*1.4/128))};
+    spacing:Math.max(100,Math.min(400,Math.round(horizontalSpan/128)))};
 }
 
 // Complete absolute-time fields in a three-slot atlas. Both interpolation
 // endpoints remain immutable while the third slot is baked. Invalid time or
 // spatial support always falls back to the physical beam; never extrapolate.
 export class CloudLightBank {
-  constructor(planet,{size=128,depth=128,interval=.0015,programOwner=null}={}) {
+  constructor(planet,{size=128,depth=128,interval=.025,programOwner=null}={}) {
     this.planet=planet;this.size=size;this.depth=depth;this.interval=interval;
     this.maps=new Map();this.disposed=false;this.baseHours=planet.weatherHours;
     this.programs=programOwner||{};this.ownsPrograms=!programOwner;
@@ -36,6 +53,7 @@ export class CloudLightBank {
       format:THREE.RedFormat,type:THREE.UnsignedByteType,
       minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,depthBuffer:false});
     this.initialized=false;this.submissions=[];this.generation=0;
+    this.forecastStream=planet.weatherStream?.retainForecast?.(this,3)?planet.weatherStream:null;
   }
   needsReset() {
     const p=this.planet,hours=p.weatherHours;
@@ -72,6 +90,10 @@ export class CloudLightBank {
   update(renderer) {
     if(this.disposed)return;
     const p=this.planet,hours=p.weatherHours,u=p.volCloudMat.uniforms;
+    if(this.forecastStream!==p.weatherStream) {
+      this.forecastStream?.releaseForecast?.(this);
+      this.forecastStream=p.weatherStream?.retainForecast?.(this,3)?p.weatherStream:null;
+    }
     u.uSunCacheReady.value=0;
     const started=performance.now();
     const index=Math.floor((hours-this.baseHours)/this.interval+1e-8);
@@ -120,6 +142,7 @@ export class CloudLightBank {
   }
   dispose() {
     if(this.disposed)return;this.disposed=true;this.unbind();
+    this.forecastStream?.releaseForecast?.(this);this.forecastStream=null;
     for(const cache of this.maps.values())cache.dispose();this.maps.clear();this.target.dispose();
     if(this.ownsPrograms)for(const material of Object.values(this.programs))material.dispose();
     this.programs={};

@@ -1,7 +1,7 @@
 // Absolute-time forecasts blended in potential space. The two existing atlas
 // textures commit together; every renderer/gameplay consumer sees those bytes.
 import * as THREE from 'three';
-import {PRODUCTION_PARAMETER_LAYERS,packProductionAcceleration} from './production-bands.js';
+import {PRODUCTION_PARAMETER_LAYERS,packProductionAcceleration,encodeCandidateEmptyRuns} from './production-bands.js';
 
 export class PlanetWeatherStream {
   constructor(planet) {
@@ -145,6 +145,13 @@ export class PlanetWeatherStream {
       if(candidates) {
         for(let i=0;i<candidates.length;i++)candidates[i]=first.candidates[i]|second.candidates[i];
         p.cloudCandidatesTex.needsUpdate=true;
+        const nearTex=p.volCloudMat?.uniforms?.uNearBandCandidates?.value;
+        if(nearTex?.userData?.rawCandidates===p.cloudCandidatesTex && nearTex.image.data.length===candidates.length) {
+          nearTex.image.data.set(candidates);
+          encodeCandidateEmptyRuns(nearTex.image.data);
+          nearTex.needsUpdate=true;
+          nearTex.userData.rawVersion=p.cloudCandidatesTex.version;
+        }
       }
       if(bandData)packProductionAcceleration(bandData,p.cloudSpeciesTex.image.width,
         p.cloudSpeciesTex.image.height,data,candidates);

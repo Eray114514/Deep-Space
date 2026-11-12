@@ -83,7 +83,8 @@ if (!WORLD_LAB && qs.has('seed')) {
   canonicalUrl.searchParams.delete('seed');
   history.replaceState(null, '', canonicalUrl);
 }
-function createUniverse(seed) {
+function createUniverse(seed, { deferSecondaryHomeBodies = false } = {}) {
+  const initialPlanetIdx = qs.has('planet') ? Math.max(0, Number(qs.get('planet')) || 0) : 0;
   return new Universe(seed, scene, {
     galaxyId: GALAXY_ID,
     blackHoleSystem: GALAXY.blackHoleSystem,
@@ -97,6 +98,8 @@ function createUniverse(seed) {
     renderer,
     spaceRadianceResolution: QUALITY_PROFILE.spaceRadianceResolution,
     renderLook: RENDER_LOOK_NEXT,
+    deferSecondaryHomeBodies,
+    initialHomeBodies: initialPlanetIdx + 1,
   });
 }
 window.NMS_NOLOCK = qs.get('nolock') === '1';
@@ -130,6 +133,7 @@ const rendererOptions = {
 };
 const rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
 const renderer = rendererRuntime.renderer;
+renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
 const actualRendererBackend = rendererRuntime.backend;
 const gpuName = rendererRuntime.gpuName;
 configureSurfaceMaterials(renderer);
@@ -228,7 +232,7 @@ let surfaceBootstrapStats=null;
 let shipPipelinesWarmed = false;
 let shipPipelineWarmPending = false;
 let heroTransitionActive = false;
-const startupWarmStartedAt = performance.now();
+let startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
 const startupCompile = new AbortController();
 // Shader compilation may consume most of the general warm-up deadline on a
@@ -548,10 +552,13 @@ const cloudResourceManager = configureCloudResourceManager({
   enabled: VOLUME_ENABLED,
   maxEntries: 2,
 });
+const CLOUD_FAR_SPLIT = qs.get('cloudsplit') !== '0';
+const CLOUD_PROGRAM_PREP = qs.get('cloudprograms') !== '0';
+const CLOUD_LIGHT_BATCHES = qs.get('cloudbatches') !== '0';
 const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
-  cloudProgramPreparation: qs.get('cloudprograms') === '1',
-  cloudFarSplit: qs.get('cloudsplit') === '1',
+  cloudProgramPreparation: CLOUD_PROGRAM_PREP,
+  cloudFarSplit: CLOUD_FAR_SPLIT,
   volumeScale: effectiveVolumeScale,
   bloomEnabled: qs.get('post') !== '0' && !QUALITY_LOW,
   bloomStrength: RENDER_LOOK_NEXT ? (IS_TOUCH ? 0.24 : 0.30) : (IS_TOUCH ? 0.35 : 0.5),
@@ -562,6 +569,13 @@ const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   realisticGrade: RENDER_LOOK_NEXT,
 });
 const volumePass = nodePipeline.volumePass;
+if (volumePass && CLOUD_LIGHT_BATCHES) {
+  volumePass.setLightBatchesEnabled(true, {
+    budgetBytes: 32 * 1024 * 1024,
+    maxBatchTiles: 128,
+    fusedDensity: false,
+  });
+}
 const atmospherePass = nodePipeline.atmospherePass;
 atmospherePass.setVisualEnabled(qs.get('atmosphere') !== '0');
 const warpDrivePass = nodePipeline.warp;
@@ -763,7 +777,7 @@ let celestialClock = new CelestialClock(SEED, {
   persist: !Number.isFinite(fixedTime),
   frozen: FREEZE,
 });
-let universe = createUniverse(SEED);
+let universe = createUniverse(SEED, { deferSecondaryHomeBodies: true });
 universe.timeHours = celestialClock.hours;
 universe.system.updateCelestial(celestialClock.hours);
 const sceneRadiance = new SceneRadianceState(renderer, scene, universe, {
@@ -3488,7 +3502,7 @@ function spawn(hero = false) {
   // The ship waits off-screen during the start page; startHeroPullBack slides
   // it into formation as the camera pulls back.
   if (hero) ship.introOffset?.set(110, -62, 48);
-  ui.setSystem(sys.name, sys.planets.length, SEED, sys.catalogId, WORLD_LAB);
+  ui.setSystem(sys.name, sys._specs?.length || sys.planets.length, SEED, sys.catalogId, WORLD_LAB);
   setState('space');
 }
 
@@ -4004,7 +4018,10 @@ function renderWorldFrame() {
     surfaceWeapons.renderScopeView(renderer);
     finishSurfaceBootstrap();
     if (pipelineResizePending && !pipelineResourcesBusy()) sizePost();
-    if (!surfacePipelinesReady || shipPipelineWarmPending) return;
+    if (!surfacePipelinesReady || shipPipelineWarmPending) {
+      nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
+      return;
+    }
     bloomPass.enabled = usePost && !QUALITY_LOW;
     if (gradePass_) {
       gradePass_.enabled = usePost && !QUALITY_LOW;
@@ -4831,7 +4848,7 @@ function frame() {
     ui.setLoadingProgress(1);
     loadingCleared = true;
     ui.setLoading(false);
-  } else if (!loadingCleared && !cloudPreparation.blocked
+  } else if (!loadingCleared && !cloudPreparation.blocked && Boolean(universe.system?.built)
     && performance.now() - startupWarmStartedAt
       > STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS + 3000) {
     // Keep the older escape for unrelated startup stages, but never reveal an
@@ -4873,6 +4890,21 @@ if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {
     prewarmSurfacePipelines(bootstrapSurfacePlanet);
   }
 }
+if (volumePass && bootstrapSurfacePlanet) {
+  volumePass.setActivePlanet(bootstrapSurfacePlanet.isGasGiant ? null : bootstrapSurfacePlanet, nav.pos, 0);
+  nodePipeline.setActiveAtmosphere(bootstrapSurfacePlanet.isGasGiant ? null : bootstrapSurfacePlanet, nav.pos);
+  nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
+}
+// Submit queued async shader compilations onto ANGLE C++ worker threads BEFORE
+// building secondary system bodies on the JS thread so FXC runs in parallel!
+for (let pump = 0; pump < 8 && nodePipeline.preparations?.hasQueued; pump++) {
+  nodePipeline.preparations.submit?.();
+}
+while (universe.system && !universe.system.built) {
+  universe.system.buildNext();
+}
+wireUniverse(universe);
+startupWarmStartedAt = performance.now();
 frame();
 
 // ---- debug / test API (used by tools/screenshot.js) ----------------------------
@@ -4900,7 +4932,12 @@ window.NMS = {
   _renderer: renderer,
   _pipeline: nodePipeline,  // debug handle (headless diagnostics)
   _THREE: THREE,
-  _planet(i = 0) { return universe.system.planets[i] || null; },
+  _planet(i = 0) {
+    while (universe.system && !universe.system.built && universe.system.planets.length <= i) {
+      universe.system.buildNext();
+    }
+    return universe.system?.planets[i] || null;
+  },
   get booted() {
     return loadingCleared;
   },

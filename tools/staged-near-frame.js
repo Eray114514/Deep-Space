@@ -21,6 +21,8 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
   if(!timer)throw Error('Staged near proof needs GPU timer queries');
   const owner=pipeline.framePacer??pipeline.startFramePacing();
   const originalSubmit=pipeline.submitFrame, profile=pass.profilePhase;
+  const savedBatchesEnabled=pass.lightBatchesEnabled, savedBatchOptions={...pass.lightBatchOptions};
+  if(savedBatchesEnabled)pass.setLightBatchesEnabled(false);
   const halted={}, queries=[];
   let input,target,microTarget,depthCopy,material,comparisonMaterial,batch,referenceBatch,probeBatch,snapshot,captureError,armed=false,blocked=false;
   const trace=label=>{if(fusedDensity)console.log('Staged cloud: '+label);};
@@ -409,7 +411,10 @@ export async function verifyStagedNearFrame(game,{compareWhole=false,mode='sciss
   } finally {
     clearTimeout(noCapture);pass.profilePhase=profile;
     try {game.teleport(0,.12,{dir:coast.direction});}
-    finally {pipeline.submitFrame=originalSubmit;}
+    finally {
+      pipeline.submitFrame=originalSubmit;
+      if(savedBatchesEnabled)pass.setLightBatchesEnabled(true,savedBatchOptions);
+    }
     if(!gl.isContextLost())for(const query of queries)gl.deleteQuery(query);
     batch?.dispose();referenceBatch?.dispose();probeBatch?.dispose();target?.dispose();microTarget?.dispose();depthCopy?.dispose();
     material?.dispose();comparisonMaterial?.dispose();

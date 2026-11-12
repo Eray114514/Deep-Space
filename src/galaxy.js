@@ -174,6 +174,7 @@ export class Universe {
   constructor(seedStr, scene, {
     galaxyId = 'milky-way', bodyTuning = null, blackHoleSystem = null,
     renderer = null, spaceRadianceResolution = 1024, renderLook = true,
+    deferSecondaryHomeBodies = false, initialHomeBodies = 1,
   } = {}) {
     this.seed = seedStr;
     this.galaxyId = galaxyId;
@@ -224,7 +225,11 @@ export class Universe {
     this.homeStar = this.catalogStarById.get(HOME_SYSTEM_ID);
     this.system = null;
     this.fadingSystem = null;          // the system being left behind
-    this.setSystem(this.homeStar);
+    this.setSystem(this.homeStar, deferSecondaryHomeBodies);
+    if (deferSecondaryHomeBodies && this.system) {
+      const count = Math.max(1, Number(initialHomeBodies) || 1);
+      while (!this.system.built && this.system.planets.length < count) this.system.buildNext();
+    }
   }
 
   // all live planets (current system + the one fading behind us)

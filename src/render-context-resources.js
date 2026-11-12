@@ -20,7 +20,8 @@ export function installRenderContextResources(renderer) {
     });
   }
 
-  for (const kind of ['Buffer','VertexArray','Texture','Framebuffer','Renderbuffer']) {
+  for (const kind of ['Buffer','VertexArray','Texture','Framebuffer','Renderbuffer','Query','Sampler','TransformFeedback']) {
+    if (typeof gl['create'+kind] !== 'function' || typeof gl['delete'+kind] !== 'function') continue;
     const ownerEpoch = new WeakMap();
     wrap('create'+kind, (receiver,native,args) => {
       const handle = native.apply(receiver,args);
@@ -29,6 +30,20 @@ export function installRenderContextResources(renderer) {
     });
     wrap('delete'+kind, (receiver,native,args) => {
       const owner = ownerEpoch.get(args[0]);
+      if (receiver === gl && owner !== undefined && owner < epoch) return;
+      return native.apply(receiver,args);
+    });
+  }
+
+  if (typeof gl.fenceSync === 'function' && typeof gl.deleteSync === 'function') {
+    const syncEpoch = new WeakMap();
+    wrap('fenceSync', (receiver,native,args) => {
+      const handle = native.apply(receiver,args);
+      if (receiver === gl && handle) syncEpoch.set(handle,epoch);
+      return handle;
+    });
+    wrap('deleteSync', (receiver,native,args) => {
+      const owner = syncEpoch.get(args[0]);
       if (receiver === gl && owner !== undefined && owner < epoch) return;
       return native.apply(receiver,args);
     });

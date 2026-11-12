@@ -1,6 +1,7 @@
 import {cloudLightPageShaders,lightPageDeclarations} from './cloud-light-query-glsl.js';
 
 const declarations=/* glsl */`
+  #define PAGE_LIGHT_COMPOSITION 1
   uniform sampler2D tPageRay,tPageCached,tPageMask,tPageOpacity,tPage0,tPage1,tPage2,tPage3,tPageLight;
   uniform ivec2 uPageSize;
   uniform int uPageTilesX,uPageMetaColumns,uPageLightColumns,uBatchStart,uBatchCount;
@@ -12,10 +13,17 @@ const declarations=/* glsl */`
   float pageAnchor(int slot,ivec2 pixel,int bin){ivec2 cell=pageMetadataPixel(slot,pixel);
     vec4 group=bin<4?texelFetch(tPage0,cell,0):bin<8?texelFetch(tPage1,cell,0):bin<12?texelFetch(tPage2,cell,0):texelFetch(tPage3,cell,0);
     return group[bin%4];}
-  float pageBeamDepth(ivec2 pixel,int field,int bin){
+  float rawPageBeamDepth(ivec2 pixel,int field,int bin){
     int slot=pageSlot(pixel)*4+field;
     ivec2 cell=ivec2(slot%uPageLightColumns*16,slot/uPageLightColumns*256+bin*16)+pixel%16;
     return texelFetch(tPageLight,cell,0).r;
+  }
+  float pageBeamDepth(ivec2 pixel,int field,int bin){
+    float d=rawPageBeamDepth(pixel,field,bin);
+    if(d>=-0.5)return d;
+    int meta=pageSlot(pixel),k0=(bin/5)*5;
+    float a0=pageAnchor(meta,pixel,k0),a1=pageAnchor(meta,pixel,k0+5),a=pageAnchor(meta,pixel,bin);
+    return mix(rawPageBeamDepth(pixel,field,k0),rawPageBeamDepth(pixel,field,k0+5),clamp((a-a0)/max(a1-a0,1e-3),0.0,1.0));
   }
 `;
 const compactDeclarations=declarations

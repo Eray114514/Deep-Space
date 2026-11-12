@@ -58,6 +58,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
     ${surfaceCloudGLSL}
     ${surfaceCloudLightingGLSL}
     uniform mat3 uSurfaceViewToLocal;
+    uniform float uSurfaceDepthOnly;
     vec3 surfaceSunTransmission(vec3 direction) {
       float cloud=surfaceCloudLighting(direction);
       if(air_uEnabled<0.5) return vec3(cloud);
@@ -79,7 +80,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
   shader.fragmentShader = shader.fragmentShader.replace('#include <lights_physical_pars_fragment>',
     '#include <lights_physical_pars_fragment>\n' + transport);
   shader.fragmentShader=shader.fragmentShader.replace('#include <logdepthbuf_fragment>',
-    '#include <logdepthbuf_fragment>\ninitializeSurfaceCloudLighting(vLocalPos);');
+    '#include <logdepthbuf_fragment>\nif(uSurfaceDepthOnly>0.5){gl_FragColor=vec4(0.0);return;}\ninitializeSurfaceCloudLighting(vLocalPos);');
   const lights = THREE.ShaderChunk.lights_fragment_begin.replace(
     'getDirectionalLightInfo( directionalLight, directLight );', `getDirectionalLightInfo( directionalLight, directLight );
     {

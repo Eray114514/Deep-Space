@@ -337,8 +337,8 @@ export class VolumetricPass extends Pass {
       }
       return;
     }
-    if(distance<=200000)return;
     if(this.lightBatchPrefetch?.planet===planet&&this.lightBatchPrefetch.material===material)return;
+    if(this.hasPreparedLightBatch(mesh,material))return;
     const claim={planet,material,state:'queued'};
     this.lightBatchPrefetch=claim;
     const current=()=>this.lightBatchesEnabled&&this.lightBatchPrefetch===claim
@@ -373,11 +373,16 @@ export class VolumetricPass extends Pass {
     return owners!==1||foreign?'multiple-volume-owners':null;
   }
 
-  usesPreparedLightBatch(requests) {
+  eligibleForLightBatch(requests) {
     if(requests.length!==1||!this.lightBatchesEnabled)return false;
     const {mesh,material}=requests[0], planet=this.activePlanet;
     return Boolean(planet&&mesh===planet.volCloudMesh&&material===planet.volCloudMat
-      &&this.hasPreparedLightBatch(mesh,material)&&!this.lightBatchRefusal(planet,mesh,material));
+      &&!this.lightBatchRefusal(planet,mesh,material));
+  }
+
+  usesPreparedLightBatch(requests) {
+    return Boolean(this.eligibleForLightBatch(requests)
+      &&this.hasPreparedLightBatch(requests[0].mesh,requests[0].material));
   }
 
   hasPreparedLightBatch(mesh,material) {
@@ -390,7 +395,7 @@ export class VolumetricPass extends Pass {
   renderLightBatches(renderer) {
     const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=mesh?.material;
     const refuse=reason=>{
-      if(reason==='disabled')this.releaseLightBatches();
+      if(reason==='disabled')this.lightBatch?.releaseScratch();
       else if(reason!=='representation'||this.lightBatchPrefetch?.planet!==planet)this.lightBatch?.releaseScratch();
       this.lightBatchStatus={reason,submitted:false};return false;
     };
@@ -458,8 +463,8 @@ export class VolumetricPass extends Pass {
   // pass starts. Column production and retirement stay in render(): either can
   // change the far-cache flag during this frame, so its closure belongs here.
   // This is deliberately independent of the previous draw's uCameraLocal.
-  enableFarSplit(renderer) {
-    this.farSplit ??= new CloudFarSplitPass(renderer);
+  enableFarSplit(renderer, options = { splitPoint: true }) {
+    this.farSplit ??= new CloudFarSplitPass(renderer, options);
   }
 
   requiredProgramRequests(origin = this.nav, split = null) {
@@ -512,19 +517,25 @@ export class VolumetricPass extends Pass {
 
   bindNearCandidates(uniforms, used) {
     const raw=uniforms.uBandCandidates.value, binding=uniforms.uNearBandCandidates;
-    if(!raw || uniforms.uCandidatesReady.value<.5) {binding.value=null;return;}
+    if(!raw || uniforms.uCandidatesReady.value<.5) {
+      if(binding.value?.userData?.rawCandidates){binding.value.dispose();}
+      binding.value=null;return;
+    }
     let grid=this.nearCandidateGrids.get(raw);
     if(!grid) {
       const {data,width,height,depth}=raw.image;
-      const texture=new THREE.DataArrayTexture(new Uint16Array(data.length),width,height,depth);
+      const owned=binding.value?.userData?.rawCandidates===raw?binding.value:null;
+      if(!owned && binding.value?.userData?.rawCandidates)binding.value.dispose();
+      const texture=owned||new THREE.DataArrayTexture(new Uint16Array(data.length),width,height,depth);
       texture.format=raw.format;texture.type=raw.type;texture.internalFormat=raw.internalFormat;
-      this.nearCandidateGrids.set(raw,grid={texture,binding,version:-1});
+      this.nearCandidateGrids.set(raw,grid={texture,binding,version:owned?owned.userData.rawVersion:-1});
     }
     if(grid.version!==raw.version) {
       grid.texture.image.data.set(raw.image.data);
       encodeCandidateEmptyRuns(grid.texture.image.data);
       grid.texture.needsUpdate=true;
       grid.version=raw.version;
+      if(grid.texture.userData)grid.texture.userData.rawVersion=raw.version;
     }
     binding.value=grid.texture;
     used.add(raw);

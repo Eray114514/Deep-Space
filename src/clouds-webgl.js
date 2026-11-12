@@ -5,6 +5,7 @@ import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
 import { nearProductionCloudGLSL, productionCloudGLSL } from './cloud/production-medium-glsl.js';
 import { buildCloudScatteringTable } from './cloud/cloud-scattering-lut.js';
+import { encodeCandidateEmptyRuns } from './cloud/production-bands.js';
 import { productionSpeciesParameters, PRODUCTION_SHAPE_VERSION } from './cloud/production-shape.js';
 import { cloudBeamGLSL } from './cloud/cloud-beam-glsl.js';
 import {cloudLightCacheGLSL,cloudLightCacheUniforms} from './cloud/cloud-light-cache-glsl.js';
@@ -61,10 +62,47 @@ export function cloudNoiseTexture() {
 // (context-loss recovery, hot-reload) — every cloud ShaderMaterial that
 // referenced this texture must itself be disposed first, since disposing
 // here invalidates the GPU handle for all existing references.
+let _emptyNearCandidatesTex = null;
+export function emptyNearCandidatesTexture() {
+  if (!_emptyNearCandidatesTex) {
+    _emptyNearCandidatesTex = new THREE.DataArrayTexture(new Uint16Array([0x8000]), 1, 1, 1);
+    _emptyNearCandidatesTex.format = THREE.RedIntegerFormat;
+    _emptyNearCandidatesTex.type = THREE.UnsignedShortType;
+    _emptyNearCandidatesTex.internalFormat = 'R16UI';
+    _emptyNearCandidatesTex.minFilter = THREE.NearestFilter;
+    _emptyNearCandidatesTex.magFilter = THREE.NearestFilter;
+    _emptyNearCandidatesTex.unpackAlignment = 1;
+    _emptyNearCandidatesTex.generateMipmaps = false;
+    _emptyNearCandidatesTex.needsUpdate = true;
+  }
+  return _emptyNearCandidatesTex;
+}
+function initialNearCandidatesTexture(raw) {
+  if (raw?.image?.data instanceof Uint16Array) {
+    const { data, width, height, depth } = raw.image;
+    const copy = new Uint16Array(data);
+    encodeCandidateEmptyRuns(copy);
+    const texture = new THREE.DataArrayTexture(copy, width, height, depth);
+    texture.format = raw.format;
+    texture.type = raw.type;
+    texture.internalFormat = raw.internalFormat;
+    texture.minFilter = THREE.NearestFilter;
+    texture.magFilter = THREE.NearestFilter;
+    texture.unpackAlignment = raw.unpackAlignment ?? 1;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+    texture.userData.rawCandidates = raw;
+    texture.userData.rawVersion = raw.version;
+    return texture;
+  }
+  return null;
+}
+
 export function disposeCloudNoiseTexture() {
   if (_noiseTex) { _noiseTex.dispose(); _noiseTex = null; }
   if (_scatteringTex) { _scatteringTex.dispose(); _scatteringTex = null; }
   if(_speciesTex){_speciesTex.dispose();_speciesTex=null;}
+  if (_emptyNearCandidatesTex) { _emptyNearCandidatesTex.dispose(); _emptyNearCandidatesTex = null; }
 }
 
 function stormCenters(offX, offY, offZ) {
@@ -104,7 +142,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uBandBounds: { value: planet.cloudBoundsTex || null },
       uCandidateLayers: { value: 64 },
       uBandCandidates: { value: planet.cloudCandidatesTex || null },
-      ...(nearEmptyRuns ? {uNearBandCandidates: {value:null}} : {}),
+      ...(nearEmptyRuns ? {uNearBandCandidates: {value:initialNearCandidatesTexture(planet.cloudCandidatesTex)}} : {}),
       uCandidatesReady: { value: planet.cloudCandidatesTex ? 1 : 0 },
       uBandsReady: { value: planet.cloudSpeciesTex ? 1 : 0 },
       uSpeciesMask: { value: -1 },
@@ -163,8 +201,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       // not depend on it.
       uQuality: { value: qualityValue },
       uMaxSteps: { value: Math.max(16, Math.min(124, steps)) },
-      uCloudLightSteps: { value: 12 },
-      uViewCapacity: { value: 8192 },
+      uCloudLightSteps: { value: quality === 'performance' || quality === 'low' ? 4 : quality === 'balanced' ? 6 : 12 },
+      uViewCapacity: { value: quality === 'performance' || quality === 'low' ? 224 : quality === 'balanced' ? 512 : 8192 },
       uColumnSteps: { value: 128 },
       uLightPathCount: { value: 4 },
       uLightQuadratureSteps: { value: 16 },
@@ -566,7 +604,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         // columns. Sampling both at the envelope makes clouds use a nearby
         // mountain's height/opacity and creates hard terrain-shaped holes.
         // Solve each deck's column at its own intersection before occlusion.
-        for(int iteration=0;iteration<4;iteration++) {
+        int cachedIterations=min(4,int(uCloudLightSteps));
+        for(int iteration=0;iteration<cachedIterations;iteration++) {
           if(lowHits.x>=0.0) {
             cloudCachedColumnAt(normalize(uCameraLocal+dir*lowHits.x),opacity,meanTau,heights);
             lowOpacityTau=vec2(opacity.r,meanTau.r);
@@ -631,6 +670,8 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         return vec4(correction,1.0-transmission);
       }
 
+      bool cloudUseKeyframeDepth=false;
+      vec4 cloudKeyframeDepth=vec4(0.0),cloudLastDepths=vec4(0.0);
       vec3 cloudSource(vec3 local, vec3 dir, float d, float thick, float sigma,
         vec3 sunDirection, vec3 sunColor, float sunEnergy, float sunOD) {
         if (sunEnergy <= 0.0) return vec3(0.0);
@@ -722,10 +763,11 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
           // the fallback result, leaving zero optical depth outside the cache.
           float pathDepth=0.0;
           bool cached=cloudCachedLight(local,path,pathDepth);
+          if(!cached && cloudUseKeyframeDepth) { pathDepth=cloudKeyframeDepth[path]; cached=true; }
           if(!cached)pathDepth=cloudSunOpticalDepthLimit(local,direction,sigma,path<2?12.0:128.0);
           depths[path]=pathDepth;
         }
-        cloudVerticalAbove=depths.z;cloudVerticalTotal=depths.z+depths.w;
+        cloudLastDepths=depths;cloudVerticalAbove=depths.z;cloudVerticalTotal=depths.z+depths.w;
         #endif
         vec3 source=vec3(0);
         for(int star=0;star<2;star++) {
@@ -744,38 +786,34 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       vec4 cloudFarColumn(vec3 dir, float start, float end) {
         float closest=-dot(uCameraLocal,dir);
         float impact2=dot(cross(uCameraLocal,dir),cross(uCameraLocal,dir));
-        float radiusStart=length(uCameraLocal+dir*start);
-        float radiusEnd=length(uCameraLocal+dir*min(end,closest));
+        float nearR0=length(uCameraLocal+dir*start);
+        float nearR1=length(uCameraLocal+dir*min(end,closest));
+        float farR0=sqrt(impact2);
+        float farR1=length(uCameraLocal+dir*end);
         float T=1.0, moment=0.0, weightedDistance=0.0;
         float previous=start;
         int columns=int(uColumnSteps);
-        for(int k=0;k<columns;k++) {
-          float radius=mix(radiusStart,radiusEnd,float(k+1)/float(columns));
-          float next=min(end,closest-sqrt(max(0.0,(radius-sqrt(impact2))*(radius+sqrt(impact2)))));
-          float distance=max(0.0,next-previous);
-          float middle=(next+previous)*0.5;
+        int totalColumns=end>closest?columns*2:columns;
+        for(int k=0;k<totalColumns;k++) {
+          bool secondHalf=k>=columns;
+          if(k==columns) {
+            if(T<0.0002) break;
+            previous=closest;
+          }
+          int stepIdx=secondHalf?k-columns:k;
+          float radius=mix(secondHalf?farR0:nearR0,secondHalf?farR1:nearR1,float(stepIdx+1)/float(columns));
+          float chord=sqrt(max(0.0,(radius-farR0)*(radius+farR0)));
+          float next=min(end,secondHalf?closest+chord:closest-chord);
+          float distance=max(0.0,next-previous),middle=(next+previous)*0.5;
           float ext=cloudExtinctionAt(uCameraLocal+dir*middle,0.0);
           float weight=T*(1.0-exp(-ext*distance));
           weightedDistance+=middle*weight; moment+=weight; T-=weight;
           previous=next;
-          if(T<0.0002) break;
-        }
-        // A grazing ray that misses the opaque body sees both shell halves.
-        if(end>closest && T>=0.0002) {
-          radiusStart=sqrt(impact2); radiusEnd=length(uCameraLocal+dir*end);
-          previous=closest;
-          for(int k=0;k<columns;k++) {
-            float radius=mix(radiusStart,radiusEnd,float(k+1)/float(columns));
-            float next=min(end,closest+sqrt(max(0.0,(radius-sqrt(impact2))*(radius+sqrt(impact2)))));
-            float distance=max(0.0,next-previous),middle=(next+previous)*0.5;
-            float ext=cloudExtinctionAt(uCameraLocal+dir*middle,0.0);
-            float weight=T*(1.0-exp(-ext*distance));
-            weightedDistance+=middle*weight; moment+=weight; T-=weight; previous=next;
-            if(T<0.0002) break;
-          }
+          if(!secondHalf && T<0.0002) k=columns-1;
         }
         if(moment<0.004) return vec4(0.0);
         float t=weightedDistance/max(moment,1e-9);
+        cloudBeamLodScale=clamp(t/3200.0,1.0,24.0);
         vec3 local=uCameraLocal+dir*t;
         vec3 source=cloudCombinedSource(local,dir,0.0,uRout-uRin,0.0);
         vec2 air=air_sphereHits(uCameraLocal,air_uTopR,dir);
@@ -942,20 +980,62 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         float alpha=totalOpacity*uEngage;
         if(alpha<0.004)discard;
         vec3 correction=vec3(0);
+        #ifdef PAGE_LIGHT_COMPOSITION
         vec3 frontLight=vec3(0),frontTransmission=vec3(1);
         float previousAnchor=max(airBounds.x,0.0);
         float airCellEnd=-1.0;vec3 airCellExt=vec3(0),airCellSource=vec3(0);
         for(int bin=0;bin<bins;bin++) {
           float distance=anchors[bin];vec3 local=uCameraLocal+dir*distance;
           float nextAnchor=min(distance,airBounds.y);
-          vec3 gapLight,gapTransmission;
-          cloudAirTransport(uCameraLocal,dir,previousAnchor,nextAnchor,bin>0,
-            airCellEnd,airCellExt,airCellSource,gapLight,gapTransmission);
-          frontLight+=frontTransmission*gapLight;frontTransmission*=gapTransmission;
-          previousAnchor=nextAnchor;
+          if(bin==0 || bin==bins-1 || (bin&3)==0) {
+            vec3 gapLight,gapTransmission;
+            cloudAirTransport(uCameraLocal,dir,previousAnchor,nextAnchor,bin>0 && nextAnchor-previousAnchor<=800.0,
+              airCellEnd,airCellExt,airCellSource,gapLight,gapTransmission);
+            frontLight+=frontTransmission*gapLight;frontTransmission*=gapTransmission;
+            previousAnchor=nextAnchor;
+          }
+          cloudBeamLodScale=clamp(distance/3200.0,1.0,24.0);
           vec3 source=cloudCombinedSource(local,dir,0.0,thick,sigma)*uTint;
           correction+=(frontLight+frontTransmission*source)*(totalOpacity/float(bins));
         }
+        #endif
+        #ifndef PAGE_LIGHT_COMPOSITION
+        vec3 frontLight=vec3(0),frontTransmission=vec3(1);
+        float previousAnchor=max(airBounds.x,0.0);
+        float airCellEnd=-1.0;vec3 airCellExt=vec3(0),airCellSource=vec3(0);
+        vec4 keyDepths[4];
+        int totalSteps=bins==16?20:bins;
+        for(int step=0;step<totalSteps;step++) {
+          bool prepass=bins==16 && step<4;
+          int bin=prepass?step*5:(bins==16?step-4:step);
+          float distance=anchors[bin];vec3 local=uCameraLocal+dir*distance;
+          if(!prepass) {
+            float nextAnchor=min(distance,airBounds.y);
+            if(bin==0 || bin==bins-1 || (bin&3)==0) {
+              vec3 gapLight,gapTransmission;
+              cloudAirTransport(uCameraLocal,dir,previousAnchor,nextAnchor,bin>0 && nextAnchor-previousAnchor<=800.0,
+                airCellEnd,airCellExt,airCellSource,gapLight,gapTransmission);
+              frontLight+=frontTransmission*gapLight;frontTransmission*=gapTransmission;
+              previousAnchor=nextAnchor;
+            }
+          }
+          cloudBeamLodScale=clamp(distance/3200.0,1.0,24.0);
+          cloudUseKeyframeDepth=false;
+          if(bins==16 && !prepass) {
+            int kIdx=bin/5,k0=kIdx*5;
+            if(bin==k0) { cloudKeyframeDepth=keyDepths[kIdx]; cloudUseKeyframeDepth=true; }
+            else if(anchors[k0+5]-anchors[k0]<3000.0+anchors[k0]*0.5) {
+              cloudKeyframeDepth=mix(keyDepths[kIdx],keyDepths[kIdx+1],
+                clamp((distance-anchors[k0])/max(anchors[k0+5]-anchors[k0],1e-3),0.0,1.0));
+              cloudUseKeyframeDepth=true;
+            }
+          }
+          vec3 source=cloudCombinedSource(local,dir,0.0,thick,sigma)*uTint;
+          if(prepass) { keyDepths[step]=cloudLastDepths; continue; }
+          correction+=(frontLight+frontTransmission*source)*(totalOpacity/float(bins));
+        }
+        cloudUseKeyframeDepth=false;
+        #endif
         gl_FragColor = vec4(correction * uEngage, alpha);
         #else
         for (int i = 0; i < STEPS; i++) {

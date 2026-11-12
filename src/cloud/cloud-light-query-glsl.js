@@ -3,6 +3,7 @@
 const beamCall='if(!cached)pathDepth=cloudSunOpticalDepthLimit(local,direction,sigma,path<2?12.0:128.0);';
 const cacheCall='bool cached=cloudCachedLight(local,path,pathDepth);';
 export const lightPageDeclarations=/* glsl */`
+  #define PAGE_LIGHT_COMPOSITION 1
   precision highp usampler2D;
   uniform sampler2D tPageRay,tPageCached,tPageMask,tPageOpacity,tPage0,tPage1,tPage2,tPage3,tPageLight;
   uniform usampler2D tPageMetaJobs,tPageLightJobs,tPageMetaMap,tPageLightMap;
@@ -24,12 +25,18 @@ export const lightPageDeclarations=/* glsl */`
   float pageAnchor(int slot,ivec2 pixel,int bin){ivec2 cell=pageMetadataPixel(slot,pixel);
     vec4 group=bin<4?texelFetch(tPage0,cell,0):bin<8?texelFetch(tPage1,cell,0):bin<12?texelFetch(tPage2,cell,0):texelFetch(tPage3,cell,0);
     return group[bin%4];}
-  float pageBeamDepth(ivec2 pixel,int field,int bin){
-    // The composition owner has validated every required field with pageReady.
+  float rawPageBeamDepth(ivec2 pixel,int field,int bin){
     int slot=int(texelFetch(tPageLightMap,pageTile(pixel),0)[field])-1;
     int columns=max(1,textureSize(tPageLight,0).x/16);
     ivec2 cell=ivec2(slot%columns*16,slot/columns*256+bin*16)+pixel%16;
     return texelFetch(tPageLight,cell,0).r;
+  }
+  float pageBeamDepth(ivec2 pixel,int field,int bin){
+    float d=rawPageBeamDepth(pixel,field,bin);
+    if(d>=-0.5)return d;
+    int meta=int(texelFetch(tPageMetaMap,pageTile(pixel),0).r)-1,k0=(bin/5)*5;
+    float a0=pageAnchor(meta,pixel,k0),a1=pageAnchor(meta,pixel,k0+5),a=pageAnchor(meta,pixel,bin);
+    return mix(rawPageBeamDepth(pixel,field,k0),rawPageBeamDepth(pixel,field,k0+5),clamp((a-a0)/max(a1-a0,1e-3),0.0,1.0));
   }
 `;
 const declarations=lightPageDeclarations;
@@ -85,13 +92,22 @@ export function cloudLightPageShaders(source) {
       ivec2 original=pageOriginal(tile,ivec2(pixel.x%16,pixel.y%16));
       if(any(greaterThanEqual(original,uPageSize)) || (pageMask(original)&(1<<field))==0)discard;
       vec4 ray=texelFetch(tPageRay,original,0);
-      vec3 local=uCameraLocal+ray.xyz*pageAnchor(meta,original,bin);
+      float anchorDistance=pageAnchor(meta,original,bin);
+      cloudBeamLodScale=clamp(anchorDistance/3200.0,1.0,24.0);
+      vec3 local=uCameraLocal+ray.xyz*anchorDistance;
       vec3 direction=field==0?normalize(uSunDir):field==1?normalize(uSecondarySunDir):field==2?normalize(local):-normalize(local);
       if(field==1 && uSecondarySunEnergy<=0.0)discard;
       if(field<2){float radius=length(local),muSun=dot(local/radius,direction);
         float horizon=-sqrt(max(0.0,1.0-uGroundR*uGroundR/(radius*radius)));
         if(muSun<=horizon-0.018 || eclipseVisibility(local,direction)<=0.0)discard;}
       float depth=0.0;bool cached=cloudCachedLight(local,field,depth);
+      if(!cached && clamp(uLightQuadratureSteps,4,32)==16) {
+        int k0=(bin/5)*5;
+        float ka0=pageAnchor(meta,original,k0);
+        if(bin!=k0 && pageAnchor(meta,original,k0+5)-ka0<3000.0+ka0*0.5) {
+          gl_FragColor=vec4(-1.0,0,0,1);return;
+        }
+      }
       if(!cached)depth=cloudSunOpticalDepthLimit(local,direction,0.0,field<2?12.0:128.0);
       gl_FragColor=vec4(depth,0,0,1);
     }`;

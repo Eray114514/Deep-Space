@@ -7,6 +7,7 @@ const fullscreen=/* glsl */`
   void main(){vDirection=vec3(0,1,0);vViewDirection=vec3(0,0,-1);gl_Position=vec4(position.xy,0,1);}
 `;
 const programSignature=material=>JSON.stringify(Object.keys(material.defines).sort().map(name=>[name,material.defines[name]]));
+let nextExecutorCacheId=0;
 
 // Owns one synchronous command sequence and scratch pages, never prior-frame
 // light data. Render never reads back, waits, or schedules asynchronous work;
@@ -15,6 +16,7 @@ export class CloudLightBatchRenderer {
   constructor(material,options) {
     this.disposed=false;
     this.legacyRadiance=options.legacyRadiance===true;
+    this.executorCacheId=++nextExecutorCacheId;
     this.fusedDensity=options.fusedDensity===true;
     this.submissions=0;
     this.targets=[];
@@ -104,6 +106,8 @@ export class CloudLightBatchRenderer {
         fragmentShader:shaders[name],glslVersion:mrt?THREE.GLSL3:null,
         depthTest:false,depthWrite:false,blending:THREE.NoBlending,
         side:mesh?material.side:THREE.DoubleSide,premultipliedAlpha:material.premultipliedAlpha});
+      const cacheTag=`cloud-batch-${this.executorCacheId}-${name}`;
+      m.customProgramCacheKey=()=>cacheTag;
       m.name='cloud-batch-'+name;this.materials.push(m);return m;
     };
     this.ray=this.fusedDensity?make('ray',-1,false,true):null;

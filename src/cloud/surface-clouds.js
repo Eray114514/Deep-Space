@@ -206,6 +206,7 @@ export const surfaceCloudLightingGLSL=/* glsl */`
 export function surfaceCloudUniforms(planet) {
   const source=planet.volCloudUniforms || planet.volCloudMat?.uniforms,result={};
   result.uSurfaceCloudEnabled={value:planet.cloudVisualEnabled===false?0:1};
+  result.uSurfaceDepthOnly={value:0};
   result.uCloudShadowViewport={value:new THREE.Vector2(1,1)};
   result.uCloudShadowForward={value:new THREE.Vector3(0,0,-1)};
   result.uCloudForeignReceiver={value:0};
@@ -224,6 +225,7 @@ export function surfaceCloudUniforms(planet) {
 }
 export function bindSurfaceClouds(uniforms,planet,renderer=null,camera=null,material=null) {
   uniforms.uSurfaceCloudEnabled.value=preparingSurface||planet.cloudVisualEnabled===false?0:1;
+  if(uniforms.uSurfaceDepthOnly)uniforms.uSurfaceDepthOnly.value=preparingSurface?1:0;
   const source=planet.volCloudUniforms || planet.volCloudMat?.uniforms;
   uniforms.uCloudForeignReceiver.value=0;
   if(source)for(const name of names)if(name!=='uCameraLocal' && uniforms['cloud_'+name])uniforms['cloud_'+name].value=source[name]?.value;

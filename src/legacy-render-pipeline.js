@@ -75,6 +75,8 @@ export class GameLegacyPipeline {
     this.composer = new EffectComposer(renderer, target);
     this.onContextLost = () => {
       this.frameState.abort('context-lost');
+      this.cloudReceiverPreparation?.controller.abort();
+      this.cloudReceiverPreparation = null;
       this.composer.renderTarget1.dispose();
       this.composer.renderTarget2.dispose();
       this.volumePass?.releaseTargets();
@@ -261,6 +263,8 @@ export class GameLegacyPipeline {
   // Internal world graph. Only submitFrame's one-use draw capability enters it.
   #renderScene({ origin = this.volumePass?.nav || this.camera.position, context = this.scene,
     timeEpoch = null, rigidObjects = null } = {}, privateFrame) {
+    if(!privateFrame&&this.volumePass?.enabled&&this.volumePass.lightBatchesEnabled)
+      this.volumePass.prefetchLightBatches(this.renderer,origin,(work,options)=>this.prepare(work,options));
     let batchOnly=false;
     if (this.cloudProgramsEnabled && this.volumePass?.enabled) {
       const volume = this.volumePass, requests = volume.requiredProgramRequests(origin, volume.farSplit);
@@ -271,12 +275,16 @@ export class GameLegacyPipeline {
         &&batchState!=='unavailable'&&batchState!=='failed';
       const prefetch = canPrefetch&&!wantsBatch ? { mesh:plan.mesh, material } : null;
       batchOnly=wantsBatch&&volume.usesPreparedLightBatch(requests);
+      const batchPreparing=!batchOnly&&wantsBatch
+        &&(batchState==='queued'||batchState==='preparing')&&Boolean(volume.eligibleForLightBatch?.(requests));
       if (!this.cloudPrograms.ensure({ scene:this.scene, camera:this.camera, target:volume.current,
-        requests:batchOnly?[]:requests, prefetch })) return false;
-      if (canPrefetch) this.prefetchCloudLightingPrograms();
+        requests:(batchOnly||batchPreparing)?[]:requests, prefetch })) return false;
+      if (batchPreparing) return false;
+      if (canPrefetch) {
+        this.prefetchCloudLightingPrograms();
+        this.prefetchCloudReceiverProgram();
+      }
     }
-    if(!privateFrame&&this.volumePass?.enabled&&this.volumePass.lightBatchesEnabled)
-      this.volumePass.prefetchLightBatches(this.renderer,origin,(work,options)=>this.prepare(work,options));
     let failed=false;
     const target = this.renderer.getRenderTarget();
     const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
@@ -398,10 +406,63 @@ export class GameLegacyPipeline {
       let bank=this.cloudLightBanks.get(p);
       if(bank?.needsReset()) {bank.dispose();bank=null;this.cloudLightBanks.delete(p);}
       if(!bank || bank.disposed) {
-        bank=new CloudLightBank(p,{programOwner:this.cloudLightPrograms});this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
+        bank=new CloudLightBank(p,{interval:0.1,workQuanta:4,programOwner:this.cloudLightPrograms});this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
       }
       bank.update(this.renderer);
     }
+  }
+
+  primeCloudPrograms({ origin = this.volumePass?.nav || this.camera.position } = {}) {
+    if (!this.cloudProgramsEnabled || !this.volumePass?.enabled) return;
+    const volume = this.volumePass, requests = volume.requiredProgramRequests(origin, volume.farSplit);
+    const plan = volume.farSplit?.plan, material = volume.activePlanet?.volCloudMat;
+    const canPrefetch = plan && material && this.renderer.extensions?.has('KHR_parallel_shader_compile');
+    const wantsBatch = volume.lightBatchesEnabled && !this.requireDirectCloudPreparation;
+    const prefetch = canPrefetch && !wantsBatch ? { mesh: plan.mesh, material } : null;
+    this.cloudPrograms.ensure({ scene: this.scene, camera: this.camera, target: volume.current, requests, prefetch });
+    if (canPrefetch) {
+      this.prefetchCloudLightingPrograms();
+      this.prefetchCloudReceiverProgram();
+    }
+    if (volume.lightBatchesEnabled) {
+      volume.prefetchLightBatches(this.renderer, origin, (work, options) => this.prepare(work, options));
+    }
+  }
+
+  prefetchCloudReceiverProgram() {
+    if (this.cloudReceiverPreparation || !this.renderer.extensions?.has('KHR_parallel_shader_compile')) return;
+    const body = this.volumePass?.activePlanet;
+    const source = body?.volCloudMat?.uniforms;
+    if (!source || !this.cloudSurfaceShadow?.material) return;
+    const controller = new AbortController(), { signal } = controller;
+    const job = { controller, state: 'pending' };
+    this.cloudReceiverPreparation = job;
+    this.prepare(() => {
+      const pass = this.cloudSurfaceShadow;
+      const u = pass.material.uniforms;
+      for (const [name, uniform] of Object.entries(source)) if (!(name in u)) u[name] = uniform;
+      u.uCameraLocal ??= { value: new THREE.Vector3() };
+      u.uInvProjection ??= { value: new THREE.Matrix4() };
+      u.uViewToLocal ??= { value: new THREE.Matrix3() };
+      u.uShadowSize ??= { value: new THREE.Vector2(1, 1) };
+      u.uDepthSize ??= { value: new THREE.Vector2(1, 1) };
+      u.tOpaqueDepth ??= { value: this.composer.writeBuffer?.depthTexture || null };
+      u.uCameraFar ??= { value: this.camera.far };
+      u.uReceiverBound ??= { value: body.R + 1000 };
+      u.uReceiverId ??= { value: 1 };
+      const saved = this.renderer.getRenderTarget(), face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
+      try {
+        this.renderer.setRenderTarget(pass.target);
+        return compilePrograms(this.renderer, pass.quad._mesh, this.camera, null, { signal });
+      } finally {
+        this.renderer.setRenderTarget(saved, face, mip);
+      }
+    }, { signal, label: 'cloud-receiver-program' }).then(() => {
+      if (!signal.aborted) job.state = 'ready';
+    }).catch(error => {
+      if (!signal.aborted) { job.state = 'failed'; job.error = String(error); }
+      controller.abort();
+    });
   }
 
   prefetchCloudLightingPrograms() {
@@ -437,6 +498,8 @@ export class GameLegacyPipeline {
   }
 
   dispose() {
+    this.cloudReceiverPreparation?.controller.abort();
+    this.cloudReceiverPreparation = null;
     this.cloudPrograms.dispose();
     this.preparations.dispose();
     this.stopFramePacing();
