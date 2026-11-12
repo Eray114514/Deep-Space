@@ -115,6 +115,36 @@ export class CloudLightBatchRenderer {
     this.base=this.legacyRadiance?make('base'):null;
     this.metadataMaterial=this.fusedDensity?null:make('metadata',0,true);
     this.lightMaterial=make('beams',1);this.compose=make('compose',2);
+    const repDepthFrag=/* glsl */`
+      uniform sampler2D tPageOpacity,tPage0,tPage1,tPage2,tPage3;
+      uniform ivec2 uPageSize;
+      uniform int uPageTilesX,uPageMetaColumns,uBatchStart,uBatchCount;
+      int pageSlot(ivec2 pixel){ivec2 tile=pixel/16;return tile.y*uPageTilesX+tile.x-uBatchStart;}
+      ivec2 pageMetadataPixel(int slot,ivec2 pixel){return ivec2(slot%uPageMetaColumns,slot/uPageMetaColumns)*16+pixel%16;}
+      void main(){
+        ivec2 pixel=ivec2(gl_FragCoord.xy);
+        int slot=pageSlot(pixel);
+        if(slot<0||slot>=uBatchCount||texelFetch(tPageOpacity,pixel,0).r<=0.0)discard;
+        ivec2 cell=pageMetadataPixel(slot,pixel);
+        vec4 g0=texelFetch(tPage0,cell,0),g1=texelFetch(tPage1,cell,0);
+        vec4 g2=texelFetch(tPage2,cell,0),g3=texelFetch(tPage3,cell,0);
+        float repT=0.25*(g0.z+g1.z+g2.y+g3.y);
+        gl_FragColor=vec4(repT,max(0.0,g3.w-g0.x),g0.x,g3.w);
+      }`;
+    if(!this.fusedDensity) {
+      const rm=new THREE.ShaderMaterial({
+        uniforms:{...material.uniforms,...this.page},
+        defines:{...material.defines,PAGE_MODE:2},
+        vertexShader:cloudLightBatchVertex,
+        fragmentShader:repDepthFrag,
+        depthTest:false,depthWrite:false,blending:THREE.NoBlending,side:THREE.DoubleSide,
+      });
+      const repTag=`cloud-batch-${this.executorCacheId}-repDepth`;
+      rm.customProgramCacheKey=()=>repTag;
+      rm.name='cloud-batch-repDepth';
+      this.materials.push(rm);
+      this.repDepthMaterial=rm;
+    } else this.repDepthMaterial=null;
     if(this.quadGeometry)return;
     this.quadGeometry=new THREE.PlaneGeometry(2,2);
     this.tileGeometry=new THREE.InstancedBufferGeometry();
@@ -137,7 +167,7 @@ export class CloudLightBatchRenderer {
     if(this.mesh)this.mesh.geometry=null;
   }
 
-  prepareAsync(renderer,camera,sourceMesh,output) {
+  prepareAsync(renderer,camera,sourceMesh,output,repDepthTarget=null) {
     if(this.disposed||this.plan.direct||!this.targets.length)return Promise.resolve(false);
     if(this.preparation)return this.preparation;
     const gl=renderer.getContext(),parallel=gl.getExtension('KHR_parallel_shader_compile');
@@ -153,7 +183,8 @@ export class CloudLightBatchRenderer {
       for(const [target,material,kind] of [...(this.rays?[[this.rays,this.ray,'mesh']]:[]),
         [this.frame,this.prepare,this.rays?'quad':'mesh'],[this.tileMask,this.reduce,'quad'],
         ...(this.base?[[output,this.base,'quad']]:[]),...(this.metadata?[[this.metadata,this.metadataMaterial,'tiles']]:[]),
-        [this.light,this.lightMaterial,'tiles'],[output,this.compose,'tiles']]) {
+        [this.light,this.lightMaterial,'tiles'],[output,this.compose,'tiles'],
+        ...(repDepthTarget&&this.repDepthMaterial?[[repDepthTarget,this.repDepthMaterial,'tiles']]:[])]) {
         renderer.setRenderTarget(target);
         if(kind==='quad')this.quad.material=material;
         if(kind==='tiles')this.tileMesh.material=material;
@@ -204,7 +235,7 @@ export class CloudLightBatchRenderer {
     }
   }
 
-  render(renderer,camera,sourceMesh,output,phase=null) {
+  render(renderer,camera,sourceMesh,output,phase=null,repDepthTarget=null) {
     if(this.disposed||this.plan.direct||!this.targets.length)return false;
     const {width,height,batchTiles,tileCount,tilesX,stripe}=this.plan;
     const stream=stripe&&!phase?renderer.getContext():null;
@@ -242,6 +273,9 @@ export class CloudLightBatchRenderer {
       if(!phase||stage==='clear') {
         if(this.base)draw(output,this.base);
         else {renderer.setRenderTarget(output);renderer.clear(true,false,false);}
+        if(!phase&&repDepthTarget&&this.repDepthMaterial) {
+          renderer.setRenderTarget(repDepthTarget);renderer.clear(true,false,false);
+        }
       }
       const first=phase?phase.start??tileCount:0;
       const end=phase?Math.min(first+batchTiles,tileCount):tileCount;
@@ -256,6 +290,7 @@ export class CloudLightBatchRenderer {
         if(!phase||stage==='beams')draw(this.light,this.lightMaterial,'tiles',true,count*4);
         if(!phase||stage==='compose') {
           draw(output,this.compose,'tiles',false,count);
+          if(!phase&&repDepthTarget&&this.repDepthMaterial)draw(repDepthTarget,this.repDepthMaterial,'tiles',false,count);
           // Release the completed stripe to the GPU command stream before
           // building the next one. The frame still publishes as a whole.
           stream?.flush();

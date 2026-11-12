@@ -75,6 +75,20 @@ export class VolumetricPass extends Pass {
     this.width = 1;
     this.height = 1;
     this.current = target(1, 1, 'volume.current');
+    this.repDepth = new THREE.WebGLRenderTarget(1, 1, {
+      type: THREE.FloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    this.repDepth.texture.name = 'volume.repDepth';
+    this.repDepth.texture.generateMipmaps = false;
+    this.latestResolvedTexture = null;
+    this.latestRepDepthTexture = null;
+    this.latestRepDepthMode = 0;
+    this.externalTaaActive = false;
     this.historyA = target(1, 1, 'volume.historyA', true);
     this.historyB = target(1, 1, 'volume.historyB', true);
     this.historyRead = this.historyA;
@@ -107,6 +121,16 @@ export class VolumetricPass extends Pass {
         tHistory: { value: this.historyRead.texture },
         tSceneDepth: { value: null },
         tHistoryDepth: { value: this.historyRead.depthTexture },
+        tRepDepth: { value: null },
+        uRepDepthMode: { value: 0 },
+        uExternalTaaActive: { value: 0 },
+        uWeatherAdvectValid: { value: 0 },
+        uWeatherWindDeltaRad: { value: 0 },
+        uBodyRadius: { value: 6000000 },
+        uCurBodyInv: { value: new THREE.Matrix3() },
+        uPrevBodyRot: { value: new THREE.Matrix3() },
+        uCurBodyCenter: { value: new THREE.Vector3() },
+        uPrevBodyCenter: { value: new THREE.Vector3() },
         uCameraFar: { value: camera.far },
         uHistoryValid: { value: 0 },
         uDepthReady: { value: 0 },
@@ -128,12 +152,18 @@ export class VolumetricPass extends Pass {
         }`,
       fragmentShader: /* glsl */`
         precision highp float;
-        uniform sampler2D tCurrent, tHistory, tSceneDepth, tHistoryDepth;
-        uniform float uCameraFar;
+        uniform sampler2D tCurrent, tHistory, tSceneDepth, tHistoryDepth, tRepDepth;
+        uniform float uCameraFar, uRepDepthMode, uExternalTaaActive;
+        uniform float uWeatherAdvectValid, uWeatherWindDeltaRad, uBodyRadius;
         uniform float uHistoryValid, uDepthReady, uStationaryHistory, uMotion, uRadius;
-        uniform vec3 uCenter, uNavDelta;
+        uniform vec3 uCenter, uNavDelta, uCurBodyCenter, uPrevBodyCenter;
         uniform mat4 uInvProjection, uCameraWorld, uPrevViewProjection;
-        uniform mat3 uCurrentToPrevious;
+        uniform mat3 uCurrentToPrevious, uCurBodyInv, uPrevBodyRot;
+
+        vec3 rotateCloudLocalY(vec3 v, float angle) {
+          float c = cos(angle), s = sin(angle);
+          return vec3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
+        }
         varying vec2 vUv;
 
         ${volumeHistoryGLSL}
@@ -160,12 +190,25 @@ export class VolumetricPass extends Pass {
           vec2 hit = sphereHits(rayOrigin, uRadius, dirWorld);
 
           vec2 prevUv = vec2(-2.0);
-          if (hit.y > 0.0) {
-            // Outside: the near shell is a good stable reprojection surface.
-            // Inside: bias into the volume instead of using the far boundary.
+          vec2 repInfo = uRepDepthMode > 0.5 ? texture2D(tRepDepth, vUv).rg : vec2(0.0);
+          float repSpreadConfidence = uRepDepthMode > 0.5 && repInfo.x > 0.0
+            ? mix(1.0, 0.52, smoothstep(4500.0, 24000.0, repInfo.y))
+            : 1.0;
+          if (hit.y > 0.0 || repInfo.x > 0.0) {
             float nearT = max(hit.x, 0.0);
-            float t = hit.x > 0.0 ? nearT : mix(nearT, hit.y, 0.42);
-            vec3 prevRelative = uCurrentToPrevious * (rayOrigin + dirWorld * t) + uNavDelta;
+            float t = (uRepDepthMode > 0.5 && repInfo.x > 0.0)
+              ? repInfo.x
+              : (hit.x > 0.0 ? nearT : mix(nearT, hit.y, 0.42));
+            vec3 curPoint = rayOrigin + dirWorld * t;
+            vec3 prevRelative = uCurrentToPrevious * curPoint + uNavDelta;
+            if (uWeatherAdvectValid > 0.5 && abs(uWeatherWindDeltaRad) > 1e-8) {
+              vec3 localPos = uCurBodyInv * (curPoint - uCurBodyCenter);
+              float alt = max(0.0, length(localPos) - uBodyRadius);
+              float shear = mix(1.0, 1.25, smoothstep(2200.0, 4200.0, alt))
+                + 0.40 * smoothstep(5500.0, 8000.0, alt);
+              vec3 advectedLocal = rotateCloudLocalY(localPos, -uWeatherWindDeltaRad * shear);
+              prevRelative = uPrevBodyRot * advectedLocal + uPrevBodyCenter;
+            }
             vec4 prevClip = uPrevViewProjection * vec4(prevRelative, 1.0);
             if (prevClip.w > 0.0) prevUv = prevClip.xy / prevClip.w * 0.5 + 0.5;
           }
@@ -179,9 +222,10 @@ export class VolumetricPass extends Pass {
           vec4 hist = volumeHistorySample(prevUv, currentDepth, uvMotion, depthSupport);
           if (depthSupport < 1e-6) { gl_FragColor = cur; return; }
           float alphaReject = 1.0 - smoothstep(0.04, 0.34, abs(hist.a - cur.a));
-          float stable = exp(-uvMotion * 48.0) * alphaReject;
+          float stable = exp(-uvMotion * 48.0) * alphaReject * repSpreadConfidence;
+          float maxFeedback = uExternalTaaActive > 0.5 ? 0.56 : 0.86;
           float historyWeight = uHistoryValid * inside * stable
-            * mix(0.86, 0.18, clamp(uMotion, 0.0, 1.0));
+            * mix(maxFeedback, 0.16, clamp(uMotion, 0.0, 1.0));
           // Current samples always dominate newly revealed edges.
           historyWeight *= smoothstep(0.0, 0.12, cur.a + hist.a);
           historyWeight *= depthSupport;
@@ -347,7 +391,7 @@ export class VolumetricPass extends Pass {
       claim.state='preparing';
       const batch=this.configureLightBatch(renderer,material);
       if(!batch||batch.plan.direct)return false;
-      return batch.programsReady||batch.prepareAsync(renderer,this.camera,mesh,this.current);
+      return batch.programsReady||batch.prepareAsync(renderer,this.camera,mesh,this.current,this.repDepth);
     },{isCurrent:current,label:'near-cloud-batch-prefetch'}).then(ready=>{
       if(current())claim.state=ready?'ready':'unavailable';
     }).catch(error=>{
@@ -404,12 +448,12 @@ export class VolumetricPass extends Pass {
     if(this.requirePreparedLightBatch&&!this.hasPreparedLightBatch(mesh,material))return false;
     if(!this.configureLightBatch(renderer,material))return refuse('capabilities');
     if(!this.lightBatch.plan.direct&&!this.lightBatch.programsReady) {
-      if(!this.lightBatch.preparationError)this.lightBatch.prepareAsync(renderer,this.camera,mesh,this.current);
+      if(!this.lightBatch.preparationError)this.lightBatch.prepareAsync(renderer,this.camera,mesh,this.current,this.repDepth);
       this.lightBatchStatus={reason:this.lightBatch.preparationError?'preparation-error':'preparing',submitted:false,
         error:this.lightBatch.preparationError,plan:this.lightBatch.plan};
       return false;
     }
-    const submitted=this.lightBatch.render(renderer,this.camera,mesh,this.current);
+    const submitted=this.lightBatch.render(renderer,this.camera,mesh,this.current,null,this.repDepth);
     this.lightBatchStatus={reason:submitted?'same-frame':'budget',submitted,plan:this.lightBatch.plan};
     return submitted;
   }
@@ -560,6 +604,7 @@ export class VolumetricPass extends Pass {
     }
     this.width=nextWidth;this.height=nextHeight;
     this.current.setSize(this.width, this.height);
+    this.repDepth.setSize(this.width, this.height);
     resizeVolumeHistoryTarget(this.historyA,this.width,this.height);
     resizeVolumeHistoryTarget(this.historyB,this.width,this.height);
     this.compositeMaterial.uniforms.uTexel.value.set(1 / this.width, 1 / this.height);
@@ -674,7 +719,26 @@ export class VolumetricPass extends Pass {
       u.uCameraFar.value = this.camera.far;
       u.tCurrent.value = this.current.texture;
       u.tHistory.value = this.historyRead.texture;
+      const batchRepValid = !splitDraw && Boolean(this.lightBatchStatus?.submitted && this.lightBatch?.repDepthMaterial);
+      const farRepValid = splitDraw && Boolean(this.farSplit?.rayTarget
+        && (this.farSplit.lastRoute === 'pointDirect' || this.farSplit.lastRoute === 'combine'));
+      const repTex = batchRepValid ? this.repDepth.texture : farRepValid ? this.farSplit.rayTarget.texture : null;
+      const repMode = batchRepValid ? 1 : farRepValid ? 2 : 0;
+      u.tRepDepth.value = repTex;
+      u.uRepDepthMode.value = repMode;
+      u.uExternalTaaActive.value = this.externalTaaActive ? 1 : 0;
+
       const correspondence = this.frameState.mapBody();
+      const weatherAdvect = this.frameState.mapWeatherAdvection();
+      u.uWeatherAdvectValid.value = weatherAdvect ? 1 : 0;
+      if (weatherAdvect && this.activePlanet) {
+        u.uWeatherWindDeltaRad.value = this.frameState.weatherWindDeltaRad;
+        u.uBodyRadius.value = this.activePlanet.R || 6000000;
+        u.uCurBodyInv.value.copy(this.frameState.curBodyInv);
+        u.uPrevBodyRot.value.copy(this.frameState.prevBodyRot);
+        u.uCurBodyCenter.value.copy(this.frameState.curBodyCenter);
+        u.uPrevBodyCenter.value.copy(this.frameState.prevBodyCenter);
+      }
       volumeMaterial = this.activePlanet?.volCloudMesh.material;
       const sameRepresentation = volumeMaterial === this.previousVolumeMaterial
         && volumeMaterial?.version === this.previousVolumeVersion && this.radius === this.previousRadius
@@ -692,6 +756,9 @@ export class VolumetricPass extends Pass {
       u.uPrevViewProjection.value.copy(this.frameState.previous.viewProjection);
       renderer.setRenderTarget(this.historyWrite);
       this.profilePhase('volume-resolve',()=>this.resolveQuad.render(renderer));
+      this.latestResolvedTexture = this.historyWrite.texture;
+      this.latestRepDepthTexture = repTex;
+      this.latestRepDepthMode = repMode;
 
       this.compositeMaterial.uniforms.tBase.value = readBuffer.texture;
       this.compositeMaterial.uniforms.tVolume.value = this.historyWrite.texture;
@@ -742,6 +809,10 @@ export class VolumetricPass extends Pass {
     for(const columns of this.columnMaps.values())columns.dispose();
     this.columnMaps.clear();this.columnRelease.clear();
     this.current.dispose();
+    this.repDepth.dispose();
+    this.latestResolvedTexture = null;
+    this.latestRepDepthTexture = null;
+    this.latestRepDepthMode = 0;
     this.historyA.dispose();
     this.historyB.dispose();
     this.historyValid = false;

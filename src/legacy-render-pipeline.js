@@ -22,6 +22,7 @@ import {withPreparedShadows} from './render-shadow-state.js';
 import { RenderFrameState } from './render-frame-state.js';
 import { compilePrograms } from './program-preparation.js';
 import { CloudProgramPreparation } from './cloud-program-preparation.js';
+import { TemporalAAPass } from './temporal-aa-pass.js';
 
 function aliasUniforms(uniforms, aliases) {
   for (const [alias, original] of Object.entries(aliases)) {
@@ -45,6 +46,7 @@ export class GameLegacyPipeline {
     foregroundLayer = 1,
     interiorLayer = null,
     realisticGrade = false,
+    temporalAA = false,
   } = {}) {
     this.renderer = renderer;
     this.framePacer = null;
@@ -80,6 +82,7 @@ export class GameLegacyPipeline {
       this.composer.renderTarget1.dispose();
       this.composer.renderTarget2.dispose();
       this.volumePass?.releaseTargets();
+      this.temporalAA?.releaseTargets();
       for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
       this.releaseCloudLightPrograms();
       this.cloudSurfaceShadow.dispose();
@@ -126,6 +129,11 @@ export class GameLegacyPipeline {
     );
     this.composer.addPass(this.foregroundPass);
 
+    this.temporalAA = new TemporalAAPass(camera, this.frameState, { foregroundLayer });
+    this.temporalAA.sceneDepthSource = this.atmospherePass;
+    this.temporalAA.volumeSource = this.volumePass;
+    this.composer.addPass(this.temporalAA);
+
     this.rift = new ShaderPass(RiftDistortionShader);
     this.rift.enabled = false;
     aliasUniforms(this.rift.uniforms, {
@@ -153,27 +161,61 @@ export class GameLegacyPipeline {
       ? new SMAAPass(1, 1)
       : null;
     if (this.smaa) this.composer.addPass(this.smaa);
+    if (temporalAA) this.setTemporalAAEnabled(true);
     renderer.info.autoReset = false;
   }
 
+  setTemporalAAEnabled(enabled, { debugMode } = {}) {
+    const next = Boolean(enabled);
+    const changed = next !== this.temporalAA.enabled;
+    this.temporalAA.enabled = next;
+    this.frameState.jitterEnabled = next;
+    if (this.volumePass) this.volumePass.externalTaaActive = next;
+    if (this.smaa) this.smaa.enabled = !next;
+    if (debugMode !== undefined) this.temporalAA.setDebugMode(debugMode);
+    if (changed) this.invalidateTemporalHistory('taa-toggle');
+    return this.temporalState();
+  }
+
+  temporalState() {
+    return {
+      enabled: Boolean(this.temporalAA?.enabled),
+      debugMode: this.temporalAA?.debugMode || 'off',
+      jitterEnabled: Boolean(this.frameState.jitterEnabled),
+      jitterPixels: this.frameState.previous.jitterPixels.toArray(),
+      historyValid: Boolean(this.temporalAA?.historyValid),
+      sequence: this.frameState.sequence,
+      epoch: this.frameState.epoch,
+      reason: this.frameState.reason,
+      exposure: this.frameState.previous.exposure,
+    };
+  }
+
   setSize(width, height, dpr = 1) {
-    this.frameState.invalidate('resize');
+    this.invalidateTemporalHistory('resize');
     this.composer.setPixelRatio(dpr);
     this.composer.setSize(width, height);
   }
 
   setVolumeScale(scale) {
     if (!this.volumePass) return;
-    this.volumePass.scale = THREE.MathUtils.clamp(scale, 0.3, 1);
+    const next = THREE.MathUtils.clamp(scale, 0.3, 1);
+    if (next !== this.volumePass.scale) this.invalidateTemporalHistory('volume-scale');
+    this.volumePass.scale = next;
   }
 
   setActiveAtmosphere(planet, nav) {
     this.atmospherePass.setActivePlanet(planet, nav);
   }
 
-  invalidateVolumeHistory(reason = 'explicit') {
+  invalidateTemporalHistory(reason = 'explicit') {
     this.frameState.invalidate(reason);
     this.volumePass?.resetHistory();
+    this.temporalAA?.resetHistory();
+  }
+
+  invalidateVolumeHistory(reason = 'explicit') {
+    this.invalidateTemporalHistory(reason);
   }
 
   // All synchronous views of this renderer share one admission and completion
@@ -288,10 +330,23 @@ export class GameLegacyPipeline {
     let failed=false;
     const target = this.renderer.getRenderTarget();
     const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
-    this.frameState.begin(this.camera, origin, { context, timeEpoch, body: this.volumePass?.activePlanet });
+    const bufW = this.composer.readBuffer?.width || 0;
+    const bufH = this.composer.readBuffer?.height || 0;
+    this.frameState.begin(this.camera, origin, {
+      context,
+      timeEpoch,
+      body: this.volumePass?.activePlanet || this.atmospherePass?.activePlanet,
+      exposure: this.renderer?.toneMappingExposure ?? 1,
+      jitterWidth: !privateFrame && this.temporalAA?.enabled ? bufW : 0,
+      jitterHeight: !privateFrame && this.temporalAA?.enabled ? bufH : 0,
+    });
+    let jitterApplied = false;
     try {
       try {
         if (!privateFrame && rigidObjects) this.frameState.captureRigidObjects(rigidObjects, this.scene);
+        if (!privateFrame && this.temporalAA?.enabled) {
+          jitterApplied = this.frameState.applyCameraJitter(this.camera);
+        }
         if(batchOnly)this.volumePass.requirePreparedLightBatch=true;
         const body = this.volumePass?.activePlanet;
         const localEye = body?.volCloudMat?.uniforms.uCameraLocal;
@@ -314,6 +369,7 @@ export class GameLegacyPipeline {
       } catch(error) {
         failed=true;throw error;
       } finally {
+        if (jitterApplied) this.frameState.restoreCameraProjection(this.camera);
         if(batchOnly)this.volumePass.requirePreparedLightBatch=false;
         if (this.volumePass?.farSplit) this.volumePass.farSplit.plan = null;
         try {this.renderer.setRenderTarget(target, face, mip);}
@@ -324,6 +380,7 @@ export class GameLegacyPipeline {
         // and sampling phase must never become the previous player frame.
         this.frameState.abort('private-prewarm');
         this.volumePass?.resetHistory();
+        this.temporalAA?.resetHistory();
       } else {
         this.frameState.commit();
         this.requireDirectCloudPreparation=false;
@@ -331,6 +388,7 @@ export class GameLegacyPipeline {
     } catch (error) {
       this.frameState.abort();
       this.volumePass?.resetHistory();
+      this.temporalAA?.resetHistory();
       if(error===lightBatchNoLongerPrepared) {
         this.requireDirectCloudPreparation=true;
         return false;
@@ -512,6 +570,7 @@ export class GameLegacyPipeline {
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.composer.dispose();
     this.volumePass?.dispose();
+    this.temporalAA?.dispose();
     this.atmospherePass.dispose();
     this.parkedInteriorPass?.dispose?.();
     this.foregroundPass.dispose?.();

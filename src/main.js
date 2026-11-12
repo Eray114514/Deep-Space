@@ -555,6 +555,8 @@ const cloudResourceManager = configureCloudResourceManager({
 const CLOUD_FAR_SPLIT = qs.get('cloudsplit') !== '0';
 const CLOUD_PROGRAM_PREP = qs.get('cloudprograms') !== '0';
 const CLOUD_LIGHT_BATCHES = qs.get('cloudbatches') !== '0';
+const TEMPORAL_AA_INITIAL = qs.get('taa') === '1';
+const TEMPORAL_AA_DEBUG = qs.get('taadebug') || 'off';
 const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
   cloudProgramPreparation: CLOUD_PROGRAM_PREP,
@@ -567,7 +569,9 @@ const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   foregroundLayer: SHIP_FOREGROUND_LAYER,
   interiorLayer: RENDER_LOOK_NEXT ? SHIP_INTERIOR_LAYER : null,
   realisticGrade: RENDER_LOOK_NEXT,
+  temporalAA: TEMPORAL_AA_INITIAL,
 });
+if (TEMPORAL_AA_DEBUG !== 'off') nodePipeline.temporalAA?.setDebugMode(TEMPORAL_AA_DEBUG);
 const volumePass = nodePipeline.volumePass;
 if (volumePass && CLOUD_LIGHT_BATCHES) {
   volumePass.setLightBatchesEnabled(true, {
@@ -4979,6 +4983,8 @@ window.NMS = {
   },
   resetPerformanceStats,
   resetAdaptiveQuality,
+  setTemporalAA: (enabled, options = {}) => nodePipeline.setTemporalAAEnabled(enabled, options),
+  temporalState: () => nodePipeline.temporalState(),
   setAdaptiveQualityLocked(value = true) {
     adaptiveQualityLocked = !!value;
     return adaptiveQualityLocked;
