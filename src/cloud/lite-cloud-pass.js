@@ -63,14 +63,14 @@ const marchShader = /* glsl */`
     // Mesoscale regimes inside a weather system: closed decks with cracks
     // alternate with broken, open-cell fields instead of one uniform texture.
     float regime = textureLod(uNoise, q.yzx / 310000.0 + 0.61, 0.0).b;
-    return c * mix(0.5, 1.0, smoothstep(0.32, 0.62, regime));
+    return c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime));
   }
 
   // lod 0: light march / far field. 1: view march. 2: view march near camera.
   float cloudDensity(vec3 p, float cover, int lod, float near) {
     float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
     if (h < 0.0 || h > 1.0) return 0.0;
-    float cov = cover * 0.92;                       // never fully closed: the deck keeps its pores
+    float cov = cover * 0.86;                       // never fully closed: the deck keeps its pores
     if (cov < 0.02) return 0.0;
     vec3 q = uCloudMat * p;
     // Worley-led closed cells: values fall along cell walls, which opens a
@@ -80,13 +80,19 @@ const marchShader = /* glsl */`
     float thick = textureLod(uNoise, q.zxy / 149000.0 + 0.37, 0.0).b;
     // Beyond ~170 km single cells are a few pixels: lean on the wider octave
     // so the far field reads as soft sheets, not confetti.
-    base = lod > 0 ? base * 0.72 + wide * 0.28 : base * 0.35 + wide * 0.65;
+    if (lod > 0) {
+      // Break every ~9 km cell into 2-3 km cumulus. Seen from the ground a
+      // sky needs many small clouds receding to the horizon; a few huge
+      // blobs overhead read as a ceiling.
+      float small = textureLod(uNoise, q.zxy / 8300.0 + 0.29, 0.0).r;
+      base = base * 0.46 + wide * 0.2 + small * 0.34;
+    } else base = base * 0.35 + wide * 0.65;
     base = sat((base - 0.22) / 0.6);
     // Stratocumulus profile: rounded base, cloud-top height driven by the
     // slow thickness field and by each cell (cell cores bulge upward).
-    float top = mix(0.5, 1.0, smoothstep(0.35, 0.75, thick)) * mix(0.55, 1.0, base);
+    float top = mix(0.42, 1.0, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
     if (lod > 0) top *= 0.82 + 0.18 * textureLod(uNoise, q / 7300.0, 0.0).g;   // cauliflower tops
-    float profile = smoothstep(0.0, 0.16, h) * smoothstep(top, top * 0.42, h);
+    float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.7, h);   // flat base, full body
     float d = sat(remap(base * profile, 1.0 - cov, 1.0, 0.0, 1.0));
     if (d <= 0.0) return 0.0;
     if (lod > 0) {
@@ -118,92 +124,147 @@ const marchShader = /* glsl */`
 
   void main() {
     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    gAux = vec4(40.0, 40.0, 0.0, 1.0);
+    gAux = vec4(1e9, 1e9, 0.0, 1.0);
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
     vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
     vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
     vec3 ro = uCameraLocal;
-
-    // Shell interval for a camera above, inside or below the layer.
-    float r0 = length(ro), t0 = -1.0, t1 = -1.0;
-    vec2 outer = shellHits(ro, rd, uShellTop), inner = shellHits(ro, rd, uShellBase);
+    float r0 = length(ro);
     bool ground = shellHits(ro, rd, uGroundR - 3000.0).x > 0.0;
+    vec3 sunDirection = normalize(uSunDirection0);
+    vec3 irradiance = uSunColor0 * uSunEnergy0 * uRadianceScale;
+    float mu = dot(rd, sunDirection);
+    vec3 sunDirection1 = normalize(uSunDirection1);
+    vec3 irradiance1 = uSunColor1 * uSunEnergy1 * uRadianceScale;
+    float mu1 = dot(rd, sunDirection1);
+
+    // ---- High cirrus: one thin sheet well above the cumulus layer. It costs
+    // a handful of fetches and gives the sky a second, clearly higher storey.
+    float cirrusRadius = uShellTop + 4500.0, cirrusT = -1.0, cirrusA = 0.0;
+    vec3 cirrusL = vec3(0.0);
+    bool cirrusFront = r0 >= cirrusRadius;
+    vec2 cirrusHit = shellHits(ro, rd, cirrusRadius);
+    if (cirrusFront) { if (cirrusHit.x > 0.0) cirrusT = cirrusHit.x; }
+    else if (!ground) cirrusT = cirrusHit.y;
+    if (cirrusT > 0.0) {
+      vec3 p = ro + rd * cirrusT;
+      vec3 q = uCloudMat * p;
+      float patches = smoothstep(0.5, 0.8, textureLod(uNoise, q.zxy / 230000.0 + 0.2, 0.0).b);
+      if (patches > 0.0) {
+        float warp = textureLod(uNoise, q / 41000.0, 0.0).b;
+        vec3 streak = q * vec3(1.0 / 16000.0, 1.0 / 16000.0, 1.0 / 90000.0) + warp * 0.9;
+        float fibre = textureLod(uNoise, streak, 0.0).g * 0.6 + textureLod(uNoise, streak * 2.7 + 0.4, 0.0).r * 0.4;
+        // Past ~60 km single fibres are sub-pixel and would sparkle; let the
+        // sheet dissolve instead (cirrus is a near-sky layer in this pass).
+        fibre = mix(fibre, 0.4, smoothstep(50000.0, 180000.0, cirrusT));
+        float a = smoothstep(0.52, 0.86, fibre) * patches * 0.36;
+        // A thin sheet thickens toward the horizon with the slant path.
+        float slant = max(abs(dot(rd, p / length(p))), 0.16);
+        cirrusA = (1.0 - pow(1.0 - a, 1.0 / slant)) * (1.0 - smoothstep(350000.0, 900000.0, cirrusT) * 0.6);
+        float day = smoothstep(-0.12, 0.12, dot(p / length(p), sunDirection));
+        cirrusL = (irradiance * sunAt(p, sunDirection) * mix(hgPhase(mu, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
+          + irradiance * vec3(0.045, 0.062, 0.095) * (0.25 + 0.75 * day)) * uCloudTint;
+      }
+    }
+
+    // ---- Cumulus shell: interval for a camera above, inside or below it.
+    float T = 1.0, weight = 0.0, weighted = 0.0, tFront = -1.0, tBack = 0.0;
+    vec3 L = vec3(0.0);
+    float t0 = -1.0, t1 = -1.0;
+    vec2 outer = shellHits(ro, rd, uShellTop), inner = shellHits(ro, rd, uShellBase);
     if (r0 > uShellTop) { if (outer.y > 0.0) { t0 = max(outer.x, 0.0); t1 = inner.x > 0.0 ? inner.x : outer.y; } }
     else if (r0 > uShellBase) { t0 = 0.0; t1 = inner.x > 0.0 ? inner.x : outer.y; }
     else if (!ground) { t0 = inner.y; t1 = outer.y; }
-    if (t1 <= t0) return;
-    t1 = min(t1, t0 + 320000.0);
-    float span = t1 - t0;
-
-    // Coverage varies over tens of kilometres: five atlas samples along the
-    // ray replace a full atlas lookup in every march and light step.
-    float cover[5];
-    float coverMax = 0.0;
-    for (int i = 0; i < 5; i++) {
-      cover[i] = coverageAt(ro + rd * (t0 + span * float(i) * 0.25));
-      coverMax = max(coverMax, cover[i]);
-    }
-    if (coverMax < 0.03) return;
-
-    vec3 sunDirection = normalize(uSunDirection0);
-    vec3 irradiance = uSunColor0 * uSunEnergy0 * uRadianceScale;
-    vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
-    vec3 sunFar = sunAt(ro + rd * t1, sunDirection);
-    float mu = dot(rd, sunDirection);
-
-    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.61803);
-    float dmin = max(min(min(50.0 + 0.004 * t0, span / 90.0), 300.0), 20.0);
-    float t = t0 + dmin * jitter;
-    float T = 1.0, weight = 0.0, weighted = 0.0, tFront = -1.0, tBack = t0;
-    vec3 L = vec3(0.0);
-    for (int i = 0; i < MARCH_STEPS; i++) {
-      if (t > t1) break;
-      float dt = max(dmin, 0.055 * (t - t0));
-      vec3 p = ro + rd * t;
-      float s = sat((t - t0) / span) * 4.0;
-      int cell = int(min(floor(s), 3.0));
-      float cov = mix(cover[cell], cover[cell + 1], s - float(cell));
-      float near = sat(1.0 - t / 28000.0);
-      float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, t > 170000.0 ? 0 : near > 0.0 ? 2 : 1, near);
-      if (d > 0.002) {
-        if (tFront < 0.0) tFront = t;
-        float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
-        // Optical depth toward the sun: four growing steps.
-        float tau = 0.0, ls = 320.0;
-        vec3 pl = p;
-        for (int j = 0; j < 4; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0) * ls; ls *= 1.8; }
-        tau *= uExtinction;
-        // Multi-scattering octaves: each order loses extinction and
-        // anisotropy. Gives silver linings and keeps thick cores from going black.
-        float scatter = 0.0, a = 1.0;
-        for (int k = 0; k < 4; k++) {
-          scatter += a * exp(-tau * a) * mix(hgPhase(mu, 0.82 * a), hgPhase(mu, -0.25 * a), 0.28);
-          a *= 0.48;
-        }
-        scatter *= mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15);
-        vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span));
-        float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection));
-        vec3 ambient = irradiance * mix(vec3(0.012, 0.017, 0.028), vec3(0.045, 0.062, 0.095), h)
-          * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
-        vec3 source = (sun * scatter * uScatterGain + ambient) * uCloudTint;
-        float Ti = exp(-d * uExtinction * dt);
-        float w = T * (1.0 - Ti);
-        L += w * source; weighted += w * t; weight += w;
-        T *= Ti;
-        tBack = t;
-        if (T < 0.008) { T = 0.0; break; }
+    if (t1 > t0) {
+      t1 = min(t1, t0 + 320000.0);
+      float span = t1 - t0;
+      // Coverage varies over tens of kilometres: five atlas samples along the
+      // ray replace a full atlas lookup in every march and light step.
+      float cover[5];
+      float coverMax = 0.0;
+      for (int i = 0; i < 5; i++) {
+        cover[i] = coverageAt(ro + rd * (t0 + span * float(i) * 0.25));
+        coverMax = max(coverMax, cover[i]);
       }
-      t += dt;
+      if (coverMax >= 0.03) {
+        vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
+        vec3 sunFar = sunAt(ro + rd * t1, sunDirection);
+        float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.61803);
+        float dmin = max(min(min(50.0 + 0.004 * t0, span / 90.0), 300.0), 20.0);
+        float t = t0 + dmin * jitter;
+        tBack = t0;
+        for (int i = 0; i < MARCH_STEPS; i++) {
+          if (t > t1) break;
+          float dt = max(dmin, 0.055 * (t - t0));
+          vec3 p = ro + rd * t;
+          float s = sat((t - t0) / span) * 4.0;
+          int cell = int(min(floor(s), 3.0));
+          float cov = mix(cover[cell], cover[cell + 1], s - float(cell));
+          float near = sat(1.0 - t / 28000.0);
+          float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, t > 170000.0 ? 0 : near > 0.0 ? 2 : 1, near);
+          if (d > 0.002) {
+            if (tFront < 0.0) tFront = t;
+            float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
+            // Optical depth toward the sun: four growing steps.
+            float tau = 0.0, ls = 320.0;
+            vec3 pl = p;
+            for (int j = 0; j < 4; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0) * ls; ls *= 1.8; }
+            tau *= uExtinction;
+            // Multi-scattering octaves: each order loses extinction and
+            // anisotropy. Gives silver linings and keeps thick cores from going black.
+            float scatter = 0.0, a = 1.0;
+            for (int k = 0; k < 4; k++) {
+              scatter += a * exp(-tau * a) * mix(hgPhase(mu, 0.82 * a), hgPhase(mu, -0.25 * a), 0.28);
+              a *= 0.48;
+            }
+            scatter *= mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15);
+            vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span));
+            if (uSunEnergy1 > 0.001) {
+              // The companion star reuses the primary's optical depth (they are
+              // rarely far apart in the sky) with its own phase and horizon.
+              float scatter1 = 0.0, a1 = 1.0;
+              for (int k = 0; k < 4; k++) {
+                scatter1 += a1 * exp(-tau * a1) * mix(hgPhase(mu1, 0.82 * a1), hgPhase(mu1, -0.25 * a1), 0.28);
+                a1 *= 0.48;
+              }
+              sun += irradiance1 * sunAt(p, sunDirection1) * scatter1 / max(scatter, 1e-4);
+            }
+            float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection));
+            vec3 ambient = irradiance * mix(vec3(0.012, 0.017, 0.028), vec3(0.045, 0.062, 0.095), h)
+              * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
+            // Bases sit in their own shadow; tops catch the sun.
+            vec3 source = (sun * scatter * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h)) + ambient) * uCloudTint;
+            float Ti = exp(-d * uExtinction * dt);
+            float w = T * (1.0 - Ti);
+            L += w * source; weighted += w * t; weight += w;
+            T *= Ti;
+            tBack = t;
+            if (T < 0.008) { T = 0.0; break; }
+          }
+          t += dt;
+        }
+      }
     }
-    if (weight < 1e-4) return;
+    if (weight < 1e-4 && cirrusA < 0.004) return;
 
-    // Air between the camera and the cloud. The scene behind already carries
+    // Merge the cirrus sheet in ray order.
+    float cirrusWeight = 0.0;
+    if (cirrusA >= 0.004) {
+      cirrusWeight = cirrusA * (cirrusFront ? 1.0 : T);
+      if (cirrusFront) L = cirrusL * cirrusA + L * (1.0 - cirrusA);
+      else L += T * cirrusL * cirrusA;
+      T *= 1.0 - cirrusA;
+      tFront = tFront < 0.0 ? cirrusT : min(tFront, cirrusT);
+      tBack = max(tBack, cirrusT);
+    }
+
+    // Air between the camera and the clouds. The scene behind already carries
     // its own full-path air, so only the cloud-covered fraction adds this.
     vec3 airRadiance, airTransmittance;
-    airIntegrate(ro, rd, 0.0, weighted / weight, airRadiance, airTransmittance);
+    airIntegrate(ro, rd, 0.0, (weighted + cirrusWeight * cirrusT) / max(weight + cirrusWeight, 1e-5), airRadiance, airTransmittance);
     gl_FragColor = vec4(airRadiance * (1.0 - T) + airTransmittance * L, T);
-    gAux = vec4(log2(1.0 + tFront), log2(1.0 + max(tBack, tFront + 1.0)), 0.0, 1.0);
+    gAux = vec4(tFront, max(tBack, tFront + 1.0), 0.0, 1.0);
   }`;
 
 const compositeShader = /* glsl */`
@@ -223,7 +284,7 @@ const compositeShader = /* glsl */`
       vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
       vec2 aux = texture2D(tCloudAux, vUv).xy;
-      float front = exp2(aux.x) - 1.0, back = exp2(aux.y) - 1.0;
+      float front = aux.x, back = aux.y;
       coverage = smoothstep(front, max(back, front + 1.0), distance);
     }
     gl_FragColor = vec4(base.rgb * mix(1.0, cloud.a, coverage) + cloud.rgb * coverage, base.a);
@@ -248,6 +309,10 @@ export class LiteCloudPass extends Pass {
     });
     this.target.textures[0].name = 'lite-cloud.radiance';
     this.target.textures[1].name = 'lite-cloud.depth-range';
+    // Metres need float32: half float quantised 200 km distances into ~2 km
+    // steps, which drew contour rings wherever terrain crossed the cloud layer.
+    this.target.textures[1].type = THREE.FloatType;
+    this.target.textures[1].minFilter = this.target.textures[1].magFilter = THREE.NearestFilter;
     // Share the atmosphere pass's uniform objects: one camera/planet/sun state.
     this.marchMaterial = new THREE.ShaderMaterial({
       name: 'Lite cloud march',
