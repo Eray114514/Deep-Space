@@ -1392,13 +1392,14 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float glitterBreak = 0.12 + 0.88 * smoothstep(0.48, 0.81,
             glitterField * 0.72 + gWaterFacetLight * 0.28);
           float glintPower = mix(1400.0, 180.0, gWaterRoughness);
-          float sunGlint = pow(sunDot, glintPower)
-            * mix(0.72, 0.24, gWaterRoughness) * min(uSunEnergy, 1.6)
-            * glitterBreak;
+          float sunGlint = sunDot > 1e-5
+            ? pow(sunDot, glintPower) * mix(0.72, 0.24, gWaterRoughness) * min(uSunEnergy, 1.6) * glitterBreak
+            : 0.0;
           float secondDot = max(dot(reflectionDir,
             normalize(vSecondarySunDirView)), 0.0);
-          float secondGlint = pow(secondDot, glintPower)
-            * mix(0.52, 0.18, gWaterRoughness) * min(uSecondarySunEnergy, 1.6);
+          float secondGlint = (secondDot > 1e-5 && uSecondarySunEnergy > 1e-5)
+            ? pow(secondDot, glintPower) * mix(0.52, 0.18, gWaterRoughness) * min(uSecondarySunEnergy, 1.6)
+            : 0.0;
           totalEmissiveRadiance += reflectedSky
             * (0.016 + gWaterShallow * 0.035
               + fresnel * (0.16 + uDay * 0.24))
@@ -1410,10 +1411,10 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           // The broad low-sun lobe stays chromatic while the much narrower
           // solar core remains bright. Separating them avoids a clipped white
           // pillar and preserves the warm path across individual wave facets.
-          float warmPath = (pow(sunDot, mix(18.0, 5.0, gWaterRoughness))
-              * 0.32 * glitterBreak
-            + pow(sunDot, 2.4) * 0.035
-              * smoothstep(0.38, 0.78, glitterField)) * uSunset;
+          float warmPath = (sunDot > 1e-5 && uSunset > 1e-4)
+            ? (pow(sunDot, mix(18.0, 5.0, gWaterRoughness)) * 0.32 * glitterBreak
+              + pow(sunDot, 2.4) * 0.035 * smoothstep(0.38, 0.78, glitterField)) * uSunset
+            : 0.0;
           vec3 reflectedSunColor = mix(uSunColor, vec3(1.0, 0.12, 0.018),
             uSunset * 0.9);
           sunGlint *= mix(1.0, 0.012, uSunset);

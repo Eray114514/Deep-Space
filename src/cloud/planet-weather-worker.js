@@ -37,9 +37,14 @@ self.onmessage = ({ data }) => {
       high.set([clamp(.5+w.highPotential/4),clamp(.5+surface/(2*surfaceRange)),
         w.convective,clamp((w.lclMeters-350)/3850)],k);
     }
-    const packed=buildProductionBands(d=>sampleWeather(system,rotate(d,hours*descriptor.angularSpeed),hours),128,descriptor.terrain,
-      {spin:hours*descriptor.angularSpeed,angularGuard:Math.abs(descriptor.angularSpeed)*data.frameHours});
-    const bands=packed.data,bounds=packed.bounds,candidates=packed.candidates;
-    self.postMessage({ token,hours,width,height,low,high,bands,wind,bounds,candidates },[low.buffer,high.buffer,bands.buffer,wind.buffer,bounds.buffer,candidates.buffer]);
+    const includeBands = data.includeBands !== false;
+    if (includeBands) {
+      const packed=buildProductionBands(d=>sampleWeather(system,rotate(d,hours*descriptor.angularSpeed),hours),128,descriptor.terrain,
+        {spin:hours*descriptor.angularSpeed,angularGuard:Math.abs(descriptor.angularSpeed)*data.frameHours});
+      const bands=packed.data,bounds=packed.bounds,candidates=packed.candidates;
+      self.postMessage({ token,hours,width,height,low,high,bands,wind,bounds,candidates },[low.buffer,high.buffer,bands.buffer,wind.buffer,bounds.buffer,candidates.buffer]);
+    } else {
+      self.postMessage({ token,hours,width,height,low,high,wind },[low.buffer,high.buffer,wind.buffer]);
+    }
   } catch(error) { self.postMessage({ token:data.token,hours:data.hours,error:String(error.stack||error) }); }
 };

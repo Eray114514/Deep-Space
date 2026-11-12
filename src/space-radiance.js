@@ -81,16 +81,22 @@ export function generateSpaceRadianceData(seed, width = 512, height = Math.round
       const warp = (fbm3(dx * 3.1 - 5.4, dy * 3.1 + 9.7, dz * 3.1 + 1.2,
         nSeed ^ 0x6ac1e743, 3) - 0.5) * 0.20;
       const signedPlane = dx * plane.x + dy * plane.y + dz * plane.z + warp;
-      const band = Math.exp(-Math.pow(Math.abs(signedPlane) / 0.115, 1.62));
-      const filament = fbm3(dx * 8.2 + 17.0, dy * 8.2 - 2.0, dz * 8.2 + 6.0,
-        nSeed ^ 0x2c9277b5, 4);
-      const dust = Math.pow(Math.max(0, 1 - Math.abs(signedPlane) / 0.075), 1.7)
-        * Math.pow(fbm3(dx * 13.0, dy * 13.0, dz * 13.0,
-          nSeed ^ 0x51ed270b, 3), 2.2);
+      const absPlane = Math.abs(signedPlane);
+      const band = Math.exp(-Math.pow(absPlane / 0.115, 1.62));
       const floor = 0.72 + low * 0.90;
-      const galaxy = band * (0.28 + filament * filament * 1.12) * (1 - dust * 0.64);
-      const warm = 0.35 + 0.65 * fbm3(dx * 4.4, dy * 4.4, dz * 4.4,
-        nSeed ^ 0x3141592, 3);
+      let galaxy = 0;
+      let warm = 0.35;
+      if (band > 1e-8) {
+        const filament = fbm3(dx * 8.2 + 17.0, dy * 8.2 - 2.0, dz * 8.2 + 6.0,
+          nSeed ^ 0x2c9277b5, 4);
+        const dust = absPlane < 0.075
+          ? Math.pow(1 - absPlane / 0.075, 1.7)
+            * Math.pow(fbm3(dx * 13.0, dy * 13.0, dz * 13.0, nSeed ^ 0x51ed270b, 3), 2.2)
+          : 0;
+        galaxy = band * (0.28 + filament * filament * 1.12) * (1 - dust * 0.64);
+        warm = 0.35 + 0.65 * fbm3(dx * 4.4, dy * 4.4, dz * 4.4,
+          nSeed ^ 0x3141592, 3);
+      }
 
       // Keep every direction above the display black floor while leaving an
       // order of magnitude of headroom for the authored Milky Way sprites.

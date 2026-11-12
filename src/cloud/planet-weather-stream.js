@@ -69,7 +69,8 @@ export class PlanetWeatherStream {
     try {
       this.worker.postMessage({type:'frame',token,hours,
         stellarDirections:this.planet.stellarDirectionsAt?.(hours),
-        width:this.planet.cloudAtlasWidth,surfaceRange:this.planet.weatherField.surfaceRangeMeters,frameHours:this.frameHours});
+        width:this.planet.cloudAtlasWidth,surfaceRange:this.planet.weatherField.surfaceRangeMeters,
+        frameHours:this.frameHours,includeBands:Boolean(this.planet.cloudSpeciesTex)});
     } catch(error) {this.failWorker(String(error));}
   }
   revisionAt(hours) {

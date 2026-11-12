@@ -10,7 +10,8 @@ const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t *
 // A compact regional terrain source. Weather gradients use this fixed content
 // resolution, never a camera LOD or the synthetic weather-test continents.
 function terrainSource(body) {
-  const width = 128, height = 64, data = new Float32Array(width * height * 4);
+  const width = (body?.R || 6000000) < 400000 ? 64 : 128;
+  const height = width >> 1, data = new Float32Array(width * height * 4);
   let minSurface = Infinity, maxSurface = -Infinity;
   for (let y = 0; y < height; y++) {
     const latitude = ((y + 0.5) / height - 0.5) * Math.PI;
@@ -57,15 +58,20 @@ export function createPlanetWeatherField(body, options = {}) {
   // System attaches the read-only ephemeris after constructing the body.
   // Every absolute-time query then uses actual stars in that body's frame.
   system.lightDirectionsAt=hours=>body.stellarDirectionsAt?.(hours);
-  const opticalCalibration=body.cloudOffsets
-    ? calibrateProductionCoverage(system,body.cloudOffsets) : null;
+  let cachedOpticalCalibration;
   // Only physical surface samples define this encoding. Dry bodies use a
   // -1e9 sea-level sentinel; including it made one 8-bit step millions of
   // metres and exploded even tiny distant cloud shells across the screen.
   const surfaceRangeMeters = Math.max(1000, body.hAmp || 0,
     Math.abs(terrain.minSurface), Math.abs(terrain.maxSurface));
   const field = { ...legacy, version: 9, namespace: `${body.seed}:production-synoptic:v6`,
-    opticalCalibration,
+    get opticalCalibration() {
+      if (cachedOpticalCalibration === undefined) {
+        cachedOpticalCalibration = body.cloudOffsets
+          ? calibrateProductionCoverage(system, body.cloudOffsets) : null;
+      }
+      return cachedOpticalCalibration;
+    },
     synoptic: true, windRadiansPerHour: angularSpeed,
     streamDescriptor: { seed: body.seed, terrain: terrain.atlas,
       coverageBias: system.coverageBias, angularSpeed,

@@ -556,6 +556,44 @@ export class GameLegacyPipeline {
       {signal,label:'pipeline-programs'});
   }
 
+  prewarmPostPasses({ signal = this.programPreparation.signal, isCurrent } = {}) {
+    return this.prepare(() => {
+      if (this.atmospherePass?.activePlanet) {
+        this.atmospherePass.prepareTransport(this.renderer);
+      }
+      const group = new THREE.Group();
+      const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      const seen = new Set();
+      const addQuad = (quad) => {
+        const mesh = quad?._mesh || (quad?.isMesh ? quad : null);
+        if (!mesh?.geometry || !mesh.material || seen.has(mesh.material)) return;
+        seen.add(mesh.material);
+        const wrapper = new THREE.Mesh(mesh.geometry, mesh.material);
+        wrapper.frustumCulled = false;
+        group.add(wrapper);
+      };
+      addQuad(this.atmospherePass?.quad);
+      if (this.cloudPass) {
+        for (const value of Object.values(this.cloudPass)) {
+          if (value && typeof value === 'object' && ('_mesh' in value || value.isMesh)) addQuad(value);
+        }
+      }
+      addQuad(this.grade?.fsQuad);
+      addQuad(this.warp?.fsQuad);
+      addQuad(this.rift?.fsQuad);
+      if (!group.children.length) return Promise.resolve(group);
+      const saved = this.renderer.getRenderTarget();
+      const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
+      try {
+        this.renderer.setRenderTarget(this.composer.writeBuffer);
+        return compilePrograms(this.renderer, group, ortho, null, { signal });
+      } finally {
+        this.renderer.setRenderTarget(saved, face, mip);
+        group.clear();
+      }
+    }, { signal, label: 'startup-post-passes', isCurrent });
+  }
+
   releaseCloudLightPrograms() {
     // These two empty-uniform material leases retain only the stable sweep/R8
     // copy programs across bank, weather and body replacement. They are never

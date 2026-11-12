@@ -455,11 +455,18 @@ export class Ship {
       const intensity = source
         ? (i === 0 ? 1.62 : 1.25) * source.irradiance * (radiance.directScale ?? 1)
         : 0;
-      light.intensity = intensity;
+      light.intensity = intensity > 0.001 ? intensity : 0;
       if (source?.color) light.color.copy(source.color);
       if (source?.direction) light.position.copy(origin).addScaledVector(source.direction, 80);
       light.target.position.copy(origin);
-      light.visible = this.foregroundOnly && intensity > 0.001;
+      // Keep light visibility bound strictly to foreground ownership so
+      // entering/exiting planetary umbra never changes NUM_DIR_LIGHTS or
+      // USE_SHADOWMAP across the 7 Halcyon PBR materials (~1.6 s recompile).
+      light.visible = this.foregroundOnly;
+      if (light.shadow) {
+        light.shadow.autoUpdate = this.foregroundOnly && intensity > 0.001;
+        if (!light.shadow.map) light.shadow.needsUpdate = true;
+      }
     }
     this.ambient.intensity = radiance?.exteriorAmbient ?? 0.07;
     this.fill.intensity = radiance?.exteriorFill ?? 0.16;

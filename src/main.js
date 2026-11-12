@@ -210,9 +210,14 @@ scene.add(ambient, hemi, headlamp);
 const sunShadow = new THREE.DirectionalLight(0xffffff, 0);
 const surfaceShadowGrid = new SurfaceShadowGrid();
 sunShadow.castShadow = true;
-sunShadow.visible = false;
+// Keep sunShadow permanently visible (with intensity=0 and shadow.autoUpdate=false
+// outside surface range) so orbit, approach, low flight and walking share one
+// unified world shader program key instead of stalling ~3.5 s on first descent.
+sunShadow.visible = true;
 const SHADOW_MAP = QUALITY_PROFILE.shadowMap;
-sunShadow.shadow.mapSize.set(SHADOW_MAP, SHADOW_MAP);
+sunShadow.shadow.mapSize.set(4, 4);
+sunShadow.shadow.autoUpdate = false;
+sunShadow.shadow.needsUpdate = true;
 sunShadow.shadow.camera.near = 100;
 sunShadow.shadow.camera.far = 8500;
 sunShadow.shadow.camera.left = sunShadow.shadow.camera.bottom = -QUALITY_PROFILE.shadowDistance;
@@ -232,6 +237,9 @@ const surfaceBootstrapTarget = new THREE.RenderTarget(2, 2, { depthBuffer: true 
 let surfaceBootstrapStats=null;
 let shipPipelinesWarmed = false;
 let shipPipelineWarmPending = false;
+let postPipelinesWarmPending = false;
+let weaponPipelinesWarmPending = false;
+let weaponPipelinesWarmed = false;
 let heroTransitionActive = false;
 let startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
@@ -248,11 +256,13 @@ function startupTerrainReady() {
   if (!planet || planet.isGasGiant) return true;
   const terrain = planet.lod?.debugStats?.();
   const water = planet.waterLod?.debugStats?.() || null;
-  const settled = (stats, targetLevel) => !stats
-    || (stats.visibleMaxLevel >= targetLevel
+  // orbitLevelCap is a ceiling, not a minimum: at 1.72R screen-space error
+  // naturally settles below orbitLevelCap once pending===0 and activeMorphs===0.
+  const settled = (stats, forceMin = 0) => !stats
+    || (stats.visibleMaxLevel >= forceMin
       && stats.activeMorphs === 0 && stats.pending === 0);
-  return settled(terrain, planet.lod.planet.orbitLevelCap)
-    && settled(water, planet.waterLod?.planet?.orbitLevelCap ?? 0);
+  return settled(terrain, planet.lod?._forceLevel ?? 0)
+    && settled(water, planet.waterLod?._forceLevel ?? 0);
 }
 
 function disposeSurfaceBootstrap() {
@@ -271,6 +281,8 @@ function releaseStartupPrewarm(reason) {
   startupCompile.abort();
   surfaceBootstrapPending = false;
   surfacePipelinesReady = true;
+  postPipelinesWarmPending = false;
+  weaponPipelinesWarmPending = false;
   for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
   surfaceBootstrapStats||={skipped:true,reason,cpuMs:0,calls:0,meshes:surfaceBootstrapMeshes.length};
   disposeSurfaceBootstrap();
@@ -349,23 +361,29 @@ function prewarmSurfacePipelines(planet) {
   scene.add(surfaceBootstrapGroup);
 
   const surfaceSources = new Map();
-  planet.group.traverse((object) => {
-    if (!object.isMesh || !object.geometry?.getAttribute?.('aLocal')
-      || !object.material) return;
-    const attributes = Object.entries(object.geometry.attributes)
-      .map(([name, value]) => {
-        const stride = value.isInterleavedBufferAttribute ? value.data.stride : value.itemSize;
-        return `${name}:${value.itemSize}:${stride}`;
-      })
-      .sort()
-      .join('|');
-    const materials = Array.isArray(object.material)
-      ? object.material : [object.material];
-    for (const material of materials) {
-      const key = `${material.uuid}|${attributes}|${object.castShadow ? 1 : 0}`;
-      if (!surfaceSources.has(key)) surfaceSources.set(key, { object, material });
-    }
-  });
+  const candidatePlanets = (universe?.system?.planets?.length ? universe.system.planets : [planet])
+    .filter((body) => body && !body.isGasGiant && body.group);
+  for (const body of candidatePlanets) {
+    body.group.traverse((object) => {
+      if (!object.isMesh || !object.geometry?.getAttribute?.('aLocal')
+        || !object.material) return;
+      const attributes = Object.entries(object.geometry.attributes)
+        .map(([name, value]) => {
+          const stride = value.isInterleavedBufferAttribute ? value.data.stride : value.itemSize;
+          return `${name}:${value.itemSize}:${stride}`;
+        })
+        .sort()
+        .join('|');
+      const materials = Array.isArray(object.material)
+        ? object.material : [object.material];
+      for (const material of materials) {
+        const topology = typeof material.customProgramCacheKey === 'function'
+          ? material.customProgramCacheKey() : material.uuid;
+        const key = `${material.type}|${topology}|${attributes}|${object.castShadow ? 1 : 0}|${material.transparent ? 1 : 0}`;
+        if (!surfaceSources.has(key)) surfaceSources.set(key, { object, material });
+      }
+    });
+  }
   for (const { object: source, material } of surfaceSources.values()) {
     const geometry = source.geometry.clone();
     const mesh = new THREE.Mesh(geometry, material);
@@ -441,10 +459,11 @@ function prewarmSurfacePipelines(planet) {
 
 function prewarmLoadedShipPipelines() {
   if (ship.heroLoadFailed) { shipPipelinesWarmed = true;return; }
-  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending || !surfacePipelinesReady) return;
+  // Enqueue concurrently alongside surface/post prewarm so ANGLE's C++ FXC
+  // worker threads compile ship and planet shaders in parallel instead of serially.
+  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending) return;
   if (startupPrewarmExpired) { shipPipelinesWarmed = true;return; }
   shipPipelineWarmPending = true;
-  surfacePipelinesReady = false;
   const signal = startupCompile.signal;
   const options = { signal, label: 'startup-ship', isCurrent: () => !startupPrewarmExpired };
   const compileLayer = (layer, buffer) => nodePipeline.prepare(() => {
@@ -472,22 +491,62 @@ function prewarmLoadedShipPipelines() {
       });
       for (const texture of textures) renderer.initTexture(texture);
     }, options);
-    await compileLayer(SHIP_FOREGROUND_LAYER, 'readBuffer');
-    if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'readBuffer');
-    // Parked hull/interior need the production WORLD light and HDR families too.
-    await compileLayer(0, 'writeBuffer');
-    if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'writeBuffer');
+    const tasks = [
+      compileLayer(SHIP_FOREGROUND_LAYER, 'readBuffer'),
+      compileLayer(0, 'writeBuffer'),
+    ];
+    if (RENDER_LOOK_NEXT) tasks.push(compileLayer(SHIP_INTERIOR_LAYER, 'readBuffer'));
+    await Promise.all(tasks);
   };
   void prepare().then(() => {
     if (!startupPrewarmExpired) shipPipelinesWarmed = true;
   }).catch(error => {
     if (!startupPrewarmExpired) console.warn('ship pipeline prewarm failed', error);
   }).finally(() => {
-    // Expiry already releases these flags; a late completion never changes the
-    // bootstrap mesh set or returns a saved scene state over a later frame.
     shipPipelineWarmPending = false;
-    surfacePipelinesReady = true;
   });
+}
+
+function prewarmWeaponAndPostPipelines() {
+  if (QUALITY_LOW || startupPrewarmExpired) return;
+  const signal = startupCompile.signal;
+  const isCurrent = () => !startupPrewarmExpired && !loadingCleared;
+  postPipelinesWarmPending = true;
+  void nodePipeline.prewarmPostPasses({ signal, isCurrent }).catch((error) => {
+    if (!startupPrewarmExpired) console.warn('post-pass prewarm failed', error);
+  }).finally(() => {
+    postPipelinesWarmPending = false;
+  });
+
+  if (!weaponPipelinesWarmed && !weaponPipelinesWarmPending && surfaceWeapons?.rig) {
+    weaponPipelinesWarmPending = true;
+    void nodePipeline.prepare(() => {
+      const rigVis = surfaceWeapons.rig.visible;
+      const lightVis = surfaceWeapons.lighting?.root?.visible;
+      try {
+        surfaceWeapons.rig.visible = true;
+        if (surfaceWeapons.lighting?.root) surfaceWeapons.lighting.root.visible = true;
+        // Seed the outdoor weapon PMREM probe during startup so entering walk
+        // mode on an atmospheric planet never blocks ~600 ms on PMREMGGXConvolution.
+        surfaceWeapons.updateLighting(sceneRadiance,
+          { day: 1, atmosphere: 1, skyIrradiance: 0.5, sunset: 0 }, new THREE.Vector3(0, 1, 0));
+        surfaceWeapons.prepareLighting();
+        surfaceWeapons.updateLighting(sceneRadiance, environmentState, new THREE.Vector3(0, 1, 0));
+        return compileRenderVariant(renderer, surfaceWeapons.rig, camera, scene, {
+          layer: WEAPON_FOREGROUND_LAYER, target: nodePipeline.composer.readBuffer, signal,
+        });
+      } finally {
+        surfaceWeapons.rig.visible = rigVis;
+        if (surfaceWeapons.lighting?.root && lightVis !== undefined) surfaceWeapons.lighting.root.visible = lightVis;
+      }
+    }, { signal, label: 'startup-weapons', isCurrent }).then(() => {
+      if (!startupPrewarmExpired) weaponPipelinesWarmed = true;
+    }).catch((error) => {
+      if (!startupPrewarmExpired) console.warn('weapon prewarm failed', error);
+    }).finally(() => {
+      weaponPipelinesWarmPending = false;
+    });
+  }
 }
 
 function configureShipForegroundLightingLayers() {
@@ -599,7 +658,8 @@ let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 let spatialRift = null;
 let pipelineResizePending = false;
 function pipelineResourcesBusy() {
-  return shipPipelineWarmPending || heroTransitionActive || !surfacePipelinesReady;
+  return shipPipelineWarmPending || postPipelinesWarmPending || weaponPipelinesWarmPending
+    || heroTransitionActive || !surfacePipelinesReady;
 }
 function sizePost(force = false) {
   if (!force && pipelineResourcesBusy()) {
@@ -4044,7 +4104,15 @@ function renderWorldFrame() {
     surfaceWeapons.renderScopeView(renderer);
     finishSurfaceBootstrap();
     if (pipelineResizePending && !pipelineResourcesBusy()) sizePost();
-    if (!surfacePipelinesReady || shipPipelineWarmPending) {
+    if (!surfacePipelinesReady || shipPipelineWarmPending || postPipelinesWarmPending || weaponPipelinesWarmPending) {
+      nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
+      return;
+    }
+    // Do not spend 30+ ms per frame rendering invisible full-resolution HDR
+    // frames behind the opaque loading screen while orbital chunks are still
+    // draining; let the CPU finish chunk generation, then present cleanly.
+    if (!loadingCleared && !QUALITY_LOW && (!startupTerrainReady() || pendingChunks() > 0)
+        && performance.now() - startupWarmStartedAt < STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS) {
       nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
       return;
     }
@@ -4366,7 +4434,7 @@ function frame() {
 
   const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
   const terrainBuildMs=debugBuildBudgetMs || (!loadingCleared
-    ? QUALITY_LOW ? 5.5 : 42
+    ? QUALITY_LOW ? 5.5 : 110
     : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6);
   const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
   sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),
@@ -4398,7 +4466,10 @@ function frame() {
       const nearWater = p === nearest && Math.abs(localRadius - p.seaRadius) < 520;
       p.waterLod.startupPriority = (!loadingCleared && p === nearest) || nearWater;
     }
-    p.update(_v, dt, p === nearest, FREEZE || photoMode ? 0 : dt,sceneBuildBudget);
+    // While the loading screen covers the canvas, settle finished LOD morphs
+    // without waiting 0.7 s per level of invisible geomorph animation.
+    const lodDt = !loadingCleared ? 2.0 : dt;
+    p.update(_v, lodDt, p === nearest, FREEZE || photoMode ? 0 : dt,sceneBuildBudget);
     // The destination ocean's first WebGPU production draw can synchronously
     // specialize the full physical water pipeline for nearly a second. During
     // stellar warp the planet is still covered by starflow and atmospheric
@@ -4516,10 +4587,18 @@ function frame() {
   });
   document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
-  // sun → shadow-light crossfade (after updateRelative, which sets intensities)
-  // Surface shaders evaluate the solar horizon at each fragment, not at the camera.
-  sunShadow.visible = shadowBlend > 0.02;
-  if (sunShadow.visible) {
+  // sun → shadow-light crossfade (after updateRelative, which sets intensities).
+  // Keep sunShadow.visible = true at all altitudes so the world program key
+  // never flips between orbit and surface; disable shadow.autoUpdate and zero
+  // intensity outside surface range so orbit pays zero shadow draw/sample cost.
+  sunShadow.visible = true;
+  if (shadowBlend > 0.02) {
+    if (sunShadow.shadow.mapSize.x !== SHADOW_MAP) {
+      sunShadow.shadow.map?.dispose();
+      sunShadow.shadow.map = null;
+      sunShadow.shadow.mapSize.set(SHADOW_MAP, SHADOW_MAP);
+    }
+    sunShadow.shadow.autoUpdate = true;
     const dominantView = universe.system.dominantStarFrom(nearest?.posUniv || nav.pos);
     const sysLight = dominantView.light;
     sunShadow.intensity = sysLight.intensity * shadowBlend;
@@ -4550,6 +4629,9 @@ function frame() {
       activeShadowRadius, renderer.capabilities.maxTextureSize);
     sysLight.intensity *= 1 - shadowBlend;
     if (universe.fadingSystem) universe.fadingSystem.sunLight.intensity *= 1 - shadowBlend;
+  } else {
+    sunShadow.intensity = 0;
+    sunShadow.shadow.autoUpdate = false;
   }
 
   // Atmospheric buffeting is coherent, not per-frame random noise. Random
@@ -4884,6 +4966,7 @@ function frame() {
     if (cloudPreparation.failed) ui.setLoading(true, '渲染准备失败，请刷新重试');
   }
   if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady
+    && !postPipelinesWarmPending && !weaponPipelinesWarmPending
     && startupAssetsReady && terrainReady && worldRendered) {
     if (!shipPipelinesWarmed) {
       for (const mesh of surfaceBootstrapMeshes.splice(0)) {
@@ -4896,6 +4979,7 @@ function frame() {
     ui.setLoadingProgress(1);
     loadingCleared = true;
     ui.setLoading(false);
+    for (const p of universe.system?.planets || []) p.deferWeatherStream = false;
   } else if (!loadingCleared && !cloudPreparation.blocked && Boolean(universe.system?.built)
     && performance.now() - startupWarmStartedAt
       > STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS + 3000) {
@@ -4903,15 +4987,26 @@ function frame() {
     // empty canvas while a required cloud program still owns readiness. Its
     // own deadline/failure remains explicit; it is not a completed world draw.
     console.warn('loading mask forced clear by safety-net timeout');
-    if(!surfacePipelinesReady||surfaceBootstrapPending)
+    if(!surfacePipelinesReady||surfaceBootstrapPending||postPipelinesWarmPending||weaponPipelinesWarmPending)
       releaseStartupPrewarm('loading mask safety deadline exceeded');
     loadingProgress = 1;
     ui.setLoadingProgress(1);
     loadingCleared = true;
     ui.setLoading(false);
+    for (const p of universe.system?.planets || []) p.deferWeatherStream = false;
   }
 }
 
+// Build up to planet-1 (pelagic ocean world) first so both terrestrial water
+// topologies exist, compute full-system stellarOccluders from ephemeris frames
+// so STELLAR_UNION_OCCLUSION matches the built system, then kick off all async
+// ANGLE C++ FXC shader compiles BEFORE building the remaining secondary bodies!
+while (universe.system && !universe.system.built && universe.system.planets.length < 3) {
+  universe.system.buildNext();
+}
+for (let i = 1; i < (universe.system?.planets?.length || 0); i++) {
+  universe.system.planets[i].deferWeatherStream = true;
+}
 wireUniverse(universe);
 const SHOW_HERO = qs.get('nohero') !== '1' && !window.NMS_NOLOCK;
 // Hero opens tight on the home planet's limb behind the start page; the
@@ -4923,16 +5018,27 @@ ui.setLoading(true, '加载中');
 ui.showSplash(SHOW_HERO);
 if (SHOW_HERO) spaceCtl.enabled = false;
 const bootstrapSurfacePlanet = universe.system.planets[0];
+nearest = bootstrapSurfacePlanet || null;
+if (nearest) {
+  _v.copy(nav.pos).sub(nearest.posUniv);
+  nearestAlt = nearest.altitudeAt(_v);
+}
+ambience(0);
+if (bootstrapSurfacePlanet && universe.system?._specs?.length > universe.system.planets.length) {
+  const ephemerisBodies = universe.system._specs.map((s) => (
+    universe.system.bodyById.get(s.bodyId)
+      || { posUniv: universe.system.frames.get(s.bodyId)?.position || new THREE.Vector3(), R: s.radius || 1000 }
+  ));
+  bootstrapSurfacePlanet.setStellarOccluders?.(
+    selectStellarOccluders(bootstrapSurfacePlanet, ephemerisBodies, universe.system.starViews));
+}
 if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {
+  nodePipeline.setActiveAtmosphere(bootstrapSurfacePlanet, nav.pos);
   scatter.setPlanet(bootstrapSurfacePlanet);
   for (const mesh of Object.values(scatter.meshes)) mesh.visible = false;
   if (FARFLORA) farFlora.setPlanet(bootstrapSurfacePlanet);
   if (farFlora.meshes) for (const mesh of farFlora.meshes) mesh.visible = false;
   if (QUALITY_LOW) {
-    // The procedural hero hull compiles ~80 shader programs across two light
-    // sets (foreground pass + landed main pass). Skipping the prewarm on the
-    // low tier used to be free with the old GLB; now it would stall the first
-    // landed frame for seconds, so the warm runs on every tier.
     renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
   } else {
     prewarmSurfacePipelines(bootstrapSurfacePlanet);
@@ -4940,16 +5046,19 @@ if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {
 }
 if (volumePass && bootstrapSurfacePlanet) {
   volumePass.setActivePlanet(bootstrapSurfacePlanet.isGasGiant ? null : bootstrapSurfacePlanet, nav.pos, 0);
-  nodePipeline.setActiveAtmosphere(bootstrapSurfacePlanet.isGasGiant ? null : bootstrapSurfacePlanet, nav.pos);
   nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
 }
-// Submit queued async shader compilations onto ANGLE C++ worker threads BEFORE
-// building secondary system bodies on the JS thread so FXC runs in parallel!
-for (let pump = 0; pump < 8 && nodePipeline.preparations?.hasQueued; pump++) {
+prewarmWeaponAndPostPipelines();
+prewarmLoadedShipPipelines();
+// Submit all queued async shader compilations onto ANGLE C++ worker threads
+// BEFORE building the remaining secondary bodies so JS and FXC run in parallel!
+for (let pump = 0; pump < 16 && nodePipeline.preparations?.hasQueued; pump++) {
   nodePipeline.preparations.submit?.();
 }
 while (universe.system && !universe.system.built) {
   universe.system.buildNext();
+  const latest = universe.system.planets.at(-1);
+  if (latest && latest !== bootstrapSurfacePlanet) latest.deferWeatherStream = true;
 }
 wireUniverse(universe);
 startupWarmStartedAt = performance.now();

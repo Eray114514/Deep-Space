@@ -280,7 +280,7 @@ export class Planet extends TerrainHeightField {
     // roots. Parent interpolation already supports different grid widths.
     const baseGroupFactor = lowTierGrouping ? 4 : (4 / 3);
     this.gridCells = Math.round(canonicalGridCells * baseGroupFactor);
-    this.gridCellsAtLevel = (level) => (!lowTierGrouping && level >= 3
+    this.gridCellsAtLevel = (level) => (!lowTierGrouping && level >= 4
       ? this.gridCells * 2
       : this.gridCells);
     // Terrain chunk boundaries stay on the continuous planet surface. Forcing
@@ -306,10 +306,16 @@ export class Planet extends TerrainHeightField {
       this.canonicalMaxLevel - (lowTierGrouping ? 3 : 2),
       Math.ceil(Math.log2(terrainFineRootCell / terrainTargetCell)),
     ));
-    // Full-disk review at 2K resolves roughly 2–12 km per pixel across curated
-    // worlds. Level four keeps the coast/limb below that footprint (~1.84 km on
-    // the 1,200 km homeworld) while lower tiers retain cheaper grouping.
-    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? 3 : 4);
+    // Full-disk spawn at 1.72R resolves ~3–9 km per terrain cell across planet
+    // scales. Level 3 on the 1,200 km homeworld gives 3.68 km cells (~90 visible
+    // chunks vs ~405 at level 4, saving ~10 s of startup chunk generation), while
+    // 6,000 km worlds use level 4 (9.2 km) and approach thresholds add levels 4..7
+    // continuously below 1.35R.
+    const highOrbitCap = clamp(Math.ceil(Math.log2(terrainFineRootCell / 9500)), 3, 4);
+    this.orbitLevelCap = Math.min(this.maxLevel, lowTierGrouping ? Math.min(3, highOrbitCap) : highOrbitCap);
+    this.orbitApproachLevelThresholds = this.orbitLevelCap <= 3
+      ? [1.35, 1.16, 1.06, 1.025]
+      : [1.20, 1.08, 1.03];
     this.orbitPrewarmRadiusRatio = 1.75;
     this.freqAtLevel = (lvl) => Math.min(this.fullMaxFreq,
       0.4 * this.gridCellsAtLevel(lvl) * Math.pow(2, lvl) / (Math.PI / 2));
@@ -377,17 +383,18 @@ export class Planet extends TerrainHeightField {
     this.weatherState = advanceWeatherField(this.weatherField, 0);
 
     // materials touched by the fade-in
-    this._fades = [{ mat: this.terrainMaterial, base: 1 }];
-    if (this.liquidMat) this._fades.push({ mat: this.liquidMat, base: this.liquidMat.opacity });
-    if (this.cloudMesh) this._fades.push({ mat: this.cloudMesh.material, base: this.cloudMesh.material.opacity });
-    if (this.cloudMesh2) this._fades.push({ mat: this.cloudMesh2.material, base: this.cloudMesh2.material.opacity });
+    const pushFade = (mat, base = 1) => {
+      if (mat) this._fades.push({ mat, base, transparent: Boolean(mat.transparent) });
+    };
+    this._fades = [];
+    pushFade(this.terrainMaterial, 1);
+    if (this.liquidMat) pushFade(this.liquidMat, this.liquidMat.opacity);
+    if (this.cloudMesh) pushFade(this.cloudMesh.material, this.cloudMesh.material.opacity);
+    if (this.cloudMesh2) pushFade(this.cloudMesh2.material, this.cloudMesh2.material.opacity);
     if (this.cloudMeshNoctilucent) {
-      this._fades.push({
-        mat: this.cloudMeshNoctilucent.material,
-        base: this.cloudMeshNoctilucent.material.opacity,
-      });
+      pushFade(this.cloudMeshNoctilucent.material, this.cloudMeshNoctilucent.material.opacity);
     }
-    if (this.ringMesh) this._fades.push({ mat: this.ringMesh.material, base: this.ringMesh.material.opacity });
+    if (this.ringMesh) pushFade(this.ringMesh.material, this.ringMesh.material.opacity);
     this._atmoBaseDensity = this.atmoMesh
       ? (this.atmoUniforms || this.atmoMesh.material.uniforms).density.value : 0;
     if (this.appear < 1) this.applyAppear();
@@ -398,7 +405,7 @@ export class Planet extends TerrainHeightField {
     for (const f of this._fades) {
       f.mat.opacity = f.base * a;
       if (f.mat.userData.opacityNodeUniform) f.mat.userData.opacityNodeUniform.value = f.base * a;
-      f.mat.transparent = a < 1 || f.base < 1;
+      f.mat.transparent = a < 1 || f.transparent || f.base < 1;
     }
     if (this.atmoMesh) {
       (this.atmoUniforms || this.atmoMesh.material.uniforms).density.value
@@ -765,7 +772,7 @@ export class Planet extends TerrainHeightField {
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,
         maxLevel: waterMaxLevel,
-        orbitLevelCap: 3,
+        orbitLevelCap: clamp(Math.ceil(Math.log2(waterRootCell / 12000)), 2, 3),
         orbitPrewarmRadiusRatio: 1.75,
         // A smooth water sphere does not need terrain's two extra
         // approach levels. Add curvature detail only as its kilometre-scale
@@ -874,11 +881,15 @@ export class Planet extends TerrainHeightField {
       // altitude share the existing two atlas allocations.
       // The new atlas carries synoptic structure, not metre-scale density.
       // Keep its content resolution fixed across rendering quality tiers.
-      this.cloudAtlasWidth = this.weatherField.synoptic ? 256 : clamp(2 ** Math.ceil(Math.log2(
-        Math.max(1, (Math.PI * 2 * R) / 8000),
-      )), 256, 512);
+      // Small moons and <400 km outer bodies resolve 3–12 km per texel at 128×64
+      // (finer than 256×128 on the 1,200 km homeworld) at 1/4 the startup CPU cost.
+      this.cloudAtlasWidth = this.weatherField.synoptic
+        ? (R < 400000 && !volumetricCloudsEnabled ? 128 : 256)
+        : clamp(2 ** Math.ceil(Math.log2(
+          Math.max(1, (Math.PI * 2 * R) / 8000),
+        )), 256, 512);
       const weatherAtlases = makeCloudTextures(
-        this.nD, coverage, o1, this.weatherField, this.cloudAtlasWidth);
+        this.nD, coverage, o1, this.weatherField, this.cloudAtlasWidth, volumetricCloudsEnabled);
       this.cloudShadowTex = weatherAtlases.low;
       this.cloudWeatherHiTex = weatherAtlases.high;
       this.cloudSpeciesTex = weatherAtlases.bands;
@@ -1222,7 +1233,8 @@ export class Planet extends TerrainHeightField {
   setWeatherTime(hours) {
     if (!Number.isFinite(hours)) return this.weatherState;
     this.weatherHours = Number(hours);
-    if (this.weatherField?.synoptic && this.cloudShadowTex && typeof Worker !== 'undefined') {
+    if (this.weatherField?.synoptic && this.cloudShadowTex && typeof Worker !== 'undefined'
+        && !this.deferWeatherStream) {
       this.weatherStream ||= new PlanetWeatherStream(this);
       this.weatherStream.update(this.weatherHours);
     }
@@ -1338,7 +1350,7 @@ export class Planet extends TerrainHeightField {
       const previousHi = this.cloudWeatherHiTex;
       const weatherAtlases = makeCloudTextures(
         this.nD, this.cloudCoverage || 0.5, this.cloudOffsets,
-        this.weatherField, this.cloudAtlasWidth || 512);
+        this.weatherField, this.cloudAtlasWidth || 512, volumetricCloudsEnabled);
       this.cloudShadowTex = weatherAtlases.low;
       this.cloudWeatherHiTex = weatherAtlases.high;
       this.cloudSpeciesTex = weatherAtlases.bands;
@@ -1930,12 +1942,12 @@ function cloudAtlasTexture(data, width, height) {
 }
 
 function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
-  weatherField = null, width = 512) {
+  weatherField = null, width = 512, includeProductionBands = true) {
   // 256–512×half-width preserves the authored 20–60 km structures at each
   // body's physical scale. The volume shader adds its own fine 3D erosion;
   // larger fixed atlases spent millions of noise evaluations on sub-pixel
   // detail during route preparation.
-  const W = clamp(Math.round(width), 256, 512), H = Math.round(W / 2);
+  const W = clamp(Math.round(width), 128, 512), H = Math.round(W / 2);
   if (typeof document === 'undefined') return { low: null, high: null, stats: null };
   const lowData = new Uint8Array(W * H * 4);
   const highData = new Uint8Array(W * H * 4);
@@ -1952,20 +1964,20 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
       // it never creates an independent camera-facing cloud pattern.
       const dir = { x: cx, y: cy, z: cz };
       if (weatherField?.synoptic) {
-        // The synoptic model owns macro coverage. Do not re-threshold it with
-        // a second noise field or re-calibrate each atlas into a different sky.
-        const w = sampleWeatherField(weatherField, dir, 0), index = j * W + i, k = index * 4;
-        lowRaw[index] = clamp(0.5 + w.potentials.low / 4);
-        highRaw[index] = clamp(0.5 + w.potentials.high / 4);
-        lowData[k + 1] = Math.round(w.cloudType * 255);
-        lowData[k + 2] = Math.round(w.stratusMask * 255);
+        // Sample the native weather model directly rather than allocating
+        // gameplay wind/morphology wrapper objects 32,768 times per planet.
+        const w = weatherField.sampleRaw(dir, 0), index = j * W + i, k = index * 4;
+        lowRaw[index] = clamp(0.5 + w.lowPotential / 4);
+        highRaw[index] = clamp(0.5 + w.highPotential / 4);
+        lowData[k + 1] = Math.round(w.convective * 255);
+        lowData[k + 2] = Math.round(w.stability * (1 - w.convective) * 255);
         lowData[k + 3] = Math.round(w.humidity * 255);
         // Hi.G is a stationary regional surface column. Weather channels
         // rotate with wind; this one is always sampled without uSpin.
         highData[k + 1] = Math.round(clamp(0.5 + weatherField.surfaceAt(dir)
           / (2 * weatherField.surfaceRangeMeters)) * 255);
         highData[k + 2] = Math.round(w.convective * 255);
-        highData[k + 3] = Math.round(clamp((w.cloudBaseMeters - LCL_MIN_METERS)
+        highData[k + 3] = Math.round(clamp((w.lclMeters - LCL_MIN_METERS)
           / (LCL_MAX_METERS - LCL_MIN_METERS)) * 255);
         continue;
       }
@@ -2083,7 +2095,7 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
   low.userData.coverageStats = stats;
   high.userData.coverageStats = stats;
   let bands = null,bounds=null,candidates=null;
-  if (weatherField?.synoptic) {
+  if (weatherField?.synoptic && includeProductionBands) {
     const packed=buildProductionBands(d=>weatherField.sampleRaw(d,0),128,weatherField.streamDescriptor.terrain);
     bands = new THREE.DataArrayTexture(packed.data, packed.width, packed.height, packed.layers);
     bands.format = THREE.RGBAFormat; bands.type = THREE.FloatType;

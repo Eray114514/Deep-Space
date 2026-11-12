@@ -225,7 +225,9 @@ export class Universe {
     this.homeStar = this.catalogStarById.get(HOME_SYSTEM_ID);
     this.system = null;
     this.fadingSystem = null;          // the system being left behind
-    this.setSystem(this.homeStar, deferSecondaryHomeBodies);
+    // Initial home-system bodies materialize behind the loading screen; keeping
+    // fadeInPlanets false avoids compiling throwaway transparent terrain shaders.
+    this.setSystem(this.homeStar, deferSecondaryHomeBodies, { fadeInPlanets: false });
     if (deferSecondaryHomeBodies && this.system) {
       const count = Math.max(1, Number(initialHomeBodies) || 1);
       while (!this.system.built && this.system.planets.length < count) this.system.buildNext();
@@ -341,7 +343,7 @@ export class Universe {
 
   // deferred=true: the sun appears now, planets materialize one per
   // buildNext() call — spreads the cost over warp/approach frames
-  setSystem(star, deferred = false) {
+  setSystem(star, deferred = false, { fadeInPlanets = deferred } = {}) {
     // returning to the system we were just leaving? promote it back
     if (this.fadingSystem && this.fadingSystem.star.id === star.id) {
       const f = this.fadingSystem;
@@ -359,7 +361,7 @@ export class Universe {
         this.system.dispose();
       }
     }
-    this.system = new StarSystem(this, star, { deferred, timeHours: this.timeHours });
+    this.system = new StarSystem(this, star, { deferred, fadeInPlanets, timeHours: this.timeHours });
     this.rebuildNearStars(star.pos);
     if (this.onSystemChange) this.onSystemChange(this.system);
     return this.system;

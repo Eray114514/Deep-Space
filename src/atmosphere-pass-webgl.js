@@ -203,6 +203,8 @@ export class AtmospherePass extends Pass {
 
         void main() {
           vec4 base = texture2D(tBase, vUv);
+          if (any(isnan(base.rgb)) || any(isinf(base.rgb))) base.rgb = vec3(0.0);
+          base.rgb = max(base.rgb, vec3(0.0));
           float sceneDepth = texture2D(tSceneDepth, vUv).x;
           gl_FragDepth = sceneDepth;
           if (uEnabled < 0.5) {
