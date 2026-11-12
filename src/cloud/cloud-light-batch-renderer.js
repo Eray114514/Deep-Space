@@ -172,7 +172,7 @@ export class CloudLightBatchRenderer {
     if(this.preparation)return this.preparation;
     const gl=renderer.getContext(),parallel=gl.getExtension('KHR_parallel_shader_compile');
     if(!parallel) {this.preparationError='Parallel shader compile unavailable';return Promise.resolve(false);}
-    const epoch=this.programEpoch,compileCamera=camera.clone(),programs=[];
+    const epoch=this.programEpoch,compileCamera=camera.clone(),programs=[],handles=[];
     compileCamera.layers.set(2);
     sourceMesh.updateWorldMatrix(true,false);this.mesh.geometry=sourceMesh.geometry;this.mesh.material=this.ray??this.prepare;
     this.mesh.matrix.copy(sourceMesh.matrixWorld);this.scene.updateMatrixWorld(true);
@@ -190,7 +190,8 @@ export class CloudLightBatchRenderer {
         if(kind==='tiles')this.tileMesh.material=material;
         renderer.compile(kind==='mesh'?this.scene:kind==='tiles'?this.tileScene:this.quadScene,
           kind==='mesh'?compileCamera:this.quadCamera);
-        programs.push(renderer.properties.get(material).currentProgram.program);
+        const handle=renderer.properties.get(material).currentProgram;
+        handles.push(handle);programs.push(handle.program);
       }
     } catch(error) {this.preparationError=String(error);return Promise.resolve(false);}
     finally {renderer.setRenderTarget(saved,face,mip);}
@@ -205,6 +206,34 @@ export class CloudLightBatchRenderer {
         try {
           if(programs.every(program=>gl.getProgramParameter(program,parallel.COMPLETION_STATUS_KHR))) {
             if(!programs.every(program=>gl.getProgramParameter(program,gl.LINK_STATUS)))throw Error('Cloud program link failed');
+            for(const h of handles)h.getUniforms();
+            if(this.targets.length&&this.mesh?.geometry) {
+              const warmOut=new THREE.WebGLRenderTarget(1,1,{format:output.texture.format,type:output.texture.type,depthBuffer:false});
+              const warmRep=repDepthTarget?new THREE.WebGLRenderTarget(1,1,{format:repDepthTarget.texture.format,type:repDepthTarget.texture.type,depthBuffer:false}):null;
+              const prevRT=renderer.getRenderTarget(),pFace=renderer.getActiveCubeFace(),pMip=renderer.getActiveMipmapLevel(),prevAuto=renderer.autoClear;
+              try {
+                renderer.autoClear=false;
+                this.tileGeometry.instanceCount=1;
+                for(const [rt,mat,kind] of [...(this.rays?[[this.rays,this.ray,'mesh']]:[]),
+                  [this.frame,this.prepare,this.rays?'quad':'mesh'],[this.tileMask,this.reduce,'quad'],
+                  ...(this.metadata?[[this.metadata,this.metadataMaterial,'tiles']]:[]),
+                  [this.light,this.lightMaterial,'tiles'],[warmOut,this.compose,'tiles'],
+                  ...(warmRep&&this.repDepthMaterial?[[warmRep,this.repDepthMaterial,'tiles']]:[])]) {
+                  if(!rt||!mat)continue;
+                  const oldST=rt.scissorTest,oldSc=rt.scissor.clone();
+                  rt.scissorTest=true;rt.scissor.set(0,0,1,1);
+                  renderer.setRenderTarget(rt);
+                  if(kind==='quad')this.quad.material=mat;
+                  if(kind==='tiles'){this.tileMesh.material=mat;this.page.uPageAtlasSize.value.set(rt.width,rt.height);}
+                  renderer.render(kind==='mesh'?this.scene:kind==='tiles'?this.tileScene:this.quadScene,
+                    kind==='mesh'?compileCamera:this.quadCamera);
+                  rt.scissor.copy(oldSc);rt.scissorTest=oldST;
+                }
+              } finally {
+                renderer.autoClear=prevAuto;renderer.setRenderTarget(prevRT,pFace,pMip);
+                warmOut.dispose();warmRep?.dispose();
+              }
+            }
             this.programsReady=true;return finish(true);
           }
           if(performance.now()>deadline)throw Error('Cloud program preparation deadline');

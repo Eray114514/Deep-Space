@@ -373,13 +373,17 @@ export class VolumetricPass extends Pass {
     if(!this.lightBatchesEnabled)return;
     const planet=this.activePlanet,mesh=planet?.volCloudMesh,material=planet?.volCloudMat;
     const distance=planet&&origin?origin.distanceTo(planet.posUniv)-this.radius:Infinity;
-    if(distance>800000||!mesh?.visible||material?.defines.PRODUCTION_CLOUD_MEDIUM!==1
+    if(distance>20000000||!mesh?.visible||material?.defines.PRODUCTION_CLOUD_MEDIUM!==1
       ||material.uniforms.uLightQuadratureSteps.value!==16) {
       if(this.lightBatchPrefetch) {
         this.lightBatchPrefetch=null;
         this.lightBatch?.releaseScratch();
       }
       return;
+    }
+    if(distance<=250000&&this.lightBatch?.programsReady&&!this.lightBatch.targets.length) {
+      this.configureLightBatch(renderer,material);
+      if(this.lightBatch?.mesh)this.lightBatch.mesh.geometry=mesh.geometry;
     }
     if(this.lightBatchPrefetch?.planet===planet&&this.lightBatchPrefetch.material===material)return;
     if(this.hasPreparedLightBatch(mesh,material))return;
@@ -393,7 +397,11 @@ export class VolumetricPass extends Pass {
       if(!batch||batch.plan.direct)return false;
       return batch.programsReady||batch.prepareAsync(renderer,this.camera,mesh,this.current,this.repDepth);
     },{isCurrent:current,label:'near-cloud-batch-prefetch'}).then(ready=>{
-      if(current())claim.state=ready?'ready':'unavailable';
+      if(current()) {
+        claim.state=ready?'ready':'unavailable';
+        const nowDist=origin?origin.distanceTo(planet.posUniv)-this.radius:Infinity;
+        if(ready&&nowDist>250000)this.lightBatch?.releaseScratch();
+      }
     }).catch(error=>{
       if(current()) {claim.state='failed';claim.error=String(error);}
     });

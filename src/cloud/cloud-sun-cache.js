@@ -74,13 +74,20 @@ export class CloudSunCache {
       const {first,second,mix}=forecast;
       if(!first || !second || !Number.isFinite(mix) || mix<0 || mix>1)
         throw Error('Solar cache requires a complete bracketed weather forecast');
-      const bounds=first.bounds.map((v,i)=>i%2===0?Math.min(v,second.bounds[i]):Math.max(v,second.bounds[i]));
-      const candidates=first.candidates.map((v,i)=>v|second.candidates[i]);
+      const bounds=new first.bounds.constructor(first.bounds.length);
+      for(let i=0;i<bounds.length;i+=2) {
+        bounds[i]=Math.min(first.bounds[i],second.bounds[i]);
+        bounds[i+1]=Math.max(first.bounds[i+1],second.bounds[i+1]);
+      }
+      const candidates=new first.candidates.constructor(first.candidates.length);
+      for(let i=0;i<candidates.length;i++)candidates[i]=first.candidates[i]|second.candidates[i];
       const bands=first.bands.slice(),image=source.uSpeciesMap.value.image;
-      for(let i=0;i<image.width*image.height*4*PRODUCTION_PARAMETER_LAYERS;i++)
-        bands[i]=first.bands[i]*(1-mix)+second.bands[i]*mix;
+      const bandLen=image.width*image.height*4*PRODUCTION_PARAMETER_LAYERS,invMix=1-mix;
+      const fb=first.bands,sb=second.bands;
+      for(let i=0;i<bandLen;i++)bands[i]=fb[i]*invMix+sb[i]*mix;
       packProductionAcceleration(bands,image.width,image.height,bounds,candidates);
-      const high=first.high.map((v,i)=>v*(1-mix)+second.high[i]*mix),highImage=source.uWeatherMapHi.value.image;
+      const fh=first.high,sh=second.high,high=new fh.constructor(fh.length),highImage=source.uWeatherMapHi.value.image;
+      for(let i=0;i<high.length;i++)high[i]=fh[i]*invMix+sh[i]*mix;
       const north=new Float32Array(high.length);
       for(let y=0;y<highImage.height;y++)north.set(high.subarray(y*highImage.width*4,(y+1)*highImage.width*4),
         (highImage.height-1-y)*highImage.width*4);

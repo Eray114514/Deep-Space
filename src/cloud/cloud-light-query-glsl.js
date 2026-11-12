@@ -93,7 +93,7 @@ export function cloudLightPageShaders(source) {
       if(any(greaterThanEqual(original,uPageSize)) || (pageMask(original)&(1<<field))==0)discard;
       vec4 ray=texelFetch(tPageRay,original,0);
       float anchorDistance=pageAnchor(meta,original,bin);
-      cloudBeamLodScale=clamp(anchorDistance/3200.0,1.0,24.0);
+      cloudBeamLodScale=clamp(anchorDistance/3200.0,1.0,240.0);
       vec3 local=uCameraLocal+ray.xyz*anchorDistance;
       vec3 direction=field==0?normalize(uSunDir):field==1?normalize(uSecondarySunDir):field==2?normalize(local):-normalize(local);
       if(field==1 && uSecondarySunEnergy<=0.0)discard;

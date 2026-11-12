@@ -41,7 +41,7 @@ function prunePointShadeStage(source) {
         float moment=rayMoment.y;
         if(moment<0.004) return vec4(0.0);
         float t=rayMoment.x;
-        cloudBeamLodScale=clamp(t/3200.0,1.0,24.0);
+        cloudBeamLodScale=clamp(t/3200.0,1.0,240.0);
         vec3 local=uCameraLocal+dir*t;
         vec3 source=cloudCombinedSource(local,dir,0.0,uRout-uRin,0.0);
         vec2 air=air_sphereHits(uCameraLocal,air_uTopR,dir);

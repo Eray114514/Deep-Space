@@ -464,7 +464,7 @@ export class GameLegacyPipeline {
       let bank=this.cloudLightBanks.get(p);
       if(bank?.needsReset()) {bank.dispose();bank=null;this.cloudLightBanks.delete(p);}
       if(!bank || bank.disposed) {
-        bank=new CloudLightBank(p,{interval:0.1,workQuanta:4,programOwner:this.cloudLightPrograms});this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
+        bank=new CloudLightBank(p,{interval:0.1,lazyBootstrap:true,programOwner:this.cloudLightPrograms});this.cloudLightBanks.set(p,bank);p.cloudLightBank=bank;
       }
       bank.update(this.renderer);
     }

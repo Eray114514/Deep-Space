@@ -40,8 +40,8 @@ function cloudAnchor(planet,position) {
 // endpoints remain immutable while the third slot is baked. Invalid time or
 // spatial support always falls back to the physical beam; never extrapolate.
 export class CloudLightBank {
-  constructor(planet,{size=128,depth=128,interval=.025,programOwner=null}={}) {
-    this.planet=planet;this.size=size;this.depth=depth;this.interval=interval;
+  constructor(planet,{size=128,depth=128,interval=.025,lazyBootstrap=false,programOwner=null}={}) {
+    this.planet=planet;this.size=size;this.depth=depth;this.interval=interval;this.lazyBootstrap=Boolean(lazyBootstrap);
     this.maps=new Map();this.disposed=false;this.baseHours=planet.weatherHours;
     this.programs=programOwner||{};this.ownsPrograms=!programOwner;
     this.fieldOwner=planet.weatherField;this.lightIds=planet.stellarLightField.sources.map(s=>s.id).join('|');
@@ -102,7 +102,7 @@ export class CloudLightBank {
     }
     // Bootstrap once before the first scene draw. Steady updates are sliced;
     // startup and steady costs are reported separately by runtime validation.
-    if(!this.initialized) {
+    if(!this.initialized && !this.lazyBootstrap) {
       // Copy and finish each bootstrap endpoint before allocating the next
       // snapshot. Completed endpoints retain only their atlas and metadata.
       for(const key of [index,index+1]) {
@@ -114,10 +114,12 @@ export class CloudLightBank {
     } else {
       // Preserve endpoint priority, but never allocate three baking snapshots
       // when only one can be submitted this update (also after a clock jump).
-      const key=[index,index+1,index+2].find(key=>!this.maps.get(key)?.ready);
+      const slots=this.initialized?[index,index+1,index+2]:[index,index+1];
+      const key=slots.find(key=>!this.maps.get(key)?.ready);
       const pending=key===undefined?null:this.maps.get(key)||this.create(key);
       if(pending)for(let pass=0;pass<2 && !pending.ready;pass++)
-        pending.bakeSlice(renderer,{boundaryRows:this.size,slices:64});
+        pending.bakeSlice(renderer,{boundaryRows:this.size,slices:this.lazyBootstrap?32:64});
+      if(!this.initialized && this.maps.get(index)?.ready && this.maps.get(index+1)?.ready)this.initialized=true;
     }
     this.submissions.push(performance.now()-started);
     if(this.submissions.length>120)this.submissions.shift();

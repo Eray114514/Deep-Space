@@ -202,7 +202,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uQuality: { value: qualityValue },
       uMaxSteps: { value: Math.max(16, Math.min(124, steps)) },
       uCloudLightSteps: { value: quality === 'performance' || quality === 'low' ? 4 : quality === 'balanced' ? 6 : 12 },
-      uViewCapacity: { value: quality === 'performance' || quality === 'low' ? 224 : quality === 'balanced' ? 512 : 8192 },
+      uViewCapacity: { value: quality === 'performance' || quality === 'low' ? 192 : quality === 'balanced' ? 320 : 8192 },
       uColumnSteps: { value: 128 },
       uLightPathCount: { value: 4 },
       uLightQuadratureSteps: { value: 16 },
@@ -813,7 +813,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
         }
         if(moment<0.004) return vec4(0.0);
         float t=weightedDistance/max(moment,1e-9);
-        cloudBeamLodScale=clamp(t/3200.0,1.0,24.0);
+        cloudBeamLodScale=clamp(t/3200.0,1.0,240.0);
         vec3 local=uCameraLocal+dir*t;
         vec3 source=cloudCombinedSource(local,dir,0.0,uRout-uRin,0.0);
         vec2 air=air_sphereHits(uCameraLocal,air_uTopR,dir);
@@ -994,7 +994,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
             frontLight+=frontTransmission*gapLight;frontTransmission*=gapTransmission;
             previousAnchor=nextAnchor;
           }
-          cloudBeamLodScale=clamp(distance/3200.0,1.0,24.0);
+          cloudBeamLodScale=clamp(distance/3200.0,1.0,240.0);
           vec3 source=cloudCombinedSource(local,dir,0.0,thick,sigma)*uTint;
           correction+=(frontLight+frontTransmission*source)*(totalOpacity/float(bins));
         }
@@ -1019,7 +1019,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
               previousAnchor=nextAnchor;
             }
           }
-          cloudBeamLodScale=clamp(distance/3200.0,1.0,24.0);
+          cloudBeamLodScale=clamp(distance/3200.0,1.0,240.0);
           cloudUseKeyframeDepth=false;
           if(bins==16 && !prepass) {
             int kIdx=bin/5,k0=kIdx*5;

@@ -1,6 +1,6 @@
 # B 的介质、深度与时域接口
 
-这是 B0 冻结、B5 落地和 F4 帧接口修订的**目标语义 v1.3**。B5 已提供分段空气与云/空气联合传输；2026-10-20 接入共同前后帧状态、云刚体映射及局部历史深度支持/范围约束，天气平流、占用深度和统一 TAA 仍为 B4/B7 目标，不要求预先分配所有纹理。状态与关闭条件只在[批次 B](cloud-atmosphere-rewrite.md)维护。
+这是 B0 冻结、B5 落地和 F4/B7 时域合流后的**目标语义 v1.4（2026-11-12）**。在共同前后帧事务与局部历史过滤之上，现已接入 `VolumetricPass.repDepth` 光学质量代表深度/跨度、3 层高度风切变天气平流（`RenderFrameState.mapWeatherAdvection`）、线性 HDR 曝光比适配（`exposureRatio`）以及多源运动缓冲驱动的可切换全场景 `TemporalAAPass`（`?taa=1` / `NMS.setTemporalAA`，通过 `externalTaaActive` 防止双累积器叠用）。状态与关闭条件只在[批次 B](cloud-atmosphere-rewrite.md)维护。
 
 ## 坐标、时间和单位
 

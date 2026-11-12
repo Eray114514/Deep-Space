@@ -3624,7 +3624,8 @@ function ambience(dt = 1 / 60) {
       : selectStellarOccluders(p, universe.system.planets, universe.system.starViews));
     const sunElev = _up.dot(sunDir);
 
-    const transit = p.cloudTransit ? p.cloudTransit(_v2.copy(nav.pos).sub(p.posUniv)) : 0;
+    const transitOffset = _v2.copy(nav.pos).sub(p.posUniv);
+    const transit = p.cloudTransit && Number.isFinite(transitOffset.lengthSq()) ? p.cloudTransit(transitOffset) : 0;
     const weatherDirection = p.worldOffsetToLocal?.(_up, _v3).normalize() || _up;
     activeWeather = p.weatherAt?.(weatherDirection) || null;
     const eyeWater = p.sampleWaterSurface?.(p.worldPositionToLocal(nav.pos, _v2),
@@ -5424,6 +5425,8 @@ window.NMS = {
   // on the far side (headlamp comes on), 'meadow' seeks flat vegetated
   // ground facing the tree line, default lands in full daylight.
   land(i, yawDeg = 0, bias = null) {
+    if (typeof yawDeg === 'string') { bias = yawDeg; yawDeg = 0; }
+    if (!Number.isFinite(yawDeg)) yawDeg = 0;
     const p = universe.system.planets[i];
     if (!p || p.isGasGiant || p.landable === false) return false;
     nodePipeline.invalidateVolumeHistory('teleport');
