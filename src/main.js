@@ -221,6 +221,7 @@ sunShadow.shadow.bias = -0.0002;
 sunShadow.shadow.normalBias = 2.0;
 scene.add(sunShadow, sunShadow.target);
 let shadowBlend = 0;
+let activeShadowOctave = 1;
 const sunDirCam = new THREE.Vector3(0, 1, 0);
 let warmedSurfacePlanet = null;
 let surfacePipelinesReady = true;
@@ -3756,7 +3757,10 @@ function ambience(dt = 1 / 60) {
   envInAtmo = inAtmo;
   envDay = day;
   // hand the sun over to the shadow-casting light near the ground
-  shadowBlend = nearest ? 1 - smoothstep(1200, 3500, nearestAlt) : 0;
+  const shadowSurfaceAlt = nearest?.hasLiquid
+    ? Math.min(nearestAlt, Math.max(0, nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius))
+    : nearestAlt;
+  shadowBlend = nearest ? 1 - smoothstep(3200, 7200, shadowSurfaceAlt) : 0;
   if (nearest && shadowBlend > 0) sunDirCam.copy(nearest.sunDirWorld);
   if (RENDER_LOOK_NEXT) {
     const radianceMode = state === 'shipwalk' || shipView.shipwalk ? 'interior'
@@ -4500,10 +4504,30 @@ function frame() {
     const sysLight = dominantView.light;
     sunShadow.intensity = sysLight.intensity * shadowBlend;
     sunShadow.color.copy(sysLight.color);
-    sunShadow.position.copy(sunDirCam).multiplyScalar(4000);
+    // Hysteresis-stabilized 2x octave shadow radius steps keep SurfaceShadowGrid's
+    // sub-texel phase locked within each altitude band while covering 0..6.5 km flight.
+    const shadowClearance = nearest?.hasLiquid
+      ? Math.min(nearestAlt, Math.max(0, nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius))
+      : nearestAlt;
+    if (state === 'walk' || shadowClearance < 115) activeShadowOctave = 1;
+    else if (shadowClearance > 1850) activeShadowOctave = 8;
+    else if (shadowClearance > 1450) activeShadowOctave = activeShadowOctave === 8 ? 8 : 4;
+    else if (shadowClearance > 560) activeShadowOctave = 4;
+    else if (shadowClearance > 440) activeShadowOctave = activeShadowOctave >= 4 ? 4 : 2;
+    else if (shadowClearance > 145) activeShadowOctave = 2;
+    else activeShadowOctave = activeShadowOctave >= 2 ? 2 : 1;
+    const activeShadowRadius = Math.min(4800, effectiveShadowDistance * activeShadowOctave);
+    const lightDist = Math.max(4000, activeShadowRadius * 2.5);
+    const farDist = Math.max(8500, activeShadowRadius * 5.5);
+    if (sunShadow.shadow.camera.far !== farDist) {
+      sunShadow.shadow.camera.far = farDist;
+      sunShadow.shadow.camera.updateProjectionMatrix();
+    }
+    sunShadow.shadow.normalBias = 2.0 * Math.sqrt(activeShadowOctave);
+    sunShadow.position.copy(sunDirCam).multiplyScalar(lightDist);
     sunShadow.target.position.set(0, 0, 0);
     surfaceShadowGrid.update(sunShadow, nav.pos, nearest.posUniv,
-      effectiveShadowDistance, renderer.capabilities.maxTextureSize);
+      activeShadowRadius, renderer.capabilities.maxTextureSize);
     sysLight.intensity *= 1 - shadowBlend;
     if (universe.fadingSystem) universe.fadingSystem.sunLight.intensity *= 1 - shadowBlend;
   }

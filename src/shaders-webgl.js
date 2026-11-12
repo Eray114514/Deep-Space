@@ -1373,6 +1373,13 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float cloud = gWaterCloud;
           reflectedSky = mix(reflectedSky, vec3(0.46, 0.5, 0.56)
             * (0.22 + uDay * 0.62), cloud * 0.62);
+          reflectedSky = surfaceWaterReflectedSky(
+            vLocalPos,
+            normalize(uSurfaceViewToLocal * reflectionDir),
+            gWaterRoughness,
+            cloud,
+            reflectedSky
+          );
           float sunDot = max(dot(reflectionDir, normalize(vSunDirView)), 0.0);
           vec3 glintUp = normalize(vLocalPos);
           vec3 glintT = normalize(cross(glintUp,

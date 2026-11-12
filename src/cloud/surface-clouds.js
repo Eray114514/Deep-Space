@@ -103,6 +103,9 @@ export const surfaceCloudGLSL=/* glsl */`
   #if SURFACE_CLOUD_MEDIUM
   #if SURFACE_CLOUD_SCREEN
   uniform sampler2D cloud_uSunTransport;
+  uniform sampler2D cloud_uWeatherMapHi;
+  uniform mat3 cloud_uSpin;
+  uniform float cloud_uBodyR,cloud_uSurfaceRange,cloud_uRin,cloud_uRout;
   uniform vec3 cloud_uSunDir,cloud_uSecondarySunDir;
   uniform float cloud_uSunCacheReady;
   #else
