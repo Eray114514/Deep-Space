@@ -18,6 +18,8 @@
 
 ## 当前底层任务的模型分配
 
+**2026-11-12 起主控为 Claude**（见[模型协作约定](model-collaboration.md)和[主控交接](reviews/handover-codex-to-claude-2026-11-12.md)）。本表各处的分工按此读：「Codex 主责 / 负责 / 集成 / 回归」为 Claude 实现并做极简验收、Codex 独立验收；「Fable」即主控自己；「Codex 独立验收 / 复核」不变。任务范围和难度未因交接改变。
+
 Carbon 已完成 F0–F6 底层代码攻关、原生 2K 全链路 GPU 取证与首轮工具/基线清理（见 [F 阶段收官基线](baselines/foundation-phase-f-2026-11-12/README.md)）。当前底层仅余 **Codex 独立复核**、**用户实机多设备/档位视觉签收**，以及随 B4/C/E 内容合流同步调优的联调余项；Fable 可直接按 [B4 恢复交接](reviews/f-phase-b4-handoff-2026-11-12.md) 开展首族云成像返工。
 
 | 任务包 | 难度 | 剩余工作与验收门槛 | 分配建议 |

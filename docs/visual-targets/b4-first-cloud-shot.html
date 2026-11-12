@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>深空 B4 · 首族层积云 · 低轨下降穿云小样</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; left: 18px; bottom: 14px; color: #9fb4c8; opacity: .72;
+    font: 12px/1.6 ui-monospace, Consolas, 'Microsoft YaHei', monospace; letter-spacing: .04em;
+    text-shadow: 0 0 6px #000; pointer-events: none; white-space: pre;
+  }
+  #err { position: fixed; inset: 0; color: #f88; font: 13px/1.5 monospace; padding: 24px; white-space: pre-wrap; display: none; background: #100; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="err"></div>
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// B4 首族层积云视觉小样。两个镜头共用同一片天气：
+//   下降（默认）：低轨 46 km → 接近 → 掠云顶 → 穿云 → 云底出云，56 秒，可重播
+//   低轨对照    ：原来的逆光掠地平线镜头（?shot=orbit 或按 1）
+// 自包含 WebGL2：CPU 烘一张 64^3 可平铺噪声体，片元着色器对球壳云层做体积步进。
+// 键位：1 低轨对照  2 下降  R 重播  空格 暂停  H 隐藏说明
+// URL ：?shot=orbit|descent  ?t=秒（冻结在该时刻）  ?s=渲染缩放（默认 0.6）
+// ---------------------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const SCALE = Math.min(2, Math.max(0.2, parseFloat(params.get('s')) || 0.6));
+const FREEZE = params.has('t') ? parseFloat(params.get('t')) || 0 : null;
+
+const canvas = document.getElementById('c');
+const hud = document.getElementById('hud');
+const errBox = document.getElementById('err');
+const fail = (m) => { errBox.style.display = 'block'; errBox.textContent = m; throw new Error(m); };
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+if (!gl) fail('需要 WebGL2。');
+
+// ---- 噪声体：R=Perlin-Worley 云体形状  G=高频 Worley 侵蚀  B=低频天气覆盖 ----
+function buildNoise(N) {
+  let seed = 0x38b4c10d;
+  const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const valueField = (f) => { const a = new Float32Array(f * f * f); for (let i = 0; i < a.length; i++) a[i] = rnd(); return a; };
+  const pointField = (f) => { const a = new Float32Array(f * f * f * 3); for (let i = 0; i < a.length; i++) a[i] = rnd(); return a; };
+  const sampleValue = (a, f, x, y, z) => {
+    x *= f; y *= f; z *= f;
+    const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+    let fx = x - x0, fy = y - y0, fz = z - z0;
+    fx = fx * fx * fx * (fx * (fx * 6 - 15) + 10); fy = fy * fy * fy * (fy * (fy * 6 - 15) + 10); fz = fz * fz * fz * (fz * (fz * 6 - 15) + 10);
+    const X0 = x0 % f, X1 = (x0 + 1) % f, Y0 = y0 % f, Y1 = (y0 + 1) % f, Z0 = z0 % f, Z1 = (z0 + 1) % f;
+    const g = (i, j, k) => a[(k * f + j) * f + i];
+    const l = (p, q, t) => p + (q - p) * t;
+    return l(l(l(g(X0, Y0, Z0), g(X1, Y0, Z0), fx), l(g(X0, Y1, Z0), g(X1, Y1, Z0), fx), fy),
+             l(l(g(X0, Y0, Z1), g(X1, Y0, Z1), fx), l(g(X0, Y1, Z1), g(X1, Y1, Z1), fx), fy), fz);
+  };
+  const sampleWorley = (a, f, x, y, z) => {
+    x *= f; y *= f; z *= f;
+    const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
+    let best = 9;
+    for (let k = -1; k <= 1; k++) for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+      const ix = cx + i, iy = cy + j, iz = cz + k;
+      const o = ((((iz % f) + f) % f * f + ((iy % f) + f) % f) * f + ((ix % f) + f) % f) * 3;
+      const dx = ix + a[o] - x, dy = iy + a[o + 1] - y, dz = iz + a[o + 2] - z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d < best) best = d;
+    }
+    return 1 - Math.min(1, Math.sqrt(best));
+  };
+  const v2 = valueField(2), v4 = valueField(4), v8 = valueField(8), v16 = valueField(16);
+  const w3 = pointField(3), w6 = pointField(6), w12 = pointField(12), w8 = pointField(8), w16 = pointField(16);
+  const n = N * N * N, ch = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  let p = 0;
+  for (let k = 0; k < N; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++, p++) {
+    const x = (i + .5) / N, y = (j + .5) / N, z = (k + .5) / N;
+    const perlin = sampleValue(v4, 4, x, y, z) * .5 + sampleValue(v8, 8, x, y, z) * .3 + sampleValue(v16, 16, x, y, z) * .2;
+    const wor = sampleWorley(w3, 3, x, y, z) * .6 + sampleWorley(w6, 6, x, y, z) * .28 + sampleWorley(w12, 12, x, y, z) * .12;
+    ch[0][p] = wor * .72 + perlin * .42;
+    ch[1][p] = sampleWorley(w8, 8, x, y, z) * .62 + sampleWorley(w16, 16, x, y, z) * .38;
+    ch[2][p] = sampleValue(v2, 2, x, y, z) * .5 + sampleValue(v4, 4, x, y, z) * .32 + sampleValue(v8, 8, x, y, z) * .18;
+  }
+  const out = new Uint8Array(n * 4);
+  for (let c = 0; c < 3; c++) {
+    let lo = 1e9, hi = -1e9;
+    for (let i = 0; i < n; i++) { if (ch[c][i] < lo) lo = ch[c][i]; if (ch[c][i] > hi) hi = ch[c][i]; }
+    for (let i = 0; i < n; i++) out[i * 4 + c] = Math.round((ch[c][i] - lo) / (hi - lo) * 255);
+  }
+  for (let i = 0; i < n; i++) out[i * 4 + 3] = 255;
+  return out;
+}
+
+const NOISE_N = 64;
+const noiseData = buildNoise(NOISE_N);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_3D, tex);
+gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, NOISE_N, NOISE_N, NOISE_N, 0, gl.RGBA, gl.UNSIGNED_BYTE, noiseData);
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.REPEAT);
+
+const VS = `#version 300 es
+void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2. - 1., 0., 1.); }`;
+
+const FS = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+uniform vec2 uRes;
+uniform float uFrame;                 // 播放时逐帧滚动抖动相位，颗粒在时间上平均掉
+uniform float uOrbit;                // 世界绕 X 轴的转角（低轨镜头用它前进；下降镜头固定）
+uniform vec3 uCamPos, uCamFwd, uCamRgt, uCamUp;
+uniform sampler3D uN;
+out vec4 outColor;
+
+// 单位：km。小行星尺度，云层厚度按画面可读性取值。
+const float R  = 1200.;   // 地表半径
+const float RB = 1203.;   // 云底
+const float RT = 1211.;   // 云顶（8 km 厚的层积云甲板）
+const float RA = 1262.;   // 大气顶
+const float HR = 8.5, HM = 1.6;
+const vec3  BR = vec3(.0058, .0135, .0331);  // Rayleigh /km
+const float BM = .0022;                       // Mie /km
+const float SIG = 2.6;                        // 云消光 /km（密度=1）
+const float SUN_I = 22.;
+const vec3  SUN = normalize(vec3(.13, .055, -1.));
+const float PI = 3.14159265;
+
+float sat(float x){ return clamp(x, 0., 1.); }
+float remap(float v, float a, float b, float c, float d){ return c + (v - a) / (b - a) * (d - c); }
+
+// 抗相消的球求交：h = (r-|d|)(r+|d|)
+vec2 sph(vec3 ro, vec3 rd, float r){
+  float b = dot(ro, rd);
+  float ld = length(ro - b * rd);
+  float h = (r - ld) * (r + ld);
+  if (h < 0.) return vec2(-1.);
+  h = sqrt(h);
+  return vec2(-b - h, -b + h);
+}
+
+vec3 orbit(vec3 p){
+  float c = cos(uOrbit), s = sin(uOrbit);
+  return vec3(p.x, p.y * c + p.z * s, -p.y * s + p.z * c);
+}
+
+// 天气覆盖：两层不同周期/朝向的低频噪声，决定“成片天气”的尺度（百公里级）
+vec2 weather(vec3 q){
+  float a = textureLod(uN, q / 337., 0.).b;
+  float b = textureLod(uN, q.zxy / 149. + .37, 0.).b;
+  return vec2(a * .64 + b * .36, b);
+}
+
+// near: 0..1，相机附近才叠加的细节量（同一套场，只加不改 → 远近是同一片云）
+float cloudDensity(vec3 p, bool cheap, float near){
+  float h = (length(p) - RB) / (RT - RB);
+  if (h < 0. || h > 1.) return 0.;
+  vec3 q = orbit(p);
+  vec2 w = weather(q);
+  float cov = smoothstep(.37, .60, w.x) * .70;        // 上限 0.7：甲板内部永远留孔
+  if (cov < .02) return 0.;
+  // 形状：Worley 主导的闭合胞 —— 胞壁处值低，自然裂成孔隙网
+  float base = textureLod(uN, q / 27., 0.).r;
+  if (!cheap) base = base * .72 + textureLod(uN, q.yzx / 63. + .5, 0.).r * .28;
+  base = sat((base - .22) / .6);
+  // 层积云剖面：底部圆钝；云顶高度由天气和胞体共同决定（胞心鼓起 = 厚度感）
+  float top = mix(.50, 1., smoothstep(.35, .75, w.y)) * mix(.55, 1., base);
+  float prof = smoothstep(0., .16, h) * smoothstep(top, top * .42, h);
+  float d = sat(remap(base * prof, 1. - cov, 1., 0., 1.));
+  if (d <= 0.) return 0.;
+  if (!cheap) {
+    // 边缘侵蚀：只啃稀薄处，核心保持实心，避免“碎块边”
+    float e = (1. - textureLod(uN, q / 7.3, 0.).g) * .34 * (1. - d);
+    if (near > 0.) e += (1. - textureLod(uN, q.zxy / 1.9 + .13, 0.).g) * .26 * near * (1. - d);
+    e = min(e, .9);
+    d = sat((d - e) / (1. - e));
+  }
+  return d * cov * 1.25;
+}
+
+vec3 sunColorAt(vec3 p){
+  float mu = dot(normalize(p), SUN);
+  float h = max(length(p) - R, 0.);
+  float od = HR * exp(-h / HR) / (max(mu, 0.) + .14);
+  return exp(-BR * od * 1.1 - BM * HM * exp(-h / HM) / (max(mu, 0.) + .14)) * smoothstep(-.09, .03, mu);
+}
+
+float hg(float mu, float g){ float g2 = g * g; return (1. - g2) / (4. * PI * pow(1. + g2 - 2. * g * mu, 1.5)); }
+
+// 云体步进。步长随离入口距离几何增长：近处细、远处粗，轨道/云内共用。
+// 返回 rgb=散射光，a=透射率；tc=按贡献加权的云深度（给大气分段用）
+vec4 marchClouds(vec3 ro, vec3 rd, float t0, float t1, float jit, out float tc){
+  float dmin = max(min(min(.05 + .004 * t0, (t1 - t0) / 90.), .3), .02);
+  float t = t0 + dmin * jit;
+  float T = 1., wsum = 0., tsum = 0.;
+  vec3 L = vec3(0.);
+  float mu = dot(rd, SUN);
+  for (int i = 0; i < 124; i++) {
+    if (t > t1) break;
+    float dt = max(dmin, .045 * (t - t0));
+    vec3 p = ro + rd * t;
+    float d = cloudDensity(p, t > 170., sat(1. - t / 28.));
+    if (d > .002) {
+      float h = (length(p) - RB) / (RT - RB);
+      float tau = 0., ls = .32; vec3 pl = p;
+      for (int j = 0; j < 5; j++) { pl += SUN * ls; tau += cloudDensity(pl, true, 0.) * ls; ls *= 1.75; }
+      tau *= SIG;
+      // 多次散射近似：逐阶衰减消光与各向异性 → 逆光银边 + 厚处不死黑
+      float sc = 0., a = 1.;
+      for (int k = 0; k < 4; k++) {
+        float ph = mix(hg(mu, .82 * a), hg(mu, -.25 * a), .28);
+        sc += a * exp(-tau * a) * ph;
+        a *= .48;
+      }
+      sc *= mix(1., 1. - exp(-tau * 2. - d * 3.), .35 * sat(.5 - .5 * mu) + .15);
+      vec3 sunC = sunColorAt(p) * SUN_I;
+      vec3 amb = mix(vec3(.030, .045, .080), vec3(.13, .19, .30), h) * (.55 + .45 * exp(-d * 2.5));
+      amb *= .35 + .65 * smoothstep(-.12, .12, dot(normalize(p), SUN));
+      vec3 S = sunC * sc + amb;
+      float Ti = exp(-d * SIG * dt);
+      float wgt = T * (1. - Ti);
+      L += wgt * S; tsum += wgt * t; wsum += wgt;
+      T *= Ti;
+      if (T < .008) { T = 0.; break; }
+    }
+    t += dt;
+  }
+  tc = wsum > 1e-4 ? tsum / wsum : t1;
+  return vec4(L, T);
+}
+
+// 任意点朝太阳穿过云壳的遮挡（地面云影、云下大气光柱共用）
+float sunShadow(vec3 P, float jit, int n){
+  float ta = length(P) < RB ? sph(P, SUN, RB).y : 0.;
+  float tb = min(sph(P, SUN, RT).y, ta + 45.);
+  float dt = (tb - ta) / float(n), tau = 0.;
+  for (int i = 0; i < 8; i++) { if (i >= n) break; tau += cloudDensity(P + SUN * (ta + dt * (float(i) + jit)), true, 0.); }
+  return exp(-tau * dt * SIG * .8);
+}
+
+// 单次散射大气，[tA,tB] 一段。云顶以下的样本被云遮挡 → 不再有盖住云的白雾，云下出光柱
+void atmosphere(vec3 ro, vec3 rd, float tA, float tB, float jit, out vec3 T, out vec3 I){
+  const int N = 10;
+  float dt = (tB - tA) / float(N), odR = 0., odM = 0.;
+  vec3 iR = vec3(0.), iM = vec3(0.);
+  for (int i = 0; i < N; i++) {
+    vec3 p = ro + rd * (tA + dt * (float(i) + jit));
+    float r = length(p), h = max(r - R, 0.);
+    float dR = exp(-h / HR) * dt, dM = exp(-h / HM) * dt;
+    odR += dR * .5; odM += dM * .5;
+    float mu = dot(p / r, SUN);
+    float ch = 1. / (max(mu, 0.) + .11);
+    float vis = smoothstep(-.03, .06, mu + sqrt(2. * h / R));
+    if (r < RT && vis > 0.) vis *= sunShadow(p, jit, 4);
+    vec3 att = exp(-BR * (odR + HR * exp(-h / HR) * ch) - BM * 1.1 * (odM + HM * exp(-h / HM) * ch));
+    iR += att * dR * vis; iM += att * dM * vis;
+    odR += dR * .5; odM += dM * .5;
+  }
+  float mu = dot(rd, SUN);
+  float pR = 3. / (16. * PI) * (1. + mu * mu);
+  I = SUN_I * (iR * BR * pR + iM * BM * hg(mu, .76));
+  T = exp(-BR * odR - BM * 1.1 * odM);
+}
+
+float hash21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+
+vec3 aces(vec3 x){ return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - .5 * uRes) / uRes.y;
+  float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(.06711056, .00583715))) + uFrame * .61803);
+
+  vec3 ro = uCamPos;
+  vec3 rd = normalize(uCamFwd * .832 + uCamRgt * uv.x + uCamUp * uv.y);   // 垂直视场 62°
+  float mu = dot(rd, SUN);
+
+  float tg = sph(ro, rd, R).x;
+  bool ground = tg > 0.;
+  float tEnd = ground ? tg : sph(ro, rd, RA).y;
+  vec3 col;
+  if (ground) {
+    vec3 P = ro + rd * tg, Nn = normalize(P), q = orbit(P);
+    float land = smoothstep(.56, .64, textureLod(uN, q / 421. + .21, 0.).b * .7 + textureLod(uN, q / 58., 0.).r * .3);
+    vec3 alb = mix(vec3(.012, .035, .075), mix(vec3(.07, .09, .04), vec3(.16, .12, .08), textureLod(uN, q / 33., 0.).g), land);
+    float sh = sunShadow(P + Nn * .01, jit, 8);
+    vec3 sunC = sunColorAt(P) * SUN_I;
+    float ndl = max(dot(Nn, SUN), 0.);
+    col = alb * (sunC * ndl * sh / PI * 3. + vec3(.05, .08, .14));
+    vec3 hv = normalize(SUN - rd);
+    col += (1. - land) * sunC * sh * pow(max(dot(Nn, hv), 0.), 260.) * .9;   // 海面逆光反光带
+  } else {
+    vec2 sp = vec2(atan(rd.x, -rd.z), asin(rd.y)) * 220.;
+    float st = hash21(floor(sp));
+    col = vec3(smoothstep(.9965, 1., st) * (.25 + .75 * hash21(floor(sp) + 7.)) * .5);
+    col += vec3(1., .86, .66) * (smoothstep(.99962, .99985, mu) * 260.
+         + pow(max(mu, 0.), 900.) * 5. + pow(max(mu, 0.), 60.) * .22 + pow(max(mu, 0.), 8.) * .03);
+  }
+
+  // 云壳区间：相机在云上 / 云内 / 云下三种情况
+  float r0 = length(ro), t0 = -1., t1 = -1.;
+  vec2 to = sph(ro, rd, RT), tb = sph(ro, rd, RB);
+  if (r0 > RT) { if (to.y > 0.) { t0 = max(to.x, 0.); t1 = tb.x > 0. ? tb.x : to.y; } }
+  else if (r0 > RB) { t0 = 0.; t1 = tb.x > 0. ? tb.x : to.y; }
+  else if (!ground) { t0 = tb.y; t1 = to.y; }
+
+  vec4 c = vec4(0., 0., 0., 1.);
+  float tc = tEnd;
+  if (t1 > t0) c = marchClouds(ro, rd, t0, t1, jit, tc);
+
+  // 大气按云深度分两段：云后的散射被云挡住，云前的才叠在云上
+  vec3 Ta, Ia;
+  if (c.a < .999) {
+    tc = min(tc, tEnd);
+    if (c.a > .02) { atmosphere(ro, rd, tc, tEnd, jit, Ta, Ia); col = col * Ta + Ia; }
+    col = col * c.a + c.rgb;
+    atmosphere(ro, rd, 0., tc, jit, Ta, Ia);
+  } else {
+    atmosphere(ro, rd, 0., tEnd, jit, Ta, Ia);
+  }
+  col = col * Ta + Ia;
+
+  col *= .50;                                   // 曝光
+  col *= 1. - .22 * dot(uv, uv);                // 轻暗角
+  col = pow(aces(col), vec3(1. / 2.2));
+  col += (hash21(gl_FragCoord.xy + 3.7) - .5) / 255.;
+  outColor = vec4(col, 1.);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) fail('着色器编译失败：\n' + gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) fail('着色器链接失败：\n' + gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+gl.bindVertexArray(gl.createVertexArray());
+const U = {};
+for (const n of ['uRes', 'uFrame', 'uOrbit', 'uCamPos', 'uCamFwd', 'uCamRgt', 'uCamUp']) U[n] = gl.getUniformLocation(prog, n);
+gl.uniform1i(gl.getUniformLocation(prog, 'uN'), 0);
+
+// ---------------------------------------------------------------------------
+// 镜头
+// ---------------------------------------------------------------------------
+const R = 1200, CAM_ALT = 46, ORBIT_RATE = 0.0042;
+const A0 = 5 * ORBIT_RATE;            // 下降镜头冻结的天气相位 = 低轨对照第 5 秒那一帧
+const DUR = 56;
+
+const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const smooth = (a, b, x) => { x = Math.min(1, Math.max(0, (x - a) / (b - a))); return x * x * (3 - 2 * x); };
+
+// CPU 侧复刻着色器的天气采样，用来把航线瞄准一片真有厚云的区域
+function sampleB(x, y, z) {
+  const N = NOISE_N, w = (i) => ((i % N) + N) % N;
+  x = x * N - .5; y = y * N - .5; z = z * N - .5;
+  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z), fx = x - x0, fy = y - y0, fz = z - z0;
+  const g = (i, j, k) => noiseData[((w(k) * N + w(j)) * N + w(i)) * 4 + 2] / 255;
+  const l = (a, b, t) => a + (b - a) * t;
+  return l(l(l(g(x0, y0, z0), g(x0 + 1, y0, z0), fx), l(g(x0, y0 + 1, z0), g(x0 + 1, y0 + 1, z0), fx), fy),
+           l(l(g(x0, y0, z0 + 1), g(x0 + 1, y0, z0 + 1), fx), l(g(x0, y0 + 1, z0 + 1), g(x0 + 1, y0 + 1, z0 + 1), fx), fy), fz);
+}
+function weatherAt(p) {
+  const c = Math.cos(A0), s = Math.sin(A0);
+  const q = [p[0], p[1] * c + p[2] * s, -p[1] * s + p[2] * c];
+  const a = sampleB(q[0] / 337, q[1] / 337, q[2] / 337);
+  const b = sampleB(q[2] / 149 + .37, q[0] / 149 + .37, q[1] / 149 + .37);
+  return [a * .64 + b * .36, b];
+}
+const trackDir = (psi, s) => {       // 从相机星下点出发、航向 psi 的大圆
+  const a = s / R, sn = Math.sin(a);
+  return [sn * Math.sin(psi), Math.cos(a), -sn * Math.cos(psi)];
+};
+function findTarget() {
+  let best = { score: -1, psi: 0, D: 120 };
+  for (let deg = -20; deg <= 20; deg += 2) for (let D = 85; D <= 170; D += 5) {
+    const psi = deg * Math.PI / 180;
+    let mn = 9, thick = 0, n = 0;
+    for (let s = D - 10; s <= D + 45; s += 3, n++) {
+      const d = trackDir(psi, s), w = weatherAt([d[0] * (R + 7), d[1] * (R + 7), d[2] * (R + 7)]);
+      mn = Math.min(mn, w[0]); thick += w[1];
+    }
+    const score = Math.min(mn, .66) + .2 * thick / n - Math.abs(deg) * .0015;
+    if (score > best.score) best = { score, psi, D };
+  }
+  return best;
+}
+const target = findTarget();
+const D = target.D;
+// 关键帧：[秒, 沿航迹距离 km, 高度 km, 俯仰 °]
+const KEYS = [
+  [0,  0,          46,   -23],   // 原低轨机位
+  [10, .34 * D,    30,   -20],   // 接近：同一片天气逐渐铺满画面
+  [20, .72 * D,    16,   -13],
+  [27, .93 * D,    10.4, -7],    // 掠云顶：胞顶从两侧擦过
+  [33, D + 6,      8.6,  -6],    // 沉进云顶
+  [39, D + 15,     6.0,  -4],    // 云内
+  [45, D + 23,     3.5,  -1],    // 云底
+  [50, D + 30,     2.3,  4],     // 出云，抬头看云底与逆光
+  [56, D + 38,     1.7,  9],
+];
+function keyAt(t) {              // 按时间的 Hermite 插值，速度连续
+  t = Math.min(DUR, Math.max(0, t));
+  let i = 0; while (i < KEYS.length - 2 && t > KEYS[i + 1][0]) i++;
+  const k0 = KEYS[i], k1 = KEYS[i + 1], h = k1[0] - k0[0], x = (t - k0[0]) / h;
+  const tan = (j, c) => { const a = KEYS[Math.max(0, j - 1)], b = KEYS[Math.min(KEYS.length - 1, j + 1)]; return (b[c] - a[c]) / (b[0] - a[0]); };
+  const x2 = x * x, x3 = x2 * x, out = [];
+  for (let c = 1; c < 4; c++) {
+    out.push((2 * x3 - 3 * x2 + 1) * k0[c] + (x3 - 2 * x2 + x) * h * tan(i, c) + (-2 * x3 + 3 * x2) * k1[c] + (x3 - x2) * h * tan(i + 1, c));
+  }
+  return out;
+}
+function camera(mode, t) {
+  let pos, up, look, pitch, alt = CAM_ALT;
+  if (mode === 'orbit') {
+    up = [0, 1, 0]; pos = [0, R + CAM_ALT, 0]; look = [0, 0, -1]; pitch = -23;
+  } else {
+    const [s, a, pt] = keyAt(t);
+    alt = Math.max(1.2, a); pitch = pt;
+    up = trackDir(target.psi, s);
+    pos = [up[0] * (R + alt), up[1] * (R + alt), up[2] * (R + alt)];
+    const ang = s / R, cs = Math.cos(ang), sn = Math.sin(ang);
+    const tangent = [cs * Math.sin(target.psi), -sn, -cs * Math.cos(target.psi)];
+    // 开场保持原镜头朝向（-Z），前 14 秒内缓缓转向航迹
+    const k = smooth(0, 14, t), m = [0, 0, -1], md = dot(m, up);
+    const m0 = norm([m[0] - up[0] * md, m[1] - up[1] * md, m[2] - up[2] * md]);
+    look = norm([tangent[0] * k + m0[0] * (1 - k), tangent[1] * k + m0[1] * (1 - k), tangent[2] * k + m0[2] * (1 - k)]);
+  }
+  const pr = pitch * Math.PI / 180, cp = Math.cos(pr), sp = Math.sin(pr);
+  const fwd = norm([look[0] * cp + up[0] * sp, look[1] * cp + up[1] * sp, look[2] * cp + up[2] * sp]);
+  const rgt = norm(cross(fwd, up));
+  return { pos, fwd, rgt, up: cross(rgt, fwd), alt };
+}
+
+let mode = params.get('shot') === 'orbit' ? 'orbit' : 'descent';
+let paused = FREEZE !== null, time = FREEZE !== null ? FREEZE : 0, last = performance.now(), dirty = true, hudOn = true;
+// 未指定 ?s 时按帧间隔自动降/升渲染分辨率，保证镜头按真实时间播完
+let curScale = SCALE, ema = 16, frameNo = 0;
+const ADAPT = !params.has('s') && FREEZE === null;
+function resize() {
+  const w = Math.max(2, Math.round(innerWidth * curScale)), h = Math.max(2, Math.round(innerHeight * curScale));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; dirty = true; }
+}
+addEventListener('resize', resize);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
+  if (e.code === 'KeyH') { hudOn = !hudOn; hud.style.display = hudOn ? '' : 'none'; }
+  if (e.code === 'KeyR') { time = 0; paused = false; }
+  if (e.code === 'Digit1') { mode = 'orbit'; time = 5; paused = false; }
+  if (e.code === 'Digit2') { mode = 'descent'; time = 0; paused = false; }
+  dirty = true;
+});
+const PHASES = [[0, '低轨接近'], [22, '掠云顶'], [31, '入云'], [44, '云底出云'], [DUR, '结束 · 按 R 重播']];
+function frame(now) {
+  const dt = Math.min(.25, (now - last) / 1000); last = now;
+  const ended = mode === 'descent' && time >= DUR;
+  if (ADAPT && !paused && !ended) {
+    ema += (dt * 1000 - ema) * .15;
+    if (++frameNo % 12 === 0) {
+      if (ema > 42 && curScale > .28) curScale = Math.max(.28, curScale * .84);
+      else if (ema < 20 && curScale < SCALE) curScale = Math.min(SCALE, curScale * 1.08);
+    }
+  }
+  if (!paused && !ended) { time += dt; if (mode === 'descent') time = Math.min(time, DUR); dirty = true; }
+  resize();
+  if (dirty) {
+    const cam = camera(mode, time);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform2f(U.uRes, canvas.width, canvas.height);
+    gl.uniform1f(U.uFrame, paused || ended ? 0 : frameNo % 64);
+    gl.uniform1f(U.uOrbit, mode === 'orbit' ? time * ORBIT_RATE : A0);
+    gl.uniform3fv(U.uCamPos, cam.pos); gl.uniform3fv(U.uCamFwd, cam.fwd);
+    gl.uniform3fv(U.uCamRgt, cam.rgt); gl.uniform3fv(U.uCamUp, cam.up);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    dirty = false;
+    let head;
+    if (mode === 'orbit') head = '低轨对照 · 46 km 逆光掠地平线';
+    else {
+      let ph = PHASES[0][1]; for (const p of PHASES) if (time >= p[0]) ph = p[1];
+      head = '下降穿云 · ' + ph + ' · 高度 ' + cam.alt.toFixed(1) + ' km · ' + time.toFixed(1) + ' / ' + DUR + ' s';
+    }
+    hud.textContent = '深空 B4 · 首族层积云 · ' + head + '\n1 低轨对照  2 下降  R 重播  空格 暂停  H 隐藏   ?shot=orbit  ?t=秒  ?s=缩放';
+  }
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
