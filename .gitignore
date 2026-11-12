@@ -32,5 +32,3 @@ tools/transpile-glsl.js
 Thumbs.db
 .workbuddy/
 
-# User-owned reference photographs: kept locally, not published with the repo.
-docs/visual-targets/real-sky-reference/photos/
