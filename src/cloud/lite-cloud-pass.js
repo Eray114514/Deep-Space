@@ -138,6 +138,10 @@ const shadowShader = /* glsl */`
   varying vec2 vUv;
   void main() {
     vec3 sun = normalize(uSunDirection0);
+    // Same octaves as the view march, faded by what one texel can resolve.
+    float texel = uShadowExtent / 512.0;
+    gFarSmall = smoothstep(500.0, 1500.0, texel);
+    gFarWide = smoothstep(2500.0, 8000.0, texel);
     vec2 xy = uShadowCenter + (vUv * 2.0 - 1.0) * uShadowExtent;
     vec3 origin = uShadowX * xy.x + uShadowY * xy.y;
     float transmittance = 1.0;
@@ -152,7 +156,7 @@ const shadowShader = /* glsl */`
           float ds = (s1 - s0) / 12.0, tau = 0.0;
           for (int i = 0; i < 12; i++) {
             float k = (float(i) + 0.5) / 12.0;
-            tau += cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(c0, c1, k), 0, 0.0) * ds;
+            tau += cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(c0, c1, k), 1, 0.0) * ds;
           }
           transmittance = exp(-tau * uExtinction);
         }
@@ -194,7 +198,7 @@ const marchShader = /* glsl */`
 
   void main() {
     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    gAux = vec4(1e9, 1e9, 0.0, 1.0);
+    gAux = vec4(6e4, 6e4, 0.0, 1.0);
     gShaft = vec4(0.0);
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
@@ -236,7 +240,7 @@ const marchShader = /* glsl */`
         loss += through * source * (1.0 - cloudShadowAt(p)) * dt;
         through *= exp(-(uBetaRayleigh * rayleigh + uBetaMieExtinction * mie) * dt);
       }
-      gShaft = vec4(loss * uShaftStrength, 1.0);
+      gShaft = vec4(loss * uShaftStrength * smoothstep(uShellBase, uShellBase - 700.0, r0), 1.0);
     }
 
     // ---- High cirrus: one thin sheet well above the cumulus layer. It costs
@@ -362,7 +366,7 @@ const marchShader = /* glsl */`
     vec3 airRadiance, airTransmittance;
     airIntegrate(ro, rd, 0.0, (weighted + cirrusWeight * cirrusT) / max(weight + cirrusWeight, 1e-5), airRadiance, airTransmittance);
     gl_FragColor = vec4(airRadiance * (1.0 - T) + airTransmittance * L, T);
-    gAux = vec4(tFront, max(tBack, tFront + 1.0), 0.0, 1.0);
+    gAux = vec4(tFront, max(tBack, tFront + 1.0), 0.0, 1.0) * vec4(0.001, 0.001, 1.0, 1.0);   // km
   }`;
 
 const compositeShader = /* glsl */`
@@ -379,7 +383,7 @@ const compositeShader = /* glsl */`
     vec4 cloud = texture2D(tCloud, vUv);
     // Distant clouds are sampled by long jittered steps; a small tent filter
     // there trades invisible detail for a clean horizon.
-    float far = smoothstep(15000.0, 70000.0, texture2D(tCloudAux, vUv).x);
+    float far = smoothstep(15.0, 70.0, texture2D(tCloudAux, vUv).x);
     if (far > 0.0) {
       vec2 o = uCloudTexel * 1.1;
       vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
@@ -393,16 +397,17 @@ const compositeShader = /* glsl */`
       vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
       vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
-      vec2 aux = texture2D(tCloudAux, vUv).xy;
+      vec2 aux = texture2D(tCloudAux, vUv).xy * 1000.0;
       coverage = smoothstep(aux.x, max(aux.y, aux.x + 1.0), distance);
       if (uShadowOn > 0.5) {
         // Surfaces under the clouds lose their direct sun to the cloud column.
         vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
         vec3 p = uCameraLocal + normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz) * distance;
         float r = length(p);
-        if (r < uShellBase + 150.0) {
+        float under = 1.0 - smoothstep(uShellBase, uShellBase + 2600.0, r);
+        if (under > 0.0) {
           float day = smoothstep(0.0, 0.14, dot(p / r, normalize(uSunDirection0)));
-          shade = mix(1.0, mix(uShadowFloor, 1.0, cloudShadowAt(p)), day);
+          shade = mix(1.0, mix(uShadowFloor, 1.0, cloudShadowAt(p)), day * under);
         }
       }
     }
@@ -431,10 +436,12 @@ export class LiteCloudPass extends Pass {
     this.target.textures[0].name = 'lite-cloud.radiance';
     this.target.textures[1].name = 'lite-cloud.depth-range';
     this.target.textures[2].name = 'lite-cloud.shaft-loss';
-    // Metres need float32: half float quantised 200 km distances into ~2 km
-    // steps, which drew contour rings wherever terrain crossed the cloud layer.
-    this.target.textures[1].type = THREE.FloatType;
+    // Cloud front/back distances, linear kilometres. log2 in half float once
+    // quantised 200 km into ~2 km steps and drew contour rings wherever terrain
+    // crossed the cloud layer. The type is chosen on first render: float32
+    // where EXT_color_buffer_float exists, linear half float (0.1%) elsewhere.
     this.target.textures[1].minFilter = this.target.textures[1].magFilter = THREE.NearestFilter;
+    this.targetTypeChosen = false;
     this.shadowTarget = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, {
       depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
     });
@@ -530,7 +537,7 @@ export class LiteCloudPass extends Pass {
   setActivePlanet(planet) {
     const next = LiteCloudPass.supports(planet) ? planet : null;
     if (next !== this.activePlanet) {
-      if (this.activePlanet) { this.activePlanet.liteCloudActive = false; this.#atlasShadows(this.activePlanet, true); }
+      if (this.activePlanet) this.activePlanet.liteCloudActive = false;
       this.activePlanet = next;
       if (next) {
         const u = this.marchMaterial.uniforms;
@@ -552,16 +559,6 @@ export class LiteCloudPass extends Pass {
     this.enabled = Boolean(planet && this.visualEnabled && planet.cloudVisualEnabled !== false);
     // The planet hides its analytic cloud decks while this pass draws them.
     if (planet) planet.liteCloudActive = this.enabled;
-  }
-
-  // The terrain and water shaders darken themselves with the coarse weather
-  // atlas. While this pass shades surfaces with real cloud shadows, that
-  // weather-scale term would double up, so it is switched off and restored.
-  #atlasShadows(planet, on) {
-    const terrain = planet.terrainMaterial?.userData.shader?.uniforms.uCloudK;
-    if (terrain) terrain.value = on ? 0.42 : 0;
-    const water = planet.liquidMat?.userData.shader?.uniforms.uCloudK;
-    if (water) water.value = on ? 0.72 : 0;
   }
 
   #renderShadowMap(renderer, planet) {
@@ -595,7 +592,6 @@ export class LiteCloudPass extends Pass {
     u.uFrame.value = this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
 
     u.uShadowOn.value = this.shadowsEnabled ? 1 : 0;
-    this.#atlasShadows(planet, !this.shadowsEnabled);
     if (this.shadowsEnabled) this.#renderShadowMap(renderer, planet);
 
     const pixels = readBuffer.width * readBuffer.height;
@@ -604,6 +600,13 @@ export class LiteCloudPass extends Pass {
     const height = Math.max(1, Math.round(readBuffer.height * scale));
     if (this.target.width !== width || this.target.height !== height) this.target.setSize(width, height);
 
+    if (!this.targetTypeChosen) {
+      this.targetTypeChosen = true;
+      if (renderer.extensions.has('EXT_color_buffer_float')) {
+        this.target.textures[1].type = THREE.FloatType;
+        this.target.dispose();
+      }
+    }
     renderer.setRenderTarget(this.target);
     this.marchQuad.render(renderer);
 
@@ -615,10 +618,10 @@ export class LiteCloudPass extends Pass {
     this.compositeQuad.render(renderer);
   }
 
-  releaseTargets() { this.target.dispose(); this.shadowTarget.dispose(); }
+  releaseTargets() { this.target.dispose(); this.shadowTarget.dispose(); this.targetTypeChosen = false; }
 
   dispose() {
-    if (this.activePlanet) { this.activePlanet.liteCloudActive = false; this.#atlasShadows(this.activePlanet, true); }
+    if (this.activePlanet) this.activePlanet.liteCloudActive = false;
     this.activePlanet = null;
     this.target.dispose();
     this.shadowTarget.dispose();

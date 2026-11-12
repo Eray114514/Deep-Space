@@ -33,7 +33,7 @@ const check = (ok, label) => {
 
 try {
   const bootStart = Date.now();
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1&quality=low&post=0&vclouds=0&farflora=0&buildms=25`);
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1&quality=low&post=0&farflora=0&buildms=25`);
   await page.waitForFunction('window.NMS && window.NMS.booted', null, { timeout: 90000 });
   console.log(`boot in ${((Date.now() - bootStart) / 1000).toFixed(1)}s`);
 
