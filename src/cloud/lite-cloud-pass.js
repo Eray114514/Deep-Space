@@ -39,7 +39,8 @@ const cloudFieldGLSL = /* glsl */`
   uniform sampler3D uNoise;
   uniform sampler2D uCloudTex;
   uniform mat3 uCloudMat;
-  uniform float uSynoptic, uShellBase, uShellTop;
+  uniform sampler2D uSurfaceTex;
+  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn;
   ${weatherAtlasGLSL}
 
   float sat(float x) { return clamp(x, 0.0, 1.0); }
@@ -58,7 +59,10 @@ const cloudFieldGLSL = /* glsl */`
 
   // Synoptic coverage from the shared weather atlas, with a mid-scale breakup
   // so the 256-texel atlas does not draw straight, blurry weather borders.
-  float coverageAt(vec3 p) {
+  // Returns (coverage, lift). Lift raises the local cloud base over high
+  // ground (the weather system's regionally smoothed surface altitude), so
+  // the layer rides over mountain ranges instead of slicing through them.
+  vec2 weatherAt(vec3 p) {
     vec3 q = uCloudMat * p;
     float c = weatherAtlasSample(uCloudTex, q).r;
     if (uSynoptic > 0.5) c = synopticCoverage(c, 0.12);
@@ -67,7 +71,12 @@ const cloudFieldGLSL = /* glsl */`
     // Mesoscale regimes inside a weather system: closed decks with cracks
     // alternate with broken, open-cell fields instead of one uniform texture.
     float regime = textureLod(uNoise, q.yzx / 310000.0 + 0.61, 0.0).b;
-    return c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime));
+    float lift = 0.0;
+    if (uLiftOn > 0.5) {
+      float surface = (weatherAtlasSample(uSurfaceTex, p).g * 2.0 - 1.0) * uSurfaceRange;
+      lift = max(surface + 1300.0 - uLiftBase, 0.0);
+    }
+    return vec2(c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime)), lift);
   }
 
   // Distance fades set by the view march. A step grows with distance, so
@@ -76,8 +85,8 @@ const cloudFieldGLSL = /* glsl */`
   float gFarSmall = 0.0, gFarWide = 0.0;
 
   // lod 0: light march / shadow / far field. 1: view march. 2: near camera.
-  float cloudDensity(vec3 p, float cover, int lod, float near) {
-    float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
+  float cloudDensity(vec3 p, float cover, int lod, float near, float lift) {
+    float h = (length(p) - uShellBase - lift) / uShellDepth;
     if (h < 0.0 || h > 1.0) return 0.0;
     float cov = cover * 0.86;                       // never fully closed: the deck keeps its pores
     if (cov < 0.02) return 0.0;
@@ -88,11 +97,12 @@ const cloudFieldGLSL = /* glsl */`
     float wide = textureLod(uNoise, q.yzx / 63000.0 + 0.5, 0.0).r;
     float thick = textureLod(uNoise, q.zxy / 149000.0 + 0.37, 0.0).b;
     float fine = lod > 0 ? 1.0 - gFarSmall : 0.0;
+    float small = 0.5;
     if (lod > 0) {
       // Break every ~9 km cell into 2-3 km cumulus. Seen from the ground a
       // sky needs many small clouds receding to the horizon; a few huge
       // blobs overhead read as a ceiling.
-      float small = textureLod(uNoise, q.zxy / 8300.0 + 0.29, 0.0).r;
+      small = textureLod(uNoise, q.zxy / 8300.0 + 0.29, 0.0).r;
       float nearField = base * 0.46 + wide * 0.2 + small * 0.34;
       float midField = base * 0.7 + wide * 0.3;
       base = mix(mix(midField, nearField, fine), base * 0.35 + wide * 0.65, gFarWide);
@@ -101,8 +111,10 @@ const cloudFieldGLSL = /* glsl */`
     // Cumulus profile: flat base, cloud-top height driven by the slow
     // thickness field and by each cell (cell cores tower upward).
     float top = mix(0.42, 1.0, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
-    if (fine > 0.0) top *= 1.0 - 0.18 * fine * (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g);   // cauliflower tops
-    float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.7, h);
+    // Every small cumulus is its own dome and carries finer bumps: seen from
+    // above the deck is a relief of lit tops and shaded gaps, not a flat sheet.
+    if (fine > 0.0) top *= 1.0 - fine * (0.34 * (1.0 - small) + 0.2 * (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g));
+    float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.45, h);
     float d = sat(remap(base * profile, 1.0 - cov, 1.0, 0.0, 1.0));
     if (d <= 0.0) return 0.0;
     if (fine > 0.0) {
@@ -112,7 +124,8 @@ const cloudFieldGLSL = /* glsl */`
       e = min(e * fine, 0.9);
       d = sat((d - e) / (1.0 - e));
     }
-    return d * cov * 1.25;
+    // Thin rims fade out instead of ending in a hard outline.
+    return pow(d, 1.35) * cov * 1.3;
   }`;
 
 const shadowLookupGLSL = /* glsl */`
@@ -150,13 +163,13 @@ const shadowShader = /* glsl */`
       vec2 base = shellHits(origin, sun, uShellBase);
       float s0 = base.y > base.x ? base.y : top.x, s1 = top.y;
       if (s1 > s0) {
-        float c0 = coverageAt(origin + sun * mix(s0, s1, 0.2));
-        float c1 = coverageAt(origin + sun * mix(s0, s1, 0.8));
-        if (max(c0, c1) > 0.03) {
+        vec2 w0 = weatherAt(origin + sun * mix(s0, s1, 0.2));
+        vec2 w1 = weatherAt(origin + sun * mix(s0, s1, 0.8));
+        if (max(w0.x, w1.x) > 0.03) {
           float ds = (s1 - s0) / 12.0, tau = 0.0;
           for (int i = 0; i < 12; i++) {
             float k = (float(i) + 0.5) / 12.0;
-            tau += cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(c0, c1, k), 1, 0.0) * ds;
+            tau += cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(w0.x, w1.x, k), 1, 0.0, mix(w0.y, w1.y, k)) * ds;
           }
           transmittance = exp(-tau * uExtinction);
         }
@@ -283,14 +296,12 @@ const marchShader = /* glsl */`
     if (t1 > t0) {
       t1 = min(t1, t0 + 320000.0);
       float span = t1 - t0;
-      // Coverage varies over tens of kilometres: five atlas samples along the
-      // ray replace a full atlas lookup in every march and light step.
-      float cover[5];
-      float coverMax = 0.0;
-      for (int i = 0; i < 5; i++) {
-        cover[i] = coverageAt(ro + rd * (t0 + span * float(i) * 0.25));
-        coverMax = max(coverMax, cover[i]);
-      }
+      // Weather is looked up where the sample is, every few kilometres of
+      // travel. Interpolating a handful of samples across the whole ray made
+      // a cloud's existence depend on the view: it vanished as the camera moved.
+      float coverMax = 1.0;
+      vec2 weather = vec2(0.0);
+      float tWeather = -1e9;
       if (coverMax >= 0.03) {
         vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
         vec3 sunFar = sunAt(ro + rd * t1, sunDirection);
@@ -301,22 +312,21 @@ const marchShader = /* glsl */`
           if (t > t1) break;
           float dt = max(dmin, 0.055 * (t - t0));
           vec3 p = ro + rd * t;
-          float s = sat((t - t0) / span) * 4.0;
-          int cell = int(min(floor(s), 3.0));
-          float cov = mix(cover[cell], cover[cell + 1], s - float(cell));
+          if (t - tWeather > 3500.0) { weather = weatherAt(p); tWeather = t; }
+          float cov = weather.x;
           float near = sat(1.0 - t / 28000.0);
           // Fade octaves the growing step can no longer resolve.
           // (by step length along grazing rays, by distance when looking down from orbit)
-          gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(40000.0, 130000.0, t));
+          gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(80000.0, 220000.0, t));
           gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(300000.0, 700000.0, t));
-          float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near);
+          float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near, weather.y);
           if (d > 0.002) {
             if (tFront < 0.0) tFront = t;
-            float h = (length(p) - uShellBase) / (uShellTop - uShellBase);
+            float h = sat((length(p) - uShellBase - weather.y) / uShellDepth);
             // Optical depth toward the sun: four growing steps.
             float tau = 0.0, ls = 320.0;
             vec3 pl = p;
-            for (int j = 0; j < 4; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0) * ls; ls *= 1.8; }
+            for (int j = 0; j < 4; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0, weather.y) * ls; ls *= 1.8; }
             tau *= uExtinction;
             // Multi-scattering octaves: each order loses extinction and
             // anisotropy. Gives silver linings and keeps thick cores from going black.
@@ -507,6 +517,11 @@ export class LiteCloudPass extends Pass {
       uSynoptic: { value: 0 },
       uShellBase: { value: 1 },
       uShellTop: { value: 2 },
+      uShellDepth: { value: 5200 },
+      uSurfaceTex: { value: null },
+      uSurfaceRange: { value: 1 },
+      uLiftBase: { value: 0 },
+      uLiftOn: { value: 0 },
     };
     const shadow = {
       tShadow: { value: this.shadowTarget.texture },
@@ -614,8 +629,15 @@ export class LiteCloudPass extends Pass {
         u.uSynoptic.value = next.weatherField?.synoptic ? 1 : 0;
         const floor = next.hasLiquid && Number.isFinite(next.seaLevel) ? Math.max(next.seaLevel, 0) : 0;
         const base = floor + THREE.MathUtils.clamp((next.hAmp || 0) * 0.25, 1500, 3500);
+        // Over high ground the base lifts with the regional surface altitude.
+        const synoptic = Boolean(next.weatherField?.synoptic && next.cloudWeatherHiTex);
+        const highest = synoptic ? Number(next.weatherField.surfaceBoundsMeters?.[1]) || 0 : 0;
+        const maxLift = synoptic ? THREE.MathUtils.clamp(highest + 1300 - base, 0, 9000) : 0;
+        u.uLiftOn.value = synoptic ? 1 : 0;
+        u.uLiftBase.value = base;
+        u.uSurfaceRange.value = synoptic ? next.weatherField.surfaceRangeMeters || 1 : 1;
         u.uShellBase.value = next.R + base;
-        u.uShellTop.value = next.R + base + 5200;
+        u.uShellTop.value = next.R + base + 5200 + maxLift;
         u.uCloudTint.value.set(next.type === 'toxic' ? 0xc8e890 : 0xffffff);
         this.layerMeters = { base, top: base + 5200 };
       }
@@ -655,6 +677,7 @@ export class LiteCloudPass extends Pass {
     const planet = this.activePlanet;
     const u = this.marchMaterial.uniforms;
     u.uCloudTex.value = planet.cloudShadowTex;
+    u.uSurfaceTex.value = planet.cloudWeatherHiTex || planet.cloudShadowTex;
     // Same inverse deck spin the terrain and water cloud shadows use.
     _matrix.makeRotationFromQuaternion(_quaternion.copy(planet.cloudMesh.quaternion).invert());
     u.uCloudMat.value.setFromMatrix4(_matrix);
