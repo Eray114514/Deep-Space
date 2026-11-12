@@ -1715,7 +1715,8 @@ export class Planet extends TerrainHeightField {
           .applyQuaternion(_q2.copy(this.cloudMeshNoctilucent.quaternion).invert());
       }
     }
-    if (this.cloudVisualEnabled === false) {
+    // The lite cloud pass draws the active planet's clouds itself.
+    if (this.cloudVisualEnabled === false || this.liteCloudActive) {
       for (const mesh of [this.cloudMesh, this.cloudMesh2,
         this.cloudMeshNoctilucent, this.volCloudMesh]) {
         if (mesh) mesh.visible = false;

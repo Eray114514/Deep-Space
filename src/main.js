@@ -523,7 +523,11 @@ function configureShipForegroundLightingLayers() {
 }
 
 // ---- renderer-specific post chain -------------------------------------------
-const VOLUME_ENABLED = qs.get('vclouds') !== '0';
+// Clouds: the lite shell march is the default renderer. ?clouds=legacy brings
+// back the retired production stack for comparison; ?vclouds=0 disables both.
+const CLOUDS_ENABLED = qs.get('vclouds') !== '0';
+const VOLUME_ENABLED = CLOUDS_ENABLED && qs.get('clouds') === 'legacy';
+const LITE_CLOUDS = CLOUDS_ENABLED && !VOLUME_ENABLED;
 const VOLUME_SCALE = QUALITY_PROFILE.volumeScale;
 // Start at the actual orbital pixel budget. Constructing the pipeline at the
 // generic 0.75 Ultra scale and shrinking it on the first live frame allocated
@@ -560,6 +564,8 @@ const TEMPORAL_AA_INITIAL = qs.get('taa') === '1';
 const TEMPORAL_AA_DEBUG = qs.get('taadebug') || 'off';
 const nodePipeline = new GameLegacyPipeline(renderer, scene, camera, {
   volume: VOLUME_ENABLED,
+  liteClouds: LITE_CLOUDS,
+  liteCloudOptions: QUALITY_PROFILE.liteClouds,
   cloudProgramPreparation: CLOUD_PROGRAM_PREP,
   cloudFarSplit: CLOUD_FAR_SPLIT,
   volumeScale: effectiveVolumeScale,

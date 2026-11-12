@@ -28,27 +28,22 @@ export const WORLD_CONFIG = Object.freeze({
         positionCells: Object.freeze([0, 0, 0]),
       }),
       bodyTuning: Object.freeze({
-        // The selected home terrain has 18.6 km of peak-to-trough relief.
-        // The 6,000 km authored radius keeps the curated terrain stream at a
-        // terrestrial curvature. The atmosphere and cloud shell follow the
-        // pre-rewrite PROPORTIONS (atmo ≈ 10.5% of R, floating cloud deck at
-        // ≈ 3.8–7% of R) that the legacy WebGL chain — now the production
-        // baseline — was tuned against. The rewrite's 120 km / 0.4–14 km
-        // "physical metres" envelope rendered as a shield-thin limb with
-        // clouds glued to the ground and was rejected in player review.
+        // [2026-11-12] The home world is authored at 1,200 km. The earlier
+        // 6,000 km body was reported by the player as taking far too long to
+        // reach and multiplied every range the renderer has to cover; the
+        // released build used 286 km. 1,200 km sits between the two. The
+        // gameplay envelopes below keep their old proportions of R (atmosphere
+        // ≈ 10.5%, cloudLayer ≈ 3.8–7%). They are not render geometry: the lite
+        // cloud pass owns its own shell (see src/cloud/lite-cloud-pass.js).
         '0,0,0': Object.freeze({
           'planet-0': Object.freeze({
-            radiusMeters: 6000000,
-            atmosphereHeightMeters: 630000,
+            radiusMeters: 1200000,
+            atmosphereHeightMeters: 126000,
             cloudCoverage: 0.64,
             weatherStyle: 'temperate-synoptic',
-            // Absolute-metre equivalents of the pre-rewrite ratios on the
-            // 6,000 km body: base 230 km (3.83% R, ≈ old 11 km on 286 km),
-            // top 420 km (7.0% R), matching the old floating-deck silhouette
-            // from orbit and from the surface.
             cloudLayer: Object.freeze({
-              minAltitudeMeters: 230000,
-              maxAltitudeMeters: 420000,
+              minAltitudeMeters: 46000,
+              maxAltitudeMeters: 84000,
             }),
             clouds: Object.freeze({
               coverage: 0.64,
@@ -60,7 +55,7 @@ export const WORLD_CONFIG = Object.freeze({
           // Preserve the authored moon's 3.6-parent-radius spacing after the
           // larger planetary curation. StarSystem scales its period with r^1.5.
           'planet-0-moon-0': Object.freeze({
-            orbitRadiusMeters: 21600000,
+            orbitRadiusMeters: 4320000,
           }),
           // The original prompt explicitly calls for a water-dominated world
           // with violent open seas, shallow shelves and only scattered land.

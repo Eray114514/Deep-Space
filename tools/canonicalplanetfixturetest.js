@@ -7,12 +7,12 @@ import { generateSystemSpec } from '../src/astronomy.js';
 
 const home=canonicalHomeBody(),ocean=canonicalHomeBody({bodyId:'planet-1'});
 assert.equal(home.seed,'MILKY-038');assert.equal(home.star.id,HOME_SYSTEM_ID);
-assert.equal(home.spec.bodyId,'planet-0');assert.equal(home.spec.radius,6000000);
-assert.equal(home.tuning.radiusMeters,6000000);assert.equal(home.spec.type,'lush');
+assert.equal(home.spec.bodyId,'planet-0');assert.equal(home.spec.radius,1200000);
+assert.equal(home.tuning.radiusMeters,1200000);assert.equal(home.spec.type,'lush');
 assert.equal(home.provenance.mode,'authored');assert.equal(home.provenance.authoredTuningApplied,true);
 assert.equal(home.provenance.stellarSource,'standalone-fallback');
 assert.equal(home.provenance.radiusMeters,home.spec.radius);assert.equal(home.provenance.bodySeed,home.spec.seed);
-assert.equal(home.tuning.atmosphereHeightMeters,630000);assert.equal(home.tuning.cloudCoverage,.64);
+assert.equal(home.tuning.atmosphereHeightMeters,126000);assert.equal(home.tuning.cloudCoverage,.64);
 assert.equal(ocean.spec.bodyId,'planet-1');assert.equal(ocean.spec.radius,560000);assert.equal(ocean.spec.type,'ocean');
 assert.equal(ocean.tuning.radiusMeters,560000);assert.equal(ocean.tuning.oceanProfile,'pelagic-storm');
 assert.equal(ocean.tuning.seaLevelOffset,1650);assert.equal(ocean.provenance.mode,'authored');
@@ -24,7 +24,7 @@ for(const bodyId of ['planet-0','planet-1']) {
   assert.deepEqual(stress.spec,expected,'Explicit stress must be the unchanged raw generator dossier');
   assert.deepEqual(stress.tuning,{});assert.equal(stress.provenance.mode,'untuned-stress');
   assert.equal(stress.provenance.authoredTuningApplied,false);assert.deepEqual(stress.provenance.tuningKeys,[]);
-  assert.equal(stress.provenance.radiusMeters,expected.radius);assert.notEqual(stress.spec.radius,bodyId==='planet-0'?6000000:560000);
+  assert.equal(stress.provenance.radiusMeters,expected.radius);assert.notEqual(stress.spec.radius,bodyId==='planet-0'?1200000:560000);
 }
 assert.equal(canonicalHomeBody({untunedStress:true}).spec.radius,286012.9330866039);
 assert.equal(canonicalHomeBody({bodyId:'planet-1',untunedStress:true}).spec.type,'barren');
@@ -36,7 +36,7 @@ for(const invalid of [undefined,null,[],ACTIVE_GALAXY_ID,'',1,false])assert.thro
 for(const bodyId of ['planet-0','planet-1']) {
   assert.throws(()=>resolveBodyTuning(ACTIVE_GALAXY_ID,star.id,bodyId),'Legacy positional tuning calls must fail');
   assert.equal(resolveBodyTuning({galaxyId:ACTIVE_GALAXY_ID,seed,systemId:star.id,bodyId}).radiusMeters,
-    bodyId==='planet-0'?6000000:560000);
+    bodyId==='planet-0'?1200000:560000);
 }
 assert.deepEqual(canonicalHomeBody(),home,'Helper calls must preserve deterministic independent fixture identity');
 console.log(JSON.stringify({passed:true,scope:'CPU authored fixture and API-shape contracts only; no runtime Planet/GPU or visual acceptance.',

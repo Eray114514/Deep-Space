@@ -14,28 +14,28 @@ assert.equal(galaxy.seed, 'MILKY-038', 'release Milky Way must use the visually 
 const homeTuning = resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
 });
-assert.equal(homeTuning.radiusMeters, 6000000,
-  'the curated home radius is an explicit terrestrial-scale tuning');
-assert.equal(homeTuning.atmosphereHeightMeters, 630000,
+assert.equal(homeTuning.radiusMeters, 1200000,
+  'the curated home radius is an explicit authored tuning (1,200 km: readable curvature, short approach)');
+assert.equal(homeTuning.atmosphereHeightMeters, 126000,
   'the home atmosphere restores the pre-rewrite limb proportion (~10.5% of R)');
 // cloudLayer pins the floating-deck shell at the pre-rewrite proportions on
-// the 6,000 km body (base ≈ 3.8% R, top ≈ 7% R), matching the legacy WebGL
+// the authored body (base ≈ 3.8% R, top ≈ 7% R), matching the legacy WebGL
 // chain the project is aligned against.
 assert.deepEqual(homeTuning.cloudLayer, {
-  minAltitudeMeters: 230000,
-  maxAltitudeMeters: 420000,
+  minAltitudeMeters: 46000,
+  maxAltitudeMeters: 84000,
 }, 'the cloud shell floats clear of the surface like the pre-rewrite deck');
 assert.equal(homeTuning.cloudCoverage, 0.64,
   'the home world retains synoptic-scale cloud coverage rather than a sparse film');
 assert.deepEqual(resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0-moon-0',
-}), { orbitRadiusMeters: 21600000 }, 'the home moon remains outside the enlarged planet');
+}), { orbitRadiusMeters: 4320000 }, 'the home moon remains outside the enlarged planet');
 const labTuning = resolveBodyTuning({
   galaxyId: galaxy.id, seed: galaxy.seed, systemId: HOME_SYSTEM_ID, bodyId: 'planet-0',
   worldLabParams: new URLSearchParams('system=0,0,0&body=planet-0&sea=-610&clouds=0.58'),
 });
-assert.equal(labTuning.radiusMeters, 6000000);
-assert.equal(labTuning.atmosphereHeightMeters, 630000);
+assert.equal(labTuning.radiusMeters, 1200000);
+assert.equal(labTuning.atmosphereHeightMeters, 126000);
 assert.equal(labTuning.seaLevelOffset, -610);
 assert.equal(labTuning.cloudCoverage, 0.58);
 

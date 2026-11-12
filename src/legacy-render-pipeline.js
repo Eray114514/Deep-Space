@@ -7,6 +7,7 @@ import { ShaderPass } from '../vendor/jsm/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ForegroundPass } from './foreground-pass.js';
 import { VolumetricPass, lightBatchNoLongerPrepared } from './volumetric-pass-webgl.js';
+import { LiteCloudPass } from './cloud/lite-cloud-pass.js';
 import { AtmospherePass } from './atmosphere-pass-webgl.js';
 import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
 import { gradePass } from './halcyon/gfx/grade.js';
@@ -36,6 +37,8 @@ function aliasUniforms(uniforms, aliases) {
 export class GameLegacyPipeline {
   constructor(renderer, scene, camera, {
     volume = false,
+    liteClouds = false,
+    liteCloudOptions = {},
     cloudProgramPreparation = false,
     cloudFarSplit = false,
     volumeScale = 0.67,
@@ -82,6 +85,7 @@ export class GameLegacyPipeline {
       this.composer.renderTarget1.dispose();
       this.composer.renderTarget2.dispose();
       this.volumePass?.releaseTargets();
+      this.cloudPass?.releaseTargets();
       this.temporalAA?.releaseTargets();
       for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
       this.releaseCloudLightPrograms();
@@ -115,6 +119,11 @@ export class GameLegacyPipeline {
       this.volumePass.sceneDepthSource = this.atmospherePass;
       this.composer.addPass(this.volumePass);
     }
+
+    // Default cloud renderer: one low-resolution shell march, composited over
+    // the lit scene. The legacy VolumetricPass above only exists with ?clouds=legacy.
+    this.cloudPass = liteClouds ? new LiteCloudPass(camera, this.atmospherePass, liteCloudOptions) : null;
+    if (this.cloudPass) this.composer.addPass(this.cloudPass);
 
     this.warp = new ShaderPass(WarpDriveShader);
     this.warp.enabled = false;
@@ -206,6 +215,7 @@ export class GameLegacyPipeline {
 
   setActiveAtmosphere(planet, nav) {
     this.atmospherePass.setActivePlanet(planet, nav);
+    this.cloudPass?.setActivePlanet(this.atmospherePass.activePlanet);
   }
 
   invalidateTemporalHistory(reason = 'explicit') {
@@ -570,6 +580,7 @@ export class GameLegacyPipeline {
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.composer.dispose();
     this.volumePass?.dispose();
+    this.cloudPass?.dispose();
     this.temporalAA?.dispose();
     this.atmospherePass.dispose();
     this.parkedInteriorPass?.dispose?.();

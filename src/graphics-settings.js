@@ -3,7 +3,7 @@ export const GRAPHICS_SETTINGS_VERSION = 1;
 
 export const QUALITY_PROFILES = Object.freeze({
   performance: Object.freeze({
-    id: 'performance', label: '性能', dprMin: 0.85, dprTarget: 0.9, dprMax: 1.0,
+    id: 'performance', liteClouds: Object.freeze({ scale: 0.34, steps: 56, maxPixels: 260000 }), label: '性能', dprMin: 0.85, dprTarget: 0.9, dprMax: 1.0,
     volumeScale: 0.45, cloudSteps: 48, cloudStepsWebGPU: 24, shadowMap: 1024, shadowDistance: 180,
     terrainScreenError: 1.35, grassRadius: 28, grassDensity: 0.62,
     treeDensity: 0.55, waterInteractionSize: 256, waterReflectionHz: 15,
@@ -14,7 +14,7 @@ export const QUALITY_PROFILES = Object.freeze({
       'shadowDistance', 'treeDensity', 'dpr'],
   }),
   balanced: Object.freeze({
-    id: 'balanced', label: '均衡', dprMin: 0.95, dprTarget: 1.0, dprMax: 1.35,
+    id: 'balanced', liteClouds: Object.freeze({ scale: 0.42, steps: 80, maxPixels: 400000 }), label: '均衡', dprMin: 0.95, dprTarget: 1.0, dprMax: 1.35,
     volumeScale: 0.6, cloudSteps: 80, cloudStepsWebGPU: 40, shadowMap: 2048, shadowDistance: 350,
     terrainScreenError: 1.0, grassRadius: 45, grassDensity: 0.82,
     treeDensity: 0.8, waterInteractionSize: 512, waterReflectionHz: 30,
@@ -25,7 +25,7 @@ export const QUALITY_PROFILES = Object.freeze({
       'shadowDistance', 'treeDensity', 'dpr'],
   }),
   ultra: Object.freeze({
-    id: 'ultra', label: '极致', dprMin: 0.95, dprTarget: 1.25, dprMax: 1.5,
+    id: 'ultra', liteClouds: Object.freeze({ scale: 0.5, steps: 96, maxPixels: 560000 }), label: '极致', dprMin: 0.95, dprTarget: 1.25, dprMax: 1.5,
     volumeScale: 0.75, cloudSteps: 124, cloudStepsWebGPU: 56, shadowMap: 4096, shadowDistance: 650,
     terrainScreenError: 0.72, grassRadius: 70, grassDensity: 1,
     treeDensity: 1, waterInteractionSize: 1024, waterReflectionHz: 60,
