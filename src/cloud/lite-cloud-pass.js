@@ -366,7 +366,46 @@ const marchShader = /* glsl */`
     vec3 airRadiance, airTransmittance;
     airIntegrate(ro, rd, 0.0, (weighted + cirrusWeight * cirrusT) / max(weight + cirrusWeight, 1e-5), airRadiance, airTransmittance);
     gl_FragColor = vec4(airRadiance * (1.0 - T) + airTransmittance * L, T);
-    gAux = vec4(tFront, max(tBack, tFront + 1.0), 0.0, 1.0) * vec4(0.001, 0.001, 1.0, 1.0);   // km
+    float representative = (weighted + cirrusWeight * cirrusT) / max(weight + cirrusWeight, 1e-5);
+    gAux = vec4(tFront, max(tBack, tFront + 1.0), representative, 1000.0) * 0.001;   // km
+  }`;
+
+// Temporal resolve. Every frame marches with a different jitter phase; this
+// pass reprojects last frame's result to where the cloud is now and blends,
+// so the step noise averages out instead of sitting on screen as grain.
+const resolveShader = /* glsl */`
+  precision highp float;
+  uniform sampler2D tCurrent, tCurrentAux, tHistory;
+  uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal, uPrevProjection;
+  uniform mat3 uPrevLocalToView;
+  uniform vec3 uCameraDelta;
+  uniform vec2 uCloudTexel;
+  uniform float uHistoryWeight;
+  varying vec2 vUv;
+  void main() {
+    vec4 current = texture2D(tCurrent, vUv);
+    if (uHistoryWeight <= 0.0) { gl_FragColor = current; return; }
+    vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
+    vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
+    vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
+    // Clear sky reprojects as a far point so the history follows rotation.
+    float km = texture2D(tCurrentAux, vUv).z;
+    float distance = km > 0.0 ? km * 1000.0 : 150000.0;
+    // The camera offset is formed on the CPU in double precision.
+    vec3 previousView = uPrevLocalToView * (uCameraDelta + rd * distance);
+    vec4 clip = uPrevProjection * vec4(previousView, 1.0);
+    vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
+    float valid = clip.w > 0.0 && uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 ? 1.0 : 0.0;
+    vec4 history = texture2D(tHistory, uv);
+    // Keep history inside what the current neighbourhood allows: this bounds
+    // ghosting when clouds are revealed, lit differently or the camera cuts.
+    vec4 a = texture2D(tCurrent, vUv + vec2(uCloudTexel.x, 0.0)), b = texture2D(tCurrent, vUv - vec2(uCloudTexel.x, 0.0));
+    vec4 c = texture2D(tCurrent, vUv + vec2(0.0, uCloudTexel.y)), d = texture2D(tCurrent, vUv - vec2(0.0, uCloudTexel.y));
+    vec4 lo = min(current, min(min(a, b), min(c, d))), hi = max(current, max(max(a, b), max(c, d)));
+    vec4 pad = (hi - lo) * 0.6 + vec4(vec3(0.02), 0.01);
+    history = clamp(history, lo - pad, hi + pad);
+    gl_FragColor = mix(current, history, valid * uHistoryWeight);
   }`;
 
 const compositeShader = /* glsl */`
@@ -388,7 +427,7 @@ const compositeShader = /* glsl */`
       vec2 o = uCloudTexel * 1.1;
       vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
         + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
-      cloud = mix(cloud, blurred, far);
+      cloud = mix(cloud, blurred, far * 0.5);
     }
     float coverage = 1.0, shade = 1.0;
     float sceneDepth = texture2D(tSceneDepth, vUv).x;
@@ -446,6 +485,19 @@ export class LiteCloudPass extends Pass {
       depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
     });
     this.shadowTarget.texture.name = 'lite-cloud.shadow';
+    this.history = [0, 1].map((index) => {
+      const target = new THREE.WebGLRenderTarget(1, 1, {
+        type: THREE.HalfFloatType, depthBuffer: false,
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      });
+      target.texture.name = 'lite-cloud.history-' + index;
+      return target;
+    });
+    this.historyIndex = 0;
+    this.historyValid = false;
+    this.temporalEnabled = true;
+    this.previousCamera = new THREE.Vector3();
+    this.previousPlanet = null;
 
     const air = atmospherePass.material.uniforms;
     const field = {
@@ -512,6 +564,23 @@ export class LiteCloudPass extends Pass {
       },
       vertexShader, fragmentShader: compositeShader,
     });
+    this.resolveMaterial = new THREE.ShaderMaterial({
+      name: 'Lite cloud temporal resolve',
+      depthTest: false, depthWrite: false, blending: THREE.NoBlending,
+      uniforms: {
+        tCurrent: { value: this.target.textures[0] }, tCurrentAux: { value: this.target.textures[1] },
+        tHistory: { value: null },
+        uInvProjection: air.uInvProjection, uCameraWorld: air.uCameraWorld, uWorldToLocal: air.uWorldToLocal,
+        uPrevProjection: { value: new THREE.Matrix4() },
+        uPrevLocalToView: { value: new THREE.Matrix3() },
+        uCameraDelta: { value: new THREE.Vector3() },
+        uCloudTexel: this.compositeMaterial.uniforms.uCloudTexel,
+        // 0.9 ≈ ten frames of accumulation.
+        uHistoryWeight: { value: 0 },
+      },
+      vertexShader, fragmentShader: resolveShader,
+    });
+    this.resolveQuad = new FullScreenQuad(this.resolveMaterial);
     this.marchQuad = new FullScreenQuad(this.marchMaterial);
     this.shadowQuad = new FullScreenQuad(this.shadowMaterial);
     this.compositeQuad = new FullScreenQuad(this.compositeMaterial);
@@ -589,7 +658,7 @@ export class LiteCloudPass extends Pass {
     // Same inverse deck spin the terrain and water cloud shadows use.
     _matrix.makeRotationFromQuaternion(_quaternion.copy(planet.cloudMesh.quaternion).invert());
     u.uCloudMat.value.setFromMatrix4(_matrix);
-    u.uFrame.value = this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
+    u.uFrame.value = this.temporalEnabled || this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
 
     u.uShadowOn.value = this.shadowsEnabled ? 1 : 0;
     if (this.shadowsEnabled) this.#renderShadowMap(renderer, planet);
@@ -598,7 +667,11 @@ export class LiteCloudPass extends Pass {
     const scale = Math.min(this.scale, Math.sqrt(this.maxPixels / Math.max(1, pixels)));
     const width = Math.max(1, Math.round(readBuffer.width * scale));
     const height = Math.max(1, Math.round(readBuffer.height * scale));
-    if (this.target.width !== width || this.target.height !== height) this.target.setSize(width, height);
+    if (this.target.width !== width || this.target.height !== height) {
+      this.target.setSize(width, height);
+      for (const target of this.history) target.setSize(width, height);
+      this.historyValid = false;
+    }
 
     if (!this.targetTypeChosen) {
       this.targetTypeChosen = true;
@@ -612,19 +685,48 @@ export class LiteCloudPass extends Pass {
 
     const c = this.compositeMaterial.uniforms;
     c.uCloudTexel.value.set(1 / width, 1 / height);
+
+    // Temporal resolve into the other history target.
+    const r = this.resolveMaterial.uniforms;
+    const cameraLocal = u.uCameraLocal.value;
+    r.uCameraDelta.value.subVectors(cameraLocal, this.previousCamera);
+    // A teleport, a body change or a resize starts the history over.
+    const continuous = this.temporalEnabled && this.historyValid && planet === this.previousPlanet
+      && r.uCameraDelta.value.length() < 20000;
+    r.uHistoryWeight.value = continuous ? 0.9 : 0;
+    const read = this.history[this.historyIndex], write = this.history[1 - this.historyIndex];
+    r.tHistory.value = read.texture;
+    renderer.setRenderTarget(write);
+    this.resolveQuad.render(renderer);
+    this.historyIndex = 1 - this.historyIndex;
+    this.historyValid = true;
+    c.tCloud.value = write.texture;
+    // Remember this frame's camera: local-to-view rotation, projection, position.
+    _matrix.multiplyMatrices(u.uWorldToLocal.value, u.uCameraWorld.value);
+    r.uPrevLocalToView.value.setFromMatrix4(_matrix).transpose();
+    r.uPrevProjection.value.copy(this.camera.projectionMatrix);
+    this.previousCamera.copy(cameraLocal);
+    this.previousPlanet = planet;
     c.tBase.value = readBuffer.texture;
     c.tSceneDepth.value = this.atmospherePass.sceneDepthTexture || readBuffer.depthTexture || null;
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
     this.compositeQuad.render(renderer);
   }
 
-  releaseTargets() { this.target.dispose(); this.shadowTarget.dispose(); this.targetTypeChosen = false; }
+  releaseTargets() {
+    this.target.dispose(); this.shadowTarget.dispose();
+    for (const target of this.history) target.dispose();
+    this.targetTypeChosen = false; this.historyValid = false;
+  }
 
   dispose() {
     if (this.activePlanet) this.activePlanet.liteCloudActive = false;
     this.activePlanet = null;
     this.target.dispose();
     this.shadowTarget.dispose();
+    for (const target of this.history) target.dispose();
+    this.resolveMaterial.dispose();
+    this.resolveQuad.dispose();
     this.marchMaterial.dispose();
     this.shadowMaterial.dispose();
     this.compositeMaterial.dispose();
