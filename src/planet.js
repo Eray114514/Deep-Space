@@ -1325,6 +1325,7 @@ export class Planet extends TerrainHeightField {
 
   setWeatherFixture(name = null) {
     this.weatherStream?.dispose(); this.weatherStream = null;
+    this.macroReliefTex?.dispose(); this.macroReliefTex = null;
     this.cloudWeatherPublication = null;
     this.cloudColumnMap?.dispose(); this.cloudColumnMap = null;
     this.cloudSpeciesTex?.dispose();
@@ -1549,10 +1550,55 @@ export class Planet extends TerrainHeightField {
     return { samples, baseCloud, enhancedCloud, gained, lost };
   }
 
+  ensureMacroReliefTexture() {
+    if (this.macroReliefTex || (this.weatherField?.synoptic && this.cloudWeatherHiTex)) return;
+    if (typeof document === 'undefined' || !(this.hAmp > 20)) return;
+    const width = 128, height = 64;
+    const elevations = new Float32Array(width * height);
+    let minSurface = Infinity, maxSurface = -Infinity;
+    const floor = this.hasLiquid && Number.isFinite(this.seaLevel) ? this.seaLevel : -1e9;
+    const dir = { x: 0, y: 0, z: 0 };
+    for (let y = 0; y < height; y++) {
+      const phi = ((y + 0.5) / height - 0.5) * Math.PI;
+      const cy = Math.sin(phi), cr = Math.cos(phi);
+      for (let x = 0; x < width; x++) {
+        const th = ((x + 0.5) / width) * Math.PI * 2;
+        dir.x = Math.cos(th) * cr; dir.y = cy; dir.z = Math.sin(th) * cr;
+        const h = Math.max(this.height(dir, 64), floor);
+        elevations[y * width + x] = h;
+        if (h < minSurface) minSurface = h;
+        if (h > maxSurface) maxSurface = h;
+      }
+    }
+    const range = Math.max(1000, this.hAmp || 0, Math.abs(minSurface), Math.abs(maxSurface));
+    const data = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      const dstRow = (height - 1 - y) * width * 4;
+      for (let x = 0; x < width; x++) {
+        const g = Math.round(clamp(0.5 + elevations[y * width + x] / (2 * range), 0, 1) * 255);
+        const k = dstRow + x * 4;
+        data[k + 1] = g;
+        data[k + 3] = 255;
+      }
+    }
+    const tex = new THREE.DataTexture(data, width, height, THREE.RGBAFormat);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.needsUpdate = true;
+    this.macroReliefTex = tex;
+    this.macroReliefRange = range;
+  }
+
   // camLocal: camera position in planet-local coords (f64 Vector3).
   // animDt drives scenery-in-motion (cloud drift); the seam test freezes it
   // to zero so static frames are pixel-comparable — LOD morphs keep dt.
   update(camLocal, dt, focused, animDt = dt, buildBudget=null) {
+    if (focused && !this.macroReliefTex && !(this.weatherField?.synoptic && this.cloudWeatherHiTex)) {
+      this.ensureMacroReliefTexture();
+    }
     if (focused && this.volumeActive && this.volCloudState?.rewrite === 'phase4-A') {
       this.ensureCloudResources();
     }
@@ -1806,6 +1852,7 @@ export class Planet extends TerrainHeightField {
     this.cloudColumnMap?.dispose();
     if (this.cloudShadowTex) this.cloudShadowTex.dispose();
     if (this.cloudWeatherHiTex) this.cloudWeatherHiTex.dispose();
+    this.macroReliefTex?.dispose();
     this.cloudSpeciesTex?.dispose();
     this.cloudBoundsTex?.dispose();
     this.cloudCandidatesTex?.dispose();

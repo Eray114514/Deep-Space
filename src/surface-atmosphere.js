@@ -5,15 +5,44 @@ import { stellarOcclusionGLSL, stellarOcclusionUniforms, bindStellarOcclusion } 
 import { surfaceCloudGLSL, surfaceCloudLightingGLSL, surfaceCloudUniforms, bindSurfaceClouds,
   hasSurfaceCloudMedium, registerSurfaceCloudOwner } from './cloud/surface-clouds.js';
 const preparedSurfaces = new WeakSet();
+let _fallbackMacroTex = null;
+function fallbackMacroTerrainTexture() {
+  if (!_fallbackMacroTex) {
+    _fallbackMacroTex = new THREE.DataTexture(new Uint8Array([0, 128, 0, 255]), 1, 1);
+    _fallbackMacroTex.colorSpace = THREE.NoColorSpace;
+    _fallbackMacroTex.needsUpdate = true;
+  }
+  return _fallbackMacroTex;
+}
+
+function bindMacroTerrainUniforms(uniforms, planet) {
+  if (!uniforms?.uMacroTerrainMap) return;
+  uniforms.uMacroBodyR.value = planet?.R || 0;
+  if (planet?.weatherField?.synoptic && planet.cloudWeatherHiTex) {
+    uniforms.uMacroTerrainMap.value = planet.cloudWeatherHiTex;
+    uniforms.uMacroTerrainRange.value = planet.weatherField.surfaceRangeMeters || 0;
+  } else if (planet?.macroReliefTex) {
+    uniforms.uMacroTerrainMap.value = planet.macroReliefTex;
+    uniforms.uMacroTerrainRange.value = planet.macroReliefRange || 0;
+  } else {
+    uniforms.uMacroTerrainMap.value = fallbackMacroTerrainTexture();
+    uniforms.uMacroTerrainRange.value = 0;
+  }
+}
 
 function surfaceMediumUniforms(material, planet) {
   if (!material.userData.surfaceMedium) {
-    material.userData.surfaceMedium = {
+    const uniforms = {
       ...namespacedAtmosphereUniforms(),
       ...stellarOcclusionUniforms(),
       ...surfaceCloudUniforms(planet),
       uSurfaceViewToLocal: { value: new THREE.Matrix3() },
+      uMacroTerrainMap: { value: fallbackMacroTerrainTexture() },
+      uMacroTerrainRange: { value: 0 },
+      uMacroBodyR: { value: planet?.R || 0 },
     };
+    bindMacroTerrainUniforms(uniforms, planet);
+    material.userData.surfaceMedium = uniforms;
   }
   return material.userData.surfaceMedium;
 }
@@ -34,6 +63,7 @@ export function prepareSurfaceAtmosphere(material, planet) {
       uniforms.uSurfaceViewToLocal.value.setFromMatrix4(rotation);
       bindStellarOcclusion(uniforms, planet, material);
       bindSurfaceClouds(uniforms, planet, renderer, camera, material);
+      bindMacroTerrainUniforms(uniforms, planet);
       const air = planet.atmosphereTransportUniforms;
       if (air) {
         for (const [name, uniform] of Object.entries(air)) {
@@ -59,12 +89,23 @@ export function installSurfaceAtmosphere(material, planet, shader) {
     ${surfaceCloudLightingGLSL}
     uniform mat3 uSurfaceViewToLocal;
     uniform float uSurfaceDepthOnly;
+    #if !SURFACE_CLOUD_MEDIUM
+    uniform sampler2D uMacroTerrainMap;
+    uniform float uMacroTerrainRange;
+    uniform float uMacroBodyR;
+    #endif
 
     // Multi-kilometre planetary relief horizon self-shadowing (1.4 km .. 16.5 km)
-    // from the shared published weather/terrain atlas (.g = normalized elevation).
+    // from the shared published weather/terrain atlas (.g = stationary normalized elevation).
     float surfaceMacroTerrainShadow(vec3 localPos, vec3 direction) {
       #if SURFACE_CLOUD_MEDIUM
-      if (uSurfaceCloudEnabled < 0.5 || cloud_uSurfaceRange <= 1.0 || cloud_uBodyR <= 1000.0) return 1.0;
+      float bodyR = cloud_uBodyR;
+      float surfaceRange = cloud_uSurfaceRange;
+      #else
+      float bodyR = uMacroBodyR;
+      float surfaceRange = uMacroTerrainRange;
+      #endif
+      if (surfaceRange <= 1.0 || bodyR <= 1000.0) return 1.0;
       vec3 radial = normalize(localPos);
       float sunMu = dot(radial, direction);
       if (sunMu <= -0.08 || sunMu >= 0.62) return 1.0;
@@ -73,23 +114,28 @@ export function installSurfaceAtmosphere(material, planet, shader) {
       if (horizLen < 1e-4) return 1.0;
       horizDir /= horizLen;
       float raySlope = sunMu / horizLen;
-      float hSelf = max(length(localPos) - cloud_uBodyR,
-        (weatherAtlasSample(cloud_uWeatherMapHi, cloud_uSpin * radial).g * 2.0 - 1.0) * cloud_uSurfaceRange);
+      #if SURFACE_CLOUD_MEDIUM
+      float atlasSelf = (weatherAtlasSample(cloud_uWeatherMapHi, radial).g * 2.0 - 1.0) * surfaceRange;
+      #else
+      float atlasSelf = (weatherAtlasSample(uMacroTerrainMap, radial).g * 2.0 - 1.0) * surfaceRange;
+      #endif
+      float hSelf = max(length(localPos) - bodyR, atlasSelf);
       float maxExcess = 0.0;
       for (int s = 0; s < 4; s++) {
         float dist = s == 0 ? 1400.0 : s == 1 ? 3400.0 : s == 2 ? 7800.0 : 16500.0;
-        vec3 sampleDir = normalize(radial + horizDir * (dist / cloud_uBodyR));
-        float hSample = (weatherAtlasSample(cloud_uWeatherMapHi, cloud_uSpin * sampleDir).g * 2.0 - 1.0) * cloud_uSurfaceRange;
-        float curvatureDrop = (dist * dist) / (2.0 * cloud_uBodyR);
+        vec3 sampleDir = normalize(radial + horizDir * (dist / bodyR));
+        #if SURFACE_CLOUD_MEDIUM
+        float hSample = (weatherAtlasSample(cloud_uWeatherMapHi, sampleDir).g * 2.0 - 1.0) * surfaceRange;
+        #else
+        float hSample = (weatherAtlasSample(uMacroTerrainMap, sampleDir).g * 2.0 - 1.0) * surfaceRange;
+        #endif
+        float curvatureDrop = (dist * dist) / (2.0 * bodyR);
         float sampleSlope = (hSample - curvatureDrop - hSelf) / dist;
         maxExcess = max(maxExcess, sampleSlope - raySlope);
       }
       float lowSunWeight = 1.0 - smoothstep(0.42, 0.62, sunMu);
       float penumbra = 1.0 - smoothstep(0.008, 0.085, maxExcess) * 0.82 * lowSunWeight;
       return clamp(penumbra, 0.18, 1.0);
-      #else
-      return 1.0;
-      #endif
     }
 
     vec3 surfaceSunTransmission(vec3 direction) {
