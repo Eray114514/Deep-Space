@@ -47,27 +47,34 @@ export function gradePass({ realistic = false } = {}) {
       uniform float uGrain;
       varying vec2 vUv;
 
-      float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
+      float hash(vec2 p){
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+      }
 
       void main(){
         vec2 c = vUv - 0.5;
         float r2 = dot(c, c);
 
-        /* radial CA: displacement grows with r^2 so the centre is clean */
-        vec2 d = c * r2 * uAberration * 4.0;
-        vec3 col = vec3(
-          texture2D(tDiffuse, clamp(vUv + d, 0.0, 1.0)).r,
-          texture2D(tDiffuse, vUv).g,
-          texture2D(tDiffuse, clamp(vUv - d, 0.0, 1.0)).b
-        );
+        /* radial CA: displacement grows with r^2 so the centre is clean;
+           skip the extra two RGBA16F fetches inside the sub-quarter-pixel core */
+        vec3 col;
+        if (r2 < 0.09 || uAberration < 0.0001) {
+          col = texture2D(tDiffuse, vUv).rgb;
+        } else {
+          vec2 d = c * r2 * uAberration * 4.0;
+          col = vec3(
+            texture2D(tDiffuse, clamp(vUv + d, 0.0, 1.0)).r,
+            texture2D(tDiffuse, vUv).g,
+            texture2D(tDiffuse, clamp(vUv - d, 0.0, 1.0)).b
+          );
+        }
 
         float vig = smoothstep(1.05, 0.28, r2 * 2.2);
         col *= mix(1.0, vig, uVignette);
 
-        /* mod() keeps the hash argument bounded no matter how long the
-           session runs — an unbounded sin() argument is how the engine
-           plume shader used to go non-finite. */
-        col += (hash(vUv * 1024.0 + mod(uTime, 64.0)) - 0.5) * uGrain;
+        col += (hash(gl_FragCoord.xy + mod(uTime, 64.0) * 19.37) - 0.5) * uGrain;
 
         gl_FragColor = vec4(max(col, 0.0), 1.0);
       }`,

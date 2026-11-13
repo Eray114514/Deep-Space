@@ -239,12 +239,18 @@ export class NearWaterPatch {
     // from the centre. Avoid a full vertex scan in the atomic commit frame.
     geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), this.size / Math.sqrt(2) + 24);
 
+    let maxDepth = -Infinity;
+    for (let i = 0; i < job.depth.length; i++) {
+      if (job.depth[i] > maxDepth) maxDepth = job.depth[i];
+    }
+    this.hasWetVertices = maxDepth > -1.0;
+
     const previous = this.mesh.geometry;
     this.mesh.geometry = geometry;
     this.mesh.position.copy(job.centerPosition);
     this.centerDirection = job.centerDirection;
     this._centerPosition.copy(job.centerPosition);
-    this.mesh.visible = true;
+    this.mesh.visible = this.hasWetVertices;
     this.rebuilds++;
     this.build = null;
     previous.dispose();
@@ -252,7 +258,7 @@ export class NearWaterPatch {
     const uniforms = this.material?.userData?.waterUniforms
       || this.material?.userData?.shader?.uniforms;
     if (uniforms?.uNearPatchCenter) uniforms.uNearPatchCenter.value.copy(job.centerPosition);
-    if (uniforms?.uNearPatchRadius) uniforms.uNearPatchRadius.value = this.radius;
+    if (uniforms?.uNearPatchRadius) uniforms.uNearPatchRadius.value = this.hasWetVertices ? this.radius : 0;
     this.lastCommitMs = performance.now() - startedAt;
   }
 
@@ -304,11 +310,12 @@ export class NearWaterPatch {
     if (this.centerDirection) {
       this.anchorDistance = Math.acos(THREE.MathUtils.clamp(
         this.centerDirection.dot(direction), -1, 1)) * this.planet.seaRadius;
-      this.mesh.visible = true;
+      const wet = this.hasWetVertices !== false;
+      this.mesh.visible = wet;
       const uniforms = this.material?.userData?.waterUniforms
         || this.material?.userData?.shader?.uniforms;
       if (uniforms?.uNearPatchCenter) uniforms.uNearPatchCenter.value.copy(this._centerPosition);
-      if (uniforms?.uNearPatchRadius) uniforms.uNearPatchRadius.value = this.radius;
+      if (uniforms?.uNearPatchRadius) uniforms.uNearPatchRadius.value = wet ? this.radius : 0;
     }
   }
 

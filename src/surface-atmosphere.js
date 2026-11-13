@@ -140,15 +140,41 @@ export function installSurfaceAtmosphere(material, planet, shader) {
 
     vec3 surfaceSunTransmission(vec3 direction) {
       float cloud = surfaceCloudLighting(direction);
-      float macroTerrain = surfaceMacroTerrainShadow(vLocalPos, direction);
+      float macroTerrain = length(vViewPosition) < 220000.0
+        ? surfaceMacroTerrainShadow(vLocalPos, direction) : 1.0;
       if (air_uEnabled < 0.5) return vec3(cloud * macroTerrain);
       float h = max(length(vLocalPos) - air_uGroundR, 0.0);
       float mu = dot(normalize(vLocalPos), direction);
+      float visible = step(0.0, air_solarHorizonClearance(vLocalPos, direction));
+      if (visible <= 0.0) return vec3(0.0);
       vec3 od = air_sunlightOpticalDepth(h, mu).rgb
         * vec3(air_uRayleighScaleHeight, air_uMieScaleHeight, air_uOzoneHalfWidth) * air_uDensityScale;
-      float visible = step(0.0, air_solarHorizonClearance(vLocalPos, direction));
       return exp(-(air_uBetaRayleigh * od.r + air_uBetaMieExtinction * od.g + air_uBetaOzone * od.b))
-        * visible * cloud * macroTerrain;
+        * (visible * cloud * macroTerrain);
+    }
+
+    vec3 gCachedStarSun0 = vec3(-1.0);
+    vec3 gCachedStarSun1 = vec3(-1.0);
+    vec3 surfaceStellarTransmission(vec3 direction) {
+      if (uLocalStarCount > 0) {
+        vec3 d0 = normalize(uLocalStars[0].xyz - vLocalPos);
+        if (dot(direction, d0) > 0.9995) {
+          if (gCachedStarSun0.x < 0.0) {
+            gCachedStarSun0 = surfaceSunTransmission(direction) * localStellarVisibility(vLocalPos, direction);
+          }
+          return gCachedStarSun0;
+        }
+        if (uLocalStarCount > 1) {
+          vec3 d1 = normalize(uLocalStars[1].xyz - vLocalPos);
+          if (dot(direction, d1) > 0.9995) {
+            if (gCachedStarSun1.x < 0.0) {
+              gCachedStarSun1 = surfaceSunTransmission(direction) * localStellarVisibility(vLocalPos, direction);
+            }
+            return gCachedStarSun1;
+          }
+        }
+      }
+      return surfaceSunTransmission(direction) * localStellarVisibility(vLocalPos, direction);
     }
 
     // Normal-aware directional hemispheric sky + ground-bounce irradiance
@@ -254,7 +280,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
       }
 
       // Coastal mountain horizon occlusion on low-elevation reflection rays
-      if (muR < 0.38) {
+      if (muR < 0.38 && length(vViewPosition) < 120000.0) {
         float coastOcc = mix(0.45, 1.0, surfaceMacroTerrainShadow(localPos, rDir));
         skyRadiance *= mix(coastOcc, 1.0, smoothstep(0.08, 0.38, muR));
       }
@@ -267,23 +293,21 @@ export function installSurfaceAtmosphere(material, planet, shader) {
     '#include <logdepthbuf_fragment>\nif(uSurfaceDepthOnly>0.5){gl_FragColor=vec4(0.0);return;}\ninitializeSurfaceCloudLighting(vLocalPos);');
   const lights = THREE.ShaderChunk.lights_fragment_begin.replace(
     'getDirectionalLightInfo( directionalLight, directLight );', `getDirectionalLightInfo( directionalLight, directLight );
-    {
-    vec3 localLightDirection=normalize(uSurfaceViewToLocal*directLight.direction);
-    directLight.color *= surfaceSunTransmission(localLightDirection)
-      * localStellarVisibility(vLocalPos,localLightDirection);
+    if (directLight.visible) {
+      vec3 localLightDirection=normalize(uSurfaceViewToLocal*directLight.direction);
+      directLight.color *= surfaceStellarTransmission(localLightDirection);
     }`).replace(
     'getPointLightInfo( pointLight, geometryPosition, directLight );', `getPointLightInfo( pointLight, geometryPosition, directLight );
-    {
-    vec3 localPointDirection=normalize(uSurfaceViewToLocal*directLight.direction);
-    float pointDistance=length(pointLight.position-geometryPosition);
-    bool isStar=false;
-    for(int star=0;star<2;star++) {
-      if(star>=uLocalStarCount) break;
-      float distanceToStar=length(uLocalStars[star].xyz-vLocalPos);
-      if(abs(pointDistance-distanceToStar)<max(10.0,distanceToStar*0.001)) isStar=true;
-    }
-    if(isStar) directLight.color*=surfaceSunTransmission(localPointDirection)
-      *localStellarVisibility(vLocalPos,localPointDirection);
+    if (directLight.visible) {
+      vec3 localPointDirection=normalize(uSurfaceViewToLocal*directLight.direction);
+      float pointDistance=length(pointLight.position-geometryPosition);
+      bool isStar=false;
+      for(int star=0;star<2;star++) {
+        if(star>=uLocalStarCount) break;
+        float distanceToStar=length(uLocalStars[star].xyz-vLocalPos);
+        if(abs(pointDistance-distanceToStar)<max(10.0,distanceToStar*0.001)) isStar=true;
+      }
+      if(isStar) directLight.color*=surfaceStellarTransmission(localPointDirection);
     }`);
   shader.fragmentShader = shader.fragmentShader.replace('#include <lights_fragment_begin>', lights + `
     #if defined(RE_IndirectDiffuse)

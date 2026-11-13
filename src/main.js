@@ -149,10 +149,17 @@ setGridCells(24);
 setTerrainScreenError(QUALITY_PROFILE.terrainScreenError);
 renderer.setSize(window.innerWidth, window.innerHeight);
 const MAX_DPR = QUALITY_PROFILE.dprMax;
-// Mild supersampling on <=1440p desktop protects the hero ship even when the
-// OS reports DPR 1. Very high-resolution displays stay at native scale.
 const DESKTOP_DPR_FLOOR = QUALITY_PROFILE.dprMin;
-let renderDpr = Math.min(Math.max(window.devicePixelRatio, QUALITY_PROFILE.dprTarget), MAX_DPR);
+function computeCeilingDpr(width = window.innerWidth, height = window.innerHeight) {
+  const base = Math.min(Math.max(window.devicePixelRatio || 1, QUALITY_PROFILE.dprTarget), MAX_DPR);
+  if (!QUALITY_PROFILE.automatic) return base;
+  // Cap automatic pixel budget near native QHD (~3.87M pixels) so HiDPI 2K/4K
+  // panels stay sharp without silently multiplying 8 full-screen HDR passes.
+  const maxAutoPixels = 2560 * 1440 * 1.05;
+  const pixelCap = Math.sqrt(maxAutoPixels / Math.max(1, width * height));
+  return clamp(Math.min(base, Math.max(1.0, pixelCap)), DESKTOP_DPR_FLOOR, MAX_DPR);
+}
+let renderDpr = computeCeilingDpr();
 renderer.setPixelRatio(renderDpr);
 // Physical water refraction needs the opaque scene buffer, but sampling it at
 // full supersampled DPR would render a second 3200x1800 4x-MSAA scene at
@@ -390,7 +397,7 @@ function prewarmSurfacePipelines(planet) {
     mesh.userData.lodMorph = 0;
     mesh.position.set(0, 0, 0);
     mesh.frustumCulled = false;
-    mesh.castShadow = source.castShadow;
+    mesh.castShadow = source.castShadow || !material.transparent;
     mesh.customDepthMaterial=source.customDepthMaterial;
     mesh.customDistanceMaterial=source.customDistanceMaterial;
     mesh.onBeforeRender=source.onBeforeRender;
@@ -4061,7 +4068,7 @@ function resetPerformanceStats() {
 function resetAdaptiveQuality() {
   adaptiveStableSince = performance.now();
   applyAdaptiveStage(0);
-  setRenderDpr(QUALITY_PROFILE.dprTarget);
+  setRenderDpr(computeCeilingDpr());
   return true;
 }
 
@@ -4073,21 +4080,26 @@ function setShadowDistance(distance) {
 }
 
 function applyAdaptiveStage(stage) {
-  adaptiveStage = clamp(Math.round(stage), 0, 7);
+  adaptiveStage = clamp(Math.round(stage), 0, 5);
   effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz
-    * (adaptiveStage >= 3 ? 0.5 : 1);
-  const adaptiveGrassScale = adaptiveStage >= 7 ? 0.5 : (adaptiveStage >= 4 ? 0.72 : 1);
+    * (adaptiveStage >= 2 ? 0.5 : 1);
+  // Scale internal cloud raymarch buffer without modifying MARCH_STEPS define
+  // (avoids any mid-flight shader recompilation).
+  if (nodePipeline.cloudPass && QUALITY_PROFILE.liteClouds) {
+    const cloudScaleFactor = adaptiveStage >= 3 ? 0.76 : adaptiveStage >= 1 ? 0.88 : 1.0;
+    nodePipeline.cloudPass.setQuality({ scale: QUALITY_PROFILE.liteClouds.scale * cloudScaleFactor });
+  }
+  const adaptiveGrassScale = adaptiveStage >= 5 ? 0.52 : adaptiveStage >= 2 ? 0.76 : 1;
   scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * adaptiveGrassScale);
-  setShadowDistance(QUALITY_PROFILE.shadowDistance * (adaptiveStage >= 5 ? 0.65 : 1));
-  farFlora.setDisplayDensity(adaptiveStage >= 7 ? 0.45 : (adaptiveStage >= 6 ? 0.68 : 1));
-  if (adaptiveStage < 7) {
-    setRenderDpr(Math.max(renderDpr, QUALITY_PROFILE.dprTarget));
+  setShadowDistance(QUALITY_PROFILE.shadowDistance * (adaptiveStage >= 5 ? 0.62 : adaptiveStage >= 2 ? 0.80 : 1));
+  farFlora.setDisplayDensity(adaptiveStage >= 5 ? 0.48 : adaptiveStage >= 3 ? 0.72 : 1);
+  const ceilingDpr = computeCeilingDpr();
+  if (adaptiveStage >= 5) {
+    setRenderDpr(Math.max(0.85, QUALITY_PROFILE.dprMin));
+  } else if (adaptiveStage >= 4) {
+    setRenderDpr(Math.max(QUALITY_PROFILE.dprMin, ceilingDpr - 0.08));
   } else {
-    // DPR is the final adaptive lever, after volume, water cadence, foliage
-    // and shadow distance have all been exhausted. Apply its reviewed floor in
-    // one resize instead of waiting through another five-second stability gate
-    // for each 0.05 step; at 1440p Ultra this still renders above native.
-    setRenderDpr(Math.min(renderDpr, QUALITY_PROFILE.dprMin));
+    setRenderDpr(ceilingDpr);
   }
 }
 
@@ -4433,9 +4445,10 @@ function frame() {
   }
 
   const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
+  const heavySurfaceBacklog = nearTerrain && nearest?.lod && pendingChunks(nearest.lod) > 12;
   const terrainBuildMs=debugBuildBudgetMs || (!loadingCleared
     ? QUALITY_LOW ? 5.5 : 110
-    : state === 'walk' ? 2.6 : nearTerrain ? 3.2 : 1.6);
+    : heavySurfaceBacklog ? 7.5 : state === 'walk' ? 2.6 : nearTerrain ? 3.6 : 1.6);
   const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
   sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),
     {terrain:terrainBuildMs,near:scatter.streamBudgetMs});
@@ -4880,26 +4893,26 @@ function frame() {
   // spikes. On a 5080 this stays at the quality ceiling; an iGPU degrades
   // gracefully instead of silently presenting a single-digit frame rate.
   dprAcc += dt;
-  const targetFrameMs = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.2;
-  const adaptInterval = perfEmaMs > targetFrameMs * 1.35 ? 1.2 : 3.5;
-  const terrainVisualReady = !nearest
-    || ((nearest.lod?.debugStats?.().activeMorphs || 0) === 0
-      && (nearest.waterLod?.debugStats?.().activeMorphs || 0) === 0);
-  const adaptiveReady = loadingCleared && terrainVisualReady
-    && pendingChunks() === 0
-    && (!FARFLORA || farFlora.pending() === 0)
+  const targetFrameMs = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.6;
+  const adaptInterval = perfEmaMs > targetFrameMs * 1.25 ? 1.2 : 3.2;
+  // Do not reset adaptiveStableSince on streaming chunk morphs: continuous
+  // flight/rotation always morphs distant chunks, which previously locked
+  // adaptiveStage at 0 forever even at 25–30 FPS.
+  const adaptiveReady = loadingCleared
     && surfacePipelinesReady && !shipPipelineWarmPending
+    && !postPipelinesWarmPending && !weaponPipelinesWarmPending
     && !heroTransitionActive;
   if (!adaptiveReady) adaptiveStableSince = performance.now();
   if (dprAcc > adaptInterval && !FREEZE && !adaptiveQualityLocked && adaptiveReady
-    && performance.now() - adaptiveStableSince > 5000) {
+    && performance.now() - adaptiveStableSince > 2500) {
     dprAcc = 0;
-    if (perfEmaMs > targetFrameMs * 1.08 && adaptiveStage < 7) {
+    if (perfEmaMs > targetFrameMs * 1.08 && adaptiveStage < 5) {
       applyAdaptiveStage(adaptiveStage + 1);
-    } else if (adaptiveStage >= 7 && perfEmaMs > targetFrameMs * 1.08) {
-      setRenderDpr(renderDpr - (perfEmaMs > targetFrameMs * 1.5 ? 0.12 : 0.05));
+    } else if (adaptiveStage >= 5 && perfEmaMs > targetFrameMs * 1.12) {
+      setRenderDpr(renderDpr - (perfEmaMs > targetFrameMs * 1.45 ? 0.10 : 0.05));
     } else if (perfEmaMs < targetFrameMs * 0.72) {
-      if (renderDpr < QUALITY_PROFILE.dprTarget - 0.04) setRenderDpr(renderDpr + 0.05);
+      const ceilingDpr = computeCeilingDpr();
+      if (renderDpr < ceilingDpr - 0.04) setRenderDpr(renderDpr + 0.05);
       else if (adaptiveStage > 0) applyAdaptiveStage(adaptiveStage - 1);
     }
   }

@@ -427,6 +427,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // orbit too. The old distance mask removed their identity to hide
           // discontinuous source fields; those fields are continuous now.
           float vertexFieldFade = 1.0;
+          float viewDist = length(vViewPosition);
           vec3 base;
           if (uHasSea > 0.5 && hgt < uT0) {
             float t = clamp(1.0 - (uT0 - hgt) / uSeaDepthSpan, 0.0, 1.0);
@@ -436,26 +437,20 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               base = mix(base, uSeaC[i],
                 clamp((t - uSeaT[i - 1]) / max(uSeaT[i] - uSeaT[i - 1], 1e-5), 0.0, 1.0));
             }
-            // Shallow transmission must reveal an actual sea floor rather
-            // than another smooth blue layer. Near the zero contour, expose
-            // pale shelf sediment with metre-scale sediment ridges and scattered
-            // darker grains; deeper terrain returns continuously to the
-            // authored ocean palette.
             float seabedDepth = uT0 - hgt;
-            float shelf = 1.0 - smoothstep(2.0, 42.0, seabedDepth);
-            vec3 seaW = pow(abs(normalize(vLocalNrm)), vec3(4.0));
-            seaW /= max(seaW.x + seaW.y + seaW.z, 1e-5);
-            float sediment = triDetail(terrainDetailPosition(), seaW, terrainSediment, 0)
-              * 0.58 + triDetail(terrainDetailPosition(), seaW, terrainSedimentFine, 1) * 0.42;
-            // Unfiltered trigonometric bars evaluated at multi-million-metre
-            // coordinates alias differently across triangle derivatives. The
-            // isolated fixed-height floor retained those wedges until the bars
-            // were removed. Mip-filtered sediment has a stable distant mean.
-            float rippleBars = smoothstep(0.28, 0.72,
-              triDetail(terrainDetailPosition(), seaW, terrainRipple, 1));
-            vec3 shelfSand = uLandC[0]
-              * (0.46 + sediment * 0.48 + rippleBars * 0.18);
-            base = mix(base, shelfSand, shelf * 0.88);
+            float shelf = (1.0 - smoothstep(2.0, 42.0, seabedDepth))
+              * (1.0 - smoothstep(3500.0, 7500.0, viewDist));
+            if (shelf > 0.001) {
+              vec3 seaW = pow(abs(normalize(vLocalNrm)), vec3(4.0));
+              seaW /= max(seaW.x + seaW.y + seaW.z, 1e-5);
+              float sediment = triDetail(terrainDetailPosition(), seaW, terrainSediment, 0)
+                * 0.58 + triDetail(terrainDetailPosition(), seaW, terrainSedimentFine, 1) * 0.42;
+              float rippleBars = smoothstep(0.28, 0.72,
+                triDetail(terrainDetailPosition(), seaW, terrainRipple, 1));
+              vec3 shelfSand = uLandC[0]
+                * (0.46 + sediment * 0.48 + rippleBars * 0.18);
+              base = mix(base, shelfSand, shelf * 0.88);
+            }
           } else {
             float t = clamp((hgt - uT0) / uTSpan, 0.0, 1.0);
             base = uLandC[0];
@@ -482,49 +477,47 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.78, 0.82, 0.9),
             diffuseColor.rgb, vMat.z);
 
-          // ---- micro grain, biome-styled
+          // ---- micro grain, biome-styled (gated by resolved camera distance)
           vec3 w = pow(abs(normalize(vLocalNrm)), vec3(4.0));
-          w /= (w.x + w.y + w.z);
-          // Recently washed land is not a mathematically thin palette edge.
-          // Give beaches an irregular damp band whose lower roughness and
-          // cooler albedo connect the moving swash to the authored terrain.
-          if (uHasSea > 0.5 && hgt >= uT0) {
+          w /= max(w.x + w.y + w.z, 1e-5);
+          if (uHasSea > 0.5 && hgt >= uT0 && hgt - uT0 < 3.6 && viewDist < 4500.0) {
             float shoreDrift = triDetail(terrainDetailPosition(), w, terrainShore, 1)
               + triDetail(terrainDetailPosition(), w, terrainShoreFine, 0) - 1.0;
             float wetReach = 2.4 + shoreDrift * 1.1;
-            gShoreWet = 1.0 - smoothstep(0.2, wetReach, hgt - uT0);
+            gShoreWet = (1.0 - smoothstep(0.2, wetReach, hgt - uT0))
+              * (1.0 - smoothstep(2800.0, 4500.0, viewDist));
             diffuseColor.rgb = mix(diffuseColor.rgb,
               diffuseColor.rgb * vec3(0.56, 0.65, 0.69), gShoreWet * 0.80);
           }
-          float grain = (triDetail(terrainDetailPosition(), w, terrainGrain, 0) - 0.5)
-                      + (triDetail(terrainDetailPosition(), w, terrainGrainFine, 1) - 0.5) * 0.8;
-          float strat = texture2D(uDetailTex, vec2(vSurfaceHeight * 0.055, 0.31)).r - 0.5;
-          float d = mix(grain, grain * 0.5 + strat * 1.15,
-            vMat.x * vertexFieldFade);
-          d += (triDetail(terrainDetailPosition(), w, terrainOrganic, 0) - 0.5)
-            * vMat.y * vertexFieldFade * 0.75;
-          diffuseColor.rgb *= 1.0 + d * uDetailK;
+          float grainNear = 1.0 - smoothstep(2500.0, 9500.0, viewDist);
+          if (grainNear > 0.001) {
+            float grain = (triDetail(terrainDetailPosition(), w, terrainGrain, 0) - 0.5)
+                        + (triDetail(terrainDetailPosition(), w, terrainGrainFine, 1) - 0.5) * 0.8;
+            float strat = texture2D(uDetailTex, vec2(vSurfaceHeight * 0.055, 0.31)).r - 0.5;
+            float d = mix(grain, grain * 0.5 + strat * 1.15,
+              vMat.x * vertexFieldFade);
+            if (vMat.y > 0.002) {
+              d += (triDetail(terrainDetailPosition(), w, terrainOrganic, 0) - 0.5)
+                * vMat.y * vertexFieldFade * 0.75;
+            }
+            diffuseColor.rgb *= 1.0 + d * uDetailK * grainNear;
+          }
 
-          // Compressed scanned structure is restricted to the near field.
-          // Alien palettes retain their authored hue while still inheriting
-          // real soil/stone grain and roughness.
-          // Scanned structure must survive a normal low-flight/chase-camera
-          // view, not only an on-foot macro shot. The samples are already
-          // paid for by this shader; extending their fade prevents beaches
-          // and plains a few hundred metres away from collapsing to one tint.
-          float pbrNear = 1.0 - smoothstep(70.0, 720.0, length(vViewPosition));
-          float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
-          vec2 pbrUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
-          vec2 pbrRockUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
-          vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb;
-          vec3 pbrStone = texture2D(uRockColor, pbrRockUv).rgb;
-          vec3 pbrSample = mix(pbrGrass, pbrStone, pbrRock);
-          float pbrLum = dot(pbrSample, vec3(0.2126, 0.7152, 0.0722));
-          vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, uEarthLike * 0.42);
-          pbrStructure = clamp(pbrStructure * 1.45, vec3(0.58), vec3(1.42));
-          diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.48);
-          gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
-            texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
+          float pbrNear = 1.0 - smoothstep(70.0, 720.0, viewDist);
+          if (pbrNear > 0.001) {
+            float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
+            vec2 pbrUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
+            vec2 pbrRockUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
+            vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb;
+            vec3 pbrStone = texture2D(uRockColor, pbrRockUv).rgb;
+            vec3 pbrSample = mix(pbrGrass, pbrStone, pbrRock);
+            float pbrLum = dot(pbrSample, vec3(0.2126, 0.7152, 0.0722));
+            vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, uEarthLike * 0.42);
+            pbrStructure = clamp(pbrStructure * 1.45, vec3(0.58), vec3(1.42));
+            diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.48);
+            gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
+              texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
+          }
 
           // ---- continental-scale tint drift: dry-brown swathes
           float macro = terrainRegionalField(vLocalPos) * 2.0 - 1.0;
@@ -532,18 +525,17 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           diffuseColor.rgb *= mix(vec3(1.0), vec3(1.09, 0.99, 0.84), mw);
           diffuseColor.rgb *= 1.0 + macro * 0.55 * uMacroK;
 
-          // ---- mid-scale patchiness (~100–500 m): soil and moisture
-          // variation seen from a hilltop — the octave between micro grain
-          // and continental swathes that uniform game terrain lacks
-          float pch = triDetail(terrainDetailPosition(), w, terrainPatch, 1)
-                    + triDetail(terrainDetailPosition(), w, terrainPatchFine, 0) - 1.0;
-          pch *= 1.0 - smoothstep(1800.0, 10000.0, length(vViewPosition));
-          gPatch = pch;
-          diffuseColor.rgb *= 1.0 + pch * (0.30 + 0.20 * vMat.z) * (0.5 + uMacroK);
-          // damp hollows darken and cool slightly
-          diffuseColor.rgb = mix(diffuseColor.rgb,
-            diffuseColor.rgb * vec3(0.88, 0.97, 0.92),
-            clamp(-pch * 1.8, 0.0, 0.5) * uMacroK);
+          // ---- mid-scale patchiness (~100–500 m)
+          float patchNear = 1.0 - smoothstep(1800.0, 10000.0, viewDist);
+          if (patchNear > 0.001) {
+            float pch = (triDetail(terrainDetailPosition(), w, terrainPatch, 1)
+                       + triDetail(terrainDetailPosition(), w, terrainPatchFine, 0) - 1.0) * patchNear;
+            gPatch = pch;
+            diffuseColor.rgb *= 1.0 + pch * (0.30 + 0.20 * vMat.z) * (0.5 + uMacroK);
+            diffuseColor.rgb = mix(diffuseColor.rgb,
+              diffuseColor.rgb * vec3(0.88, 0.97, 0.92),
+              clamp(-pch * 1.8, 0.0, 0.5) * uMacroK);
+          }
 
           // ---- per-pixel snowline: crisp caps from orbit
           if (uSnowK > 0.5) {
@@ -555,23 +547,6 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             diffuseColor.rgb = mix(diffuseColor.rgb, uSnowColor, sw);
             gSnowW = sw;
           }
-
-          // Reassert the optical wet band after every dry-land detail layer.
-          // Otherwise grain/PBR/macro multiplication can lift the beach back
-          // to the dry palette and the shoreline reads as a hard colour cut.
-          // The wet albedo was already applied above. A second multiply here
-          // turns a damp beach into a black outline from orbit.
-
-          // ---- the cloud deck overhead casts drifting shadows.
-          // UV must match cloudAtlasUV() in shaders-node.js exactly, or the
-          // shadows mirror about the equator relative to the clouds casting
-          // them and leave a visible seam there.
-          vec3 cd = uCloudMat * nd;
-          float cloudCover = weatherAtlasSample(uCloudTex, cd).r;
-          if (uCloudSynoptic > 0.5) cloudCover = synopticCoverage(cloudCover, 0.12);
-          // Keep some indirect skylight in totality while the direct surface
-          // response tracks the same finite-star penumbra as atmosphere/cloud.
-          // Direct stellar occlusion is applied per light, never to albedo.
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         // snow glints, damp hollows go faintly glossy, dry rises stay matte —
@@ -594,37 +569,36 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         #include <fog_fragment>`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
-          // micro-relief: bend the shading normal with the same detail field —
-          // this, more than geometry, is what makes ground read as *real*
-          vec3 wN = pow(abs(normalize(vLocalNrm)), vec3(4.0));
-          wN /= (wN.x + wN.y + wN.z);
-          float gx = triDetail(terrainDetailPosition() + vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1)
-                   - triDetail(terrainDetailPosition() - vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1);
-          float gy = triDetail(terrainDetailPosition() + vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1)
-                   - triDetail(terrainDetailPosition() - vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1);
-          vec3 ndPbr = normalize(vLocalPos);
-          float slopePbr = 1.0 - clamp(dot(normalize(vLocalNrm), ndPbr), 0.0, 1.0);
-          float rockPbr = smoothstep(uSlopeLo, uSlopeHi, slopePbr);
-          vec2 uvPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
-          vec2 uvRockPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
-          vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
-          vec2 rockN = texture2D(uRockNormal, uvRockPbr).xy * 2.0 - 1.0;
-          vec2 scanN = mix(grassN, rockN, rockPbr);
-          float scanNear = 1.0 - smoothstep(35.0, 420.0, length(vViewPosition));
-          gx += scanN.x * scanNear * 0.34;
-          gy += scanN.y * scanNear * 0.34;
-          vec3 tang = normalize(cross(normal, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
-          vec3 bitn = cross(normal, tang);
-          float normalVertexFieldFade = 1.0 - smoothstep(4500.0, 24000.0,
-            length(vViewPosition));
-          // Terrain support and crest normals are continuous now. Flattening
-          // their resolved relief towards the radial normal hid generation
-          // discontinuities but erased the mountain lighting from orbit.
           normal = normalize(normal);
-          normal = normalize(normal
-            + (tang * gx + bitn * gy) * uDetailK
-            * normalVertexFieldFade
-            * (1.7 + vMat.x * normalVertexFieldFade * 1.5));
+          float viewDistNrm = length(vViewPosition);
+          float normalVertexFieldFade = 1.0 - smoothstep(4500.0, 24000.0, viewDistNrm);
+          if (normalVertexFieldFade > 0.001) {
+            vec3 wN = pow(abs(normalize(vLocalNrm)), vec3(4.0));
+            wN /= max(wN.x + wN.y + wN.z, 1e-5);
+            float gx = triDetail(terrainDetailPosition() + vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1)
+                     - triDetail(terrainDetailPosition() - vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1);
+            float gy = triDetail(terrainDetailPosition() + vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1)
+                     - triDetail(terrainDetailPosition() - vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1);
+            float scanNear = 1.0 - smoothstep(35.0, 420.0, viewDistNrm);
+            if (scanNear > 0.001) {
+              vec3 ndPbr = normalize(vLocalPos);
+              float slopePbr = 1.0 - clamp(dot(normalize(vLocalNrm), ndPbr), 0.0, 1.0);
+              float rockPbr = smoothstep(uSlopeLo, uSlopeHi, slopePbr);
+              vec2 uvPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
+              vec2 uvRockPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
+              vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
+              vec2 rockN = texture2D(uRockNormal, uvRockPbr).xy * 2.0 - 1.0;
+              vec2 scanN = mix(grassN, rockN, rockPbr);
+              gx += scanN.x * scanNear * 0.34;
+              gy += scanN.y * scanNear * 0.34;
+            }
+            vec3 tang = normalize(cross(normal, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
+            vec3 bitn = cross(normal, tang);
+            normal = normalize(normal
+              + (tang * gx + bitn * gy) * uDetailK
+              * normalVertexFieldFade
+              * (1.7 + vMat.x * normalVertexFieldFade * 1.5));
+          }
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
@@ -938,29 +912,21 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         // Both meshes use the same pre-displacement rendered position and
         // sampling anchor. Never subtract planet-scale Float32 attributes.
         vOceanRelative = oceanRelativeFromView((modelViewMatrix * vec4(transformed, 1.0)).xyz);
-        float localCell = aNearPatchPass > 0.5
-          ? max(4.0, aWaterCell)
-          : 144.0;
-        vec4 waveSample = oceanWaveField(vOceanRelative, localCell);
-        macroWave = waveSample.x;
-        vec3 waveGradient = waveSample.yzw;
         float cameraDistance = length((modelViewMatrix * vec4(transformed, 1.0)).xyz);
         vWaveNear = 1.0 - smoothstep(18000.0, 220000.0, cameraDistance);
-        // Only the graded camera patch owns geometric displacement. Its last
-        // 1.2 km returns continuously to the base sphere before the coverage
-        // hand-off, so the coarse global shell and the patch meet at exactly
-        // the same position instead of exposing a rectangular step.
         float patchDistanceVertex = oceanPatchDistance(vOceanRelative);
         float patchGeometry = 1.0 - smoothstep(uNearPatchRadius - 1840.0,
           uNearPatchRadius - 640.0, patchDistanceVertex);
         float geometryNear = step(0.5, aNearPatchPass) * patchGeometry;
-        // Breakers lose displacement as the available water column collapses.
-        // At the 0.9 m wading fixture the eye stays above a ~0.15 m swash;
-        // metre-scale swell reaches full height only beyond the inner shelf.
+        vec3 waveGradient = vec3(0.0);
+        if (geometryNear > 0.0001) {
+          float localCell = max(4.0, aWaterCell);
+          vec4 waveSample = oceanWaveField(vOceanRelative, localCell);
+          macroWave = waveSample.x;
+          waveGradient = waveSample.yzw;
+        }
         float shoal = min(1.0, max(0.0, vDepth) * 0.62 / max(uOceanHeight, 0.001));
         vec4 tidalSample = oceanTidalEvent(vOceanRelative, vDepth);
-        // The bounded giant packet belongs to the world, including the global
-        // shell. Only short ordinary waves fade at the local patch boundary.
         float displacedWave = macroWave * shoal * geometryNear + tidalSample.x;
         transformed += waveUp * (displacedWave + 0.18);
         vWaveUp = normalize(normalMatrix * waveUp);
@@ -1089,9 +1055,12 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           // Sample the displaced surface, not its flat sea-sphere footprint.
           // Otherwise a 280 m wave face stretches a few metres of texture
           // into long vertical fabric streaks. The anchor remains unchanged.
+          float viewDist = length(vViewPosition);
           vec3 detailPosition = vOceanRelative + localUp * vWaveHeight;
-          vec2 detailSample = waterDetail(detailPosition, uWaveS,
-            vec2(uTime * 0.017, -uTime * 0.011));
+          float detailFade = 1.0 - smoothstep(22000.0, 48000.0, viewDist);
+          vec2 detailSample = detailFade > 0.001
+            ? mix(vec2(0.5), waterDetail(detailPosition, uWaveS, vec2(uTime * 0.017, -uTime * 0.011)), detailFade)
+            : vec2(0.5);
           gWaterDetail = detailSample;
           // A real waterline advances and retreats over the authored contour.
           // Modulate depth with a broad stochastic swash field and the actual
@@ -1126,21 +1095,32 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 transmission = exp(-uAbsorption * waterPath);
           float depthHaze = smoothstep(0.0, uDepthHazeDistance, opticalDepth) * 0.9;
           vec3 bodyTransmit = transmission * (1.0 - depthHaze);
-          vec3 analyticWaveGradient = waterWaveGradient();
           float fragmentShoal = min(1.0, dep * 0.62 / max(uOceanHeight, 0.001));
-          gWaterMacroSlope = vec2(dot(analyticWaveGradient, localT),
-            dot(analyticWaveGradient, localB)) * fragmentShoal * vWaveNear;
-          vec4 tidalFragment = oceanTidalEvent(vOceanRelative, dep);
-          vec3 tidalGradient = tidalFragment.yzw;
-          gWaterMacroSlope += vec2(dot(tidalGradient, localT), dot(tidalGradient, localB)) * vWaveNear;
+          if (vWaveNear > 0.001) {
+            if (fragmentShoal > 0.001 && opticalFootprint < 900.0) {
+              vec3 analyticWaveGradient = waterWaveGradient();
+              gWaterMacroSlope = vec2(dot(analyticWaveGradient, localT),
+                dot(analyticWaveGradient, localB)) * fragmentShoal * vWaveNear;
+            }
+            vec4 tidalFragment = oceanTidalEvent(vOceanRelative, dep);
+            vec3 tidalGradient = tidalFragment.yzw;
+            gWaterMacroSlope += vec2(dot(tidalGradient, localT), dot(tidalGradient, localB)) * vWaveNear;
+          } else {
+            vec4 tidalFragment = vec4(0.0);
+          }
           float smallDetail = clamp(detailSample.r * 0.58 + detailSample.g * 0.42,
             0.0, 1.0);
-          float refractiveWarp = oceanCausticWarp(vOceanRelative,
-            vec2(uTime * 0.035, -uTime * 0.027)) - 0.5;
-          float caustic = pow(smoothstep(0.51, 0.86,
-            oceanCaustic(vOceanRelative, vec2(refractiveWarp * 3.2)
-              + vec2(uTime * 0.19, -uTime * 0.13))), 2.0)
-            * exp(-dep * 0.024) * uDay;
+          float refractiveWarp = 0.0;
+          float caustic = 0.0;
+          if (dep < 95.0 && uDay > 0.002 && viewDist < 6500.0) {
+            float causticFade = 1.0 - smoothstep(4200.0, 6500.0, viewDist);
+            refractiveWarp = (oceanCausticWarp(vOceanRelative,
+              vec2(uTime * 0.035, -uTime * 0.027)) - 0.5) * causticFade;
+            caustic = pow(smoothstep(0.51, 0.86,
+              oceanCaustic(vOceanRelative, vec2(refractiveWarp * 3.2)
+                + vec2(uTime * 0.19, -uTime * 0.13))), 2.0)
+              * exp(-dep * 0.024) * uDay * causticFade;
+          }
           vec3 seabed = uShallowC * (0.68 + caustic * 0.72)
             * (0.92 + refractiveWarp * 0.2);
           vec3 inScatter = uDeepC * (0.38 + uDay * 0.28);
@@ -1171,60 +1151,56 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           gWaterFacetLight = facetLight;
           diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.77, 0.88, 0.94),
             diffuseColor.rgb * vec3(1.12, 1.1, 1.03), facetLight);
-          vec2 shoreCoordinates = oceanShorePhase(vOceanRelative, vec2(0.0, uTime * 0.37 / 6.28318530718));
-          float shorePhase = dep * 1.12 - uTime * 1.54
-            + smallDetail * 6.2 + sin(shoreCoordinates.x * 6.28318530718) * 1.7
-            + sin(shoreCoordinates.y * 6.28318530718) * 1.35;
-          float waveLine = sin(shorePhase);
-          float shoreBand = pow(1.0 - smoothstep(0.08, 9.5, dep), 0.68);
-          // Foam belongs to breaking crests, not to the whole shallow-water
-          // column. A permanent 0.42 baseline turned a 0.9 m wade into a
-          // featureless white sheet once the interaction texture bug was
-          // fixed and the real near patch finally rendered.
-          float breakingCrest = smoothstep(0.36, 0.88, waveLine)
-            * smoothstep(0.38, 0.73, smallDetail);
-          // The water/terrain intersection needs a continuous optical bridge:
-          // real beaches retain a thin aerated swash line even between the
-          // larger breaking crests. Noise and phase modulate it so the result
-          // does not become a ruler-straight white border.
-          float alongShoreBreak = oceanShore(vOceanRelative,
-            vec2(uTime * 0.025, -uTime * 0.018));
-          float swashNoise = smoothstep(0.48, 0.78,
-            alongShoreBreak * 0.68
-              + (sin(shorePhase * 0.73 + smallDetail * 3.1) * 0.5 + 0.5) * 0.42);
-          float swashRibbon = (1.0 - smoothstep(0.025, 1.65, dep))
-            * swashNoise * uFoamK * 0.24;
-          float shoreFoam = shoreBand * breakingCrest
-            * (0.34 + alongShoreBreak * 0.66) * uFoamK * 0.76
-            + swashRibbon;
-          // Metre-wide swash cannot resolve in an orbital pixel. Coarse
-          // bathymetry interpolates its zero contour along triangle edges;
-          // rendering that contour as full-strength foam drew detached zigzag
-          // lines kilometres from the visible coast. Keep shore detail in the
-          // near field and let depth/scattering own the distant coastal shelf.
-          shoreFoam *= 1.0 - smoothstep(1200.0, 9000.0, length(vViewPosition));
-          // Aeration belongs on elevated steep crests, not every sloping
-          // trough. Fine pores break up the formerly broad painted white caps.
+          float shoreFade = 1.0 - smoothstep(1200.0, 9000.0, viewDist);
+          float shoreFoam = 0.0;
           float crestHeight = smoothstep(0.0, 0.12,
             vWaveHeight / max(uOceanHeight, 0.25));
-          vec2 foamPoreUv = oceanCapillary(vOceanRelative + localUp * vWaveHeight,
-            vec2(uTime * 0.017, -uTime * 0.011));
-          vec2 foamPore = texture2D(uDetailTex, foamPoreUv).rg;
-          float resolvedPores = smoothstep(0.46, 0.61, foamPore.x * 0.6 + foamPore.y * 0.4);
-          float openWhitecap = crestHeight * resolvedPores
-            * smoothstep(0.035, 0.11, length(gWaterMacroSlope))
-            * smoothstep(5.0, 32.0, dep)
-            * smoothstep(0.6, 0.84, smallDetail)
-            * smoothstep(0.45, 0.76, alongShoreBreak) * uFoamK * 0.38;
+          float macroSlopeLen = length(gWaterMacroSlope);
+          bool needAlongShore = (dep < 10.0 && shoreFade > 0.001)
+            || (crestHeight > 0.001 && macroSlopeLen > 0.035 && dep > 5.0)
+            ${tidalField ? '|| true' : ''};
+          float alongShoreBreak = needAlongShore
+            ? oceanShore(vOceanRelative, vec2(uTime * 0.025, -uTime * 0.018))
+            : 0.5;
+          if (dep < 10.0 && shoreFade > 0.001) {
+            vec2 shoreCoordinates = oceanShorePhase(vOceanRelative, vec2(0.0, uTime * 0.37 / 6.28318530718));
+            float shorePhase = dep * 1.12 - uTime * 1.54
+              + smallDetail * 6.2 + sin(shoreCoordinates.x * 6.28318530718) * 1.7
+              + sin(shoreCoordinates.y * 6.28318530718) * 1.35;
+            float waveLine = sin(shorePhase);
+            float shoreBand = pow(1.0 - smoothstep(0.08, 9.5, dep), 0.68);
+            float breakingCrest = smoothstep(0.36, 0.88, waveLine)
+              * smoothstep(0.38, 0.73, smallDetail);
+            float swashNoise = smoothstep(0.48, 0.78,
+              alongShoreBreak * 0.68
+                + (sin(shorePhase * 0.73 + smallDetail * 3.1) * 0.5 + 0.5) * 0.42);
+            float swashRibbon = (1.0 - smoothstep(0.025, 1.65, dep))
+              * swashNoise * uFoamK * 0.24;
+            shoreFoam = (shoreBand * breakingCrest
+              * (0.34 + alongShoreBreak * 0.66) * uFoamK * 0.76
+              + swashRibbon) * shoreFade;
+          }
+          float openWhitecap = 0.0;
+          if (crestHeight > 0.001 && macroSlopeLen > 0.035 && dep > 5.0) {
+            vec2 foamPoreUv = oceanCapillary(vOceanRelative + localUp * vWaveHeight,
+              vec2(uTime * 0.017, -uTime * 0.011));
+            vec2 foamPore = texture2D(uDetailTex, foamPoreUv).rg;
+            float resolvedPores = smoothstep(0.46, 0.61, foamPore.x * 0.6 + foamPore.y * 0.4);
+            openWhitecap = crestHeight * resolvedPores
+              * smoothstep(0.035, 0.11, macroSlopeLen)
+              * smoothstep(5.0, 32.0, dep)
+              * smoothstep(0.6, 0.84, smallDetail)
+              * smoothstep(0.45, 0.76, alongShoreBreak) * uFoamK * 0.38;
+          }
           ${tidalField ? `
-          // Aeration concentrates near the advancing crest. Broad face foam
-          // made a giant packet resemble a snowy hill rather than heavy water.
-          float crestFraction = tidalFragment.x / max(1.0, uTidalShape.x);
+          vec4 tidalFoamSample = oceanTidalEvent(vOceanRelative, dep);
+          float crestFraction = tidalFoamSample.x / max(1.0, uTidalShape.x);
           float tidalCrestFoam = smoothstep(0.66, 0.94, crestFraction)
             * smoothstep(0.4, 0.7, smallDetail * 0.6 + alongShoreBreak * 0.4);
           openWhitecap += tidalCrestFoam * 0.72;
           ` : ''}
           float wakeFoam = 0.0;
+          if (uRippleCount > 0 && viewDist < 4500.0)
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
             if (i >= uRippleCount) break;
             vec3 ripplePosition = texelFetch(uRippleTex, ivec2(i, 0), 0).xyz;
@@ -1323,6 +1299,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           g += capillary * 0.8;
           float pixelFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
           g *= (1.0 - smoothstep(2.5, 18.0, pixelFootprint)) * vWaveNear;
+          if (uRippleCount > 0 && length(vViewPosition) < 4500.0)
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
             if (i >= uRippleCount) break;
             vec3 ripplePosition = texelFetch(uRippleTex, ivec2(i, 0), 0).xyz;
@@ -1381,14 +1358,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             reflectedSky
           );
           float sunDot = max(dot(reflectionDir, normalize(vSunDirView)), 0.0);
-          vec3 glintUp = normalize(vLocalPos);
-          vec3 glintT = normalize(cross(glintUp,
-            abs(glintUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-          vec3 glintB = cross(glintUp, glintT);
-          vec3 glintQ = vOceanRelative;
-          vec2 glintUv = vec2(dot(glintQ, glintT), dot(glintQ, glintB));
-          float glitterField = oceanGlitter(vOceanRelative,
-            vec2(uTime * 0.11, -uTime * 0.073));
+          float glitterField = (sunDot > 0.01 || (uSunset > 1e-3 && sunDot > 1e-4))
+            ? oceanGlitter(vOceanRelative, vec2(uTime * 0.11, -uTime * 0.073))
+            : 0.5;
           float glitterBreak = 0.12 + 0.88 * smoothstep(0.48, 0.81,
             glitterField * 0.72 + gWaterFacetLight * 0.28);
           float glintPower = mix(1400.0, 180.0, gWaterRoughness);
@@ -1418,12 +1390,14 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 reflectedSunColor = mix(uSunColor, vec3(1.0, 0.12, 0.018),
             uSunset * 0.9);
           sunGlint *= mix(1.0, 0.012, uSunset);
-          totalEmissiveRadiance += (reflectedSunColor * (sunGlint + warmPath)
-            * surfaceSunTransmission(normalize(uSurfaceViewToLocal*vSunDirView))
-            * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSunDirView))
-            + uSecondarySunColor * secondGlint
-            * surfaceSunTransmission(normalize(uSurfaceViewToLocal*vSecondarySunDirView))
-            * localStellarVisibility(vLocalPos,normalize(uSurfaceViewToLocal*vSecondarySunDirView)));
+          if (sunGlint + warmPath > 1e-6) {
+            totalEmissiveRadiance += reflectedSunColor * (sunGlint + warmPath)
+              * surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSunDirView));
+          }
+          if (secondGlint > 1e-6) {
+            totalEmissiveRadiance += uSecondarySunColor * secondGlint
+              * surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSecondarySunDirView));
+          }
           totalEmissiveRadiance += vec3(0.32, 0.39, 0.44)
             * gWaterFoam * 0.05;
           // Aerated wake water remains bright even when it interrupts a dark

@@ -13,9 +13,11 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
   target.texture.name = 'atmosphere.multiple-scattering';
   const material = new THREE.ShaderMaterial({
     depthTest: false, depthWrite: false, blending: THREE.NoBlending,
+    defines: { STELLAR_UNION_OCCLUSION: 0 },
     uniforms: { ...uniforms,
       uEnabled: { value: 1 }, uMultipleEnabled: { value: 0 },
       uMultipleDirections: { value: directions },
+      uMultipleSteps: { value: steps },
       uLocalOccluderCount: { value: 0 }, uEclipseEnabled: { value: 0 }, uRadianceScale: { value: 1 },
       uSunDirection0: { value: new THREE.Vector3() }, uSunEnergy0: { value: 1 },
       uSunColor0: { value: new THREE.Color(1, 1, 1) }, uSunEnergy1: { value: 0 },
@@ -23,7 +25,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
     vertexShader: 'void main(){gl_Position=vec4(position.xy,0,1);}',
     fragmentShader: `precision highp float;
       #define VIEW_STEPS ${steps}
-      uniform int uMultipleDirections;
+      uniform int uMultipleDirections, uMultipleSteps;
       ${atmosphereUniformGLSL}
       ${atmosphereTransportGLSL}
       void main() {
@@ -32,6 +34,7 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
         float sunMu = (gl_FragCoord.x-0.5)/31.0*2.0-1.0;
         vec3 sun = vec3(sqrt(max(0.0,1.0-sunMu*sunMu)),sunMu,0);
         vec3 meanL=vec3(0), meanReturn=vec3(0);
+        float invSteps = 1.0 / float(uMultipleSteps);
         for(int j=0;j<uMultipleDirections;j++) {
           float y=1.0-2.0*(float(j)+0.5)/float(${directions});
           float phi=float(j)*2.399963229728653;
@@ -42,8 +45,8 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
           if(groundHit) end=min(end,ground.x);
           vec3 L=vec3(0), T=vec3(1), returned=vec3(0);
           float previous=0.0;
-          for(int i=0;i<VIEW_STEPS;i++) {
-            float next=atmosphereSampleBoundary(0.0,end,-dot(origin,dir),float(i+1)/float(VIEW_STEPS));
+          for(int i=0;i<uMultipleSteps;i++) {
+            float next=atmosphereSampleBoundary(0.0,end,-dot(origin,dir),float(i+1)*invSteps);
             float ds=next-previous;
             vec3 pos=origin+dir*(previous+next)*0.5;
             float h=max(0.0,length(pos)-uGroundR);

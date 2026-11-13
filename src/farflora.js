@@ -73,6 +73,8 @@ function applyFarFade(mat, uniforms) {
             float d = distance(instanceMatrix[3].xyz, uCamL);
             float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
             g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
+            vec4 instCenterView = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+            if (!isOrthographic && instCenterView.z > 40.0) g = 0.0;
             transformed *= g;
           }
           #endif`);

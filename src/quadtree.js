@@ -775,47 +775,80 @@ export class ChunkedLOD {
     // cache-friendly sixteen-vertex batch.
     const batchMask = p.hAmp > 10 && !this.startupPriority ? 3 : 15;
 
+    // Pass 1: evaluate height/extras/depth once per grid vertex (reduces
+    // terrain noise calls by ~2.7x compared to 3-tap finite differences at
+    // every interior vertex while keeping border normals seam-exact).
     for (let j = 0; j <= N; j++) {
       const v = node.v0 + (node.v1 - node.v0) * (j / N);
       for (let i = 0; i <= N; i++) {
         const u = node.u0 + (node.u1 - node.u0) * (i / N);
         const idx = j * (N + 1) + i;
-
         faceFn(u, v, _dirV).normalize();
-        sampleSurface(p, _dirV, maxFreq, eps, _p0, _n);
-        const edgeConstrained = false;
-        let h = _p0.length() - p.R;
+        const h = p.height(_dirV, maxFreq);
+        const r = p.R + h;
+        positions[idx * 3] = _dirV.x * r;
+        positions[idx * 3 + 1] = _dirV.y * r;
+        positions[idx * 3 + 2] = _dirV.z * r;
         if (aSurfaceHeight) aSurfaceHeight[idx * 2] = h;
-        let slope = Math.max(0, 1 - _n.dot(_dirV));
-
-        positions[idx * 3] = _p0.x;
-        positions[idx * 3 + 1] = _p0.y;
-        positions[idx * 3 + 2] = _p0.z;
-        normals[idx * 3] = _n.x; normals[idx * 3 + 1] = _n.y; normals[idx * 3 + 2] = _n.z;
-
         if (aExtra) {
           p.extrasAt(_dirV, h, maxFreq, _ex);
           aExtra[idx * 4] = _ex.x; aExtra[idx * 4 + 1] = _ex.y;
           aExtra[idx * 4 + 2] = _ex.z; aExtra[idx * 4 + 3] = _ex.w;
         }
         if (aDepth) aDepth[idx] = p.bakeDepth(_dirV, maxFreq, node.level);
+        if ((i & batchMask) === batchMask || i === N) yield;
+      }
+    }
+
+    // Pass 2: central-difference normals for interior vertices (zero extra
+    // noise evaluations), exact intrinsic tangent normals along the 4 edges,
+    // and parent-triangle morph deltas.
+    for (let j = 0; j <= N; j++) {
+      const v = node.v0 + (node.v1 - node.v0) * (j / N);
+      for (let i = 0; i <= N; i++) {
+        const u = node.u0 + (node.u1 - node.u0) * (i / N);
+        const idx = j * (N + 1) + i;
+        _p0.set(positions[idx * 3], positions[idx * 3 + 1], positions[idx * 3 + 2]);
+        faceFn(u, v, _dirV).normalize();
+
+        if (!p.pal && p.hAmp <= 2) {
+          _n.copy(_dirV);
+        } else if (i > 0 && i < N && j > 0 && j < N) {
+          const idxL = idx - 1, idxR = idx + 1;
+          const idxD = idx - (N + 1), idxU = idx + (N + 1);
+          _p1.set(
+            positions[idxR * 3] - positions[idxL * 3],
+            positions[idxR * 3 + 1] - positions[idxL * 3 + 1],
+            positions[idxR * 3 + 2] - positions[idxL * 3 + 2],
+          );
+          _p2.set(
+            positions[idxU * 3] - positions[idxD * 3],
+            positions[idxU * 3 + 1] - positions[idxD * 3 + 1],
+            positions[idxU * 3 + 2] - positions[idxD * 3 + 2],
+          );
+          _n.crossVectors(_p1, _p2).normalize();
+          if (_n.dot(_dirV) < 0) _n.negate();
+        } else {
+          if (Math.abs(_dirV.y) < 0.95) _t1.set(-_dirV.z, 0, _dirV.x).normalize();
+          else _t1.set(1, 0, 0).projectOnPlane(_dirV).normalize();
+          _t2.crossVectors(_dirV, _t1);
+          _d1.copy(_dirV).addScaledVector(_t1, eps).normalize();
+          _p1.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq)).sub(_p0);
+          _d2.copy(_dirV).addScaledVector(_t2, eps).normalize();
+          _p2.copy(_d2).multiplyScalar(p.R + p.height(_d2, maxFreq)).sub(_p0);
+          _n.crossVectors(_p1, _p2).normalize();
+        }
+        normals[idx * 3] = _n.x; normals[idx * 3 + 1] = _n.y; normals[idx * 3 + 2] = _n.z;
+        const slope = Math.max(0, 1 - _n.dot(_dirV));
+
         if (aMat) {
           const sl = (slope - p.pal.slopeLo) / (p.pal.slopeHi - p.pal.slopeLo);
           aMat[idx * 3] = Math.min(1, Math.max(0, sl));
-          aMat[idx * 3 + 1] = aExtra ? Math.min(1, _ex.x * 1.4) : 0;
-          // One means fully lit when this world has no static sun-visibility
-          // baker. Leaving the zero-initialized channel untouched applied the
-          // shader's valley-shadow tint to every rotating-world vertex.
+          aMat[idx * 3 + 1] = aExtra ? Math.min(1, aExtra[idx * 4] * 1.4) : 0;
           aMat[idx * 3 + 2] = 1;
         }
 
         if (hasMorph) {
-          // Reconstruct the exact point on the parent mesh's two real
-          // triangles. Sampling the parent frequency again at the child's
-          // spherical direction produces a different curved surface, so a
-          // child at morph=1 still cracks against its visible neighbour.
-          // Barycentric interpolation is exact and reuses already-built data,
-          // avoiding one expensive height+normal evaluation per child vertex.
           if (parentPositionAttribute && parentCenter && parentNormalAttribute && parentN > 0) {
             const gx = (node.childX + i / N) * parentN * 0.5;
             const gy = (node.childY + j / N) * parentN * 0.5;
@@ -892,13 +925,9 @@ export class ChunkedLOD {
                 + parentSurfaceHeightAttribute.getX(i1) * w1
                 + parentSurfaceHeightAttribute.getX(i2) * w2 - aSurfaceHeight[idx * 2];
             } else if (aSurfaceHeight) {
-              // Compatibility fallback for a parent without this attribute;
-              // sample authored height, never infer it from a triangle chord.
               aSurfaceHeight[idx * 2 + 1] = p.height(_dirV, coarseFreq) - aSurfaceHeight[idx * 2];
             }
           } else {
-            // Root/bootstrap fallback; normal child builds always have a
-            // committed parent mesh because display ownership is top-down.
             sampleSurface(p, _dirV, coarseFreq, eps * 2, _cP, _cN);
             if (aSurfaceHeight) aSurfaceHeight[idx * 2 + 1] = _ss.h - aSurfaceHeight[idx * 2];
           }
@@ -911,10 +940,7 @@ export class ChunkedLOD {
           maxMorphHeightDelta = Math.max(maxMorphHeightDelta,
             Math.abs(_cP.length() - _p0.length()));
         }
-        // Yield in small cache-friendly batches. Yielding every vertex creates
-        // millions of short-lived IteratorResult objects during a descent and
-        // eventually hands the render loop a large garbage-collection pause.
-        if ((i & batchMask) === batchMask || i === N) yield;
+        if ((i & 31) === 31 || i === N) yield;
       }
     }
 
@@ -1098,7 +1124,9 @@ export class ChunkedLOD {
       underlay.receiveShadow = false;
       mesh.add(underlay);
     }
-    mesh.castShadow = !p.noShadow;
+    // Only local surface chunks (< ~30 km wide) belong in the 0.65–4.8 km
+    // directional shadow frustum; macro relief shadows own continent-scale ranges.
+    mesh.castShadow = !p.noShadow && node.level >= 5;
     mesh.receiveShadow = true;
     mesh.visible = false;
     node.mesh = mesh;

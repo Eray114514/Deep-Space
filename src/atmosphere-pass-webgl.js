@@ -134,14 +134,18 @@ export function createAtmosphereOpticalDepthLut(profile,
 
 function makeLutTexture(profile) {
   const lut = createAtmosphereOpticalDepthLut(profile);
+  const half = new Uint16Array(lut.data.length);
+  for (let i = 0; i < lut.data.length; i++) {
+    half[i] = THREE.DataUtils.toHalfFloat(Math.min(65000, Math.max(-65000, lut.data[i])));
+  }
   const texture = new THREE.DataTexture(
-    lut.data, lut.width, lut.height, THREE.RGBAFormat, THREE.FloatType,
+    half, lut.width, lut.height, THREE.RGBAFormat, THREE.HalfFloatType,
   );
   texture.name = 'atmosphere.optical-depth';
-  // The dense LUT uses portable nearest sampling so the WebGL2 baseline does
-  // not depend on the optional OES_texture_float_linear extension.
-  texture.minFilter = THREE.NearestFilter;
-  texture.magFilter = THREE.NearestFilter;
+  // RGBA16F is guaranteed linear-filterable by core WebGL 2 / ES 3.0 without
+  // optional float-linear extensions, replacing 4 manual shader taps with 1.
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.generateMipmaps = false;
@@ -235,8 +239,16 @@ export class AtmospherePass extends Pass {
             return;
           }
 
+          float span = t1 - t0;
+          int steps = VIEW_STEPS;
+          if (VIEW_STEPS > 8) {
+            float needed = sceneDepth < 0.999999
+              ? clamp(4.0 + sqrt(span) * 0.11, 4.0, float(VIEW_STEPS))
+              : clamp(16.0 + span / 6500.0, 16.0, float(VIEW_STEPS));
+            steps = min(VIEW_STEPS, int(needed + 0.5));
+          }
           vec3 radiance, transmittance;
-          airIntegrate(uCameraLocal, direction, t0, t1, radiance, transmittance);
+          airIntegrateSteps(uCameraLocal, direction, t0, t1, steps, radiance, transmittance);
           gl_FragColor = vec4(radiance + base.rgb * transmittance, base.a);
         }`,
     });
