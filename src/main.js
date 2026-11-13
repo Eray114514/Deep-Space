@@ -337,7 +337,7 @@ function finishSurfaceBootstrap() {
   surfacePipelinesReady = true;
 }
 
-function prewarmSurfacePipelines(planet) {
+function prewarmSurfacePipelines(planet, extraPlanets = null) {
   // The low tier intentionally skips the expensive asynchronous surface
   // warm-up.  Mark the shared topology as accounted for so the regular frame
   // loop does not start that compile one frame later and recreate the same
@@ -368,7 +368,7 @@ function prewarmSurfacePipelines(planet) {
   scene.add(surfaceBootstrapGroup);
 
   const surfaceSources = new Map();
-  const candidatePlanets = (universe?.system?.planets?.length ? universe.system.planets : [planet])
+  const candidatePlanets = (extraPlanets?.length ? extraPlanets : [planet])
     .filter((body) => body && !body.isGasGiant && body.group);
   for (const body of candidatePlanets) {
     body.group.traverse((object) => {
@@ -466,11 +466,10 @@ function prewarmSurfacePipelines(planet) {
 
 function prewarmLoadedShipPipelines() {
   if (ship.heroLoadFailed) { shipPipelinesWarmed = true;return; }
-  // Enqueue concurrently alongside surface/post prewarm so ANGLE's C++ FXC
-  // worker threads compile ship and planet shaders in parallel instead of serially.
-  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending) return;
+  if (!ship.heroLoaded || shipPipelinesWarmed || shipPipelineWarmPending || !surfacePipelinesReady) return;
   if (startupPrewarmExpired) { shipPipelinesWarmed = true;return; }
   shipPipelineWarmPending = true;
+  surfacePipelinesReady = false;
   const signal = startupCompile.signal;
   const options = { signal, label: 'startup-ship', isCurrent: () => !startupPrewarmExpired };
   const compileLayer = (layer, buffer) => nodePipeline.prepare(() => {
@@ -498,12 +497,11 @@ function prewarmLoadedShipPipelines() {
       });
       for (const texture of textures) renderer.initTexture(texture);
     }, options);
-    const tasks = [
-      compileLayer(SHIP_FOREGROUND_LAYER, 'readBuffer'),
-      compileLayer(0, 'writeBuffer'),
-    ];
-    if (RENDER_LOOK_NEXT) tasks.push(compileLayer(SHIP_INTERIOR_LAYER, 'readBuffer'));
-    await Promise.all(tasks);
+    await compileLayer(SHIP_FOREGROUND_LAYER, 'readBuffer');
+    if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'readBuffer');
+    // Parked hull/interior need the production WORLD light and HDR families too.
+    await compileLayer(0, 'writeBuffer');
+    if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'writeBuffer');
   };
   void prepare().then(() => {
     if (!startupPrewarmExpired) shipPipelinesWarmed = true;
@@ -511,6 +509,7 @@ function prewarmLoadedShipPipelines() {
     if (!startupPrewarmExpired) console.warn('ship pipeline prewarm failed', error);
   }).finally(() => {
     shipPipelineWarmPending = false;
+    surfacePipelinesReady = true;
   });
 }
 
@@ -4116,15 +4115,7 @@ function renderWorldFrame() {
     surfaceWeapons.renderScopeView(renderer);
     finishSurfaceBootstrap();
     if (pipelineResizePending && !pipelineResourcesBusy()) sizePost();
-    if (!surfacePipelinesReady || shipPipelineWarmPending || postPipelinesWarmPending || weaponPipelinesWarmPending) {
-      nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
-      return;
-    }
-    // Do not spend 30+ ms per frame rendering invisible full-resolution HDR
-    // frames behind the opaque loading screen while orbital chunks are still
-    // draining; let the CPU finish chunk generation, then present cleanly.
-    if (!loadingCleared && !QUALITY_LOW && (!startupTerrainReady() || pendingChunks() > 0)
-        && performance.now() - startupWarmStartedAt < STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS) {
+    if (!surfacePipelinesReady || shipPipelineWarmPending) {
       nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
       return;
     }
@@ -4929,7 +4920,19 @@ function frame() {
   // surfaced from the listener.
   let worldRendered = false;
   if (!contextLost) {
-    worldRendered = renderWorldFrame();
+    const startupDeferWorldDraw = !loadingCleared && (
+      postPipelinesWarmPending || weaponPipelinesWarmPending
+      || (!QUALITY_LOW && (!startupTerrainReady() || pendingChunks() > 0)
+        && performance.now() - startupWarmStartedAt < STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS)
+    );
+    if (startupDeferWorldDraw) {
+      nodePipeline.submitFrame(() => {
+        finishSurfaceBootstrap();
+        nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
+      });
+    } else {
+      worldRendered = renderWorldFrame();
+    }
     if(worldRendered) {
       // A paced-out RAF is simulation time, not another presented frame.
       // Keep severe stalls and the full interval across skipped callbacks.
@@ -5054,7 +5057,7 @@ if (bootstrapSurfacePlanet && !bootstrapSurfacePlanet.isGasGiant) {
   if (QUALITY_LOW) {
     renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
   } else {
-    prewarmSurfacePipelines(bootstrapSurfacePlanet);
+    prewarmSurfacePipelines(bootstrapSurfacePlanet, universe.system?.planets || null);
   }
 }
 if (volumePass && bootstrapSurfacePlanet) {
