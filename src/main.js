@@ -249,7 +249,7 @@ let weaponPipelinesWarmPending = false;
 let weaponPipelinesWarmed = false;
 let heroTransitionActive = false;
 let startupWarmStartedAt = performance.now();
-const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 9000;
+const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 24000;
 const startupCompile = new AbortController();
 // Shader compilation may consume most of the general warm-up deadline on a
 // cold browser profile.  Give the visible terrain/water LOD a separate,
@@ -5112,6 +5112,7 @@ window.NMS = {
     return loadingCleared;
   },
   get state() { return state; },
+  get alt() { return nearestAlt; },
   surfaceWarmupState() {return {ready:surfacePipelinesReady,pending:surfaceBootstrapPending,
     expired:startupPrewarmExpired,remainingMeshes:surfaceBootstrapMeshes.length,stats:surfaceBootstrapStats};},
   sceneBuildState() {return sceneBuildBudget.snapshot();},
