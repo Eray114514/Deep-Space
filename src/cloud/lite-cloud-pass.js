@@ -112,12 +112,15 @@ const cloudFieldGLSL = /* glsl */`
     base = sat((base - 0.22) / 0.6);
     // Cumulus profile: flat base, cloud-top height driven by the slow
     // thickness field and by each cell (cell cores tower upward).
-    float top = mix(0.42, 1.0, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
+    float top = mix(0.3, 0.66, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
+    // Convective towers: where the wide cells and the thickness field agree,
+    // a cumulus grows through the rest of the deck (cumulus congestus).
+    top += 0.42 * smoothstep(0.6, 0.84, wide) * smoothstep(0.42, 0.78, thick) * smoothstep(0.35, 0.7, base);
     // Every small cumulus is its own dome and carries finer bumps: seen from
     // above the deck is a relief of lit tops and shaded gaps, not a flat sheet.
     if (fine > 0.0) top *= 1.0 - fine * (0.22 * (1.0 - small) + 0.12 * (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g));
     gCrown = top;
-    float profile = smoothstep(0.0, 0.07, h) * smoothstep(top, top * 0.45, h);
+    float profile = smoothstep(0.0, 0.05, h) * smoothstep(top, top * mix(0.5, 0.74, fine), h);   // crisp tops up close
     float d = sat(remap(base * profile, 1.0 - cov, 1.0, 0.0, 1.0));
     if (d <= 0.0) return 0.0;
     if (fine > 0.0) {
@@ -327,10 +330,11 @@ const marchShader = /* glsl */`
           if (d > 0.002) {
             if (tFront < 0.0) tFront = t;
             float h = sat((length(p) - uShellBase - weather.y) / uShellDepth);
-            // Optical depth toward the sun: four growing steps.
-            float tau = 0.0, ls = 320.0;
+            // Optical depth toward the sun: five growing steps reaching ~7 km, far
+            // enough for a tower to shade the cumulus beside it.
+            float tau = 0.0, ls = 300.0;
             vec3 pl = p;
-            for (int j = 0; j < 4; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0, weather.y) * ls; ls *= 1.8; }
+            for (int j = 0; j < 5; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0, weather.y) * ls; ls *= 1.9; }
             tau *= uExtinction;
             // Multi-scattering octaves: each order loses extinction and
             // anisotropy. Gives silver linings and keeps thick cores from going black.
@@ -341,13 +345,14 @@ const marchShader = /* glsl */`
               scatter1 += e * mix(hgPhase(mu1, 0.82 * a), hgPhase(mu1, -0.25 * a), 0.28);
               a *= 0.48;
             }
-            float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15);
+            float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15)
+              * mix(0.76, 1.0, exp(-tau * 0.3));
             // The companion star reuses the primary's optical depth (they are
             // rarely far apart in the sky) with its own phase and horizon.
             vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span)) * scatter * powder;
             if (uSunEnergy1 > 0.001) sun += irradiance1 * sunAt(p, sunDirection1) * scatter1 * powder;
             float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection));
-            vec3 ambient = irradiance * mix(vec3(0.012, 0.017, 0.028), vec3(0.045, 0.062, 0.095), h)
+            vec3 ambient = irradiance * mix(vec3(0.013, 0.020, 0.036), vec3(0.047, 0.070, 0.116), h)
               * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
             // Bases sit in their own shadow; tops catch the sun.
             // Troughs between domes are hemmed in by their neighbours: less sun
@@ -455,7 +460,13 @@ const compositeShader = /* glsl */`
       vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
       vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
-      vec3 aux = texture2D(tCloudAux, vUv).xyz * 1000.0;
+      // The range target is nearest-filtered (float linear is optional) and
+      // empty texels hold a far sentinel. Take the nearest cloud front among
+      // the four surrounding texels: averaging would let one empty texel push
+      // the front away and punch square holes along every cloud edge.
+      vec2 h = uCloudTexel * 0.5;
+      vec3 aux = min(min(texture2D(tCloudAux, vUv + h).xyz, texture2D(tCloudAux, vUv - h).xyz),
+        min(texture2D(tCloudAux, vUv + vec2(h.x, -h.y)).xyz, texture2D(tCloudAux, vUv + vec2(-h.x, h.y)).xyz)) * 1000.0;
       // Terrain inside a cloud is swallowed gradually: opacity grows from the
       // cloud's front face over its optical depth, with at least ~600 m of
       // fog so a ridge never cuts a cloud along a hard line.
@@ -531,7 +542,7 @@ export class LiteCloudPass extends Pass {
       uSynoptic: { value: 0 },
       uShellBase: { value: 1 },
       uShellTop: { value: 2 },
-      uShellDepth: { value: 5200 },
+      uShellDepth: { value: 7600 },
       uSurfaceTex: { value: null },
       uSurfaceRange: { value: 1 },
       uLiftBase: { value: 0 },
@@ -654,9 +665,9 @@ export class LiteCloudPass extends Pass {
         u.uLiftBase.value = base;
         u.uSurfaceRange.value = synoptic ? next.weatherField.surfaceRangeMeters || 1 : 1;
         u.uShellBase.value = next.R + base;
-        u.uShellTop.value = next.R + base + 5200 + maxLift;
+        u.uShellTop.value = next.R + base + 7600 + maxLift;
         u.uCloudTint.value.set(next.type === 'toxic' ? 0xc8e890 : 0xffffff);
-        this.layerMeters = { base, top: base + 5200 };
+        this.layerMeters = { base, top: base + 7600 };
       }
     }
     this.#refresh();
