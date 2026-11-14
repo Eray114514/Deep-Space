@@ -6,7 +6,7 @@ import { ShipHUD } from './ship-hud.js';
 export class UI {
   constructor(callbacks = {}) {
     this.cb = callbacks;
-    this.shipHud = new ShipHUD();
+    this.shipHud = new ShipHUD({ externalTick: true });
     const $ = (id) => document.getElementById(id);
     this.els = {
       system: $('sys-name'), systemCatalog: $('sys-catalog'), cosmicTime: $('cosmic-time'), seed: $('sys-seed'), planetCount: $('sys-planets'),
@@ -202,6 +202,7 @@ export class UI {
       `${Math.ceil(Math.max(0, pulseFuel))}/${Math.ceil(pulseFuelMax)}${pulseRecharging ? ' ↑' : ''}`);
     this.els.pulseFuel?.parentElement?.classList.toggle('pulse-recharging', pulseRecharging);
     this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax });
+    this.shipHud.tick(performance.now());
   }
 
   setCockpitView(active) { this.shipHud.setCockpitView(active); }

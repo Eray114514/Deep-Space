@@ -41,7 +41,8 @@ export function powerEffectsFor(power = DEFAULT_POWER) {
 }
 
 export class ShipHUD {
-  constructor() {
+  constructor({ externalTick = false } = {}) {
+    this.externalTick = externalTick;
     this.stage = document.getElementById('ship-hud-stage');
     this.svg = document.getElementById('ship-hud-svg');
     this.speedValue = document.getElementById('speed-value');
@@ -107,7 +108,11 @@ export class ShipHUD {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(document.documentElement);
     this.lastFrame = performance.now();
-    this.frame = requestAnimationFrame((time) => this.tick(time));
+    if (this.externalTick) {
+      this.tick(this.lastFrame);
+    } else {
+      this.frame = requestAnimationFrame((time) => this.tick(time));
+    }
   }
 
   svgElement(name, attrs, parent = this.svg) {
@@ -628,6 +633,11 @@ export class ShipHUD {
       }
     }
 
+    if (document.body.classList.contains('ui-walk') || document.body.classList.contains('hero-active')) {
+      if (!this.externalTick) this.frame = requestAnimationFrame((frameTime) => this.tick(frameTime));
+      return;
+    }
+
     const speedRatio = clamp(this.speed / this.speedLimit);
     for (let index = 0; index < this.rows.length; index++) {
       const row = this.rows[index];
@@ -690,6 +700,8 @@ export class ShipHUD {
     this.hullBar.style.transform = `scaleX(${(this.hull / 100).toFixed(3)})`;
     this.hullBar.style.background = this.hull < 30 ? '#e2483d' : '#f2ecd8';
 
-    this.frame = requestAnimationFrame((frameTime) => this.tick(frameTime));
+    if (!this.externalTick) {
+      this.frame = requestAnimationFrame((frameTime) => this.tick(frameTime));
+    }
   }
 }

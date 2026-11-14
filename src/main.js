@@ -20,6 +20,7 @@ import { compileDestinationVariant, compileWorldPublicationVariant, worldPublica
 import { captureWorldPublication } from './world-publication.js';
 import { FrameWorkBudget } from './frame-work-budget.js';
 import { PresentedFrameStats } from './presented-frame-stats.js';
+import { AdaptiveQualityGovernor, FrameGpuTimer } from './adaptive-quality.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
@@ -4094,10 +4095,16 @@ let statAcc = 0;
 let devFpsElapsed = 0;
 let devFpsFrames = 0;
 let perfEmaMs = 16.7;
-let dprAcc = 0;
 let adaptiveStage = 0;
 let adaptiveQualityLocked = false;
 let adaptiveStableSince = 0;
+const ADAPTIVE_TARGET_FRAME_MS = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.67;
+const frameGpuTimer = new FrameGpuTimer(renderer);
+const adaptiveGovernor = new AdaptiveQualityGovernor({
+  targetFrameMs: ADAPTIVE_TARGET_FRAME_MS,
+  maxStage: 5,
+  initialNow: performance.now(),
+});
 const presentedFrames = new PresentedFrameStats({initialTime:performance.now()});
 let latestRenderCalls = 0;
 let latestRenderTriangles = 0;
@@ -4113,7 +4120,10 @@ function resetPerformanceStats() {
 }
 
 function resetAdaptiveQuality() {
-  adaptiveStableSince = performance.now();
+  const now = performance.now();
+  adaptiveStableSince = now;
+  frameGpuTimer.reset();
+  adaptiveGovernor.reset(now);
   applyAdaptiveStage(0);
   setRenderDpr(computeCeilingDpr());
   return true;
@@ -4180,8 +4190,9 @@ function renderWorldFrame() {
   return rendered;
 }
 
-function frame() {
+function frame(rafTs) {
   requestAnimationFrame(frame);
+  const frameCpuStart = performance.now();
   cloudResourceManager.tickFrame();
   const realDt = clock.getDelta();
   // Paused: the full-page pause surface floats over a LIVE world. Simulation
@@ -4487,7 +4498,7 @@ function frame() {
   const heavySurfaceBacklog = nearTerrain && nearest?.lod && pendingChunks(nearest.lod) > 12;
   const terrainBuildMs=debugBuildBudgetMs || (!loadingCleared
     ? QUALITY_LOW ? 5.5 : 110
-    : heavySurfaceBacklog ? 7.5 : state === 'walk' ? 2.6 : nearTerrain ? 3.6 : 1.6);
+    : heavySurfaceBacklog ? 4.2 : state === 'walk' ? 2.6 : nearTerrain ? 3.4 : 1.6);
   const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
   sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),
     {terrain:terrainBuildMs,near:scatter.streamBudgetMs});
@@ -4929,32 +4940,13 @@ function frame() {
     }
   }
 
-  // Slow adaptation avoids reallocating render targets during momentary LOD
-  // spikes. On a 5080 this stays at the quality ceiling; an iGPU degrades
-  // gracefully instead of silently presenting a single-digit frame rate.
-  dprAcc += dt;
-  const targetFrameMs = QUALITY_LOW ? 21.5 : QUALITY_PROFILE.id === 'balanced' ? 17.5 : 16.6;
-  const adaptInterval = perfEmaMs > targetFrameMs * 1.25 ? 1.2 : 3.2;
-  // Do not reset adaptiveStableSince on streaming chunk morphs: continuous
-  // flight/rotation always morphs distant chunks, which previously locked
-  // adaptiveStage at 0 forever even at 25–30 FPS.
   const adaptiveReady = loadingCleared
     && surfacePipelinesReady && !shipPipelineWarmPending
     && !postPipelinesWarmPending && !weaponPipelinesWarmPending
-    && !heroTransitionActive;
-  if (!adaptiveReady) adaptiveStableSince = performance.now();
-  if (dprAcc > adaptInterval && !FREEZE && !adaptiveQualityLocked && adaptiveReady
-    && performance.now() - adaptiveStableSince > 2500) {
-    dprAcc = 0;
-    if (perfEmaMs > targetFrameMs * 1.08 && adaptiveStage < 5) {
-      applyAdaptiveStage(adaptiveStage + 1);
-    } else if (adaptiveStage >= 5 && perfEmaMs > targetFrameMs * 1.12) {
-      setRenderDpr(renderDpr - (perfEmaMs > targetFrameMs * 1.45 ? 0.10 : 0.05));
-    } else if (perfEmaMs < targetFrameMs * 0.72) {
-      const ceilingDpr = computeCeilingDpr();
-      if (renderDpr < ceilingDpr - 0.04) setRenderDpr(renderDpr + 0.05);
-      else if (adaptiveStage > 0) applyAdaptiveStage(adaptiveStage - 1);
-    }
+    && !heroTransitionActive && !FREEZE;
+  if (!adaptiveReady) {
+    adaptiveStableSince = performance.now();
+    adaptiveGovernor.markNotReady(adaptiveStableSince);
   }
 
   if (!FREEZE && !photoMode && !(DEV_SERVER && devWaterWakeFixture?.held)) tickShaders(dt);
@@ -4980,14 +4972,44 @@ function frame() {
         nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
       });
     } else {
-      worldRendered = renderWorldFrame();
+      worldRendered = frameGpuTimer.measure(() => renderWorldFrame(), {
+        skip: Boolean(nodePipeline.profiler || VOLUME_ENABLED),
+      });
     }
     if(worldRendered) {
       // A paced-out RAF is simulation time, not another presented frame.
       // Keep severe stalls and the full interval across skipped callbacks.
-      const timing=presentedFrames.present(performance.now());
+      const frameEndNow = performance.now();
+      const timing=presentedFrames.present(frameEndNow);
       if(timing!==null) {
-        if(timing.recorded)perfEmaMs+=(Math.min(timing.activeMs,100)-perfEmaMs)*.025;
+        if(timing.recorded) {
+          perfEmaMs+=(Math.min(timing.activeMs,100)-perfEmaMs)*.025;
+          const preFrameSpinMs = Number.isFinite(rafTs)
+            ? clamp(frameCpuStart - rafTs, 0, Math.max(0, timing.activeMs - 1))
+            : 0;
+          const rawCpuBusyMs = preFrameSpinMs + Math.max(0, frameEndNow - frameCpuStart);
+          const renderCpuMs = Math.max(0.2, rawCpuBusyMs - (sceneBuildBudget.spentMs || 0));
+          const streamingActive = Boolean(
+            (nearest?.lod && pendingChunks(nearest.lod) > 4)
+            || (nearest?.waterLod && pendingChunks(nearest.waterLod) > 4)
+            || nearest?.nearWaterPatch?.build
+          );
+          const decision = adaptiveGovernor.update({
+            now: frameEndNow,
+            ready: adaptiveReady,
+            locked: adaptiveQualityLocked,
+            streaming: streamingActive,
+            activeMs: timing.activeMs,
+            cpuWorkMs: renderCpuMs,
+            gpuWorkMs: frameGpuTimer.latestMs(),
+            stage: adaptiveStage,
+            renderDpr,
+            ceilingDpr: computeCeilingDpr(),
+            dprMin: QUALITY_PROFILE.dprMin,
+          });
+          if (decision.action === 'stage') applyAdaptiveStage(decision.stage);
+          else if (decision.action === 'dpr') setRenderDpr(decision.dpr);
+        }
         if(DEV_SERVER) {
           devFpsElapsed+=timing.elapsedMs/1000;devFpsFrames++;
           if(devFpsElapsed>=.45) {
@@ -5470,6 +5492,7 @@ window.NMS = {
       waterTransmissionScale: renderer.transmissionResolutionScale,
       waterReflectionHz: effectiveWaterReflectionHz,
       adaptiveStage,
+      adaptiveGovernor: adaptiveGovernor.snapshot(),
       waterInteractions: waterInteraction.activeCount(),
       waterContact,
       waterSurfaceHeight,
