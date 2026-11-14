@@ -872,13 +872,13 @@ export class SystemView {
     // (such as the 1,200 km homeworld + its 3.6R moon) never intersect an
     // adjacent neighbour's sphere or moon track in the compressed chart.
     const starClearance = (this.starRecords || []).reduce(
-      (maxR, s) => Math.max(maxR, (s.orbitRadius || 0) + (s.radius || 2.5) * 1.45), 4.5);
+      (maxR, s) => Math.max(maxR, (s.orbit?.renderRadius || 0) * (s.orbitScale || 0) + (s.radius || 2.5) * 1.45), 4.5);
     let minNextInner = starClearance + 1.2;
     const plannedOrbitRadii = primaries.map((body) => {
       if (body.type === 'blackHole') return 0;
       const baseOrbit = 9 + Math.log1p(body.orbit / 4e7) / Math.log1p(maxOrbit / 4e7) * 36;
       const visR = this._visualPlanetRadius(body);
-      const childMoons = moons.filter((m) => m.parentSpec === body);
+      const childMoons = moons.filter((m) => m.parentSpec === body.index);
       const envelope = childMoons.reduce(
         (ext, m) => Math.max(ext, this._moonOrbitExtent(m, visR, body.radius) + 0.25),
         body.ringSystem?.present ? visR * 2.15 : visR,
