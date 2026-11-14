@@ -66,19 +66,23 @@ export function atmosphereRenderProfile(planet) {
   // wears its air as a hairline: from orbit the limb is a thin pale ring and
   // there is no depth of blue to fly down through. Compact worlds therefore
   // get taller scale heights (up to 2.2x, never more than ~1.7% of the
-  // radius), and the density is divided by the same factor so the vertical
-  // optical depth -- sky colour and sunset reddening seen from the ground --
-  // is unchanged. Bodies of 6,000 km and above keep physical scale heights.
+  // radius). The density is divided by limbScale^0.6, not by the full factor:
+  // a straight division kept the vertical column but cut the grazing column
+  // (which scales with sqrt(R*H)) to 1/sqrt(k), so sunsets lost their red and
+  // twilight went pale. This split keeps the grazing column within ~10% and
+  // thickens the vertical one by ~1.35x at k = 2.2. Bodies of 6,000 km and
+  // above keep physical scale heights; small moons keep their physical top.
   const limbScale = clamp(Math.min(Math.sqrt(6000000 / groundRadiusMeters),
     groundRadiusMeters * 0.017 / 8000), 1, 2.2);
-  const topAltitudeMeters = Math.max(physicalTopMeters, 8000 * limbScale * 5.2);
+  const topAltitudeMeters = limbScale > 1.001
+    ? Math.max(physicalTopMeters, 8000 * limbScale * 5.2) : physicalTopMeters;
   const type = planet?.type || 'lush';
   const temperatureK = clamp(
     Number(planet?.weatherProfile?.temperatureK) || 286, 170, 700);
   const temperatureScale = clamp(temperatureK / 286, 0.68, 1.45);
   // Ideal-gas reference density at the authored surface pressure/temperature.
   // atmoDensity is only the fallback for worlds without a physical pressure.
-  const densityScale = pressure * 286 / temperatureK / limbScale;
+  const densityScale = pressure * 286 / temperatureK / limbScale ** 0.6;
   const rayleighScaleHeightMeters = 8000 * temperatureScale * limbScale;
   const mieScaleHeightMeters = (type === 'desert' || type === 'toxic' ? 1800 : 1200)
     * Math.sqrt(temperatureScale) * limbScale;
@@ -87,8 +91,8 @@ export function atmosphereRenderProfile(planet) {
     topAltitudeMeters,
     rayleighScaleHeightMeters,
     mieScaleHeightMeters,
-    ozoneCenterMeters: Math.min(25000, topAltitudeMeters * 0.42),
-    ozoneHalfWidthMeters: Math.min(15000, topAltitudeMeters * 0.28),
+    ozoneCenterMeters: Math.min(25000 * limbScale, topAltitudeMeters * 0.42),
+    ozoneHalfWidthMeters: Math.min(15000 * limbScale, topAltitudeMeters * 0.28),
     multipleScatteringFactor: 0.1,
   });
   return { profile, densityScale };

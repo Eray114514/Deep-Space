@@ -221,6 +221,7 @@ export class GameLegacyPipeline {
   invalidateTemporalHistory(reason = 'explicit') {
     this.frameState.invalidate(reason);
     this.volumePass?.resetHistory();
+    this.cloudPass?.resetHistory();
     this.temporalAA?.resetHistory();
   }
 

@@ -40,7 +40,7 @@ const cloudFieldGLSL = /* glsl */`
   uniform sampler2D uCloudTex;
   uniform mat3 uCloudMat;
   uniform sampler2D uSurfaceTex;
-  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn;
+  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn, uLiftMax;
   ${weatherAtlasGLSL}
 
   float sat(float x) { return clamp(x, 0.0, 1.0); }
@@ -77,7 +77,7 @@ const cloudFieldGLSL = /* glsl */`
     float lift = 0.0;
     if (uLiftOn > 0.5) {
       float surface = (weatherAtlasSample(uSurfaceTex, p).g * 2.0 - 1.0) * uSurfaceRange;
-      lift = max(surface + 500.0 - uLiftBase, 0.0) * 0.85;
+      lift = min(max(surface + 500.0 - uLiftBase, 0.0) * 0.85, uLiftMax);
     }
     return vec2(c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime)), lift);
   }
@@ -242,7 +242,8 @@ const marchShader = /* glsl */`
     // ---- Light shafts. The atmosphere pass lit all the air as if the sky
     // were clear. Below the clouds, take back the primary sun's single
     // scattering wherever the air sits in a cloud shadow.
-    if (uShadowOn > 0.5 && r0 < uShellBase) {
+    float baseHere = uShellBase + weatherAt(ro).y;
+    if (uShadowOn > 0.5 && r0 < baseHere) {
       float tMax = min(inner.y, 90000.0);
       float sceneDepth = texture2D(tSceneDepth, vUv).x;
       if (sceneDepth < 0.999999) tMax = min(tMax, (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005));
@@ -262,7 +263,7 @@ const marchShader = /* glsl */`
         loss += through * source * (1.0 - cloudShadowAt(p)) * dt;
         through *= exp(-(uBetaRayleigh * rayleigh + uBetaMieExtinction * mie) * dt);
       }
-      gShaft = vec4(loss * uShaftStrength * smoothstep(uShellBase, uShellBase - 700.0, r0), 1.0);
+      gShaft = vec4(loss * uShaftStrength * smoothstep(baseHere, baseHere - 700.0, r0), 1.0);
     }
 
     // ---- High cirrus: one thin sheet well above the cumulus layer. It costs
@@ -326,6 +327,13 @@ const marchShader = /* glsl */`
           float dt = max(dmin, 0.055 * (t - t0));
           vec3 p = ro + rd * t;
           if (t - tWeather > 3500.0) { weather = weatherAt(p); tWeather = t; }
+          float rp = length(p);
+          float above = rp - (uShellBase + weather.y + uShellDepth);
+          if (above > 200.0) {
+            // Reaching the local tops takes at least above/down along a straight ray.
+            t += clamp(0.8 * above / max(-dot(rd, p / rp), 0.08), dt, 6000.0);
+            continue;
+          }
           float cov = weather.x;
           float near = sat(1.0 - t / 28000.0);
           // Fade octaves the growing step can no longer resolve.
@@ -446,10 +454,17 @@ const compositeShader = /* glsl */`
   uniform sampler2D tBase, tSceneDepth, tCloud, tCloudAux, tShaft;
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal;
   uniform vec3 uCameraLocal, uSunDirection0;
-  uniform float uCameraFar, uShellBase, uShadowFloor;
+  uniform float uCameraFar, uShadowFloor;
   uniform vec2 uCloudTexel;
+  ${cloudFieldGLSL}
   ${shadowLookupGLSL}
   varying vec2 vUv;
+  // Cloud in front of a surface at the given distance, for one low-res texel:
+  // opacity grows from the texel's cloud front over its optical depth, with
+  // at least ~600 m of fog so a ridge never cuts a cloud along a hard line.
+  float frontCoverage(vec3 aux, float distance) {
+    return distance <= aux.x ? 0.0 : 1.0 - exp(-2.2 * (distance - aux.x) / max(aux.z - aux.x, 600.0));
+  }
   void main() {
     vec4 base = texture2D(tBase, vUv);
     vec4 cloud = texture2D(tCloud, vUv);
@@ -469,24 +484,33 @@ const compositeShader = /* glsl */`
       vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
       vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
-      // The range target is nearest-filtered (float linear is optional) and
-      // empty texels hold a far sentinel. Take the nearest cloud front among
-      // the four surrounding texels: averaging would let one empty texel push
-      // the front away and punch square holes along every cloud edge.
-      vec2 h = uCloudTexel * 0.5;
-      vec3 aux = min(min(texture2D(tCloudAux, vUv + h).xyz, texture2D(tCloudAux, vUv - h).xyz),
-        min(texture2D(tCloudAux, vUv + vec2(h.x, -h.y)).xyz, texture2D(tCloudAux, vUv + vec2(-h.x, h.y)).xyz)) * 1000.0;
-      // Terrain inside a cloud is swallowed gradually: opacity grows from the
-      // cloud's front face over its optical depth, with at least ~600 m of
-      // fog so a ridge never cuts a cloud along a hard line.
-      float depthScale = max(aux.z - aux.x, 600.0);
-      coverage = distance <= aux.x ? 0.0 : 1.0 - exp(-2.2 * (distance - aux.x) / depthScale);
+      // Depth-aware upsample. Each of the four surrounding low-res texels
+      // decides how much of its own cloud lies in front of this surface, and
+      // the results are blended bilinearly. One shared front distance (the
+      // old min of four) switched the whole cloud on or off per texel and drew
+      // the low-res grid as blocks along every ridge and coast.
+      vec2 st = vUv / uCloudTexel - 0.5;
+      vec2 cell = floor(st), f = st - cell;
+      vec4 ws = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+      vec3 rgb = vec3(0.0);
+      float hidden = 0.0;
+      for (int k = 0; k < 4; k++) {
+        vec2 o = vec2(float(k - (k / 2) * 2), float(k / 2));
+        vec2 uv = (cell + o + 0.5) * uCloudTexel;
+        vec4 c = texture2D(tCloud, uv);
+        float w = ws[k] * frontCoverage(texture2D(tCloudAux, uv).xyz * 1000.0, distance);
+        rgb += w * c.rgb; hidden += w * (1.0 - c.a);
+      }
+      cloud = vec4(rgb, 1.0 - hidden);
+      coverage = 1.0;
       if (uShadowOn > 0.5) {
         // Surfaces under the clouds lose their direct sun to the cloud column.
         vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
         vec3 p = uCameraLocal + normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz) * distance;
         float r = length(p);
-        float under = 1.0 - smoothstep(uShellBase, uShellBase + 2600.0, r);
+        // The base rides over high ground with the same lift the march uses.
+        float localBase = uShellBase + (r < uShellBase + uLiftMax + 2600.0 ? weatherAt(p).y : uLiftMax);
+        float under = 1.0 - smoothstep(localBase, localBase + 2600.0, r);
         if (under > 0.0) {
           float day = smoothstep(0.0, 0.14, dot(p / r, normalize(uSunDirection0)));
           shade = mix(1.0, mix(uShadowFloor, 1.0, cloudShadowAt(p)), day * under);
@@ -542,6 +566,7 @@ export class LiteCloudPass extends Pass {
     this.temporalEnabled = true;
     this.previousCamera = new THREE.Vector3();
     this.previousPlanet = null;
+    this.previousSun = new THREE.Vector3();
 
     const air = atmospherePass.material.uniforms;
     const field = {
@@ -556,6 +581,7 @@ export class LiteCloudPass extends Pass {
       uSurfaceRange: { value: 1 },
       uLiftBase: { value: 0 },
       uLiftOn: { value: 0 },
+      uLiftMax: { value: 0 },
     };
     const shadow = {
       tShadow: { value: this.shadowTarget.texture },
@@ -600,13 +626,12 @@ export class LiteCloudPass extends Pass {
       name: 'Lite cloud composite',
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
       uniforms: {
-        ...shadow,
+        ...field, ...shadow,
         tBase: { value: null }, tSceneDepth: { value: null },
         tCloud: { value: this.target.textures[0] }, tCloudAux: { value: this.target.textures[1] },
         tShaft: { value: this.target.textures[2] },
         uInvProjection: air.uInvProjection, uCameraWorld: air.uCameraWorld, uWorldToLocal: air.uWorldToLocal,
         uCameraLocal: air.uCameraLocal, uSunDirection0: air.uSunDirection0, uCameraFar: air.uCameraFar,
-        uShellBase: field.uShellBase,
         // Sky and bounce light left under a fully opaque cloud.
         uShadowFloor: { value: 0.4 },
         uCloudTexel: { value: new THREE.Vector2(1, 1) },
@@ -673,6 +698,7 @@ export class LiteCloudPass extends Pass {
         const highest = synoptic ? Number(next.weatherField.surfaceBoundsMeters?.[1]) || 0 : 0;
         const maxLift = synoptic ? THREE.MathUtils.clamp((highest + 500 - base) * 0.85, 0, 9000) : 0;
         u.uLiftOn.value = synoptic ? 1 : 0;
+        u.uLiftMax.value = maxLift;
         u.uLiftBase.value = base;
         u.uSurfaceRange.value = synoptic ? next.weatherField.surfaceRangeMeters || 1 : 1;
         u.uShellBase.value = next.R + base;
@@ -754,7 +780,8 @@ export class LiteCloudPass extends Pass {
     r.uCameraDelta.value.subVectors(cameraLocal, this.previousCamera);
     // A teleport, a body change or a resize starts the history over.
     const continuous = this.temporalEnabled && this.historyValid && planet === this.previousPlanet
-      && r.uCameraDelta.value.length() < 20000;
+      && r.uCameraDelta.value.length() < 20000
+      && _sun.copy(u.uSunDirection0.value).normalize().dot(this.previousSun) > 0.99985;
     r.uHistoryWeight.value = continuous ? 0.9 : 0;
     const read = this.history[this.historyIndex], write = this.history[1 - this.historyIndex];
     r.tHistory.value = read.texture;
@@ -769,10 +796,15 @@ export class LiteCloudPass extends Pass {
     r.uPrevProjection.value.copy(this.camera.projectionMatrix);
     this.previousCamera.copy(cameraLocal);
     this.previousPlanet = planet;
+    this.previousSun.copy(u.uSunDirection0.value).normalize();
     c.tBase.value = readBuffer.texture;
     c.tSceneDepth.value = this.atmospherePass.sceneDepthTexture || readBuffer.depthTexture || null;
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
     this.compositeQuad.render(renderer);
+  }
+
+  resetHistory() {
+    this.historyValid = false;
   }
 
   releaseTargets() {
