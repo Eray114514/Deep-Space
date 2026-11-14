@@ -4522,12 +4522,9 @@ function frame(rafTs) {
     } else {
       _v.copy(nav.pos).sub(p.posUniv);
     }
-    const localRadius = _v.length();
-    const nearSurfacePriority = p === nearest && nearestAlt < 1200;
-    p.lod.startupPriority = (!loadingCleared && p === nearest) || nearSurfacePriority;
+    p.lod.startupPriority = !loadingCleared && p === nearest;
     if (p.waterLod) {
-      const nearWater = p === nearest && Math.abs(localRadius - p.seaRadius) < 520;
-      p.waterLod.startupPriority = (!loadingCleared && p === nearest) || nearWater;
+      p.waterLod.startupPriority = !loadingCleared && p === nearest;
     }
     // While the loading screen covers the canvas, settle finished LOD morphs
     // without waiting 0.7 s per level of invisible geomorph animation.

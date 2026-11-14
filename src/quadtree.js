@@ -182,6 +182,7 @@ export function flushChunkQueue(budgetMs = 7) {
         const e = buildQueue[i];
         if (e.dead || e.mesh) continue;
         const focusK = e.lod.focused ? 0.18 : 1.0;
+        const focusBonus = e.lod.focused && !e.lod.startupPriority ? -2000 : 0;
         // During the covered startup pass complete the whole coarse shell
         // before drilling into a few central patches. The old depth-first-ish
         // ordering left half the globe coarse while isolated areas sharpened.
@@ -206,7 +207,7 @@ export function flushChunkQueue(budgetMs = 7) {
         // dozens of isolated, unusable children while the centre stays coarse.
         const activationSetPriority = e.parent === preferredBuildParent
           ? -1e6 : 0;
-        const prio = activationSetPriority + explicitPriority + startupLevel
+        const prio = activationSetPriority + focusBonus + explicitPriority + startupLevel
           + focusAngle + (e.lod.nodeDistance(e) / e.size) * focusK;
         if (prio < bestPriority) {
           bestPriority = prio;
@@ -295,7 +296,7 @@ export class ChunkedLOD {
       && this.planet.orbitPrewarmRadiusRatio
       ? Math.max(liveCamR, p.R * this.planet.orbitPrewarmRadiusRatio)
       : liveCamR;
-    const R0 = p.R * 0.94;
+    const R0 = Math.min(p.R * 0.992, Math.max(p.R * 0.94, p.R - Math.max((p.hAmp || 0) * 1.6, 14000)));
     if (camR <= R0 + 1) return false;
     const horizon = Math.acos(Math.min(1, R0 / camR))
       + Math.sqrt(2 * Math.max(p.hAmp, 1) / R0)
@@ -771,11 +772,10 @@ export class ChunkedLOD {
     let maxMorphHeightDelta = 0;
     let maxMorphDelta = 0;
     let maxBakedDepth = -Infinity;
-    // Terrain noise is much more expensive than flat water. Four-vertex
-    // interactive batches keep the 3.2 ms scheduler budget honest even for
-    // 64×64 high-tier chunks; startup and liquid jobs retain the
-    // cache-friendly sixteen-vertex batch.
-    const batchMask = p.hAmp > 10 && !this.startupPriority ? 3 : 15;
+    // Pass-1 evaluates a single height sample per vertex (~0.08 ms per 16
+    // vertices), so 16-vertex batches stay well within interactive frame
+    // grants while cutting generator yield/clock overhead by 4x.
+    const batchMask = 15;
 
     // Pass 1: evaluate height/extras/depth once per grid vertex (reduces
     // terrain noise calls by ~2.7x compared to 3-tap finite differences at
