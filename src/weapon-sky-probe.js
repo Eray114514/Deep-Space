@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { getSharedPmremGenerator, isSharedPmremGenerator } from './shared-pmrem.js';
 
 // Low-frequency outdoor radiance only: no solar disk (direct lights own it),
 // no display exposure, and no artificial multiplier on the night-sky map.
@@ -47,7 +48,8 @@ export class WeaponSkyProbe {
     const key = [environment.day, environment.atmosphere, environment.skyIrradiance,
       environment.sunset, up.x, up.y, up.z].map(quantize).join(':');
     if (this.target && key === this.key) return this.target.texture;
-    this.generator ||= new THREE.PMREMGenerator(renderer);
+    this.renderer = renderer;
+    this.generator ||= getSharedPmremGenerator(renderer);
     const pixels = weaponSkyPixels(environment, up);
     const half = new Uint16Array(pixels.data.length);
     for (let i = 0; i < half.length; i++) half[i] = THREE.DataUtils.toHalfFloat(pixels.data[i]);
@@ -70,8 +72,11 @@ export class WeaponSkyProbe {
 
   dispose() {
     this.target?.dispose();
-    this.generator?.dispose();
+    if (this.generator && !isSharedPmremGenerator(this.renderer, this.generator)) {
+      this.generator.dispose?.();
+    }
     this.target = null;
     this.generator = null;
+    this.renderer = null;
   }
 }

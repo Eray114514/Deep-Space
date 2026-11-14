@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { makeRng } from './rng.js';
+import { getSharedPmremGenerator } from './shared-pmrem.js';
 
 const PI2 = Math.PI * 2;
 
@@ -160,13 +161,11 @@ export class SpaceRadiance {
     const generated = generateSpaceRadianceData(seed, width, Math.round(width / 2));
     this.stats = generated.stats;
     this.texture = toHalfTexture(generated);
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    pmrem.compileEquirectangularShader();
+    const pmrem = getSharedPmremGenerator(renderer);
     const target = pmrem.fromEquirectangular(this.texture);
     this.environmentMap = target.texture;
     this.environmentMap.name = 'space-radiance-pmrem';
     this.environmentTarget = target;
-    pmrem.dispose();
 
     this.material = new THREE.ShaderMaterial({
       name: 'SpaceRadianceMaterial',

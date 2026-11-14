@@ -5,6 +5,7 @@ import { screenTexture, gradientStrip } from './textures.js';
 import { loadBaked, dress } from './baked.js';
 import { makeRng } from '../rng.js';
 import { tagMaterialProfile } from '../pbr-materials.js';
+import { getSharedPmremGenerator } from '../shared-pmrem.js';
 
 /* ------------------------------------------------------------------ *
  *  TILING SCALE
@@ -319,8 +320,7 @@ export function buildMaterials(maxAniso = 8) {
 /** Procedural HDRI-ish environment: deep space with a hot key star,
  *  a cool rim fill and a planetary bounce. Drives all metal specular. */
 export function buildEnvironment(renderer, seed = 'HALCYON-VII') {
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  pmrem.compileEquirectangularShader();
+  const pmrem = getSharedPmremGenerator(renderer);
   const rand = makeRng(`${seed}:legacy-ship-environment:v1`);
 
   const size = 512;
@@ -385,6 +385,5 @@ export function buildEnvironment(renderer, seed = 'HALCYON-VII') {
   t.colorSpace = THREE.SRGBColorSpace;
   const env = pmrem.fromEquirectangular(t).texture;
   t.dispose();
-  pmrem.dispose();
   return env;
 }

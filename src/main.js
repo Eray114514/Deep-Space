@@ -23,6 +23,7 @@ import { PresentedFrameStats } from './presented-frame-stats.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
+import { loadShipModel } from './halcyon/ship/model.js';
 import { ShipView } from './ship-view.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
@@ -414,7 +415,7 @@ function prewarmSurfacePipelines(planet, extraPlanets = null) {
   for (const source of instancedSources) {
     const mesh = new THREE.InstancedMesh(source.geometry, source.material, 1);
     mesh.setMatrixAt(0, new THREE.Matrix4());
-    mesh.setColorAt(0, new THREE.Color(1, 1, 1));
+    if (source.instanceColor) mesh.setColorAt(0, new THREE.Color(1, 1, 1));
     mesh.position.set(0, 0, 0);
     mesh.frustumCulled = false;
     mesh.castShadow = source.castShadow;
@@ -552,6 +553,34 @@ function prewarmWeaponAndPostPipelines() {
     }).finally(() => {
       weaponPipelinesWarmPending = false;
     });
+  }
+
+  // Kick off ANGLE background FXC compilation for all ship pass variants right
+  // alongside surface/post/weapon shaders so ship compilation never sits idle
+  // behind startup-surface; prewarmLoadedShipPipelines() still runs its live
+  // resource/readiness sequence afterwards, hitting warm cached programs.
+  if (ship.heroLoaded && !shipPipelinesWarmed && !shipPipelineWarmPending) {
+    const shipVariants = [
+      [SHIP_FOREGROUND_LAYER, 'readBuffer'],
+      ...(RENDER_LOOK_NEXT ? [[SHIP_INTERIOR_LAYER, 'readBuffer']] : []),
+      [0, 'writeBuffer'],
+      ...(RENDER_LOOK_NEXT ? [[SHIP_INTERIOR_LAYER, 'writeBuffer']] : []),
+    ];
+    for (const [layer, buffer] of shipVariants) {
+      void nodePipeline.prepare(() => {
+        configureShipForegroundLightingLayers();
+        const foreground = ship.foregroundOnly, sunVisible = sunShadow.visible;
+        try {
+          if (layer === 0) { ship.setForegroundOnly(false); sunShadow.visible = true; }
+          return compileRenderVariant(renderer, ship.group, camera, scene, {
+            layer, target: nodePipeline.composer[buffer], shadowLight: layer === 0 ? sunShadow : null, signal,
+          });
+        } finally {
+          ship.setForegroundOnly(foreground);
+          sunShadow.visible = sunVisible;
+        }
+      }, { signal, label: 'startup-ship-parallel', isCurrent }).catch(() => {});
+    }
   }
 }
 
@@ -875,7 +904,9 @@ const farFlora = new FarFlora({
 });
 const skyDome = new SkyDome(scene);
 const weatherEffects = new WeatherEffects(scene);
+const shipModel = await loadShipModel();
 const ship = new Ship(scene, {
+  model: shipModel,
   anisotropy: Math.min(16, renderer.getMaxAnisotropy?.()
     ?? renderer.capabilities?.getMaxAnisotropy?.()
     ?? 1),
@@ -5086,7 +5117,7 @@ prewarmWeaponAndPostPipelines();
 prewarmLoadedShipPipelines();
 // Submit all queued async shader compilations onto ANGLE C++ worker threads
 // BEFORE building the remaining secondary bodies so JS and FXC run in parallel!
-for (let pump = 0; pump < 16 && nodePipeline.preparations?.hasQueued; pump++) {
+for (let pump = 0; pump < 24 && nodePipeline.preparations?.hasQueued; pump++) {
   nodePipeline.preparations.submit?.();
 }
 while (universe.system && !universe.system.built) {

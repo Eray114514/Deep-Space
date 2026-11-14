@@ -153,28 +153,52 @@ export function installSurfaceAtmosphere(material, planet, shader) {
         * (visible * cloud * macroTerrain);
     }
 
-    vec3 gCachedStarSun0 = vec3(-1.0);
-    vec3 gCachedStarSun1 = vec3(-1.0);
-    vec3 surfaceStellarTransmission(vec3 direction) {
-      if (uLocalStarCount > 0) {
-        vec3 d0 = normalize(uLocalStars[0].xyz - vLocalPos);
-        if (dot(direction, d0) > 0.9995) {
-          if (gCachedStarSun0.x < 0.0) {
-            gCachedStarSun0 = surfaceSunTransmission(direction) * localStellarVisibility(vLocalPos, direction);
-          }
-          return gCachedStarSun0;
-        }
-        if (uLocalStarCount > 1) {
-          vec3 d1 = normalize(uLocalStars[1].xyz - vLocalPos);
-          if (dot(direction, d1) > 0.9995) {
-            if (gCachedStarSun1.x < 0.0) {
-              gCachedStarSun1 = surfaceSunTransmission(direction) * localStellarVisibility(vLocalPos, direction);
-            }
-            return gCachedStarSun1;
-          }
+    vec3 gStarDir0 = vec3(0.0, 1.0, 0.0);
+    vec3 gStarDir1 = vec3(0.0, 1.0, 0.0);
+    float gStarVis0 = 1.0;
+    float gStarVis1 = 1.0;
+    vec3 gStarTrans0 = vec3(1.0);
+    vec3 gStarTrans1 = vec3(1.0);
+    vec3 gFallbackSunTrans = vec3(1.0);
+
+    // Pre-evaluate solar transmission and multi-moon disc occlusion once per
+    // fragment instead of re-inlining macro-relief + union-occlusion loops at
+    // every directional/point/glint/sky/reflection call site (cuts D3D11 FXC
+    // link time by 5x-30x while keeping per-star lighting exact).
+    void initializeSurfaceMedium(vec3 localPos) {
+      if (uLocalStarCount <= 0) {
+        #if NUM_DIR_LIGHTS > 0
+        gFallbackSunTrans = surfaceSunTransmission(normalize(uSurfaceViewToLocal * directionalLights[0].direction));
+        #else
+        gFallbackSunTrans = surfaceSunTransmission(normalize(air_uSunDirection0));
+        #endif
+        return;
+      }
+      for (int star = 0; star < 2; star++) {
+        if (star >= uLocalStarCount) break;
+        vec4 starData = star == 0 ? uLocalStars[0] : uLocalStars[1];
+        vec3 d = normalize(starData.xyz - localPos);
+        float vis = localStellarVisibility(localPos, d);
+        vec3 trans = vis > 0.0 ? surfaceSunTransmission(d) * vis : vec3(0.0);
+        if (star == 0) {
+          gStarDir0 = d;
+          gStarVis0 = vis;
+          gStarTrans0 = trans;
+        } else {
+          gStarDir1 = d;
+          gStarVis1 = vis;
+          gStarTrans1 = trans;
         }
       }
-      return surfaceSunTransmission(direction) * localStellarVisibility(vLocalPos, direction);
+    }
+
+    vec3 surfaceStellarTransmission(vec3 direction) {
+      if (uLocalStarCount > 0) {
+        if (dot(direction, gStarDir0) > 0.98) return gStarTrans0;
+        if (uLocalStarCount > 1 && dot(direction, gStarDir1) > 0.98) return gStarTrans1;
+        return vec3(1.0);
+      }
+      return gFallbackSunTrans;
     }
 
     // Normal-aware directional hemispheric sky + ground-bounce irradiance
@@ -197,7 +221,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
         // vs cool Rayleigh zenith/anti-solar hemisphere
         float horizonBoost = 1.0 - clamp(abs(sunMu), 0.0, 1.0) * 0.55;
         float sunAlign = dot(localNormal, sunDir);
-        float starVis = star < uLocalStarCount ? localStellarVisibility(vLocalPos, sunDir) : 1.0;
+        float starVis = star < uLocalStarCount ? (star == 0 ? gStarVis0 : gStarVis1) : 1.0;
         float dipole = 1.0 + 0.32 * sunAlign * horizonBoost * starVis;
         vec3 tint = mix(vec3(0.88, 0.96, 1.10), vec3(1.12, 1.01, 0.90), clamp(0.5 + 0.5 * sunAlign, 0.0, 1.0));
         vec3 skyPart = multi * skyHemi * dipole * tint;
@@ -244,7 +268,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
         vec3 sunOd = air_sunlightOpticalDepth(h, sunMu).rgb
           * vec3(air_uRayleighScaleHeight, air_uMieScaleHeight, air_uOzoneHalfWidth) * air_uDensityScale;
         vec3 sunTrans = exp(-min(air_uBetaRayleigh * sunOd.r + air_uBetaMieExtinction * sunOd.g + air_uBetaOzone * sunOd.b, vec3(40.0)));
-        float vis = smoothstep(-0.04, 0.02, sunMu) * (star < uLocalStarCount ? localStellarVisibility(localPos, sunDir) : 1.0);
+        float vis = smoothstep(-0.04, 0.02, sunMu) * (star < uLocalStarCount ? (star == 0 ? gStarVis0 : gStarVis1) : 1.0);
         float cosTheta = dot(rDir, sunDir);
         float phaseR = 3.0 / (16.0 * 3.14159265) * (1.0 + cosTheta * cosTheta);
         float g = 0.76 * (1.0 - roughness * 0.45);
@@ -290,7 +314,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
   shader.fragmentShader = shader.fragmentShader.replace('#include <lights_physical_pars_fragment>',
     '#include <lights_physical_pars_fragment>\n' + transport);
   shader.fragmentShader = shader.fragmentShader.replace('#include <logdepthbuf_fragment>',
-    '#include <logdepthbuf_fragment>\nif(uSurfaceDepthOnly>0.5){gl_FragColor=vec4(0.0);return;}\ninitializeSurfaceCloudLighting(vLocalPos);');
+    '#include <logdepthbuf_fragment>\nif(uSurfaceDepthOnly>0.5){gl_FragColor=vec4(0.0);return;}\ninitializeSurfaceCloudLighting(vLocalPos);\ninitializeSurfaceMedium(vLocalPos);');
   const lights = THREE.ShaderChunk.lights_fragment_begin.replace(
     'getDirectionalLightInfo( directionalLight, directLight );', `getDirectionalLightInfo( directionalLight, directLight );
     if (directLight.visible) {

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { getSharedPmremGenerator } from './shared-pmrem.js';
 import { setSharedPbrEnvironment } from './pbr-materials.js';
 
 function probePixels(zone, size) {
@@ -54,11 +55,9 @@ function probePixels(zone, size) {
 
 function buildProbe(renderer, zone, size) {
   const texture = probePixels(zone, size);
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  pmrem.compileEquirectangularShader();
+  const pmrem = getSharedPmremGenerator(renderer);
   const target = pmrem.fromEquirectangular(texture);
   target.texture.name = `${zone}-radiance-pmrem`;
-  pmrem.dispose();
   texture.dispose();
   return { texture: target.texture, dispose: () => target.dispose() };
 }
