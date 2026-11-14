@@ -58,20 +58,30 @@ export function atmosphereRenderProfile(planet) {
   // The canonical 6,000 km world receives a 100 km optical top. Compressed
   // procedural bodies retain enough clearance for relief without inheriting
   // the old 9–13.5% uniform shell.
-  const topAltitudeMeters = clamp(Math.max(
+  const physicalTopMeters = clamp(Math.max(
     groundRadiusMeters * (100000 / 6000000),
     maxTerrainMeters * 2.4 + 6000,
   ), 26000, 120000);
+  // [2026-11-14] Limb scale. With true 8 km scale heights a 1,200 km world
+  // wears its air as a hairline: from orbit the limb is a thin pale ring and
+  // there is no depth of blue to fly down through. Compact worlds therefore
+  // get taller scale heights (up to 2.2x, never more than ~1.7% of the
+  // radius), and the density is divided by the same factor so the vertical
+  // optical depth -- sky colour and sunset reddening seen from the ground --
+  // is unchanged. Bodies of 6,000 km and above keep physical scale heights.
+  const limbScale = clamp(Math.min(Math.sqrt(6000000 / groundRadiusMeters),
+    groundRadiusMeters * 0.017 / 8000), 1, 2.2);
+  const topAltitudeMeters = Math.max(physicalTopMeters, 8000 * limbScale * 5.2);
   const type = planet?.type || 'lush';
   const temperatureK = clamp(
     Number(planet?.weatherProfile?.temperatureK) || 286, 170, 700);
   const temperatureScale = clamp(temperatureK / 286, 0.68, 1.45);
   // Ideal-gas reference density at the authored surface pressure/temperature.
   // atmoDensity is only the fallback for worlds without a physical pressure.
-  const densityScale = pressure * 286 / temperatureK;
-  const rayleighScaleHeightMeters = 8000 * temperatureScale;
+  const densityScale = pressure * 286 / temperatureK / limbScale;
+  const rayleighScaleHeightMeters = 8000 * temperatureScale * limbScale;
   const mieScaleHeightMeters = (type === 'desert' || type === 'toxic' ? 1800 : 1200)
-    * Math.sqrt(temperatureScale);
+    * Math.sqrt(temperatureScale) * limbScale;
   const profile = createAtmosphereProfile({
     groundRadiusMeters,
     topAltitudeMeters,

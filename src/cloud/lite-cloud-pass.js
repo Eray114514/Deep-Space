@@ -65,16 +65,19 @@ const cloudFieldGLSL = /* glsl */`
   vec2 weatherAt(vec3 p) {
     vec3 q = uCloudMat * p;
     float c = weatherAtlasSample(uCloudTex, q).r;
-    if (uSynoptic > 0.5) c = synopticCoverage(c, 0.12);
+    // A weather system does not end at a wall. The synoptic mask is widened
+    // into a long margin and the breakup noise eats into it, so a deck thins
+    // into scattered cumulus before the sky clears.
+    if (uSynoptic > 0.5) c = synopticCoverage(c, 0.42);
     float breakup = textureLod(uNoise, q / 93000.0, 0.0).b;
-    c = sat(c * 1.12 + (breakup - 0.5) * 0.55 - 0.06);
+    c = sat(c * 1.15 + (breakup - 0.5) * 0.8 * (1.0 - 0.6 * c) - 0.07);
     // Mesoscale regimes inside a weather system: closed decks with cracks
     // alternate with broken, open-cell fields instead of one uniform texture.
     float regime = textureLod(uNoise, q.yzx / 310000.0 + 0.61, 0.0).b;
     float lift = 0.0;
     if (uLiftOn > 0.5) {
       float surface = (weatherAtlasSample(uSurfaceTex, p).g * 2.0 - 1.0) * uSurfaceRange;
-      lift = max(surface + 1300.0 - uLiftBase, 0.0);
+      lift = max(surface + 500.0 - uLiftBase, 0.0) * 0.85;
     }
     return vec2(c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime)), lift);
   }
@@ -314,6 +317,10 @@ const marchShader = /* glsl */`
         float dmin = max(min(min(50.0 + 0.004 * t0, span / 90.0), 300.0), 20.0);
         float t = t0 + dmin * jitter;
         tBack = t0;
+        // Seen edge-on from far away (the limb from orbit) the small octaves
+        // are squeezed below a pixel and only produce sparkle: drop them there.
+        vec3 entry = ro + rd * t0;
+        float edgeOn = (1.0 - smoothstep(0.1, 0.42, abs(dot(rd, entry / length(entry))))) * smoothstep(40000.0, 160000.0, t0);
         for (int i = 0; i < MARCH_STEPS; i++) {
           if (t > t1) break;
           float dt = max(dmin, 0.055 * (t - t0));
@@ -325,6 +332,8 @@ const marchShader = /* glsl */`
           // (by step length along grazing rays, by distance when looking down from orbit)
           gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(150000.0, 500000.0, t));
           gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(1500000.0, 4000000.0, t));
+          gFarSmall = max(gFarSmall, edgeOn);
+          gFarWide = max(gFarWide, edgeOn * 0.7);
           float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near, weather.y);
           float crown = gCrown;
           if (d > 0.002) {
@@ -498,7 +507,7 @@ export class LiteCloudPass extends Pass {
     this.activePlanet = null;
     this.visualEnabled = true;
     this.shadowsEnabled = true;
-    this.terrainLift = false;
+    this.terrainLift = true;
     this.enabled = false;
     this.needsSwap = true;
     this.frame = 0;
@@ -659,8 +668,10 @@ export class LiteCloudPass extends Pass {
         // the hard intersection, which the composite now softens. With the lift on,
         // regions of high regional altitude also lost their clouds entirely.
         const synoptic = this.terrainLift && Boolean(next.weatherField?.synoptic && next.cloudWeatherHiTex);
+        // (On: without it, every snow-capped highland stood in a cloud-free hole,
+        // because the fixed-altitude layer lay below the ground there.)
         const highest = synoptic ? Number(next.weatherField.surfaceBoundsMeters?.[1]) || 0 : 0;
-        const maxLift = synoptic ? THREE.MathUtils.clamp(highest + 1300 - base, 0, 9000) : 0;
+        const maxLift = synoptic ? THREE.MathUtils.clamp((highest + 500 - base) * 0.85, 0, 9000) : 0;
         u.uLiftOn.value = synoptic ? 1 : 0;
         u.uLiftBase.value = base;
         u.uSurfaceRange.value = synoptic ? next.weatherField.surfaceRangeMeters || 1 : 1;
