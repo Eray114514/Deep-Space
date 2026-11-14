@@ -6,7 +6,7 @@
 
 - 用户只关心最终看到和玩到的效果。用户的提示用来阐明需求和期望的结果，不构成对实现方式、修改范围或技术方案的限制。怎么做、改哪里、先做什么，由主控自行判断并负责。
 - 主控发现项目状态有问题时主动修，不等用户指出，也不把技术决策抛回给用户。需要用户参与的是审美确认、实机体验和方向取舍。
-- 分工见 [模型协作约定](docs/model-collaboration.md)：Claude 主控并亲自完成大部分工作，只做极简验收；Codex 负责独立验收；Carbon（Gemini）能力略弱于 Claude 但额度多，主控可以把与前端效果关系不大、或主要难在工作量和耗时的难任务交给它。被派发的 agent 按该文档里自己的角色工作，不回环派发。
+- 分工见 [模型协作约定](docs/model-collaboration.md)：Claude 主控并亲自完成大部分工作，只做极简验收；Gemini 4 Hydrogen（xhigh）负责独立验收，也能分担不太难的实现和杂活；Carbon（Gemini）能力略弱于 Claude 但额度多，主控可以把与前端效果关系不大、或主要难在工作量和耗时的难任务交给它。被派发的 agent 按该文档里自己的角色工作，不回环派发。
 
 ## Project Structure & Module Organization
 
@@ -65,6 +65,6 @@ InstancedMesh 链）。停牌原因见 `docs/optimization-roadmap.md` 2026-08-15
 TSL/NodeMaterial 生态成熟且出现 WebGL 无法承载的需求时，由用户重新决策（从 git
 历史恢复），届时一次只迁一个子系统。
 
-派发 Codex 验收或把任务交给 DSH Carbon 时，按 [模型协作约定](docs/model-collaboration.md) 中对应的流程执行，并沿用用户已给出的工作范围授权。
+派发 Hydrogen 验收或把任务交给 DSH 的 Carbon、Hydrogen 时，按 [模型协作约定](docs/model-collaboration.md) 中对应的流程执行，并沿用用户已给出的工作范围授权。
 
 * 项目正在进行全量重构，暂时不需要考虑宇宙锁（详情参考docs/optimization-roadmap.md）。确认重构完成后按用户要求进行重筛选，然后删除此注释。此前的任何任务都不需要考虑宇宙锁。
