@@ -200,7 +200,88 @@
 - `npm run test:stage-b`、`npm run test:b5`、`npm run test:ocean-gpu`、`npm run test:near-water`、`npm run test:terrain`（`sanity.js` 全 8 类行星）、`npm run test:far-flora`、`npm run test:vegetation:precision`、`npm run test:sysview`、`npm run test:starmap`、`npm run test:smoke`（`9.7 s` 启动）、`npm run test:astronomy:browser`：**全部通过**。
 
 ### 没测到或仍待后续确认的部分（实事求是列出）
-1. **RTX 5080 Laptop 在 P0（110 W 满血态）下的改动后稳态帧率未直接测到**：由于 00:20 后本机持续处于 EC `P5`（`35 W / 810 MHz` 显存）限功档，本轮在 P5 下用背靠背同条件实测证明改动后比 `7610f8b` 快 **1.8×–2.4×** 且 2K 默认已追平/反超线上 `0.37.7`，但唤醒屏幕回到 P0 110 W 后的实机 60+ 帧最终体感数字需在正常桌面供电态下复核一次。
+1. **RTX 5080 Laptop 在 P0（110 W 满血态）下的改动后稳态帧率未直接测到**：由于 00:20 后本机持续处于 EC `P5`（`35 W / 810 MHz` 显存）限功档，本轮在 P5 下用背靠背同条件实测证明改动后比 `7610f8b` 快 **1.8×–2.4×** 且 2K 默认已追平/反超线上 `0.37.7`，但唤醒屏幕回到 P0 110 W 后的实机 60+ 帧最终体感数字需在正常桌面供电态下复核一次（见下方第二轮 P0 实测章节）。
 2. **水面方向性云反射与云体光学余项**：按分工边界由主控在云线内处理，本轮未触碰 `src/cloud/lite-cloud-pass.js` 与 `src/cloud/lite-cloud-noise.js`。
 3. **旧云栈代码与测试清理**：本轮已剥离旧云栈在默认路径上的启动与 Worker 开销（保留 `?clouds=legacy` 可用），待用户最终拍板轻量云方向后再整套删除旧栈文件与测试。
 4. **多硬件与长时星际跃迁实机遍历**：本轮聚焦母星系默认体验与自动化回归，未在集显真机、移动端或跨十余星系连续跃迁下做长时热稳态测试。此外，走 CPU SwiftShader 软件光栅的 `seamtest` / `touchtest` 在未传 `?vclouds=0` 时会逐像素软件步进 `LiteCloudPass`（`seamtest` 前 15 个静态高度全部 `0 px` 通过，连续下降段在 SwiftShader 上极慢），后续可在测试脚本或软件渲染器检测上做区分。
+
+---
+
+## 第二轮（Hydrogen 验收后）
+
+日期：2026-11-14  
+背景：针对 Hydrogen 满功率独立验收报告（`test-results/hydrogen-verify-2026-11-14/REVIEW.md`）指出的非云性能与交互问题（**P1-3 自适应降画质 60 Hz 死锁与误降档、P1-3 满画质步行 ~40 FPS、P1-3 冷/热启动 21–28 s、P2-3 深海无法下潜、P2-5 `window.NMS.alt` 重复定义**）逐项定位深层根因、独立提交修复并在本机 RTX 5080 Laptop 上串行完成满功率实测验收。  
+本轮实测数据与截图目录：`test-results/carbon-round2-verify-2026-11-14/`（`summary.json` 及 `1080p`/`2k` 实拍图）  
+本轮提交序列：`9f1d627`、`a0d4201`、`6dcf4d9`、`d1c83bf`、`e143333`、`dc1be44`
+
+### 1. 硬件功率态核查（`nvidia-smi` 实时采样）
+
+所有 GPU 基准测试严格串行运行，每站同步记录 `nvidia-smi` 功率态：
+- **主体性能、启动、自适应与 101 秒实飞验收时段（19:23–22:00）**：GPU 处于正常供电态（高负载 `P0/P2`，功耗 **`95–147 W`**，核心 **`2085–2760 MHz`**，显存 **`11001–14001 MHz`**；轻载步行 `P0/P2/P4`，功耗 **`84–133 W`**，核心 **`1372–2302 MHz`**，显存 **`9001–14001 MHz`**），未触发 35 W 限功。
+- **末尾补充地形优先级抽检时段（22:20）**：屏幕休眠后笔记本再次落入 EC `P5`（`34.8–36.6 W`，显存锁定 `810 MHz`），该组数据仅用于验证真实硬件限功下自适应降档行为，不混入下方 P0 帧率表。
+
+### 2. 修复前后核心实测对比（RTX 5080 Laptop P0/P2 正常供电态）
+
+| 指标 / 场景（默认画质，自适应未锁定） | Hydrogen 验收基线（第一轮后） | **第二轮修复后实测** | 变化 |
+|---|---:|---:|---|
+| **1080p 冷着色器缓存启动** | 27.1–28.3 s | **`9.0 s`（`8,955 ms`）** | **快 3.1×（省 ~19 s）** |
+| **1080p 热着色器缓存启动** | 21.4–25.1 s | **`6.1 s`（`6,065 ms`）** | **快 3.8×（省 ~17 s）** |
+| **2K 冷着色器缓存启动** | 28.0 s | **`9.1 s`（`9,077 ms`）** | **快 3.1×（省 ~19 s）** |
+| **2K 热着色器缓存启动** | 24.8 s | **`6.1 s`（`6,111 ms`）** | **快 4.1×（省 ~18.7 s）** |
+| **默认开屏页启动（无 `nohero=1`）** | 30.5 s | **`5.9 s`（`5,937 ms`）** | **快 5.1×** |
+| `1-spawn`（864 km 出生点，1080p / 2K） | 144.8 / 98.3 FPS | **`156.4 / 101.0 FPS`**（`stage 0`） | 保持满画质 `1.0×` |
+| `3-orbit`（0.3 R 轨道，1080p / 2K） | 87.4 / 75.1 FPS | **`90.7 / 64.3 FPS`**（`stage 0`） | 保持满画质 `1.0×` |
+| `4-high-atmo`（24 km 高层大气，1080p / 2K） | 59.6 / 59.0 FPS | **`78.4 / 73.7 FPS`**（`stage 0`） | **+25%–32%**，不误降档 |
+| `4b-cloudlevel`（5.8 km 云层，1080p / 2K） | 91.4 / 77.7 FPS（路线中误降至 `stage 5` 仅 53 FPS） | **`108.8 / 71.8 FPS`**（**全程 `stage 0`**） | 消除误降档与 `FarFlora` 漏编 |
+| `5-coast-800m`（海岸 800 m，1080p / 2K） | 87.6 / 83.3 FPS（路线中锁在 `stage 5`） | **`95.4 / 85.1 FPS`**（**全程 `stage 0`**） | 保持满画质 `1.0×` |
+| **`6-walk`（草地步行，稳态满画质 `stage 0`）** | **39.7 / 40.0 FPS**（`923 / 869` calls，`7.0M` tris） | **`88.0 / 81.8 FPS`**（`522` calls，`4.92M` tris） | **+105%–122%（`2.1×–2.2×`）** |
+| **`6-walk`（传送刚落地的后台流式期，`stage 0`）** | ~40 FPS（被推至 `stage 5`） | **`58.0–65.1 / 58.2 FPS`**（保持 `stage 0`） | 流式期亦接近/达到 60 FPS |
+| **P0 101 s 真实键鼠飞行下降至落地步行** | 27 km 降至 `stage 2`，12 km 锁死 `stage 5`（`0.92×`） | **862 km → 360 km → 12 km → 落地全程 `stage 0`（`1.0×`）** | **0 误降档** |
+| **60 Hz VSync 下从 `stage 5` 回升能力** | **永久锁死在 `stage 5`** | **1080p 与 2K 均在 10 s 内从 `stage 5` 完整回升至 `stage 0`（`1.0×`）** | 彻底修复死锁 |
+
+### 3. 五项问题根因与修复详情
+
+#### （1）P1-3 启动时间 21–28 s（提交 `6dcf4d9`）
+- **根因定位（逐 Program 挂钩 D3D11 FXC 编译与链接耗时抓取确认）**：
+  1. **地表/水体片元着色器在 D3D11 FXC 内联爆炸导致单次链接长达 `15–83 秒`**：`src/surface-atmosphere.js` 的 `surfaceStellarTransmission` 内含 3 条调用 `surfaceSunTransmission`（4 步宏观山体图集采样）× `localStellarVisibility`（`STELLAR_UNION_OCCLUSION` 下 `16×64` 双重循环）的分支，又在 Three.js 展开的平行光、点光、水体双星高光、半球天光与水面反射中被重复调用，导致单个水体着色器被 FXC 展开 **22 份遮挡循环 + 19 份宏观地形循环**！无缓存实测地形链接耗时 `6.9 s`（多卫星 `UNION=1` 达 **`27.9 s`**）、水体链接耗时 `14.8 s`（`UNION=1` 达 **`82.8 s`**），且热启动在上一轮进程退出时尚未刷盘时仍需等待 `15–20 s`。
+  2. **5 次重复创建与销毁 `THREE.PMREMGenerator` 同步阻塞主线程 `~1.6 s`**：`scene-radiance.js`（2 次）、`space-radiance.js`、`halcyon/materials.js`、`weapon-sky-probe.js` 各自新建 `PMREMGenerator` 后立即 `dispose()` 销毁内部卷积 Program，迫使主线程重复同步编译 5 次 `PMREMGGXConvolution`。
+  3. **飞船预热被串行门控阻塞 + `FarFlora` 预热宏不匹配**：`src/main.js` 中飞船着色器一直闲置等待 `startup-surface` 完成才提交编译；且 `prewarmSurfacePipelines` 无条件对所有实例化网格调用 `setColorAt` 注入 `#define USE_INSTANCING_COLOR`，导致无 `instanceColor` 的 `FarFlora` 在降至 5.8 km 时仍发生一次 `~88 ms` 漏编。
+- **修复**：
+  - 在 `src/surface-atmosphere.js` 片元入口新增 `initializeSurfaceMedium(vLocalPos)`，每片元对最多 2 颗恒星**只执行唯一 1 次** `localStellarVisibility` 与 `surfaceSunTransmission` 并缓存结果，所有光照/高光/天光/反射直接读取缓存。D3D11 FXC 冷编译链接时间从 `6.9–82.8 s` 骤降至 **`1.4–2.8 s`（提速 `5×–30×`）**，`npm run test:b5` 与 `npm run test:ocean-gpu` 光学精度完全一致。
+  - 新增 `src/shared-pmrem.js` 按 `renderer` 共享 `PMREMGenerator`（监听 `webglcontextlost` 自动清理），消除 4 次冗余卷积着色器同步编译。
+  - 在 `prewarmWeaponAndPostPipelines` 中将飞船各通道变体与地表/后处理同步送入 ANGLE C++ 后台线程池并行编译（保留 `prewarmLoadedShipPipelines` 既有契约直接命中热缓存）；仅当 `source.instanceColor` 存在时才在预热网格上设置实例色。
+
+#### （2）P1-3 满画质步行 ~40 FPS（提交 `d1c83bf`、`dc1be44`）
+- **根因定位（逐通道与逐类别 Draw Call 剖析）**：
+  1. **地形块包围球被错误加上整星振幅 `+p.hAmp`（`+8,607 m`），导致相机视锥裁剪与 `350 m` 步行阴影裁剪完全失效**：`src/quadtree.js:1111` 写为 `if (hasMorph) geo.boundingSphere.radius += p.hAmp`。在 1,200 km 母星上，近地 `163 m` 宽的草地块包围球变成 `8,770 m` 并直接包住相机原点与阴影正交视锥，迫使主通道每帧绘制相机背后的数百个不可见地形块（`367` 块），且 `350 m` 步行阴影图每帧白画 **`206` 个地形块（`169 万` 三角形）**！
+  2. **第一人称手持步枪未合批，单把枪每帧提交 `142` 次独立 Draw Call**：`src/weapon-models.js` 将导轨齿、螺丝、散热槽拆成 140+ 个独立 `THREE.Mesh`，占前景通道 `1.8 ms` CPU。
+  3. **内陆地下干海面块每帧参与透明排序与绘制 + 地表材质每块重复绑定 Uniform + 近地 `startupPriority` 符号反置**：大陆深处完全埋在地下 `> 60 m` 的细层水体块仍提交渲染；`terrainMaterial.onBeforeRender` 在同一通道对数百块重复遍历拷贝 40+ 个共享 uniform；`src/main.js` 在 `< 1200 m` 设 `p.lod.startupPriority = true`，反而在 `quadtree.js` 触发 `+level * 1000`（`+13,000`）惩罚，使脚下地形排在远端行星和地平线粗块之后持续后台流式数十秒。
+- **修复**：
+  - `src/quadtree.js` 用块内真实最大变形位移 `maxMorphDelta + 2` 替代 `+p.hAmp`（水体块留 `+56 m` 波浪包络），恢复相机与实时阴影的精确视锥裁剪；对 `level >= 6` 且全顶点 `maxBakedDepth < -60 m` 的纯内陆干水块设 `mesh.layers.mask = 0`（保留 `visible` 与 LOD 契约）；将球面地平线遮挡底界 `R0` 从 `-0.06 R`（`-72 km`）收紧至物理最深海沟以下的 `max(0.94 R, R - max(1.6 * hAmp, 14 km))`；修正近地 `startupPriority` 仅用于加载黑幕期并为聚焦天体赋予 `-2000` 队列优先权。
+  - `src/weapon-models.js` 按材质静态合并枪身与弹匣内部的非透明刚体网格（保留拉机柄、弹匣换弹位移、准星线框与 `M77` 实时画中画瞄具镜片），单枪绘制调用从 `142` 降至 `~8`。
+  - `src/surface-atmosphere.js` 按 `(frame, camera, renderTarget)` 缓存同通道材质 uniform 绑定。
+- **实测结果**：P0 满画质（`adaptiveStage = 0`、`dpr = 1.0`）稳态步行从 **`39.7 / 40.0 FPS` 提升至 `88.0 FPS`（1080p，`11.37 ms`）与 `81.8 FPS`（2K，`12.23 ms`）**，总绘制调用从 `~900` 降至 `421–522`，画面与枪械细节完全一致（见证据目录 `1080p-6-walk.jpg`、`1080p-walk-m77.jpg`、`2k-6-walk.jpg`）。
+
+#### （3）P1-3 自适应降画质 60 Hz 死锁、流式误降档与防抖（提交 `e143333`）
+- **根因**：旧逻辑直接用 `PresentedFrameStats` 的 wall-clock `rAF` 间隔与 `< 11.95 ms` 比较决定回升，在 60 Hz 显示器（`rAF >= 16.67 ms`）上数学不可达；高空下降流式构建开销计入帧间隔导致 P0 实飞误降至 5 档；此外 `ShipHUD` 自带第二条独立 `rAF` 循环与主循环并跑并在步行隐藏态空刷 SVG。
+- **修复**：
+  - 新增 `src/adaptive-quality.js`（`FrameGpuTimer` + `AdaptiveQualityGovernor`）及单测 `tools/adaptivequalitytest.js`：利用共享 `GPU_DISJOINT_EXT` 纪元的非阻塞 `EXT_disjoint_timer_query_webgl2` 采集真实 GPU 帧耗时，结合扣除 `sceneBuildBudget.spentMs` 后的渲染 CPU 耗时计算真实硬件负载 `max(CPU, GPU)`，准确区分“压在 60 Hz / 50 Hz VSync 上的空闲等待”与“真实硬件过载”。
+  - 对活跃地形/水体流式期（`pendingChunks > 4` 或 `nearWaterPatch` 构建中，带 10 s 连续安全上限）豁免降档累积，并将重度积压地形单帧预算从 `7.5 ms` 微调至 `4.2 ms`。
+  - 采用非对称滞回死区（过载 `> 18.5 ms` 持续 `1.4 s` 逐级降档 + `0.85 s` 稳定观察期；真实硬件负载 `<= 12.7 ms` 持续 `1.1 s` 逐级回升）配合回退指数退避锁（回升后 9 s 内若再次过载则退避 `12 s → 24 s → 48 s → 60 s`），同时覆盖无 GPU 计时扩展时的降级回退分支。
+  - 将 `ShipHUD` 纳入主循环 `ui.setFlightTelemetry` 同步 tick，并在 `ui-walk` / `hero-active` 隐藏态跳过 SVG 属性重算。
+- **实测验证**：
+  - **1080p & 2K 60 Hz VSync 全程回升实测**：施加 11 s `30 ms` 负载将 `adaptiveStage` 推至满级 `stage 5`（`dpr = 0.92`，`cloudScale = 0.38`）后切入 60 Hz VSync，10 s 内平滑逐级回升至 **`stage 0`（`dpr = 1.0`，`cloudScale = 0.5`）**，`gl.getError() === 0`；
+  - **P0 101 s 真实键鼠飞行着陆**：从 862 km 出生点经 360 km、126 km、27 km、12 km、4.5 km、1 km、420 m 直至落地步行，全程 `adaptiveStage === 0`、`dpr === 1.0`；
+  - **EC P5 35 W 真实限功验证**：当笔记本在 22:20 进入 35 W / 810 MHz 限功态时，控制器检测到真实 GPU 耗时超限，自动降至 `stage 5` 将 1080p 步行稳在 `51.4 FPS`。
+
+#### （4）P2-3 深海悬停无 `DIVE` 提示且按 `L` 无法下潜（提交 `a0d4201`）
+- **根因**：`canLand` 与 `tryLand()` 均用距海底距离 `nearestAlt < 420` 判定，深海（水深 `> 600 m`）海面上空 `150 m` 处 `nearestAlt > 750 m` 导致判定失效；且 `src/ui.js:249` 的 `'潜入并离开飞船'` 漏了 `  [L]`。
+- **修复**：新增 `hasDiveableOcean`（仅限 `'water'` / `'toxic'` 海洋，排除熔岩与冰盖）与 `landingClearanceMeters(planet, worldPos, terrainAlt)`（对可下潜海洋取 `Math.min(terrainAlt, seaClearance)`），统一接入 `canLand` 与 `tryLand()`；补齐 `src/ui.js` 的 `'潜入并离开飞船  [L]'`；并在 `tools/gameplaytest.js` 新增深海（水深 `> 600 m`）`560 m` 隐藏、`150 m` 显示 `潜入并离开飞船  [L]` 及按 `KeyL` 潜入海底进入 `walk` 的回归断言。实测水深 `1,493 m`（`seabedAlt = 1,643 m`）海面上方 `150 m` 正常显示并完成下潜。
+
+#### （5）P2-5 `window.NMS.alt` 重复属性覆盖（提交 `9f1d627`）
+- **核查与修复**：扫描全仓 `tools/` 下所有 `NMS.alt` 调用点（`artificialplaytest.js`、`astroplaytest.js`、`gameplaytest.js`、`seamtest.js`、`touchtest.js` 共 8 处）均以方法 `NMS.alt()` 调用（需读取数值属性处均读 `NMS.stats().alt`）。移除 `src/main.js` 前半部被遮蔽的重复 `get alt()` getter，统一为 `alt: () => nearestAlt`。
+
+### 4. 第二轮回归验证汇总
+- `npm test`：除末尾已知暂缓的 `worldlocktest.js` 外，前面全部 **63 项 Node 契约测试 100% 通过**（含新增 `adaptivequalitytest.js`）。
+- `npm run test:smoke`（`8.6 s` 启动全绿）、`npm run test:stage-a`（全 14 项通过）、`npm run test:b5`、`npm run test:ocean-gpu`、`npm run test:near-water`、`npm run test:terrain`（全 8 类行星 `SANITY: all good`）、`npm run test:far-flora`、`npm run test:vegetation:precision`、`npm run test:starmap`、`npm run test:astronomy:browser`、`tools/gameplaytest.js` 深海下潜回归：**全部通过**。
+- 协作边界核查：全程未修改 `src/cloud/`、`src/atmosphere-pass-webgl.js`、`src/legacy-render-pipeline.js`、`src/sysview.js` 及主控正在改动的飞船模型文件。
