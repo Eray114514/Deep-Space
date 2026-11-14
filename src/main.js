@@ -5115,7 +5115,6 @@ window.NMS = {
     return loadingCleared;
   },
   get state() { return state; },
-  get alt() { return nearestAlt; },
   surfaceWarmupState() {return {ready:surfacePipelinesReady,pending:surfaceBootstrapPending,
     expired:startupPrewarmExpired,remainingMeshes:surfaceBootstrapMeshes.length,stats:surfaceBootstrapStats};},
   sceneBuildState() {return sceneBuildBudget.snapshot();},
