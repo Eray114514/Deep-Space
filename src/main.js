@@ -1816,8 +1816,25 @@ function parkShipNear(planet, landDir) {
   return { padLocal, padUniv, parkedLocalQuat, parkedWorldQuat, dryFound };
 }
 
+const LANDING_CLEARANCE_METERS = 420;
+
+function hasDiveableOcean(planet) {
+  return Boolean(planet?.hasLiquid
+    && (planet.liquid === 'water' || planet.liquid === 'toxic')
+    && Number.isFinite(planet.seaRadius));
+}
+
+function landingClearanceMeters(planet, worldPos = nav.pos, terrainAlt = nearestAlt) {
+  if (!planet || planet.isGasGiant || planet.landable === false) return Infinity;
+  if (!hasDiveableOcean(planet)) return terrainAlt;
+  const seaClearance = worldPos.distanceTo(planet.posUniv) - planet.seaRadius;
+  return Math.min(terrainAlt, seaClearance);
+}
+
 function tryLand() {
-  if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false || nearestAlt > 420) return;
+  if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false
+    || landingClearanceMeters(nearest, nav.pos, nearestAlt) >= LANDING_CLEARANCE_METERS
+    || nav.vel.length() >= 4000) return;
   const planet = nearest;
   // a landing always seals the hull first
   shipView.closeRamp();
@@ -1830,7 +1847,7 @@ function tryLand() {
   // If the ship was hovering just off a shoreline (wet directly underneath)
   // while parkShipNear found a dry coastal pad nearby, step the player onto
   // dry ground beside the ramp instead of dropping them underwater off the beach.
-  if (planet.hasLiquid && planet.liquid !== 'ice' && ground < planet.seaRadius + 0.5 && landing.dryFound) {
+  if (hasDiveableOcean(planet) && ground < planet.seaRadius + 0.5 && landing.dryFound) {
     const exitShipLocal = new THREE.Vector3(0, 0, ship.def.dims.rampTopZ + 3.2)
       .applyQuaternion(landing.parkedLocalQuat);
     const shoreDir = landing.padLocal.clone().add(exitShipLocal).normalize();
@@ -4541,8 +4558,9 @@ function frame() {
 
   // land prompt
   const canLand = state === 'space' && nearest && !nearest.isGasGiant && nearest.landable !== false
-    && nearestAlt < 420 && nav.vel.length() < 4000;
-  const overOpenWater = Boolean(canLand && nearest.hasLiquid && nearest.liquid !== 'ice'
+    && landingClearanceMeters(nearest, nav.pos, nearestAlt) < LANDING_CLEARANCE_METERS
+    && nav.vel.length() < 4000;
+  const overOpenWater = Boolean(canLand && hasDiveableOcean(nearest)
     && (waterSurfaceHeight < 2
       || (nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius) < nearestAlt - 1.5));
   ui.showLand(!!canLand, overOpenWater

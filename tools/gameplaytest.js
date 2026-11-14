@@ -259,6 +259,51 @@ try {
   const quatAfterResumeMove = await page.evaluate('NMS._internals.nav.quat.toArray()');
   check(quatAfterResumeMove.some((value, index) => Math.abs(value - quatBeforeResumeMove[index]) > 1e-5),
     'resumed Pointer Lock immediately owns camera look input');
+
+  // Deep ocean hover (< 420 m above sea surface even when seabed is > 600 m below)
+  // must show the DIVE [L] prompt and allow diving via KeyL.
+  const deepOceanDir = await page.evaluate(() => {
+    const p = NMS._planet(0);
+    const THREE = NMS._THREE;
+    const v = new THREE.Vector3();
+    for (let k = 0; k < 4000; k++) {
+      const y = 1 - (2 * (k + 0.5)) / 4000;
+      const r = Math.sqrt(1 - y * y), ga = k * 2.399963229728653;
+      v.set(Math.cos(ga) * r, y, Math.sin(ga) * r);
+      const depth = p.seaLevel - p.height(v, p.fullMaxFreq);
+      if (depth > 600 && v.dot(p.sunDirLocal) > 0.25) return v.toArray();
+    }
+    return null;
+  });
+  check(Boolean(deepOceanDir), 'home planet provides a sunlit > 600 m deep ocean test column');
+  if (deepOceanDir) {
+    await page.evaluate((dir) => {
+      const p = NMS._planet(0);
+      NMS.teleport(0, (p.seaRadius + 560 - p.R) / p.R, { dir, horizon: true, pitch: -0.2 });
+    }, deepOceanDir);
+    await page.waitForTimeout(180);
+    check(await page.evaluate(() => document.getElementById('land-btn').classList.contains('hidden')),
+      'deep ocean hover above 420 m sea clearance hides the dive prompt');
+
+    await page.evaluate((dir) => {
+      const p = NMS._planet(0);
+      NMS.teleport(0, (p.seaRadius + 150 - p.R) / p.R, { dir, horizon: true, pitch: -0.2 });
+    }, deepOceanDir);
+    await page.waitForTimeout(180);
+    const divePrompt = await page.evaluate(() => ({
+      seabedAlt: NMS.alt(),
+      visible: !document.getElementById('land-btn').classList.contains('hidden'),
+      text: document.getElementById('land-btn').textContent.trim(),
+    }));
+    check(divePrompt.seabedAlt > 700 && divePrompt.visible && divePrompt.text === '潜入并离开飞船  [L]',
+      `deep ocean hover at 150 m sea clearance shows DIVE [L] prompt (${Math.round(divePrompt.seabedAlt)} m above seabed)`);
+    await page.keyboard.press('KeyL');
+    check(['landing', 'walk'].includes(await page.evaluate(() => window.NMS.state)),
+      'KeyL over deep ocean begins seabed dive sequence');
+    await page.waitForFunction(() => window.NMS.state === 'walk', null, { timeout: 60000 });
+    check(await page.evaluate(() => window.NMS.state === 'walk'),
+      'KeyL over deep ocean completes dive into seabed walk mode');
+  }
 } finally {
   await browser.close();
   server.close();

@@ -246,7 +246,7 @@ export class UI {
   }
 
   showLand(show, text = 'LAND — walk the surface') {
-    this.els.land.textContent = text.startsWith('DIVE') ? '潜入并离开飞船' :
+    this.els.land.textContent = text.startsWith('DIVE') ? '潜入并离开飞船  [L]' :
       text.startsWith('LAND') ? '着陆并离开飞船  [L]' : text;
     this.els.land.classList.toggle('hidden', !show);
   }
