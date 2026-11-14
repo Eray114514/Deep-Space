@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 
 const SHARED_MATERIALS = createMaterials();
@@ -676,11 +677,74 @@ function createMiningLaser() {
   return gun;
 }
 
+function mergeStaticContainerMeshes(container, excludedSet) {
+  container.updateMatrixWorld(true);
+  const invRoot = new THREE.Matrix4().copy(container.matrixWorld).invert();
+  const relMat = new THREE.Matrix4();
+  const byMaterial = new Map();
+  const walk = (obj) => {
+    if (excludedSet.has(obj)) return;
+    if (obj.isMesh && !Array.isArray(obj.material) && obj.material
+      && !obj.material.transparent && obj.renderOrder === 0
+      && obj.geometry?.attributes?.position && obj.geometry?.attributes?.normal) {
+      let list = byMaterial.get(obj.material);
+      if (!list) { list = []; byMaterial.set(obj.material, list); }
+      list.push(obj);
+    }
+    for (const child of [...obj.children]) walk(child);
+  };
+  for (const child of [...container.children]) walk(child);
+
+  for (const [material, meshes] of byMaterial.entries()) {
+    if (meshes.length < 2) continue;
+    const baked = [];
+    for (const m of meshes) {
+      const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+      for (const attr of Object.keys(g.attributes)) {
+        if (attr !== 'position' && attr !== 'normal' && attr !== 'uv') {
+          g.deleteAttribute(attr);
+        }
+      }
+      if (!g.attributes.uv) {
+        const count = g.attributes.position.count;
+        g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+      }
+      relMat.multiplyMatrices(invRoot, m.matrixWorld);
+      g.applyMatrix4(relMat);
+      baked.push(g);
+    }
+    const merged = mergeGeometries(baked, false);
+    for (const g of baked) g.dispose();
+    if (!merged) continue;
+    for (const m of meshes) {
+      m.parent?.remove(m);
+      m.geometry.dispose();
+    }
+    const combined = new THREE.Mesh(merged, material);
+    combined.castShadow = false;
+    combined.receiveShadow = false;
+    container.add(combined);
+  }
+}
+
+function batchWeaponParts(gun) {
+  const excluded = new Set();
+  if (gun.userData.bolt) excluded.add(gun.userData.bolt);
+  if (gun.userData.opticGlass) excluded.add(gun.userData.opticGlass);
+  for (const coil of gun.userData.laserCoils || []) excluded.add(coil);
+  if (gun.userData.magazine) {
+    mergeStaticContainerMeshes(gun.userData.magazine, excluded);
+    excluded.add(gun.userData.magazine);
+  }
+  mergeStaticContainerMeshes(gun, excluded);
+  return gun;
+}
+
 export function createWeaponModel(id) {
   switch (id) {
-    case "KX9": return createCarbine();
-    case "M77": return createMarksman();
-    case "CX5": return createSubmachineGun();
+    case "KX9": return batchWeaponParts(createCarbine());
+    case "M77": return batchWeaponParts(createMarksman());
+    case "CX5": return batchWeaponParts(createSubmachineGun());
     case 'HLX3': return createMiningLaser();
   }
 }

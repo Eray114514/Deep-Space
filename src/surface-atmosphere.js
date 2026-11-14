@@ -56,8 +56,25 @@ export function prepareSurfaceAtmosphere(material, planet) {
   if (!preparedSurfaces.has(material)) {
     const rotation = new THREE.Matrix4();
     const previous = material.onBeforeRender;
+    let lastPassFrame = -1;
+    let lastPassCamera = null;
+    let lastPassTarget = null;
+    let lastOccluders = null;
+    let lastSpeciesTex = null;
     material.onBeforeRender = function (renderer, scene, camera, ...args) {
       previous?.call(this, renderer, scene, camera, ...args);
+      const renderInfo = renderer?.info?.render;
+      const currentTarget = typeof renderer?.getRenderTarget === 'function'
+        ? renderer.getRenderTarget() : null;
+      if (renderInfo && renderInfo.calls > 0
+        && renderInfo.frame === lastPassFrame
+        && camera === lastPassCamera
+        && currentTarget === lastPassTarget
+        && planet.stellarOccluders === lastOccluders
+        && planet.cloudSpeciesTex === lastSpeciesTex
+        && material.userData.surfaceMedium) {
+        return;
+      }
       const uniforms = surfaceMediumUniforms(material, planet);
       rotation.makeRotationFromQuaternion(planet._invFrame).multiply(camera.matrixWorld);
       uniforms.uSurfaceViewToLocal.value.setFromMatrix4(rotation);
@@ -70,6 +87,13 @@ export function prepareSurfaceAtmosphere(material, planet) {
           if (uniforms['air_' + name]) uniforms['air_' + name].value = uniform.value;
         }
       } else uniforms.air_uEnabled.value = 0;
+      if (renderInfo) {
+        lastPassFrame = renderInfo.frame;
+        lastPassCamera = camera;
+        lastPassTarget = currentTarget;
+        lastOccluders = planet.stellarOccluders;
+        lastSpeciesTex = planet.cloudSpeciesTex;
+      }
     };
     preparedSurfaces.add(material);
   }

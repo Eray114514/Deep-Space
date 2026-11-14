@@ -769,6 +769,8 @@ export class ChunkedLOD {
 
     const faceFn = FACE_FN[node.face];
     let maxMorphHeightDelta = 0;
+    let maxMorphDelta = 0;
+    let maxBakedDepth = -Infinity;
     // Terrain noise is much more expensive than flat water. Four-vertex
     // interactive batches keep the 3.2 ms scheduler budget honest even for
     // 64×64 high-tier chunks; startup and liquid jobs retain the
@@ -795,7 +797,11 @@ export class ChunkedLOD {
           aExtra[idx * 4] = _ex.x; aExtra[idx * 4 + 1] = _ex.y;
           aExtra[idx * 4 + 2] = _ex.z; aExtra[idx * 4 + 3] = _ex.w;
         }
-        if (aDepth) aDepth[idx] = p.bakeDepth(_dirV, maxFreq, node.level);
+        if (aDepth) {
+          const bakedDepth = p.bakeDepth(_dirV, maxFreq, node.level);
+          aDepth[idx] = bakedDepth;
+          if (bakedDepth > maxBakedDepth) maxBakedDepth = bakedDepth;
+        }
         if ((i & batchMask) === batchMask || i === N) yield;
       }
     }
@@ -939,6 +945,8 @@ export class ChunkedLOD {
           dNrm[idx * 3 + 2] = _cN.z - _n.z;
           maxMorphHeightDelta = Math.max(maxMorphHeightDelta,
             Math.abs(_cP.length() - _p0.length()));
+          maxMorphDelta = Math.max(maxMorphDelta,
+            Math.hypot(dPos[idx * 3], dPos[idx * 3 + 1], dPos[idx * 3 + 2]));
         }
         if ((i & 31) === 31 || i === N) yield;
       }
@@ -1108,7 +1116,11 @@ export class ChunkedLOD {
     }
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeBoundingSphere();
-    if (hasMorph) geo.boundingSphere.radius += p.hAmp;   // morphed verts may bulge
+    // Bound morph displacement by the chunk's actual parent-delta envelope
+    // rather than full-planet hAmp (~8.6 km), which bloated every local ground
+    // chunk's sphere across the camera and defeated camera + shadow culling.
+    if (hasMorph) geo.boundingSphere.radius += maxMorphDelta + 2;
+    else if (p.bakeDepth) geo.boundingSphere.radius += 56;
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
     mesh.userData.lodMorph = node.morph;
@@ -1128,6 +1140,12 @@ export class ChunkedLOD {
     // directional shadow frustum; macro relief shadows own continent-scale ranges.
     mesh.castShadow = !p.noShadow && node.level >= 5;
     mesh.receiveShadow = true;
+    // Fine ocean chunks buried > 60 m beneath dry continental rock discard
+    // every fragment; exclude them from render layers while keeping LOD node
+    // readiness and debugStats visibility intact.
+    if (p.bakeDepth && node.level >= 6 && maxBakedDepth < -60) {
+      mesh.layers.mask = 0;
+    }
     mesh.visible = false;
     node.mesh = mesh;
     p.group.add(mesh);
