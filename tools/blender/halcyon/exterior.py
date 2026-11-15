@@ -281,6 +281,26 @@ def build_engine(M, col, e, idx):
         (r * 0.30, z - L * 0.62), (r * 0.22, z - L * 0.60), (r * 0.20, z - L * 0.56),
         (r * 0.08, z - L * 0.56), (0.0, z - L * 0.50),
     ], (x, y), mat=M['engineCore'], segs=40))
+    # flame holder inside the bell: two gutters on radial struts, lit from the core
+    zf = z - L * 0.30
+    for k, rr in enumerate((0.26, 0.46)):
+        out.append(prims.lathe('eng%d-gutter' % idx, col, [
+            (r * (rr - 0.022), zf - 0.03), (r * rr, zf + 0.03), (r * (rr + 0.022), zf - 0.03), (r * (rr - 0.022), zf - 0.03),
+        ], (x, y), mat=M['metalDark'], segs=36))
+    n_strut = 8 if e['main'] else 6
+    for k in range(n_strut):
+        t = 2 * math.pi * k / n_strut
+        c, s = math.cos(t), math.sin(t)
+        rot = Matrix((Vector((-s, c, 0)), Vector((c, s, 0)), Vector((0, 0, 1)))).transposed()
+        out.append(prims.box('eng%d-strut' % idx, col, (r * 0.02, r * 0.40, r * 0.07), M['metalDark'], bevel=0.0,
+                             origin=(x + c * r * 0.34, y + s * r * 0.34, zf - 0.02), rot=rot))
+    # actuator rods that drive the petals
+    for k in range(0, n, 3):
+        t = 2 * math.pi * (k + 0.5) / n
+        c, s = math.cos(t), math.sin(t)
+        out.append(prims.tube('eng%d-actuator' % idx, col, [
+            (x + c * r * 1.16, y + s * r * 1.16, z - 0.34), (x + c * r * 1.145, y + s * r * 1.145, z + L * 0.10)],
+            r * 0.014, M['chrome'], 6))
     return out
 
 

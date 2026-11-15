@@ -293,5 +293,22 @@ def build(M, col, groups):
                                     origin=(sx * xs, yu - 0.03, zf)))
 
     static += lettering(M, col, HULL, FIN)
+    # ---- where the lamps glow and where exhaust stains the skin (read by the
+    # exporter and the soot bake; positions in game space)
+    spine_top = HULL.section(-2.1)['yTop'] + 0.10
+    glows = [('glow-green', (10.78, tip['off'], tip['yBot'] + 0.25)), ('glow-red', (-10.78, tip['off'], tip['yBot'] + 0.25)),
+             ('glow-white', (0, 6.36, 10.53)), ('glow-strobe-fin', (0, 6.57, 9.72)),
+             ('glow-strobe-belly', (0, belly(-2.0) - 0.06, -2.0)), ('glow-strobe-dorsal', (0, spine_top + 0.09, -2.1)),
+             ('glow-landing-port', (-0.55, belly(-10.6) - 0.03, -10.6)), ('glow-landing-stbd', (0.55, belly(-10.6) - 0.03, -10.6))]
+    soot = []          # (position, radius, aft streak length)
+    for side in (1, -1):
+        for (z, jf) in ((-13.1, 8.5), (-13.1, 26.5), (10.0, 9.5), (10.0, 26.0)):
+            soot.append((tuple(HULL.point(z, jf, side)), 0.34, 0.9))
+        soot.append(((side * 5.2, 0.08, 0.85), 0.26, 1.6))             # cannon muzzle
+        soot.append(((side * NX, NY + 1.2, 6.95), 0.34, 1.5))          # radiator outflow
+        for a in range(8):                                             # nozzle ring
+            t = math.pi * 2 * a / 8
+            soot.append(((side * NX + math.cos(t) * 1.02, NY + math.sin(t) * 1.02, 10.15), 0.42, 0.5))
+    groups['marks'] = {'glows': glows, 'soot': soot}
     groups['gear-pivots'] = {'gear-nose': (0.0, belly(-9.3), -9.3),
                              'gear-main-stbd': (2.45, -0.72, 3.6), 'gear-main-port': (-2.45, -0.72, 3.6)}

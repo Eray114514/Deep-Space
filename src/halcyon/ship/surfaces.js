@@ -29,7 +29,7 @@ const FINISH = {
   cap:         { tint: 0.0, rough: 0.0, grime: 0.15, noise: 0.10 },
   metal:       { tint: 0.10, rough: 0.14, grime: 0.14, noise: 0.14, relief: 'brushed', wear: 0.3, bare: [0.6, 0.6, 0.62], bareMetal: 1 },
   metalDark:   { tint: 0.14, rough: 0.14, grime: 0.16, noise: 0.14, relief: 'brushed', wear: 0.9, bare: [0.5, 0.5, 0.52], bareMetal: 1 },
-  heat:        { tint: 0.30, rough: 0.16, grime: 0.24, noise: 0.16, relief: 'brushed', wear: 0.4, bare: [0.5, 0.45, 0.4], bareMetal: 1 },
+  heat:        { tint: 0.30, rough: 0.16, grime: 0.24, noise: 0.16, relief: 'brushed', wear: 0.4, bare: [0.5, 0.45, 0.4], bareMetal: 1, temper: 0.55 },
   chrome:      { tint: 0.0, rough: 0.0, grime: 0.04, noise: 0.04 },
   rubber:      { tint: 0.0, rough: 0.0, grime: 0.08, noise: 0.06, relief: 'ribs' },
   // interior
@@ -187,13 +187,20 @@ ${RELIEF_LIB}`)
       * (0.50 + 0.95 * mix(0.5, shipNoise(vShipPos * 85.0), fineFade) + 0.45 * broad));
     c = mix(c, vec3(${bare.map(glsl).join(', ')}), shipChip);
     c *= 1.0 - groove * 0.82;
-    /* baked contact occlusion (paint B): wing roots, nacelle joints, gear bays */
-    c *= 1.0 - vShipPaint.b * 0.5;
+    ${spec.temper ? `{
+      /* heat tint: the oxide film on hot alloy runs straw, purple, blue with temperature */
+      float band = vShipPos.z * 2.6 + broad * 1.3 + tint * 0.6;
+      vec3 oxide = 0.5 + 0.5 * cos(6.2832 * (band + vec3(0.02, 0.36, 0.64)));
+      c = mix(c, c * (0.35 + 1.5 * oxide), ${glsl(spec.temper)});
+    }` : ''}
+    /* baked contact occlusion and exhaust staining (paint B): wing roots,
+       nacelle joints, gear bays, the skin aft of every thruster */
+    c *= 1.0 - vShipPaint.b * 0.58;
     diffuseColor.rgb = c;
   }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
   roughnessFactor = clamp(roughnessFactor + (vShipPaint.r - 0.5) * ${glsl(spec.rough)}
-    + (shipBreakup - 0.5) * ${glsl(spec.noise * 2)} + vShipPaint.g * 0.3, 0.045, 1.0);
+    + (shipBreakup - 0.5) * ${glsl(spec.noise * 2)} + vShipPaint.g * 0.3 + vShipPaint.b * 0.22, 0.045, 1.0);
   roughnessFactor = mix(roughnessFactor, 0.36, shipChip * ${glsl(spec.bareMetal || 0)});`)
       .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
   metalnessFactor = mix(metalnessFactor, 1.0, shipChip * ${glsl(spec.bareMetal || 0)});`)
@@ -216,7 +223,7 @@ ${RELIEF_LIB}`)
     reflectedLight.indirectSpecular += hemiIrradiance * material.specularColor * 0.22;
   }`);
   };
-  material.customProgramCacheKey = () => `halcyon-surface-7|${name}|${JSON.stringify(spec)}`;
+  material.customProgramCacheKey = () => `halcyon-surface-8|${name}|${JSON.stringify(spec)}`;
   /* three's Material.clone() does not carry onBeforeCompile, and the ship's
      radiance zones clone every interior material — keep the finish on the copy */
   const baseClone = Object.getPrototypeOf(material).clone;

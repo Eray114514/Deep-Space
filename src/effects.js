@@ -596,6 +596,7 @@ export class Ship {
     /* strobes — kept modest so the bloom chain never saturates */
     const blink = (t % 1.3) < 0.09 ? 3.2 : 0.05;
     for (const s of this.ext.strobes) s.material.emissiveIntensity = blink;
+    for (const glow of this.ext.strobeGlows || []) glow.material.opacity = blink > 1 ? 0.95 : 0;
 
     /* cargo-ramp containment field ticks even while closed so opening it
        never starts from a frozen lattice */

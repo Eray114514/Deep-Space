@@ -39,7 +39,7 @@ def join_group(name, objs, pivot=None):
     return obj
 
 
-def finalize(groups, gear_pivots):
+def finalize(groups, gear_pivots, glows=()):
     nodes = {}
     nodes['exterior'] = join_group('exterior', groups['exterior'])
     nodes['ramp'] = join_group('ramp', groups['ramp'], (0, DIMS['rampHingeY'], DIMS['rampHingeZ']))
@@ -52,6 +52,11 @@ def finalize(groups, gear_pivots):
         bpy.context.scene.collection.objects.link(em)
         em.location = G(e['x'], e['y'], e['z'])
         em.scale = (e['r'], e['r'], e['r'])
+        nodes[em.name] = em
+    for name, pos in glows:
+        em = bpy.data.objects.new(name, None)
+        bpy.context.scene.collection.objects.link(em)
+        em.location = G(*pos)
         nodes[em.name] = em
     return nodes
 

@@ -222,6 +222,38 @@ export function assembleShip(gltf, def) {
     extGroup.add(mesh);
     return mesh;
   };
+  /* ---- lamp glows: a soft additive halo at every navigation lamp --------- */
+  const glowTexture = (() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 128;
+    const g = canvas.getContext('2d');
+    const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.12, 'rgba(255,255,255,0.55)');
+    grd.addColorStop(0.4, 'rgba(255,255,255,0.10)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(canvas);
+  })();
+  const GLOW = { green: [0x30ff70, 1.5, 0.9], red: [0xff2a18, 1.5, 0.9], white: [0xfff2dc, 1.2, 0.8],
+    strobe: [0xffffff, 3.2, 0], landing: [0xfff4e0, 1.1, 0.55] };
+  const strobeGlows = [];
+  for (const child of [...root.children]) {
+    const match = /^glow-([a-z]+)/.exec(child.name);
+    if (!match || !GLOW[match[1]]) continue;
+    const [color, size, opacity] = GLOW[match[1]];
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTexture, color, transparent: true, opacity, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false,
+    }));
+    sprite.name = child.name;
+    sprite.position.copy(child.position);
+    sprite.scale.setScalar(size);
+    sprite.renderOrder = 9;
+    extGroup.add(sprite);
+    if (match[1] === 'strobe') strobeGlows.push(sprite);
+  }
   const plumes = [addInstances(plumeGeometry(), plumeMaterial(), 'engine-plume-volume', 3)];
   const glowRings = [addInstances(nozzleGlowGeometry(), haloMaterial(), 'engine-plume-throat', 5, true)];
 
@@ -308,7 +340,7 @@ export function assembleShip(gltf, def) {
   intGroup.add(barrier);
 
   return {
-    ext: { group: extGroup, rampPivot, plumes, glowRings, strobes, gear, engines },
+    ext: { group: extGroup, rampPivot, plumes, glowRings, strobes, strobeGlows, gear, engines },
     bakedLight,
     int: {
       group: intGroup, barrier, lights,

@@ -24,6 +24,7 @@ scene = common.reset_scene()
 M = mats.library(debug='--export' not in argv and '--nodebug' not in argv)
 groups = exterior.build(M)
 gear_pivots = groups.pop('gear-pivots')
+marks = groups.pop('marks')
 icol = common.collection('interior')
 cockpit_parts, screens, cockpit_outline = cockpit.build(M, icol)
 groups['cockpit'] = cockpit_parts
@@ -80,7 +81,7 @@ if '--export' in argv:
     if '--nobake' not in argv:
         bake.setup(scene, 96)
         probe.render(scene, out)
-    nodes = export.finalize(groups, gear_pivots)
+    nodes = export.finalize(groups, gear_pivots, marks['glows'])
     for node in nodes.values():
         if node.type == 'MESH':
             bake.bake_wear(node)
@@ -88,6 +89,7 @@ if '--export' in argv:
         tb = time.time()
         bake.bake_irradiance(scene, [nodes['cockpit'], nodes['interior']], samples=int(arg('--samples', 192)))
         bake.bake_occlusion(scene, [nodes[k] for k in ('exterior', 'ramp', 'gear-nose', 'gear-main-stbd', 'gear-main-port')])
+        bake.bake_soot(nodes['exterior'], marks['soot'])
         print('baked in %.1fs' % (time.time() - tb))
     export.write(os.path.join(out, 'halcyon.raw.glb'))
     print('exported', os.path.join(out, 'halcyon.raw.glb'))

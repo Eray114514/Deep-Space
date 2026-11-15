@@ -133,6 +133,33 @@ def bake_occlusion(scene, objs, samples=96, distance=1.2):
         print('  occlusion %-16s mean %.3f  open %.2f  closed %.2f' % (obj.name, float(paint[:, 2].mean()), float((paint[:, 2] < 0.1).mean()), float((paint[:, 2] > 0.9).mean())))
 
 
+def bake_soot(obj, sources, strength=0.9):
+    """Exhaust staining into the occlusion channel: a soft patch round each
+    source with a streak dragged aft (+z in game space)."""
+    me = obj.data
+    co = np.zeros(len(me.vertices) * 3, dtype=np.float32)
+    me.vertices.foreach_get('co', co)
+    co = co.reshape(-1, 3)
+    wm = np.array(obj.matrix_world, dtype=np.float32)
+    world = co @ wm[:3, :3].T + wm[:3, 3]
+    game = np.stack([world[:, 0], world[:, 2], -world[:, 1]], axis=1)      # blender -> game
+    soot = np.zeros(len(game), dtype=np.float32)
+    for (pos, radius, streak) in sources:
+        d = game - np.array(pos, dtype=np.float32)
+        t = np.clip(d[:, 2], 0.0, streak)
+        q = d.copy()
+        q[:, 2] -= t
+        dist2 = (q * q).sum(axis=1)
+        soot += np.exp(-dist2 / (radius * radius)) * (1.0 - 0.65 * t / max(streak, 1e-3))
+    soot = np.clip(soot, 0.0, 1.0) * strength
+    vert = np.zeros(len(me.loops), dtype=np.int64)
+    me.loops.foreach_get('vertex_index', vert)
+    paint = _paint(me)
+    paint[:, 2] = np.maximum(paint[:, 2], soot[vert])
+    me.color_attributes['Color'].data.foreach_set('color', paint.ravel())
+    print('  soot %-21s max %.2f' % (obj.name, float(soot.max())))
+
+
 def bake_irradiance(scene, objs, samples=192):
     setup(scene, samples)
     # every surface must report the light ARRIVING on it, so metals get a
