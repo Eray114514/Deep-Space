@@ -11,7 +11,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const reference = process.argv.find(value => value.startsWith('--reference-main='))?.slice('--reference-main='.length);
 const readMain = async () => reference ? execFileSync('git', ['show', `${reference}:src/main.js`]) : readFile('src/main.js');
-const bytes = await readMain(), main = bytes.toString(), verifier = await readFile(new URL(import.meta.url));
+// Source anchors below are LF; a CRLF checkout (core.autocrlf) must not hide them.
+const bytes = await readMain(), main = bytes.toString().replace(/\r\n/g, '\n'), verifier = await readFile(new URL(import.meta.url));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const out = `test-results/deferred-publication/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });await writeFile(`${out}/main.js`, bytes);await writeFile(`${out}/verifier.js`, verifier);

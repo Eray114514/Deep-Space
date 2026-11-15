@@ -582,6 +582,16 @@ export class Planet extends TerrainHeightField {
         break;
       }
     }
+    // [2026-11-15] Vegetated land was authored as display colours and shaded
+    // as albedo: the home world's land averaged (0.18, 0.23, 0.07), the
+    // brightness of a dry savanna. Under the same sun as the clouds that left
+    // a 2:1 cloud-to-ground contrast and a milky globe from orbit (Earth is
+    // nearer 6:1). Living land keeps its hues at a plant albedo; the beach
+    // stop and bare rock stay as authored.
+    if (this.type === 'lush' || this.type === 'ocean') {
+      for (let i = 1; i < p.land.length; i++) p.land[i].c.multiplyScalar(0.68);
+      p.forest.multiplyScalar(0.72);
+    }
     // Colors are authored as sRGB hex and shaded in linear — and that
     // conversion has ALREADY happened. `col()` is `new THREE.Color(hex)`, and
     // with THREE.ColorManagement enabled (the r155+ default, and this project

@@ -1082,8 +1082,12 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           // but their authored depth still identifies shelf, slope or abyss.
           // Compress that real column instead of mapping every value above
           // 80 m to one luminous 48 m cyan plate.
-          float unresolvedDepth = mix(14.0, 92.0,
-            smoothstep(0.0, 2800.0, dep));
+          // [2026-11-15] The compression used to map a 500 m shelf to ~20 m,
+          // so from orbit whole oceans wore the bright shallow-shelf colour
+          // and read as a milky turquoise plate. Light does not return from
+          // a 100 m+ column of real water either way; keep the true depth and
+          // only lift the first metres so unresolved shoals stay continuous.
+          float unresolvedDepth = max(dep, mix(3.0, 0.0, smoothstep(0.0, 12.0, dep)));
           float opticalDepth = mix(dep, unresolvedDepth, farBathymetry);
           gWaterShallow = 1.0 - smoothstep(0.08, 6.0, dep);
           float viewCos = clamp(abs(dot(normalize(vWaveUp),

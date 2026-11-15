@@ -362,7 +362,20 @@ const marchShader = /* glsl */`
               scatter1 += e * mix(hgPhase(mu1, 0.82 * a), hgPhase(mu1, -0.25 * a), 0.28);
               a *= 0.48;
             }
-            float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), 0.35 * sat(0.5 - 0.5 * mu) + 0.15)
+            // The higher orders a thick cloud really has leave its sunlit
+            // skin as a near-Lambert diffuser (albedo ~0.8 from any side).
+            // Four HG octaves lose that energy fast at back-scatter angles,
+            // so an orbit view with the sun behind it saw grey tops. This
+            // isotropic term only lives where sunlight still arrives; shaded
+            // flanks (large tau) keep their blue-grey.
+            float skin = 0.0796 * 0.55 * exp(-tau * 0.9);
+            scatter += skin;
+            scatter1 += skin;
+            // Powder darkens the sun-facing rims of small puffs seen up close.
+            // From tens of kilometres it only dimmed whole decks: with the sun
+            // behind an orbital viewer it halved every cloud top to grey.
+            float powderK = (0.35 * sat(0.5 - 0.5 * mu) + 0.15) * (1.0 - smoothstep(12000.0, 60000.0, t));
+            float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), powderK)
               * mix(0.76, 1.0, exp(-tau * 0.3));
             // The companion star reuses the primary's optical depth (they are
             // rarely far apart in the sky) with its own phase and horizon.
@@ -377,7 +390,10 @@ const marchShader = /* glsl */`
             // from straight above, where the light march alone sees no shadow.
             float open = mix(0.74, 1.0, smoothstep(0.25, 0.8, crown));
             open = mix(open, 1.0, 0.5 * smoothstep(100000.0, 400000.0, t));
-            vec3 source = (sun * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h)) + ambient) * open * uCloudTint;
+            // Bases sit lower in their own cloud, not in the deck: a small cumulus
+            // whose top is at a third of the deck used to stay in the "base"
+            // band entirely and read grey from above.
+            vec3 source = (sun * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h / max(crown, 0.2))) + ambient) * open * uCloudTint;
             float Ti = exp(-d * uExtinction * dt);
             float w = T * (1.0 - Ti);
             L += w * source; weighted += w * t; weight += w;
