@@ -76,13 +76,14 @@ def gear_leg(M, col, tag, x, z, top_y, pad_r=0.40):
     P.append(prims.tube('gear-line', col, [
         (x + 0.13, top_y - 0.1, z - 0.02), (x + 0.135, -0.95, z - 0.02), (x + 0.11, -1.06, z - 0.05)],
         0.012, M['rubber'], 6))
-    # bay doors, hanging open either side
+    # bay doors, hanging open either side: separate nodes hinged at their top edge
+    doors = {}
     for sx in (-1, 1):
         rot = _rot_z(sx * 14)
         hinge = Vector((x + sx * 0.48, top_y - 0.02, z + 0.25))
-        P.append(prims.box('gear-door', col, (0.03, 0.46, 1.6), M['hullDark'], bevel=0.008,
-                           origin=hinge + rot @ Vector((0, -0.23, 0)), rot=rot))
-    return P
+        doors[sx] = ([prims.box('gear-door', col, (0.03, 0.46, 1.6), M['hullDark'], bevel=0.008,
+                                origin=hinge + rot @ Vector((0, -0.23, 0)), rot=rot)], tuple(hinge))
+    return P, doors
 
 
 # ---------------------------------------------------------------- reaction control
@@ -212,12 +213,23 @@ def build(M, col, groups):
 
     # ---- gear
     belly = lambda z: HULL.section(z)['yBot']  # noqa: E731
-    groups['gear-nose'] = gear_leg(M, col, 'nose', 0.0, -9.3, belly(-9.3), pad_r=0.52)
+    pivots = groups['pivots']
+
+    def leg(name, x, z, top_y, pad_r):
+        parts, doors = gear_leg(M, col, name, x, z, top_y, pad_r=pad_r)
+        groups[name] = parts
+        pivots[name] = (x, top_y, z)
+        for sx, (objs, hinge) in doors.items():
+            key = '%s-door-%s' % (name, 'stbd' if sx > 0 else 'port')
+            groups[key] = objs
+            pivots[key] = hinge
+
+    leg('gear-nose', 0.0, -9.3, belly(-9.3), 0.52)
     for sx, tag in ((1, 'stbd'), (-1, 'port')):
         z = 3.6
         jf = HULL.y_to_jf(z, -0.74, lower=True)
         p = HULL.point(z, jf, sx)
-        groups['gear-main-' + tag] = gear_leg(M, col, tag, sx * 2.45, z, p.y + 0.02, pad_r=0.62)
+        leg('gear-main-' + tag, sx * 2.45, z, p.y + 0.02, 0.62)
 
     # ---- reaction control
     for side in (1, -1):
@@ -272,12 +284,14 @@ def build(M, col, groups):
 
     # ---- sensor ball under the nose, pitot boom at the tip
     zs = -12.6
+    sensor = groups['sensor'] = []
+    pivots['sensor'] = (0, belly(zs), zs)
     static.append(prims.revolve('sensor-collar', col, [(0.27, 0.0), (0.27, 0.035), (0.21, 0.05), (0.21, 0.0)],
                                 (0, belly(zs), zs), (0, -1, 0), 24, M['metalDark']))
-    static.append(prims.revolve('sensor-ball', col, [
+    sensor.append(prims.revolve('sensor-ball', col, [
         (0.2 * math.sin(a), 0.03 + 0.2 - 0.2 * math.cos(a)) for a in
         [math.pi * k / 16 for k in range(0, 17)]], (0, belly(zs) - 0.34, zs), (0, 1, 0), 24, M['metalDark']))
-    static.append(prims.revolve('sensor-lens', col, [(0.085, 0.0), (0.07, 0.02), (0.0, 0.026)],
+    sensor.append(prims.revolve('sensor-lens', col, [(0.085, 0.0), (0.07, 0.02), (0.0, 0.026)],
                                 (0, belly(zs) - 0.15, zs - 0.185), (0, -0.15, -1), 18, M['glass']))
     static.append(prims.revolve('pitot', col, [
         (0.0, 0.0), (0.03, 0.02), (0.022, 0.25), (0.012, 0.3), (0.012, 0.95), (0.0, 0.97)],
@@ -310,5 +324,3 @@ def build(M, col, groups):
             t = math.pi * 2 * a / 8
             soot.append(((side * NX + math.cos(t) * 1.02, NY + math.sin(t) * 1.02, 10.15), 0.42, 0.5))
     groups['marks'] = {'glows': glows, 'soot': soot}
-    groups['gear-pivots'] = {'gear-nose': (0.0, belly(-9.3), -9.3),
-                             'gear-main-stbd': (2.45, -0.72, 3.6), 'gear-main-port': (-2.45, -0.72, 3.6)}

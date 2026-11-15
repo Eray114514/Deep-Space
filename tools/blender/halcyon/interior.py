@@ -42,6 +42,17 @@ FINE_U = [j + 0.5 for j in list(range(0, 6)) + list(range(16, 21)) + list(range(
 class Kit:
     def __init__(self, M, col):
         self.M, self.col, self.parts = M, col, []
+        self.movers = {}
+        self.screens = []
+
+    def begin(self, name, pivot):
+        """everything added until end() becomes the moving node `name`"""
+        self._saved, self.parts, self._mover = self.parts, [], (name, tuple(pivot))
+
+    def end(self):
+        name, pivot = self._mover
+        self.movers[name] = (self.parts, pivot)
+        self.parts = self._saved
 
     def box(self, key, size, origin, bevel=0.01, rot=None, name='box', taper=None, tint=None, seg=2):
         o = prims.box(name, self.col, size, self.M[key], bevel=bevel, origin=origin, rot=rot,
@@ -422,9 +433,11 @@ def build_hold(kit):
     zt = 3.6
     kit.box('crateOrange', (0.34, 0.22, 0.46), (0, yr - 0.20, zt), bevel=0.03, name='crane-trolley')
     kit.rev('metalDark', [(0.0, 0.0), (0.09, 0.0), (0.09, 0.14), (0.0, 0.14)], (-0.07, yr - 0.38, zt), (1, 0, 0), 16, 'crane-drum')
+    kit.begin('crane-hook', (0, yr - 0.38, zt))
     kit.tube('metal', [(0, yr - 0.38, zt), (0, yr - 0.72, zt)], 0.008, 6, 'crane-cable')
     kit.box('paintYellow', (0.12, 0.12, 0.08), (0, yr - 0.76, zt), bevel=0.02, name='crane-block')
-    kit.tube('metalDark', [(0, yr - 0.80, zt), (0, yr - 0.90, zt), (0.05, yr - 0.95, zt), (0.07, yr - 0.90, zt)], 0.014, 8, 'crane-hook')
+    kit.tube('metalDark', [(0, yr - 0.80, zt), (0, yr - 0.90, zt), (0.05, yr - 0.95, zt), (0.07, yr - 0.90, zt)], 0.014, 8, 'hook-tube')
+    kit.end()
     # ---------------- cargo
     crate(kit, -1.42, 0.25, (1.10, 1.00, 1.20), 'crateGrey', tint=0.4)
     crate(kit, -1.42, 0.25, (0.80, 0.55, 0.90), 'crateOrange', y=1.0, rot_y=0.12, tint=0.6)
@@ -619,11 +632,71 @@ def build_labels(kit):
                     kit.bolt(p, -HOLD_S.normal(zz + dz, jf, side), 0.011)
 
 
+def door_leaves(kit, n, z, half_w, y1, chamfer, thick):
+    """two sliding leaves filling a portal; each slides sideways into the
+    bulkhead slab (the game moves them along x)"""
+    for sx in (-1, 1):
+        tag = 'door-%d-%s' % (n, 'stbd' if sx > 0 else 'port')
+        x0, x1 = 0.0, sx * (half_w + 0.03)
+        pts = [(x0, 0.0), (x1, 0.0), (x1, y1 - chamfer), (x1 - sx * chamfer, y1), (x0, y1)]
+        q = []
+        for zz in (z - thick / 2, z + thick / 2):
+            q.append(tuple((x, y, zz) for x, y in pts))
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            q.append(((a[0], a[1], z - thick / 2), (b[0], b[1], z - thick / 2), (b[0], b[1], z + thick / 2), (a[0], a[1], z + thick / 2)))
+        kit.begin(tag, (sx * half_w / 2, 0.0, z))
+        kit.quads('panelGrey', q, away=(sx * half_w / 2, y1 / 2, z), name='door-leaf')
+        for zz in (z - thick / 2 - 0.004, z + thick / 2 + 0.004):
+            kit.box('lampCyan', (0.012, y1 * 0.72, 0.006), (sx * 0.03, y1 * 0.45, zz), bevel=0.0, name='door-edge-lamp')
+            kit.box('panelDark', (half_w * 0.62, 0.36, 0.008), (sx * half_w * 0.55, 1.30, zz), bevel=0.003, name='door-window')
+            for k in range(3):
+                kit.box('paintYellow' if k % 2 == 0 else 'panelDark', (half_w * 0.9, 0.05, 0.006),
+                        (sx * half_w * 0.5, 0.10 + 0.05 * k, zz), bevel=0.0, name='door-kick')
+        kit.end()
+
+
+def dress_dynamic(kit):
+    """interior parts the game animates"""
+    # sliding doors at the flight-deck and hold bulkheads
+    door_leaves(kit, 1, MID_Z0 - 0.05, 0.74, 2.02, 0.22, 0.035)
+    door_leaves(kit, 2, (MID_Z1 + HOLD_Z0) / 2, 0.98, 2.10, 0.22, 0.045)
+    # extractor fans: two in the hold ceiling, one over the mid-deck
+    yT = HOLD['yTop']
+    fans = [((-0.85, yT, HOLD_Z0 + HOLD_BAY * 1.5), 0.22), ((0.85, yT, HOLD_Z0 + HOLD_BAY * 3.5), 0.22),
+            ((0.0, MID['yTop'], MID_Z0 + MID_BAY * 2.5), 0.16)]
+    for i, (c, r) in enumerate(fans):
+        c = Vector(c)
+        kit.rev('metalDark', [(r + 0.05, 0.0), (r + 0.05, -0.03), (r + 0.01, -0.04), (r + 0.01, -0.10), (r, -0.10), (r, 0.0)],
+                c, (0, 1, 0), 28, 'fan-housing')
+        kit.begin('fan-%d' % i, c - Vector((0, 0.07, 0)))
+        kit.rev('metal', [(0.0, -0.05), (0.045, -0.05), (0.05, -0.085), (0.0, -0.09)], c, (0, 1, 0), 16, 'fan-hub')
+        for k in range(7):
+            a = 2 * math.pi * k / 7
+            rot = Matrix.Rotation(a, 3, 'Y') @ Matrix.Rotation(math.radians(28), 3, 'X')
+            kit.box('metalDark', (r * 0.82, 0.006, 0.07), c + Matrix.Rotation(a, 3, 'Y') @ Vector((r * 0.5, -0.07, 0)),
+                    bevel=0.0, rot=rot, name='fan-blade')
+        kit.end()
+        for k in range(5):
+            kit.box('metal', (2 * r + 0.02, 0.008, 0.012), c + Vector((0, -0.105, -r + r * k / 2)), bevel=0.0, name='fan-grille')
+    # cabin light switch on the environment panel
+    w = MID['w']
+    za = MID_Z0 + MID_BAY * 4.5
+    base = Vector((-(w - 0.04), 1.05, za + 0.12))
+    kit.box('panelGrey', (0.02, 0.11, 0.07), base, bevel=0.006, name='switch-plate')
+    kit.label('CABIN', 0.022, base + Vector((0.012, 0.075, 0)), (0, 0, -1), (0, 1, 0), 'decalLight')
+    kit.begin('light-switch', base + Vector((0.012, 0, 0)))
+    kit.box('metal', (0.03, 0.06, 0.02), base + Vector((0.02, 0.0, 0)), bevel=0.006, name='switch-rocker')
+    kit.box('btnAmber', (0.004, 0.01, 0.01), base + Vector((0.036, 0.018, 0)), bevel=0.0, name='switch-tell')
+    kit.end()
+
+
 def build(M, col, cockpit_outline):
     kit = Kit(M, col)
+    dress_dynamic(kit)
     build_mid(kit)
     build_hold(kit)
     build_bulkheads(kit, cockpit_outline)
     dress_mid(kit)
     build_labels(kit)
-    return kit.parts
+    return kit.parts, kit.movers

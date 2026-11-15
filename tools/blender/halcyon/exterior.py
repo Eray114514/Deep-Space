@@ -207,20 +207,52 @@ def build_nacelle(M, col, mirror):
 def build_wing(M, col, mirror):
     S = LoftSurface(WING_KEYS, axes=('y', 'z', 'x'), mirror=mirror)
     tag = 'port' if mirror else 'stbd'
-    seams = [('l', 11.0, 5.3, 9.9), ('l', 16.0, 3.3, 10.6), ('l', 27.0, 3.3, 10.6)]
-    seams += [('r', x, 0.0, 27.0) for x in (4.9, 6.2, 7.5, 8.85)]
-    seams += [('r', x, 0.0, 11.0) for x in (5.3, 9.9)]
-    seams += [('r', x, 0.0, 27.0) for x in (9.25, 9.55)]
+    seams = [('l', 16.0, 3.3, 10.6), ('l', 27.0, 3.3, 10.6)]
+    seams += [('r', x, 11.0, 27.0) for x in (6.2, 7.5, 8.85)] + [('r', 4.9, 0.0, 27.0)]
+    seams += [('r', x, 11.0, 27.0) for x in (9.25, 9.55)]
+    FX0, FX1, FJ = 5.3, 9.9, 11.0
+
+    def in_flap(x, jf):
+        return FX0 < x < FX1 and jf < FJ
 
     def region(x, jf, side):
+        if in_flap(x, jf):
+            return None
         if jf > 27.0 or x > 10.2:
             return 'hullDark'
         if 9.25 < x < 9.55:
             return 'accent'
         return 'hull'
 
-    return [S.build('wing-' + tag, col, seams=seams, region=region, mats=M,
-                    cap_end=True, ring_step=0.45)]
+    xs = [FX0 + (FX1 - FX0) * k / 10 for k in range(11)]
+    js = [FJ * k / 8 for k in range(9)]
+    wing = S.build('wing-' + tag, col, seams=seams, region=region, mats=M, cap_end=True, ring_step=0.45,
+                   z_extra=(FX0, FX1), u_extra=(FJ,))
+    flap = S.build('flap-' + tag, col, seams=[('r', 7.6, 0.0, FJ)], mats=M, ring_step=0.45,
+                   region=lambda x, jf, side: 'hullGrey' if in_flap(x, jf) else None,
+                   z_extra=(FX0, FX1), u_extra=(FJ,))
+    mid = lambda x, j: (S.point(x, j, 1) + S.point(x, j, -1)) / 2  # noqa: E731
+
+    def closure(away):
+        q = prims.strip_between([S.point(x, FJ, 1) for x in xs], [S.point(x, FJ, -1) for x in xs])
+        for x in (FX0, FX1):
+            up = [S.point(x, j, 1) for j in js]
+            lo = [S.point(x, j, -1) for j in js]
+            q.append((up[0], up[1], lo[1]))
+            q += prims.strip_between(up[1:], lo[1:])
+        return q
+
+    flap_skin = prims.quads('flap-closure', col, closure(None), M['hullGrey'], away_from=mid(7.6, 5.0))
+    slot = []
+    for (pts, away) in ((prims.strip_between([S.point(x, FJ, 1) for x in xs], [S.point(x, FJ, -1) for x in xs]),
+                         mid(7.6, 17.0)),):
+        slot.append(prims.quads('flap-slot', col, pts, M['metalDark'], away_from=away))
+    for x, ax in ((FX0, FX0 - 0.6), (FX1, FX1 + 0.4)):
+        up = [S.point(x, j, 1) for j in js]
+        lo = [S.point(x, j, -1) for j in js]
+        q = [(up[0], up[1], lo[1])] + prims.strip_between(up[1:], lo[1:])
+        slot.append(prims.quads('flap-slot', col, q, M['metalDark'], away_from=mid(ax, 5.0)))
+    return [wing] + slot, [flap, flap_skin], tuple(mid(FX0, FJ)), tuple(mid(FX1, FJ))
 
 
 def build_canard(M, col, mirror):
@@ -265,12 +297,13 @@ def build_engine(M, col, e, idx):
     ], (x, y), mat=M['metalDark'], segs=56))
     # variable-area petals around the shroud
     n = 18 if e['main'] else 10
+    petals = []
     for k in range(n):
         t = 2 * math.pi * (k + 0.5) / n
         c, s = math.cos(t), math.sin(t)
         rot = Matrix((Vector((-s, c, 0)), Vector((c, s, 0)), Vector((0, 0, 1)))).transposed()
         w = 2 * math.pi * r * 1.10 / n * 0.86
-        out.append(prims.box('eng%d-petal' % idx, col, (w, r * 0.035, L * 0.30), M['heat'],
+        petals.append(prims.box('eng%d-petal' % idx, col, (w, r * 0.035, L * 0.30), M['heat'],
                              bevel=r * 0.008,
                              origin=(x + c * r * 1.115, y + s * r * 1.115, z + L * 0.15),
                              rot=rot, tint=(k * 0.37) % 1.0))
@@ -311,7 +344,7 @@ def build_engine(M, col, e, idx):
         out.append(prims.tube('eng%d-actuator' % idx, col, [
             (x + c * r * 1.16, y + s * r * 1.16, z - 0.34), (x + c * r * 1.145, y + s * r * 1.145, z + L * 0.10)],
             r * 0.014, M['chrome'], 6))
-    return out
+    return out, petals
 
 
 def build_plates(M, col):
@@ -349,16 +382,26 @@ def build_plates(M, col):
 def build(M):
     from . import exterior_detail as detail
     col = collection('exterior')
-    groups = {'exterior': [build_hull(M, col)], 'ramp': build_ramp(M, col)}
+    groups = {'exterior': [build_hull(M, col)], 'ramp': build_ramp(M, col),
+              'pivots': {'ramp': (0, DIMS['rampHingeY'], DIMS['rampHingeZ'])}, 'empties': []}
     static = groups['exterior']
+    pivots = groups['pivots']
     for mirror in (False, True):
         static += build_nacelle(M, col, mirror)
-        static += build_wing(M, col, mirror)
+        wing, flap, hinge_a, hinge_b = build_wing(M, col, mirror)
+        tag = 'port' if mirror else 'stbd'
+        static += wing
+        groups['flap-' + tag] = flap
+        pivots['flap-' + tag] = hinge_a
+        groups['empties'].append(('flap-%s-axis' % tag, hinge_b))
         static += build_canard(M, col, mirror)
         static += build_cant(M, col, mirror)
     static += build_fin(M, col)
     for i, e in enumerate(ENGINES):
-        static += build_engine(M, col, e, i)
+        parts, petals = build_engine(M, col, e, i)
+        static += parts
+        groups['petals-%d' % i] = petals
+        pivots['petals-%d' % i] = (e['x'], e['y'], e['z'])
     static += build_plates(M, col)
     detail.build(M, col, groups)
     return groups

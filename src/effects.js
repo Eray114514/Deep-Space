@@ -280,6 +280,17 @@ export class Ship {
 
     this.group.add(this.ext.group);
     this.group.add(this.int.group);
+    /* night watch lighting: dim red fill that takes over when the cabin
+       lights are switched down (see toggleCabinLights) */
+    for (const [x, y, z, intensity] of [[0, 1.85, -7.4, 1.6], [0, 2.0, -3.0, 2.4], [0, 2.3, 2.6, 3.2]]) {
+      const light = new THREE.PointLight(0xff2a12, intensity, 6.5, 2);
+      light.position.set(x, y, z);
+      light.userData.night = true;
+      this.int.group.add(light);
+    }
+    this.cabinNight = false;
+    this.cabinLightT = 1;
+    this.animT = 0;
     this.interiorLights = [];
     this.int.group.traverse((object) => {
       if (!object.isLight) return;
@@ -503,15 +514,23 @@ export class Ship {
         radiance?.components?.reflections === false ? 0 : envScale);
     }
     for (const material of [...this.cabinMaterials, ...this.cockpitMaterials]) {
+      // the zone probes were rendered with the cabin lit: dim them with it
       setMaterialEnvironmentIntensity(material,
-        radiance?.components?.reflections === false ? 0 : 1);
+        radiance?.components?.reflections === false ? 0 : THREE.MathUtils.lerp(0.12, 1, this.cabinLightT ?? 1));
       if (material.userData?.interiorIndirectScale) {
-        material.userData.interiorIndirectScale.value = radiance?.components?.indirect === false ? 0 : 1;
+        material.userData.interiorIndirectScale.value = (radiance?.components?.indirect === false ? 0 : 1)
+          * THREE.MathUtils.lerp(0.10, 1, this.cabinLightT ?? 1);
       }
     }
+    const cabin = this.cabinLightT ?? 1;
     for (const light of this.interiorLights || []) {
+      const level = light.userData.night ? 1 - cabin : THREE.MathUtils.lerp(0.08, 1, cabin);
       light.intensity = (light.userData.radianceBaseIntensity ?? light.intensity)
-        * (radiance?.components?.localLights === false ? 0 : 1);
+        * (radiance?.components?.localLights === false ? 0 : 1) * level;
+    }
+    for (const material of [...(this.cabinMaterials || []), ...(this.cockpitMaterials || [])]) {
+      if (material.userData.lampBase === undefined || !/^lamp(Warm|Cool|Strip)$/.test(material.name)) continue;
+      material.emissiveIntensity = material.userData.lampBase * THREE.MathUtils.lerp(0.04, 1, cabin);
     }
   }
 
@@ -617,11 +636,110 @@ export class Ship {
   updateGear(dt) {
     if (!this.ext?.gear) return;
     const want = THREE.MathUtils.smoothstep(this.parkAmt, 0.35, 0.85);
-    this.gearT = THREE.MathUtils.lerp(this.gearT ?? want, want, 1 - Math.exp(-Math.max(0, dt) * 6));
+    this.gearT = THREE.MathUtils.lerp(this.gearT ?? want, want, 1 - Math.exp(-Math.max(0, dt) * 3.2));
+    /* bay doors swing first, then the leg drops and unfolds; retraction runs
+       the same timeline backwards, so the doors shut behind the stowed leg */
+    const doorT = THREE.MathUtils.smoothstep(this.gearT, 0.0, 0.35);
+    const legT = THREE.MathUtils.smoothstep(this.gearT, 0.3, 1.0);
     for (const leg of this.ext.gear) {
-      leg.visible = this.gearT > 0.02;
-      leg.position.y = leg.userData.deployedY + (1 - this.gearT) * 0.78;
+      const stowed = 1 - legT;
+      leg.visible = doorT > 0.04;
+      leg.position.y = leg.userData.deployedY + stowed * 0.55;
+      if (leg.userData.nose) leg.rotation.set(stowed * 0.9, 0, 0);
+      else leg.rotation.set(-stowed * 0.35, 0, -leg.userData.side * stowed * 0.55);
+      for (const door of leg.userData.doors) {
+        _gq.setFromAxisAngle(_gz, door.userData.side * -1.815 * (1 - doorT));
+        door.quaternion.copy(door.userData.baseQuat).premultiply(_gq);
+      }
     }
+  }
+
+  /** petals, ailerons and the sensor turret */
+  updateMotion(dt) {
+    if (!this.ext) return;
+    this.animT = (this.animT ?? 0) + Math.max(0, dt);
+    const iris = 0.93 + 0.08 * THREE.MathUtils.clamp(this.enginePower / 1.7, 0, 1);
+    for (const ring of this.ext.petals || []) ring.scale.set(iris, iris, 1);
+    // ailerons follow the visual bank and pitch; they droop when parked
+    for (const flap of this.ext.flaps || []) {
+      const angle = THREE.MathUtils.clamp(
+        flap.userData.side * this.roll * 2.6 + (this.lookPitch ?? 0) * 9 - this.parkAmt * 0.22, -0.4, 0.4);
+      this.flapAngles ??= new Map();
+      const prev = this.flapAngles.get(flap) ?? angle;
+      const eased = THREE.MathUtils.lerp(prev, angle, 1 - Math.exp(-Math.max(0, dt) * 8));
+      this.flapAngles.set(flap, eased);
+      flap.quaternion.setFromAxisAngle(flap.userData.axis, eased);
+    }
+    if (this.ext.sensor) {
+      const t = this.animT;
+      this.ext.sensor.rotation.set(0, Math.sin(t * 0.23) * 1.3 + Math.sin(t * 0.61) * 0.3, 0);
+    }
+  }
+
+  /** switch the cabin between normal and night-watch lighting */
+  toggleCabinLights() {
+    this.cabinNight = !this.cabinNight;
+    return this.cabinNight;
+  }
+
+  /**
+   * Everything inside that moves: doors that open for the walker, fans,
+   * the crane hook swinging with the ship, the light switch, the stick and
+   * throttle, and the live displays.
+   */
+  updateInterior(dt, view, telemetry = null) {
+    if (!this.int) return;
+    const step = Math.max(0, dt);
+    this.cabinLightT = THREE.MathUtils.lerp(this.cabinLightT ?? 1, this.cabinNight ? 0 : 1, 1 - Math.exp(-step * 2.5));
+    const walking = !!view?.shipwalk;
+    const p = view?.walkPos;
+    for (const door of this.int.doors || []) {
+      const near = walking && p && Math.hypot(p.x, p.z - door.position.z) < 2.1;
+      const open = THREE.MathUtils.lerp(door.userData.openT ?? 0, near ? 1 : 0, 1 - Math.exp(-step * (near ? 7 : 3.5)));
+      door.userData.openT = open;
+      door.position.x = door.userData.closedX + door.userData.side * door.userData.travel * open * open * (3 - 2 * open);
+    }
+    for (const fan of this.int.fans || []) fan.rotation.y += step * 11;
+    // crane hook: a damped pendulum driven by the hull's apparent motion
+    if (this.int.hook) {
+      const h = this.hookState ??= { x: 0, z: 0, vx: 0, vz: 0 };
+      const tx = THREE.MathUtils.clamp(-(this.thrustPose ?? 0) * 0.35 + (this.lookPitch ?? 0) * 6, -0.5, 0.5);
+      const tz = THREE.MathUtils.clamp(this.roll * 2.2, -0.5, 0.5);
+      for (const [a, v, target] of [['x', 'vx', tx], ['z', 'vz', tz]]) {
+        h[v] += ((target - h[a]) * 9.0 - h[v] * 0.6) * step;
+        h[a] += h[v] * step;
+      }
+      this.int.hook.rotation.set(h.x, 0, h.z);
+    }
+    if (this.int.lightSwitch) this.int.lightSwitch.rotation.z = THREE.MathUtils.lerp(-0.3, 0.3, this.cabinLightT);
+    const input = this.lastInput;
+    const cockpit = this.int.cockpit;
+    if (cockpit?.stick) {
+      const sx = THREE.MathUtils.clamp(input?.pitch || 0, -1, 1), sz = THREE.MathUtils.clamp(input?.yaw || 0, -1, 1);
+      this.stickPose = this.stickPose ?? new THREE.Vector2();
+      this.stickPose.lerp(_sv2.set(sx, sz), 1 - Math.exp(-step * 12));
+      cockpit.stick.rotation.set(this.stickPose.x * 0.22, 0, -this.stickPose.y * 0.22);
+    }
+    if (cockpit?.throttle) {
+      const thrust = THREE.MathUtils.clamp((input?.throttle || 0) * 0.5 + (this.thrustPose ?? 0) * 0.5, -1, 1);
+      cockpit.throttle.rotation.x = THREE.MathUtils.lerp(cockpit.throttle.rotation.x, -thrust * 0.45, 1 - Math.exp(-step * 8));
+    }
+    this.updateDisplays(step, telemetry, walking || view?.isCockpit?.());
+  }
+
+  /** redraw the cockpit pages from live telemetry, a page at a time */
+  updateDisplays(dt, telemetry, active) {
+    const pages = (this.mats?.screens || []).filter((material) => material.map?.userData?.redraw);
+    if (!active || !pages.length) return;
+    this.displayClock = (this.displayClock ?? 0) + dt;
+    if (this.displayClock < 0.1) return;
+    this.displayClock = 0;
+    this.displayTick = (this.displayTick ?? 0) + 1;
+    const attitude = pages.find((material) => material.name === 'screen-attitude');
+    const others = pages.filter((material) => material !== attitude);
+    const page = attitude && this.displayTick % 2 === 0 ? attitude : others[(this.displayTick >> 1) % others.length];
+    if (!page) return;
+    page.map.userData.redraw({ ...(telemetry || {}), power: this.enginePower, time: this.animT });
   }
 
   update(dt, nav, state, speed, warp, boost = 0, flightInput = null, camera = null) {
@@ -702,8 +820,10 @@ export class Ship {
       this.group.quaternion.copy(formQuat);
     }
 
+    this.lastInput = flightInput;
     this.updateEngineFx(dt, speed, warp, boost);
     this.updateGear(dt);
+    this.updateMotion(dt);
     // the cabin probes are baked in ship space: turn them with the hull
     if (this.probes) {
       _probeEuler.setFromQuaternion(_sq.copy(this.group.quaternion).invert());
@@ -731,6 +851,9 @@ export class Ship {
   }
 }
 const _sq2 = new THREE.Quaternion();
+const _gq = new THREE.Quaternion();
+const _gz = new THREE.Vector3(0, 0, 1);
+const _sv2 = new THREE.Vector2();
 const _probeEuler = new THREE.Euler();
 const _sp = new THREE.Vector3();
 

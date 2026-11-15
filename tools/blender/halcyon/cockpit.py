@@ -164,8 +164,10 @@ def build_seat(kit):
     kit.box('metal', (0.10, 0.03, 0.05), bc + back @ Vector((0, -0.05, -0.058)), bevel=0.008, rot=back, name='harness-buckle')
     # sidestick on the right armrest, throttle on the left console (see consoles)
     kit.rev('rubber', [(0.0, 0.0), (0.035, 0.0), (0.03, 0.03), (0.0, 0.03)], (0.335, 0.722, z - 0.20), (0, 1, 0), 12, 'stick-boot')
+    kit.begin('stick', (0.335, 0.735, z - 0.20))
     kit.box('panelDark', (0.034, 0.13, 0.04), (0.335, 0.80, z - 0.21), bevel=0.012, rot=_rx(-12), name='stick-grip')
     kit.box('btnAmber', (0.012, 0.012, 0.012), (0.335, 0.862, z - 0.235), bevel=0.003, name='stick-hat')
+    kit.end()
 
 
 def build_panels(kit):
@@ -225,12 +227,14 @@ def build_panels(kit):
     # throttle quadrant on the port console
     tq = Vector((-0.80, 0.642, -7.72))
     kit.box('metalDark', (0.22, 0.05, 0.30), tq + Vector((0, 0.02, 0)), bevel=0.012, name='throttle-base')
+    kit.begin('throttle', tq + Vector((0, 0.045, 0)))
     for k, dx in enumerate((-0.045, 0.045)):
         lev = _rx(-28 + 8 * k)
         kit.box('metal', (0.014, 0.16, 0.022), tq + Vector((dx, 0.045, 0)) + lev @ Vector((0, 0.08, 0)), bevel=0.004, rot=lev,
                 name='throttle-lever')
         kit.box('panelDark', (0.06, 0.035, 0.045), tq + Vector((dx, 0.045, 0)) + lev @ Vector((0, 0.17, 0)), bevel=0.012, rot=lev,
                 name='throttle-grip')
+    kit.end()
     # trackball on the starboard console
     kit.rev('panelGrey', [(0.0, 0.0), (0.03, 0.006), (0.036, 0.02), (0.03, 0.034), (0.0, 0.04)], (0.80, 0.642, -7.74), (0, 1, 0), 16,
             'trackball')
@@ -378,4 +382,4 @@ def build(M, col):
     build_seat(kit)
     build_panels(kit)
     build_dressing(kit)
-    return kit.parts, kit.screens, outline(CZ1)
+    return kit.parts, kit.screens, outline(CZ1), kit.movers

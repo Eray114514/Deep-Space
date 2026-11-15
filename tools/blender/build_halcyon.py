@@ -23,13 +23,20 @@ t0 = time.time()
 scene = common.reset_scene()
 M = mats.library(debug='--export' not in argv and '--nodebug' not in argv)
 groups = exterior.build(M)
-gear_pivots = groups.pop('gear-pivots')
+pivots = groups.pop('pivots')
+empties = groups.pop('empties')
 marks = groups.pop('marks')
 icol = common.collection('interior')
-cockpit_parts, screens, cockpit_outline = cockpit.build(M, icol)
+cockpit_parts, screens, cockpit_outline, cockpit_movers = cockpit.build(M, icol)
 groups['cockpit'] = cockpit_parts
 groups['screens'] = screens
-groups['interior'] = interior.build(M, icol, cockpit_outline)
+interior_parts, interior_movers = interior.build(M, icol, cockpit_outline)
+groups['interior'] = interior_parts
+INSIDE = ['cockpit', 'interior']
+for name, (objs, pivot) in {**cockpit_movers, **interior_movers}.items():
+    groups[name] = objs
+    pivots[name] = pivot
+    INSIDE.append(name)
 for k, objs in groups.items():
     tris = sum(sum(len(p.vertices) - 2 for p in o.data.polygons) for o in objs)
     print('  %-16s %4d objects %7d tris' % (k, len(objs), tris))
@@ -82,14 +89,14 @@ if '--export' in argv:
     if '--nobake' not in argv:
         bake.setup(scene, 96)
         probe.render(scene, out)
-    nodes = export.finalize(groups, gear_pivots, marks['glows'])
+    nodes = export.finalize(groups, pivots, list(empties) + list(marks['glows']))
     for node in nodes.values():
         if node.type == 'MESH':
             bake.bake_wear(node)
     if '--nobake' not in argv:
         tb = time.time()
-        bake.bake_irradiance(scene, [nodes['cockpit'], nodes['interior']], samples=int(arg('--samples', 192)))
-        bake.bake_occlusion(scene, [nodes[k] for k in ('exterior', 'ramp', 'gear-nose', 'gear-main-stbd', 'gear-main-port')])
+        bake.bake_irradiance(scene, [nodes[k] for k in INSIDE if k in nodes], samples=int(arg('--samples', 192)))
+        bake.bake_occlusion(scene, [n for k, n in nodes.items() if n.type == 'MESH' and k not in INSIDE])
         bake.bake_soot(nodes['exterior'], marks['soot'])
         print('baked in %.1fs' % (time.time() - tb))
     export.write(os.path.join(out, 'halcyon.raw.glb'))

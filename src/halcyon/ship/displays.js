@@ -12,6 +12,15 @@ const INK = '#6fe3ff', AMBER = '#ffb454', GREEN = '#7dffb0', RED = '#ff5a4a';
 const DIM = 'rgba(111,227,255,0.38)', GRID = 'rgba(111,227,255,0.13)', BG = '#02070b';
 const FONT = (px, weight = 600) => `${weight} ${px}px "Segoe UI", "Helvetica Neue", Arial, sans-serif`;
 
+/** the values a page shows when nothing live is supplied */
+export const IDLE = Object.freeze({
+  speed: 0, alt: Infinity, heading: 0, pitch: 0, roll: 0, power: 0.1,
+  hull: 1, shield: 0.88, fuel: 0.71, gun: 1, time: 0, atmosphere: 0,
+});
+
+const fmtAlt = (m) => (!Number.isFinite(m) ? '----' : m >= 1e5 ? `${Math.round(m / 1000)}` : (m / 1000).toFixed(1));
+const fmtSpd = (v) => (v >= 1e4 ? `${(v / 1000).toFixed(1)}K` : `${Math.round(v)}`);
+
 /** deterministic RNG so the pages are identical every load */
 function rng(seed) {
   let s = seed >>> 0;
@@ -67,13 +76,13 @@ function frame(g, W, H, title, keys) {
   });
 }
 
-function attitude(g, W, H) {
+function attitude(g, W, H, s = IDLE) {
   frame(g, W, H, 'PFD', ['*ATT', 'HSI', 'VNAV', 'APP', 'TCAS', 'MENU']);
   const cx = W / 2, cy = H / 2 + 4, R = Math.min(W * 0.27, H * 0.33);
   g.save();
   g.beginPath(); g.rect(cx - R * 1.25, cy - R, R * 2.5, R * 2); g.clip();
-  g.translate(cx, cy); g.rotate(-0.10);
-  const pitch = 26;
+  g.translate(cx, cy); g.rotate(-s.roll);
+  const pitch = Math.max(-40, Math.min(40, s.pitch * 180 / Math.PI)) * 7;
   g.fillStyle = '#0c2a44'; g.fillRect(-W, -H + pitch, W * 2, H);
   g.fillStyle = '#2a1c10'; g.fillRect(-W, pitch, W * 2, H);
   g.strokeStyle = '#e8f6ff'; g.lineWidth = 3;
@@ -106,25 +115,25 @@ function attitude(g, W, H) {
     for (let i = -4; i <= 4; i++) {
       const y = cy - i * (h / 9);
       g.fillStyle = DIM; g.fillRect(x + (x < cx ? w - 14 : 0), y - 1, 14, 2);
-      if (i) text(g, String(value + i * step), x + w / 2, y, 19, DIM, 'center');
+      if (i && typeof value === 'number') text(g, String(Math.max(0, Math.round(value / step) * step + i * step)), x + w / 2, y, 19, DIM, 'center');
     }
     g.fillStyle = BG; g.fillRect(x - 4, cy - 22, w + 8, 44);
     g.strokeStyle = AMBER; g.lineWidth = 2; g.strokeRect(x - 4, cy - 22, w + 8, 44);
-    text(g, String(value), x + w / 2, cy, 27, AMBER, 'center', 700);
+    text(g, typeof value === 'number' ? String(Math.round(value)) : value, x + w / 2, cy, 27, AMBER, 'center', 700);
     text(g, label, x + w / 2, top - 18, 18, INK, 'center');
     text(g, unit, x + w / 2, top + h + 18, 16, DIM, 'center');
   };
-  tape(cx - R * 1.25 - W * 0.13 - 14, 'SPD', 412, 20, 'M/S');
-  tape(cx + R * 1.25 + 14, 'ALT', 8620, 100, 'KM');
-  text(g, 'HDG 274', cx, cy + R + 24, 22, GREEN, 'center');
+  tape(cx - R * 1.25 - W * 0.13 - 14, 'SPD', s.speed < 1e4 ? s.speed : fmtSpd(s.speed), s.speed < 1e4 ? 20 : 1, 'M/S');
+  tape(cx + R * 1.25 + 14, 'ALT', fmtAlt(s.alt), 1, 'KM');
+  text(g, `HDG ${String(Math.round((s.heading % 360 + 360) % 360)).padStart(3, '0')}`, cx, cy + R + 24, 22, GREEN, 'center');
   text(g, 'AP  ATT HOLD', 24, 78, 19, GREEN);
   text(g, 'G 1.02', W - 24, 78, 19, INK, 'right');
 }
 
-function radar(g, W, H) {
+function radar(g, W, H, s = IDLE) {
   frame(g, W, H, 'TACTICAL', ['RNG-', 'RNG+', '*PLOT', 'IFF', 'TRK', 'MENU']);
   const rand = rng(41), cx = W * 0.44, cy = H / 2 + 2, R = Math.min(W * 0.36, H * 0.38);
-  const sweep = g.createConicGradient(-0.9, cx, cy);
+  const sweep = g.createConicGradient(-0.9 + s.time * 1.6, cx, cy);
   sweep.addColorStop(0, 'rgba(111,227,255,0.30)'); sweep.addColorStop(0.12, 'rgba(111,227,255,0)'); sweep.addColorStop(1, 'rgba(111,227,255,0)');
   g.fillStyle = sweep; g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fill();
   g.strokeStyle = DIM; g.lineWidth = 2;
@@ -157,7 +166,7 @@ function radar(g, W, H) {
   rows.forEach(([id, d, col], i) => text(g, `${id}   ${d.padStart(4, ' ')}`, lx, 116 + i * 30, 19, col, 'center'));
 }
 
-function nav(g, W, H) {
+function nav(g, W, H, s = IDLE) {
   frame(g, W, H, 'NAV  /  SYSTEM', ['SYS', '*ROUTE', 'WPT', 'ORB', 'FUEL', 'MENU']);
   const sx = W * 0.26, sy = H * 0.52;
   const glow = g.createRadialGradient(sx, sy, 0, sx, sy, 60);
@@ -191,7 +200,7 @@ function nav(g, W, H) {
     });
 }
 
-function systems(g, W, H) {
+function systems(g, W, H, s = IDLE) {
   frame(g, W, H, 'SHIP  STATUS', ['*SYS', 'PWR', 'ECLSS', 'HULL', 'DOORS', 'MENU']);
   const cx = W * 0.30, cy = H * 0.50 + 6, sc = (H - 150) / 28.5;
   planPath(g, cx, cy + 2.3 * sc, sc);
@@ -210,8 +219,13 @@ function systems(g, W, H) {
   zone(-3.6, 6.0, 2.0, 9.0, GREEN, 'E1');
   zone(3.6, 6.0, 2.0, 9.0, GREEN, 'E2');
   const lx = W * 0.60, bw = W * 0.34;
-  [['MAIN BUS', 0.92, GREEN, '28.1 V'], ['REACTOR', 0.74, GREEN, '74 %'], ['PROPELLANT', 0.71, GREEN, '71 %'], ['COOLANT', 0.46, AMBER, '46 %'],
-    ['CABIN O2', 0.98, GREEN, '20.9 %'], ['HULL', 1.0, GREEN, '100 %'], ['SHIELD', 0.88, INK, '88 %']].forEach(([k, v, col, val], i) => {
+  const pct = (v) => `${Math.round(v * 100)} %`;
+  const reactor = Math.min(1, 0.35 + s.power * 0.4);
+  const coolant = Math.min(1, 0.30 + s.power * 0.32);
+  [['MAIN BUS', 0.92, GREEN, '28.1 V'], ['REACTOR', reactor, reactor > 0.85 ? AMBER : GREEN, pct(reactor)],
+    ['PULSE CELL', s.fuel, s.fuel < 0.25 ? AMBER : GREEN, pct(s.fuel)], ['COOLANT', coolant, coolant > 0.7 ? AMBER : GREEN, pct(coolant)],
+    ['CABIN O2', 0.98, GREEN, '20.9 %'], ['HULL', s.hull, s.hull < 0.5 ? RED : GREEN, pct(s.hull)],
+    ['SHIELD', s.shield, INK, pct(s.shield)]].forEach(([k, v, col, val], i) => {
     const y = 96 + i * ((H - 190) / 7);
     text(g, k, lx, y, 18, DIM);
     text(g, val, lx + bw, y, 19, col, 'right', 700);
@@ -220,7 +234,7 @@ function systems(g, W, H) {
   });
 }
 
-function comms(g, W, H) {
+function comms(g, W, H, s = IDLE) {
   frame(g, W, H, 'COMMS', ['*VHF', 'DEEP', 'DATA', 'XPDR', 'REC', 'MENU']);
   const rand = rng(77);
   [['TRAFFIC', '121.500', GREEN, 4], ['APPROACH', '134.275', INK, 3], ['*COMPANY', '248.900', AMBER, 5], ['BEACON', '406.025', INK, 2], ['GUARD', '243.000', DIM, 0]]
@@ -237,7 +251,7 @@ function comms(g, W, H) {
   g.strokeStyle = AMBER; g.lineWidth = 2; g.beginPath();
   for (let i = 0; i <= 90; i++) {
     const x = x0 + 6 + (w - 12) * i / 90, env = Math.sin(i / 90 * Math.PI) * (0.35 + 0.65 * Math.abs(Math.sin(i * 0.21)));
-    const y = y0 + h * 0.56 + (rand() - 0.5) * h * 0.62 * env;
+    const y = y0 + h * 0.56 + Math.sin(i * 1.7 + s.time * 9.0) * Math.cos(i * 0.43 - s.time * 4.0) * h * 0.31 * env;
     i ? g.lineTo(x, y) : g.moveTo(x, y);
   }
   g.stroke();
@@ -253,14 +267,22 @@ export function displayTexture(page, aspect = 1.5) {
   canvas.width = W;
   canvas.height = H;
   const g = canvas.getContext('2d');
-  (PAGES[page] || systems)(g, W, H);
-  // faint scanlines and a vignette: a panel, not a printout
-  g.fillStyle = 'rgba(0,0,0,0.13)';
-  for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1.5);
-  const v = g.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, W * 0.62);
-  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.42)');
-  g.fillStyle = v; g.fillRect(0, 0, W, H);
+  const draw = (state) => {
+    (PAGES[page] || systems)(g, W, H, state);
+    // faint scanlines and a vignette: a panel, not a printout
+    g.fillStyle = 'rgba(0,0,0,0.13)';
+    for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1.5);
+    const v = g.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, W * 0.62);
+    v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.42)');
+    g.fillStyle = v; g.fillRect(0, 0, W, H);
+  };
+  draw(IDLE);
   const texture = new THREE.CanvasTexture(canvas);
+  /* live pages: Ship redraws one display at a time from flight telemetry */
+  texture.userData.redraw = (state) => {
+    draw({ ...IDLE, ...state });
+    texture.needsUpdate = true;
+  };
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = 8;
   texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;

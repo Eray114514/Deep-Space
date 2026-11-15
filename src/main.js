@@ -971,6 +971,9 @@ const _velActual = new THREE.Vector3();
 // ---- temps ------------------------------------------------------------------
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _shipUp = new THREE.Vector3();
+const _shipFwd = new THREE.Vector3();
+const _shipRight = new THREE.Vector3();
 const _ex4 = new THREE.Vector4();
 const _v3 = new THREE.Vector3();
 const _v4 = new THREE.Vector3();
@@ -4634,6 +4637,7 @@ function frame(rafTs) {
   // camera-relative placement. shipView.tick runs first: while the interior
   // owns the camera it exports nav (the walk stance) before anything reads it.
   shipView.tick(dt, { nav, landed: !!ship.parkedPosUniv && ship.parkAmt > 0.98 });
+  ship.updateInterior(dt, shipView, ship.telemetry);
   // sitting back down returns the camera to flight (cockpit view, state space)
   if (state === 'shipwalk' && !shipView.shipwalk && !paused) setState('space');
   universe.updateRelative(nav.pos);
@@ -4823,6 +4827,27 @@ function frame(rafTs) {
   _v.set(0, 0, -1).applyQuaternion(nav.quat);
   const headingDeg = Math.atan2(_v.x, -_v.z) * 180 / Math.PI;
   ui.setHeading(headingDeg);
+  // cockpit displays read the same numbers the HUD shows
+  {
+    const t = ship.telemetry ??= {};
+    t.speed = spd;
+    t.alt = telemetryAltitude;
+    t.heading = (headingDeg + 360) % 360;
+    t.shield = flightPower.shield;
+    t.gun = flightPower.weapon;
+    t.fuel = PULSE_FUEL_MAX > 0 ? pulseFuel / PULSE_FUEL_MAX : 1;
+    t.atmosphere = envInAtmo;
+    if (nearest) {
+      _shipUp.copy(nav.pos).sub(nearest.posUniv).normalize();
+      _shipFwd.set(0, 0, -1).applyQuaternion(nav.quat);
+      _shipRight.set(1, 0, 0).applyQuaternion(nav.quat);
+      t.pitch = Math.asin(clamp(_shipFwd.dot(_shipUp), -1, 1));
+      t.roll = Math.atan2(-_shipRight.dot(_shipUp), _shipFwd.set(0, 1, 0).applyQuaternion(nav.quat).dot(_shipUp));
+    } else {
+      t.pitch = 0;
+      t.roll = 0;
+    }
+  }
 
   // the survey watch owns the bottom-left corner while on foot: local solar
   // time, day/night terminator, local atmospheric pressure / cell charge and

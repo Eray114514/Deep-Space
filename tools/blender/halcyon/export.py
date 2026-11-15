@@ -39,21 +39,21 @@ def join_group(name, objs, pivot=None):
     return obj
 
 
-def finalize(groups, gear_pivots, glows=()):
+def finalize(groups, pivots, empties=()):
+    """One node per group; a group with a pivot is re-origined there so the
+    game can turn or slide it about that point."""
     nodes = {}
-    nodes['exterior'] = join_group('exterior', groups['exterior'])
-    nodes['ramp'] = join_group('ramp', groups['ramp'], (0, DIMS['rampHingeY'], DIMS['rampHingeZ']))
-    for key, pivot in gear_pivots.items():
-        nodes[key] = join_group(key, groups[key], pivot)
-    nodes['cockpit'] = join_group('cockpit', groups['cockpit'])
-    nodes['interior'] = join_group('interior', groups['interior'])
+    for name, objs in groups.items():
+        if name == 'screens' or not objs:
+            continue
+        nodes[name] = join_group(name, objs, pivots.get(name))
     for i, e in enumerate(ENGINES):
         em = bpy.data.objects.new('engine-%d' % i, None)
         bpy.context.scene.collection.objects.link(em)
         em.location = G(e['x'], e['y'], e['z'])
         em.scale = (e['r'], e['r'], e['r'])
         nodes[em.name] = em
-    for name, pos in glows:
+    for name, pos in empties:
         em = bpy.data.objects.new(name, None)
         bpy.context.scene.collection.objects.link(em)
         em.location = G(*pos)

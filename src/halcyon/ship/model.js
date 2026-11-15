@@ -187,12 +187,41 @@ export function assembleShip(gltf, def) {
   extGroup.add(take('exterior'));
   const rampPivot = take('ramp');
   extGroup.add(rampPivot);
+  /* moving parts are named nodes re-origined on their pivots in Blender
+     (tools/blender/halcyon/export.py); a missing one simply does not move */
+  const optional = (name) => root.getObjectByName(name) || null;
+  const sideOf = (name) => (name.endsWith('stbd') ? 1 : -1);
   const gear = ['gear-nose', 'gear-main-stbd', 'gear-main-port'].map((name) => {
     const node = take(name);
     node.userData.deployedY = node.position.y;
+    node.userData.nose = name === 'gear-nose';
+    node.userData.side = name === 'gear-nose' ? 0 : sideOf(name);
+    node.userData.doors = ['port', 'stbd'].map((side) => optional(`${name}-door-${side}`)).filter(Boolean);
+    for (const door of node.userData.doors) {
+      door.userData.side = sideOf(door.name);
+      door.userData.baseQuat = door.quaternion.clone();
+      extGroup.add(door);
+    }
     extGroup.add(node);
     return node;
   });
+  const petals = [];
+  for (let i = 0; ; i++) {
+    const node = optional(`petals-${i}`);
+    if (!node) break;
+    petals.push(node);
+    extGroup.add(node);
+  }
+  const flaps = ['stbd', 'port'].map((tag) => {
+    const node = optional(`flap-${tag}`), end = optional(`flap-${tag}-axis`);
+    if (!node || !end) return null;
+    node.userData.axis = end.position.clone().sub(node.position).normalize();
+    node.userData.side = sideOf(tag);
+    extGroup.add(node);
+    return node;
+  }).filter(Boolean);
+  const sensor = optional('sensor');
+  if (sensor) extGroup.add(sensor);
 
   const engines = [];
   for (let i = 0; ; i++) {
@@ -263,10 +292,31 @@ export function assembleShip(gltf, def) {
   const intGroup = new THREE.Group();
   intGroup.name = 'interior';
   intGroup.add(take('interior'));
+  const cabinDoors = ['door-1-port', 'door-1-stbd', 'door-2-port', 'door-2-stbd'].map(optional).filter(Boolean);
+  for (const door of cabinDoors) {
+    door.userData.closedX = door.position.x;
+    door.userData.side = sideOf(door.name);
+    door.userData.travel = door.name.startsWith('door-1') ? 0.77 : 1.01;
+    intGroup.add(door);
+  }
+  const fans = [];
+  for (let i = 0; ; i++) {
+    const node = optional(`fan-${i}`);
+    if (!node) break;
+    fans.push(node);
+    intGroup.add(node);
+  }
+  const hook = optional('crane-hook');
+  if (hook) intGroup.add(hook);
+  const lightSwitch = optional('light-switch');
+  if (lightSwitch) intGroup.add(lightSwitch);
 
   const cockpitGroup = new THREE.Group();
   cockpitGroup.name = 'cockpit';
   cockpitGroup.add(take('cockpit'));
+  const stick = optional('stick'), throttle = optional('throttle');
+  if (stick) cockpitGroup.add(stick);
+  if (throttle) cockpitGroup.add(throttle);
   intGroup.add(cockpitGroup);
 
   const screenMaterials = [];
@@ -342,11 +392,11 @@ export function assembleShip(gltf, def) {
   intGroup.add(barrier);
 
   return {
-    ext: { group: extGroup, rampPivot, plumes, glowRings, strobes, strobeGlows, gear, engines },
+    ext: { group: extGroup, rampPivot, plumes, glowRings, strobes, strobeGlows, gear, engines, petals, flaps, sensor },
     bakedLight,
     int: {
-      group: intGroup, barrier, lights,
-      cockpit: { group: cockpitGroup, holo, glass, screens, lights: [] },
+      group: intGroup, barrier, lights, doors: cabinDoors, fans, hook, lightSwitch,
+      cockpit: { group: cockpitGroup, holo, glass, screens, lights: [], stick, throttle },
     },
     mats: { ...Object.fromEntries(surface.materials), screens: screenMaterials, glass: glassMaterial },
   };

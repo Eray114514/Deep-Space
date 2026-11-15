@@ -72,7 +72,7 @@ const EMISSIVE = {
    lights cannot reach the underside of a parked hull, and deep space has no
    fill at all; this is the hemisphere the hull actually sits in — sky above,
    ground bounce or planetshine below — set once per frame by Ship. */
-export const shipEngine = { uShipEnginePower: { value: 0.1 } };
+export const shipEngine = { uShipEnginePower: { value: 0.1 }, uShipTime: { value: 0 } };
 
 export const shipAmbient = {
   uShipHemiUp: { value: new THREE.Vector3(0, 1, 0) },
@@ -250,6 +250,42 @@ ${RELIEF_LIB}`)
   return material;
 }
 
+/* Emissives that are alive: floor guide lights run toward the doors, a few
+   caution lamps blink, a few status lamps flicker.  Phase comes from object
+   position, so neighbouring lamps never blink in step. */
+const ANIMATED = {
+  lampCyan: 'emissiveGain = 0.30 + 0.70 * pow(0.5 + 0.5 * sin(vShipLampPos.z * 5.0 - uShipTime * 3.2), 3.0);',
+  btnAmber: `float h = fract(sin(dot(floor(vShipLampPos * 40.0), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+    emissiveGain = mix(1.0, step(0.45, fract(uShipTime * (0.5 + h) + h)), step(0.55, h));`,
+  btnGreen: `float h = fract(sin(dot(floor(vShipLampPos * 40.0), vec3(39.346, 11.135, 83.155))) * 43758.5453);
+    emissiveGain = mix(1.0, 0.35 + 0.65 * step(0.2, fract(uShipTime * (1.5 + 3.0 * h) + h)), step(0.8, h));`,
+};
+
+function installEmissive(material, name) {
+  const body = ANIMATED[name];
+  if (!body) return material;
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, shipEngine);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vShipLampPos;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vShipLampPos = position;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vShipLampPos;\nuniform float uShipTime;')
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+  {
+    float emissiveGain = 1.0;
+    ${body}
+    totalEmissiveRadiance *= emissiveGain;
+  }`);
+  };
+  material.customProgramCacheKey = () => `halcyon-lamp-1|${name}`;
+  const baseClone = Object.getPrototypeOf(material).clone;
+  material.clone = function cloneLamp() {
+    return installEmissive(baseClone.call(this), name);
+  };
+  return material;
+}
+
 /**
  * Turn the file's carrier materials into game surfaces, one per name.
  * @returns {(source: THREE.Material) => THREE.Material}
@@ -265,6 +301,8 @@ export function createSurfaceLibrary() {
         name, color: 0x050505, emissive: source.emissive.clone(),
         emissiveIntensity: EMISSIVE[name], metalness: 0, roughness: 0.6,
       });
+      material.userData.lampBase = EMISSIVE[name];
+      installEmissive(material, name);
     } else {
       const spec = FINISH[name] || DEFAULT_FINISH;
       /* gloss paint is a clear lacquer over pigment: the coat is what gives

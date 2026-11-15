@@ -210,7 +210,17 @@ export class ShipView {
       this.rampTarget = this.rampTarget > 0.5 ? 0 : 1;
       return true;
     }
+    if (this.nearLightSwitch()) {
+      this.ship.toggleCabinLights?.();
+      return true;
+    }
     return false;
+  }
+
+  /** the environment panel on the mid-deck's port wall, aft bay */
+  nearLightSwitch() {
+    const p = this.walkPos;
+    return p.x < -0.45 && p.z > -2.05 && p.z < -0.95;
   }
 
   /** the ship-local camera pose the cockpit view settles at */
@@ -478,6 +488,7 @@ export class ShipView {
       if (landed) return this.rampTarget > 0.5 ? '[F] 关闭尾舱门 · [E] 离船' : '[F] 打开尾舱门 · [E] 离船';
       return this.rampTarget > 0.5 ? '[F] 关闭尾舱门' : '[F] 打开尾舱门';
     }
+    if (this.nearLightSwitch()) return this.ship.cabinNight ? '[F] 舱内灯光：恢复标准照明' : '[F] 舱内灯光：切换夜间模式';
     return '';
   }
 
