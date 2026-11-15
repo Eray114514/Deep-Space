@@ -285,3 +285,43 @@
 - `npm test`：除末尾已知暂缓的 `worldlocktest.js` 外，前面全部 **63 项 Node 契约测试 100% 通过**（含新增 `adaptivequalitytest.js`）。
 - `npm run test:smoke`（`8.6 s` 启动全绿）、`npm run test:stage-a`（全 14 项通过）、`npm run test:b5`、`npm run test:ocean-gpu`、`npm run test:near-water`、`npm run test:terrain`（全 8 类行星 `SANITY: all good`）、`npm run test:far-flora`、`npm run test:vegetation:precision`、`npm run test:starmap`、`npm run test:astronomy:browser`、`tools/gameplaytest.js` 深海下潜回归：**全部通过**。
 - 协作边界核查：全程未修改 `src/cloud/`、`src/atmosphere-pass-webgl.js`、`src/legacy-render-pipeline.js`、`src/sysview.js` 及主控正在改动的飞船模型文件。
+
+---
+
+## 第三轮（Hydrogen 复验后，2026-11-15）
+
+### 1. 背景与分工边界
+- Hydrogen 对 `e61ed50..576dea0` 的独立复验报告（`test-results/hydrogen-verify-2026-11-15/REVIEW.md`）确认第二轮主体指标全部成立：1080p/2K 冷启动 **`9.0–9.9 s`**、热启动 **`6.5–8.3 s`**，100 s 真实键鼠飞行降落全程保持 `adaptiveStage = 0` 且零卡顿，默认 GPU 计时路径下 60 Hz VSync 自适应升降正常，P0 满画质步行 **`71.4–72.7 FPS`**，深海 `DIVE [L]` 下潜成立。
+- 报告中的 P1-1（`src/surface-atmosphere.js` 近距双星恒星匹配）、P2-1（`tools/satelliteeclipsevisualtest.js` 双星双日食基准）与 P2-2（`src/quadtree.js` 水体包围球波浪与巨潮裕量）已由主控在提交 `e6609a9` 修复。
+- 本轮由 Carbon 负责收敛 **P2-3（自适应回退分支、过期 GPU 读数失效、两项滞后回归断言）** 与 **P3 第 5 条（深海海底远景地平线浅色斜线）**。
+
+### 2. 根因定位与修复项
+
+#### （1）P2-3 第 1、2 条：`src/adaptive-quality.js` 无计时器回退与过期 GPU 读数失效（提交 `4d4d4c3`）
+- **根因**：
+  1. 屏蔽 `EXT_disjoint_timer_query_webgl2` 后，Windows D3D11 / `rAF` 呈现存在约 15%–22% 的偶发双 VBlank 微抖（`33.3 ms`），使算术指数均值 `activeEmaMs` 漂移至 `19.3–20.5 ms`，既跌破原回升门槛 `<= 17.5 ms`，又间歇触碰原过载门槛 `> 19.6 ms`，导致 10 s 恢复期内无法回升反而滑向 `stage 5`。
+  2. 当启用 `nodePipeline.profiler`（`src/main.js` 传入 `skip: true`）或 `FrameGpuTimer.latestMs()` 超龄返回 `null` 时，`AdaptiveQualityGovernor.update()` 仅在非空样本时更新 `this.gpuEmaMs`，使启动期旧值永久滞留，无法回落到无计时器判断。
+- **修复**：
+  - 在 `AdaptiveQualityGovernor` 中引入最近 21 帧呈现间隔分位窗口（`p25 / p50 / p70`），结合测得显示刷新间隔 `cadenceMs`（兼容含偶发掉拍的 60 Hz 以及稳态聚类的 50 Hz / 48 Hz VSync）与渲染 CPU 耗时 `cpuEmaMs` 联合判定：当单拍中位数 `p50ActiveMs <= cadenceMs * 1.10`、`cpuEmaMs <= upgradeWorkThreshold * 0.95` 且 `activeEmaMs <= max(22.4, cadenceMs * 1.34)` 时确认具备垂直同步余量，同时保留对真实持续慢帧（`> 21.5 ms` 中位或 `> 22.8 ms` 量化半帧率过载）的降档与退避防抖。
+  - `FrameGpuTimer.measure(..., { skip: true })` 在跳过采样时立即清空 `lastGpuMs` 并将默认样本寿命收紧为 45 帧；`AdaptiveQualityGovernor` 追踪 `lastGpuSampleAt` 与连续缺样帧数，超 `600 ms`（或连续 `> 12` 帧且 `>= 180 ms`）无新样本即令 `this.gpuEmaMs = null` 失效。
+  - 在 `tools/adaptivequalitytest.js` 补充 60 Hz 微抖回升、50 Hz 稳态回升、40 FPS 量化 VSync 隐性 GPU 过载降档、`skip: true` 与查询停滞 `gpuEmaMs` 失效的确定性单测；无头 Chrome 实测开启/关闭 `startProfiling()` 时 `gpuEmaMs` 按 `7.92 → null → 7.40 ms` 精确失效与恢复。
+
+#### （2）P2-3 第 3 条：更新 `test:gameplay` 与 `test:render-look` 滞后断言（提交 `1f0244e`）
+- **`tools/gameplaytest.js`**：将首条地表云检查从已退役的 `volCloudMesh` 更新为核验默认轻量云通道 `LiteCloudPass`（`passEnabled`、`activePlanet` 绑定、`planet.liteCloudActive === true`、`marchSteps > 0`、`scale > 0` 且旧解析云壳隐藏），并将 SwiftShader 下新 Blender 飞船脉冲等待超时放宽至 `15 s`。实测 **`npm run test:gameplay` 30/30 全绿**。
+- **`src/main.js` + `tools/renderlookplaytest.js`**：针对提交 `050d53c` 切换至 Blender 离线逐顶点辐照度烘焙（`halcyon.glb` 解码为 `aCabinIrradiance`），在 `NMS.renderLookState().cabinBake` 中统计并缓存离线烘焙网格数、顶点数、受光顶点数、峰值辐照度与绑定 `interiorIrradiance` 的舱内/座舱材质数（实测 `meshes = 43`、`vertices = 252,529`、`litVertices = 187,776`、`maxIrradiance = 2.72`、`boundMaterials = 48`），更新 `renderlookplaytest.js` 断言。实测 **`npm run test:render-look` 全套件（含 `renderlooktest` / `renderlookplaytest` / `renderlookworldtest`）全绿**。
+
+#### （3）P3 第 5 条：深海海底远景地平线浅色斜线定位与修复（提交 `8584963`）
+- **根因定位（逐通道开关 + 缓冲深度与 HDR 辐射度逐行回读）**：
+  - 在复验同机位逐一开关飞船、水体、地形、`LiteCloudPass` 与 `AtmospherePass` 并回读 `AtmospherePass` 前后缓冲发现：左侧斜线像素处（如 `x = 48, sy = 328..329`）线性深度从上下相邻行的 `7.38 km`（头顶 `seaRadius` 海面）突跳至 `13.06 km`（远处岛屿地形），导致射线穿过海面缝隙进入 `uGroundR`（`1,200,000 m`）以上的晴空大气，被 `AtmospherePass` 叠加前向米氏散射亮条（sRGB 局部跳变 `+27 ~ +49`）。
+  - 几何根因有两处，均发生在水下向上看海面反面（`!gl_FrontFacing`）时：
+    1. **`NearWaterPatch` 与 `waterLod` 在 `patchHandoff = uNearPatchRadius - 640`（`7,388 m`）处的球面弦高差双重 `discard`**：`7.4 km` 处 `waterLod` 粗块三角形弦向球心内凹约 `9–11 m`。从水上向下看时细网格与粗网格自然重叠 `2 px`；而从水下以 `+6.5°` 掠射角（`cot 6.5° ≈ 8.8`）向上看时，射线先穿过内凹的 `waterLod`（`patchDistance < patchHandoff` 被 `discard`），约 `80–99 m` 后再穿过外侧 `NearWaterPatch`（`patchDistance >= patchHandoff` 也被 `discard`），形成恰好 `2 px` 宽的倾斜漏光环弧。
+    2. **远景（`~17.5 km`）浅滩反面 `edgeDepth <= -0.85` 丢弃**：水下低仰角视线擦过内凹的远景地形粗块弦顶打到海面干湿交界处时，`edgeDepth <= -0.85` 丢弃海面片元露出后方天空小楔形。
+- **修复与实测验证**：
+  - 在 `src/shaders-webgl.js` 水体片元着色器中，仅对水下反面（`!gl_FrontFacing`）按视线仰角余弦施加有界交接重叠带 `underwaterOverlap`（上限受 `uNearPatchRadius` 严格约束），并仅在正面（`gl_FrontFacing`）执行 `edgeDepth <= -0.85` 丢弃与岸线透明度渐隐，水上正面渲染逐像素零改动。
+  - 复验同机位实测：左侧远景水下天空 `diff > 8` 的亮线像素数从 `112+` 降至 **`0`**，最大局部邻域亮度差从 `+49.23` 降至海底雾化过渡自然梯度 `5.85`（验证截图见 `test-results/underwater-handoff-verify-2026-11-15/deep-ocean-seabed-fixed.jpg`）。
+  - **附注供主控参考（未改大气文件）**：当前海面反面封口后水下视野已完全闭合；若未来某颗行星在狭窄大陆后方整块 `waterLod` 被 CPU 干块裁剪且水下低仰角视线恰好越过远景地形粗块弦顶，当 `|uCameraLocal| < uGroundR` 时 `src/atmosphere-pass-webgl.js` 仍会对越过 `uGroundR` 的远段积分晴空散射，可在后续大气维护时按需加一道水下门控。
+
+### 3. 第三轮验证汇总
+- `npm test`：前面全部 **63 项 Node 契约测试 100% 通过**（末尾 `worldlocktest.js` 为已知暂缓项）。
+- 浏览器与 GPU 回归：`npm run test:smoke`（`9.5 s` 全绿）、`npm run test:gameplay`（`30/30` 全绿）、`npm run test:render-look`（全套件通过）、`npm run test:near-water`、`npm run test:ocean-gpu`、`node tools/surfaceprogramkeytest.js` **全部通过**。
+- 范围核查：仅改动 `src/adaptive-quality.js`、`src/main.js`（仅 `renderLookState().cabinBake`）、`src/shaders-webgl.js`（仅水体反面交接与岸线门控）及 `tools/` 下对应测试与本文档/待办表；未触碰主控与飞船会话负责模块。
