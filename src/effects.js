@@ -212,7 +212,8 @@ export const SHIP_FOREGROUND_LAYER = 3;
 export { SHIP_INTERIOR_LAYER } from './render-layers.js';
 
 export class Ship {
-  constructor(scene, { anisotropy = 1, renderer = null, radiance = null, model = null } = {}) {
+  constructor(scene, { anisotropy = 1, renderer = null, radiance = null, model = null, probes = null } = {}) {
+    this.probes = probes;
     const g = new THREE.Group();
     g.layers.set(SHIP_FOREGROUND_LAYER);
     this.group = g;
@@ -360,8 +361,8 @@ export class Ship {
         this.exteriorMaterials.add(material);
       }
     });
-    cloneZone(this.int.group, radiance.cabinProbe?.texture, this.cabinMaterials);
-    cloneZone(this.int.cockpit.group, radiance.cockpitProbe?.texture, this.cockpitMaterials);
+    cloneZone(this.int.group, this.probes?.cabin ?? radiance.cabinProbe?.texture, this.cabinMaterials);
+    cloneZone(this.int.cockpit.group, this.probes?.cockpit ?? radiance.cockpitProbe?.texture, this.cockpitMaterials);
     this.radiance = radiance;
   }
 
@@ -699,6 +700,12 @@ export class Ship {
 
     this.updateEngineFx(dt, speed, warp, boost);
     this.updateGear(dt);
+    // the cabin probes are baked in ship space: turn them with the hull
+    if (this.probes) {
+      _probeEuler.setFromQuaternion(_sq.copy(this.group.quaternion).invert());
+      for (const material of this.cabinMaterials) material.envMapRotation.copy(_probeEuler);
+      for (const material of this.cockpitMaterials) material.envMapRotation.copy(_probeEuler);
+    }
 
     // Sun-shadow cadence: live while flying; while parked the hull cannot
     // move under its own power, so the map re-renders only often enough to
@@ -720,6 +727,7 @@ export class Ship {
   }
 }
 const _sq2 = new THREE.Quaternion();
+const _probeEuler = new THREE.Euler();
 const _sp = new THREE.Vector3();
 
 // ============================================================================

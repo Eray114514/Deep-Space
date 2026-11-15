@@ -24,7 +24,7 @@ import { AdaptiveQualityGovernor, FrameGpuTimer } from './adaptive-quality.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
-import { loadShipModel } from './halcyon/ship/model.js';
+import { loadShipModel, loadShipProbes } from './halcyon/ship/model.js';
 import { ShipView } from './ship-view.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
@@ -905,9 +905,10 @@ const farFlora = new FarFlora({
 });
 const skyDome = new SkyDome(scene);
 const weatherEffects = new WeatherEffects(scene);
-const shipModel = await loadShipModel();
+const [shipModel, shipProbes] = await Promise.all([loadShipModel(), loadShipProbes(renderer)]);
 const ship = new Ship(scene, {
   model: shipModel,
+  probes: shipProbes,
   anisotropy: Math.min(16, renderer.getMaxAnisotropy?.()
     ?? renderer.capabilities?.getMaxAnisotropy?.()
     ?? 1),

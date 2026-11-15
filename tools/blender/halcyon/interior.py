@@ -70,6 +70,18 @@ class Kit:
         self.parts.append(o)
         return o
 
+    def label(self, body, height, origin, right, up, key='decal', align='CENTER'):
+        """stencilled lettering lying on a surface; right x up faces the reader"""
+        r, u, o = Vector(right).normalized(), Vector(up).normalized(), Vector(origin)
+        n = r.cross(u)
+        obj = prims.text('label', self.col, body, height, lambda a, b: o + r * a + u * b + n * 0.003,
+                         self.M[key], align=align, outward=n)
+        self.parts.append(obj)
+        return obj
+
+    def bolt(self, origin, direction, r=0.014, key='metal'):
+        self.rev(key, [(r, 0.0), (r, 0.006), (r * 0.55, 0.009), (0.0, 0.009)], origin, direction, 6, 'bolt')
+
     def add(self, objs):
         self.parts += objs if isinstance(objs, list) else [objs]
 
@@ -482,9 +494,43 @@ def build_bulkheads(kit, cockpit_outline):
     kit.quads('panelDark', q, toward=(0, 1.2, zh + 0.8), name='ramp-tunnel')
 
 
+def build_labels(kit):
+    PX, SX, UP = (0, 0, -1), (0, 0, 1), (0, 1, 0)     # reading direction on the port / starboard wall
+    wm, wh = MID['w'] - 0.002, HOLD['w'] - 0.002
+    b0 = MID_Z0 + MID_BAY * 0.5
+    kit.label('STOWAGE  P-1', 0.045, (-wm + 0.03, 1.74, b0), PX, UP)
+    kit.label('EVA  LOCKER  S-1', 0.045, (wm - 0.03, 1.74, b0), SX, UP)
+    za = MID_Z0 + MID_BAY * 4.5
+    kit.label('O2  RESERVE  35 MPa', 0.04, (wm - 0.05, 1.66, za), SX, UP, 'decalLight')
+    kit.label('ENV  CTRL', 0.04, (-wm + 0.045, 1.63, za), PX, UP, 'decalLight')
+    kit.label('FLIGHT  DECK', 0.07, (0, 2.115, MID_Z0 + 0.001), (1, 0, 0), UP)
+    kit.label('CARGO  HOLD', 0.07, (0, 2.15, MID_Z1 - 0.001), (-1, 0, 0), UP)
+    kit.label('MID  DECK', 0.08, (0, 2.24, HOLD_Z0 + 0.001), (1, 0, 0), UP, 'decalLight')
+    for i in range(5):
+        zz = HOLD_Z0 + HOLD_BAY * (i + 0.5)
+        kit.label('BAY  %d' % (i + 1), 0.11, (-wh, 1.72, zz), PX, UP, 'decalLight')
+        kit.label('BAY  %d' % (i + 1), 0.11, (wh, 1.72, zz), SX, UP, 'decalLight')
+        kit.label('MAX  1200 KG', 0.035, (-wh, 1.58, zz), PX, UP, 'decalLight')
+        kit.label('MAX  1200 KG', 0.035, (wh, 1.58, zz), SX, UP, 'decalLight')
+    kit.label('RAMP  -  CONFIRM  FIELD  BEFORE  OPENING', 0.05, (0, 2.42, HOLD_Z1 - 0.001), (-1, 0, 0), UP, 'decalLight')
+    kit.label('KEEP  CLEAR', 0.16, (0, 0.004, HOLD_Z1 - 0.75), (-1, 0, 0), (0, 0, 1), 'paintYellow')
+    kit.label('HX-2291', 0.10, (0, 0.004, HOLD_Z0 + 0.55), (1, 0, 0), (0, 0, -1), 'decalLight')
+    # fasteners along every rib flange and round the pressure frame
+    for i in range(6):
+        zz = min(max(HOLD_Z0 + HOLD_BAY * i, HOLD_Z0 + 0.07), HOLD_Z1 - 0.07)
+        for side in (1, -1):
+            for jf in [j * 0.5 for j in range(1, int(J_E * 2))]:
+                if int(jf * 2) % 3:
+                    continue
+                for dz in (-0.075, 0.075):
+                    p = HOLD_S.point(zz + dz, jf, side, 0.105)
+                    kit.bolt(p, -HOLD_S.normal(zz + dz, jf, side), 0.011)
+
+
 def build(M, col, cockpit_outline):
     kit = Kit(M, col)
     build_mid(kit)
     build_hold(kit)
     build_bulkheads(kit, cockpit_outline)
+    build_labels(kit)
     return kit.parts

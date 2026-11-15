@@ -175,7 +175,7 @@ class LoftSurface:
             quad = [outer[k], outer[k2], inner[k2], inner[k]]
             f = bm.faces.new(quad[::-1] if want_flip else quad)
             for loop in f.loops:
-                loop[layer] = (tint, 0.0, 0.0, 1.0)
+                loop[layer] = (tint, 0.0, 0.0, 0.0)
         me = bpy.data.meshes.new(name)
         bm.normal_update()
         bm.to_mesh(me)
@@ -390,7 +390,7 @@ class LoftSurface:
             while stack:
                 cur = stack.pop()
                 for loop in cur.loops:
-                    loop[col_layer] = (tint, 0.0, 0.0, 1.0)
+                    loop[col_layer] = (tint, 0.0, 0.0, 0.0)
                 for e in cur.edges:
                     for o in e.link_faces:
                         if o.index in seen or o.tag or o.material_index != cur.material_index:
@@ -401,7 +401,7 @@ class LoftSurface:
         for f in bm.faces:
             if f.tag:
                 for loop in f.loops:
-                    loop[col_layer] = (0.5, 1.0, 0.0, 1.0)
+                    loop[col_layer] = (0.5, 1.0, 0.0, 0.0)
                     loop[nrm_layer] = f.normal
         for e in bm.edges:
             if len(e.link_faces) == 2 and e.link_faces[0].tag != e.link_faces[1].tag:

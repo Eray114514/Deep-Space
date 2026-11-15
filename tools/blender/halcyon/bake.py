@@ -28,6 +28,35 @@ def refine(obj, max_edge=0.28, passes=5):
     bm.free()
 
 
+def bake_wear(obj, gain=2.4):
+    """Convexity per vertex into paint alpha: where paint chips first.  A
+    bevelled edge, a groove lip and a corner stand proud of their neighbours;
+    a flat or concave vertex scores zero."""
+    me = obj.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bm.normal_update()
+    wear = np.zeros(len(bm.verts), dtype=np.float32)
+    for v in bm.verts:
+        if not v.link_edges:
+            continue
+        n = v.normal
+        acc = 0.0
+        for e in v.link_edges:
+            d = e.other_vert(v).co - v.co
+            L = d.length
+            if L > 1e-9:
+                acc += n.dot(d) / L
+        wear[v.index] = max(0.0, min(1.0, -acc / len(v.link_edges) * gain))
+    bm.free()
+    vert = np.zeros(len(me.loops), dtype=np.int64)
+    me.loops.foreach_get('vertex_index', vert)
+    paint = _paint(me)
+    paint[:, 3] = wear[vert]
+    me.color_attributes['Color'].data.foreach_set('color', paint.ravel())
+    print('  wear %-21s mean %.3f' % (obj.name, float(paint[:, 3].mean())))
+
+
 def setup(scene, samples):
     scene.render.engine = 'CYCLES'
     prefs = bpy.context.preferences.addons['cycles'].preferences

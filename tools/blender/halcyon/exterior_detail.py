@@ -167,6 +167,7 @@ def build_cannon(M, col, sx, WING):
 
 # ---------------------------------------------------------------- lettering
 def lettering(M, col, HULL, FIN):
+    from .exterior import WING as WING_REF
     out = []
     lift = 0.006
     # hull sides, on the chine band aft of the crew door
@@ -195,6 +196,13 @@ def lettering(M, col, HULL, FIN):
 
         out.append(prims.text('fin-reg-%s' % ('stbd' if sx > 0 else 'port'), col, 'HX-2291', 0.36,
                               place, M['decal'], outward=(sx, 0, 0)))
+    # walk limits on the wing roots
+    for sx in (1, -1):
+        def place(u, v, sx=sx):
+            x, z = 5.6 * sx + u, 6.6 - v
+            return (x, WING_REF.section(abs(x))['off'] + half_width(WING_REF, abs(x), z) + lift, z)
+
+        out.append(prims.text('no-step-%d' % sx, col, 'NO  STEP', 0.16, place, M['decal'], outward=(0, 1, 0)))
     return out
 
 

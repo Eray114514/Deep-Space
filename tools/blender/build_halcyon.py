@@ -9,7 +9,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpy  # noqa: E402,F401
-from halcyon import common, exterior, interior, cockpit, export, bake  # noqa: E402
+from halcyon import common, exterior, interior, cockpit, export, bake, probe  # noqa: E402
 from halcyon import mats, preview as pv  # noqa: E402
 
 argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
@@ -77,7 +77,13 @@ if '--preview' in argv:
 if '--export' in argv:
     out = arg('--export')
     os.makedirs(out, exist_ok=True)
+    if '--nobake' not in argv:
+        bake.setup(scene, 96)
+        probe.render(scene, out)
     nodes = export.finalize(groups, gear_pivots)
+    for node in nodes.values():
+        if node.type == 'MESH':
+            bake.bake_wear(node)
     if '--nobake' not in argv:
         tb = time.time()
         bake.bake_irradiance(scene, [nodes['cockpit'], nodes['interior']], samples=int(arg('--samples', 192)))

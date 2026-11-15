@@ -9,7 +9,7 @@ from .common import G, Gv, new_object, add_bevel, add_weighted_normal, apply_mod
 
 def _finish(name, bm, col, mat=None, smooth=True, tint=None):
     layer = bm.loops.layers.float_color.new('Color')
-    c = (0.5 if tint is None else tint, 0.0, 0.0, 1.0)
+    c = (0.5 if tint is None else tint, 0.0, 0.0, 0.0)
     for f in bm.faces:
         f.smooth = smooth
         for loop in f.loops:

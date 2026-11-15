@@ -11,8 +11,10 @@
 // Node contract with the exporter is documented in tools/blender/halcyon/export.py.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { screenTexture } from '../textures.js';
+import { getSharedPmremGenerator } from '../../shared-pmrem.js';
 import { makeCanopyGlass, bindGlass } from './cockpit/glass.js';
 import { buildInstruments } from './cockpit/holo.js';
 import {
@@ -27,6 +29,27 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 
 export function loadShipModel(url = SHIP_MODEL_URL) {
   return loader.loadAsync(url);
+}
+
+/**
+ * Reflection probes rendered in Blender from each zone's own lamps
+ * (tools/blender/halcyon/probe.py), prefiltered for PBR lookup.
+ * They are in SHIP space: Ship turns them with the hull every frame.
+ */
+export async function loadShipProbes(renderer, base = '/assets/halcyon/') {
+  const pmrem = getSharedPmremGenerator(renderer);
+  if (!pmrem) return null;
+  const hdr = new HDRLoader();
+  const load = async (zone) => {
+    const equirect = await hdr.loadAsync(`${base}probe-${zone}.hdr`);
+    equirect.mapping = THREE.EquirectangularReflectionMapping;
+    const target = pmrem.fromEquirectangular(equirect);
+    equirect.dispose();
+    target.texture.name = `halcyon-${zone}-probe`;
+    return target.texture;
+  };
+  const [cockpit, cabin] = await Promise.all([load('cockpit'), load('cabin')]);
+  return { cockpit, cabin };
 }
 
 /* the bell lip sits this many radii aft of the engine node (see build_engine) */
@@ -62,7 +85,7 @@ const CANOPY_LAMPS = [
 
 /* Baked cabin light arrives as sqrt(E / 8) in 8 bits (tools/blender/halcyon/bake.py). */
 const IRRADIANCE_RANGE = 8;
-const IRRADIANCE_GAIN = 0.40;
+const IRRADIANCE_GAIN = 0.34;
 
 function prepareBakedLight(geometry) {
   const baked = geometry.getAttribute('_irradiance');
@@ -235,7 +258,7 @@ export function assembleShip(gltf, def) {
   cockpitGroup.add(holo.group);
 
   const lights = [];
-  const fixtureGain = bakedLight ? 0.22 : 1;
+  const fixtureGain = bakedLight ? 0.12 : 1;
   for (const [x, y, z, color, intensity, distance] of CABIN_LIGHTS) {
     const light = new THREE.PointLight(color, intensity * fixtureGain, distance, 2);
     light.position.set(x, y, z);

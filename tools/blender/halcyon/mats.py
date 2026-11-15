@@ -22,6 +22,7 @@ PALETTE = {
     'deck':       ((0.16, 0.17, 0.18), 0.6, 0.55),    # walking surfaces
     'chrome':     ((0.82, 0.83, 0.85), 1.0, 0.12),    # oleo pistons
     'decal':      ((0.06, 0.065, 0.07), 0.0, 0.55),   # lettering
+    'decalLight': ((0.72, 0.73, 0.72), 0.0, 0.55),    # stencils on dark surfaces
     # ---- interior
     'panelWhite': ((0.60, 0.60, 0.58), 0.0, 0.62),    # padded habitation panels
     'panelGrey':  ((0.25, 0.26, 0.28), 0.1, 0.55),
