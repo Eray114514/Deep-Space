@@ -34,13 +34,10 @@ function rgbDifference(a, b, pixel) {
   ) / 3;
 }
 
-function median(values) {
+function quantile(values, q) {
   if (!values.length) return 0;
   values.sort((a, b) => a - b);
-  const middle = values.length >> 1;
-  return values.length % 2
-    ? values[middle]
-    : (values[middle - 1] + values[middle]) * 0.5;
+  return values[Math.min(values.length - 1, Math.floor(q * values.length))];
 }
 
 function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
@@ -65,7 +62,12 @@ function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
       delta: luma(shadow, pixel) - luma(reference, pixel),
     });
   }
-  const globalDelta = median(stable.map((sample) => sample.delta));
+  // Frame-wide offset from the least-darkened quarter of the stable pixels.
+  // The home system is a binary: the 0.24 R fixture casts one shadow per star,
+  // and together they can cover more than half the disc, which pulled a plain
+  // median down although every pixel off the shadows was unchanged. A real
+  // full-frame darkening still moves this quartile.
+  const globalDelta = quantile(stable.map((sample) => sample.delta), 0.75);
   let darkened = 0;
   let weight = 0;
   let weightedX = 0;

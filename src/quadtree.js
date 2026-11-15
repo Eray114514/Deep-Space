@@ -1120,7 +1120,10 @@ export class ChunkedLOD {
     // rather than full-planet hAmp (~8.6 km), which bloated every local ground
     // chunk's sphere across the camera and defeated camera + shadow culling.
     if (hasMorph) geo.boundingSphere.radius += maxMorphDelta + 2;
-    else if (p.bakeDepth) geo.boundingSphere.radius += 56;
+    // Water rises in the vertex shader (swell envelope ~56 m, plus a tidal
+    // giant's crest carried in hAmp); its CPU heights are all zero, so the
+    // morph envelope above never covers it.
+    if (p.bakeDepth) geo.boundingSphere.radius += 56 + (p.hAmp || 0);
 
     const mesh = new THREE.Mesh(geo, p.terrainMaterial);
     mesh.userData.lodMorph = node.morph;

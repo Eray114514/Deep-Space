@@ -218,9 +218,13 @@ export function installSurfaceAtmosphere(material, planet, shader) {
 
     vec3 surfaceStellarTransmission(vec3 direction) {
       if (uLocalStarCount > 0) {
-        if (dot(direction, gStarDir0) > 0.98) return gStarTrans0;
-        if (uLocalStarCount > 1 && dot(direction, gStarDir1) > 0.98) return gStarTrans1;
-        return vec3(1.0);
+        // A light belongs to the star whose direction it is closest to. First
+        // match within a fixed cone handed a close binary's companion (8-11
+        // degrees away) the primary's horizon and eclipse state.
+        float d0 = dot(direction, gStarDir0);
+        float d1 = uLocalStarCount > 1 ? dot(direction, gStarDir1) : -2.0;
+        if (max(d0, d1) <= 0.98) return vec3(1.0);   // not a star (fill light)
+        return d1 > d0 ? gStarTrans1 : gStarTrans0;
       }
       return gFallbackSunTrans;
     }
