@@ -8,7 +8,7 @@ function clamp(value, min, max) {
 // with RenderProfiler and GpuWorkBudget via the shared GPU_DISJOINT_EXT epoch
 // and never starts a nested TIME_ELAPSED_EXT query when another owner is active.
 export class FrameGpuTimer {
-  constructor(renderer, { sampleEvery = 3, maxPending = 4, maxSampleAgeFrames = 90 } = {}) {
+  constructor(renderer, { sampleEvery = 3, maxPending = 4, maxSampleAgeFrames = 45 } = {}) {
     this.renderer = renderer;
     this.gl = renderer?.getContext?.() || null;
     this.sampleEvery = Math.max(1, Math.floor(sampleEvery));
@@ -21,6 +21,7 @@ export class FrameGpuTimer {
     this.lost = Boolean(this.gl?.isContextLost?.());
     this.disposed = false;
     this.frame = 0;
+    this.skippedFrames = 0;
     this.pending = [];
     this.lastGpuMs = null;
     this.lastSampleFrame = -Infinity;
@@ -28,8 +29,10 @@ export class FrameGpuTimer {
     this.onLost = () => {
       this.lost = true;
       this.epoch++;
+      this.skippedFrames = 0;
       this.pending = [];
       this.lastGpuMs = null;
+      this.lastSampleFrame = -Infinity;
     };
     this.onRestored = () => {
       this.epoch++;
@@ -94,6 +97,13 @@ export class FrameGpuTimer {
   measure(work, { skip = false } = {}) {
     this.frame++;
     this.poll();
+    if (skip) {
+      this.skippedFrames++;
+      this.lastGpuMs = null;
+      this.lastSampleFrame = -Infinity;
+    } else {
+      this.skippedFrames = 0;
+    }
     const gl = this.gl, ext = this.ext, epoch = this.epoch;
     const canSample = !skip && ext && this.live(epoch)
       && this.pending.length < this.maxPending
@@ -134,6 +144,7 @@ export class FrameGpuTimer {
   }
 
   reset() {
+    this.skippedFrames = 0;
     this.lastGpuMs = null;
     this.lastSampleFrame = -Infinity;
   }
@@ -170,6 +181,7 @@ export class AdaptiveQualityGovernor {
     downgradeSettleMs = 850,
     upgradeHoldMs = 1100,
     maxStreamImmunityMs = 10000,
+    maxGpuStaleMs = 600,
     initialNow = 0,
   } = {}) {
     this.targetFrameMs = targetFrameMs;
@@ -179,6 +191,7 @@ export class AdaptiveQualityGovernor {
     this.downgradeSettleMs = downgradeSettleMs;
     this.upgradeHoldMs = upgradeHoldMs;
     this.maxStreamImmunityMs = maxStreamImmunityMs;
+    this.maxGpuStaleMs = Math.max(150, maxGpuStaleMs);
     this.reset(initialNow);
   }
 
@@ -194,6 +207,9 @@ export class AdaptiveQualityGovernor {
     this.activeEmaMs = this.targetFrameMs;
     this.cpuEmaMs = this.targetFrameMs * 0.45;
     this.gpuEmaMs = null;
+    this.lastGpuSampleAt = -Infinity;
+    this.gpuMissingFrames = 0;
+    this.activeWindow = [];
     this.workEmaMs = this.targetFrameMs * 0.55;
     this.overloadAccumMs = 0;
     this.recoveryAccumMs = 0;
@@ -208,6 +224,7 @@ export class AdaptiveQualityGovernor {
     if (!Number.isFinite(now)) return;
     this.readySince = now;
     this.lastSampleAt = now;
+    this.activeWindow.length = 0;
     this.overloadAccumMs = 0;
     this.recoveryAccumMs = 0;
   }
@@ -247,13 +264,49 @@ export class AdaptiveQualityGovernor {
     this.activeEmaMs += (clampedActive - this.activeEmaMs) * alpha;
     this.cpuEmaMs += (clampedCpu - this.cpuEmaMs) * alpha;
     if (clampedGpu !== null) {
+      this.gpuMissingFrames = 0;
+      this.lastGpuSampleAt = now;
       this.gpuEmaMs = this.gpuEmaMs === null
         ? clampedGpu
         : this.gpuEmaMs + (clampedGpu - this.gpuEmaMs) * 0.18;
+    } else if (this.gpuEmaMs !== null) {
+      this.gpuMissingFrames++;
+      const missingMs = now - this.lastGpuSampleAt;
+      if (missingMs >= this.maxGpuStaleMs || (this.gpuMissingFrames > 12 && missingMs >= 180)) {
+        this.gpuEmaMs = null;
+        this.lastGpuSampleAt = -Infinity;
+      }
     }
 
+    this.activeWindow.push(clampedActive);
+    if (this.activeWindow.length > 21) this.activeWindow.shift();
+    const sortedActive = [...this.activeWindow].sort((a, b) => a - b);
+    const winLen = sortedActive.length;
+    const p25ActiveMs = sortedActive[Math.floor((winLen - 1) * 0.25)];
+    const p50ActiveMs = sortedActive[Math.floor((winLen - 1) * 0.50)];
+    const p70ActiveMs = sortedActive[Math.floor((winLen - 1) * 0.70)];
+
     const target = this.targetFrameMs;
+    const downgradeWorkThreshold = target * 1.11; // ~18.5 ms on Ultra (< 54 FPS true work)
+    const severeWorkThreshold = target * 1.40;    // ~23.3 ms on Ultra
+    const upgradeWorkThreshold = target * 0.76;   // ~12.7 ms pipelined max(CPU, GPU) on Ultra
     const ipcCeilingMs = Math.max(25.5, target * 1.52);
+
+    // Reference display VSync cadence for timerless fallback:
+    // - On 60 Hz with occasional D3D11/DWM beat-skip micro-jitter (~20-25% 33 ms
+    //   frames), median p50 stays pinned at ~16.7 ms even when arithmetic
+    //   activeEmaMs drifts to ~19.5-20.5 ms.
+    // - On steady 50 Hz / 48 Hz / half-100Hz pacing, intervals cluster tightly
+    //   (p70 - p25 <= 2 ms) around ~19.5–21.0 ms with low render CPU cost.
+    const steadyAltVsync = winLen >= 8
+      && p25ActiveMs >= target * 1.05
+      && p70ActiveMs <= Math.max(21.2, target * 1.27)
+      && (p70ActiveMs - p25ActiveMs) <= 2.0
+      && this.cpuEmaMs <= upgradeWorkThreshold * 0.95;
+    const cadenceMs = steadyAltVsync
+      ? p50ActiveMs
+      : Math.max(target, Math.min(p25ActiveMs, target * 1.05));
+
     const streamProtected = Boolean(streaming) && this.streamAccumMs < this.maxStreamImmunityMs;
     if (streaming) this.streamAccumMs = Math.min(this.maxStreamImmunityMs + 1000, this.streamAccumMs + dtMs);
     else this.streamAccumMs = Math.max(0, this.streamAccumMs - dtMs * 2);
@@ -263,16 +316,20 @@ export class AdaptiveQualityGovernor {
     //   independent of 60 Hz / 50 Hz VSync sleep; sustained wall intervals
     //   beyond ipcCeilingMs (> ~23.8 ms = < 42 FPS) also count as IPC/compositor
     //   overload when not actively streaming chunks.
-    // - When GPU timer is unavailable, fall back to activeEmaMs only when it
-    //   exceeds 60 Hz VSync + jitter (> 19.4 ms).
+    // - When GPU timer is unavailable, compare quantile-filtered presentation
+    //   intervals against measured VSync cadence plus render CPU work so 60 Hz
+    //   presentation jitter does not masquerade as sustained GPU overload.
     let instantWorkMs;
     if (this.gpuEmaMs !== null) {
       const hwMs = Math.max(clampedCpu, clampedGpu ?? this.gpuEmaMs);
       const wallBottleneck = !streamProtected && clampedActive > ipcCeilingMs ? clampedActive : 0;
       instantWorkMs = Math.max(hwMs, wallBottleneck);
     } else {
-      const fallbackWall = !streamProtected && clampedActive > Math.max(19.4, target * 1.16)
-        ? clampedActive : clampedCpu;
+      const sustainedWallOverload = !streamProtected && (
+        (p50ActiveMs > Math.max(21.2, cadenceMs * 1.20) && clampedActive > cadenceMs * 1.15)
+        || (p70ActiveMs > cadenceMs * 1.45 && this.activeEmaMs > Math.max(22.6, cadenceMs * 1.35))
+      );
+      const fallbackWall = sustainedWallOverload ? clampedActive : clampedCpu;
       instantWorkMs = Math.max(clampedCpu, fallbackWall);
     }
     this.workEmaMs += (instantWorkMs - this.workEmaMs) * alpha;
@@ -289,28 +346,33 @@ export class AdaptiveQualityGovernor {
       this.lastUpgradeAt = now;
     }
 
-    const downgradeWorkThreshold = target * 1.11; // ~18.5 ms on Ultra (< 54 FPS true work)
-    const severeWorkThreshold = target * 1.40;    // ~23.3 ms on Ultra
-    const upgradeWorkThreshold = target * 0.76;   // ~12.7 ms pipelined max(CPU, GPU) on Ultra
-
     if (streamProtected) {
       // Transient high-altitude / teleport terrain streaming is CPU noise
-      // generation, not steady rendering overload; never downgrade on it.
+      // generation, not steady rendering overload; never downgrade on it, and
+      // pause recovery without wiping accumulated headroom on brief worker builds.
       this.overloadAccumMs = Math.max(0, this.overloadAccumMs - dtMs * 0.5);
-      this.recoveryAccumMs = 0;
+      this.recoveryAccumMs = Math.max(0, this.recoveryAccumMs - dtMs * 0.25);
       return { action: 'none' };
     }
 
+    const fallbackWallOverloaded = (
+      p50ActiveMs > Math.max(21.2, cadenceMs * 1.20)
+      && this.activeEmaMs > Math.max(21.5, cadenceMs * 1.22)
+    ) || (
+      p70ActiveMs > cadenceMs * 1.45
+      && this.activeEmaMs > Math.max(22.8, cadenceMs * 1.36)
+    );
     const overloaded = this.gpuEmaMs !== null
       ? this.workEmaMs > downgradeWorkThreshold
-      : (this.cpuEmaMs > downgradeWorkThreshold || this.activeEmaMs > Math.max(19.6, target * 1.18));
+      : (this.cpuEmaMs > downgradeWorkThreshold || fallbackWallOverloaded);
 
     const hasHeadroom = this.gpuEmaMs !== null
       ? (this.workEmaMs <= upgradeWorkThreshold
         && (this.cpuEmaMs + this.gpuEmaMs) <= target * 1.48
         && this.activeEmaMs <= ipcCeilingMs)
-      : (this.cpuEmaMs <= upgradeWorkThreshold * 0.92
-        && this.activeEmaMs <= Math.max(17.5, target * 1.05));
+      : (this.cpuEmaMs <= upgradeWorkThreshold * 0.95
+        && p50ActiveMs <= cadenceMs * 1.10
+        && this.activeEmaMs <= Math.max(22.4, cadenceMs * 1.34));
 
     if (overloaded) {
       const weight = this.workEmaMs > severeWorkThreshold ? 1.55 : 1.0;
@@ -358,7 +420,7 @@ export class AdaptiveQualityGovernor {
         }
       }
     } else if (!hasHeadroom) {
-      this.recoveryAccumMs = Math.max(0, this.recoveryAccumMs - dtMs * 0.75);
+      this.recoveryAccumMs = Math.max(0, this.recoveryAccumMs - dtMs * 0.4);
     }
 
     return { action: 'none' };
