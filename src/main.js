@@ -3913,6 +3913,9 @@ function ambience(dt = 1 / 60) {
     hemi.intensity *= 0.82;
     renderer.toneMappingExposure = sceneRadiance.exposure;
     ship.updateLighting(sceneRadiance);
+    ship.updateAmbient(environmentState,
+      nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null,
+      nearest ? nearest.R / Math.max(nearest.R, nav.pos.distanceTo(nearest.posUniv)) : 0);
     surfaceWeapons.updateLighting(sceneRadiance, environmentState,
       nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null);
   } else {

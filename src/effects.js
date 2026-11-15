@@ -6,10 +6,9 @@
 import * as THREE from 'three';
 import { SHIP_INTERIOR_LAYER, SKY_BACKDROP_LAYER } from './render-layers.js';
 
-import { buildMaterials, buildEnvironment } from './halcyon/materials.js';
-import { buildExterior } from './halcyon/ship/exterior.js';
-import { buildInterior } from './halcyon/ship/interior.js';
-import { occupancy, bakeCavity, collectGeometries } from './halcyon/gfx/cavity.js';
+import { buildEnvironment } from './halcyon/materials.js';
+import { assembleShip } from './halcyon/ship/model.js';
+import { shipAmbient } from './halcyon/ship/surfaces.js';
 import { applyInteriorIrradiance, bakeInteriorIrradiance } from './halcyon/gfx/interior-irradiance.js';
 import { SHIPS } from './halcyon/ship/registry.js';
 import { setMaterialEnvironmentIntensity } from './pbr-materials.js';
@@ -19,17 +18,17 @@ const X = new THREE.Vector3(1, 0, 0);
 const SKY_SUNSET_TINT = new THREE.Color(1.35, 0.22, 0.035);
 const _fallbackSunColor = new THREE.Color(1.0, 0.93, 0.84);
 
-// Eager preload note: the hero ship is now built procedurally from
-// src/halcyon/ (the 3aaa-spaceship-flight-prototype kernel), so there is no
-// GLB fetch to front-load any more. Construction happens synchronously in the
-// Ship constructor (~geometry loft + cavity bake), which the loading veil
-// already covers.
+// The hero ship is authored in Blender (tools/blender/build_halcyon.py) and
+// shipped as assets/halcyon/halcyon.glb. main.js awaits loadShipModel() under
+// the loading veil and hands the parsed glTF to the Ship constructor, so
+// construction itself stays synchronous.
 
 // One authored size contract drives landing clearance and walk collision.
 // Values follow the HALCYON VII definition (src/halcyon/ship/ships/halcyon.js):
-// 27.0 m long (z -15.6 .. 11.3), 21.4 m span (wing booms at x ±10.68),
-// hull belly at y -1.05, fin antenna tip at y ~7.3. The ship flies at 1:1
-// scale; y = 0 is the interior deck, so the belly sits ~1 m under the deck.
+// 27.9 m long (pitot z -16.5 .. nozzle lips 11.7), 21.6 m span (tip rails at
+// x ±10.8), hull belly at y -1.05, fin tip at y ~6.55. The ship flies at 1:1
+// scale; y = 0 is the interior deck, so the belly sits ~1 m under the deck and
+// the landing gear pads reach y -1.60 (belly minus groundClearance).
 export const SHIP_LANDING_PROFILE = Object.freeze({
   scale: 1,
   bounds: Object.freeze({
@@ -213,7 +212,7 @@ export const SHIP_FOREGROUND_LAYER = 3;
 export { SHIP_INTERIOR_LAYER } from './render-layers.js';
 
 export class Ship {
-  constructor(scene, { anisotropy = 1, renderer = null, radiance = null } = {}) {
+  constructor(scene, { anisotropy = 1, renderer = null, radiance = null, model = null } = {}) {
     const g = new THREE.Group();
     g.layers.set(SHIP_FOREGROUND_LAYER);
     this.group = g;
@@ -229,15 +228,14 @@ export class Ship {
     this.heroLoadSettled = false;
     this.heroLoadFailed = false;
 
-    // The flown vessel. HALCYON VII — long range exploration corvette,
-    // lofted from the section tables in src/halcyon/ rather than loaded.
+    // The flown vessel. HALCYON VII — long range exploration corvette.
     this.def = SHIPS[0];
     this.rampT = 0;
     this.rampTarget = 0;
     this.enginePower = 0.1;
     this.t = 0;
 
-    this.mountShip(scene, renderer, radiance);
+    this.mountShip(scene, renderer, radiance, model);
 
     // when you land, the ship sets down on a pad beside you and waits
     this.parkedPosUniv = null;
@@ -258,9 +256,14 @@ export class Ship {
    * main scene pass never pays for it and the ship's lights never leak onto
    * planets or terrain.
    */
-  mountShip(scene, renderer, radiance = null) {
+  mountShip(scene, renderer, radiance = null, model = null) {
+    if (!model) throw new Error('Ship needs the loaded HALCYON model (loadShipModel)');
     this.separateInterior = Boolean(radiance?.enabled);
-    this.mats = buildMaterials(this.anisotropy);
+    const built = assembleShip(model, this.def);
+    this.mats = built.mats;
+    this.ext = built.ext;
+    this.int = built.int;
+    this.bakedLight = built.bakedLight;
     if (renderer && !radiance?.enabled) {
       // The demo's deep-space PMREM probe drives all hull specular. It is
       // assigned per-material rather than as scene.environment so the rest
@@ -272,8 +275,6 @@ export class Ship {
       }
     }
 
-    this.ext = buildExterior(this.mats, this.def);
-    this.int = buildInterior(this.mats, this.def);
     this.group.add(this.ext.group);
     this.group.add(this.int.group);
     this.interiorLights = [];
@@ -283,15 +284,14 @@ export class Ship {
       this.interiorLights.push(object);
     });
 
-    const geos = collectGeometries(this.group);
-    bakeCavity(geos, occupancy(geos, 0.05));
-
     this.zoneMaterials = new Set();
     this.exteriorMaterials = new Set();
     this.cabinMaterials = new Set();
     this.cockpitMaterials = new Set();
     if (radiance?.enabled) {
-      bakeInteriorIrradiance(this.int.group);
+      // the cabin's light is baked in Blender; the runtime estimate is only
+      // the fallback for a model exported without it
+      if (!this.bakedLight) bakeInteriorIrradiance(this.int.group);
       this.configureMaterialZones(radiance);
     } else {
       this.ext.group.traverse((object) => {
@@ -416,12 +416,12 @@ export class Ship {
     scene.add(this.fill, this.fill.target);
   }
 
-  /** Weapon hardpoints: one per wing, just inboard of the leading edge. */
+  /** Weapon hardpoints: the muzzles of the two underwing cannon. */
   buildHardpoints() {
     this.hardpoints = [];
     for (const sx of [-1, 1]) {
       const hp = new THREE.Object3D();
-      hp.position.set(sx * 5.2, 0.55, 3.1);
+      hp.position.set(sx * 5.2, 0.10, 0.78);
       hp.name = sx > 0 ? 'hardpoint-stbd' : 'hardpoint-port';
       hp.layers.set(SHIP_FOREGROUND_LAYER);
       this.group.add(hp);
@@ -444,6 +444,23 @@ export class Ship {
     _sv.set(0.62, -0.26, 0.80).normalize();
     this.fill.position.copy(origin).addScaledVector(_sv, 60);
     this.fill.target.position.copy(origin);
+  }
+
+  /**
+   * The hemisphere the hull sits in: sky above, ground bounce or planetshine
+   * below.  `up` points away from the nearest body (null in deep space),
+   * `proximity` is that body's radius over the ship's distance from its centre.
+   */
+  updateAmbient(environment, up, proximity = 0) {
+    const sky = shipAmbient.uShipHemiSky.value, ground = shipAmbient.uShipHemiGround.value;
+    const day = environment?.day ?? 1;
+    const air = Math.min(1, environment?.skyIrradiance ?? 0);
+    if (up) shipAmbient.uShipHemiUp.value.copy(up);
+    // starlight floor, then the lit atmosphere overhead
+    sky.setRGB(0.020 + air * 0.30, 0.024 + air * 0.38, 0.034 + air * 0.52);
+    // a sunlit world fills roughly proximity^2 of the lower hemisphere
+    const shine = up ? Math.min(1, proximity * proximity) * day : 0;
+    ground.setRGB(0.012 + shine * 0.30, 0.012 + shine * 0.28, 0.014 + shine * 0.26);
   }
 
   updateLighting(radiance) {
@@ -590,6 +607,18 @@ export class Ship {
     this.int.cockpit.holo.update(t, speed, power);
   }
 
+  /** Landing gear follows the parking blend: stowed inside the belly in
+   *  flight, extended for the last half of the descent. */
+  updateGear(dt) {
+    if (!this.ext?.gear) return;
+    const want = THREE.MathUtils.smoothstep(this.parkAmt, 0.35, 0.85);
+    this.gearT = THREE.MathUtils.lerp(this.gearT ?? want, want, 1 - Math.exp(-Math.max(0, dt) * 6));
+    for (const leg of this.ext.gear) {
+      leg.visible = this.gearT > 0.02;
+      leg.position.y = leg.userData.deployedY + (1 - this.gearT) * 0.78;
+    }
+  }
+
   update(dt, nav, state, speed, warp, boost = 0, flightInput = null, camera = null) {
     this.frameNo = (this.frameNo ?? 0) + 1;
     const cinematicLanding = state === 'landing' && !!this.landingPose;
@@ -669,6 +698,7 @@ export class Ship {
     }
 
     this.updateEngineFx(dt, speed, warp, boost);
+    this.updateGear(dt);
 
     // Sun-shadow cadence: live while flying; while parked the hull cannot
     // move under its own power, so the map re-renders only often enough to

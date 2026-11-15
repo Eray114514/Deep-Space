@@ -1,0 +1,130 @@
+"""Cycles bakes, stored per vertex so they cost no texture memory and hold at
+any distance:
+
+  exterior  ambient occlusion  -> paint attribute B (as occlusion, 0 = open)
+  interior  diffuse irradiance -> colour attribute `Light`, sqrt(E / RANGE)
+            (direct + bounced light from every modelled lamp; the packer
+            renames it to the custom attribute _IRRADIANCE)
+"""
+import bmesh
+import bpy
+import numpy as np
+
+RANGE = 8.0
+
+
+def refine(obj, max_edge=0.28, passes=5):
+    """Split long edges so a flat face has enough vertices to carry lighting."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    for _ in range(passes):
+        long_edges = [e for e in bm.edges if e.calc_length() > max_edge]
+        if not long_edges:
+            break
+        bmesh.ops.subdivide_edges(bm, edges=long_edges, cuts=1)
+        bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 3])
+    bm.to_mesh(obj.data)
+    bm.free()
+
+
+def setup(scene, samples):
+    scene.render.engine = 'CYCLES'
+    prefs = bpy.context.preferences.addons['cycles'].preferences
+    prefs.compute_device_type = 'OPTIX'
+    prefs.get_devices()
+    for d in prefs.devices:
+        d.use = d.type == 'OPTIX'
+    scene.cycles.device = 'GPU'
+    scene.cycles.samples = samples
+    scene.cycles.use_denoising = False
+    scene.cycles.max_bounces = 6
+    scene.cycles.diffuse_bounces = 4
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new('bake')
+    scene.world.use_nodes = True
+    scene.world.node_tree.nodes['Background'].inputs[1].default_value = 0.0
+
+
+def _bake(obj, attr, bake_type, pass_filter=None):
+    me = obj.data
+    ca = me.color_attributes
+    if attr in ca:
+        ca.remove(ca[attr])
+    layer = ca.new(attr, 'FLOAT_COLOR', 'CORNER')
+    ca.active_color = layer
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    kw = dict(type=bake_type, target='VERTEX_COLORS')
+    if pass_filter:
+        kw['pass_filter'] = pass_filter
+    bpy.ops.object.bake(**kw)
+    data = np.zeros(len(me.loops) * 4, dtype=np.float32)
+    ca[attr].data.foreach_get('color', data)
+    return data.reshape(-1, 4)
+
+
+def _share(me, values):
+    """Average a per-corner bake over the corners that share a vertex AND a
+    shading normal.  Hard edges keep their step in light; smooth surfaces get
+    one value per vertex, so the exporter can weld them again."""
+    n = len(me.loops)
+    vert = np.zeros(n, dtype=np.int64)
+    me.loops.foreach_get('vertex_index', vert)
+    nrm = np.zeros(n * 3, dtype=np.float32)
+    me.corner_normals.foreach_get('vector', nrm)
+    q = np.round(nrm.reshape(-1, 3) * 24).astype(np.int64) + 32
+    key = ((vert * 64 + q[:, 0]) * 64 + q[:, 1]) * 64 + q[:, 2]
+    _, inverse = np.unique(key, return_inverse=True)
+    count = np.bincount(inverse).astype(np.float32)
+    out = np.empty_like(values)
+    for c in range(values.shape[1]):
+        out[:, c] = (np.bincount(inverse, weights=values[:, c]) / count)[inverse]
+    return out
+
+
+def _paint(me):
+    data = np.zeros(len(me.loops) * 4, dtype=np.float32)
+    me.color_attributes['Color'].data.foreach_get('color', data)
+    return data.reshape(-1, 4)
+
+
+def bake_occlusion(scene, objs, samples=96, distance=1.2):
+    setup(scene, samples)
+    scene.world.light_settings.distance = distance
+    for obj in objs:
+        me = obj.data
+        ao = _bake(obj, 'AO_tmp', 'AO')
+        paint = _paint(me)
+        paint[:, 2] = np.clip(1.0 - _share(me, ao)[:, 0], 0.0, 1.0)
+        me.color_attributes['Color'].data.foreach_set('color', paint.ravel())
+        me.color_attributes.remove(me.color_attributes['AO_tmp'])
+        me.color_attributes.active_color = me.color_attributes['Color']
+        print('  occlusion %-16s mean %.3f  open %.2f  closed %.2f' % (obj.name, float(paint[:, 2].mean()), float((paint[:, 2] < 0.1).mean()), float((paint[:, 2] > 0.9).mean())))
+
+
+def bake_irradiance(scene, objs, samples=192):
+    setup(scene, samples)
+    # every surface must report the light ARRIVING on it, so metals get a
+    # diffuse lobe for the duration of the bake
+    saved = []
+    for m in bpy.data.materials:
+        if not m.use_nodes:
+            continue
+        b = m.node_tree.nodes.get('Principled BSDF')
+        if b is None:
+            continue
+        saved.append((b, b.inputs['Metallic'].default_value))
+        b.inputs['Metallic'].default_value = 0.0
+    for obj in objs:
+        me = obj.data
+        e = _bake(obj, 'Light', 'DIFFUSE', {'DIRECT', 'INDIRECT'})
+        e = _share(me, e)
+        e[:, :3] = np.sqrt(np.clip(e[:, :3] / RANGE, 0.0, 1.0))
+        e[:, 3] = 1.0
+        me.color_attributes['Light'].data.foreach_set('color', e.ravel())
+        me.color_attributes.active_color = me.color_attributes['Color']
+        print('  irradiance %-14s mean %.3f max %.3f' % (obj.name, float(e[:, :3].mean()), float(e[:, :3].max())))
+    for b, v in saved:
+        b.inputs['Metallic'].default_value = v
