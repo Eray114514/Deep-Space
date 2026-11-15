@@ -1044,9 +1044,18 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             // reached zero before this radius, so both meshes meet on the
             // same sphere and a camera pan cannot reveal a screen-locked
             // checkerboard or rectangular coverage edge.
+            // From underwater (!gl_FrontFacing), upward grazing rays cross
+            // coarse inscribed waterLod chords before the finer NearWaterPatch
+            // sphere, turning the above-water sag overlap into a double-discard
+            // slit. Bridge that chord sag with a bounded overlap band.
             float patchHandoff = uNearPatchRadius - 640.0;
-            if (vNearPatchPass < 0.5 && patchDistance < patchHandoff) discard;
-            if (vNearPatchPass > 0.5 && patchDistance >= patchHandoff) discard;
+            float maxOverlap = max(0.0, min(420.0,
+              min(patchHandoff * 0.45, (uNearPatchRadius - patchHandoff) * 0.7)));
+            float underwaterOverlap = gl_FrontFacing ? 0.0
+              : min(maxOverlap, 18.0 / max(abs(dot(normalize(vWaveUp),
+                normalize(vViewPosition))), 0.03));
+            if (vNearPatchPass < 0.5 && patchDistance < patchHandoff - underwaterOverlap) discard;
+            if (vNearPatchPass > 0.5 && patchDistance >= patchHandoff + underwaterOverlap) discard;
           }
           vec3 localUp = normalize(vLocalPos);
           vec3 localT = normalize(cross(localUp,
@@ -1069,8 +1078,8 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float swashField = (detailSample.r - 0.5) * 2.6
             + (detailSample.g - 0.5) * 1.2 + vWaveHeight * 0.42;
           float edgeDepth = vDepth + swashField;
-          if (edgeDepth <= -0.85) discard;
-          float edgeCoverage = smoothstep(-0.85, 0.22, edgeDepth);
+          if (gl_FrontFacing && edgeDepth <= -0.85) discard;
+          float edgeCoverage = gl_FrontFacing ? smoothstep(-0.85, 0.22, edgeDepth) : 1.0;
           float dep = max(edgeDepth, 0.0);
           float opticalFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
           float farBathymetry = smoothstep(2.0, 22.0, opticalFootprint);
@@ -1421,7 +1430,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v34-view-frame:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v35-underwater-handoff:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
   return prepareSurfaceAtmosphere(material, planet);
 }
 
