@@ -14,7 +14,7 @@ import { buildGalaxyBackdrop, CELL, GalaxyCatalog, HOME_SYSTEM_ID } from './gala
 import { buildCivilizationSites, civilizationSitesForSystem } from './civilization.js';
 import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual } from './artificial-sites.js';
 import { applySystemBodyTuning } from './world-config.js';
-import { blackbodyLinearRgb, buildStellarLightField } from './stellar-radiometry.js';
+import { adaptedStellarRgb, buildStellarLightField, referenceStellarTemperature } from './stellar-radiometry.js';
 import { SpaceRadiance } from './space-radiance.js';
 
 export { CELL } from './galaxy-layout.js';
@@ -572,9 +572,12 @@ export class StarSystem {
     this.name = this.spec.name;
     this.catalogId = this.spec.catalogId;
     this.isHome = this.spec.isHome;
+    // Lights and discs share the observer's adaptation to the system's
+    // brightest star (see STELLAR_WHITE_ADAPTATION).
+    const referenceK = referenceStellarTemperature(this.spec.stars);
     this.starViews = this.spec.stars.map((spec) => {
       const group = new THREE.Group();
-      const color = new THREE.Color().fromArray(blackbodyLinearRgb(spec.temperatureK));
+      const color = new THREE.Color().fromArray(adaptedStellarRgb(spec.temperatureK, referenceK));
       const material = new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(4), fog: false });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(spec.radiusRender, 48, 32), material);
       group.add(mesh);

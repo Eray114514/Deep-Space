@@ -28,6 +28,9 @@ const _quaternion = new THREE.Quaternion();
 const _sun = new THREE.Vector3();
 const _ground = new THREE.Vector3();
 
+// Quarter-texel offsets of the march grid; each lands on one pixel of the 2x history.
+const SUBPIXEL_CYCLE = [[-0.25, -0.25], [0.25, 0.25], [0.25, -0.25], [-0.25, 0.25]];
+
 const vertexShader = /* glsl */`
   varying vec2 vUv;
   void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
@@ -193,6 +196,7 @@ const marchShader = /* glsl */`
   uniform sampler2D tSceneDepth;
   uniform float uFrame, uExtinction, uScatterGain, uShaftStrength;
   uniform vec3 uCloudTint;
+  uniform vec2 uSubpixel, uMarchTexel;
   ${atmosphereUniformGLSL}
   varying vec2 vUv;
   layout(location = 1) out highp vec4 gAux;
@@ -222,7 +226,10 @@ const marchShader = /* glsl */`
     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
     gAux = vec4(6e4, 6e4, 0.0, 1.0);
     gShaft = vec4(0.0);
-    vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+    // The whole low-res grid shifts by a quarter texel each frame (2x2 cycle):
+    // its samples land exactly on the centres of the 2x history's pixels.
+    vec2 rayUv = vUv + uSubpixel * uMarchTexel;
+    vec4 view = uInvProjection * vec4(rayUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
     vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
     vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
@@ -245,7 +252,7 @@ const marchShader = /* glsl */`
     float baseHere = uShellBase + weatherAt(ro).y;
     if (uShadowOn > 0.5 && r0 < baseHere) {
       float tMax = min(inner.y, 90000.0);
-      float sceneDepth = texture2D(tSceneDepth, vUv).x;
+      float sceneDepth = texture2D(tSceneDepth, rayUv).x;
       if (sceneDepth < 0.999999) tMax = min(tMax, (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005));
       else if (ground) tMax = min(tMax, groundHit.x);
       vec3 loss = vec3(0.0), through = vec3(1.0);
@@ -427,42 +434,55 @@ const marchShader = /* glsl */`
     gAux = vec4(tFront, max(tBack, tFront + 1.0), representative, 1000.0) * 0.001;   // km
   }`;
 
-// Temporal resolve. Every frame marches with a different jitter phase; this
-// pass reprojects last frame's result to where the cloud is now and blends,
-// so the step noise averages out instead of sitting on screen as grain.
+// Temporal upsampling. The march runs at a reduced resolution with its grid
+// shifted by a quarter texel each frame; the history is twice as fine, so
+// every history pixel receives an exact sample once in four frames and keeps
+// a reprojected, neighbourhood-clamped value in between. Static and slowly
+// moving views converge to the history's resolution instead of the march's.
 const resolveShader = /* glsl */`
   precision highp float;
   uniform sampler2D tCurrent, tCurrentAux, tHistory;
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal, uPrevProjection;
   uniform mat3 uPrevLocalToView;
   uniform vec3 uCameraDelta;
-  uniform vec2 uCloudTexel;
-  uniform float uHistoryWeight;
+  uniform vec2 uCloudTexel, uSubpixel;
+  uniform float uHistoryWeight, uCurrentWeight;
   varying vec2 vUv;
   void main() {
-    vec4 current = texture2D(tCurrent, vUv);
-    if (uHistoryWeight <= 0.0) { gl_FragColor = current; return; }
+    vec2 size = 1.0 / uCloudTexel;
+    vec2 st = vUv * size - 0.5 - uSubpixel;
+    vec2 cellF = clamp(floor(st + 0.5), vec2(0.0), size - 1.0);
+    ivec2 cell = ivec2(cellF);
+    vec2 off = st - cellF;
+    vec4 nearest = texelFetch(tCurrent, cell, 0);
+    vec4 spatial = texture2D(tCurrent, vUv - uSubpixel * uCloudTexel);
+    if (uHistoryWeight <= 0.0) { gl_FragColor = spatial; return; }
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
     vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
     vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
     // Clear sky reprojects as a far point so the history follows rotation.
-    float km = texture2D(tCurrentAux, vUv).z;
+    float km = texelFetch(tCurrentAux, cell, 0).z;
     float distance = km > 0.0 ? km * 1000.0 : 150000.0;
     // The camera offset is formed on the CPU in double precision.
     vec3 previousView = uPrevLocalToView * (uCameraDelta + rd * distance);
     vec4 clip = uPrevProjection * vec4(previousView, 1.0);
     vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
-    float valid = clip.w > 0.0 && uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 ? 1.0 : 0.0;
+    if (!(clip.w > 0.0 && uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0)) { gl_FragColor = spatial; return; }
     vec4 history = texture2D(tHistory, uv);
-    // Keep history inside what the current neighbourhood allows: this bounds
-    // ghosting when clouds are revealed, lit differently or the camera cuts.
-    vec4 a = texture2D(tCurrent, vUv + vec2(uCloudTexel.x, 0.0)), b = texture2D(tCurrent, vUv - vec2(uCloudTexel.x, 0.0));
-    vec4 c = texture2D(tCurrent, vUv + vec2(0.0, uCloudTexel.y)), d = texture2D(tCurrent, vUv - vec2(0.0, uCloudTexel.y));
-    vec4 lo = min(current, min(min(a, b), min(c, d))), hi = max(current, max(max(a, b), max(c, d)));
-    vec4 pad = (hi - lo) * 0.6 + vec4(vec3(0.02), 0.01);
+    // Keep history inside what the current 3x3 neighbourhood allows: this
+    // bounds ghosting when clouds are revealed, relit or the camera cuts.
+    vec4 lo = nearest, hi = nearest;
+    ivec2 maxCell = ivec2(size) - 1;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+      vec4 n = texelFetch(tCurrent, clamp(cell + ivec2(x, y), ivec2(0), maxCell), 0);
+      lo = min(lo, n); hi = max(hi, n);
+    }
+    vec4 pad = (hi - lo) * 0.25 + vec4(vec3(0.02), 0.01);
     history = clamp(history, lo - pad, hi + pad);
-    gl_FragColor = mix(current, history, valid * uHistoryWeight);
+    // This pixel's own sample arrives when the shifted grid lands on it.
+    float exact = 1.0 - smoothstep(0.15, 0.4, max(abs(off.x), abs(off.y)));
+    gl_FragColor = mix(history, nearest, exact * uCurrentWeight);
   }`;
 
 const compositeShader = /* glsl */`
@@ -471,7 +491,7 @@ const compositeShader = /* glsl */`
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal;
   uniform vec3 uCameraLocal, uSunDirection0;
   uniform float uCameraFar, uShadowFloor;
-  uniform vec2 uCloudTexel;
+  uniform vec2 uCloudTexel, uHistTexel, uSubpixel;
   ${cloudFieldGLSL}
   ${shadowLookupGLSL}
   varying vec2 vUv;
@@ -488,7 +508,7 @@ const compositeShader = /* glsl */`
     // there trades invisible detail for a clean horizon.
     float far = smoothstep(15.0, 70.0, texture2D(tCloudAux, vUv).x);
     if (far > 0.0) {
-      vec2 o = uCloudTexel * 1.1;
+      vec2 o = uHistTexel * 2.2;
       vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
         + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
       cloud = mix(cloud, blurred, far * 0.15);
@@ -505,19 +525,18 @@ const compositeShader = /* glsl */`
       // the results are blended bilinearly. One shared front distance (the
       // old min of four) switched the whole cloud on or off per texel and drew
       // the low-res grid as blocks along every ridge and coast.
-      vec2 st = vUv / uCloudTexel - 0.5;
+      // The depth range is coarse (march resolution, on this frame's shifted
+      // grid); the colour comes from the fine history.
+      vec2 st = vUv / uCloudTexel - 0.5 - uSubpixel;
       vec2 cell = floor(st), f = st - cell;
       vec4 ws = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-      vec3 rgb = vec3(0.0);
-      float hidden = 0.0;
+      float inFront = 0.0;
       for (int k = 0; k < 4; k++) {
         vec2 o = vec2(float(k - (k / 2) * 2), float(k / 2));
-        vec2 uv = (cell + o + 0.5) * uCloudTexel;
-        vec4 c = texture2D(tCloud, uv);
-        float w = ws[k] * frontCoverage(texture2D(tCloudAux, uv).xyz * 1000.0, distance);
-        rgb += w * c.rgb; hidden += w * (1.0 - c.a);
+        vec2 uv = (cell + o + 0.5 + uSubpixel) * uCloudTexel;
+        inFront += ws[k] * frontCoverage(texture2D(tCloudAux, uv).xyz * 1000.0, distance);
       }
-      cloud = vec4(rgb, 1.0 - hidden);
+      cloud = vec4(cloud.rgb * inFront, 1.0 - (1.0 - cloud.a) * inFront);
       coverage = 1.0;
       if (uShadowOn > 0.5) {
         // Surfaces under the clouds lose their direct sun to the cloud column.
@@ -608,6 +627,10 @@ export class LiteCloudPass extends Pass {
       uShadowOn: { value: 0 },
     };
     const extinction = { value: 0.0026 };
+    const subpixel = { value: new THREE.Vector2() };
+    const marchTexel = { value: new THREE.Vector2(1, 1) };
+    this.subpixelIndex = 0;
+    this.historyRatio = 1;
     // Share the atmosphere pass's uniform objects: one camera/planet/sun state.
     this.marchMaterial = new THREE.ShaderMaterial({
       name: 'Lite cloud march',
@@ -623,6 +646,8 @@ export class LiteCloudPass extends Pass {
         uScatterGain: { value: 3.6 },
         uShaftStrength: { value: 0.9 },
         uCloudTint: { value: new THREE.Color(1, 1, 1) },
+        uSubpixel: subpixel,
+        uMarchTexel: marchTexel,
       },
       vertexShader, fragmentShader: marchShader,
     });
@@ -650,7 +675,9 @@ export class LiteCloudPass extends Pass {
         uCameraLocal: air.uCameraLocal, uSunDirection0: air.uSunDirection0, uCameraFar: air.uCameraFar,
         // Sky and bounce light left under a fully opaque cloud.
         uShadowFloor: { value: 0.4 },
-        uCloudTexel: { value: new THREE.Vector2(1, 1) },
+        uCloudTexel: marchTexel,
+        uHistTexel: { value: new THREE.Vector2(1, 1) },
+        uSubpixel: subpixel,
       },
       vertexShader, fragmentShader: compositeShader,
     });
@@ -664,9 +691,12 @@ export class LiteCloudPass extends Pass {
         uPrevProjection: { value: new THREE.Matrix4() },
         uPrevLocalToView: { value: new THREE.Matrix3() },
         uCameraDelta: { value: new THREE.Vector3() },
-        uCloudTexel: this.compositeMaterial.uniforms.uCloudTexel,
-        // 0.9 ≈ ten frames of accumulation.
+        uCloudTexel: marchTexel,
+        uSubpixel: subpixel,
         uHistoryWeight: { value: 0 },
+        // Exact samples arrive once per four frames on the 2x history; at
+        // ~0.22 each, about twenty frames average the step jitter away.
+        uCurrentWeight: { value: 0.22 },
       },
       vertexShader, fragmentShader: resolveShader,
     });
@@ -771,11 +801,21 @@ export class LiteCloudPass extends Pass {
     const scale = Math.min(this.scale, Math.sqrt(this.maxPixels / Math.max(1, pixels)));
     const width = Math.max(1, Math.round(readBuffer.width * scale));
     const height = Math.max(1, Math.round(readBuffer.height * scale));
-    if (this.target.width !== width || this.target.height !== height) {
+    // The history is twice the march resolution while that stays within the
+    // output; a march at three quarters or more just accumulates in place.
+    const ratio = this.temporalEnabled && scale <= 0.55 ? 2 : 1;
+    if (this.target.width !== width || this.target.height !== height || this.historyRatio !== ratio) {
       this.target.setSize(width, height);
-      for (const target of this.history) target.setSize(width, height);
+      for (const target of this.history) target.setSize(width * ratio, height * ratio);
+      this.historyRatio = ratio;
       this.historyValid = false;
     }
+    const sub = u.uSubpixel.value;
+    if (ratio === 2) {
+      this.subpixelIndex = (this.subpixelIndex + 1) & 3;
+      sub.set(SUBPIXEL_CYCLE[this.subpixelIndex][0], SUBPIXEL_CYCLE[this.subpixelIndex][1]);
+    } else sub.set(0, 0);
+    u.uMarchTexel.value.set(1 / width, 1 / height);
 
     if (!this.targetTypeChosen) {
       this.targetTypeChosen = true;
@@ -788,7 +828,7 @@ export class LiteCloudPass extends Pass {
     this.marchQuad.render(renderer);
 
     const c = this.compositeMaterial.uniforms;
-    c.uCloudTexel.value.set(1 / width, 1 / height);
+    c.uHistTexel.value.set(1 / (width * ratio), 1 / (height * ratio));
 
     // Temporal resolve into the other history target.
     const r = this.resolveMaterial.uniforms;
@@ -798,7 +838,8 @@ export class LiteCloudPass extends Pass {
     const continuous = this.temporalEnabled && this.historyValid && planet === this.previousPlanet
       && r.uCameraDelta.value.length() < 20000
       && _sun.copy(u.uSunDirection0.value).normalize().dot(this.previousSun) > 0.99985;
-    r.uHistoryWeight.value = continuous ? 0.9 : 0;
+    r.uHistoryWeight.value = continuous ? 1 : 0;
+    r.uCurrentWeight.value = ratio === 2 ? 0.22 : 0.1;
     const read = this.history[this.historyIndex], write = this.history[1 - this.historyIndex];
     r.tHistory.value = read.texture;
     renderer.setRenderTarget(write);

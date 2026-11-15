@@ -83,6 +83,39 @@ export function blackbodyLinearRgb(temperatureK) {
 }
 
 /**
+ * Share of the reference star's tint the observer adapts away. An eye (or a
+ * camera on daylight balance) sees its own sun's light as nearly white; the
+ * raw D65-relative black body of a 5,500 K star turned every cloud deck
+ * beige. 0.7 leaves red dwarfs reddish and blue giants cool, and keeps the
+ * colour difference between the two stars of a binary.
+ */
+export const STELLAR_WHITE_ADAPTATION = 0.7;
+
+/**
+ * Black-body colour seen by an observer adapted to `referenceK` (von Kries
+ * scaling in linear sRGB). The brightest channel is one.
+ */
+export function adaptedStellarRgb(temperatureK, referenceK = temperatureK,
+  adaptation = STELLAR_WHITE_ADAPTATION) {
+  const color = blackbodyLinearRgb(temperatureK);
+  const reference = blackbodyLinearRgb(referenceK);
+  const k = clamp(Number(adaptation) || 0, 0, 1);
+  const rgb = color.map((channel, index) => channel / Math.max(1e-6, reference[index]) ** k);
+  const peak = Math.max(1e-12, ...rgb);
+  return rgb.map((channel) => channel / peak);
+}
+
+/** Temperature of the most luminous star: the one an observer adapts to. */
+export function referenceStellarTemperature(stars) {
+  let best = null;
+  for (const star of stars || []) {
+    const luminosity = Number(star?.luminositySolar ?? star?.luminosity) || 0;
+    if (!best || luminosity > best.luminosity) best = { luminosity, temperatureK: star?.temperatureK };
+  }
+  return clamp(Number(best?.temperatureK) || 6500, 1000, 50000);
+}
+
+/**
  * Relative irradiance from a star. Units cancel when every source uses the
  * same distance unit; the default result is luminositySolar / distance².
  */
@@ -122,6 +155,7 @@ function observerOf(value) {
  */
 export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
   const observer = observerOf(observerPosition);
+  const referenceK = referenceStellarTemperature((stars || []).slice(0, 2));
   const sources = (stars || []).slice(0, 2).map((source, index) => {
     const position = positionOf(source);
     const delta = [
@@ -136,7 +170,7 @@ export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
     const flux = stellarIrradiance(source?.luminositySolar ?? source?.luminosity ?? 0,
       distance, visibility);
     const temperatureK = clamp(Number(source?.temperatureK) || 6500, 1000, 50000);
-    const color = blackbodyLinearRgb(temperatureK);
+    const color = adaptedStellarRgb(temperatureK, referenceK);
     return {
       index,
       id: source?.starId ?? source?.id ?? `star-${index}`,
