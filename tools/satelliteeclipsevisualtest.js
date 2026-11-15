@@ -59,15 +59,33 @@ function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
     if (rgbDifference(reference, control, pixel) > 3) continue;
     stable.push({
       x, y,
+      lit: luma(reference, pixel),
       delta: luma(shadow, pixel) - luma(reference, pixel),
     });
   }
-  // Frame-wide offset from the least-darkened quarter of the stable pixels.
-  // The home system is a binary: the 0.24 R fixture casts one shadow per star,
-  // and together they can cover more than half the disc, which pulled a plain
-  // median down although every pixel off the shadows was unchanged. A real
-  // full-frame darkening still moves this quartile.
-  const globalDelta = quantile(stable.map((sample) => sample.delta), 0.75);
+  // Frame-wide offset, read where the shadow is not: the lit pixels farthest
+  // from the raw shadow centroid. The home system is a binary (one shadow per
+  // star) and the clouds over the disc are eclipsed as well, so the shadows
+  // can cover most of the lit disc; any whole-frame quantile then measured
+  // the shadow itself. A uniform full-frame darkening still moves this
+  // far field as much as the core.
+  let rawWeight = 0, rawX = 0, rawY = 0;
+  for (const sample of stable) {
+    if (sample.delta >= -9) continue;
+    const amount = -sample.delta - 9;
+    rawWeight += amount; rawX += sample.x * amount; rawY += sample.y * amount;
+  }
+  const deltas = stable.map((sample) => sample.delta);
+  let globalDelta = quantile(deltas.slice(), 0.75);
+  if (rawWeight > 0) {
+    const cx = rawX / rawWeight, cy = rawY / rawWeight;
+    const far = stable.filter((sample) => sample.lit > 24)
+      .map((sample) => ({ delta: sample.delta, r: Math.hypot(sample.x - cx, sample.y - cy) }))
+      .sort((a, b) => b.r - a.r);
+    const field = far.slice(0, Math.max(1, Math.floor(far.length * 0.2)));
+    if (field.length > 100) globalDelta = quantile(field.map((sample) => sample.delta), 0.5);
+  }
+  const coreDelta = quantile(deltas, 0.02);
   let darkened = 0;
   let weight = 0;
   let weightedX = 0;
@@ -75,7 +93,10 @@ function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
   for (const sample of stable) {
     const residual = sample.delta - globalDelta;
     if (residual >= -9) continue;
-    const amount = -residual - 9;
+    // Weight by the fraction of light lost, not absolute luma: bright land
+    // and dark sea under the same shadow otherwise pull the surface centroid
+    // toward the continents, while the air's even albedo does not.
+    const amount = (-residual - 9) / Math.max(sample.lit, 24);
     darkened++;
     weight += amount;
     weightedX += sample.x * amount;
@@ -83,6 +104,9 @@ function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
   }
   return {
     globalDelta,
+    coreDelta,
+    // Local: the far field moves far less than the shadow core.
+    local: Math.abs(globalDelta) < Math.max(3, 0.12 * Math.abs(coreDelta)),
     stableFraction: stable.length / ((x1 - x0) * (y1 - y0)),
     darkenedFraction: darkened / Math.max(1, stable.length),
     centroid: weight > 0
@@ -213,6 +237,10 @@ try {
   await page.evaluate(() => {
     NMS.setAdaptiveQualityLocked(true);
     NMS.setWeatherFixture(0, 'cumulus');
+    // The player ship sits in the frame and is itself eclipsed in the surface
+    // pass only, which pulled the surface centroid toward it. Measure the
+    // planet alone.
+    NMS.shipVisible?.(false);
   });
   // Global NMS.idle() includes every generated body and far-flora queue. It
   // may legitimately remain false for over a minute even though the focused
@@ -264,10 +292,9 @@ try {
   assert.ok(centroidDistance(surfaceLeftStats.centroid, surfaceRightStats.centroid) > 0.035,
     `moving the satellite must move the surface-shadow centroid: `
     + `${JSON.stringify([surfaceLeftStats.centroid, surfaceRightStats.centroid])}`);
-  assert.ok(Math.abs(surfaceLeftStats.globalDelta) < 3
-      && Math.abs(surfaceRightStats.globalDelta) < 3,
-  `local eclipse must not darken the full frame: `
-    + `${surfaceLeftStats.globalDelta}, ${surfaceRightStats.globalDelta}`);
+  assert.ok(surfaceLeftStats.local && surfaceRightStats.local,
+    `local eclipse must not darken the full frame: `
+    + `${JSON.stringify([surfaceLeftStats, surfaceRightStats])}`);
 
   // Media-only shadow field. Opaque terrain still writes depth, but colorWrite
   // is disabled so atmosphere/cloud changes can be measured independently.
@@ -287,8 +314,7 @@ try {
   // failed lighting contract does not hide an independent depth-order result.
   const mediaShadowPresent = mediaLeftStats.darkenedFraction > 0.0015
     && mediaRightStats.darkenedFraction > 0.0015;
-  const mediaShadowLocal = Math.abs(mediaLeftStats.globalDelta) < 3
-    && Math.abs(mediaRightStats.globalDelta) < 3;
+  const mediaShadowLocal = mediaLeftStats.local && mediaRightStats.local;
   const mediaAlignment = motionAlignment(
     surfaceLeftStats.centroid, surfaceRightStats.centroid,
     mediaLeftStats.centroid, mediaRightStats.centroid);

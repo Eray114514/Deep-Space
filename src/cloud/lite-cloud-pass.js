@@ -245,6 +245,10 @@ const marchShader = /* glsl */`
     float mu1 = dot(rd, sunDirection1);
     float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.61803);
     vec2 outer = shellHits(ro, rd, uShellTop), inner = shellHits(ro, rd, uShellBase);
+    // A moon (or a close planet) between the star and this world: the same
+    // occluder model the atmosphere pass uses, so cloud, air and ground
+    // shadows stay concentric.
+    bool eclipsing = uLocalOccluderCount > 0 || uEclipseEnabled >= 0.5;
 
     // ---- Light shafts. The atmosphere pass lit all the air as if the sky
     // were clear. Below the clouds, take back the primary sun's single
@@ -270,6 +274,7 @@ const marchShader = /* glsl */`
         loss += through * source * (1.0 - cloudShadowAt(p)) * dt;
         through *= exp(-(uBetaRayleigh * rayleigh + uBetaMieExtinction * mie) * dt);
       }
+      if (eclipsing) loss *= eclipseVisibility(ro, sunDirection);
       gShaft = vec4(loss * uShaftStrength * smoothstep(baseHere, baseHere - 700.0, r0), 1.0);
     }
 
@@ -297,8 +302,10 @@ const marchShader = /* glsl */`
         float slant = max(abs(dot(rd, p / length(p))), 0.16);
         cirrusA = 1.0 - pow(1.0 - a, 1.0 / slant);
         float day = smoothstep(-0.12, 0.12, dot(p / length(p), sunDirection));
-        cirrusL = (irradiance * sunAt(p, sunDirection) * mix(hgPhase(mu, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
-          + irradiance1 * sunAt(p, sunDirection1) * mix(hgPhase(mu1, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
+        float ecl = eclipsing ? eclipseVisibility(p, sunDirection) : 1.0;
+        day *= mix(0.3, 1.0, ecl);
+        cirrusL = (irradiance * sunAt(p, sunDirection) * ecl * mix(hgPhase(mu, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
+          + irradiance1 * sunAt(p, sunDirection1) * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0) * mix(hgPhase(mu1, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
           + irradiance * vec3(0.045, 0.062, 0.095) * (0.25 + 0.75 * day)) * uCloudTint;
       }
     }
@@ -386,9 +393,12 @@ const marchShader = /* glsl */`
               * mix(0.76, 1.0, exp(-tau * 0.3));
             // The companion star reuses the primary's optical depth (they are
             // rarely far apart in the sky) with its own phase and horizon.
-            vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span)) * scatter * powder;
-            if (uSunEnergy1 > 0.001) sun += irradiance1 * sunAt(p, sunDirection1) * scatter1 * powder;
-            float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection));
+            float ecl = eclipsing ? eclipseVisibility(p, sunDirection) : 1.0;
+            vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span)) * (scatter * powder * ecl);
+            if (uSunEnergy1 > 0.001) sun += irradiance1 * sunAt(p, sunDirection1) * (scatter1 * powder
+              * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0));
+            // Under the umbra the surrounding sky is shadowed too.
+            float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection)) * mix(0.3, 1.0, ecl);
             vec3 ambient = irradiance * mix(vec3(0.013, 0.020, 0.036), vec3(0.047, 0.070, 0.116), h)
               * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
             // Bases sit in their own shadow; tops catch the sun.
@@ -470,6 +480,8 @@ const resolveShader = /* glsl */`
     vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
     if (!(clip.w > 0.0 && uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0)) { gl_FragColor = spatial; return; }
     vec4 history = texture2D(tHistory, uv);
+    // Screen motion of this point since last frame, in march texels.
+    float motion = length((uv - vUv) * size);
     // Keep history inside what the current 3x3 neighbourhood allows: this
     // bounds ghosting when clouds are revealed, relit or the camera cuts.
     vec4 lo = nearest, hi = nearest;
@@ -482,7 +494,12 @@ const resolveShader = /* glsl */`
     history = clamp(history, lo - pad, hi + pad);
     // This pixel's own sample arrives when the shifted grid lands on it.
     float exact = 1.0 - smoothstep(0.15, 0.4, max(abs(off.x), abs(off.y)));
-    gl_FragColor = mix(history, nearest, exact * uCurrentWeight);
+    // In fast motion only a quarter of the pixels would see a current sample,
+    // which drew a 2x2 comb across moving edges: let every pixel follow the
+    // interpolated current frame there.
+    float moving = smoothstep(0.5, 2.5, motion);
+    vec4 target = mix(spatial, nearest, exact);
+    gl_FragColor = mix(history, target, max(exact * uCurrentWeight, moving * 0.35));
   }`;
 
 const compositeShader = /* glsl */`
@@ -530,12 +547,20 @@ const compositeShader = /* glsl */`
       vec2 st = vUv / uCloudTexel - 0.5 - uSubpixel;
       vec2 cell = floor(st), f = st - cell;
       vec4 ws = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-      float inFront = 0.0;
+      // A texel whose ray met no cloud knows nothing about depth order. It
+      // used to vote "behind" and erase the fine history's cloud wherever
+      // this frame's shifted grid happened to miss it: a 4-frame flicker on
+      // every thin edge. Only texels that saw cloud vote.
+      float inFront = 0.0, votes = 0.0;
       for (int k = 0; k < 4; k++) {
         vec2 o = vec2(float(k - (k / 2) * 2), float(k / 2));
         vec2 uv = (cell + o + 0.5 + uSubpixel) * uCloudTexel;
-        inFront += ws[k] * frontCoverage(texture2D(tCloudAux, uv).xyz * 1000.0, distance);
+        vec3 aux = texture2D(tCloudAux, uv).xyz;
+        if (aux.z > 0.0) { inFront += ws[k] * frontCoverage(aux * 1000.0, distance); votes += ws[k]; }
       }
+      // No vote at all: from above the deck every cloud lies in front of the
+      // ground; from below, keep the surface.
+      inFront = votes > 1e-3 ? inFront / votes : (length(uCameraLocal) > uShellTop ? 1.0 : 0.0);
       cloud = vec4(cloud.rgb * inFront, 1.0 - (1.0 - cloud.a) * inFront);
       coverage = 1.0;
       if (uShadowOn > 0.5) {
