@@ -155,7 +155,9 @@ function observerOf(value) {
  */
 export function buildStellarLightField(stars, observerPosition = [0, 0, 0]) {
   const observer = observerOf(observerPosition);
-  const referenceK = referenceStellarTemperature((stars || []).slice(0, 2));
+  // Adapt to the brightest star of the whole system, as the star views do,
+  // even when it is not one of the two that light this body.
+  const referenceK = referenceStellarTemperature(stars);
   const sources = (stars || []).slice(0, 2).map((source, index) => {
     const position = positionOf(source);
     const delta = [
