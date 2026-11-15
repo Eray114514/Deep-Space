@@ -5352,6 +5352,41 @@ window.NMS = {
     };
   },
   renderLookState() {
+    let cabinBake = ship.int?.group?.userData?.interiorIrradiance || null;
+    if (!cabinBake && ship.bakedLight && ship.int?.group) {
+      cabinBake = ship.int.group.userData.offlineInteriorIrradiance;
+      if (!cabinBake) {
+        let meshes = 0, vertices = 0, litVertices = 0, maxIrradiance = 0;
+        const boundMaterials = new Set();
+        ship.int.group.traverse((object) => {
+          if (!object.isMesh) return;
+          const attr = object.geometry?.getAttribute?.('aCabinIrradiance');
+          if (attr) {
+            meshes++;
+            vertices += attr.count;
+            for (let i = 0; i < attr.count; i++) {
+              const peak = Math.max(attr.getX(i), attr.getY(i), attr.getZ(i));
+              if (peak > 1e-4) litVertices++;
+              if (peak > maxIrradiance) maxIrradiance = peak;
+            }
+          }
+          const mats = Array.isArray(object.material) ? object.material : object.material ? [object.material] : [];
+          for (const mat of mats) {
+            if (mat?.userData?.interiorIrradiance) boundMaterials.add(mat);
+          }
+        });
+        cabinBake = {
+          offline: true,
+          fixtures: ship.int.lights?.length || 0,
+          meshes,
+          vertices,
+          litVertices,
+          maxIrradiance: +maxIrradiance.toFixed(4),
+          boundMaterials: boundMaterials.size,
+        };
+        ship.int.group.userData.offlineInteriorIrradiance = cabinBake;
+      }
+    }
     return {
       production: RENDER_LOOK_NEXT,
       toneMapping: renderer.toneMapping,
@@ -5361,7 +5396,7 @@ window.NMS = {
         vignette: gradePass_.uniforms.uVignette.value,
         grain: gradePass_.uniforms.uGrain.value,
       } : null,
-      cabinBake: ship.int?.group?.userData?.interiorIrradiance || null,
+      cabinBake,
       ...sceneRadiance.debugState(),
     };
   },

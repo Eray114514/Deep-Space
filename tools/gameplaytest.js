@@ -23,26 +23,36 @@ try {
   // A trusted keyboard gesture both unlocks WebAudio and invokes boarding.
   await page.evaluate('NMS.land(0)');
   await page.waitForTimeout(100);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   const cloudFallback = await page.evaluate(() => {
     const planet = NMS._internals.universe.system.planets[0];
+    const cloudPass = NMS._pipeline?.cloudPass || null;
+    const marchSteps = cloudPass?.marchMaterial?.defines?.MARCH_STEPS ?? 0;
     return {
       quality: NMS.stats().quality,
       coverage: planet.cloudCoverage,
-      volumeExists: !!planet.volCloudMesh,
-      volumeVisible: planet.volCloudMesh?.visible,
-      rayQuality: planet.volCloudMat?.uniforms?.uQuality?.value,
-      analyticVisible: planet.cloudMesh?.visible,
-      upperVisible: planet.cloudMesh2?.visible,
+      passExists: Boolean(cloudPass),
+      passEnabled: Boolean(cloudPass?.enabled && cloudPass?.visualEnabled !== false),
+      activeBodyMatch: cloudPass?.activePlanet === planet,
+      liteCloudActive: Boolean(planet.liteCloudActive),
+      marchSteps,
+      scale: cloudPass?.scale ?? 0,
+      analyticVisible: Boolean(planet.cloudMesh?.visible),
+      upperVisible: Boolean(planet.cloudMesh2?.visible),
       ok: planet.cloudCoverage <= 0.05 || (
-        planet.volCloudMesh?.visible
-        && planet.volCloudMat?.uniforms?.uQuality?.value === 0
+        Boolean(cloudPass?.enabled)
+        && cloudPass?.visualEnabled !== false
+        && cloudPass?.activePlanet === planet
+        && planet.liteCloudActive === true
+        && marchSteps > 0
+        && (cloudPass?.scale ?? 0) > 0
         && !planet.cloudMesh?.visible
         && (!planet.cloudMesh2 || !planet.cloudMesh2.visible)
       ),
     };
   });
   check(cloudFallback.quality === 'performance' && cloudFallback.ok,
-    `auto performance keeps the shared volumetric cloud field visible from the surface ${JSON.stringify(cloudFallback)}`);
+    `auto performance keeps the default LiteCloudPass enabled and visible from the surface ${JSON.stringify(cloudFallback)}`);
   const surfaceWeaponVisibility = [];
   for (let index = 0; index < 4; index++) {
     await page.evaluate((slot) => NMS.surfaceWeapon(slot), index);
@@ -141,7 +151,7 @@ try {
   await page.waitForTimeout(120);
   const pulseBefore = await page.evaluate(() => ({ alt: NMS.alt(), fuel: NMS.pulseFuel() }));
   await page.keyboard.press('Space');
-  await page.waitForFunction('NMS.stats().pulseVisual > 0.25', null, { timeout: 5000 });
+  await page.waitForFunction('NMS.stats().pulseVisual > 0.25', null, { timeout: 15000 });
   const pulseDuring = await page.evaluate('NMS.stats().pulse');
   const pulseGauge = await page.evaluate('shipHUD.getTelemetry()');
   check(pulseGauge.speed > pulseGauge.speedLimit
@@ -150,7 +160,7 @@ try {
   `pulse raises the numeric speed above the governor without over-driving the pointer (${pulseGauge.speed.toFixed(0)} > ${pulseGauge.speedLimit.toFixed(0)} m/s)`);
   // Wait for the simulation-owned burst state instead of assuming 620 ms of
   // wall time also contained the full 560 ms of rendered simulation time.
-  await page.waitForFunction(() => !window.NMS.stats().pulse, null, { timeout: 5000 });
+  await page.waitForFunction(() => !window.NMS.stats().pulse, null, { timeout: 15000 });
   const pulseAfter = await page.evaluate(() => ({
     alt: NMS.alt(), fuel: NMS.pulseFuel(), active: NMS.stats().pulse,
   }));

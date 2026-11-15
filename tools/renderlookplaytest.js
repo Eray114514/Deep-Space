@@ -33,8 +33,14 @@ try {
   check(state.space?.minLuma > 0.003, 'every generated sky direction stays above black');
   check(state.space?.bandMeanLuma > state.space?.outsideMeanLuma * 3.5,
     'the Milky Way remains dominant over the diffuse floor');
-  check(state.cabinBake?.fixtures >= 10 && state.cabinBake?.vertices > 1000,
-    'cabin indirect irradiance is baked from the real fixture rig');
+  check(
+    state.cabinBake?.offline === true
+      && state.cabinBake?.vertices > 1000
+      && state.cabinBake?.litVertices > 100
+      && state.cabinBake?.maxIrradiance > 0.05
+      && state.cabinBake?.boundMaterials > 0,
+    `offline-baked cabin indirect irradiance is loaded and bound (${JSON.stringify(state.cabinBake)})`,
+  );
 
   const layers = await page.evaluate(() => {
     const { ship } = NMS._internals;
