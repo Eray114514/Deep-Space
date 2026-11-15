@@ -131,132 +131,72 @@ export function plumeMaterial() {
       uniform float uTime; uniform float uPower;
       varying vec3 vLocalSurface; varying vec3 vCameraLocal;
       varying float vLengthScale;
-
-      float transportedTurbulence(vec3 p, float phase) {
-        /* Three travelling pressure waves form an inexpensive three-dimensional
-           flow field.  None is camera-aligned, so their intersections survive
-           the ray integral as rolling shear folds instead of horizontal bands. */
-        float a = sin(dot(p, vec3(1.83, 2.31, -1.27)) - phase * 3.0);
-        float b = sin(dot(p, vec3(-2.71, 4.17, 2.13)) - phase * 5.0
-          + a * 0.72);
-        float c = cos(dot(p, vec3(3.67, 5.43, 2.89)) - phase * 7.0
-          + b * 0.44);
-        return clamp(0.52 + a * 0.24 + b * 0.16 + c * 0.08,
-          0.0, 1.0);
-      }
+      /* Units are engine radii; y runs downstream from a root 0.3 R inside
+         the bell, so the jet is born in the glowing throat, not at the lip.
+         Three parts, each with its own job:
+           core    a tight white-blue potential core that lengthens with power
+           knots   shock diamonds on the axis, only under real thrust
+           mantle  a soft, wide, turbulent blue sheath that carries the length
+         The result is premultiplied light over a light veil: it brightens what
+         is behind it but never paints a flat sheet over the stars. */
       void main(){
         #include <logdepthbuf_fragment>
         float drive = smoothstep(0.06, 1.7, uPower);
         vec3 rayVector = vLocalSurface - vCameraLocal;
         float rayVectorLength = length(rayVector);
         if (rayVectorLength < 0.0001) discard;
-        vec3 rayDirection = rayVector / rayVectorLength;
-        vec3 raySign = mix(vec3(1.0), sign(rayDirection),
-          greaterThan(abs(rayDirection), vec3(0.0001)));
-        vec3 inverseRay = raySign / max(abs(rayDirection), vec3(0.0001));
-        vec3 boxMin = vec3(-1.16, 0.0, -1.16);
-        vec3 boxMax = vec3(1.16, 7.6 * vLengthScale, 1.16);
-        vec3 hitA = (boxMin - vCameraLocal) * inverseRay;
-        vec3 hitB = (boxMax - vCameraLocal) * inverseRay;
-        vec3 nearHit = min(hitA, hitB);
-        vec3 farHit = max(hitA, hitB);
-        float rayEnter = max(max(nearHit.x, nearHit.y), max(nearHit.z, 0.0));
-        float rayExit = min(min(farHit.x, farHit.y), farHit.z);
-        if (rayExit <= rayEnter) discard;
-
-        const int MARCH_STEPS = 16;
-        float segmentLength = rayExit - rayEnter;
-        float stepLength = segmentLength / float(MARCH_STEPS);
-        vec3 accumulatedColor = vec3(0.0);
-        float accumulatedAlpha = 0.0;
-        for (int index = 0; index < MARCH_STEPS; index++) {
-          float distanceAlong = rayEnter + (float(index) + 0.5) * stepLength;
-          vec3 samplePosition = vCameraLocal + rayDirection * distanceAlong;
-          float t = clamp(samplePosition.y / max(7.6 * vLengthScale, 0.001), 0.0, 1.0);
-          /* Four coupled compression cells remain below the 16-step Nyquist
-             limit and survive both axial and oblique integration. */
-          float cell = 0.5 + 0.5 * cos(t * 25.13 - 0.45);
-          float compression = cell * cell;
-          float expansion = (0.40 + drive * 0.045)
-            + (0.55 + drive * 0.045) * (t / (t + 0.105));
-          float envelope = expansion * (1.0 - t * 0.12)
-            * (0.955 + compression * 0.095 * (1.0 - t));
-
-          /* A tiny downstream wander and cross-flow warp break the mathematically
-             perfect cone while the t^1.45 term keeps the first nozzle diameter
-             rigidly centred.  This is density motion, not mesh deformation. */
-          float wanderGain = 0.115 * t * sqrt(max(t, 0.0))
-            * (1.0 - drive * 0.22);
-          vec2 wander = vec2(
-            sin(samplePosition.y * 1.37 - uTime * 3.0
-              + sin(samplePosition.z * 1.9)),
-            cos(samplePosition.y * 1.11 - uTime * 5.0
-              + sin(samplePosition.x * 1.6))) * wanderGain;
-          vec2 flowCross = samplePosition.xz - wander;
-          float rawRadial = length(flowCross) / max(envelope, 0.08);
-          float turbulence = transportedTurbulence(
-            vec3(flowCross.x, samplePosition.y, flowCross.y), uTime);
-          float edgeWarp = (turbulence - 0.5) * 0.34
-            * smoothstep(0.10, 0.86, t);
-          float radial = max(0.0, rawRadial - edgeWarp);
-
-          /* The plume is two coupled volumes: a hollow, rolling mixing layer and
-             a compact potential core.  Ray integration through the shell gives
-             genuine limb depth; there is no screen-facing opacity gradient. */
-          float interiorBase = max(0.0, 1.0 - smoothstep(0.08, 0.98, radial));
-          float interior = interiorBase * interiorBase;
-          float shellCentre = 0.72 + (turbulence - 0.5) * 0.105;
-          float shell = (1.0 - smoothstep(0.055, 0.27, abs(radial - shellCentre)))
-            * (1.0 - smoothstep(0.94, 1.05, radial));
-          float rootAttach = smoothstep(-0.035, 0.035 + radial * 0.045, t);
-          float spent = 1.0 - smoothstep(0.64, 0.985, t);
-          float shearFold = mix(0.92, 0.10 + turbulence * 1.28,
-            smoothstep(0.08, 0.74, t));
-          float breakup = mix(1.0, smoothstep(0.30, 0.66, turbulence),
-            smoothstep(0.44, 0.92, t));
-          float mixingLayer = interior * mix(0.58, 0.24, smoothstep(0.12, 0.78, t))
-            + shell * mix(0.42, 0.88, smoothstep(0.08, 0.70, t));
-
-          /* Restrained compression cells live only in the hot potential core.
-             They modulate radius and radiance together, reading as pressure
-             structure rather than a row of glowing sprites. */
-          float pressureWave = 0.66 + compression * 0.34;
-          float shear = mixingLayer * rootAttach * spent
-            * shearFold * breakup * pressureWave;
-          float coreRadius = (0.19 + t * 0.13)
-            * mix(0.94, 1.10, compression);
-          float coreProfile = 1.0 - smoothstep(0.02, coreRadius, radial);
-          /* White-hot gas is a compact near-field potential core.  Downstream
-             pressure cells remain in the blue mixing flow instead of drawing
-             a long straight white laser through the whole plume. */
-          float coreAxial = (1.0 - smoothstep(0.30, 0.53, t))
-            * exp(-t * 1.55);
-          float potentialCore = coreProfile * coreProfile * coreAxial
-            * (0.95 + compression * 0.20)
-            * smoothstep(-0.050, 0.015, t);
-          float weightedShear = shear * (0.060 + drive * 0.098);
-          float weightedCore = potentialCore * (0.25 + drive * 0.32);
-          float density = weightedShear + weightedCore;
-          float sampleAlpha = 1.0 - exp(-density * stepLength * 0.68);
-          float coreMix = clamp(weightedCore / max(density, 0.001), 0.0, 1.0);
-          float shellMix = clamp(shell * (1.0 - coreMix), 0.0, 1.0);
-          vec3 innerBlue = mix(vec3(0.58, 0.82, 1.0), vec3(0.12, 0.30, 0.72),
-            smoothstep(0.08, 0.95, t));
-          vec3 shellBlue = mix(vec3(0.26, 0.55, 0.96), vec3(0.035, 0.12, 0.42),
-            smoothstep(0.10, 0.95, t));
-          vec3 shearColor = mix(innerBlue, shellBlue, shellMix * 0.72);
-          vec3 coreColor = mix(vec3(0.82, 0.94, 1.0), vec3(0.20, 0.48, 0.92),
-            smoothstep(0.10, 0.48, t));
-          vec3 sampleColor = mix(shearColor, coreColor, coreMix);
-          float radiance = mix(1.24, 0.34, smoothstep(0.08, 0.96, t))
-            + coreMix * (0.88 + drive * 0.52 + compression * 0.04);
-          float remaining = 1.0 - accumulatedAlpha;
-          accumulatedColor += remaining * sampleColor * radiance * sampleAlpha;
-          accumulatedAlpha += remaining * sampleAlpha;
+        vec3 dir = rayVector / rayVectorLength;
+        vec3 sgn = mix(vec3(1.0), sign(dir), greaterThan(abs(dir), vec3(0.0001)));
+        vec3 inv = sgn / max(abs(dir), vec3(0.0001));
+        float L = 7.6 * vLengthScale;
+        vec3 hitA = (vec3(-1.16, 0.0, -1.16) - vCameraLocal) * inv;
+        vec3 hitB = (vec3(1.16, L, 1.16) - vCameraLocal) * inv;
+        vec3 nearHit = min(hitA, hitB), farHit = max(hitA, hitB);
+        float enter = max(max(nearHit.x, nearHit.y), max(nearHit.z, 0.0));
+        float exit = min(min(farHit.x, farHit.y), farHit.z);
+        if (exit <= enter) discard;
+        const int STEPS = 22;
+        float stepLength = (exit - enter) / float(STEPS);
+        float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        float coreLen = mix(0.55, 2.1, drive);
+        float coreR = mix(0.26, 0.40, drive);
+        float cell = mix(1.35, 1.0, drive);
+        float knotGain = smoothstep(0.38, 1.0, drive);
+        float mantleLen = mix(0.7, L * 0.30, drive);
+        /* End-on, a jet is optically thin: the downstream gas is a column you
+           look along, not a sheet you look across.  Without this the chase
+           camera, which sits nearly on the axis, sees every metre of plume
+           stacked into one blob. */
+        float axial = smoothstep(0.62, 0.97, abs(dir.y));
+        vec3 light = vec3(0.0);
+        float veil = 0.0;
+        for (int i = 0; i < STEPS; i++) {
+          vec3 q = vCameraLocal + dir * (enter + (float(i) + jitter) * stepLength);
+          float y = q.y;
+          float t = clamp(y / L, 0.0, 1.0);
+          float rr = dot(q.xz, q.xz);
+          float born = smoothstep(0.0, 0.32, y) * (1.0 - smoothstep(0.55, 1.0, t))
+            * mix(1.0, 0.18, axial * smoothstep(0.6, 2.2, y));
+          float flicker = 0.9 + 0.1 * sin(uTime * 37.0 + y * 3.1);
+          /* the potential core CONTRACTS downstream, as a real one does */
+          float cr = coreR * (1.0 - 0.45 * smoothstep(0.0, coreLen * 1.8, y));
+          float core = exp(-rr / (cr * cr)) * exp(-max(y - 0.15, 0.0) / coreLen) * born;
+          float ph = fract((y - 0.45) / cell);
+          float knot = exp(-pow((ph - 0.5) / 0.09, 2.0)) * exp(-rr / 0.045)
+            * exp(-y / coreLen) * step(0.45, y) * (1.0 - smoothstep(coreLen * 1.6, coreLen * 2.4, y)) * knotGain;
+          float sr = 0.48 + 0.55 * t + 0.06 * drive;
+          float roll = 0.72 + 0.28 * sin(q.x * 5.0 + y * 2.3 - uTime * 9.0)
+            * cos(q.z * 4.6 - y * 1.7 + uTime * 7.0);
+          float mantle = exp(-rr / (sr * sr) * 2.2) * exp(-y / mantleLen) * roll * born;
+          light += (vec3(0.66, 0.84, 1.0) * core * 3.4 + vec3(0.92, 0.96, 1.0) * knot * 4.0
+            + vec3(0.10, 0.22, 1.0) * mantle * 0.45) * flicker * stepLength;
+          veil += (core * 0.5 + mantle * 0.2) * stepLength;
         }
-        accumulatedAlpha = min(accumulatedAlpha, 0.40);
-        gl_FragColor = clamp(vec4(accumulatedColor, accumulatedAlpha), 0.0, 4.0);
-        if (accumulatedAlpha < 0.002) discard;
+        float gain = mix(0.30, 1.3, drive);
+        vec3 col = min(light * gain, vec3(6.0));
+        float alpha = clamp(1.0 - exp(-veil * gain * 0.5), 0.0, 0.8) * 0.3;
+        if (max(col.r, max(col.g, col.b)) < 0.003) discard;
+        gl_FragColor = vec4(col, alpha);
       }`,
   });
 }
@@ -293,38 +233,18 @@ export function haloMaterial() {
       uniform float uPower; uniform float uTime;
       varying float vRadius; varying float vEngineRadius;
       varying vec2 vDisc; varying vec3 vWorld;
+      /* the hot throat at the bottom of the bell: a smooth white-to-blue
+         dish, no rings, seen through the flame-holder struts */
       void main(){
         #include <logdepthbuf_fragment>
         float drive = smoothstep(0.06, 1.7, uPower);
-        float gasFill = 1.0 - smoothstep(0.58, 0.86, vRadius);
-        float hotCore = exp(-pow((vRadius - 0.27) / 0.085, 2.0));
-        float ionRing = exp(-pow((vRadius - 0.52) / 0.10, 2.0));
-        float wallRing = exp(-pow((vRadius - 0.72) / 0.075, 2.0));
-        float cameraFade = smoothstep(0.35, 1.35, distance(cameraPosition, vWorld));
-        float fillAlpha = (0.135 + drive * 0.085) * gasFill;
-        float coreAlpha = (0.095 + drive * 0.125) * hotCore;
-        float ringAlpha = (0.065 + drive * 0.095) * ionRing;
-        float wallAlpha = (0.042 + drive * 0.060) * wallRing;
-        float smallEngineBoost = mix(4.50, 1.0,
-          smoothstep(0.34, 0.82, vEngineRadius));
-        float baseAlpha = fillAlpha + coreAlpha + ringAlpha + wallAlpha;
-        float thermal = 0.955 + 0.045
-          * sin(vDisc.x * 7.0 + uTime * 3.0)
-          * cos(vDisc.y * 8.5 - uTime * 5.0);
-        float alpha = baseAlpha * cameraFade * thermal;
-        vec3 fillColor = vec3(0.018, 0.070, 0.18);
-        vec3 coreColor = vec3(0.38, 0.74, 1.0);
-        vec3 ringColor = vec3(0.34, 0.68, 1.0);
-        vec3 wallColor = vec3(0.08, 0.35, 0.82);
-        vec3 color = (fillColor * fillAlpha + coreColor * coreAlpha
-          + ringColor * ringAlpha + wallColor * wallAlpha)
-          / max(baseAlpha, 0.001);
-        float radiance = (1.10 + drive * 0.62)
-          * mix(3.60, 1.0, smoothstep(0.34, 0.82, vEngineRadius));
-        float alphaCap = mix(0.82, 0.46,
-          smoothstep(0.34, 0.82, vEngineRadius));
-        alpha = min(alpha * smallEngineBoost, alphaCap);
-        gl_FragColor = clamp(vec4(color * radiance * alpha, alpha), 0.0, 1.8);
+        float g = 1.0 - smoothstep(0.0, 0.88, vRadius);
+        vec3 color = mix(vec3(0.16, 0.36, 1.0), vec3(0.86, 0.94, 1.0), g * g);
+        float flicker = 0.94 + 0.06 * sin(uTime * 23.0 + vDisc.x * 3.0);
+        float alpha = clamp((0.45 + drive * 0.45) * g, 0.0, 0.9);
+        float small = mix(3.2, 1.0, smoothstep(0.10, 0.28, vEngineRadius));
+        float radiance = (1.0 + drive * 2.2) * flicker * small;
+        gl_FragColor = clamp(vec4(color * radiance * alpha, alpha), 0.0, 4.0);
         if (alpha < 0.002) discard;
       }`,
   });

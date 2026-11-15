@@ -38,14 +38,18 @@ const DIMS = {
   nacX: 3.6,
 };
 
-/** walkable volumes (axis aligned, ship local). y is floor height. */
+/** walkable volumes (axis aligned, ship local). y is floor height.
+ *  ship-view.js insets every room by the walker's radius (0.26 m) on all four
+ *  sides, so two rooms only connect if they OVERLAP by more than 0.52 m along
+ *  the way through — a doorway is a room that reaches well into both of its
+ *  neighbours, not a slab the thickness of the bulkhead. */
 const ROOMS = [
   /* the aisle between the side consoles, then the open deck behind the seat */
   { name: 'cockpit-aisle', x0: -0.50, x1: 0.50, z0: -8.45, z1: -5.50 },
   { name: 'cockpit-aft', x0: -1.28, x1: 1.28, z0: -6.52, z1: -5.52 },
-  { name: 'door', x0: -0.72, x1: 0.72, z0: -5.60, z1: -5.20 },
+  { name: 'door', x0: -0.72, x1: 0.72, z0: -6.40, z1: -4.50 },
   { name: 'corridor', x0: -1.24, x1: 1.24, z0: -5.36, z1: -1.00 },
-  { name: 'throat', x0: -0.94, x1: 0.94, z0: -1.10, z1: -0.50 },
+  { name: 'throat', x0: -0.94, x1: 0.94, z0: -2.00, z1: 0.40 },
   { name: 'hold', x0: -2.08, x1: 2.08, z0: -0.60, z1: 6.05 },
 ];
 

@@ -41,7 +41,7 @@ const FINISH = {
   fabric:      { tint: 0.0, rough: 0.0, grime: 0.0, noise: 0.05, relief: 'weave' },
   fabricOrange: { tint: 0.0, rough: 0.0, grime: 0.08, noise: 0.06, relief: 'weave' },
   cushion:     { tint: 0.0, rough: 0.0, grime: 0.06, noise: 0.08, relief: 'leather' },
-  paintYellow: { tint: 0.0, rough: 0.0, grime: 0.28, noise: 0.10, wear: 0.9, bare: ALLOY, bareMetal: 0.8 },
+  paintYellow: { tint: 0.0, rough: 0.0, grime: 0.28, noise: 0.10, wear: 0.3, bare: ALLOY, bareMetal: 0.8 },
   crateGrey:   { tint: 0.30, rough: 0.14, grime: 0.24, noise: 0.14, relief: 'peel', wear: 1.0, bare: ALLOY, bareMetal: 0.9 },
   crateOrange: { tint: 0.24, rough: 0.14, grime: 0.24, noise: 0.14, relief: 'peel', wear: 1.0, bare: ALLOY, bareMetal: 0.9 },
 };
@@ -58,11 +58,12 @@ const RELIEF = {
   studs:   { span: 0.05, glsl: 'shipStuds(p)' },
   quilt:   { span: 0.26, glsl: 'shipQuilt(p)' },
 };
+FINISH.bellInner = { tint: 0, rough: 0, grime: 0.1, noise: 0.12, relief: 'brushed', glow: true };
 const DEFAULT_FINISH = { tint: 0.1, rough: 0.1, grime: 0.1, noise: 0.08 };
 
 /* display intensities: the file's values are tuned as Cycles light sources */
 const EMISSIVE = {
-  lampWarm: 2.4, lampCool: 2.3, lampAmber: 2.6, lampCyan: 1.5, lampStrip: 2.2,
+  lampWarm: 1.9, lampCool: 1.55, lampAmber: 2.6, lampCyan: 1.5, lampStrip: 2.2,
   lampWhite: 4.0, lampRed: 5.0, lampGreen: 5.0, strobe: 0.05,
   btnGreen: 1.8, btnAmber: 1.8, btnWhite: 1.8, engineCore: 3.2, screen: 1.0,
 };
@@ -71,6 +72,8 @@ const EMISSIVE = {
    lights cannot reach the underside of a parked hull, and deep space has no
    fill at all; this is the hemisphere the hull actually sits in — sky above,
    ground bounce or planetshine below — set once per frame by Ship. */
+export const shipEngine = { uShipEnginePower: { value: 0.1 } };
+
 export const shipAmbient = {
   uShipHemiUp: { value: new THREE.Vector3(0, 1, 0) },
   uShipHemiSky: { value: new THREE.Color(0.02, 0.025, 0.035) },
@@ -125,7 +128,7 @@ function install(material, spec, name) {
   const wear = spec.wear || 0;
   const bare = spec.bare || [0.4, 0.4, 0.42];
   material.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, shipAmbient);
+    Object.assign(shader.uniforms, shipAmbient, shipEngine);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
 attribute vec4 aPaint;
@@ -147,6 +150,7 @@ varying vec3 vShipPos;
 varying vec3 vShipNrm;
 varying float vShipWear;
 varying vec2 vShipUv;
+uniform float uShipEnginePower;
 uniform vec3 uShipHemiUp;
 uniform vec3 uShipHemiSky;
 uniform vec3 uShipHemiGround;
@@ -212,6 +216,15 @@ ${RELIEF_LIB}`)
     float reliefFade = 1.0 - smoothstep(${glsl(relief.span * 0.22)}, ${glsl(relief.span * 0.6)}, shipFootprint);
     if (reliefFade > 0.0) normal = shipBump(-vViewPosition, normal, (${relief.glsl}) * reliefFade);
   }` : '#include <normal_fragment_maps>')
+      .replace('#include <emissivemap_fragment>', spec.glow ? `#include <emissivemap_fragment>
+  {
+    /* paint R is depth into the bell: 0 at the lip, 1 at the throat */
+    float depth = vShipPaint.r;
+    float drive = smoothstep(0.06, 1.7, uShipEnginePower);
+    float hot = pow(smoothstep(0.05, 1.0, depth), 1.6);
+    vec3 heat = mix(vec3(0.10, 0.18, 0.95), vec3(0.80, 0.90, 1.0), hot * hot);
+    totalEmissiveRadiance += heat * hot * (0.35 + drive * 2.4);
+  }` : '#include <emissivemap_fragment>')
       .replace('#include <lights_fragment_end>', spec.interior ? '#include <lights_fragment_end>' : `#include <lights_fragment_end>
   {
     vec3 hemiUp = normalize((viewMatrix * vec4(uShipHemiUp, 0.0)).xyz);
@@ -223,7 +236,7 @@ ${RELIEF_LIB}`)
     reflectedLight.indirectSpecular += hemiIrradiance * material.specularColor * 0.22;
   }`);
   };
-  material.customProgramCacheKey = () => `halcyon-surface-8|${name}|${JSON.stringify(spec)}`;
+  material.customProgramCacheKey = () => `halcyon-surface-10|${name}|${JSON.stringify(spec)}`;
   /* three's Material.clone() does not carry onBeforeCompile, and the ship's
      radiance zones clone every interior material — keep the finish on the copy */
   const baseClone = Object.getPrototypeOf(material).clone;

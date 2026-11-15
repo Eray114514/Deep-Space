@@ -171,7 +171,8 @@ def portal_poly(half_w, y0, y1, chamfer=0.22):
 
 def portal_frame(kit, z, half_w, y0, y1, depth, key='metalDark', chamfer=0.22, t=0.09, lamp=None):
     """proud door surround built from bevelled bars following the portal"""
-    pts = portal_poly(half_w + t / 2, y0, y1 + t / 2, chamfer)
+    inset = 0.014        # bars stand proud of the jamb, never coplanar with it
+    pts = portal_poly(half_w + t / 2 - inset, y0, y1 + t / 2 - inset, chamfer)
     for i in range(1, len(pts)):
         a, b = Vector((*pts[i], 0)), Vector((*pts[(i + 1) % len(pts)], 0))
         if i == len(pts) - 1:
@@ -440,6 +441,7 @@ def build_hold(kit):
     for yy in (0.55, 1.15):
         kit.box('metalDark', (0.06, 0.05, 1.66), (-1.57, yy, 4.07), bevel=0.01, name='tank-bar')
         kit.box('fabricOrange', (0.02, 0.045, 1.62), (-1.545, yy, 4.07), bevel=0.004, name='tank-strap')
+    dress_hold(kit, bays)
     # ---------------- workbench (starboard, aft)
     bx, bz0, bz1 = 1.74, 3.45, 5.15
     kit.box('metal', (0.74, 0.05, bz1 - bz0), (bx, 0.90, (bz0 + bz1) / 2), bevel=0.01, name='bench-top')
@@ -494,6 +496,96 @@ def build_bulkheads(kit, cockpit_outline):
     kit.quads('panelDark', q, toward=(0, 1.2, zh + 0.8), name='ramp-tunnel')
 
 
+def pipe_run(kit, S, jf, side, z0, z1, radius, inset, key, clamp_every=0.62):
+    """a pipe following the liner at cell jf, with clamp brackets"""
+    pts = [S.point(z0 + (z1 - z0) * k / 8, jf, side, inset) for k in range(9)]
+    kit.tube(key, pts, radius, 10, 'pipe')
+    z = z0 + 0.2
+    while z < z1 - 0.1:
+        p, n = S.point(z, jf, side, inset), S.normal(z, jf, side)
+        q = S.point(z, jf, side, 0.004)
+        kit.tube('metalDark', [q, p - n * radius * 1.1], radius * 0.5 + 0.004, 6, 'pipe-bracket')
+        kit.rev('metalDark', [(radius * 1.35, -0.012), (radius * 1.35, 0.012)], p, (0, 0, 1), 12, 'pipe-clamp')
+        z += clamp_every
+
+
+def dress_hold(kit, bays):
+    """what makes the hold a working space: services overhead, kit on the walls"""
+    z0, z1 = HOLD_Z0 + 0.12, HOLD_Z1 - 0.25
+    for side in (1, -1):
+        pipe_run(kit, HOLD_S, 7.5, side, z0, z1, 0.045, 0.16, 'paintYellow')
+        pipe_run(kit, HOLD_S, 9.2, side, z0, z1, 0.030, 0.13, 'metal')
+        pipe_run(kit, HOLD_S, 10.6, side, z0, z1, 0.022, 0.11, 'accent')
+        pipe_run(kit, HOLD_S, 23.5, side, z0, z1, 0.028, 0.11, 'metalDark')
+    w = HOLD['w']
+    for i in range(5):
+        zz = HOLD_Z0 + HOLD_BAY * (i + 0.5)
+        for sx in (-1, 1):
+            x = sx * (w - 0.02)
+            # emergency lamp over every bay
+            kit.box('metalDark', (0.05, 0.10, 0.22), (x, 2.02, zz), bevel=0.012, name='bay-lamp-housing')
+            kit.box('lampAmber' if i % 2 else 'lampWarm', (0.012, 0.05, 0.16), (x - sx * 0.026, 2.02, zz), bevel=0.004,
+                    name='bay-lamp')
+            if (i + (sx > 0)) % 2 == 0:
+                # junction box with conduit up to the pipe run
+                kit.box('panelGrey', (0.10, 0.34, 0.26), (x - sx * 0.04, 1.18, zz + 0.32), bevel=0.012, name='junction-box')
+                kit.box('btnGreen', (0.008, 0.02, 0.02), (x - sx * 0.092, 1.30, zz + 0.40), bevel=0.003, name='junction-lamp')
+                kit.tube('rubber', [(x - sx * 0.04, 1.35, zz + 0.32), (x - sx * 0.04, 1.62, zz + 0.32),
+                                    (x - sx * 0.06, 1.80, zz + 0.32)], 0.014, 6, 'conduit')
+            else:
+                # cargo net across the upper bay
+                for k in range(6):
+                    yy = 1.66 + k * 0.06
+                    kit.tube('fabric', [(x - sx * 0.035, yy, zz - 0.5), (x - sx * 0.05, yy, zz + 0.5)], 0.006, 4, 'net')
+                for k in range(9):
+                    zk = zz - 0.5 + k * 0.125
+                    kit.tube('fabric', [(x - sx * 0.035, 1.64, zk), (x - sx * 0.05, 2.0, zk)], 0.006, 4, 'net')
+                kit.box('crateOrange', (0.06, 0.22, 0.40), (x - sx * 0.07, 1.80, zz), bevel=0.02, name='netted-bag', tint=0.3)
+    # intercom by the mid-deck door and a fire-suppression station by the ramp
+    for (x, zz, key) in ((-w + 0.03, HOLD_Z0 + 0.55, 'screen'), (w - 0.03, HOLD_Z1 - 0.65, 'lampRed')):
+        kit.box('panelDark', (0.05, 0.36, 0.26), (x, 1.40, zz), bevel=0.012, name='wall-station')
+        kit.box(key, (0.006, 0.14, 0.18), (x - (0.026 if x > 0 else -0.026), 1.45, zz), bevel=0.0, name='wall-station-face')
+    # floor hatches with recessed handles
+    for zz in (1.2, 3.1):
+        kit.box('deck', (0.92, 0.012, 0.92), (0, 0.006, zz), bevel=0.004, name='floor-hatch', tint=0.8)
+        for dx in (-0.3, 0.3):
+            kit.box('metal', (0.12, 0.014, 0.03), (dx, 0.012, zz + 0.38), bevel=0.004, name='hatch-handle')
+        kit.label('ACCESS', 0.06, (0, 0.014, zz), (1, 0, 0), (0, 0, -1), 'decalLight')
+
+
+def dress_mid(kit):
+    """the lived-in layer of the mid-deck"""
+    w = MID['w']
+    for side in (1, -1):
+        pipe_run(kit, MID_S, 7.0, side, MID_Z0 + 0.15, MID_Z1 - 0.12, 0.022, 0.07, 'metal', 0.55)
+    na, nb = NICHE
+    # personal items in the bunks: photos, a jacket, boots
+    xb = 2.10
+    ymid = (MID['yD'] + MID['yC']) / 2 + 0.02
+    for k, (yy, zz) in enumerate(((MID['yD'] + 0.36, nb - 0.25), (ymid + 0.38, nb - 0.30))):
+        kit.box('panelWhite', (0.006, 0.10, 0.075), (xb - 0.005, yy, zz), bevel=0.0, name='photo', tint=0.2 + 0.5 * k)
+        kit.box('screen', (0.003, 0.08, 0.055), (xb - 0.009, yy, zz), bevel=0.0, name='photo-face')
+    kit.box('fabricOrange', (0.06, 0.62, 0.36), (w - 0.06, 1.25, na - 0.25), bevel=0.04, seg=3, name='jacket')
+    kit.rev('metal', [(0.012, 0.0), (0.012, 0.05), (0.0, 0.06)], (w - 0.005, 1.58, na - 0.25), (-1, 0, 0), 8, 'hook')
+    for dz in (-0.07, 0.07):
+        kit.box('rubber', (0.11, 0.13, 0.28), (w - 0.22, 0.065, na - 0.12 + dz), bevel=0.03, seg=3, name='boot')
+    # galley: a screen with the menu, a towel, a plant
+    xg = -2.06
+    kit.box('panelDark', (0.02, 0.22, 0.32), (xg + 0.01, 1.62, (na + nb) / 2), bevel=0.008, name='galley-screen')
+    kit.box('screen', (0.004, 0.18, 0.28), (xg + 0.022, 1.62, (na + nb) / 2), bevel=0.0, name='galley-screen-face')
+    kit.box('fabric', (0.03, 0.30, 0.16), (xg + 0.64, 0.66, nb - 0.18), bevel=0.012, seg=3, name='towel')
+    kit.rev('panelGrey', [(0.0, 0.0), (0.05, 0.0), (0.06, 0.10), (0.0, 0.10)], (xg + 0.18, 0.80, nb - 0.12), (0, 1, 0), 12, 'pot')
+    for k in range(5):
+        a = k * 1.256
+        kit.box('btnGreen', (0.012, 0.11, 0.04), (xg + 0.18 + math.cos(a) * 0.03, 0.94, nb - 0.12 + math.sin(a) * 0.03), bevel=0.004,
+                rot=Matrix.Rotation(0.3, 3, 'X') @ Matrix.Rotation(a, 3, 'Y'), name='leaf')
+    # hazard-striped door surround into the flight deck
+    for k in range(8):
+        for sx in (-1, 1):
+            kit.box('paintYellow' if k % 2 == 0 else 'panelDark', (0.06, 0.12, 0.012),
+                    (sx * 0.84, 0.10 + 0.24 * k, MID_Z0 + 0.012), bevel=0.0, name='hazard')
+
+
 def build_labels(kit):
     PX, SX, UP = (0, 0, -1), (0, 0, 1), (0, 1, 0)     # reading direction on the port / starboard wall
     wm, wh = MID['w'] - 0.002, HOLD['w'] - 0.002
@@ -532,5 +624,6 @@ def build(M, col, cockpit_outline):
     build_mid(kit)
     build_hold(kit)
     build_bulkheads(kit, cockpit_outline)
+    dress_mid(kit)
     build_labels(kit)
     return kit.parts

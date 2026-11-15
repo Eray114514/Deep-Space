@@ -304,7 +304,10 @@ try {
   const chaseVisiblePng = readPng(chaseVisible);
   const chaseHiddenPng = readPng(chaseHidden);
   const chaseDelta = imageDelta(chaseVisiblePng, chaseHiddenPng, 5);
-  check(chaseDelta.ratio > 0.00008 && chaseDelta.ratio < 0.035,
+  /* The Blender-built HALCYON (2026-11-15) roots the jet 0.3 R inside the
+     bell and lets it be seen from the chase camera; the plume fades end-on
+     but is no longer suppressed to a throat-only signature. */
+  check(chaseDelta.ratio > 0.00008 && chaseDelta.ratio < 0.05,
     `axial chase view retains a bounded hot-throat signature (${(chaseDelta.ratio * 100).toFixed(3)}% pixels)`);
   await page.evaluate(() => {
     const { ship } = NMS._internals;
@@ -319,7 +322,9 @@ try {
   const normalizedThroatEnergy = throatBalances.map((balance, index) =>
     balance.total / Math.max(16, allChaseProjection[index].radius ** 2));
   check(throatBalances.every((balance, index) =>
-    balance.total > (allChaseProjection[index].authoredRadius > 0.5 ? 10000 : 1200)
+    /* the dorsal bells are 0.30 R engines whose throat dish sits 0.48 R deep:
+       their absolute energy is small, their normalised energy matches the mains */
+    balance.total > (allChaseProjection[index].authoredRadius > 0.5 ? 3000 : 350)
       && balance.vertical > 0.38 && balance.horizontal > 0.38)
       && Math.min(...normalizedThroatEnergy) / Math.max(...normalizedThroatEnergy) > 0.22,
   `all four apertures illuminate around their full circumference (${throatBalances.map((balance, index) => `${balance.total.toFixed(0)}e/${normalizedThroatEnergy[index].toFixed(2)}n/${balance.vertical.toFixed(2)}v/${balance.horizontal.toFixed(2)}h`).join(', ')})`);

@@ -8,7 +8,7 @@ import { SHIP_INTERIOR_LAYER, SKY_BACKDROP_LAYER } from './render-layers.js';
 
 import { buildEnvironment } from './halcyon/materials.js';
 import { assembleShip } from './halcyon/ship/model.js';
-import { shipAmbient } from './halcyon/ship/surfaces.js';
+import { shipAmbient, shipEngine } from './halcyon/ship/surfaces.js';
 import { applyInteriorIrradiance, bakeInteriorIrradiance } from './halcyon/gfx/interior-irradiance.js';
 import { SHIPS } from './halcyon/ship/registry.js';
 import { setMaterialEnvironmentIntensity } from './pbr-materials.js';
@@ -265,6 +265,8 @@ export class Ship {
     this.ext = built.ext;
     this.int = built.int;
     this.bakedLight = built.bakedLight;
+    // nozzle positions come from the model (engine-N empties), not the def
+    this.def.engines = this.ext.engines;
     if (renderer && !radiance?.enabled) {
       // The demo's deep-space PMREM probe drives all hull specular. It is
       // assigned per-material rather than as scene.environment so the rest
@@ -591,7 +593,8 @@ export class Ship {
       r.material.uniforms.uPower.value = power;
       r.material.uniforms.uTime.value = t;
     }
-    this.mats.engineCore.emissiveIntensity = 0.72 + power * 0.88;
+    if (this.mats.engineCore) this.mats.engineCore.emissiveIntensity = 0.72 + power * 0.88;
+    shipEngine.uShipEnginePower.value = power;
 
     /* strobes — kept modest so the bloom chain never saturates */
     const blink = (t % 1.3) < 0.09 ? 3.2 : 0.05;

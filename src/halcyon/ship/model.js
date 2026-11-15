@@ -54,6 +54,8 @@ export async function loadShipProbes(renderer, base = '/assets/halcyon/') {
 
 /* the bell lip sits this many radii aft of the engine node (see build_engine) */
 const BELL_LIP = 0.625;
+/* and the throat this many radii FORWARD of it */
+const BELL_THROAT = -0.775;
 
 /* Cabin fixtures.  Positions follow the lamps modelled in Blender, so the
    dynamic highlights land where the emissive strips are. */
@@ -199,7 +201,7 @@ export function assembleShip(gltf, def) {
     engines.push({ x: node.position.x, y: node.position.y, z: node.position.z, r: node.scale.x });
   }
   const plumeRoot = (engine) => new THREE.Vector3(
-    engine.x, engine.y, engine.z + engine.r * (BELL_LIP - 0.01));
+    engine.x, engine.y, engine.z + engine.r * (BELL_LIP - 0.30));
   const plumeRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
   const instanceMatrix = new THREE.Matrix4();
   const instanceScale = new THREE.Vector3();
@@ -210,9 +212,9 @@ export function assembleShip(gltf, def) {
     mesh.frustumCulled = false;
     engines.forEach((engine, index) => {
       const origin = inThroat
-        ? new THREE.Vector3(engine.x, engine.y, engine.z + engine.r * (BELL_LIP + 0.025))
+        ? new THREE.Vector3(engine.x, engine.y, engine.z + engine.r * (BELL_THROAT + 0.30))
         : plumeRoot(engine);
-      instanceScale.setScalar(engine.r);
+      instanceScale.setScalar(inThroat ? engine.r * 0.52 : engine.r);
       instanceMatrix.compose(origin, inThroat ? new THREE.Quaternion() : plumeRotation, instanceScale);
       mesh.setMatrixAt(index, instanceMatrix);
     });
@@ -236,7 +238,7 @@ export function assembleShip(gltf, def) {
     g.fillRect(0, 0, 128, 128);
     return new THREE.CanvasTexture(canvas);
   })();
-  const GLOW = { green: [0x30ff70, 1.5, 0.9], red: [0xff2a18, 1.5, 0.9], white: [0xfff2dc, 1.2, 0.8],
+  const GLOW = { green: [0x30ff70, 1.5, 0.9], red: [0xff2a18, 1.5, 0.9], white: [0xfff2dc, 0.7, 0.6],
     strobe: [0xffffff, 3.2, 0], landing: [0xfff4e0, 1.1, 0.55] };
   const strobeGlows = [];
   for (const child of [...root.children]) {

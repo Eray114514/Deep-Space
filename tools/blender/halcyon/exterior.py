@@ -109,7 +109,7 @@ def build_hull(M, col):
     z_extra = sorted({v for p in PANES for v in p[:2]} | {v for p in PAINT for v in p[:2]}
                      | {GZ0 + 0.42})
     u_extra = sorted({v for p in PANES for v in p[2:]} | {13.0, 13.9})
-    return HULL.build('hull', col, seams=hull_seams(), region=hull_region, mats=M,
+    return HULL.build('hull', col, seams=hull_seams() + [('r', 11.0, 0.0, float(JMAX))], region=hull_region, mats=M,
                       cap_start=True, cap_end=True, z_extra=z_extra, u_extra=u_extra, uv_fn=pane_uv)
 
 
@@ -120,12 +120,14 @@ def build_ramp(M, col):
     T = 0.15
 
     def only(z, jf, side):
-        return 'hullDark' if in_ramp(z, jf) else None
+        if not in_ramp(z, jf):
+            return None
+        return 'accent' if z > 8.36 else 'hullGrey'
 
     def deck(z, jf, side):
         return 'deck' if in_ramp(z, jf) else None
 
-    seams = [('r', z, float(J_E), float(JMAX)) for z in (7.0, 7.8)]
+    seams = [('r', z, float(J_E), float(JMAX)) for z in (7.0, 7.8, 8.36)] + [('l', 31.0, RAMP_Z0, RAMP_Z1)]
     outer = HULL.build('ramp-skin', col, seams=seams, region=only, mats=M,
                        z_range=(RAMP_Z0, RAMP_Z1))
     inner = HULL.build('ramp-deck', col, region=deck, mats=M, inset=T, flip=True,
@@ -274,9 +276,17 @@ def build_engine(M, col, e, idx):
                              rot=rot, tint=(k * 0.37) % 1.0))
     out.append(prims.lathe('eng%d-bell' % idx, col, [
         (r * 0.50, z - L * 0.55), (r * 0.72, z - L * 0.10), (r * 0.90, z + L * 0.38),
-        (r * 0.93, z + L * 0.50), (r * 0.895, z + L * 0.50), (r * 0.86, z + L * 0.36),
-        (r * 0.66, z - L * 0.12), (r * 0.40, z - L * 0.50), (r * 0.30, z - L * 0.62),
+        (r * 0.93, z + L * 0.50), (r * 0.895, z + L * 0.50),
     ], (x, y), mat=M['heat'], segs=56))
+    # the inner wall glows with the burn: paint R carries depth into the bell
+    # (0 at the lip, 1 at the throat), which the game's liner shader reads
+    z_lip, z_throat = z + L * 0.50, z - L * 0.62
+    liner = prims.lathe('eng%d-liner' % idx, col, [
+        (r * 0.895, z + L * 0.50), (r * 0.86, z + L * 0.36), (r * 0.76, z + L * 0.12),
+        (r * 0.66, z - L * 0.12), (r * 0.52, z - L * 0.32), (r * 0.40, z - L * 0.50), (r * 0.30, z - L * 0.62),
+    ], (x, y), mat=M['bellInner'], segs=56)
+    prims.paint_by(liner, lambda p: ((z_lip - p.z) / (z_lip - z_throat), 0.0, 0.0, 0.0))
+    out.append(liner)
     out.append(prims.lathe('eng%d-core' % idx, col, [
         (r * 0.30, z - L * 0.62), (r * 0.22, z - L * 0.60), (r * 0.20, z - L * 0.56),
         (r * 0.08, z - L * 0.56), (0.0, z - L * 0.50),
@@ -304,6 +314,38 @@ def build_engine(M, col, e, idx):
     return out
 
 
+def build_plates(M, col):
+    """Raised armour and access plates.  At chase distance a 1 cm seam is
+    sub-pixel; a 2 cm step with a lit chamfer is what reads as construction."""
+    import random
+    random.seed(11)
+    out = []
+    P = [
+        # (surface, z0, z1, j0, j1, material)
+        (HULL, -13.2, -11.0, 12.2, 16.6, 'hullGrey'),     # nose cheeks
+        (HULL, -4.9, -2.7, 9.3, 12.8, 'hull'),            # shoulder, fore
+        (HULL, -2.4, -0.2, 9.3, 12.8, 'hullGrey'),
+        (HULL, 0.2, 2.6, 9.3, 12.8, 'hull'),
+        (HULL, 3.0, 5.3, 9.3, 12.8, 'hull'),
+        (HULL, -4.6, -2.4, 2.6, 5.4, 'hull'),             # dorsal
+        (HULL, -0.6, 1.5, 2.6, 5.4, 'hullGrey'),
+        (HULL, 2.7, 5.0, 2.6, 5.4, 'hull'),
+        (HULL, 6.6, 9.4, 1.6, 5.2, 'hullGrey'),           # aft deck over the hold
+        (HULL, -7.6, -5.6, 27.0, 32.5, 'hullDark'),       # keel
+        (HULL, -3.0, 0.8, 27.0, 32.5, 'hullDark'),
+        (NACELLE, 1.6, 3.4, 3.0, 13.0, 'hull'),           # nacelle armour band
+        (NACELLE, 7.6, 9.0, 6.0, 15.0, 'hullGrey'),
+        (NACELLE, 3.8, 6.6, 20.0, 27.0, 'hull'),
+    ]
+    for side in (1, -1):
+        for (S, z0, z1, j0, j1, key) in P:
+            nac = S is NACELLE
+            if nac:
+                S = LoftSurface(NACELLE_KEYS, mirror=side < 0)
+            out.append(S.plate('plate', col, M[key], z0, z1, j0, j1, side=1 if nac else side, lift=0.024, chamfer=0.035))
+    return out
+
+
 def build(M):
     from . import exterior_detail as detail
     col = collection('exterior')
@@ -317,6 +359,7 @@ def build(M):
     static += build_fin(M, col)
     for i, e in enumerate(ENGINES):
         static += build_engine(M, col, e, i)
+    static += build_plates(M, col)
     detail.build(M, col, groups)
     return groups
 

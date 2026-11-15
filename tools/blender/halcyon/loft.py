@@ -184,6 +184,50 @@ class LoftSurface:
         me.materials.append(mat)
         return obj
 
+    def plate(self, name, col, mat, z0, z1, j0, j1, side=1, lift=0.022, chamfer=0.03, nz=None, nj=None, tint=None):
+        """A raised plate lying on the skin: a top face `lift` proud of the
+        surface with a chamfered rim down to it.  It is what makes a hull read
+        as built-up armour at a distance where a 1 cm seam is sub-pixel."""
+        import random as _r
+        tint = _r.random() if tint is None else tint
+        zm = (z0 + z1) / 2
+        jc = chamfer / max(self.metric_u(zm, (j0 + j1) / 2), 1e-4)
+        nz = nz or max(2, int((z1 - z0) / 0.3))
+        nj = nj or max(2, int(j1 - j0))
+        zs = [z0, z0 + chamfer] + [z0 + chamfer + (z1 - z0 - 2 * chamfer) * k / nz for k in range(1, nz)] + [z1 - chamfer, z1]
+        js = [j0, j0 + jc] + [j0 + jc + (j1 - j0 - 2 * jc) * k / nj for k in range(1, nj)] + [j1 - jc, j1]
+        bm = bmesh.new()
+        layer = bm.loops.layers.float_color.new('Color')
+        V = []
+        for i, z in enumerate(zs):
+            row = []
+            for k, j in enumerate(js):
+                rim = i in (0, len(zs) - 1) or k in (0, len(js) - 1)
+                p = self.point(z, j, side) + self.normal(z, j, side) * (-0.004 if rim else lift)
+                row.append(bm.verts.new(G(*p)))
+            V.append(row)
+        for i in range(len(zs) - 1):
+            for k in range(len(js) - 1):
+                quad = [V[i][k], V[i][k + 1], V[i + 1][k + 1], V[i + 1][k]]
+                f = bm.faces.new(quad if (side < 0) != (self.sign < 0) else quad[::-1])
+                f.smooth = True
+                for loop in f.loops:
+                    loop[layer] = (tint, 0.0, 0.0, 0.0)
+        bm.normal_update()
+        # face the plate away from the hull
+        n_out = G(*self.normal(zm, (j0 + j1) / 2, side))
+        if sum(f.normal.dot(n_out) for f in bm.faces) < 0:
+            bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
+        for e in bm.edges:
+            if len(e.link_faces) == 2 and e.calc_face_angle(0) > math.radians(25):
+                e.smooth = False
+        me = bpy.data.meshes.new(name)
+        bm.to_mesh(me)
+        bm.free()
+        obj = new_object(name, me, col)
+        me.materials.append(mat)
+        return obj
+
     def y_to_jf(self, z, y, lower=False):
         """cell coordinate where the side of the section crosses height y"""
         s = self.section(z)

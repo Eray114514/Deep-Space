@@ -171,9 +171,16 @@ check(hullLook.angle < 1e-6,
 check(Math.abs(hullLook.speed - transitionStart.speed) < 1e-6,
   `automatic cruise remains engaged after standing settles (${hullLook.speed.toFixed(0)} m/s)`);
 
-// --- walk forward through the corridor toward the cockpit
+// --- face aft again (the head-look check turned the walker 95 deg), then
+// walk out of the flight deck and down the corridor
+await page.evaluate(() => { NMS._internals.shipView.walkYaw = Math.PI; });
 for (let i = 0; i < 10; i++) { await page.keyboard.down('KeyW'); await page.waitForTimeout(120); await page.keyboard.up('KeyW'); }
 await settle(600);
+// the flight-deck door must actually let the walker through (the rooms are
+// inset by the walker's radius, so a too-thin doorway room seals the deck)
+const walked = await page.evaluate(() => NMS.shipViewState().walkPos);
+check(walked && walked[2] > -5.0,
+  `standing pilot walks from the flight deck into the mid-deck (z ${walked?.[2]?.toFixed?.(2)})`);
 await shot('04-interior-corridor');
 
 // --- sit back down (teleport near seat first for determinism)

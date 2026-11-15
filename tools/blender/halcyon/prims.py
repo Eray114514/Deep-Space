@@ -184,6 +184,16 @@ def text(name, col, body, height, place, mat=None, tint=0.5, align='CENTER', out
     return obj
 
 
+def paint_by(obj, fn):
+    """Overwrite the paint attribute per vertex: fn(game_point) -> (r, g, b, a)."""
+    me = obj.data
+    layer = me.color_attributes['Color']
+    for loop in me.loops:
+        co = me.vertices[loop.vertex_index].co
+        layer.data[loop.index].color = fn(Vector((co.x, co.z, -co.y)))
+    return obj
+
+
 def flip_faces(obj):
     bm = bmesh.new()
     bm.from_mesh(obj.data)

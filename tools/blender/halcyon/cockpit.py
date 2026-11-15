@@ -365,9 +365,9 @@ def build_dressing(kit):
     kit.rev('accent', [(0.0, 0.0), (0.055, 0.012), (0.06, 0.34), (0.03, 0.40), (0.0, 0.41)], (0.95, 0.30, CZ1 - 0.10), (0, 1, 0), 14,
             'extinguisher')
     kit.box('metalDark', (0.15, 0.05, 0.03), (0.95, 0.52, CZ1 - 0.035), bevel=0.008, name='ext-clip')
-    kit.box('fabric', (0.52, 0.42, 0.05), (-0.98, 1.25, CZ1 - 0.045), bevel=0.02, seg=3, name='stowage-bag')
+    kit.box('fabric', (0.40, 0.42, 0.05), (-1.20, 1.25, CZ1 - 0.045), bevel=0.02, seg=3, name='stowage-bag')
     for yy in (1.12, 1.38):
-        kit.box('fabricOrange', (0.54, 0.035, 0.008), (-0.98, yy, CZ1 - 0.073), bevel=0.002, name='stowage-strap')
+        kit.box('fabricOrange', (0.42, 0.035, 0.008), (-1.20, yy, CZ1 - 0.073), bevel=0.002, name='stowage-strap')
     kit.label('COMMAND  SEAT  -  HARNESS  BEFORE  BURN', 0.03, (0, 2.10, CZ1 - 0.012), (-1, 0, 0), (0, 1, 0), 'decalLight')
 
 
