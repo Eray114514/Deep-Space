@@ -5,7 +5,7 @@
 // Meshopt-compressed like the other hero assets, but POSITION stays float:
 // the ship shaders evaluate their weathering noise in object space (metres),
 // and position quantisation would hide a per-node scale in every mesh.
-import { NodeIO } from '@gltf-transform/core';
+import { NodeIO, PropertyType } from '@gltf-transform/core';
 import { ALL_EXTENSIONS, EXTMeshoptCompression } from '@gltf-transform/extensions';
 import { dedup, prune, quantize, reorder, weld } from '@gltf-transform/functions';
 import { MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
@@ -32,7 +32,8 @@ for (const mesh of document.getRoot().listMeshes()) {
   }
 }
 await document.transform(
-  dedup(),
+  // never merge materials: the game keys its surfaces on their names
+  dedup({ propertyTypes: [PropertyType.ACCESSOR, PropertyType.MESH, PropertyType.TEXTURE] }),
   // quantise first: baked light is per face corner, and corners only weld
   // back into shared vertices once their values are snapped to 8 bits
   quantize({ pattern: /^(NORMAL|TEXCOORD_\d+|COLOR_\d+|_\w+)$/, quantizeNormal: 10, quantizeTexcoord: 14, quantizeColor: 8, quantizeGeneric: 8 }),

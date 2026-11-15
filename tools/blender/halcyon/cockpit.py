@@ -264,10 +264,118 @@ def build_panels(kit):
                        seed=30 + k)
 
 
+def build_dressing(kit):
+    """The second and third read of the flight deck: everything a pilot's
+    hands, feet and eyes go to that is not one of the big displays."""
+    tilt = _rx(-18)
+    pc = Vector((0, 0.80, -9.18))
+    face = lambda x, y, lift=0.0: pc + tilt @ Vector((x, y, lift))  # noqa: E731
+    # ---------------- annunciator strip across the top of the panel
+    tiles = ('btnAmber', 'panelGrey', 'panelGrey', 'btnGreen', 'panelGrey', 'btnWhite', 'panelGrey', 'panelGrey',
+             'btnGreen', 'panelGrey', 'btnAmber', 'panelGrey', 'panelGrey', 'btnGreen', 'panelGrey', 'panelGrey')
+    kit.box('panelDark', (0.98, 0.036, 0.012), face(0, 0.224, 0.004), bevel=0.004, rot=tilt, name='annunciator-bed')
+    for k, key in enumerate(tiles):
+        kit.box(key, (0.052, 0.024, 0.008), face((k - 7.5) * 0.059, 0.224, 0.011), bevel=0.003, rot=tilt, name='annunciator')
+    # ---------------- standby instruments and the gear lever, outboard of the displays
+    for sx in (-1, 1):
+        R = tilt @ _ry(-sx * 12)
+        n = R @ Vector((0, 0, 1))
+        for k, yy in enumerate((-0.085, -0.19)):
+            c = face(sx * 0.905, yy) + Vector((0, 0, 0.092))
+            kit.rev('metalDark', [(0.050, 0.0), (0.050, 0.014), (0.040, 0.014), (0.040, 0.004)], c, n, 20, 'gauge-bezel')
+            kit.rev('screen', [(0.040, 0.004), (0.0, 0.004)], c, n, 20, 'gauge-face')
+            kit.box('btnWhite' if k else 'btnAmber', (0.003, 0.030, 0.002), c + n * 0.007 + R @ Vector((0.008, 0.008, 0)),
+                    bevel=0.0, rot=R @ Matrix.Rotation(0.6 - k, 3, 'Z'), name='gauge-needle')
+    lever = tilt @ _rx(38)
+    lp = face(0.335, -0.215, 0.01)
+    kit.box('metalDark', (0.05, 0.10, 0.012), lp, bevel=0.004, rot=tilt, name='gear-lever-gate')
+    kit.box('metal', (0.012, 0.012, 0.085), lp + lever @ Vector((0, 0, 0.045)), bevel=0.003, rot=lever, name='gear-lever')
+    kit.rev('accent', [(0.0, 0.0), (0.022, 0.0), (0.022, 0.016), (0.0, 0.016)], lp + lever @ Vector((-0.008, 0, 0.088)),
+            lever @ Vector((1, 0, 0)), 14, 'gear-lever-wheel')
+    # guarded switches (red covers) under the centre display
+    for k in (-1, 0, 1):
+        gp = face(-0.36 + k * 0.05, -0.215, 0.012)
+        kit.box('accent', (0.026, 0.040, 0.016), gp, bevel=0.005, rot=tilt @ _rx(-14), name='switch-guard')
+    # ---------------- head-up display on the glareshield lip
+    top = face(0, 0.26)
+    hud = _rx(-24)
+    hc = top + Vector((0, 0.165, 0.015))
+    kit.box('hudGlass', (0.34, 0.20, 0.006), hc, bevel=0.0, rot=hud, name='hud-combiner')
+    for sx in (-1, 1):
+        kit.box('metalDark', (0.012, 0.23, 0.014), hc + hud @ Vector((sx * 0.176, -0.012, 0)), bevel=0.004, rot=hud, name='hud-arm')
+    kit.box('metalDark', (0.38, 0.03, 0.06), top + Vector((0, 0.05, 0.02)), bevel=0.01, name='hud-base')
+    kit.box('metalDark', (0.20, 0.06, 0.12), top + Vector((0, 0.045, -0.10)), bevel=0.015, name='hud-projector')
+    kit.rev('screen', [(0.03, 0.002), (0.0, 0.004)], top + Vector((0, 0.076, -0.10)), (0, 0.93, 0.37), 14, 'hud-lens')
+    # ---------------- rudder pedals and heel plates
+    for sx in (-1, 1):
+        px = sx * 0.17
+        ped = _rx(-34)
+        kit.box('metalDark', (0.115, 0.17, 0.016), (px, 0.19, -8.98), bevel=0.006, rot=ped, name='pedal')
+        for k in range(4):
+            kit.box('rubber', (0.10, 0.012, 0.008), Vector((px, 0.19, -8.98)) + ped @ Vector((0, -0.06 + k * 0.04, 0.012)),
+                    bevel=0.002, rot=ped, name='pedal-tread')
+        kit.tube('metal', [(px, 0.13, -9.02), (px, 0.10, -9.20), (px, 0.22, -9.30)], 0.014, 8, 'pedal-arm')
+        kit.box('metal', (0.14, 0.006, 0.30), (px, 0.004, -8.72), bevel=0.002, name='heel-plate')
+    # ---------------- display pods on the window ledges, turned to the pilot
+    for sx, idx, page in ((-1, 5, 'comms'), (1, 6, 'nav')):
+        R = _ry(-sx * 38) @ _rx(-24)
+        c = Vector((sx * 1.36, 0.83, -8.98))
+        kit.box('panelDark', (0.42, 0.30, 0.10), c - (R @ Vector((0, 0, 0.055))), bevel=0.02, rot=R, name='pod')
+        kit.box('metalDark', (0.10, 0.16, 0.10), (sx * 1.40, 0.66, -9.04), bevel=0.02, name='pod-stalk')
+        mfd(kit, idx, page, c, R, 0.34, 0.22)
+        switch_row(kit, c + R @ Vector((0, -0.135, 0.0)), R, 8, pitch=0.04, lit=0.4, seed=50 + idx)
+    # ---------------- console furniture: selectors, a tablet, a headset, a mug
+    for sx in (-1, 1):
+        top_r = Matrix.Rotation(math.radians(-sx * 8), 3, 'Z')
+        up = top_r @ Vector((0, 1, 0))
+        for k in range(4):
+            c = Vector((sx * 0.80 - sx * 0.12, 0.645, -7.98 + k * 0.075))
+            kit.rev('metalDark', [(0.022, 0.0), (0.019, 0.02), (0.012, 0.024), (0.0, 0.024)], c, up, 16, 'selector')
+            kit.box('btnWhite', (0.003, 0.004, 0.014), c + up * 0.025, bevel=0.0, rot=top_r @ _ry(40 * k), name='selector-mark')
+    kit.box('panelDark', (0.24, 0.012, 0.17), (-1.52, 0.712, -7.42), bevel=0.006, rot=_ry(18), name='tablet')
+    kit.box('screen', (0.21, 0.004, 0.14), (-1.52, 0.72, -7.42), bevel=0.0, rot=_ry(18), name='tablet-screen')
+    kit.rev('panelWhite', [(0.0, 0.0), (0.036, 0.0), (0.042, 0.085), (0.036, 0.085), (0.031, 0.008), (0.0, 0.008)],
+            (1.30, 0.705, -7.36), (0, 1, 0), 14, 'mug')
+    arc = [(1.62 + 0.085 * math.cos(a), 0.74 + 0.085 * math.sin(a), -7.62) for a in [math.pi * k / 8 for k in range(9)]]
+    kit.tube('panelDark', arc, 0.012, 8, 'headset-band')
+    for dx in (-0.085, 0.085):
+        kit.box('cushion', (0.035, 0.085, 0.07), (1.62 + dx, 0.735, -7.62), bevel=0.014, seg=3, name='headset-cup')
+    # ---------------- overhead: aft switch panels, gaspers, conduits to the bulkhead
+    for sx in (-1, 1):
+        zo = -7.25
+        yo = HULL.section(zo)['yTop'] - INSET - 0.04
+        ov = _rx(-4)
+        kit.box('panelDark', (0.50, 0.06, 0.62), (sx * 0.52, yo, zo), bevel=0.02, rot=ov, name='overhead-aft')
+        down = ov @ _rx(90)
+        for k, dz in enumerate((-0.20, -0.10, 0.0, 0.10)):
+            switch_row(kit, Vector((sx * 0.52, yo - 0.032, zo + dz)), down, 11, lit=0.4, seed=60 + k + sx)
+        kit.rev('metal', [(0.04, 0.0), (0.04, 0.02), (0.022, 0.035), (0.016, 0.035), (0.016, 0.0)],
+                (sx * 0.52, yo - 0.03, zo + 0.24), (0, -1, 0), 14, 'gasper')
+        kit.tube('rubber', [(sx * 0.34, yo + 0.01, zo + 0.31), (sx * 0.34, yo - 0.02, -6.4), (sx * 0.38, yo - 0.05, CZ1 + 0.02)],
+                 0.016, 8, 'conduit')
+        kit.tube('accent', [(sx * 0.30, yo + 0.01, zo + 0.31), (sx * 0.30, yo - 0.02, -6.4), (sx * 0.33, yo - 0.05, CZ1 + 0.02)],
+                 0.009, 6, 'conduit')
+    # standby compass hung from the forward overhead
+    zo = -8.28
+    yo = HULL.section(zo)['yTop'] - INSET - 0.05
+    kit.box('metalDark', (0.07, 0.07, 0.06), (0, yo - 0.085, zo - 0.19), bevel=0.014, name='compass')
+    kit.rev('screen', [(0.026, 0.0), (0.0, 0.003)], (0, yo - 0.085, zo - 0.158), (0, 0, 1), 14, 'compass-card')
+    kit.tube('metalDark', [(0, yo - 0.03, zo - 0.19), (0, yo - 0.055, zo - 0.19)], 0.008, 6, 'compass-stem')
+    # ---------------- aft bulkhead: extinguisher, stowage bag, legend
+    kit.rev('accent', [(0.0, 0.0), (0.055, 0.012), (0.06, 0.34), (0.03, 0.40), (0.0, 0.41)], (0.95, 0.30, CZ1 - 0.10), (0, 1, 0), 14,
+            'extinguisher')
+    kit.box('metalDark', (0.15, 0.05, 0.03), (0.95, 0.52, CZ1 - 0.035), bevel=0.008, name='ext-clip')
+    kit.box('fabric', (0.52, 0.42, 0.05), (-0.98, 1.25, CZ1 - 0.045), bevel=0.02, seg=3, name='stowage-bag')
+    for yy in (1.12, 1.38):
+        kit.box('fabricOrange', (0.54, 0.035, 0.008), (-0.98, yy, CZ1 - 0.073), bevel=0.002, name='stowage-strap')
+    kit.label('COMMAND  SEAT  -  HARNESS  BEFORE  BURN', 0.03, (0, 2.10, CZ1 - 0.012), (-1, 0, 0), (0, 1, 0), 'decalLight')
+
+
 def build(M, col):
     kit = Kit(M, col)
     kit.screens = []
     build_shell(kit)
     build_seat(kit)
     build_panels(kit)
+    build_dressing(kit)
     return kit.parts, kit.screens, outline(CZ1)

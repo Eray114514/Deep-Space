@@ -13,7 +13,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { screenTexture } from '../textures.js';
+import { displayTexture } from './displays.js';
 import { getSharedPmremGenerator } from '../../shared-pmrem.js';
 import { makeCanopyGlass, bindGlass } from './cockpit/glass.js';
 import { buildInstruments } from './cockpit/holo.js';
@@ -54,7 +54,6 @@ export async function loadShipProbes(renderer, base = '/assets/halcyon/') {
 
 /* the bell lip sits this many radii aft of the engine node (see build_engine) */
 const BELL_LIP = 0.625;
-const SCREEN_KIND = { radar: 0, attitude: 1, nav: 2, systems: 3, comms: 4 };
 
 /* Cabin fixtures.  Positions follow the lamps modelled in Blender, so the
    dynamic highlights land where the emissive strips are. */
@@ -132,6 +131,11 @@ export function assembleShip(gltf, def) {
     spanU: 2.6, spanV: 2.0, rim: 0.30, envGain: 0.92,
     lamp: 1.15, cover: 0.23, coverLum: 0.76, sheen: 1.12,
   });
+  /* the head-up combiner: a faint cyan-coated plate */
+  const hudGlass = new THREE.MeshBasicMaterial({
+    name: 'hud-glass', color: 0x6fd8f0, transparent: true, opacity: 0.085,
+    depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+  });
   root.traverse((object) => {
     if (!object.isMesh) return;
     const name = object.material?.name || '';
@@ -142,6 +146,12 @@ export function assembleShip(gltf, def) {
       glassPanes.push(object);
       if (!glass || object.geometry.getAttribute('position').count
         > glass.geometry.getAttribute('position').count) glass = object;
+      return;
+    }
+    if (name === 'hudGlass') {
+      object.material = hudGlass;
+      object.renderOrder = 5;
+      object.castShadow = false;
       return;
     }
     preparePaint(object.geometry);
@@ -225,32 +235,36 @@ export function assembleShip(gltf, def) {
   cockpitGroup.add(take('cockpit'));
   intGroup.add(cockpitGroup);
 
-  const screenMaterials = [0, 1, 2, 3, 4, 5].map((kind) => {
-    const texture = screenTexture(kind);
-    return new THREE.MeshStandardMaterial({
-      name: `screen-${kind}`,
-      map: texture, emissiveMap: texture, emissive: 0xffffff, emissiveIntensity: 2.4,
-      color: 0x000000, metalness: 0, roughness: 0.9,
+  const screenMaterials = [];
+  const screenMaterial = (page, aspect) => {
+    const texture = displayTexture(page, aspect);
+    const material = new THREE.MeshStandardMaterial({
+      name: `screen-${page}`,
+      map: texture, emissiveMap: texture, emissive: 0xffffff, emissiveIntensity: 2.2,
+      color: 0x000000, metalness: 0, roughness: 0.35,
     });
-  });
+    screenMaterials.push(material);
+    return material;
+  };
   const screens = [];
   const position = new THREE.Vector3(), quaternion = new THREE.Quaternion(), scale = new THREE.Vector3();
   for (const child of [...root.children]) {
     const match = /^mfd-(\d+)-(\w+)$/.exec(child.name);
     if (!match) continue;
-    const kind = SCREEN_KIND[match[2]] ?? Number(match[1]);
+    const kind = Number(match[1]);
+    child.updateMatrix();
+    child.matrix.decompose(position, quaternion, scale);
+    const page = screenMaterial(match[2], scale.x / scale.z);
     child.traverse((object) => {
       if (!object.isMesh) return;
-      object.material = screenMaterials[kind % screenMaterials.length];
+      object.material = page;
       object.castShadow = false;
       object.receiveShadow = false;
     });
-    child.updateMatrix();
-    child.matrix.decompose(position, quaternion, scale);
     screens.push({
       m: new THREE.Matrix4().compose(position, quaternion, new THREE.Vector3(1, 1, 1)),
       w: scale.x, h: scale.z, kind,
-      role: match[2] === 'attitude' ? 'mfd-centre' : match[2] === 'systems' ? 'pedestal' : `mfd-${match[2]}`,
+      role: match[2] === 'radar' ? 'mfd-centre' : match[2] === 'systems' ? 'pedestal' : `mfd-${match[2]}`,
     });
     cockpitGroup.add(child);
   }
