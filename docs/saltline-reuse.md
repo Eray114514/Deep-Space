@@ -45,7 +45,7 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 | GPU 雨与地面溅水 | `Nb` 及着色器 `kR/FR/UR/NR` | `src/saltline/rain.js`，由 `weather-effects.js` 调用 | 12k 个实例化面片；雨场固定在世界中（不跟着玩家走）；按像素宽度控制线宽；太阳前向散射光照；溅水按 7×7 地形高度网格贴地。改成了球面切平面坐标系，并加了对数深度。`?rain=0..1` 可强制下雨，`?rainGain=` 调亮度 |
 | 武器雨湿 | `Wv`（`uRain`） | `SurfaceWeapons.setWetness` | 下雨时枪面出现水珠、颜色变深、粗糙度降低，雨停后数秒内变干 |
 | 合成音效库（全部 57 种，包括枪声、换弹、弹壳、命中、脚步、雨、风、雷、无人机旋翼、机器狗伺服、混响冲激响应、配乐片段） | 渲染入口 `r_` 与生成器表 `Go`（第 765 号） | `src/saltline/sfx-generators.js`（生成代码），播放器为 `src/saltline/sfx.js` | 第二轮（2026-11-16）接入：PAC-9 的开枪（含户外回声尾音）、弹壳落地、拔弹匣、插弹匣、拉枪栓、空仓击发；步行时的雨声和闪电后的雷声。播放器在空闲时预渲染，各音效有变体轮换和并发上限。还没接入的音效（命中、脚步、无人机和机器狗、风、海、配乐）也都在库里，按名称调用 `audio.sfx.play(名称)` 即可；`node tools/saltline/render-sfx.mjs --list` 列出全部名称，加 `<名称> --out x.wav` 可导出试听 |
-| 材质库：27 套程序纹理（混凝土、油漆、镀锌/拉丝/锈蚀钢、枪械阳极、聚合物、布料、木、轮胎、玻璃等）和 48 种命名材质 | 材质模块 `qg`（`Gg`）；每套纹理的烘焙着色器由副作用语句 `Tn.<名称> = …` 注册 | `src/saltline/materials.js` | 第三轮（2026-11-16）接入：首次用到某套纹理时，由 GPU 一次烘焙出反照率、ORM（AO/粗糙度/金属度）和法线三张图，不需要图片文件。共用的着色器补丁负责三平面投影、宏观色斑、积灰和雨湿（`mats.uniforms.wet`）。PAC-9 的手套和黄铜已改用 `glove_fabric` / `brass`。全部材质的陈列页：`npm run dev` 后打开 `/tools/saltline/material-gallery.html`（加 `?wet=1` 看湿润效果）。冷启动时烘焙两套纹理约 430 ms，命中着色器缓存后约 20 ms；29 套全部烘焙的冷启动约 18 s，所以只能按需烘焙 |
+| 材质库：27 套程序纹理（混凝土、油漆、镀锌/拉丝/锈蚀钢、枪械阳极、聚合物、布料、木、轮胎、玻璃等）和 48 种命名材质 | 材质模块 `qg`（`Gg`）；每套纹理的烘焙着色器由副作用语句 `Tn.<名称> = …` 注册 | `src/saltline/materials.js` | 第三轮（2026-11-16）接入：首次用到某套纹理时，由 GPU 一次烘焙出反照率、ORM（AO/粗糙度/金属度）和法线三张图，不需要图片文件。共用的着色器补丁负责三平面投影、宏观色斑、积灰和雨湿（`mats.uniforms.wet`）。PAC-9 的手套和黄铜已改用 `glove_fabric` / `brass`。全部材质的陈列页：`npm run dev` 后打开 `/tools/saltline/material-gallery.html`（加 `?wet=1` 看湿润效果）。这些材质全是人造物，没有草、土、岩、沙、雪；地表重做只复用它的烘焙框架和雨湿补丁。冷启动时烘焙两套纹理约 430 ms，命中着色器缓存后约 20 ms；29 套全部烘焙的冷启动约 18 s，所以只能按需烘焙 |
 
 验收工具：`tools/pac9viewmodeltest.js`、`tools/rainvisualtest.js`（加 `--gpu --out <目录>` 可截图）。
 
@@ -58,7 +58,7 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 | **敌人 AI**（用户要求记录） | `iM`（第 841 号，16 KB）+ 调参 `Ui`（`TUNE`：视野 45 m、视锥 200°、丢失目标 4 s、搜索 8 s、听觉半径 45 m、同时进攻配额 2/3 个、间隔 1.25 s、暴露度升降）；射击接口 `playerShot` 在 `zv` | 在 `Em` 闭包内 | 有战斗玩法时再搬。机制：视锥 + 听觉警戒（枪声会惊动 `hearRadius` 内的敌人）；巡逻、交战、搜索状态机；用"进攻令牌"限制同时开火的敌人数量；波次与对象池（`poolGulls 10`、`poolHounds 8`） |
 | 道具库（约 30 种）：集装箱、叉车、发电机、灯塔杆、沙袋、木材堆、吨桶、工具车、楼梯、岗亭等 | `$g`：`PROP_SIZES = Gi`，注册函数 `J3` / `eb` / `sb` | 分别 55、37、43 条（37、25、38 KB） | 依赖材质库。用于 `artificial-sites.js` 的地表据点；配色可改为科幻风 |
 | 特效：曳光、抛壳、硝烟、弹孔贴花、命中碎屑 | 特效模块 `Sv`（`Cf`） | 20 条，约 50 KB | 和战斗一起搬；弹孔贴花依赖命中射线 |
-| 地面雨湿与雨点涟漪 | 地面模块 `vv`（`O1`）；涟漪着色器在第 637 号语句（`TR / AR / RR`，"one sparse layer of rain rings"） | 25 条，约 39 KB | 是雨的下一步：地表变暗、变亮滑，积水出现涟漪。要改 `shaders-webgl.js` 的地形材质，不能改动地形高度流 |
+| 地面雨湿与雨点涟漪 | 地面模块 `vv`（`O1`）；涟漪着色器在第 637 号语句（`TR / AR / RR`，"one sparse layer of rain rings"） | 25 条，约 39 KB | 是雨的下一步：地表变暗、变亮滑，积水出现涟漪。随[地表重做](planet-surface-rewrite.md) T3 接到新地形材质上，不能改动地形高度流 |
 | 后处理参考：AgX、自动曝光、色差、暗角、颗粒、锐化 | 渲染模块 `Vg`（`Hg`）、`jy`（第 365 号） | 16 条，约 54 KB | 只参考参数，不替换我们的管线（WebGL2 基准不变） |
 | 关卡、远景、天空 | `cv`（`C1`）、`mv`（`pv`）、`SALTLINE_SKY` | 51 KB / 57 KB | 单场景天空罩，不搬，我们的大气和云更强。远景的起重机、船等模型可以拆出来单独用 |
 
