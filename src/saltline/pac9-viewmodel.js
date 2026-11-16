@@ -818,6 +818,11 @@ const SALTLINE_BASE_COLOURS = {
   glove_fabric: () => new THREE.MeshStandardMaterial({ color: new THREE.Color(0x23262a).multiplyScalar(0.5), roughness: 0.93, metalness: 0, vertexColors: true }),
 };
 
+// Draw/holster and relaxed-carry poses, added here (Saltline never holsters):
+// offsets layered on top of the hip pose like Saltline's sprint/reload poses.
+const POSE_HOLSTER = { p: [0.07, -0.34, 0.1], r: [-0.85, 0.6, 0.55] };
+const POSE_LOWER = { p: [-0.01, -0.028, 0.02], r: [-0.22, 0.26, 0.15] };
+
 export const PAC9_SPEC = PAC9;
 export const PAC9_VIEW_FOV = 54;
 export const PAC9_ADS_FOV = 52;
@@ -947,6 +952,10 @@ export function createPac9Viewmodel(ctx) {
   const TACTICAL = [[0, kGuard], [0.1, kGuard], [0.36, kMagPull], [0.44, kMag], [0.5, kMag], [0.8, kMagAway], [0.98, kMagAway], [1.28, kMagSeat], [1.35, kMag], [1.45, kMagPush], [1.52, kMagTap], [1.62, kMag], [1.7, kMagPull], [2.02, kGuard], [9, kGuard]];
   const EMPTY = [...TACTICAL.slice(0, 12), [1.7, kMagPull], [1.96, kHandle], [2.02, kHandle], [2.14, kHandleBack], [2.19, kHandleBack], [2.26, kHandle], [2.36, kHandle], [2.66, kGuard], [9, kGuard]];
   const T_MAG_OUT = 0.47, T_MAG_IN = 1.345, T_RACK = 2.02, T_RACK_BACK = 2.14, T_BOLT = 2.19;
+  // draw: the rifle rises out of the holster pose with the support hand on the
+  // charging handle, racks a round, and the hand returns to the handguard
+  const DRAW_KEYS = [[0, kHandle], [0.45, kHandle], [0.57, kHandleBack], [0.62, kHandleBack], [0.68, kHandle], [0.78, kHandle], [1.05, kGuard], [9, kGuard]];
+  const T_DRAW = 1.05, T_DRAW_RACK = 0.45, T_DRAW_BACK = 0.57, T_DRAW_RELEASE = 0.62, T_HOLSTER = 0.42;
   const keyPos = new Vec3(), keyQ = new Quaternion(), magQ = new Quaternion(), camQ = new Quaternion();
   function sampleKeys(keys, t) {
     let i = 0;
@@ -963,6 +972,7 @@ export function createPac9Viewmodel(ctx) {
   // ---- state
   const rand = ctx.rng || Math.random;
   const s = {
+    draw: null, holster: null, holstered: true, equipW: 0, relaxW: 0, quietT: 0,
     t: 0, cooldown: 0, dryDone: false, autoReload: -1, reload: null, burst: 0, lastShot: -9, bloom: 0, heat: 0,
     adsLin: 0, adsE: 0, sprintT: 0, reloadW: 0, rackW: 0, bobPhase: 0, bobAmt: 0, finger: 0, boltT: 9, boltLocked: false,
     flashT: 0, flashDur: 0.05, recPhase: 0, wasGround: true, lastVy: 0, spreadS: 0.0125, idleT: 0, inspect: -1,
@@ -976,6 +986,10 @@ export function createPac9Viewmodel(ctx) {
     isReloading: () => !!s.reload,
     reloadProgress: () => (s.reload ? Math.min(1, s.reload.t / s.reload.T) : 0),
     reloadDuration: () => (s.reload ? s.reload.T : 0),
+    draw: drawNow, holster: holsterNow,
+    isHolstered: () => s.holstered,
+    isHolstering: () => !!s.holster,
+    equipState: () => (s.draw ? 'drawing' : s.holster ? 'holstering' : s.holstered ? 'holstered' : s.relaxW > 0.5 ? 'lowered' : 'ready'),
     setWetness(w) { RAIN_WETNESS.value = Math.max(0, Math.min(1, +w || 0)); },
     snap(input = {}) {
       s.adsLin = input.ads ? 1 : 0;
@@ -993,6 +1007,7 @@ export function createPac9Viewmodel(ctx) {
     leftGroup.quaternion.copy(kGuard.q);
   }
   function reset() {
+    Object.assign(s, { draw: null, holster: null, holstered: true, equipW: 0, relaxW: 0, quietT: 0 });
     api.ammo = MAG_SIZE; api.state = 'idle'; api.ads = 0;
     Object.assign(s, { cooldown: 0, dryDone: false, autoReload: -1, reload: null, burst: 0, lastShot: -9, bloom: 0, heat: 0, adsLin: 0, adsE: 0, sprintT: 0, reloadW: 0, rackW: 0, boltT: 9, boltLocked: false, flashT: 0, idleT: 0, inspect: -1 });
     for (const k of SPRINGS) { s[k].x = 0; s[k].v = 0; }
@@ -1000,6 +1015,28 @@ export function createPac9Viewmodel(ctx) {
     restPose();
   }
   // Interrupting a reload (weapon switch) keeps the round count it reached.
+  // Bring the rifle up (resumes from wherever a holster left it).
+  function drawNow() {
+    if (s.draw || (!s.holstered && !s.holster)) return false;
+    const from = s.equipW;
+    s.holster = null;
+    s.holstered = false;
+    s.draw = { t: from * T_DRAW_RACK * 0.999, f: {} };
+    ctx.emit?.('weapon:draw', { phase: 'start' });
+    return true;
+  }
+  // Put it away: a reload in progress is abandoned (rounds already seated stay).
+  function holsterNow() {
+    if (s.holstered || s.holster) return false;
+    if (s.reload) cancelReload();
+    s.draw = null;
+    s.relaxW = 0;
+    s.holster = { t: (1 - s.equipW) * T_HOLSTER };
+    restPose();
+    ctx.emit?.('weapon:holster', { phase: 'start' });
+    return true;
+  }
+
   function cancelReload() {
     if (!s.reload) return;
     s.reload = null; s.reloadW = 0; s.rackW = 0;
@@ -1023,7 +1060,7 @@ export function createPac9Viewmodel(ctx) {
   function muzzleWorld(out = new Vec3()) { return viewToWorld(PAC9.muzzle, out); }
 
   function reloadNow() {
-    if (s.reload || api.ammo >= api.magSize || api.reserve <= 0) return false;
+    if (s.holstered || s.holster || s.draw || s.reload || api.ammo >= api.magSize || api.reserve <= 0) return false;
     const empty = api.ammo <= 0;
     s.reload = { t: 0, T: empty ? RELOAD_EMPTY_TIME : RELOAD_TIME, empty, f: {} };
     s.autoReload = -1;
@@ -1075,11 +1112,31 @@ export function createPac9Viewmodel(ctx) {
 
   function update(dt, input) {
     s.t += dt;
-    const fire = !!input.fire && root.visible;
+    // ---- draw / holster
+    let drawRack = 0;
+    if (s.draw) {
+      const D = s.draw;
+      D.t += dt;
+      const t = D.t;
+      s.equipW = smootherstep(t / T_DRAW_RACK);
+      sampleKeys(DRAW_KEYS, t);
+      leftGroup.position.copy(keyPos);
+      leftGroup.quaternion.copy(keyQ);
+      if (t >= T_DRAW_RACK) drawRack = t < T_DRAW_BACK ? smootherstep((t - T_DRAW_RACK) / (T_DRAW_BACK - T_DRAW_RACK)) : t < T_DRAW_RELEASE ? 1 : Math.max(0, 1 - (t - T_DRAW_RELEASE) / 0.035);
+      if (t >= T_DRAW_RELEASE && !D.f.rack) { D.f.rack = 1; s.bump.v += 0.3; s.kZ.v -= 0.5; ctx.emit?.('weapon:draw', { phase: 'rack' }); }
+      if (t >= T_DRAW) { s.draw = null; s.equipW = 1; restPose(); ctx.emit?.('weapon:draw', { phase: 'done' }); }
+    } else if (s.holster) {
+      const H = s.holster;
+      H.t += dt;
+      s.equipW = 1 - smootherstep(H.t / T_HOLSTER);
+      if (H.t >= T_HOLSTER) { s.holster = null; s.holstered = true; s.equipW = 0; ctx.emit?.('weapon:holster', { phase: 'done' }); }
+    }
+    const equipped = !s.holstered && !s.holster && (!s.draw || s.draw.t > 0.8);
+    const fire = !!input.fire && root.visible && equipped;
     if (!fire) s.dryDone = false;
     const wantsSprint = !!input.sprinting && !fire && !input.ads && !s.reload;
     s.sprintT = damp(s.sprintT, wantsSprint ? 1 : 0, 9, dt);
-    if (input.reload) reloadNow();
+    if (input.reload && equipped) reloadNow();
     if (s.autoReload >= 0) { s.autoReload -= dt; if (s.autoReload < 0) reloadNow(); }
 
     let rack = 0;
@@ -1125,7 +1182,7 @@ export function createPac9Viewmodel(ctx) {
     }
 
     s.cooldown -= dt;
-    const canFire = !s.reload && s.sprintT < 0.45;
+    const canFire = !s.reload && s.sprintT < 0.45 && s.relaxW < 0.3;
     if (fire && canFire) {
       if (api.ammo > 0) {
         let n = 0;
@@ -1142,7 +1199,7 @@ export function createPac9Viewmodel(ctx) {
     s.bloom = Math.max(0, s.bloom - dt * 1.5);
     s.heat = Math.max(0, s.heat - dt * 0.2);
 
-    const adsHeld = !!input.ads && !s.reload && s.sprintT < 0.35;
+    const adsHeld = !!input.ads && !s.reload && s.sprintT < 0.35 && equipped;
     s.adsLin = clamp(s.adsLin + (adsHeld ? dt : -dt) / 0.18, 0, 1);
     s.adsE = smootherstep(s.adsLin);
     api.ads = s.adsE;
@@ -1157,6 +1214,12 @@ export function createPac9Viewmodel(ctx) {
       if (s.inspect >= 0) s.inspect = Math.max(s.inspect, 2.9);
     } else s.idleT += dt;
     if (s.inspect < 0 && s.idleT > 24) s.inspect = 0;
+    // relaxed carry: after a few quiet seconds the rifle sinks to a low ready;
+    // any trigger or aim input snaps it back up (~50 ms) before a shot leaves
+    const quiet = !input.fire && !input.ads && !s.reload && !s.draw && s.inspect < 0;
+    s.quietT = quiet ? s.quietT + dt : 0;
+    const relaxTarget = s.quietT > 3.5 && s.sprintT < 0.5 ? 1 : 0;
+    s.relaxW = damp(s.relaxW, relaxTarget, relaxTarget > s.relaxW ? 1.4 : 24, dt);
     let inspectRoll = 0, inspectFlip = 0, inspectLift = 0;
     if (s.inspect >= 0) {
       const t = s.inspect += dt;
@@ -1171,7 +1234,7 @@ export function createPac9Viewmodel(ctx) {
     const boltDur = 0.072;
     let boltW = s.boltT < boltDur ? Math.sin(Math.PI * s.boltT / boltDur) : 0;
     if (s.boltLocked && s.boltT > boltDur * 0.5) boltW = Math.max(boltW, 0.86);
-    bolt.position.z = PAC9.boltTravel * Math.max(boltW * 0.95, rack);
+    bolt.position.z = PAC9.boltTravel * Math.max(boltW * 0.95, rack, drawRack);
     s.finger = damp(s.finger, fire && canFire ? 1 : 0, 30, dt);
     setTriggerFinger(s.finger);
 
@@ -1207,12 +1270,13 @@ export function createPac9Viewmodel(ctx) {
 
     const mx = input.move ? input.move.x : 0, my = input.move ? input.move.y : 0;
     const hip = 1 - s.adsE, ads = s.adsE, spr = s.sprintT, rl = s.reloadW, rk = s.rackW;
-    const x = lerp(POSE_HIP.p[0], POSE_ADS.p[0], ads) + POSE_SPRINT.p[0] * spr + POSE_RELOAD.p[0] * rl + bobX + Math.sin(t * 0.85 + 1) * 12e-4 * breathe - s.swY.x * 0.06 - mx * 4e-3 * hip - 0.035 * inspectLift;
-    const y = lerp(POSE_HIP.p[1], POSE_ADS.p[1], ads) + POSE_SPRINT.p[1] * spr + POSE_RELOAD.p[1] * rl + bobY + Math.sin(t * 1.7) * 16e-4 * breathe + s.swP.x * 0.05 + s.jY.x + s.bump.x * 0.6 + 0.045 * inspectLift;
-    const z = lerp(POSE_HIP.p[2], POSE_ADS.p[2], ads) + POSE_SPRINT.p[2] * spr + POSE_RELOAD.p[2] * rl + s.kZ.x * 0.55 + my * 4e-3 * hip * (1 - spr);
-    const rx = POSE_HIP.r[0] * hip + POSE_SPRINT.r[0] * spr + POSE_RELOAD.r[0] * rl - 0.16 * rk + Math.sin(t * 1.7 + 0.8) * 35e-4 * breathe + Math.sin(2 * ph + 0.5) * 8e-3 * bob + s.swP.x + s.jP.x + s.kP.x + s.bump.x * 1.5 + 0.3 * inspectLift;
-    const ry = POSE_HIP.r[1] * hip + POSE_SPRINT.r[1] * spr + POSE_RELOAD.r[1] * rl + Math.sin(t * 0.6) * 2e-3 * breathe + Math.sin(ph) * 0.01 * bob + s.swY.x + s.kY.x + 0.18 * inspectLift + 0.25 * inspectFlip;
-    const rz = POSE_HIP.r[2] * hip + POSE_SPRINT.r[2] * spr + POSE_RELOAD.r[2] * rl + 0.62 * rk + Math.sin(ph) * 0.014 * bob + s.swY.x * 0.7 - mx * 0.035 * hip + s.kR.x - 0.75 * inspectRoll + 0.55 * inspectFlip + Math.sin(t * 0.5) * 4e-3 * breathe;
+    const hol = 1 - s.equipW, lw = s.relaxW * (1 - s.adsE);
+    const x = lerp(POSE_HIP.p[0], POSE_ADS.p[0], ads) + POSE_SPRINT.p[0] * spr + POSE_RELOAD.p[0] * rl + bobX + Math.sin(t * 0.85 + 1) * 12e-4 * breathe - s.swY.x * 0.06 - mx * 4e-3 * hip - 0.035 * inspectLift + POSE_HOLSTER.p[0] * hol + POSE_LOWER.p[0] * lw;
+    const y = lerp(POSE_HIP.p[1], POSE_ADS.p[1], ads) + POSE_SPRINT.p[1] * spr + POSE_RELOAD.p[1] * rl + bobY + Math.sin(t * 1.7) * 16e-4 * breathe + s.swP.x * 0.05 + s.jY.x + s.bump.x * 0.6 + 0.045 * inspectLift + POSE_HOLSTER.p[1] * hol + POSE_LOWER.p[1] * lw;
+    const z = lerp(POSE_HIP.p[2], POSE_ADS.p[2], ads) + POSE_SPRINT.p[2] * spr + POSE_RELOAD.p[2] * rl + s.kZ.x * 0.55 + my * 4e-3 * hip * (1 - spr) + POSE_HOLSTER.p[2] * hol + POSE_LOWER.p[2] * lw;
+    const rx = POSE_HIP.r[0] * hip + POSE_SPRINT.r[0] * spr + POSE_RELOAD.r[0] * rl - 0.16 * rk + Math.sin(t * 1.7 + 0.8) * 35e-4 * breathe + Math.sin(2 * ph + 0.5) * 8e-3 * bob + s.swP.x + s.jP.x + s.kP.x + s.bump.x * 1.5 + 0.3 * inspectLift + POSE_HOLSTER.r[0] * hol + POSE_LOWER.r[0] * lw;
+    const ry = POSE_HIP.r[1] * hip + POSE_SPRINT.r[1] * spr + POSE_RELOAD.r[1] * rl + Math.sin(t * 0.6) * 2e-3 * breathe + Math.sin(ph) * 0.01 * bob + s.swY.x + s.kY.x + 0.18 * inspectLift + 0.25 * inspectFlip + POSE_HOLSTER.r[1] * hol + POSE_LOWER.r[1] * lw;
+    const rz = POSE_HIP.r[2] * hip + POSE_SPRINT.r[2] * spr + POSE_RELOAD.r[2] * rl + 0.62 * rk + Math.sin(ph) * 0.014 * bob + s.swY.x * 0.7 - mx * 0.035 * hip + s.kR.x - 0.75 * inspectRoll + 0.55 * inspectFlip + Math.sin(t * 0.5) * 4e-3 * breathe + POSE_HOLSTER.r[2] * hol + POSE_LOWER.r[2] * lw;
     root.position.set(x, y, z);
     root.rotation.set(rx, ry, rz, 'YXZ');
   }

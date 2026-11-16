@@ -37,6 +37,12 @@ try {
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 120000 });
   await page.evaluate('NMS.land(0)');
   await page.waitForFunction(() => NMS.surfaceWeaponState().rendered, null, { timeout: 60000 });
+  // stepping onto the surface draws the rifle: capture the rise and the rack
+  const drawSeen = await page.evaluate(() => NMS.surfaceWeaponState().equip);
+  check(drawSeen === 'drawing' || drawSeen === 'ready', `landing draws the rifle (${drawSeen})`);
+  for (let i = 0; i < 3; i++) { await shot(`00-draw-${i}`); await page.waitForTimeout(120); }
+  await page.waitForFunction(() => NMS.surfaceWeaponState().equip === 'ready', null, { timeout: 15000 });
+  check(true, 'draw completes to ready');
   await page.evaluate((slot) => NMS.surfaceWeapon(slot), 0);
   await page.waitForTimeout(gpu ? 3000 : 6000);
   await frames(10);
@@ -97,6 +103,25 @@ try {
   await shot('05-empty-reload');
   await page.waitForFunction(() => !NMS.surfaceWeaponState().reloading, null, { timeout: 20000 });
   check((await state()).ammo === 30, 'empty reload refills the magazine');
+
+  // G holsters and draws again; a quiet rifle sinks to a low ready and a
+  // trigger pull brings it straight back up and fires
+  await page.keyboard.press('KeyG');
+  await page.waitForFunction(() => NMS.surfaceWeaponState().equip === 'holstered', null, { timeout: 10000 });
+  check(!(await state()).rendered, 'G holsters the rifle (rig hidden)');
+  await page.keyboard.press('KeyG');
+  await page.waitForFunction(() => NMS.surfaceWeaponState().equip === 'ready', null, { timeout: 15000 });
+  check((await state()).rendered, 'G draws it again');
+  await page.waitForFunction(() => NMS.surfaceWeaponState().equip === 'lowered', null, { timeout: 20000 });
+  check(true, 'idle rifle settles into the relaxed carry');
+  await page.waitForTimeout(800);
+  await shot('06-lowered');
+  const ammoBefore = (await state()).ammo;
+  await page.mouse.down({ button: 'left' });
+  await page.waitForTimeout(300);
+  await page.mouse.up({ button: 'left' });
+  const raised = await state();
+  check(raised.equip === 'ready' && raised.ammo < ammoBefore, `trigger raises the rifle and fires (${raised.equip}, ${ammoBefore} -> ${raised.ammo})`);
 
   // Saltline synthesized foley: the input gestures above unlock WebAudio
   const played = await page.evaluate(() => {

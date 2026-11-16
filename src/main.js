@@ -4724,7 +4724,9 @@ function frame(rafTs) {
   // trigger input because dt=0 and the fire state is disconnected upstream.
   activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
   const surfaceShotDistance = state === 'walk' ? surfaceBeamDistance(120) : 120;
-  surfaceWeapons.update(dt, state === 'walk' && !paused, surfaceShotDistance, {
+  // Walking draws the rifle and leaving walk holsters it; pausing only freezes.
+  surfaceWeapons.update(dt, state === 'walk', surfaceShotDistance, {
+    paused,
     speed: walkCtl.hSpeed.length(),
     grounded: walkCtl.grounded,
     velY: walkCtl.vR,
@@ -6940,6 +6942,7 @@ window.NMS = {
       const value = pixels[i] * 0.2126 + pixels[i + 1] * 0.7152 + pixels[i + 2] * 0.0722;
       luminance += value;
       if (value > 4) litPixels++;
+    equip: surfaceWeapons.models[surfaceWeapons.index].viewmodel.equipState(),
     }
     return { luminance: luminance / (size * size), litPixels, totalPixels: size * size };
   },

@@ -40,7 +40,7 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 
 | 内容 | Saltline 来源 | 本项目位置 | 说明 |
 |---|---|---|---|
-| PAC-9 Longshore 第一人称武器 | `Xv` 模块，`dm` 及其 49 条依赖 | `src/saltline/pac9-viewmodel.js` | 枪体几何、戴手套的双手、扳机指形变、红点镜（含镀膜反光）、枪口焰着色器、微细节/雨湿着色器，原样保留。控制器按原数学改写为上下文接口，包括战术和空仓两套关键帧换弹、弹匣随左手移动、9 组弹簧后坐与摆动、开镜、冲刺、跳跃落地、闲置检视。是 `surface-weapons.js` 的 1 号位（替换 KX-9） |
+| PAC-9 Longshore 第一人称武器 | `Xv` 模块，`dm` 及其 49 条依赖 | `src/saltline/pac9-viewmodel.js` | 枪体几何、戴手套的双手、扳机指形变、红点镜（含镀膜反光）、枪口焰着色器、微细节/雨湿着色器，原样保留。控制器按原数学改写为上下文接口，包括战术和空仓两套关键帧换弹、弹匣随左手移动、9 组弹簧后坐与摆动、开镜、冲刺、跳跃落地、闲置检视。是 `surface-weapons.js` 的 1 号位（替换 KX-9）。另外加了 Saltline 没有的三个动作：下船落地自动掏枪（枪从收起姿态抬起，左手拉一下拉机柄上膛，约 1 秒）；登船或按 `G` 收枪（约 0.4 秒压低移出画面，`G` 或左键再掏出来）；放松持枪（3.5 秒没有开火、瞄准、换弹就垂到低位戒备，一按射击或瞄准约 0.05 秒抬起）。暂停不会触发收枪 |
 | 武器层独立相机 | Saltline 的 `viewCamera`（fov 54） | `surface-weapons.js` 的 `viewCamera` 与 `foreground-pass.js` 的 `setLayerCamera` | 近裁面 0.01，不再切掉手和瞄具。其余三把枪跟随世界 fov，外观不变 |
 | GPU 雨与地面溅水 | `Nb` 及着色器 `kR/FR/UR/NR` | `src/saltline/rain.js`，由 `weather-effects.js` 调用 | 12k 个实例化面片；雨场固定在世界中（不跟着玩家走）；按像素宽度控制线宽；太阳前向散射光照；溅水按 7×7 地形高度网格贴地。改成了球面切平面坐标系，并加了对数深度。`?rain=0..1` 可强制下雨，`?rainGain=` 调亮度 |
 | 武器雨湿 | `Wv`（`uRain`） | `SurfaceWeapons.setWetness` | 下雨时枪面出现水珠、颜色变深、粗糙度降低，雨停后数秒内变干 |

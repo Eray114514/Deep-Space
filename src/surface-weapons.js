@@ -50,6 +50,8 @@ export class SurfaceWeapons {
     this.reloadT = 0;
     this.reloadDuration = 0;
     this.wetness = 0;
+    this.wasActive = false;
+    this.manualHolster = false;
     this.tracers = [];
     this.casings = [];
     this.lookDelta = { dx: 0, dy: 0 };
@@ -118,6 +120,10 @@ export class SurfaceWeapons {
       if (slot >= 0 && slot < SURFACE_WEAPONS.length) {
         event.preventDefault();
         this.select(slot);
+      }
+      if (event.code === 'KeyG') {
+        event.preventDefault();
+        this.toggleHolster();
       }
       if (event.code === 'KeyR') {
         event.preventDefault();
@@ -287,10 +293,43 @@ export class SurfaceWeapons {
     this.lighting.prepareEnvironment();
   }
 
+  // Toggle the weapon away / back (G). Manual choice holds until the next landing.
+  toggleHolster() {
+    const vm = this.models[this.index].viewmodel;
+    if (vm.isHolstered() || vm.isHolstering()) {
+      this.manualHolster = false;
+      return vm.draw();
+    }
+    this.manualHolster = true;
+    this.releaseInput();
+    return vm.holster();
+  }
+
+  // active: on foot on a surface. Entering draws the rifle (racking a round),
+  // leaving plays the holster before the rig hides. motion.paused freezes
+  // everything without counting as leaving.
   update(dt, active, beamDistance = 120, motion = {}) {
-    this.rig.visible = active;
-    this.lighting.root.visible = active;
-    if (!active) {
+    let vm = this.models[this.index].viewmodel;
+    if (motion.paused) {
+      this.releaseInput();
+      this.lookDelta.dx = 0;
+      this.lookDelta.dy = 0;
+      return;
+    }
+    if (active !== this.wasActive) {
+      this.wasActive = active;
+      if (active) { this.manualHolster = false; vm.draw(); } else vm.holster();
+    }
+    // left click on a holstered rifle draws it instead of firing
+    if (active && this.trigger && this.manualHolster && vm.isHolstered()) {
+      this.trigger = false;
+      this.toggleHolster();
+    }
+    const shown = active ? !vm.isHolstered() : vm.isHolstering();
+    this.rig.visible = shown;
+    this.lighting.root.visible = shown;
+    if (!active) this.releaseInput();
+    if (!shown) {
       this.releaseInput();
       this.lookDelta.dx = 0;
       this.lookDelta.dy = 0;
@@ -311,15 +350,15 @@ export class SurfaceWeapons {
     }
     const def = SURFACE_WEAPONS[this.index];
     const current = this.models[this.index];
-    const vm = current.viewmodel;
+    vm = current.viewmodel; // the index may have changed with a weapon switch
     // Gaits were tuned for ~4 m/s walking and ~6.5 m/s sprinting; the
     // explorer walks at 7 and runs at 18. Remap so bob cadence stays human.
     const speed = Number.isFinite(motion.speed) ? motion.speed : 0;
     const gait = speed <= 7 ? speed * (4 / 7) : 4 + (speed - 7) * (2.5 / 11);
     this.camera.getWorldPosition(this._eye);
     vm.update(dt, {
-      fire: this.trigger && this.switchT <= 0,
-      ads: this.ads && this.switchT <= 0,
+      fire: active && this.trigger && this.switchT <= 0,
+      ads: active && this.ads && this.switchT <= 0,
       reload: false,
       move: motion.move || null,
       look: this.lookDelta,
@@ -333,6 +372,11 @@ export class SurfaceWeapons {
     this.lookDelta.dx = 0;
     this.lookDelta.dy = 0;
     this.syncViewmodelState(current);
+    // a holster that finished inside this update hides the rig this frame
+    if (vm.isHolstered()) {
+      this.rig.visible = false;
+      this.lighting.root.visible = false;
+    }
 
     // weapon switch: dip the whole rig
     const dip = this.switchT > 0 ? this.switchT / SWITCH_TIME : 0;
