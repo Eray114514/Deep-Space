@@ -69,6 +69,9 @@ export class WeaponLighting {
     this.environmentFrame = { radiance, environment, daylight };
     const reflectionScale = radiance?.components?.reflections === false ? 0
       : (radiance?.environmentIntensity ?? 0) * (0.08 + daylight * 0.92);
+    // Exposed so other near-field outdoor objects (survey robots) can share the
+    // same reflection environment and strength as the weapon.
+    this.reflectionScale = reflectionScale;
     for (const material of this.materials) {
       material.envMapIntensity = material.userData.weaponEnvironmentIntensity * reflectionScale;
     }
@@ -82,6 +85,7 @@ export class WeaponLighting {
     const outdoorTexture = outdoor
       ? this.skyProbe.update(radiance?.renderer, environment, this.up) : null;
     const texture = outdoorTexture || radiance?.spaceEnvironment || null;
+    this.environmentTexture = texture;
     for (const material of this.materials) {
       if (material.envMap !== texture) {
         material.envMap = texture;

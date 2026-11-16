@@ -1106,7 +1106,24 @@ function createSaltlineMaterials(i) {
     return T.name = "emissive", M.set(U, T), T;
   }
   let z = createDecalLibrary(i, o);
-  return { get: w, emissive: S, decal: z.decal, label: z.label, number: z.number, names: Object.keys(MATERIALS), decalNames: z.names, uniforms: r, update(O) {
+  // [深空] Bake the texture sets behind `names` without stalling a frame: the
+  // bake programs are compiled with compileAsync (parallel shader compile)
+  // first, so the bakes that follow are only a few quad draws.
+  async function prepareAsync(names) {
+    const sets = [...new Set(names.map((name) => (MATERIALS[name] || FALLBACK_MATERIAL).set))].filter((set) => !p.has(set));
+    if (!sets.length) return;
+    const scene = new THREE.Scene(), Q = x();
+    for (const mat of [Q.copy, Q.normal]) { const q = new THREE.Mesh(u.geometry, mat); q.frustumCulled = false; scene.add(q); }
+    for (const set of sets) {
+      const U = TEXTURE_SETS[set];
+      let j = f.get(U.fn);
+      j || (j = g(BAKE_FRAG_HEAD + SET_SHADERS[U.fn] + BAKE_FRAG_TAIL, { uP: { value: new THREE.Vector4() }, uSeed: { value: 0 }, uTexel: { value: 0 } }), f.set(U.fn, j));
+      const q = new THREE.Mesh(u.geometry, j); q.frustumCulled = false; scene.add(q);
+    }
+    if (e.compileAsync) await e.compileAsync(scene, l);
+    for (const set of sets) A(set);
+  }
+  return { get: w, emissive: S, prepareAsync, decal: z.decal, label: z.label, number: z.number, names: Object.keys(MATERIALS), decalNames: z.names, uniforms: r, update(O) {
     h.size && performance.now() - d > 4e3 && _();
   }, prewarm(O) {
     for (let q of O || Object.keys(MATERIALS)) w(q);

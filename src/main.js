@@ -40,6 +40,7 @@ import './walkdial.js';
 import { SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
+import { SurveyUnits } from './saltline/robots.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
@@ -1020,6 +1021,23 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
 });
 // Hands and optics sit closer than the world camera's 0.12 m near plane, so
 // the weapon layer renders through the rig's own view camera.
+// HALCYON survey units (Saltline's robot dog and drone, patrol-only) share the
+// weapon's Saltline material library; prewarmed in idle time (below).
+const surveyUnits = new SurveyUnits({
+  scene,
+  materials: surfaceWeapons.materials,
+  getSfx: () => (audio.ready ? audio.sfx : null),
+  getEnvironment: () => ({
+    texture: surfaceWeapons.lighting.environmentTexture,
+    intensity: surfaceWeapons.lighting.reflectionScale ?? 1,
+  }),
+});
+// Build the robots in idle time after startup so the first landing does not
+// stall on their texture bakes and shader compiles.
+setTimeout(() => {
+  const run = () => surveyUnits.prewarm({ renderer, camera, scene });
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else run();
+}, 6000);
 foregroundPass.setLayerCamera(WEAPON_FOREGROUND_LAYER, surfaceWeapons.viewCamera);
 let warpIntensity = 0;
 let warpArrival = 0;
@@ -4729,6 +4747,22 @@ function frame(rafTs) {
     paused,
     speed: walkCtl.hSpeed.length(),
     grounded: walkCtl.grounded,
+  // Survey units patrol the parked ship while you are on its planet (on foot
+  // or aboard); taking off recalls them.
+  if (surveyUnits.materials && ship.parkedPlanet && ship.parkedLocal
+    && (state === 'walk' || state === 'shipwalk') && walkCtl.planet === ship.parkedPlanet) {
+    surveyUnits.deploy(ship.parkedPlanet, ship.parkedLocal);
+  } else if (surveyUnits.deployed && (!ship.parkedPlanet || (state !== 'walk' && state !== 'shipwalk'))) {
+    surveyUnits.recall();
+  }
+  if (surveyUnits.deployed) {
+    surveyUnits.update(dt, {
+      navPos: nav.pos,
+      cameraWorld: camera.getWorldPosition(_rainA),
+      cameraQuat: camera.quaternion,
+      paused,
+    });
+  }
     velY: walkCtl.vR,
     sprinting: walkCtl.running,
     move: walkCtl.moveInput,
@@ -6987,6 +7021,7 @@ if (qs.get('scene') === 'orbit') {
 }
 
 if (qs.get('scene') === 'surfaceflight') {
+      surveyUnits,
   window.NMS.land(Number(qs.get('planet') || 0), Number(qs.get('yaw') || 0), qs.get('bias') || 'meadow');
   const p = walkCtl.planet;
   if (p) {

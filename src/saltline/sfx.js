@@ -105,6 +105,37 @@ export class SaltlineSfx {
     entry.gain.gain.setTargetAtTime(Math.max(0, gain), this.ctx.currentTime, tau);
   }
 
+  // Independent looping voice with its own gain, pitch and stereo pan (a robot's
+  // rotor or servo). Returns { setGain, setPitch, setPan, stop } or null.
+  voice(name) {
+    if (!this.ctx || !this.bus) return null;
+    const buffer = this.buffer(name, 0);
+    if (!buffer) return null;
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    src.loopStart = 0;
+    const amp = ctx.createGain();
+    amp.gain.value = 0;
+    const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    if (pan) src.connect(amp).connect(pan).connect(this.bus); else src.connect(amp).connect(this.bus);
+    // start at a random point so two voices of the same loop never phase
+    src.start(0, Math.random() * buffer.duration);
+    let stopped = false;
+    return {
+      setGain: (g) => { if (!stopped) amp.gain.setTargetAtTime(Math.max(0, g), ctx.currentTime, 0.05); },
+      setPitch: (p) => { if (!stopped) src.playbackRate.setTargetAtTime(Math.max(0.1, p), ctx.currentTime, 0.05); },
+      setPan: (p) => { if (!stopped && pan) pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, p)), ctx.currentTime, 0.05); },
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        amp.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
+        try { src.stop(ctx.currentTime + 0.3); } catch { /* already stopped */ }
+      },
+    };
+  }
+
   dispose() {
     for (const { src } of this.loops.values()) { try { src.stop(); } catch { /* stopped */ } }
     this.loops.clear();

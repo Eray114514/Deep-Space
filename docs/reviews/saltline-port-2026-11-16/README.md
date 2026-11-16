@@ -62,3 +62,14 @@ Saltline 一直持枪，没有这些动作；这里用 PAC-9 现有的关键帧�
 - 截图：`pac9-draw.png`（掏枪，左手在拉机柄上）、`pac9-lowered.png`（低位戒备）。
 
 验证：`pac9viewmodeltest --gpu` 22/22 通过，新增落地掏枪、`G` 收枪/掏枪、放松持枪、放松状态下开火 4 项检查。
+
+## 第五轮（同日）：机器狗与无人机
+
+- 搬入 Saltline 的机器人模块（`src/saltline/robots-engine.js`，行为体和 AI 原样保留），作为 **HALCYON 勘测单位** 上线：飞船停在星球上时，一只机器狗、一架无人机在着陆点周围巡逻，起飞时收回。用的是被动模式，只巡逻，不感知玩家、不交战。
+- 适配层 `src/saltline/robots.js`：局部切平面坐标系、基于地形的"物理"（地面高度、射线、通行判断、飞船禁区）、带声像的旋翼/伺服循环声（`SaltlineSfx.voice`）、共享武器户外天空反射（`WeaponLighting.environmentTexture` / `reflectionScale`）。
+- 开销：首次落地现场建造时，冷启动要 2 s、热启动要 0.7 s，几乎都花在两套纹理的烘焙着色器编译上。改为启动后空闲时预热（材质库新增 `prepareAsync`，用 `compileAsync` 并行编译），预热期间主线程最长任务约 60 ms（基准 50 ms），落地时只需激活。
+- 截图：`survey-hound.png`（机器狗近景）、`survey-gull.png`（无人机和探照灯）。
+
+验证：`tools/surveyunitstest.js --gpu` 8/8 通过（部署、巡逻移动、与机身保持距离、反射环境、循环声、起飞收回、无报错）；`pac9viewmodeltest` 22/22 通过；`test:smoke`、`test:gameplay` 通过。`npm test` 目前停在 `terrainheightfieldtest`，原因是另一个会话正在改 `planet.js` / `terrain-*`（地表重写 T 批次），与本轮无关。
+
+注意：带 GPU 的浏览器测试不要和 SwiftShader 的 gameplay 测试并行跑，资源争抢会让开火时序检查误报。
