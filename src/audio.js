@@ -300,15 +300,15 @@ export class FlightAudio {
       if (data.phase === 'magout') this.sfx.play('reload_magout');
       else if (data.phase === 'magin') this.sfx.play('reload_magin');
       else if (data.phase === 'bolt') this.sfx.play('reload_bolt');
+    } else if (type === 'weapon:draw' && data.phase === 'rack') {
+      // drawing racks a round: the charging-handle slam, a touch lighter
+      this.sfx.play('reload_bolt', { gain: 0.85, pitch: 1.06 });
     }
   }
 
   // Surface weather beds: rain intensity 0..1, and a thunder clap when the
   // storm flashes (delayed by distance like real thunder).
   weather({ rain = 0, lightning = 0 } = {}) {
-    } else if (type === 'weapon:draw' && data.phase === 'rack') {
-      // drawing racks a round: the charging-handle slam, a touch lighter
-      this.sfx.play('reload_bolt', { gain: 0.85, pitch: 1.06 });
     if (this.disposed || !this.ready || !this.sfx) return;
     this.sfx.loop('rain', this.paused ? 0 : Math.min(1, rain) * 0.85, 0.8);
     if (lightning > 0.5 && !this.lightningLatched) {

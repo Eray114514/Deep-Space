@@ -39,8 +39,8 @@ import { StarMap } from './starmap.js';
 import './walkdial.js';
 import { SpatialRift } from './spatial-rift.js';
 import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
-import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { SurveyUnits } from './saltline/robots.js';
+import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
@@ -1019,8 +1019,6 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   onEvent: (type, data) => audio.weaponEvent(type, data),
   renderer,
 });
-// Hands and optics sit closer than the world camera's 0.12 m near plane, so
-// the weapon layer renders through the rig's own view camera.
 // HALCYON survey units (Saltline's robot dog and drone, patrol-only) share the
 // weapon's Saltline material library; prewarmed in idle time (below).
 const surveyUnits = new SurveyUnits({
@@ -1038,6 +1036,8 @@ setTimeout(() => {
   const run = () => surveyUnits.prewarm({ renderer, camera, scene });
   if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else run();
 }, 6000);
+// Hands and optics sit closer than the world camera's 0.12 m near plane, so
+// the weapon layer renders through the rig's own view camera.
 foregroundPass.setLayerCamera(WEAPON_FOREGROUND_LAYER, surfaceWeapons.viewCamera);
 let warpIntensity = 0;
 let warpArrival = 0;
@@ -4742,11 +4742,6 @@ function frame(rafTs) {
   // trigger input because dt=0 and the fire state is disconnected upstream.
   activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
   const surfaceShotDistance = state === 'walk' ? surfaceBeamDistance(120) : 120;
-  // Walking draws the rifle and leaving walk holsters it; pausing only freezes.
-  surfaceWeapons.update(dt, state === 'walk', surfaceShotDistance, {
-    paused,
-    speed: walkCtl.hSpeed.length(),
-    grounded: walkCtl.grounded,
   // Survey units patrol the parked ship while you are on its planet (on foot
   // or aboard); taking off recalls them.
   if (surveyUnits.materials && ship.parkedPlanet && ship.parkedLocal
@@ -4763,6 +4758,11 @@ function frame(rafTs) {
       paused,
     });
   }
+  // Walking draws the rifle and leaving walk holsters it; pausing only freezes.
+  surfaceWeapons.update(dt, state === 'walk', surfaceShotDistance, {
+    paused,
+    speed: walkCtl.hSpeed.length(),
+    grounded: walkCtl.grounded,
     velY: walkCtl.vR,
     sprinting: walkCtl.running,
     move: walkCtl.moveInput,
@@ -6956,6 +6956,7 @@ window.NMS = {
       ? 1 - surfaceWeapons.reloadT / surfaceWeapons.reloadDuration : 0,
     magazine: surfaceWeapons.models[surfaceWeapons.index].magazine?.position.toArray() || null,
     ads: surfaceWeapons.ads,
+    equip: surfaceWeapons.models[surfaceWeapons.index].viewmodel.equipState(),
     scopeEyeBox: surfaceWeapons.models[surfaceWeapons.index].opticGlass?.material?.uniforms?.eyeBox?.value ?? null,
   }),
   surfaceScopeSample() {
@@ -6976,7 +6977,6 @@ window.NMS = {
       const value = pixels[i] * 0.2126 + pixels[i + 1] * 0.7152 + pixels[i + 2] * 0.0722;
       luminance += value;
       if (value > 4) litPixels++;
-    equip: surfaceWeapons.models[surfaceWeapons.index].viewmodel.equipState(),
     }
     return { luminance: luminance / (size * size), litPixels, totalPixels: size * size };
   },
@@ -7001,6 +7001,7 @@ window.NMS = {
       walkCtl,
       weatherEffects,
       audio,
+      surveyUnits,
     };
   },
 };
@@ -7021,7 +7022,6 @@ if (qs.get('scene') === 'orbit') {
 }
 
 if (qs.get('scene') === 'surfaceflight') {
-      surveyUnits,
   window.NMS.land(Number(qs.get('planet') || 0), Number(qs.get('yaw') || 0), qs.get('bias') || 'meadow');
   const p = walkCtl.planet;
   if (p) {
