@@ -74,10 +74,11 @@ export function liteCloudNoiseTexture() {
   texture.name = 'lite-cloud.noise';
   texture.format = THREE.RGBAFormat;
   texture.type = THREE.UnsignedByteType;
-  texture.minFilter = THREE.LinearFilter;
+  // Mipmapped: the march filters every octave to its pixel footprint.
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.wrapS = texture.wrapT = texture.wrapR = THREE.RepeatWrapping;
-  texture.generateMipmaps = false;
+  texture.generateMipmaps = true;
   texture.unpackAlignment = 1;
   texture.needsUpdate = true;
   shared = texture;

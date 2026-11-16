@@ -41,7 +41,7 @@ function quantile(values, q) {
 }
 
 const LOSS_CELL = 8;
-const LOSS_SMOOTH = 3;
+const LOSS_SMOOTH = 6;
 const LOSS_SEARCH = 0.12;
 
 function shadowStats(referenceBuffer, controlBuffer, shadowBuffer, shadows) {
@@ -405,11 +405,11 @@ try {
   const mediaLeftStats = shadowStats(mediaReference, mediaControl, mediaLeft, predictedLeft);
   const mediaRightStats = shadowStats(mediaReference, mediaControl, mediaRight, predictedRight);
 
-  // Each layer's shadow peak beside each predicted axis. The opaque surface
-  // mixes bright land with dark sea under one penumbra, which moves its peak
-  // more than the evenly bright air and cloud field moves theirs. (A
-  // clouds-only frame is too sparse to locate a shadow in: its loss map
-  // follows wherever the largest clouds are.)
+  // Each layer's shadow peak beside each predicted axis, on a loss map
+  // smoothed over ~100 px so one bright cloud or coastline cannot own the
+  // peak. Air and cirrus at altitude are seen along a slanted column, hence
+  // the looser media bound. (A clouds-only frame is too sparse to locate a
+  // shadow in: its loss map follows wherever the largest clouds are.)
   const located = (left, right) => [
     ...predictedLeft.map(({ point }) => shadowPeak(left.lossMap, point)),
     ...predictedRight.map(({ point }) => shadowPeak(right.lossMap, point)),
@@ -418,7 +418,7 @@ try {
     surface: located(surfaceLeftStats, surfaceRightStats),
     media: located(mediaLeftStats, mediaRightStats),
   };
-  const surfaceShadowPlaced = overlay.surface.every((o) => o.error < 0.08);
+  const surfaceShadowPlaced = overlay.surface.every((o) => o.error < 0.04);
 
   // Defer the media assertions until after the z-occlusion fixture so one
   // failed lighting contract does not hide an independent depth-order result.
@@ -431,7 +431,7 @@ try {
   // The centroids only vouch for the direction the shadow moves; where it
   // lies is checked against the predicted axes.
   const mediaShadowConcentric = mediaAlignment.cosine > 0.9
-    && overlay.media.every((o) => o.error < 0.05);
+    && overlay.media.every((o) => o.error < 0.06);
 
   // Restore the complete frame, remove the eclipse fixture, then use an actual
   // generated moon group for front/behind depth ownership. updateVisual runs
