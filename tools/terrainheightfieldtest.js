@@ -34,7 +34,7 @@ for (const type of Object.keys(TYPES)) {
   for (let i=0;i<1800;i++) {
     const dir = new THREE.Vector3(rng()*2-1,rng()*2-1,rng()*2-1).normalize();
     const cap = [planet.fullMaxFreq,1e9,0,5,50,300][i%6];
-    const expected = TerrainHeightOracle.prototype.height.call(oracle,dir,cap);
+    const expected = TerrainHeightField.prototype.height.call(oracle,dir,cap);
     assert.equal(planet.height(dir,cap),expected,`${type} live height`);
     assert.equal(field.height(dir,cap),expected,`${type} snapshot height`);
     heights++;

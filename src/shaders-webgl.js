@@ -253,6 +253,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uHasSea = { value: U.hasSea };
     shader.uniforms.uT0 = { value: U.t0 };
     shader.uniforms.uTSpan = { value: U.tSpan };
+    shader.uniforms.uTCurve = { value: U.tCurve };
     shader.uniforms.uSeaDepthSpan = { value: U.seaDepthSpan };
     shader.uniforms.uRockC = { value: U.rock };
     shader.uniforms.uSlopeLo = { value: U.slopeLo };
@@ -270,7 +271,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uMistK = {
       value: mistBase * Math.min(planet.atmoDensity || 0.4, 1),
     };
-    shader.uniforms.uMistH = { value: planet.hAmp * 0.12 };
+    // land sits within a few hundred metres of the datum now; a 12% band
+    // would hang valley mist over every plain
+    shader.uniforms.uMistH = { value: planet.hAmp * 0.015 };
     shader.uniforms.uMistColor = { value: planet.skyColor.clone().convertSRGBToLinear() };
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
@@ -338,6 +341,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uHasSea;
         uniform float uT0;
         uniform float uTSpan;
+        uniform float uTCurve;
         uniform float uSeaDepthSpan;
         uniform vec3 uRockC;
         uniform float uSlopeLo;
@@ -452,14 +456,43 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               base = mix(base, shelfSand, shelf * 0.88);
             }
           } else {
-            float t = clamp((hgt - uT0) / uTSpan, 0.0, 1.0);
+            float t = pow(clamp((hgt - uT0) / uTSpan, 0.0, 1.0), uTCurve);
             base = uLandC[0];
             for (int i = 1; i < 7; i++) {
               if (float(i) >= uLandN) break;
               base = mix(base, uLandC[i],
                 clamp((t - uLandT[i - 1]) / max(uLandT[i] - uLandT[i - 1], 1e-5), 0.0, 1.0));
             }
-            base = mix(base, uForestC, vExtra.x * vertexFieldFade);
+            // ---- climate mosaic, per pixel. Elevation alone painted every
+            // lowland one green. Moisture and a latitude/altitude temperature
+            // decide between dry steppe, grassland and woodland, and two
+            // finer fields break the woodland edge into stands and clearings
+            // so the pattern holds from orbit down to low flight.
+            vec3 climateP = vLocalPos / uPlanetR;
+            float moistBroad = terrainField(climateP * 2.7 + vec3(7.3, 1.9, 4.1));
+            float moistMid = terrainField(vec3(dot(climateP, vec3(0.36, 0.48, -0.8)),
+              dot(climateP, vec3(-0.8, 0.60, 0.0)), dot(climateP, vec3(0.48, 0.64, 0.60))) * 11.0 + moistBroad * 2.0);
+            float moistFine = terrainField(climateP.yzx * 47.0 + moistMid * 1.7);
+            float moisture = moistBroad * 0.5 + moistMid * 0.32 + moistFine * 0.18;
+            float standField = terrainField(vLocalPos.zxy * 0.00052) * 0.6
+              + terrainField(vLocalPos * 0.0031 + 3.7) * 0.4;
+            float chill = smoothstep(0.55, 0.92, abs(nd.y) + t * 0.5);
+            float forestW = clamp(vExtra.x / 0.85, 0.0, 1.0);
+            if (uEarthLike > 0.5) {
+              float dryW = (1.0 - smoothstep(0.3, 0.44, moisture)) * (1.0 - forestW);
+              vec3 steppe = mix(uLandC[0], base, 0.55) * vec3(1.0, 0.97, 0.88);
+              base = mix(base, steppe, dryW * 0.7);
+              vec3 tundra = mix(uRockC, base, 0.35) * vec3(0.96, 0.94, 0.9);
+              base = mix(base, tundra, chill * 0.7);
+              forestW = smoothstep(0.3, 0.62, forestW * 0.75 + (moisture - 0.5) * 0.9
+                + (standField - 0.5) * 0.8) * (1.0 - chill * 0.8)
+                * smoothstep(0.02, 0.07, t) * (1.0 - smoothstep(0.42, 0.56, t));
+              base *= 0.9 + 0.2 * terrainField(vLocalPos.yxz * 0.00017 + 9.1);
+            } else {
+              base *= 0.86 + 0.28 * moisture;
+              forestW *= 0.85;
+            }
+            base = mix(base, uForestC, forestW * 0.85 * vertexFieldFade);
             base = mix(base, uBlotchC, vExtra.y * vertexFieldFade);
             if (uStripeK > 0.001) base = mix(base,
               mix(uStripeA, uStripeB, vExtra.z), uStripeK * vertexFieldFade);
@@ -469,6 +502,22 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               vExtra.w * vertexFieldFade);
             base = mix(base, uRockC, smoothstep(uSlopeLo, uSlopeHi, slope)
               * mix(0.18, 1.0, vertexFieldFade));
+          }
+          if (!(uHasSea > 0.5 && hgt < uT0)) {
+            // ---- ground mottle from 30 m to 3 km: soil showing through
+            // thin cover, greener hollows, paler rises. Each octave fades
+            // out before it would alias, so nothing sparkles at altitude.
+            float mA = terrainField(vLocalPos.zxy * 0.00041 + 5.3);
+            float mB = terrainField(vLocalPos * 0.0019 + mA * 2.0);
+            float mC = terrainField(vLocalPos.yzx * 0.0083 + mB * 1.5);
+            float mD = terrainField(vLocalPos * 0.034 + 1.7);
+            float fadeB = 1.0 - smoothstep(60000.0, 160000.0, viewDist);
+            float fadeC = 1.0 - smoothstep(14000.0, 40000.0, viewDist);
+            float fadeD = 1.0 - smoothstep(3000.0, 9000.0, viewDist);
+            float mottle = (mA - 0.5) * 0.9 + (mB - 0.5) * 0.7 * fadeB
+              + (mC - 0.5) * 0.5 * fadeC + (mD - 0.5) * 0.35 * fadeD;
+            vec3 lean = mix(vec3(1.10, 1.0, 0.82), vec3(0.86, 1.0, 0.9), clamp(mottle + 0.5, 0.0, 1.0));
+            base *= mix(vec3(1.0), lean, 0.55) * (1.0 + mottle * 0.34);
           }
           diffuseColor.rgb = base;
 
@@ -541,9 +590,12 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           if (uSnowK > 0.5) {
             float lat = abs(nd.y) + (texture2D(uDetailTex, nd.xz * 2.0 + nd.y).r - 0.5) * 0.12;
             float sl = uSnowLine * (1.0 - 0.65 * smoothstep(0.45, 0.95, lat));
-            float sw = smoothstep(sl, sl + uSnowBand, hgt);
+            // a broken snowline: drifts reach down gullies, rock shows above
+            float snowH = hgt + (terrainField(vLocalPos * 0.00075 + 2.9) - 0.5) * uSnowBand * 2.6
+              + (terrainField(vLocalPos.zxy * 0.0052) - 0.5) * uSnowBand * 1.1;
+            float sw = smoothstep(sl, sl + uSnowBand * 0.55, snowH);
             sw = max(sw, smoothstep(uSnowCap, uSnowCap + 0.07, lat));
-            sw *= 1.0 - smoothstep(0.55, 0.8, slope) * 0.85;
+            sw *= 1.0 - smoothstep(0.2, 0.42, slope) * 0.9;
             diffuseColor.rgb = mix(diffuseColor.rgb, uSnowColor, sw);
             gSnowW = sw;
           }
@@ -602,7 +654,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v16-relative-detail-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v19-climate-'+hasSurfaceCloudMedium(planet);
   return prepareSurfaceAtmosphere(material, planet);
 }
 

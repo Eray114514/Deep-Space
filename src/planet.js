@@ -239,6 +239,32 @@ export class Planet extends TerrainHeightField {
       if (this.duneAmp > 0) this.duneAmp *= 0.72 + (1 - formation.waterInventory) * 0.58;
     }
 
+    // ---- generator v2: relief in physical wavelengths ---------------------
+    // Own RNG namespace: the v1 draws above are untouched. A wavelength in
+    // metres becomes a unit-sphere frequency through the body's radius, so a
+    // small moon gets small mountains instead of a scaled-down continent.
+    {
+      const v2 = makeRng(seed + ':terrain-v2');
+      const frequencyOf = (wavelength) => this.R / wavelength;
+      const tectonic = this.mountAmp / (this.hAmp * 0.775);
+      const roughK = { barren: 1.3, lava: 1.4, exotic: 1.2, ice: 0.6, desert: 0.85 }[type] ?? 1;
+      this.landDatum = this.hasLiquid ? this.naturalSeaLevel : -this.contAmp * 0.25;
+      this.landRise = 0.07 + v2() * 0.05;
+      this.rangeFreq = frequencyOf(clamp(this.R * 0.2, 30000, 260000) * (0.8 + v2() * 0.4));
+      this.rangeBias = 0.4 + (v2() - 0.5) * 0.1;
+      const ridgeLength = clamp(this.R * 0.03, 5000, 36000) * (0.8 + v2() * 0.4);
+      this.ridgeFreq = frequencyOf(ridgeLength);
+      this.ridgeAmp = Math.min(this.hAmp * 0.42 * tectonic, ridgeLength * 0.17);
+      const hillLength = clamp(this.R * 0.006, 900, 7000) * (0.8 + v2() * 0.4);
+      this.hillFreq = frequencyOf(hillLength);
+      this.hillAmp = Math.min(this.hAmp * 0.04, hillLength * 0.075);
+      const roughLength = clamp(this.R * 0.0004, 120, 420);
+      this.roughFreq = frequencyOf(roughLength);
+      this.roughAmp = roughLength * 0.065 * roughK;
+      this.microFreq = frequencyOf(11);
+      this.microAmp = 0.45 * roughK;
+    }
+
     // Wide chunks preserve the exact finest sampling density while replacing
     // each former 2×2 child set with one submission. Collision and gameplay
     // keep the canonical frequency cap; only the renderer's grouping changes.
@@ -435,8 +461,7 @@ export class Planet extends TerrainHeightField {
       const depth = clamp((this.seaLevel - h) / (this.hAmp * 0.85), 0, 1);
       sampleStops(p.sea, 1 - depth, out);
     } else {
-      const t0 = this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85;
-      const tl = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
+      const tl = this.landT(h);
       sampleStops(p.land, tl, out);
 
       const moist = this.nC.fbm(x + 11.3, y - 4.1, z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
@@ -486,6 +511,16 @@ export class Planet extends TerrainHeightField {
     return out;
   }
 
+  // Where a land elevation falls on the palette, 0..1. Land is compressed
+  // toward the datum (plains a few hundred metres up, peaks a few kilometres),
+  // so a straight ramp would paint every lowland with the beach stop. The
+  // shader evaluates the same curve through uT0 / uTSpan / uTCurve.
+  landT(h) {
+    const t0 = this.palU ? this.palU.t0 : (this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85);
+    const lin = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
+    return Math.pow(lin, this.landTCurve);
+  }
+
   // Low-frequency tint masks baked per-vertex (they're smooth, so vertex
   // resolution is fine): x=forest, y=blotch, z=stripe phase, w=ember/
   // crevasse/strata. The fragment shader applies the actual colors.
@@ -494,8 +529,7 @@ export class Planet extends TerrainHeightField {
     const p = this.pal;
     if (this.hasLiquid && h < this.seaLevel && this.liquid !== 'lava') return out;
     const x = dir.x, y = dir.y, z = dir.z;
-    const t0 = this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85;
-    const tl = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
+    const tl = this.landT(h);
 
     if (p.forest && tl > 0.04 && tl < 0.55) {
       const moist = this.nC.fbm(x + 11.3, y - 4.1, z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
@@ -524,6 +558,7 @@ export class Planet extends TerrainHeightField {
   }
 
   buildPalette(rand) {
+    this.landTCurve = this.hasLiquid ? 0.5 : 0.75;
     // vivid types can drift far; living worlds keep believable hues
     const hueSpan = (this.type === 'lush' || this.type === 'ocean') ? 0.05 : 0.13;
     const dh = (rand() - 0.5) * hueSpan;
@@ -531,7 +566,7 @@ export class Planet extends TerrainHeightField {
     const dl = 0.88 + rand() * 0.26;
     const J = (hex) => jitterColor(col(hex), rand, dh, ds, dl);
 
-    const p = { slopeLo: 0.22, slopeHi: 0.5, snow: null, snowLine: 1e9, capLat: 0 };
+    const p = { slopeLo: 0.08, slopeHi: 0.24, snow: null, snowLine: 1e9, capLat: 0 };
     switch (this.type) {
       case 'lush':
         // remote-sensing greens: olive, sage, moss — never crayon
@@ -539,13 +574,13 @@ export class Planet extends TerrainHeightField {
         p.land = stops([[0, J('#b3a478')], [0.06, J('#8f9459')], [0.22, J('#5f7a42')], [0.45, J('#4a5f38')],
                         [0.62, J('#6b6a48')], [0.78, J('#77695a')], [1, J('#877e6f')]]);
         p.forest = J('#2e4527'); p.rock = J('#6b6156');
-        p.snow = J('#dce5ed'); p.snowLine = this.hAmp * (0.68 + rand() * 0.14); p.capLat = 0.86;
+        p.snow = J('#dce5ed'); p.snowLine = this.hAmp * (0.68 + rand() * 0.14) * 0.5; p.capLat = 0.86;
         break;
       case 'ocean':
         p.sea = stops([[0, J('#041124')], [0.5, J('#082c52')], [0.82, J('#135273')], [1, J('#3f8f88')]]);
         p.land = stops([[0, J('#c2b183')], [0.12, J('#a29a62')], [0.3, J('#657e49')], [0.6, J('#4c5f3d')], [1, J('#6c6b56')]]);
         p.forest = J('#2f4a2c'); p.rock = J('#6f685c');
-        p.snow = J('#d9e4ed'); p.snowLine = this.hAmp * 0.76; p.capLat = 0.82;
+        p.snow = J('#d9e4ed'); p.snowLine = this.hAmp * 0.76 * 0.5; p.capLat = 0.82;
         break;
       case 'desert':
         p.land = stops([[0, J('#d8b069')], [0.2, J('#cf9a52')], [0.42, J('#bd7d40')], [0.6, J('#a26035')],
@@ -556,7 +591,7 @@ export class Planet extends TerrainHeightField {
         p.sea = stops([[0, J('#9cc2dd')], [0.6, J('#b9d8ec')], [1, J('#d8ecf8')]]);
         p.land = stops([[0, J('#cfe2f0')], [0.35, J('#ddeefa')], [0.65, J('#c4dcf0')], [1, J('#f0f8ff')]]);
         p.rock = J('#5d6b7a'); p.crevasse = J('#7fa8d8');
-        p.slopeLo = 0.3; p.slopeHi = 0.6;
+        p.slopeLo = 0.16; p.slopeHi = 0.4;
         break;
       case 'lava':
         p.land = stops([[0, J('#221b1d')], [0.3, J('#392c2e')], [0.6, J('#4a3a36')], [1, J('#5d4a40')]]);
@@ -640,6 +675,7 @@ export class Planet extends TerrainHeightField {
       slopeLo: p.slopeLo, slopeHi: p.slopeHi,
       t0: this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85,
       tSpan: this.hAmp * 1.15 - (this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85),
+      tCurve: this.landTCurve,
       seaDepthSpan: this.hAmp * 0.85,
       forest: p.forest || black,
       blotch: p.blotch || black,
@@ -680,8 +716,7 @@ export class Planet extends TerrainHeightField {
     if (this.hasLiquid && h < this.seaLevel + 1.5) return 'shore';
     switch (this.type) {
       case 'lush': case 'ocean': {
-        const t0 = this.seaLevel;
-        const tl = clamp((h - t0) / (this.hAmp * 1.15 - t0), 0, 1);
+        const tl = this.landT(h);
         if (tl > 0.6) return 'rock';                 // olive-brown high country: bare
         const moist = this.nC.fbm(dir.x + 11.3, dir.y - 4.1, dir.z + 7.7, 2.4, 3, 0.5, 2.15, 64);
         if (tl > 0.45) return moist > 0.25 ? 'grass' : 'rock';

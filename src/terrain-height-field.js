@@ -4,6 +4,8 @@ import { worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
 import { TerrainSimplex } from './terrain-noise.js';
 import { TerrainCraterField } from './terrain-crater-field.js';
 
+const _g = { x: 0, y: 0, z: 0 };
+
 const PARAMETERS = [
   'R', 'seaRadius', 'seaLevel', 'fullMaxFreq', 'intSeed', 'hasLiquid', 'hAmp',
   'regFreq', 'beltBias', 'warpFreq', 'warpAmp', 'contFreq', 'contAmp',
@@ -11,6 +13,9 @@ const PARAMETERS = [
   'detailAmp', 'plainsCalm', 'plateauAmt', 'plateauH', 'canyonAmp',
   'canyonFreq', 'canyonWidth', 'craterAmp', 'craterFreq', 'blobAmp',
   'blobFreq', 'duneAmp', 'duneFreq', 'spikeAmp', 'spikeFreq',
+  // generator v2: physical-wavelength relief (see height())
+  'landDatum', 'landRise', 'rangeFreq', 'rangeBias', 'ridgeFreq', 'ridgeAmp',
+  'hillFreq', 'hillAmp', 'roughFreq', 'roughAmp', 'microFreq', 'microAmp',
 ];
 const NOISE_FIELDS = ['nA', 'nB', 'nC', 'nD', 'nOceanBasin'];
 
@@ -47,6 +52,23 @@ export class TerrainHeightField {
     return field;
   }
 
+  // Terrain v2 (2026-11). The world is described in physical wavelengths so a
+  // 1,200 km planet and a 60 km moon both get mountains a few tens of
+  // kilometres across, hills a few kilometres across and ground relief down
+  // to metres. v1 placed every feature on unit-sphere frequencies whose finest
+  // octave was about a kilometre long: the land was one uniformly lumpy sheet
+  // with nothing below that scale and no contrast between plains and ranges.
+  //
+  //   continents  warped fBm, unchanged, so coastlines keep their layout
+  //   hypsometry  land above the datum rises gently (coastal plains, interior
+  //               lowlands); basins and ocean floors keep their depth
+  //   ranges      ridged multifractal with slope-damped octaves, confined to
+  //               belts: sharp crests, smooth carved flanks
+  //   hills       slope-damped fBm everywhere, calmer on the plains
+  //   roughness   outcrops, knolls and gullies; micro relief underfoot
+  //
+  // Every octave fades in through frequencyBlend, so a coarse LOD is the same
+  // world with the short wavelengths missing.
   height(dir, maxFreq = 1e9) {
     const x = dir.x, y = dir.y, z = dir.z;
 
@@ -61,26 +83,49 @@ export class TerrainHeightField {
     const ax = x + this.nB.noise(x * wf + 31.4, y * wf, z * wf) * wa;
     const ay = y + this.nB.noise(x * wf, y * wf + 47.2, z * wf) * wa;
     const az = z + this.nB.noise(x * wf, y * wf, z * wf + 71.7) * wa;
-    const c = this.nA.fbm(ax, ay, az, this.contFreq, 4, 0.52, 2.05, maxFreq);
-    let h = c * this.contAmp;
+    let c = this.nA.fbm(ax, ay, az, this.contFreq, 4, 0.52, 2.05, maxFreq);
+    // The four continental octaves stop near 70 km. Carry the same spectrum
+    // down to a few hundred metres so shores are bays, headlands and islets
+    // rather than the smooth outline of the last octave.
+    c += this.bandFbm(this.nA, ax + 5.3, ay - 2.1, az + 8.7,
+      this.contFreq * 17.6, 9, 0.5, 2.03, maxFreq) * 0.075;
 
-    // mountains/detail keep their first octave at every LOD (fractals cut
-    // octaves internally) so the mean elevation never jumps between levels.
-    // Ranges cluster into the rugged provinces instead of covering the globe.
-    // Mountain provinces used to exclude 61.7% of the globe and vary their
-    // amplitude by 8.3×, producing isolated "mountain islands" separated by
-    // featureless plains. Broaden the continental foothill mask and keep a
-    // meaningful ruggedness floor so ranges form connected regional chains.
-    const foothills = smoothstep(this.mountMaskLo - 0.18, this.mountMaskHi, c);
-    const mMask = foothills * (0.34 + 0.66 * belt);
-    const m = this.nB.ridged(x, y, z, this.mountFreq, 6, 0.55, 2.1, maxFreq, 0.12);
-    h += m * this.mountAmp * mMask;
+    // hypsometry: real continents sit low. Above the datum the continental
+    // swell is compressed into plains; below it nothing changes.
+    const raw = c * this.contAmp;
+    const above = raw - this.landDatum;
+    let h = above > 0
+      ? this.landDatum + above * (this.landRise + 0.10 * smoothstep(0, this.contAmp * 0.7, above))
+      : raw;
+    // detail thins out under deep water: sea floors are smooth sediment
+    const dry = smoothstep(-0.05 * this.contAmp, 0.012 * this.contAmp, above);
 
-    {
-      // eroded hillsides: rugged crests, smooth carved flanks —
-      // rough in the belts, long calm plains elsewhere
-      const d = this.nC.fbmEroded(x, y, z, this.detailFreq, 6, 0.5, 2.2, maxFreq, 3.2);
-      h += d * this.detailAmp * 1.25 * (0.45 + 0.55 * mMask) * (1 - this.plainsCalm * (1 - belt));
+    // mountain belts: ranges are long ridged bands inside the rugged
+    // provinces, not a mask that covers every interior
+    const foothills = smoothstep(this.mountMaskLo - 0.1, this.mountMaskHi, c);
+    const range = this.nD.ridged(x - 23.7, y + 8.1, z + 41.9, this.rangeFreq, 3, 0.5, 2.1, maxFreq, 0.1);
+    const mMask = foothills * smoothstep(this.rangeBias, this.rangeBias + 0.34, range * 0.62 + belt * 0.38);
+
+    if (mMask > 0.002) {
+      h += (this.ridgedEroded(x, y, z, maxFreq) * 0.86 + 0.14 * mMask) * this.ridgeAmp * mMask;
+    }
+
+    // hills: slope-damped fBm. Strong in the foothills and rugged provinces,
+    // a low swell on the calm plains
+    const hilliness = (0.36 + 0.64 * Math.max(mMask, belt * 0.55))
+      * (1 - this.plainsCalm * 0.5 * (1 - belt)) * (0.25 + 0.75 * dry);
+    h += this.hillsEroded(x, y, z, maxFreq) * this.hillAmp * hilliness;
+
+    // ground roughness: outcrops and gullies on steep country, soft
+    // undulation elsewhere; then the relief you feel on foot
+    if (maxFreq > this.roughFreq) {
+      const rugged = 0.3 + 0.7 * mMask;
+      h += this.bandFbm(this.nB, x + 3.1, y + 7.7, z - 1.3, this.roughFreq, 6, 0.52, 2.17, maxFreq)
+        * this.roughAmp * rugged * (0.2 + 0.8 * dry);
+      if (maxFreq > this.microFreq) {
+        h += this.bandFbm(this.nC, x - 9.2, y + 0.6, z + 4.4, this.microFreq, 4, 0.5, 2.2, maxFreq)
+          * this.microAmp * (0.7 + 0.3 * rugged) * (0.3 + 0.7 * dry);
+      }
     }
 
     // mesa country: whole provinces terraced into flat-topped plateaus
@@ -106,8 +151,8 @@ export class TerrainHeightField {
       const cv = this.nD.fbm(x, y, z, this.canyonFreq, 4, 0.5, 2.3, maxFreq);
       if (this.hasLiquid) {
         const band = smoothstep(this.seaLevel - this.hAmp * 0.45, this.seaLevel + 4, h)
-          * (1 - smoothstep(this.seaLevel + this.hAmp * 0.30,
-            this.seaLevel + this.hAmp * 0.7, h));
+          * (1 - smoothstep(this.seaLevel + this.hAmp * 0.035,
+            this.seaLevel + this.hAmp * 0.09, h));
         // A river is a broad alluvial valley with a much narrower wet
         // channel. The old single profile drove the entire strip directly to
         // sea level; from orbit its steep banks became dotted black ink lines.
@@ -117,8 +162,8 @@ export class TerrainHeightField {
         const valleyT = 1 - Math.abs(cv) / valleyWidth;
         if (valleyT > 0) {
           const valleyShape = valleyT * valleyT * (3 - 2 * valleyT);
-          const valleyDepth = this.hAmp * 0.035
-            + Math.max(0, h - this.seaLevel) * 0.16;
+          const valleyDepth = Math.min(this.hAmp * 0.012,
+            Math.max(0, h - this.seaLevel) * 0.55 + this.hAmp * 0.002);
           h -= valleyShape * valleyDepth * band;
         }
         const channelWidth = Math.max(this.canyonWidth * 0.72, 2.5 / maxFreq);
@@ -152,9 +197,9 @@ export class TerrainHeightField {
         const tt2 = t2 * t2 * (3 - 2 * t2) * (this.canyonWidth * 0.55 / cw2);
         if (this.hasLiquid) {
           const band2 = smoothstep(this.seaLevel - this.hAmp * 0.35, this.seaLevel + 3, h) *
-                        (1 - smoothstep(this.seaLevel + this.hAmp * 0.22, this.seaLevel + this.hAmp * 0.5, h));
+                        (1 - smoothstep(this.seaLevel + this.hAmp * 0.02, this.seaLevel + this.hAmp * 0.05, h));
           const tributaryTarget = this.seaLevel - this.hAmp * 0.008;
-          const floodplain = Math.max(0, h - this.seaLevel) * 0.1 + this.hAmp * 0.012;
+          const floodplain = Math.min(this.hAmp * 0.006, Math.max(0, h - this.seaLevel) * 0.4 + this.hAmp * 0.001);
           h -= tt2 * floodplain * band2;
           h = lerp(h, Math.min(h, tributaryTarget), tt2 * band2 * 0.68);
         } else {
@@ -215,6 +260,90 @@ export class TerrainHeightField {
     }
 
     return h;
+  }
+
+  // fBm whose every octave (the first included) waits for the sampling grid
+  // to resolve it. Simplex.fbm always admits its first octave, which is right
+  // for continental shapes and wrong for a detail band that starts at 300 m.
+  bandFbm(noise, x, y, z, baseFreq, octaves, gain, lacunarity, maxFreq) {
+    let sum = 0, amp = 1, norm = 0, f = baseFreq;
+    for (let o = 0; o < octaves; o++) {
+      if (maxFreq > f) {
+        sum += amp * frequencyBlend(f, maxFreq) * noise.noise(x * f, y * f + o * 17.3, z * f);
+      }
+      norm += amp;
+      amp *= gain;
+      f *= lacunarity;
+    }
+    return sum / norm;
+  }
+
+  // Ridged multifractal with erosion-style damping (the derivative-noise idea
+  // described by Inigo Quilez): each octave is attenuated where the terrain
+  // built so far is already steep, so detail collects on crests and spurs
+  // while the flanks run smooth into the valleys. Only the tangential part of
+  // the gradient counts: the radial part is not a slope on a sphere. Returns
+  // roughly [0, 1].
+  ridgedEroded(x, y, z, maxFreq) {
+    let sum = 0, amp = 0.5, norm = 0, f = this.ridgeFreq, weight = 1;
+    // Unwarped ridged noise closes into cell-like loops. Bending the domain
+    // with a field a little longer than the ridges pulls them into ranges.
+    const wf = f * 0.43, wa = 0.55 / f;
+    const wx = this.nC.noise(x * wf + 11.1, y * wf, z * wf) * wa;
+    const wy = this.nC.noise(x * wf, y * wf + 27.4, z * wf) * wa;
+    const wz = this.nC.noise(x * wf, y * wf, z * wf + 43.9) * wa;
+    x += wx; y += wy; z += wz;
+    let gx = 0, gy = 0, gz = 0;
+    for (let o = 0; o < 11; o++) {
+      const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
+      if (blend <= 0) {
+        // the remaining octaves are all above the cutoff: finish the
+        // full-spectrum normalizer without sampling them
+        norm += amp * (1 - Math.pow(0.56, 11 - o)) / 0.44;
+        break;
+      }
+      const n = this.nB.noiseD(x * f, y * f - o * 13.7, z * f, _g);
+      const an = Math.abs(n), sign = n < 0 ? 1 : -1;
+      // C1 crest: the abs() cusp is rounded over a narrow band
+      let ridge, slopeK;
+      if (an < 0.12) { ridge = 1 - (0.06 + an * an / 0.24); slopeK = an / 0.12; }
+      else { ridge = 1 - an; slopeK = 1; }
+      const dk = 2 * ridge * slopeK * sign * weight * blend;
+      const radial = _g.x * x + _g.y * y + _g.z * z;
+      gx += (_g.x - radial * x) * dk;
+      gy += (_g.y - radial * y) * dk;
+      gz += (_g.z - radial * z) * dk;
+      const v = ridge * ridge * weight;
+      weight = Math.min(1, Math.max(0, v * 2));
+      sum += v * amp * blend * (o === 0 ? 1 : 1 / (1 + 0.07 * (gx * gx + gy * gy + gz * gz)));
+      norm += amp;
+      amp *= 0.56;
+      f *= 2.07;
+    }
+    return sum / norm;
+  }
+
+  // Slope-damped fBm for hill country, roughly [-1, 1].
+  hillsEroded(x, y, z, maxFreq) {
+    let sum = 0, amp = 1, norm = 0, f = this.hillFreq;
+    let gx = 0, gy = 0, gz = 0;
+    for (let o = 0; o < 7; o++) {
+      const blend = frequencyBlend(f, maxFreq);
+      if (blend <= 0) {
+        norm += amp * 2 * (1 - Math.pow(0.5, 7 - o));
+        break;
+      }
+      const n = this.nC.noiseD(x * f, y * f + o * 19.19, z * f, _g);
+      const radial = _g.x * x + _g.y * y + _g.z * z;
+      gx += (_g.x - radial * x) * blend;
+      gy += (_g.y - radial * y) * blend;
+      gz += (_g.z - radial * z) * blend;
+      sum += amp * blend * n / (1 + 0.55 * (gx * gx + gy * gy + gz * gz));
+      norm += amp;
+      amp *= 0.5;
+      f *= 2.13;
+    }
+    return sum / norm;
   }
 
   craters(x, y, z, freq, amp, lane) {
