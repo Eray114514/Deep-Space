@@ -1008,14 +1008,14 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
     if (!surfaceWeaponHud) return;
     surfaceWeaponHud.querySelector('[data-weapon-name]').textContent = weapon.name;
     const ammoReadout = surfaceWeaponHud.querySelector('[data-weapon-ammo]');
-    ammoReadout.textContent = weapon.kind === 'laser' ? '∞' : `${ammo} / ${weapon.magSize}`;
-    ammoReadout.dataset.state = reloading ? 'RELOADING' : weapon.kind === 'laser' ? 'MINING BEAM' : 'READY';
+    ammoReadout.textContent = `${ammo} / ${weapon.magSize}`;
+    ammoReadout.dataset.state = reloading ? 'RELOADING' : 'READY';
     surfaceWeaponHud.dataset.activeSlot = String(index + 1).padStart(2, '0');
     surfaceWeaponHud.classList.toggle('reloading', reloading);
-    surfaceWeaponHud.classList.toggle('mining-laser', weapon.kind === 'laser');
     for (const item of surfaceWeaponHud.querySelectorAll('[data-weapon-slot]')) item.classList.toggle('active', Number(item.dataset.weaponSlot) === index);
   },
-  onShot: () => audio.cue('fire'),
+  // gunshot, reload foley and dry click are Saltline's synthesized sounds
+  onEvent: (type, data) => audio.weaponEvent(type, data),
 });
 // Hands and optics sit closer than the world camera's 0.12 m near plane, so
 // the weapon layer renders through the rig's own view camera.
@@ -4652,6 +4652,11 @@ function frame(rafTs) {
       clock.elapsedTime, 0);
   }
   surfaceWeapons.setWetness(weatherEffects.state.rainVisible ? weatherEffects.state.precipitation : 0, dt);
+  // Rain is heard on foot; aboard the ship the hull shuts it out.
+  audio.weather({
+    rain: state === 'walk' && weatherEffects.state.rainVisible ? weatherEffects.state.precipitation : 0,
+    lightning: state === 'walk' ? weatherEffects.state.lightning : 0,
+  });
   updateSurfaceInteraction(dt);
   if (nearest?.isGasGiant && nearestAlt < nearest.atmoHeight) {
     const depth = clamp(-nearestAlt / (nearest.R * 0.1), 0, 1);
@@ -6907,8 +6912,8 @@ window.NMS = {
     rendered: surfaceWeapons.rig.visible
       && surfaceWeapons.models[surfaceWeapons.index].group.visible
       && foregroundPass.enabled,
-    assetLoaded: SURFACE_WEAPONS[surfaceWeapons.index].kind !== 'laser'
-      || surfaceWeapons.models[surfaceWeapons.index].group.userData.loaded === true,
+    // every surface weapon is a procedural viewmodel built synchronously
+    assetLoaded: true,
     reloading: surfaceWeapons.reloadT > 0,
     reloadProgress: surfaceWeapons.reloadDuration > 0
       ? 1 - surfaceWeapons.reloadT / surfaceWeapons.reloadDuration : 0,
@@ -6957,6 +6962,7 @@ window.NMS = {
       riftPreviewSystem,
       walkCtl,
       weatherEffects,
+      audio,
     };
   },
 };

@@ -30,3 +30,14 @@
 - 渲染器开启了 `logarithmicDepthBuffer`，自写的 `ShaderMaterial` 必须带 three 的 logdepth 片段，否则会和地形深度对不上，雨只能显示在天空前面。
 - 低频 `planet.height(dir, 64)` 和步行实际使用的 `fullMaxFreq` 地面相差约 100 m，贴地计算要用 `fullMaxFreq`。
 - 提取工具的改名最初漏掉了"在同一条声明语句内引用自己的顶层名"，已修。
+
+## 第二轮（同日）
+
+- **删除低模武器**：去掉 CX-5、M77、HLX-3（采矿激光本来也没有玩法），连同 `weapon-models.js` 和 `hlx-3-prospector.glb`。`SurfaceWeapons` 重写为只管理 viewmodel，原来的方块枪、激光、旧换弹、旧枪口焰代码随之删除；瞄准镜离屏渲染的约定保留，并改为按模型判断是否带镜。
+- **合成音效**：搬入 Saltline 的整套合成音效库（`src/saltline/sfx-generators.js`，57 种），由播放器 `src/saltline/sfx.js` 接到 `audio.js`。PAC-9 的开枪（含户外回声尾音）、弹壳落地、拔弹匣、插弹匣、拉枪栓、空仓击发都是合成音；步行遇雨有雨声，闪电后有延迟的雷声。
+- 试听文件：`pac9-audio-demo.wav`（8 连发 + 战术换弹 + 空仓），可以用 `node tools/saltline/render-sfx.mjs --demo` 重新生成。
+
+验证：
+- `tools/pac9viewmodeltest.js --gpu`：16/16 通过，新增 6 项音效播放计数。
+- `test:smoke` 通过；`renderframepacinggputest` 通过（瞄准镜辅助渲染约定）。
+- `npm test` 仍然只有宇宙锁失败。

@@ -77,10 +77,10 @@ function scopeFixture(fault, error, lensVisible = true) {
   const group = new THREE.Group();group.add(lens);
   const caller = {}, initial = { target: caller, face: 4, mip: 2 };
   let target = caller, face = 4, mip = 2, draws = 0;
-  const subject = { index: SURFACE_WEAPONS.findIndex(def => def.hasScope), models: [],
+  const subject = { index: 0, models: [],
     rig: new THREE.Group(), scopeTarget, scopeCamera: new THREE.PerspectiveCamera(),
     camera: new THREE.PerspectiveCamera(), scene: new THREE.Scene() };
-  subject.models[subject.index] = { group, opticGlass: lens };
+  subject.models[subject.index] = { group, opticGlass: lens, hasScope: true };
   const renderer = {
     getRenderTarget: () => target, getActiveCubeFace: () => face, getActiveMipmapLevel: () => mip,
     setRenderTarget(value, nextFace = 0, nextMip = 0) {

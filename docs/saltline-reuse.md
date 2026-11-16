@@ -44,6 +44,7 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 | 武器层独立相机 | Saltline 的 `viewCamera`（fov 54） | `surface-weapons.js` 的 `viewCamera` 与 `foreground-pass.js` 的 `setLayerCamera` | 近裁面 0.01，不再切掉手和瞄具。其余三把枪跟随世界 fov，外观不变 |
 | GPU 雨与地面溅水 | `Nb` 及着色器 `kR/FR/UR/NR` | `src/saltline/rain.js`，由 `weather-effects.js` 调用 | 12k 个实例化面片；雨场固定在世界中（不跟着玩家走）；按像素宽度控制线宽；太阳前向散射光照；溅水按 7×7 地形高度网格贴地。改成了球面切平面坐标系，并加了对数深度。`?rain=0..1` 可强制下雨，`?rainGain=` 调亮度 |
 | 武器雨湿 | `Wv`（`uRain`） | `SurfaceWeapons.setWetness` | 下雨时枪面出现水珠、颜色变深、粗糙度降低，雨停后数秒内变干 |
+| 合成音效库（全部 57 种，包括枪声、换弹、弹壳、命中、脚步、雨、风、雷、无人机旋翼、机器狗伺服、混响冲激响应、配乐片段） | 渲染入口 `r_` 与生成器表 `Go`（第 765 号） | `src/saltline/sfx-generators.js`（生成代码），播放器为 `src/saltline/sfx.js` | 第二轮（2026-11-16）接入：PAC-9 的开枪（含户外回声尾音）、弹壳落地、拔弹匣、插弹匣、拉枪栓、空仓击发；步行时的雨声和闪电后的雷声。播放器在空闲时预渲染，各音效有变体轮换和并发上限。还没接入的音效（命中、脚步、无人机和机器狗、风、海、配乐）也都在库里，按名称调用 `audio.sfx.play(名称)` 即可；`node tools/saltline/render-sfx.mjs --list` 列出全部名称，加 `<名称> --out x.wav` 可导出试听 |
 
 验收工具：`tools/pac9viewmodeltest.js`、`tools/rainvisualtest.js`（加 `--gpu --out <目录>` 可截图）。
 
@@ -51,7 +52,6 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 
 | 内容 | 来源符号 | 闭包规模 | 搬法与注意事项 |
 |---|---|---|---|
-| 合成音频：枪声、换弹、弹壳、各种材质的命中、脚步、风雨、无人机旋翼和机器狗伺服声、混响 | 音频库 `u_`；生成器表在第 765 号语句（`ki, Xn, pl, Go…`），各音效 `gen` 指向 `t8 / n8 / i8 …` | 97 条，约 53 KB | 下一步就该搬：PAC-9 已经发出 `weapon:fire`、`weapon:reload {phase: magout/magin/bolt}`、`weapon:dry` 事件，接上即可。全部离线合成，没有音频文件。要和我们的 `audio.js` 合并总线 |
 | 材质库：油漆剥落、锈迹、划痕、湿润，GPU 烘焙纹理 | 材质模块 `qg`（`Gg`、`h3`），材质表在第 410 号语句（`Nt(...)`） | 14 条，约 40 KB，另有大段着色器 | 道具和敌人依赖 `i.mats.get(name)`，必须先搬这个。也可以给 HALCYON 船体、地表据点做旧化 |
 | 机器狗"猎犬"（hound） | 敌人模块 `ex`（`Em`）；`Q_`（第 838 号，约 10 KB，推测是猎犬构建）+ 调参 `Kv` | `Em` 共 31 条，约 58 KB | 零件挂在骨骼上（`pm` 刚性蒙皮）。步态与伺服动画在 `iM` 里 |
 | 无人机"海鸥"（gull） | `Z_`（第 833 号）/ `j_`（第 836 号）+ 调参 `Zv` | 同上 | 四涵道旋翼，带探照灯 |
@@ -67,5 +67,6 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 - PAC-9 的手套和黄铜目前用纯色基底，只保留 Saltline 的顶点色乘数，所以比原版略平。搬完材质库后，换成 `glove_fabric` / `brass` 正式材质。
 - 红点镜反光使用的太阳和天空颜色是 Saltline 港口的常量（`LENS_SUN` / `LENS_SKY`），还没接本项目的实时太阳方向和天空色。
 - 地表射击没有命中模型，曳光弹仍飞向准星下的地形距离。
-- 2–4 号武器（CX-5、M77、HLX-3）还没有手。可以复用 `buildHand` 和姿态参数给它们配手，需要逐把调握持位置。
+- 2026-11-16 起只保留 PAC-9：低模的 CX-5、M77、HLX-3（采矿激光本来也没有玩法）连同 `weapon-models.js` 和 `hlx-3-prospector.glb` 已删除。新武器至少要达到 PAC-9 的标准：带手、关键帧动作、合成音效。瞄准镜的离屏渲染约定（`renderScopeView`）保留了下来，供将来的带镜型号使用。
+- 合成音效的音量是按电平估的，还没有人实际听过；可以用 `docs/reviews/saltline-port-2026-11-16/pac9-audio-demo.wav` 试听。
 - 雨在强制晴天下偏淡。真实降雨天气下天空更暗，雨会更明显。地面湿润效果待搬（见上表）。

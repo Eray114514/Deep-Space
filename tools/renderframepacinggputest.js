@@ -252,12 +252,12 @@ try {
       equipmentMaterial = new T.MeshStandardMaterial({ metalness: .8, roughness: .3 });
       modelGroup.add(new T.Mesh(geometry, equipmentMaterial));
       lighting = new WeaponLighting(scene, camera);lighting.register(scopeRig);
-      const scopeIndex = SURFACE_WEAPONS.findIndex(definition => definition.hasScope), models = [];
-      models[scopeIndex] = { group: modelGroup, opticGlass: lens };
+      const scopeIndex = 0, models = [];
+      models[scopeIndex] = { group: modelGroup, opticGlass: lens, hasScope: true };
       const scopeObject = { models, index: scopeIndex, rig: scopeRig, scopeTarget, scene, camera,
         scopeCamera: new T.PerspectiveCamera(4.2, 1, .12, camera.far) };
       check('Actual authored scope input selected without weapon constructor or GLB', scopeIndex >= 0
-        && SURFACE_WEAPONS[scopeIndex].hasScope && lens.material.map === scopeTarget.texture && scopeRig.visible);
+        && models[scopeIndex].hasScope && lens.material.map === scopeTarget.texture && scopeRig.visible);
       // A separate tiny destination keeps the main native pixel controls
       // unchanged. The actual portal method owns all camera/texture matrices;
       // its real ShaderMaterial consumes both projectionMatrix and the

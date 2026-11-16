@@ -1,0 +1,114 @@
+// Plays Saltline's synthesized sounds (sfx-generators.js) on the game's
+// AudioContext: renders lazily, caches one AudioBuffer per variant, rotates
+// variants, caps voices per sound, and pre-renders a warm list during idle
+// time so the first shot never stalls the frame.
+import { renderSound, SOUND_TABLE } from './sfx-generators.js';
+
+const idle = (fn) => (typeof requestIdleCallback === 'function'
+  ? requestIdleCallback(fn, { timeout: 400 }) : setTimeout(fn, 16));
+
+export class SaltlineSfx {
+  constructor() {
+    this.ctx = null;
+    this.bus = null;
+    this.buffers = new Map();   // `${name}#${variant}` -> AudioBuffer
+    this.nextVariant = new Map();
+    this.voices = new Map();    // name -> [{ src, gain, end }]
+    this.loops = new Map();     // name -> { src, gain }
+    this.played = {};           // name -> count (diagnostics / tests)
+  }
+
+  attach(ctx, destination, gain = 1) {
+    this.ctx = ctx;
+    this.bus = ctx.createGain();
+    this.bus.gain.value = gain;
+    this.bus.connect(destination);
+  }
+
+  // Render the listed sounds (all variants) one per idle slice.
+  prewarm(names) {
+    const queue = [];
+    for (const name of names) {
+      const def = SOUND_TABLE[name];
+      if (def) for (let v = 0; v < def.n; v++) queue.push([name, v]);
+    }
+    const step = () => {
+      const job = queue.shift();
+      if (!job) return;
+      this.buffer(job[0], job[1]);
+      idle(step);
+    };
+    idle(step);
+  }
+
+  buffer(name, variant) {
+    const key = `${name}#${variant}`;
+    let buffer = this.buffers.get(key);
+    if (buffer || !this.ctx) return buffer || null;
+    const rendered = renderSound(name, variant);
+    if (!rendered) return null;
+    buffer = this.ctx.createBuffer(rendered.ch.length, rendered.ch[0].length, rendered.sr);
+    rendered.ch.forEach((data, i) => buffer.copyToChannel(data, i));
+    this.buffers.set(key, buffer);
+    return buffer;
+  }
+
+  // play(name, { gain, pitch, delay, variant }) -> source node or null
+  play(name, { gain = 1, pitch = 1, delay = 0, variant = null } = {}) {
+    const def = SOUND_TABLE[name];
+    if (!def || !this.ctx || !this.bus) return null;
+    let v = variant;
+    if (v === null) {
+      v = this.nextVariant.get(name) || 0;
+      this.nextVariant.set(name, (v + 1) % def.n);
+    }
+    const buffer = this.buffer(name, v % def.n);
+    if (!buffer) return null;
+    const now = this.ctx.currentTime + delay;
+    const active = (this.voices.get(name) || []).filter((voice) => voice.end > this.ctx.currentTime);
+    while (active.length >= (def.max || 4)) {
+      const oldest = active.shift();
+      oldest.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
+      try { oldest.src.stop(this.ctx.currentTime + 0.05); } catch { /* already stopped */ }
+    }
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = pitch;
+    const amp = this.ctx.createGain();
+    amp.gain.value = gain;
+    src.connect(amp).connect(this.bus);
+    src.start(now);
+    active.push({ src, gain: amp, end: now + buffer.duration / pitch });
+    this.played[name] = (this.played[name] || 0) + 1;
+    this.voices.set(name, active);
+    return src;
+  }
+
+  // Looping bed (rain, wind…): fades toward `gain`; created on first use.
+  loop(name, gain, tau = 0.6) {
+    if (!this.ctx || !this.bus) return;
+    let entry = this.loops.get(name);
+    if (!entry) {
+      if (gain <= 0.001) return;
+      const buffer = this.buffer(name, 0);
+      if (!buffer) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const amp = this.ctx.createGain();
+      amp.gain.value = 0;
+      src.connect(amp).connect(this.bus);
+      src.start();
+      entry = { src, gain: amp };
+      this.loops.set(name, entry);
+    }
+    entry.gain.gain.setTargetAtTime(Math.max(0, gain), this.ctx.currentTime, tau);
+  }
+
+  dispose() {
+    for (const { src } of this.loops.values()) { try { src.stop(); } catch { /* stopped */ } }
+    this.loops.clear();
+    this.bus?.disconnect();
+    this.buffers.clear();
+  }
+}

@@ -98,6 +98,17 @@ try {
   await page.waitForFunction(() => !NMS.surfaceWeaponState().reloading, null, { timeout: 20000 });
   check((await state()).ammo === 30, 'empty reload refills the magazine');
 
+  // Saltline synthesized foley: the input gestures above unlock WebAudio
+  const played = await page.evaluate(() => {
+    const audio = NMS._internals.audio;
+    return { ready: !!audio?.ready, played: audio?.sfx?.played || {} };
+  });
+  if (played.ready) {
+    for (const name of ['rifle_shot', 'rifle_tail_out', 'reload_magout', 'reload_magin', 'reload_bolt', 'rifle_dry']) {
+      check((played.played[name] || 0) > 0, `${name} sound plays (${played.played[name] || 0})`);
+    }
+  } else console.log('SKIP: WebAudio not unlocked in this browser, sound checks skipped');
+
   check(errors.length === 0, `no page errors ${JSON.stringify(errors.slice(0, 3))}`);
 } finally {
   await browser.close();

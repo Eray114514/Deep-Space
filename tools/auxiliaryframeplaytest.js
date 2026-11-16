@@ -1,4 +1,4 @@
-// Actual-player walk/M77/ADS/input and native submission observation. Clouds are
+// Actual-player walk/PAC-9/ADS/input and native submission observation. Clouds are
 // explicitly disabled to isolate auxiliary ownership; this is not cloud art or
 // whole-frame performance acceptance. Observers add no native readiness polls.
 import assert from 'node:assert/strict';
@@ -10,7 +10,7 @@ import { evidenceFingerprint } from './evidence-fingerprint.js';
 const verifier = 'tools/auxiliaryframeplaytest.js';
 const out = `test-results/auxiliary-frame-player/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 await mkdir(out, { recursive: true });
-const report = { scope: 'Actual game walk/M77/ADS/input, PMREM and scope draws in the shared frame ticket; vclouds=0, no performance or cloud-art acceptance',
+const report = { scope: 'Actual game walk/PAC-9/ADS/input, PMREM and scope draws in the shared frame ticket; vclouds=0, no performance or cloud-art acceptance',
   before: await evidenceFingerprint(verifier), errors: [], driverWarnings: [] };
 const { server, port } = await startServer(0);let browser, page;
 try {
@@ -64,12 +64,12 @@ try {
       }
     });
     window.__restoreAuxiliaryObserver = () => { restores.reverse().forEach(restore => restore());data.restored = true; };
-    NMS.land(0, 0, 'meadow');NMS.setLocalSunAltitude(0, 32);NMS.surfaceWeapon(2);
+    NMS.land(0, 0, 'meadow');NMS.setLocalSunAltitude(0, 32);NMS.surfaceWeapon(0);
   });
-  await page.waitForFunction(() => NMS.state === 'walk' && NMS.surfaceWeaponState().index === 2 && NMS.surfaceWeaponState().rendered,
+  await page.waitForFunction(() => NMS.state === 'walk' && NMS.surfaceWeaponState().index === 0 && NMS.surfaceWeaponState().rendered,
     null, { timeout: 60000 });
   await page.waitForTimeout(3000);
-  await page.screenshot({ path: `${out}/unpaced-m77.png`, timeout: 90000 });
+  await page.screenshot({ path: `${out}/unpaced-pac9.png`, timeout: 90000 });
   await page.evaluate(() => { __auxiliaryObserver.phase = 'paced';NMS._pipeline.startFramePacing();NMS.resetPerformanceStats(); });
   await page.waitForTimeout(8000);
   report.beforeInput = await page.evaluate(() => ({ pos: NMS.pos(), state: NMS.surfaceWeaponState(), stats: NMS.stats() }));
@@ -78,7 +78,7 @@ try {
   await page.mouse.move(640, 360);await page.mouse.down({ button: 'right' });
   await page.waitForFunction(() => NMS.surfaceWeaponState().ads, null, { timeout: 10000 });
   await page.waitForTimeout(700);
-  await page.screenshot({ path: `${out}/paced-m77-ads.png`, timeout: 90000 });
+  await page.screenshot({ path: `${out}/paced-pac9-ads.png`, timeout: 90000 });
   await page.mouse.up({ button: 'right' });
   await page.keyboard.press('Escape');await page.waitForFunction(() => NMS.stats().paused);
   await page.waitForTimeout(500);await page.keyboard.press('Escape');await page.waitForFunction(() => !NMS.stats().paused);
@@ -91,7 +91,7 @@ try {
   await page.waitForFunction(() => __retiredAuxiliaryPacer.snapshot().released, null, { timeout: 15000 });
   report.retired = await page.evaluate(() => ({ pacing: NMS._pipeline.framePacer, owner: __retiredAuxiliaryPacer.snapshot(),
     gl: NMS._renderer.getContext().getError(), lost: NMS._renderer.getContext().isContextLost() }));
-  await page.screenshot({ path: `${out}/resumed-m77.png`, timeout: 90000 });
+  await page.screenshot({ path: `${out}/resumed-pac9.png`, timeout: 90000 });
   const data = report.result.observer, preparations = data.records.filter(row => row.after.preparations > row.before.preparations),
     rejected = data.records.filter(row => row.accepted === false && row.after.preparations === row.before.preparations),
     paced = data.records.filter(row => row.paced && row.accepted);

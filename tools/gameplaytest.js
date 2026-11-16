@@ -1,6 +1,9 @@
 // Focused regression for boarding, procedural audio unlock and RMB boost.
 import { startServer } from './server.js';
 import { launchBrowser } from './browser.js';
+import { SURFACE_WEAPONS } from '../src/surface-weapons.js';
+
+const SURFACE_WEAPON_COUNT = SURFACE_WEAPONS.length;
 
 const { server, port } = await startServer(0);
 const browser = await launchBrowser();
@@ -54,21 +57,17 @@ try {
   check(cloudFallback.quality === 'performance' && cloudFallback.ok,
     `auto performance keeps the default LiteCloudPass enabled and visible from the surface ${JSON.stringify(cloudFallback)}`);
   const surfaceWeaponVisibility = [];
-  for (let index = 0; index < 4; index++) {
+  for (let index = 0; index < SURFACE_WEAPON_COUNT; index++) {
     await page.evaluate((slot) => NMS.surfaceWeapon(slot), index);
     // The procedural HALCYON hero hull costs ~25% more per SwiftShader frame
     // than the old GLB did, and the switch animation is frame-bound. Give the
     // software renderer enough room to land the committed index.
     await page.waitForFunction((slot) => NMS.surfaceWeaponState().index === slot,
       index, { timeout: 9000 });
-    if (index === 3) {
-      await page.waitForFunction(() => NMS.surfaceWeaponState().assetLoaded,
-        null, { timeout: 10000 });
-    }
     surfaceWeaponVisibility.push(await page.evaluate('NMS.surfaceWeaponState()'));
   }
   check(surfaceWeaponVisibility.every((weapon) => weapon.rendered && weapon.assetLoaded),
-    `all four first-person weapons own an active foreground pass ${JSON.stringify(surfaceWeaponVisibility)}`);
+    `every first-person weapon owns an active foreground pass ${JSON.stringify(surfaceWeaponVisibility)}`);
   const initialShipDistance = await page.evaluate('NMS.shipDistance()');
   check(initialShipDistance < 46, `parked ship is in boarding range (${initialShipDistance.toFixed(1)} m)`);
   await page.keyboard.press('KeyE');

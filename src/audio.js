@@ -3,6 +3,7 @@
 // follow actual simulation state continuously.
 
 import { makeRng } from './rng.js';
+import { SaltlineSfx } from './saltline/sfx.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
@@ -59,6 +60,12 @@ export class FlightAudio {
     this.compressor.attack.value = 0.006;
     this.compressor.release.value = 0.18;
     this.master.connect(this.compressor).connect(ctx.destination);
+
+    // Saltline's synthesized foley (weapon, rain, thunder) on its own bus.
+    this.sfx = new SaltlineSfx();
+    this.sfx.attach(ctx, this.master, 1.15);
+    this.sfx.prewarm(['rifle_shot', 'rifle_tail_out', 'rifle_dry', 'reload_magout', 'reload_magin',
+      'reload_bolt', 'shell_bounce', 'rain', 'thunder']);
 
     this.engineBus = ctx.createGain();
     this.engineBus.gain.value = 0;
@@ -275,6 +282,36 @@ export class FlightAudio {
     } else if (kind === 'water-splash') {
       this.noiseBurst({ duration: 0.32, gain: 0.085, from: 1600, to: 420, q: 0.48 });
     }
+  }
+
+  // First-person weapon events from SurfaceWeapons (see surface-weapons.js).
+  weaponEvent(type, data = {}) {
+    if (this.disposed || !this.ready || !this.sfx || this.paused) return;
+    const jitter = () => 0.97 + Math.random() * 0.06;
+    if (type === 'weapon:fire') {
+      this.sfx.play('rifle_shot', { pitch: jitter() });
+      // outdoor slap-back tail; quieter while aiming down sights (less of the
+      // body behind the shoulder)
+      this.sfx.play('rifle_tail_out', { gain: data.ads > 0.5 ? 0.8 : 1 });
+      if (Math.random() < 0.55) this.sfx.play('shell_bounce', { delay: 0.42 + Math.random() * 0.25, gain: 0.7, pitch: jitter() });
+    } else if (type === 'weapon:dry') {
+      this.sfx.play('rifle_dry');
+    } else if (type === 'weapon:reload') {
+      if (data.phase === 'magout') this.sfx.play('reload_magout');
+      else if (data.phase === 'magin') this.sfx.play('reload_magin');
+      else if (data.phase === 'bolt') this.sfx.play('reload_bolt');
+    }
+  }
+
+  // Surface weather beds: rain intensity 0..1, and a thunder clap when the
+  // storm flashes (delayed by distance like real thunder).
+  weather({ rain = 0, lightning = 0 } = {}) {
+    if (this.disposed || !this.ready || !this.sfx) return;
+    this.sfx.loop('rain', this.paused ? 0 : Math.min(1, rain) * 0.85, 0.8);
+    if (lightning > 0.5 && !this.lightningLatched) {
+      this.lightningLatched = true;
+      this.sfx.play('thunder', { delay: 0.6 + Math.random() * 2.4, gain: 0.5 + lightning * 0.4 });
+    } else if (lightning < 0.1) this.lightningLatched = false;
   }
 
   update({ state, speed, atmosphere, boosting, warp, rift = 0, water = 0, underwater = false, paused }) {
