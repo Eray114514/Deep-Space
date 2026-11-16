@@ -905,6 +905,67 @@ const farFlora = new FarFlora({
 });
 const skyDome = new SkyDome(scene);
 const weatherEffects = new WeatherEffects(scene);
+// ?rain=0..1 forces surface rain intensity (captures and rain tuning).
+const RAIN_OVERRIDE = qs.has('rain') ? THREE.MathUtils.clamp(Number(qs.get('rain')) || 0, 0, 1) : null;
+const rainFrame = {
+  dt: 0, camera, renderer, origin: new THREE.Vector3(), displacement: new THREE.Vector3(),
+  sunDir: new THREE.Vector3(0, 1, 0), sunColor: new THREE.Color(), ambient: new THREE.Color(),
+  groundSampler: null,
+};
+const RAIN_GAIN = qs.has('rainGain') ? Number(qs.get('rainGain')) || 1 : 1;
+const _rainAmbFallback = new THREE.Color(0.4, 0.45, 0.5);
+const rainPrevLocal = new THREE.Vector3();
+const _rainA = new THREE.Vector3(), _rainB = new THREE.Vector3(), _rainC = new THREE.Vector3();
+let rainPrevBody = null;
+let rainBody = null;
+// Terrain height under a 7x7 grid around the walker, as local y relative to
+// the eye, in the rain's tangent frame. Drives splash placement and lets drops
+// stop at the ground instead of falling through it.
+function sampleRainGround(side, up, forward, out, span, grid) {
+  const p = rainBody;
+  if (!p?.height || !p.worldOffsetToLocal) return false;
+  const pos = walkCtl.posLocal, r0 = pos.length();
+  p.worldOffsetToLocal(side, _rainA);
+  p.worldOffsetToLocal(forward, _rainB);
+  for (let j = 0; j < grid; j++) {
+    for (let i = 0; i < grid; i++) {
+      const x = (i / (grid - 1) * 2 - 1) * span, z = (j / (grid - 1) * 2 - 1) * span;
+      _rainC.copy(pos).addScaledVector(_rainA, x).addScaledVector(_rainB, z).normalize();
+      out[j * grid + i] = p.R + p.height(_rainC, p.fullMaxFreq) - r0;
+    }
+  }
+  return true;
+}
+function prepareRainFrame(dt, body) {
+  rainFrame.dt = dt;
+  camera.getWorldPosition(rainFrame.origin);
+  rainFrame.displacement.set(0, 0, 0);
+  const walking = state === 'walk' && walkCtl.planet === body;
+  if (walking) {
+    // Walking moves the world past the camera; feed that displacement to the
+    // rain so its field stays fixed in the world.
+    if (rainPrevBody === body) {
+      _rainA.copy(walkCtl.posLocal).sub(rainPrevLocal);
+      if (_rainA.lengthSq() < 400) body.localOffsetToWorld(_rainA, rainFrame.displacement);
+    }
+    rainPrevLocal.copy(walkCtl.posLocal);
+    rainPrevBody = body;
+    rainBody = body;
+    rainFrame.groundSampler = sampleRainGround;
+  } else {
+    rainPrevBody = null;
+    rainFrame.groundSampler = null;
+  }
+  rainFrame.sunDir.copy(body?.sunDirWorld || _up);
+  // Saltline lit its rain with a dusk harbour (ambient = fog x 0.15). Our
+  // open daylight scenes are far brighter, so the drops take their ambient
+  // from the live fog/sky colour at a higher gain to stay legible.
+  const sunUp = THREE.MathUtils.clamp(rainFrame.sunDir.dot(_up) * 4 + 0.3, 0, 1);
+  rainFrame.sunColor.setRGB(1, 0.93, 0.82).multiplyScalar(RAIN_GAIN * 5 * envDay * sunUp);
+  rainFrame.ambient.copy(scene.fog?.color || _rainAmbFallback).multiplyScalar(RAIN_GAIN * 1.4)
+    .addScalar(RAIN_GAIN * 0.03);
+  return rainFrame;
+}
 const [shipModel, shipProbes] = await Promise.all([loadShipModel(), loadShipProbes(renderer)]);
 const ship = new Ship(scene, {
   model: shipModel,
@@ -956,6 +1017,9 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   },
   onShot: () => audio.cue('fire'),
 });
+// Hands and optics sit closer than the world camera's 0.12 m near plane, so
+// the weapon layer renders through the rig's own view camera.
+foregroundPass.setLayerCamera(WEAPON_FOREGROUND_LAYER, surfaceWeapons.viewCamera);
 let warpIntensity = 0;
 let warpArrival = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
@@ -4578,12 +4642,16 @@ function frame(rafTs) {
       nearest.atmoHeight * 0.22,
       Math.max(0, nearestAlt),
     ));
-    weatherEffects.update(activeWeather, _up, _v3, clock.elapsedTime, surfaceWeather);
+    const fxWeather = RAIN_OVERRIDE !== null && activeWeather
+      ? { ...activeWeather, precipitationKind: 'rain', precipitation: RAIN_OVERRIDE } : activeWeather;
+    weatherEffects.update(fxWeather, _up, _v3, clock.elapsedTime, surfaceWeather,
+      prepareRainFrame(dt, nearest));
   } else {
     setWeatherWind(null, 0.18, 0);
     weatherEffects.update(null, _up.set(0, 1, 0), _v3.set(1, 0, 0),
       clock.elapsedTime, 0);
   }
+  surfaceWeapons.setWetness(weatherEffects.state.rainVisible ? weatherEffects.state.precipitation : 0, dt);
   updateSurfaceInteraction(dt);
   if (nearest?.isGasGiant && nearestAlt < nearest.atmoHeight) {
     const depth = clamp(-nearestAlt / (nearest.R * 0.1), 0, 1);
@@ -4653,6 +4721,9 @@ function frame(rafTs) {
   surfaceWeapons.update(dt, state === 'walk' && !paused, surfaceShotDistance, {
     speed: walkCtl.hSpeed.length(),
     grounded: walkCtl.grounded,
+    velY: walkCtl.vR,
+    sprinting: walkCtl.running,
+    move: walkCtl.moveInput,
   });
   document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
@@ -6884,6 +6955,8 @@ window.NMS = {
       spaceCtl,
       starMap,
       riftPreviewSystem,
+      walkCtl,
+      weatherEffects,
     };
   },
 };

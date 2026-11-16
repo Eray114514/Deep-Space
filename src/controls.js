@@ -454,6 +454,8 @@ export class WalkControls {
     this.grounded = false;
     this.eyeHeight = 1.7;
     this.hSpeed = new THREE.Vector3();
+    this.running = false;
+    this.moveInput = { x: 0, y: 0 };   // last walk input: x strafe, y forward
     this.quat = new THREE.Quaternion();
     this.previousPosLocal = new THREE.Vector3();
 
@@ -545,6 +547,9 @@ export class WalkControls {
     const stickMag = Math.hypot(this.touchMove.x, this.touchMove.y);
     const run = keys.ShiftLeft || keys.ShiftRight || stickMag > 0.92;  // slam the stick to run
     const speed = run ? 18 : 7;
+    this.running = !!run && (fIn !== 0 || rIn !== 0);
+    this.moveInput.x = rIn;
+    this.moveInput.y = fIn;
     _f.set(0, 0, 0).addScaledVector(fwd, fIn).addScaledVector(right, rIn);
     if (_f.lengthSq() > 1) _f.normalize();          // keep analog magnitudes
     _f.multiplyScalar(speed);

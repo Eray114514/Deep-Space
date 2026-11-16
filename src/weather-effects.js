@@ -1,13 +1,12 @@
 import * as THREE from 'three';
+import { SaltlineRain, GROUND_GRID, GROUND_SPAN } from './saltline/rain.js';
 
-const RAIN_DROPS = 1450;
 const SNOW_FLAKES = 760;
 const _axis = new THREE.Vector3();
 const _side = new THREE.Vector3();
 const _forward = new THREE.Vector3();
 const _wind = new THREE.Vector3();
 const _point = new THREE.Vector3();
-const _tail = new THREE.Vector3();
 
 function fract(value) {
   return value - Math.floor(value);
@@ -27,22 +26,10 @@ function basisFromUp(up) {
 export class WeatherEffects {
   constructor(scene) {
     this.scene = scene;
-    this.rainPositions = new Float32Array(RAIN_DROPS * 2 * 3);
-    const rainGeometry = new THREE.BufferGeometry();
-    rainGeometry.setAttribute('position',
-      new THREE.BufferAttribute(this.rainPositions, 3).setUsage(THREE.DynamicDrawUsage));
-    this.rain = new THREE.LineSegments(rainGeometry, new THREE.LineBasicMaterial({
-      color: 0xa9c9e2,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      depthTest: true,
-      fog: true,
-      blending: THREE.NormalBlending,
-    }));
-    this.rain.frustumCulled = false;
-    this.rain.renderOrder = 6;
-    scene.add(this.rain);
+    // GPU rain ported from Saltline: lit, pixel-aware streaks in a world-fixed
+    // field plus ground splashes (replaced 1450 CPU-rebuilt line segments).
+    this.rainFx = new SaltlineRain(scene);
+    this.groundHeights = new Float32Array(GROUND_GRID * GROUND_GRID);
 
     this.snowPositions = new Float32Array(SNOW_FLAKES * 3);
     const snowGeometry = new THREE.BufferGeometry();
@@ -74,7 +61,9 @@ export class WeatherEffects {
     };
   }
 
-  update(weather, up, windWorld, seconds, atmosphere = 1) {
+  // frame (optional): { dt, camera, renderer, origin, displacement, sunDir,
+  //   sunColor, ambient, groundSampler(side, up, forward, out, span, grid) -> bool }
+  update(weather, up, windWorld, seconds, atmosphere = 1, frame = {}) {
     const precipitation = THREE.MathUtils.clamp(
       (weather?.precipitation || 0) * atmosphere, 0, 1);
     const kind = weather?.precipitationKind || 'none';
@@ -86,35 +75,20 @@ export class WeatherEffects {
     const windLean = 3 + gust * 12;
 
     const rainVisible = kind === 'rain' && precipitation > 0.045;
-    this.rain.visible = rainVisible;
-    // Thin, short streaks read as nearby rain. The old 7–9 m segments filled
-    // the whole perspective cone and looked like a warp-speed star field.
-    this.rain.material.opacity = rainVisible ? 0.07 + precipitation * 0.25 : 0;
-    if (rainVisible) {
-      for (let i = 0; i < RAIN_DROPS; i++) {
-        const radius = 8 + hash(i, 1) * 72;
-        const angle = hash(i, 2) * Math.PI * 2;
-        const height = fract(hash(i, 3) - seconds * (0.72 + hash(i, 4) * 0.34))
-          * 62 - 18;
-        const x = Math.cos(angle) * radius;
-        const z = Math.sin(angle) * radius;
-        const length = 0.48 + precipitation * 1.24 + hash(i, 5) * 0.72;
-        const base = _point.copy(_side).multiplyScalar(x)
-          .addScaledVector(_forward, z)
-          .addScaledVector(_axis, height)
-          .addScaledVector(_wind, (height + 18) * windLean * 0.018);
-        const tail = _tail.copy(base).addScaledVector(_axis, -length)
-          .addScaledVector(_wind, length * windLean * 0.045);
-        const offset = i * 6;
-        this.rainPositions[offset] = base.x;
-        this.rainPositions[offset + 1] = base.y;
-        this.rainPositions[offset + 2] = base.z;
-        this.rainPositions[offset + 3] = tail.x;
-        this.rainPositions[offset + 4] = tail.y;
-        this.rainPositions[offset + 5] = tail.z;
-      }
-      this.rain.geometry.attributes.position.needsUpdate = true;
-    }
+    const groundOk = rainVisible && frame.groundSampler
+      ? frame.groundSampler(_side, _axis, _forward, this.groundHeights, GROUND_SPAN, GROUND_GRID) : false;
+    this.rainFx.update({
+      dt: frame.dt ?? 1 / 60,
+      time: seconds,
+      level: rainVisible ? THREE.MathUtils.clamp(0.15 + precipitation * 0.95, 0, 1) : 0,
+      origin: frame.origin,
+      side: _side, up: _axis, forward: _forward,
+      displacement: frame.displacement,
+      wind: windWorld ? _point.copy(windWorld).multiplyScalar(0.35 + gust * 0.4) : null,
+      sunDir: frame.sunDir, sunColor: frame.sunColor, ambient: frame.ambient,
+      camera: frame.camera, renderer: frame.renderer,
+      groundHeights: groundOk ? this.groundHeights : null,
+    });
 
     const snowVisible = kind === 'snow' && precipitation > 0.035;
     this.snow.visible = snowVisible;
@@ -162,9 +136,8 @@ export class WeatherEffects {
   }
 
   dispose() {
-    this.scene.remove(this.rain, this.snow, this.lightning);
-    this.rain.geometry.dispose();
-    this.rain.material.dispose();
+    this.rainFx.dispose();
+    this.scene.remove(this.snow, this.lightning);
     this.snow.geometry.dispose();
     this.snow.material.dispose();
   }

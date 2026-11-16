@@ -101,10 +101,16 @@
     "test:cloud-air-binding:gpu": "node tools/cloudairbindinggputest.js",
     "test:cloud-fading-resources": "node tools/cloudfadingresourcetest.js",
     "test:cloud-fading-resources:gpu": "node tools/cloudfadingresourcegputest.js",
-    "test:ship": "node tools/halcyon-playtest.js && node tools/shipdynamicstest.js"
+    "test:ship": "node tools/halcyon-playtest.js && node tools/shipdynamicstest.js",
+    "test:pac9": "node tools/pac9viewmodeltest.js",
+    "test:rain": "node tools/rainvisualtest.js",
+    "saltline:extract": "node tools/saltline/extract.mjs"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",
+    "acorn": "^8.19.0",
+    "acorn-walk": "^8.3.5",
+    "esbuild": "^0.28.2",
     "playwright": "1.56.0",
     "pngjs": "^7.0.0",
     "three": "^0.185.1"

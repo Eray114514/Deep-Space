@@ -82,7 +82,9 @@ try {
   check(await page.evaluate(() => window.NMS.shipViewState().shipwalk),
     'boarding completes into the interior walk');
   await page.evaluate('NMS.takeoff()');
-  await page.waitForFunction('NMS.state === "space"', null, { timeout: 30000 });
+  // SwiftShader needs ~50 s for the debug takeoff since the HALCYON moving-parts
+  // build (measured 2026-11-16 on unmodified HEAD); a GPU takes ~2 s.
+  await page.waitForFunction('NMS.state === "space"', null, { timeout: 90000 });
   check(await page.evaluate('NMS.stats().audio'), 'user gesture unlocks procedural WebAudio');
 
   const canvas = page.locator('canvas').first();

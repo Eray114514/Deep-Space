@@ -1,6 +1,6 @@
 # 未完成任务：难度与交接评估
 
-更新于 2026-11-15。这里只列待办和有明确验收缺口的任务。范围、验收状态和历史证据见[总路线图](optimization-roadmap.md)、[渲染基础交接](render-foundation-improvements.md)、[F 阶段收官基线](baselines/foundation-phase-f-2026-11-12/README.md)、[B4 恢复交接](reviews/f-phase-b4-handoff-2026-11-12.md)、[批次 B](cloud-atmosphere-rewrite.md)及[最终重筛](world-curation.md)。
+更新于 2026-11-16。这里只列待办和有明确验收缺口的任务。范围、验收状态和历史证据见[总路线图](optimization-roadmap.md)、[渲染基础交接](render-foundation-improvements.md)、[F 阶段收官基线](baselines/foundation-phase-f-2026-11-12/README.md)、[B4 恢复交接](reviews/f-phase-b4-handoff-2026-11-12.md)、[批次 B](cloud-atmosphere-rewrite.md)及[最终重筛](world-curation.md)。
 
 任务范围、难度或验收状态有变化时，在同一轮交付中同步更新本表。整项验收后删掉条目和相关分工引用，部分验收后缩小到待办范围。完成记录留在原计划和证据目录，原任务编号保留供交接。实际工作按相互依赖的任务成组推进。
 
@@ -208,6 +208,21 @@ C-03 与 C-08 耦合较强；树、草、岩石、星环可以在各自数据/�
 | D-06 | 启动接管、地表↔轨道、触摸及全浏览器回归 | 4 | 对全项目合流版本复验，包含 E，不沿用子批次的旧 PASS |
 | D-07 | 全项目最终性能/释放与视觉复核 | 5 | 复用 B7 测量方法，重测合流内容；锐度、拖影、水天色彩都要看 |
 | D-08 | 重筛完成后的发布整理、版本/构建/证据 | 2 | 等 W 完成和用户发布安排；同步三处版本，保持提交/种子/证据一致 |
+
+## L：Saltline 移植（第一人称、机器人、道具、音频）
+
+来源、提取方法和完整清单见 [Saltline 复用目录](saltline-reuse.md)。2026-11-16 第一轮已经搬入：PAC-9 第一人称武器（手、换弹、弹簧后坐）、武器层独立相机、GPU 雨与溅水、武器雨湿，验收工具为 `tools/pac9viewmodeltest.js` 和 `tools/rainvisualtest.js`。待办：
+
+| 任务 | 难度 | 说明 |
+|---|---:|---|
+| 用户实机确认 PAC-9 与新雨 | 1 | 手感、握枪姿态、手套颜色、雨的密度和亮度由用户试玩后决定 |
+| L-1 合成音频 | 3 | 搬 `u_` 音频库与生成器表，接 PAC-9 已经发出的 fire / reload / dry 事件，并与 `audio.js` 合并总线 |
+| L-2 材质库 | 3 | 搬 `qg`（GPU 烘焙的油漆、锈迹、湿润材质）。道具和敌人依赖它；搬完后 PAC-9 的手套和黄铜换成正式材质 |
+| L-3 地面雨湿与涟漪 | 4 | 搬地面模块的湿润与涟漪着色器到地形材质，不能改动高度流 |
+| L-4 机器狗与无人机 | 4 | 搬 `Q_`（猎犬）、`Z_` / `j_`（海鸥）与刚性蒙皮动画，先作为据点巡逻单位；敌人 AI `iM` 等有战斗玩法时再接 |
+| L-5 道具库 | 3 | 搬 `J3` / `eb` / `sb` 注册的约 30 种道具，铺进 `artificial-sites.js` 的地表据点 |
+| L-6 其余武器配手 | 3 | 用 `buildHand` 给 CX-5、M77、HLX-3 配手，并逐把调整握持位置 |
+| L-7 红点镜接实时天空 | 1 | `LENS_SUN` / `LENS_SKY` 改为跟随当前星球的太阳和天空色 |
 
 ## S：HALCYON VII 飞船（Blender 重建后的余项）
 

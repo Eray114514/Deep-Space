@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createWeaponModel } from './weapon-models.js';
 import { WeaponLighting } from './weapon-lighting.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
+import { createPac9Viewmodel, PAC9_ADS_FOV, PAC9_VIEW_FOV, PAC9_SPEC } from './saltline/pac9-viewmodel.js';
 
 // Directly ported ballistic profiles from futuristic-space-station. The two
 // excluded entries are the VX-4 sidearm and GV-1 gravity projector.
@@ -11,8 +12,12 @@ import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 //   shotFovKickMul   — camera FOV kick multiplier on each shot
 //   longCasing       — uses long-casing geometry for eject animation
 //   hasScope         — weapon renders a scope view when ADS
+// Slot 1 is the PAC-9 Longshore ported from Saltline (src/saltline/): a
+// `kind: 'viewmodel'` weapon whose geometry, gloved hands, keyframed reload,
+// spring recoil and sway are driven by its own controller. It replaced the
+// primitive-built KX-9 (still available from weapon-models.js).
 export const SURFACE_WEAPONS = [
-  { id: 'KX9', name: 'KX-9 CERBERUS', short: 'KX-9', magSize: 30, reloadTime: 1.55, fireInterval: 60 / 720, auto: true, kick: 0.95, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.292, -0.556], adsFov: 57, recoilP: 0.018, recoilY: 0.012, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.018, tracerLife: 0.075, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
+  { id: 'PAC9', name: 'PAC-9 LONGSHORE', short: 'PAC-9', kind: 'viewmodel', magSize: 30, reloadTime: 2.1, fireInterval: 60 / 720, auto: true, kick: 0, hipPos: [0, 0, 0], adsPos: [0, 0, 0], adsFov: PAC9_ADS_FOV, recoilP: 0, recoilY: 0, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.014, tracerLife: 0.06, flashDuration: 0.05, muzzleIntensity: 26, shotFovKickMul: 0.5, longCasing: false, hasScope: false },
   { id: 'CX5', name: 'CX-5 MARAUDER', short: 'CX-5', magSize: 35, reloadTime: 1.35, fireInterval: 60 / 860, auto: true, kick: 0.68, hipPos: [0.31, -0.3, -0.64], adsPos: [0, -0.2745, -0.526], adsFov: 57, recoilP: 0.011, recoilY: 0.011, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.011, tracerLife: 0.05, flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
   { id: 'M77', name: 'M77 SENTINEL', short: 'M77', magSize: 12, reloadTime: 2.05, fireInterval: 60 / 310, auto: false, kick: 1.5, hipPos: [0.34, -0.31, -0.68], adsPos: [0, -0.315, -0.537], adsFov: 42, recoilP: 0.055, recoilY: 0.018, color: 0xffbe5c, tracerColor: 0xffd38a, tracerRadius: 0.026, tracerLife: 0.12, flashDuration: 0.1, muzzleIntensity: 42, shotFovKickMul: 1.35, longCasing: true, hasScope: true },
   { id: 'HLX3', name: 'HLX-3 PROSPECTOR', short: 'HLX-3', magSize: Infinity, fireInterval: 0, auto: true, kick: 0.08, hipPos: [0.38, -0.44, -0.92], adsPos: [0, -0.4, -0.86], adsFov: 54, color: 0x63efff, kind: 'laser', flashDuration: 0.06, muzzleIntensity: 26, shotFovKickMul: 1, longCasing: false, hasScope: false },
@@ -78,7 +83,16 @@ export class SurfaceWeapons {
     this.rig.layers.set(WEAPON_FOREGROUND_LAYER);
     this.lighting = new WeaponLighting(scene, camera);
     this.rig.renderOrder = 1000;
+    // The weapon layer is drawn with its own camera: same transform as the
+    // world camera, but a near plane that does not clip hands and optics, and
+    // (for the Saltline viewmodel) the fixed 54 deg fov its poses were authored
+    // for. Other weapons follow the world fov so they look exactly as before.
+    this.viewCamera = new THREE.PerspectiveCamera(camera.fov, camera.aspect, 0.01, 50);
+    this.viewCamera.name = 'weapon-view-camera';
+    camera.add(this.viewCamera);
+    this.lookDelta = { dx: 0, dy: 0 };
     this.models = SURFACE_WEAPONS.map((def) => {
+      if (def.kind === 'viewmodel') return this.createViewmodel(def);
       const group = createWeaponModel(def.id);
       group.visible = false;
       group.traverse((child) => {
@@ -160,6 +174,44 @@ export class SurfaceWeapons {
     this.syncHud();
   }
 
+  createViewmodel(def) {
+    const shotPoint = new THREE.Vector3();
+    const viewmodel = createPac9Viewmodel({
+      camera: this.camera,
+      viewCamera: this.viewCamera,
+      emit: (type) => {
+        if (type === 'weapon:fire') this.onShot?.(def);
+      },
+      // Surface shots have no hit model yet; aim at whatever is under the
+      // crosshair (the same distance the old tracers used).
+      shot: (eye, dir) => shotPoint.copy(eye).addScaledVector(dir, THREE.MathUtils.clamp(this.beamDistance, 1.5, 120)),
+      tracer: (from, to) => this.addTracerSegment(def, from, to),
+      shell: () => this.ejectCasing(),
+      recoil: (pitch, yaw) => {
+        this.recoilP = Math.min(0.13, this.recoilP + pitch);
+        this.recoilY = THREE.MathUtils.clamp(this.recoilY + yaw, -0.045, 0.045);
+      },
+    });
+    const group = viewmodel.root;
+    group.visible = false;
+    group.traverse((child) => child.layers.set(WEAPON_FOREGROUND_LAYER));
+    this.rig.add(group);
+    const flash = new THREE.Group(); // the viewmodel owns its muzzle flash
+    return {
+      group,
+      flash,
+      laser: null,
+      viewmodel,
+      ammo: viewmodel.ammo,
+      muzzle: new THREE.Vector3().fromArray(PAC9_SPEC.muzzle),
+      eject: new THREE.Vector3().fromArray(PAC9_SPEC.eject),
+      bolt: null,
+      opticGlass: null,
+      magazine: viewmodel.magazine,
+      magazineHome: null,
+    };
+  }
+
   makeFlash(color, muzzle) {
     const flash = new THREE.Group();
     const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
@@ -213,6 +265,11 @@ export class SurfaceWeapons {
   reload() {
     const def = SURFACE_WEAPONS[this.index];
     const current = this.models[this.index];
+    if (current.viewmodel) {
+      if (this.switchT > 0 || !current.viewmodel.reloadNow()) return false;
+      this.syncViewmodelState(current);
+      return true;
+    }
     if (def.kind === 'laser' || current.ammo >= def.magSize || this.reloadT > 0 || this.switchT > 0) return false;
     this.reloadDuration = def.reloadTime;
     this.reloadT = def.reloadTime;
@@ -223,8 +280,27 @@ export class SurfaceWeapons {
     return true;
   }
 
+  // Mirror the viewmodel controller's ammo/reload state into the fields the
+  // HUD, test API and the rest of the game already read.
+  syncViewmodelState(current) {
+    const vm = current.viewmodel;
+    const reloading = vm.isReloading();
+    const duration = vm.reloadDuration();
+    const remaining = reloading ? duration * (1 - vm.reloadProgress()) : 0;
+    const changed = current.ammo !== vm.ammo || (this.reloadT > 0) !== reloading;
+    current.ammo = vm.ammo;
+    this.reloadDuration = duration;
+    this.reloadT = remaining;
+    if (changed) this.syncHud();
+  }
+
   cancelReload() {
     const current = this.models[this.index];
+    if (current?.viewmodel) {
+      current.viewmodel.cancelReload();
+      this.syncViewmodelState(current);
+      return;
+    }
     if (current?.magazine && current.magazineHome) {
       current.magazine.position.copy(current.magazineHome);
       current.magazine.rotation.set(0, 0, 0);
@@ -267,6 +343,10 @@ export class SurfaceWeapons {
 
   onLookDelta(movementX, movementY) {
     if (!this.canUse()) return;
+    // Camera rotation this frame in radians (WalkControls turns 0.0024 rad/px).
+    const turn = 0.0024 * this.lookScale;
+    this.lookDelta.dx += movementX * turn;
+    this.lookDelta.dy += movementY * turn;
     this.weaponSwayX = THREE.MathUtils.clamp(this.weaponSwayX - movementX * 0.00032, -0.035, 0.035);
     this.weaponSwayY = THREE.MathUtils.clamp(this.weaponSwayY - movementY * 0.00028, -0.026, 0.026);
   }
@@ -511,6 +591,8 @@ export class SurfaceWeapons {
       this.trigger = false;
       this.justPressed = false;
       this.ads = false;
+      this.lookDelta.dx = 0;
+      this.lookDelta.dy = 0;
       this.updateTransientEffects(dt);
       return;
     }
@@ -529,6 +611,16 @@ export class SurfaceWeapons {
     }
     const currentDef = SURFACE_WEAPONS[this.index];
     const current = this.models[this.index];
+    if (current.viewmodel) {
+      this.updateViewmodel(dt, currentDef, current, motion);
+      this.updateTransientEffects(dt);
+      return;
+    }
+    if (this.viewCamera.fov !== this.camera.fov || this.viewCamera.aspect !== this.camera.aspect) {
+      this.viewCamera.fov = this.camera.fov;
+      this.viewCamera.aspect = this.camera.aspect;
+      this.viewCamera.updateProjectionMatrix();
+    }
     const reloadWeight = this.updateReload(dt, current);
     const laserFiring = currentDef.kind === 'laser' && this.trigger;
     if (this.switchT <= 0 && this.reloadT <= 0 && currentDef.kind !== 'laser' && this.cooldown <= 0 && (currentDef.auto ? this.trigger : this.justPressed)) this.fire();
@@ -603,6 +695,83 @@ export class SurfaceWeapons {
     this.camera.updateProjectionMatrix();
     if (this.models[this.index].laser) this.updateLaser(this.models[this.index].laser, dt, laserFiring, this.models[this.index].group, beamDistance);
     this.updateTransientEffects(dt);
+  }
+
+  updateViewmodel(dt, def, current, motion) {
+    const vm = current.viewmodel;
+    // Saltline's gait was tuned for ~4 m/s walking and ~6.5 m/s sprinting;
+    // our explorer walks at 7 and runs at 18. Remap so bob cadence stays human.
+    const speed = Number.isFinite(motion.speed) ? motion.speed : 0;
+    const gait = speed <= 7 ? speed * (4 / 7) : 4 + (speed - 7) * (2.5 / 11);
+    this.camera.getWorldPosition(this._eye || (this._eye = new THREE.Vector3()));
+    vm.update(dt, {
+      fire: this.trigger && this.switchT <= 0,
+      ads: this.ads && this.switchT <= 0,
+      reload: false,
+      move: motion.move || null,
+      look: this.lookDelta,
+      speed: gait,
+      onGround: motion.grounded !== false,
+      velY: Number.isFinite(motion.velY) ? motion.velY : 0,
+      sprinting: !!motion.sprinting,
+      crouching: false,
+      eye: this._eye,
+    });
+    this.lookDelta.dx = 0;
+    this.lookDelta.dy = 0;
+    this.syncViewmodelState(current);
+
+    // weapon switch: dip the whole rig like the other weapons
+    const switchProgress = this.switchT > 0 ? 1 - this.switchT / SWITCH_TIME : 1;
+    const dip = this.switchT > 0 ? 1 - switchProgress : 0;
+    this.rig.position.set(0, this.switchT > 0 ? -0.22 * dip - 0.1 : 0, 0);
+    this.rig.rotation.set(this.switchT > 0 ? -0.5 * dip : 0, 0, 0);
+
+    if (this.viewCamera.fov !== PAC9_VIEW_FOV || this.viewCamera.aspect !== this.camera.aspect) {
+      this.viewCamera.fov = PAC9_VIEW_FOV;
+      this.viewCamera.aspect = this.camera.aspect;
+      this.viewCamera.updateProjectionMatrix();
+    }
+    this.recoilP *= Math.pow(0.001, dt);
+    this.recoilY *= Math.pow(0.001, dt);
+    const cameraRecoil = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.recoilP, this.recoilY, 0, 'XYZ'));
+    this.camera.quaternion.multiply(cameraRecoil);
+    // World zoom follows the viewmodel's own eased ADS blend so the sight and
+    // the world arrive together.
+    const targetFov = THREE.MathUtils.lerp(62, def.adsFov, vm.ads);
+    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, Math.min(1, dt * 20));
+    this.camera.updateProjectionMatrix();
+  }
+
+  // Rain wets the Saltline viewmodel (beads + darker, glossier finish). Eased
+  // so the gun dries off over a few seconds after the rain stops.
+  setWetness(level, dt = 1 / 60) {
+    const target = THREE.MathUtils.clamp(level || 0, 0, 1);
+    this.wetness = THREE.MathUtils.lerp(this.wetness || 0, target, Math.min(1, dt * (target > (this.wetness || 0) ? 0.8 : 0.15)));
+    for (const model of this.models) model.viewmodel?.setWetness(this.wetness);
+  }
+
+  addTracerSegment(def, from, to) {
+    const direction = new THREE.Vector3().subVectors(to, from);
+    const pathLength = THREE.MathUtils.clamp(direction.length(), 1.5, 120);
+    direction.normalize();
+    const streakLength = Math.min(pathLength, 1.35);
+    const velocity = direction.clone().multiplyScalar(Math.max(0, pathLength - streakLength) / def.tracerLife);
+    const streakCenter = from.clone().addScaledVector(direction, streakLength * 0.5);
+    const quaternion = new THREE.Quaternion().setFromUnitVectors(axis, direction);
+    for (const [radius, color, opacity, geometry] of [
+      [def.tracerRadius * 1.6, def.tracerColor, 0.2, this.tracerGlowGeometry],
+      [def.tracerRadius * 0.35, 0xffffff, 0.82, this.tracerCoreGeometry],
+    ]) {
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+      }));
+      mesh.position.copy(streakCenter);
+      mesh.scale.set(radius, streakLength, radius);
+      mesh.quaternion.copy(quaternion);
+      this.scene.add(mesh);
+      this.tracers.push({ mesh, life: def.tracerLife, max: def.tracerLife, velocity: velocity.clone(), baseOpacity: opacity });
+    }
   }
 
   updateTransientEffects(dt) {
