@@ -44,7 +44,7 @@ const cloudFieldGLSL = /* glsl */`
   uniform sampler2D uCloudTex;
   uniform mat3 uCloudMat;
   uniform sampler2D uSurfaceTex;
-  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn, uLiftMax;
+  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn, uLiftMax, uSharp, uHaze, uBillow, uLightLod;
   ${weatherAtlasGLSL}
 
   float sat(float x) { return clamp(x, 0.0, 1.0); }
@@ -133,12 +133,19 @@ const cloudFieldGLSL = /* glsl */`
     if (fine > 0.0) {
       // Erode only where the cloud is already thin; cores stay solid.
       float e = (1.0 - textureLod(uNoise, q / 7300.0, 0.0).g) * 0.34 * (1.0 - d);
-      if (lod > 1) e += (1.0 - textureLod(uNoise, q.zxy / 1900.0 + 0.13, 0.0).g) * 0.26 * near * (1.0 - d);
+      if (lod > 1) {
+        e += (1.0 - textureLod(uNoise, q.zxy / 1900.0 + 0.13, 0.0).g) * 0.26 * near * (1.0 - d);
+        // Cauliflower: sub-kilometre billows carved into the rim up close.
+        e += (1.0 - textureLod(uNoise, q.yzx / 640.0 + 0.71, 0.0).g) * uBillow * near * near * (1.0 - d);
+      }
       e = min(e * fine, 0.9);
       d = sat((d - e) / (1.0 - e));
     }
-    // Thin rims fade out instead of ending in a hard outline.
-    return pow(d, 1.15) * cov * 1.3;
+    // A cumulus goes from clear air to opaque within tens of metres. The
+    // noise ramp spans hundreds, which drew every cloud as a ball of fog:
+    // push the ramp to the outside so the edge is a surface, then let the
+    // thinnest rim still fade instead of ending in a hard outline.
+    return pow(sat((d - uHaze) * uSharp), 1.15) * cov * 1.3;
   }`;
 
 const shadowLookupGLSL = /* glsl */`
@@ -195,7 +202,7 @@ const marchShader = /* glsl */`
   precision highp float;
   #define VIEW_STEPS 8
   uniform sampler2D tSceneDepth;
-  uniform float uFrame, uExtinction, uScatterGain, uShaftStrength;
+  uniform float uFrame, uExtinction, uScatterGain, uShaftStrength, uAltocumulus;
   uniform vec3 uCloudTint;
   uniform vec2 uSubpixel, uMarchTexel;
   ${atmosphereUniformGLSL}
@@ -298,7 +305,19 @@ const marchShader = /* glsl */`
         // Past ~60 km single fibres are sub-pixel and would sparkle; let the
         // sheet dissolve instead (cirrus is a near-sky layer in this pass).
         fibre = mix(fibre, 0.4, smoothstep(50000.0, 180000.0, cirrusT));
-        float a = smoothstep(0.52, 0.86, fibre) * patches * 0.36;
+        // Not every high sheet is fibrous. Elsewhere the same storey breaks
+        // into altocumulus: small rounded cells packed in loose rows, grey in
+        // the middle and bright at the rims from below. A fibrous texture
+        // over the whole sky converged on the vanishing point as streaks.
+        float cellular = smoothstep(0.42, 0.62, textureLod(uNoise, q.yzx / 160000.0 + 0.47, 0.0).b) * uAltocumulus;
+        vec3 cq = q * vec3(1.0 / 2600.0, 1.0 / 2600.0, 1.0 / 4200.0) + warp * 0.15;
+        float cell = textureLod(uNoise, cq, 0.0).r * 0.72 + textureLod(uNoise, cq * 2.3 + 0.31, 0.0).g * 0.28;
+        float puff = smoothstep(0.5, 0.74, cell);
+        // Cells a few kilometres across fall below a pixel past ~80 km.
+        float cellFade = smoothstep(40000.0, 150000.0, cirrusT);
+        puff = mix(puff, 0.3, cellFade);
+        float a = mix(smoothstep(0.52, 0.86, fibre) * 0.36, puff * 0.62, cellular) * patches;
+        float cellThick = cellular * smoothstep(0.62, 0.95, cell) * (1.0 - cellFade);
         // A thin sheet thickens toward the horizon with the slant path.
         float slant = max(abs(dot(rd, p / length(p))), 0.16);
         cirrusA = 1.0 - pow(1.0 - a, 1.0 / slant);
@@ -308,6 +327,8 @@ const marchShader = /* glsl */`
         cirrusL = (irradiance * sunAt(p, sunDirection) * ecl * mix(hgPhase(mu, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
           + irradiance1 * sunAt(p, sunDirection1) * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0) * mix(hgPhase(mu1, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
           + irradiance * vec3(0.045, 0.062, 0.095) * (0.25 + 0.75 * day)) * uCloudTint;
+        // From below, a cell's thick middle passes less of the sunlit top.
+        if (!cirrusFront) cirrusL *= 1.0 - 0.45 * cellThick * (1.0 - smoothstep(0.7, 0.97, mu));
       }
     }
 
@@ -366,7 +387,13 @@ const marchShader = /* glsl */`
             // enough for a tower to shade the cumulus beside it.
             float tau = 0.0, ls = 300.0;
             vec3 pl = p;
-            for (int j = 0; j < 5; j++) { pl += sunDirection * ls; tau += cloudDensity(pl, cov, 0, 0.0, weather.y) * ls; ls *= 1.9; }
+            // The first step sees the same billows the view does, so each one
+            // shades the next instead of the whole cloud lighting as a blob.
+            for (int j = 0; j < 5; j++) {
+              pl += sunDirection * ls;
+              tau += cloudDensity(pl, cov, j == 0 && uLightLod > 0.5 ? (near > 0.0 ? 2 : 1) : 0, near, weather.y) * ls;
+              ls *= 1.9;
+            }
             tau *= uExtinction;
             // Multi-scattering octaves: each order loses extinction and
             // anisotropy. Gives silver linings and keeps thick cores from going black.
@@ -462,10 +489,10 @@ const resolveShader = /* glsl */`
   precision highp float;
   uniform sampler2D tCurrent, tCurrentAux, tHistory, tSceneDepth;
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal, uPrevProjection;
-  uniform mat3 uPrevLocalToView;
-  uniform vec3 uCameraDelta, uCameraLocal;
+  uniform mat3 uPrevLocalToView, uDeckDelta;
+  uniform vec3 uCameraDelta, uDeckCameraDelta, uCameraLocal;
   uniform vec2 uCloudTexel, uSubpixel;
-  uniform float uHistoryWeight, uCurrentWeight, uSettling, uCameraFar, uShellTop;
+  uniform float uHistoryWeight, uCurrentWeight, uSettling, uDeckMoving, uCameraFar, uShellTop, uShellBase;
   varying vec2 vUv;
   float surfaceDistance, cloudAbove;
   ivec2 maxCell;
@@ -509,8 +536,27 @@ const resolveShader = /* glsl */`
     // Clear sky reprojects as a far point so the history follows rotation.
     float km = texelFetch(tCurrentAux, cell, 0).z;
     float distance = km > 0.0 ? km * 1000.0 : 150000.0;
-    // The camera offset is formed on the CPU in double precision.
-    vec3 previousView = uPrevLocalToView * (uCameraDelta + rd * distance);
+    // Where this frame saw no cloud but the ray crosses the deck, whatever the
+    // history holds there is cloud that just drifted off: follow it at the
+    // deck's middle so it leaves rather than fading out as a trail.
+    bool onDeck = km > 0.0;
+    if (!onDeck) {
+      float mid = 0.5 * (uShellBase + uShellTop);
+      float b = dot(uCameraLocal, rd), r0 = length(uCameraLocal);
+      float h = b * b - (r0 - mid) * (r0 + mid);
+      if (h > 0.0) {
+        h = sqrt(h);
+        float t = r0 > mid ? -b - h : -b + h;
+        if (t > 0.0) { distance = t; onDeck = true; }
+      }
+    }
+    // The camera offset is formed on the CPU in double precision. A cloud
+    // point also rode the deck's rotation since last frame: at the game's
+    // accelerated clock that is several texels a frame, and reprojecting it
+    // as fixed ground dragged every cloud into a long streak.
+    vec3 previousView = onDeck
+      ? uPrevLocalToView * (uDeckCameraDelta + uDeckDelta * (rd * distance))
+      : uPrevLocalToView * (uCameraDelta + rd * distance);
     vec4 clip = uPrevProjection * vec4(previousView, 1.0);
     vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
     if (!(clip.w > 0.0 && uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0)) { gl_FragColor = spatial; return; }
@@ -522,7 +568,9 @@ const resolveShader = /* glsl */`
     // A held view reprojects exactly, and there the clamp would only erase
     // sub-texel cloud that the shifted grid sees in one phase of four, so it
     // applies while the view moves and for a few frames after it settles.
-    float clampAmount = max(smoothstep(0.05, 0.3, motion), uSettling);
+    // Drifting clouds also grow and dissolve; while the deck moves, keep half
+    // the clamp so a cloud that thinned away does not linger in the history.
+    float clampAmount = max(max(smoothstep(0.05, 0.3, motion), uSettling), uDeckMoving * 0.5);
     vec4 lo = nearest, hi = nearest;
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
       vec4 n = maskedTexel(cell + ivec2(x, y));
@@ -642,6 +690,7 @@ export class LiteCloudPass extends Pass {
     this.previousPlanet = null;
     this.previousSun = new THREE.Vector3();
     this.previousLocalToView = new THREE.Matrix3();
+    this.previousDeck = new THREE.Matrix3();
     this.settleFrames = 0;
 
     const air = atmospherePass.material.uniforms;
@@ -650,6 +699,11 @@ export class LiteCloudPass extends Pass {
       uCloudTex: { value: null },
       uCloudMat: { value: new THREE.Matrix3() },
       uSynoptic: { value: 0 },
+      // Density contrast, rim billows, detailed first light step (see cloudDensity).
+      uSharp: { value: 5 },
+      uHaze: { value: 0.05 },
+      uBillow: { value: 0.4 },
+      uLightLod: { value: 1 },
       uShellBase: { value: 1 },
       uShellTop: { value: 2 },
       uShellDepth: { value: 7600 },
@@ -667,7 +721,7 @@ export class LiteCloudPass extends Pass {
       uShadowExtent: { value: 1 },
       uShadowOn: { value: 0 },
     };
-    const extinction = { value: 0.0026 };
+    const extinction = { value: 0.005 };
     const subpixel = { value: new THREE.Vector2() };
     const marchTexel = { value: new THREE.Vector2(1, 1) };
     this.subpixelIndex = 0;
@@ -685,6 +739,7 @@ export class LiteCloudPass extends Pass {
         // really has; this gain restores a bright (albedo ~0.8) sunlit deck
         // against Lambert surfaces lit by the same irradiance.
         uScatterGain: { value: 3.6 },
+        uAltocumulus: { value: 1 },
         uShaftStrength: { value: 0.9 },
         uCloudTint: { value: new THREE.Color(1, 1, 1) },
         uSubpixel: subpixel,
@@ -728,15 +783,19 @@ export class LiteCloudPass extends Pass {
       uniforms: {
         tCurrent: { value: this.target.textures[0] }, tCurrentAux: { value: this.target.textures[1] },
         tHistory: { value: null }, tSceneDepth: { value: null },
-        uCameraLocal: air.uCameraLocal, uCameraFar: air.uCameraFar, uShellTop: field.uShellTop,
+        uCameraLocal: air.uCameraLocal, uCameraFar: air.uCameraFar,
+        uShellTop: field.uShellTop, uShellBase: field.uShellBase,
         uInvProjection: air.uInvProjection, uCameraWorld: air.uCameraWorld, uWorldToLocal: air.uWorldToLocal,
         uPrevProjection: { value: new THREE.Matrix4() },
         uPrevLocalToView: { value: new THREE.Matrix3() },
         uCameraDelta: { value: new THREE.Vector3() },
+        uDeckDelta: { value: new THREE.Matrix3() },
+        uDeckCameraDelta: { value: new THREE.Vector3() },
         uCloudTexel: marchTexel,
         uSubpixel: subpixel,
         uHistoryWeight: { value: 0 },
         uSettling: { value: 1 },
+        uDeckMoving: { value: 0 },
         // Exact samples arrive once per four frames on the 2x history; at
         // ~0.22 each, about twenty frames average the step jitter away.
         uCurrentWeight: { value: 0.22 },
@@ -881,6 +940,19 @@ export class LiteCloudPass extends Pass {
     const r = this.resolveMaterial.uniforms;
     const cameraLocal = u.uCameraLocal.value;
     r.uCameraDelta.value.subVectors(cameraLocal, this.previousCamera);
+    // Deck motion since last frame: previous = prevDeck^-1 * deck (rotations).
+    const deck = u.uCloudMat.value;
+    r.uDeckDelta.value.copy(this.previousDeck).transpose().multiply(deck);
+    r.uDeckCameraDelta.value.copy(cameraLocal).applyMatrix3(r.uDeckDelta.value).sub(this.previousCamera);
+    // Metres the deck slid at the planet's surface since last frame.
+    const spin = Math.acos(THREE.MathUtils.clamp((r.uDeckDelta.value.elements[0] + r.uDeckDelta.value.elements[4]
+      + r.uDeckDelta.value.elements[8] - 1) / 2, -1, 1));
+    r.uDeckMoving.value = THREE.MathUtils.smoothstep(spin * planet.R, 0.5, 3);
+    // A held view over a held deck can average longer: the sharp cloud rims
+    // otherwise shimmer with the march's per-frame step jitter.
+    const held = this.settleFrames === 0 && r.uDeckMoving.value < 0.5;
+    r.uCurrentWeight.value = ratio === 2 ? (held ? 0.1 : 0.22) : 0.1;
+    this.previousDeck.copy(deck);
     // A teleport, a body change or a resize starts the history over.
     const continuous = this.temporalEnabled && this.historyValid && planet === this.previousPlanet
       && r.uCameraDelta.value.length() < 20000
@@ -897,7 +969,6 @@ export class LiteCloudPass extends Pass {
     this.settleFrames = moved ? 8 : Math.max(0, this.settleFrames - 1);
     r.uSettling.value = this.settleFrames > 0 ? 1 : 0;
     this.previousLocalToView.copy(_rotation);
-    r.uCurrentWeight.value = ratio === 2 ? 0.22 : 0.1;
     const read = this.history[this.historyIndex], write = this.history[1 - this.historyIndex];
     r.tHistory.value = read.texture;
     r.tSceneDepth.value = this.atmospherePass.sceneDepthTexture || readBuffer.depthTexture || null;
