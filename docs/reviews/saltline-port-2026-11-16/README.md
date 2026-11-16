@@ -41,3 +41,14 @@
 - `tools/pac9viewmodeltest.js --gpu`：16/16 通过，新增 6 项音效播放计数。
 - `test:smoke` 通过；`renderframepacinggputest` 通过（瞄准镜辅助渲染约定）。
 - `npm test` 仍然只有宇宙锁失败。
+
+## 第三轮（同日）：材质库
+
+- 搬入 Saltline 材质库（`src/saltline/materials.js`）：27 套 GPU 程序纹理、48 种命名材质，共用的着色器补丁负责三平面投影、宏观色斑、积灰和雨湿。没有图片文件。
+- PAC-9 的手套（`glove_fabric`）和黄铜（`brass`）改用正式材质，雨湿通过 `mats.uniforms.wet` 和武器同步。
+- 提取工具新增 `--effects`：每套纹理的烘焙着色器是用 `Tn.<名称> = …` 这样的副作用语句注册的，不属于声明，原来的依赖闭包带不出来。
+- 陈列页 `tools/saltline/material-gallery.html`。截图 `materials-dry.png` / `materials-wet.png`，换弹时手套近景见 `pac9-gloves-material.png`。
+
+开销：游戏冷启动时烘焙两套纹理约 428 ms（整个冷启动约 30 s），热启动约 18 ms，显存约 5 MB。全部 29 套冷启动烘焙要约 18 s，热启动约 0.2 s，所以只按需烘焙。
+
+验证：`pac9viewmodeltest --gpu` 16/16 通过；`test:smoke` 通过；`npm test` 仍然只有宇宙锁失败。

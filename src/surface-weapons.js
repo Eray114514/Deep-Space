@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { WeaponLighting } from './weapon-lighting.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 import { createPac9Viewmodel, PAC9_ADS_FOV, PAC9_VIEW_FOV, PAC9_SPEC } from './saltline/pac9-viewmodel.js';
+import { createSaltlineMaterials } from './saltline/materials.js';
+
+// Triplanar scale per library material, as Saltline dressed the PAC-9.
+const VIEWMODEL_MATERIAL_SCALE = { anodized_black: 2, gunmetal: 2, brass: 4, glove_fabric: 3, rubber: 4 };
 
 // First-person surface weapons. Every entry is a full viewmodel (geometry,
 // gloved hands, keyframed reload, spring recoil) driven by its own controller;
@@ -27,7 +31,7 @@ const BASE_FOV = 62;
 
 export class SurfaceWeapons {
   // onEvent(type, data): 'weapon:fire' | 'weapon:reload' {phase} | 'weapon:dry'
-  constructor(scene, camera, dom, { canUse, onChange, onShot, onEvent }) {
+  constructor(scene, camera, dom, { canUse, onChange, onShot, onEvent, renderer = null }) {
     this.scene = scene;
     this.camera = camera;
     this.canUse = canUse;
@@ -76,7 +80,18 @@ export class SurfaceWeapons {
     this.viewCamera = new THREE.PerspectiveCamera(SURFACE_WEAPONS[0].viewFov, camera.aspect, 0.01, 50);
     this.viewCamera.name = 'weapon-view-camera';
     camera.add(this.viewCamera);
+    // Saltline's GPU-baked material library (glove fabric, brass…). Without a
+    // renderer (Node tests) the viewmodel falls back to plain base colours.
+    this.materials = null;
+    if (renderer) {
+      try { this.materials = createSaltlineMaterials({ renderer, params: { tex: 1024, wet: 0 } }); }
+      catch (error) { console.warn('[weapons] material library unavailable', error); }
+    }
     this.models = SURFACE_WEAPONS.map((def) => this.createViewmodel(def));
+    if (this.materials) {
+      const st = this.materials.stats();
+      console.info(`[weapons] Saltline materials: ${st.sets} texture sets baked in ${st.genMs} ms (${st.textureMB} MB)`);
+    }
     this.models[0].group.visible = true;
     this.lighting.register(this.rig);
     camera.add(this.rig);
@@ -130,6 +145,7 @@ export class SurfaceWeapons {
     const viewmodel = def.create({
       camera: this.camera,
       viewCamera: this.viewCamera,
+      material: (name) => this.materials?.get(name, { triplanar: true, vertexColors: true, scale: VIEWMODEL_MATERIAL_SCALE[name] || 1 }) || null,
       emit: (type, data) => {
         if (type === 'weapon:fire') this.onShot?.(def);
         this.onEvent?.(type, data, def);
@@ -260,6 +276,7 @@ export class SurfaceWeapons {
     const target = THREE.MathUtils.clamp(level || 0, 0, 1);
     this.wetness = THREE.MathUtils.lerp(this.wetness, target, Math.min(1, dt * (target > this.wetness ? 0.8 : 0.15)));
     for (const model of this.models) model.viewmodel.setWetness(this.wetness);
+    if (this.materials) this.materials.uniforms.wet.value = this.wetness;
   }
 
   updateLighting(radiance, environment = {}, worldUp = null) {

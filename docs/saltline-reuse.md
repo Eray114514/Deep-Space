@@ -24,7 +24,7 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 使用注意：
 - `--rename` 用 JSON 把顶层符号改成可读名，示例见 `tools/saltline/maps/pac9.json`。函数内部的局部变量名仍是生成名。几何构建函数内部的这些名字当数据看待；控制逻辑才需要手工改写。
 - `sa` 是包里内联的 `mergeGeometries`。用 `--stop sa` 跳过它，改从 `three/addons/utils/BufferGeometryUtils.js` 导入。
-- 闭包只跟随声明，不包含顶层的副作用调用，比如道具注册 `J3(_i)`。这类调用要单独提取它们调用的函数。
+- 闭包只跟随声明，不包含顶层的副作用语句，比如材质烘焙着色器的注册 `Tn.asphalt = …` 和道具注册 `J3(_i)`。提取时用 `--effects Tn` 这样的参数，把引用该变量的副作用语句和它们的依赖一起带出来。
 - 第 332 号语句（`oi, Mn, en, Pi, Pr…`）是 Saltline 的场景常量：太阳方向、天空色、玩家尺寸和画质档。提取物引用这些常量时，改成本项目的值或模块常量（例子见 `pac9-viewmodel.js` 的 `LENS_SUN` / `LENS_SKY`）。
 - 汉化是直接打在压缩包上的，以后如果拿到 Saltline 的新版本，要重新汉化。
 
@@ -45,6 +45,7 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 | GPU 雨与地面溅水 | `Nb` 及着色器 `kR/FR/UR/NR` | `src/saltline/rain.js`，由 `weather-effects.js` 调用 | 12k 个实例化面片；雨场固定在世界中（不跟着玩家走）；按像素宽度控制线宽；太阳前向散射光照；溅水按 7×7 地形高度网格贴地。改成了球面切平面坐标系，并加了对数深度。`?rain=0..1` 可强制下雨，`?rainGain=` 调亮度 |
 | 武器雨湿 | `Wv`（`uRain`） | `SurfaceWeapons.setWetness` | 下雨时枪面出现水珠、颜色变深、粗糙度降低，雨停后数秒内变干 |
 | 合成音效库（全部 57 种，包括枪声、换弹、弹壳、命中、脚步、雨、风、雷、无人机旋翼、机器狗伺服、混响冲激响应、配乐片段） | 渲染入口 `r_` 与生成器表 `Go`（第 765 号） | `src/saltline/sfx-generators.js`（生成代码），播放器为 `src/saltline/sfx.js` | 第二轮（2026-11-16）接入：PAC-9 的开枪（含户外回声尾音）、弹壳落地、拔弹匣、插弹匣、拉枪栓、空仓击发；步行时的雨声和闪电后的雷声。播放器在空闲时预渲染，各音效有变体轮换和并发上限。还没接入的音效（命中、脚步、无人机和机器狗、风、海、配乐）也都在库里，按名称调用 `audio.sfx.play(名称)` 即可；`node tools/saltline/render-sfx.mjs --list` 列出全部名称，加 `<名称> --out x.wav` 可导出试听 |
+| 材质库：27 套程序纹理（混凝土、油漆、镀锌/拉丝/锈蚀钢、枪械阳极、聚合物、布料、木、轮胎、玻璃等）和 48 种命名材质 | 材质模块 `qg`（`Gg`）；每套纹理的烘焙着色器由副作用语句 `Tn.<名称> = …` 注册 | `src/saltline/materials.js` | 第三轮（2026-11-16）接入：首次用到某套纹理时，由 GPU 一次烘焙出反照率、ORM（AO/粗糙度/金属度）和法线三张图，不需要图片文件。共用的着色器补丁负责三平面投影、宏观色斑、积灰和雨湿（`mats.uniforms.wet`）。PAC-9 的手套和黄铜已改用 `glove_fabric` / `brass`。全部材质的陈列页：`npm run dev` 后打开 `/tools/saltline/material-gallery.html`（加 `?wet=1` 看湿润效果）。冷启动时烘焙两套纹理约 430 ms，命中着色器缓存后约 20 ms；29 套全部烘焙的冷启动约 18 s，所以只能按需烘焙 |
 
 验收工具：`tools/pac9viewmodeltest.js`、`tools/rainvisualtest.js`（加 `--gpu --out <目录>` 可截图）。
 
@@ -52,7 +53,6 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 
 | 内容 | 来源符号 | 闭包规模 | 搬法与注意事项 |
 |---|---|---|---|
-| 材质库：油漆剥落、锈迹、划痕、湿润，GPU 烘焙纹理 | 材质模块 `qg`（`Gg`、`h3`），材质表在第 410 号语句（`Nt(...)`） | 14 条，约 40 KB，另有大段着色器 | 道具和敌人依赖 `i.mats.get(name)`，必须先搬这个。也可以给 HALCYON 船体、地表据点做旧化 |
 | 机器狗"猎犬"（hound） | 敌人模块 `ex`（`Em`）；`Q_`（第 838 号，约 10 KB，推测是猎犬构建）+ 调参 `Kv` | `Em` 共 31 条，约 58 KB | 零件挂在骨骼上（`pm` 刚性蒙皮）。步态与伺服动画在 `iM` 里 |
 | 无人机"海鸥"（gull） | `Z_`（第 833 号）/ `j_`（第 836 号）+ 调参 `Zv` | 同上 | 四涵道旋翼，带探照灯 |
 | **敌人 AI**（用户要求记录） | `iM`（第 841 号，16 KB）+ 调参 `Ui`（`TUNE`：视野 45 m、视锥 200°、丢失目标 4 s、搜索 8 s、听觉半径 45 m、同时进攻配额 2/3 个、间隔 1.25 s、暴露度升降）；射击接口 `playerShot` 在 `zv` | 在 `Em` 闭包内 | 有战斗玩法时再搬。机制：视锥 + 听觉警戒（枪声会惊动 `hearRadius` 内的敌人）；巡逻、交战、搜索状态机；用"进攻令牌"限制同时开火的敌人数量；波次与对象池（`poolGulls 10`、`poolHounds 8`） |
@@ -64,7 +64,6 @@ node tools/saltline/extract.mjs <符号> --stop sa --rename tools/saltline/maps/
 
 ## 已知余项（本轮未做）
 
-- PAC-9 的手套和黄铜目前用纯色基底，只保留 Saltline 的顶点色乘数，所以比原版略平。搬完材质库后，换成 `glove_fabric` / `brass` 正式材质。
 - 红点镜反光使用的太阳和天空颜色是 Saltline 港口的常量（`LENS_SUN` / `LENS_SKY`），还没接本项目的实时太阳方向和天空色。
 - 地表射击没有命中模型，曳光弹仍飞向准星下的地形距离。
 - 2026-11-16 起只保留 PAC-9：低模的 CX-5、M77、HLX-3（采矿激光本来也没有玩法）连同 `weapon-models.js` 和 `hlx-3-prospector.glb` 已删除。新武器至少要达到 PAC-9 的标准：带手、关键帧动作、合成音效。瞄准镜的离屏渲染约定（`renderScopeView`）保留了下来，供将来的带镜型号使用。

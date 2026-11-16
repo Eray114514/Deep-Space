@@ -1016,6 +1016,7 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
   },
   // gunshot, reload foley and dry click are Saltline's synthesized sounds
   onEvent: (type, data) => audio.weaponEvent(type, data),
+  renderer,
 });
 // Hands and optics sit closer than the world camera's 0.12 m near plane, so
 // the weapon layer renders through the rig's own view camera.

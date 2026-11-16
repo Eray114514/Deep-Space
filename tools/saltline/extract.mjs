@@ -14,6 +14,8 @@
 //   node tools/saltline/extract.mjs --find <text>             top-level statements containing text
 //   node tools/saltline/extract.mjs <name...> [--out file]    extract symbols + dependencies
 //        [--stop name,name]   treat these names as external (do not pull them in)
+//        [--effects name,…]   also pull top-level side-effect statements that
+//                             reference these names (registries like Tn.x = …)
 //        [--deps]             print the dependency list only
 //
 // The bundle path defaults to the local Saltline checkout; override with
@@ -31,11 +33,12 @@ const BUNDLE = process.env.SALTLINE_BUNDLE || 'D:/Eray0/下载/Saltline/public/e
 const ADDON_ALIASES = {};
 
 function parseArgs(argv) {
-  const out = { names: [], stop: new Set(), outFile: null, deps: false, modules: false, find: null, rename: new Map() };
+  const out = { names: [], stop: new Set(), outFile: null, deps: false, modules: false, find: null, rename: new Map(), effects: new Set() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--out') out.outFile = argv[++i];
     else if (a === '--stop') argv[++i].split(',').filter(Boolean).forEach((n) => out.stop.add(n));
+    else if (a === '--effects') argv[++i].split(',').filter(Boolean).forEach((n) => out.effects.add(n));
     else if (a === '--deps') out.deps = true;
     else if (a === '--rename') {
       const spec = argv[++i];
@@ -288,7 +291,7 @@ function loadBundle() {
   return { src, stmts, namespaces, threeAlias, declIndex, threeEnd, freeOf };
 }
 
-function closure(b, roots, stop) {
+function closure(b, roots, stop, effects = new Set()) {
   const want = new Set();
   const external = new Map(); // three alias -> name
   const unresolvedThree = new Set();
@@ -298,7 +301,7 @@ function closure(b, roots, stop) {
     if (!b.declIndex.has(r)) throw new Error(`no top-level declaration named "${r}"`);
     queue.push(b.declIndex.get(r));
   }
-  while (queue.length) {
+  const drain = () => { while (queue.length) {
     const i = queue.pop();
     if (want.has(i)) continue;
     want.add(i);
@@ -310,6 +313,22 @@ function closure(b, roots, stop) {
       if (j === undefined) { globals.add(name); continue; }
       if (j <= b.threeEnd) { unresolvedThree.add(name); continue; }
       queue.push(j);
+    }
+  } };
+  drain();
+  // Side-effect statements (e.g. `Tn.asphalt = ...`, `J3(_i)`) that touch an
+  // --effects name are not declarations, so the closure never reaches them.
+  if (effects.size) {
+    let added = true;
+    while (added) {
+      added = false;
+      b.stmts.forEach((st, i) => {
+        if (want.has(i) || st.type !== 'ExpressionStatement') return;
+        for (const name of b.freeOf(i).keys()) {
+          if (effects.has(name)) { queue.push(i); added = true; break; }
+        }
+      });
+      drain();
     }
   }
   return { want: [...want].sort((a, c) => a - c), external, unresolvedThree, globals };
@@ -379,7 +398,7 @@ if (args.find) {
 
 if (!args.names.length) { console.error('nothing to extract; see header for usage'); process.exit(1); }
 
-const c = closure(b, args.names, args.stop);
+const c = closure(b, args.names, args.stop, args.effects);
 const report = [
   `// roots: ${args.names.join(', ')}`,
   `// statements: ${c.want.length}`,
