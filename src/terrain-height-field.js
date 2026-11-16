@@ -96,7 +96,9 @@ export class TerrainHeightField {
     const above = raw - this.landDatum;
     let h = above > 0
       ? this.landDatum + above * (this.landRise + 0.10 * smoothstep(0, this.contAmp * 0.7, above))
-      : raw;
+      // the shoreface drops off about twice as fast for the first few hundred
+      // metres: a shelf, not a turquoise apron kilometres wide around every coast
+      : raw - this.contAmp * 0.07 * (1 - Math.exp(above / (this.contAmp * 0.06)));
     // detail thins out under deep water: sea floors are smooth sediment
     const dry = smoothstep(-0.05 * this.contAmp, 0.012 * this.contAmp, above);
 

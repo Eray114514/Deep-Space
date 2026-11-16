@@ -432,6 +432,20 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // discontinuous source fields; those fields are continuous now.
           float vertexFieldFade = 1.0;
           float viewDist = length(vViewPosition);
+          // From a full-disk orbit one terrain cell is several kilometres and
+          // the mesh cannot carry the coast's bays and islets, so the shore
+          // came out as the smooth outline of the coarsest octaves. Roughen
+          // the height the palette reads (never the geometry) near the
+          // waterline, and hand back to the real surface on approach.
+          float coastFar = smoothstep(260000.0, 900000.0, viewDist) * uHasSea;
+          if (coastFar > 0.001) {
+            vec3 cq = vLocalPos / uPlanetR;
+            float cn = (terrainField(cq * 97.0 + 1.3) - 0.5)
+              + (terrainField(cq.yzx * 223.0 + 4.1) - 0.5) * 0.62
+              + (terrainField(cq.zxy * 541.0 + 8.7) - 0.5) * 0.36;
+            float band = 1.0 - smoothstep(0.0, uTSpan * 0.03, abs(hgt - uT0));
+            hgt += cn * uTSpan * 0.011 * coastFar * band;
+          }
           vec3 base;
           if (uHasSea > 0.5 && hgt < uT0) {
             float t = clamp(1.0 - (uT0 - hgt) / uSeaDepthSpan, 0.0, 1.0);
@@ -474,6 +488,10 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               dot(climateP, vec3(-0.8, 0.60, 0.0)), dot(climateP, vec3(0.48, 0.64, 0.60))) * 11.0 + moistBroad * 2.0);
             float moistFine = terrainField(climateP.yzx * 47.0 + moistMid * 1.7);
             float moisture = moistBroad * 0.5 + moistMid * 0.32 + moistFine * 0.18;
+            // circulation: a dry belt either side of the equator, wet tropics
+            float sinLat = abs(nd.y);
+            float dryBelt = exp(-pow((sinLat - 0.42) / 0.13, 2.0));
+            moisture += 0.1 * exp(-pow(sinLat / 0.16, 2.0)) - 0.2 * dryBelt;
             float standField = terrainField(vLocalPos.zxy * 0.00052) * 0.6
               + terrainField(vLocalPos * 0.0031 + 3.7) * 0.4;
             float chill = smoothstep(0.55, 0.92, abs(nd.y) + t * 0.5);
@@ -482,12 +500,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               float dryW = (1.0 - smoothstep(0.3, 0.44, moisture)) * (1.0 - forestW);
               vec3 steppe = mix(uLandC[0], base, 0.55) * vec3(1.0, 0.97, 0.88);
               base = mix(base, steppe, dryW * 0.7);
+              // the driest country is bare: pale sand and ochre rock
+              float aridW = (1.0 - smoothstep(0.14, 0.27, moisture)) * (1.0 - forestW);
+              base = mix(base, uLandC[0] * vec3(1.02, 0.93, 0.78), aridW * 0.8);
               vec3 tundra = mix(uRockC, base, 0.35) * vec3(0.96, 0.94, 0.9);
               base = mix(base, tundra, chill * 0.7);
               forestW = smoothstep(0.3, 0.62, forestW * 0.75 + (moisture - 0.5) * 0.9
                 + (standField - 0.5) * 0.8) * (1.0 - chill * 0.8)
                 * smoothstep(0.02, 0.07, t) * (1.0 - smoothstep(0.42, 0.56, t));
               base *= 0.9 + 0.2 * terrainField(vLocalPos.yxz * 0.00017 + 9.1);
+              // wet country is deeper and bluer-green, dry country warmer
+              float wetW = smoothstep(0.46, 0.7, moisture);
+              base = mix(base, base * vec3(0.72, 0.9, 0.78), wetW * 0.6);
             } else {
               base *= 0.86 + 0.28 * moisture;
               forestW *= 0.85;
@@ -654,7 +678,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v19-climate-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v21-climate-'+hasSurfaceCloudMedium(planet);
   return prepareSurfaceAtmosphere(material, planet);
 }
 

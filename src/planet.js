@@ -458,7 +458,7 @@ export class Planet extends TerrainHeightField {
     const p = this.pal;
 
     if (this.hasLiquid && h < this.seaLevel && this.liquid !== 'lava') {
-      const depth = clamp((this.seaLevel - h) / (this.hAmp * 0.85), 0, 1);
+      const depth = clamp((this.seaLevel - h) / (this.hAmp * 0.04), 0, 1);
       sampleStops(p.sea, 1 - depth, out);
     } else {
       const tl = this.landT(h);
@@ -676,7 +676,8 @@ export class Planet extends TerrainHeightField {
       t0: this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85,
       tSpan: this.hAmp * 1.15 - (this.hasLiquid ? this.seaLevel : -this.contAmp * 0.85),
       tCurve: this.landTCurve,
-      seaDepthSpan: this.hAmp * 0.85,
+      // shelves are a few hundred metres deep; the open ocean is all "deep"
+      seaDepthSpan: this.hAmp * 0.04,
       forest: p.forest || black,
       blotch: p.blotch || black,
       stripeA: p.stripes ? p.stripes[0].c : black,

@@ -48,7 +48,7 @@ export function placeOceanTidalEvent(event, { seed, radius, gravity, depthAt }) 
 // Ocean identity is independent of the terrain RNG stream and of the camera.
 // Values describe optical composition and wave climate, not renderer presets.
 const COMPOSITIONS = {
-  'temperate-blue': { absorption: [0.16, 0.034, 0.016], scatter: [0.006, 0.036, 0.065], life: 0.35 },
+  'temperate-blue': { absorption: [0.16, 0.034, 0.016], scatter: [0.005, 0.027, 0.068], life: 0.35 },
   'jade-shelf': { absorption: [0.23, 0.025, 0.065], scatter: [0.015, 0.075, 0.048], life: 0.65 },
   'mineral-violet': { absorption: [0.042, 0.19, 0.026], scatter: [0.052, 0.015, 0.090], life: 0.1 },
   'copper-brine': { absorption: [0.025, 0.070, 0.22], scatter: [0.090, 0.039, 0.010], life: 0.04 },
