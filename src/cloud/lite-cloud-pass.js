@@ -26,6 +26,7 @@ const SHADOW_SIZE = 1024;
 const _matrix = new THREE.Matrix4();
 const _quaternion = new THREE.Quaternion();
 const _sun = new THREE.Vector3();
+const _rotation = new THREE.Matrix3();
 const _ground = new THREE.Vector3();
 
 // Quarter-texel offsets of the march grid; each lands on one pixel of the 2x history.
@@ -449,26 +450,60 @@ const marchShader = /* glsl */`
 // every history pixel receives an exact sample once in four frames and keeps
 // a reprojected, neighbourhood-clamped value in between. Static and slowly
 // moving views converge to the history's resolution instead of the march's.
+// Cloud in front of a surface at the given distance, for one low-res texel:
+// opacity grows from the texel's cloud front over its optical depth, with at
+// least ~600 m of fog so a ridge never cuts a cloud along a hard line.
+const frontCoverageGLSL = /* glsl */`
+  float frontCoverage(vec3 aux, float distance) {
+    return distance <= aux.x ? 0.0 : 1.0 - exp(-2.2 * (distance - aux.x) / max(aux.z - aux.x, 600.0));
+  }`;
+
 const resolveShader = /* glsl */`
   precision highp float;
-  uniform sampler2D tCurrent, tCurrentAux, tHistory;
+  uniform sampler2D tCurrent, tCurrentAux, tHistory, tSceneDepth;
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal, uPrevProjection;
   uniform mat3 uPrevLocalToView;
-  uniform vec3 uCameraDelta;
+  uniform vec3 uCameraDelta, uCameraLocal;
   uniform vec2 uCloudTexel, uSubpixel;
-  uniform float uHistoryWeight, uCurrentWeight;
+  uniform float uHistoryWeight, uCurrentWeight, uSettling, uCameraFar, uShellTop;
   varying vec2 vUv;
+  float surfaceDistance, cloudAbove;
+  ivec2 maxCell;
+  ${frontCoverageGLSL}
+  // One march texel with the part of its cloud that lies behind this pixel's
+  // opaque surface removed. Masking here, per fine pixel and always with that
+  // pixel's own grid phase, keeps the depth order out of the per-frame
+  // shifted grid: in the composite it switched thin cloud over high ground on
+  // and off every frame.
+  vec4 maskedTexel(ivec2 cell) {
+    cell = clamp(cell, ivec2(0), maxCell);
+    vec4 cloud = texelFetch(tCurrent, cell, 0);
+    if (surfaceDistance < 0.0) return cloud;
+    vec3 aux = texelFetch(tCurrentAux, cell, 0).xyz;
+    // A texel that met no cloud carries none to mask.
+    float inFront = aux.z > 0.0 ? frontCoverage(aux * 1000.0, surfaceDistance) : cloudAbove;
+    return vec4(cloud.rgb * inFront, 1.0 - (1.0 - cloud.a) * inFront);
+  }
   void main() {
     vec2 size = 1.0 / uCloudTexel;
+    maxCell = ivec2(size) - 1;
     vec2 st = vUv * size - 0.5 - uSubpixel;
     vec2 cellF = clamp(floor(st + 0.5), vec2(0.0), size - 1.0);
     ivec2 cell = ivec2(cellF);
     vec2 off = st - cellF;
-    vec4 nearest = texelFetch(tCurrent, cell, 0);
-    vec4 spatial = texture2D(tCurrent, vUv - uSubpixel * uCloudTexel);
-    if (uHistoryWeight <= 0.0) { gl_FragColor = spatial; return; }
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
+    float sceneDepth = texture2D(tSceneDepth, vUv).x;
+    surfaceDistance = sceneDepth < 0.999999
+      ? (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005) : -1.0;
+    // From above the deck every cloud lies in front of the ground.
+    cloudAbove = length(uCameraLocal) > uShellTop ? 1.0 : 0.0;
+    vec4 nearest = maskedTexel(cell);
+    vec2 corner = floor(st), f = st - corner;
+    ivec2 c0 = ivec2(corner);
+    vec4 spatial = mix(mix(maskedTexel(c0), maskedTexel(c0 + ivec2(1, 0)), f.x),
+      mix(maskedTexel(c0 + ivec2(0, 1)), maskedTexel(c0 + ivec2(1, 1)), f.x), f.y);
+    if (uHistoryWeight <= 0.0) { gl_FragColor = spatial; return; }
     vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
     vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
     // Clear sky reprojects as a far point so the history follows rotation.
@@ -484,14 +519,17 @@ const resolveShader = /* glsl */`
     float motion = length((uv - vUv) * size);
     // Keep history inside what the current 3x3 neighbourhood allows: this
     // bounds ghosting when clouds are revealed, relit or the camera cuts.
+    // A held view reprojects exactly, and there the clamp would only erase
+    // sub-texel cloud that the shifted grid sees in one phase of four, so it
+    // applies while the view moves and for a few frames after it settles.
+    float clampAmount = max(smoothstep(0.05, 0.3, motion), uSettling);
     vec4 lo = nearest, hi = nearest;
-    ivec2 maxCell = ivec2(size) - 1;
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-      vec4 n = texelFetch(tCurrent, clamp(cell + ivec2(x, y), ivec2(0), maxCell), 0);
+      vec4 n = maskedTexel(cell + ivec2(x, y));
       lo = min(lo, n); hi = max(hi, n);
     }
     vec4 pad = (hi - lo) * 0.25 + vec4(vec3(0.02), 0.01);
-    history = clamp(history, lo - pad, hi + pad);
+    history = mix(history, clamp(history, lo - pad, hi + pad), clampAmount);
     // This pixel's own sample arrives when the shifted grid lands on it.
     float exact = 1.0 - smoothstep(0.15, 0.4, max(abs(off.x), abs(off.y)));
     // In fast motion only a quarter of the pixels would see a current sample,
@@ -512,18 +550,21 @@ const compositeShader = /* glsl */`
   ${cloudFieldGLSL}
   ${shadowLookupGLSL}
   varying vec2 vUv;
-  // Cloud in front of a surface at the given distance, for one low-res texel:
-  // opacity grows from the texel's cloud front over its optical depth, with
-  // at least ~600 m of fog so a ridge never cuts a cloud along a hard line.
-  float frontCoverage(vec3 aux, float distance) {
-    return distance <= aux.x ? 0.0 : 1.0 - exp(-2.2 * (distance - aux.x) / max(aux.z - aux.x, 600.0));
-  }
   void main() {
     vec4 base = texture2D(tBase, vUv);
     vec4 cloud = texture2D(tCloud, vUv);
+    vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
+    vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
+    vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
     // Distant clouds are sampled by long jittered steps; a small tent filter
-    // there trades invisible detail for a clean horizon.
-    float far = smoothstep(15.0, 70.0, texture2D(tCloudAux, vUv).x);
+    // there trades invisible detail for a clean horizon. The distance is to
+    // the deck itself: the march's own front depth comes from this frame's
+    // shifted grid and toggled the filter along every distant cloud edge.
+    float r0 = length(uCameraLocal);
+    float deck = r0 > uShellTop ? shellHits(uCameraLocal, rd, uShellTop).x
+      : r0 < uShellBase ? shellHits(uCameraLocal, rd, uShellBase).y : 0.0;
+    float far = smoothstep(15000.0, 70000.0, deck);
     if (far > 0.0) {
       vec2 o = uHistTexel * 2.2;
       vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
@@ -533,40 +574,13 @@ const compositeShader = /* glsl */`
     float coverage = 1.0, shade = 1.0;
     float sceneDepth = texture2D(tSceneDepth, vUv).x;
     if (sceneDepth < 0.999999) {
-      // Opaque geometry: keep the fraction of the cloud column in front of it.
-      vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
-      vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
+      // Opaque geometry: the resolve already kept only the cloud in front of
+      // it; here the surface takes the cloud column's shadow.
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
-      // Depth-aware upsample. Each of the four surrounding low-res texels
-      // decides how much of its own cloud lies in front of this surface, and
-      // the results are blended bilinearly. One shared front distance (the
-      // old min of four) switched the whole cloud on or off per texel and drew
-      // the low-res grid as blocks along every ridge and coast.
-      // The depth range is coarse (march resolution, on this frame's shifted
-      // grid); the colour comes from the fine history.
-      vec2 st = vUv / uCloudTexel - 0.5 - uSubpixel;
-      vec2 cell = floor(st), f = st - cell;
-      vec4 ws = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-      // A texel whose ray met no cloud knows nothing about depth order. It
-      // used to vote "behind" and erase the fine history's cloud wherever
-      // this frame's shifted grid happened to miss it: a 4-frame flicker on
-      // every thin edge. Only texels that saw cloud vote.
-      float inFront = 0.0, votes = 0.0;
-      for (int k = 0; k < 4; k++) {
-        vec2 o = vec2(float(k - (k / 2) * 2), float(k / 2));
-        vec2 uv = (cell + o + 0.5 + uSubpixel) * uCloudTexel;
-        vec3 aux = texture2D(tCloudAux, uv).xyz;
-        if (aux.z > 0.0) { inFront += ws[k] * frontCoverage(aux * 1000.0, distance); votes += ws[k]; }
-      }
-      // No vote at all: from above the deck every cloud lies in front of the
-      // ground; from below, keep the surface.
-      inFront = votes > 1e-3 ? inFront / votes : (length(uCameraLocal) > uShellTop ? 1.0 : 0.0);
-      cloud = vec4(cloud.rgb * inFront, 1.0 - (1.0 - cloud.a) * inFront);
       coverage = 1.0;
       if (uShadowOn > 0.5) {
         // Surfaces under the clouds lose their direct sun to the cloud column.
-        vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
-        vec3 p = uCameraLocal + normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz) * distance;
+        vec3 p = uCameraLocal + rd * distance;
         float r = length(p);
         // The base rides over high ground with the same lift the march uses.
         float localBase = uShellBase + (r < uShellBase + uLiftMax + 2600.0 ? weatherAt(p).y : uLiftMax);
@@ -627,6 +641,8 @@ export class LiteCloudPass extends Pass {
     this.previousCamera = new THREE.Vector3();
     this.previousPlanet = null;
     this.previousSun = new THREE.Vector3();
+    this.previousLocalToView = new THREE.Matrix3();
+    this.settleFrames = 0;
 
     const air = atmospherePass.material.uniforms;
     const field = {
@@ -711,7 +727,8 @@ export class LiteCloudPass extends Pass {
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
       uniforms: {
         tCurrent: { value: this.target.textures[0] }, tCurrentAux: { value: this.target.textures[1] },
-        tHistory: { value: null },
+        tHistory: { value: null }, tSceneDepth: { value: null },
+        uCameraLocal: air.uCameraLocal, uCameraFar: air.uCameraFar, uShellTop: field.uShellTop,
         uInvProjection: air.uInvProjection, uCameraWorld: air.uCameraWorld, uWorldToLocal: air.uWorldToLocal,
         uPrevProjection: { value: new THREE.Matrix4() },
         uPrevLocalToView: { value: new THREE.Matrix3() },
@@ -719,6 +736,7 @@ export class LiteCloudPass extends Pass {
         uCloudTexel: marchTexel,
         uSubpixel: subpixel,
         uHistoryWeight: { value: 0 },
+        uSettling: { value: 1 },
         // Exact samples arrive once per four frames on the 2x history; at
         // ~0.22 each, about twenty frames average the step jitter away.
         uCurrentWeight: { value: 0.22 },
@@ -783,7 +801,11 @@ export class LiteCloudPass extends Pass {
 
   #refresh() {
     const planet = this.activePlanet;
-    this.enabled = Boolean(planet && this.visualEnabled && planet.cloudVisualEnabled !== false);
+    const enabled = Boolean(planet && this.visualEnabled && planet.cloudVisualEnabled !== false);
+    // History from before the pass was switched off is stale; a held view no
+    // longer clamps it, so start over instead of fading it out.
+    if (enabled && !this.enabled) this.historyValid = false;
+    this.enabled = enabled;
     // The planet hides its analytic cloud decks while this pass draws them.
     if (planet) planet.liteCloudActive = this.enabled;
   }
@@ -864,9 +886,21 @@ export class LiteCloudPass extends Pass {
       && r.uCameraDelta.value.length() < 20000
       && _sun.copy(u.uSunDirection0.value).normalize().dot(this.previousSun) > 0.99985;
     r.uHistoryWeight.value = continuous ? 1 : 0;
+    // Clamp for two full grid cycles after the view turns by a visible amount
+    // (in march texels) or cuts; translation shows up in the per-pixel motion.
+    _matrix.multiplyMatrices(u.uWorldToLocal.value, u.uCameraWorld.value);
+    _rotation.setFromMatrix4(_matrix).transpose();
+    let turned = 0;
+    for (let i = 0; i < 9; i++) turned = Math.max(turned, Math.abs(_rotation.elements[i] - this.previousLocalToView.elements[i]));
+    const texelsPerRadian = height / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov || 60) / 2));
+    const moved = !continuous || turned * texelsPerRadian > 0.1;
+    this.settleFrames = moved ? 8 : Math.max(0, this.settleFrames - 1);
+    r.uSettling.value = this.settleFrames > 0 ? 1 : 0;
+    this.previousLocalToView.copy(_rotation);
     r.uCurrentWeight.value = ratio === 2 ? 0.22 : 0.1;
     const read = this.history[this.historyIndex], write = this.history[1 - this.historyIndex];
     r.tHistory.value = read.texture;
+    r.tSceneDepth.value = this.atmospherePass.sceneDepthTexture || readBuffer.depthTexture || null;
     renderer.setRenderTarget(write);
     this.resolveQuad.render(renderer);
     this.historyIndex = 1 - this.historyIndex;

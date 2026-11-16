@@ -40,7 +40,11 @@ function quantile(values, q) {
   return values[Math.min(values.length - 1, Math.floor(q * values.length))];
 }
 
-function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
+const LOSS_CELL = 8;
+const LOSS_SMOOTH = 3;
+const LOSS_SEARCH = 0.12;
+
+function shadowStats(referenceBuffer, controlBuffer, shadowBuffer, shadows) {
   const reference = decode(referenceBuffer);
   const control = decode(controlBuffer);
   const shadow = decode(shadowBuffer);
@@ -63,56 +67,84 @@ function shadowStats(referenceBuffer, controlBuffer, shadowBuffer) {
       delta: luma(shadow, pixel) - luma(reference, pixel),
     });
   }
-  // Frame-wide offset, read where the shadow is not: the lit pixels farthest
-  // from the raw shadow centroid. The home system is a binary (one shadow per
-  // star) and the clouds over the disc are eclipsed as well, so the shadows
-  // can cover most of the lit disc; any whole-frame quantile then measured
-  // the shadow itself. A uniform full-frame darkening still moves this
-  // far field as much as the core.
-  let rawWeight = 0, rawX = 0, rawY = 0;
-  for (const sample of stable) {
-    if (sample.delta >= -9) continue;
-    const amount = -sample.delta - 9;
-    rawWeight += amount; rawX += sample.x * amount; rawY += sample.y * amount;
-  }
+  // Frame-wide offset, read where no shadow can be: lit pixels outside every
+  // predicted penumbra. The home primary is angularly large, so its penumbra
+  // reaches far across the disc and a whole-frame quantile (or any field
+  // chosen from the image itself) measured the eclipse rather than a
+  // full-frame dimming.
+  const outside = stable.filter((sample) => sample.lit > 24 && shadows.every(({ point, penumbra }) =>
+    Math.hypot(sample.x - point[0] * reference.width, sample.y - point[1] * reference.height)
+      > penumbra * reference.height * 1.1));
   const deltas = stable.map((sample) => sample.delta);
-  let globalDelta = quantile(deltas.slice(), 0.75);
-  if (rawWeight > 0) {
-    const cx = rawX / rawWeight, cy = rawY / rawWeight;
-    const far = stable.filter((sample) => sample.lit > 24)
-      .map((sample) => ({ delta: sample.delta, r: Math.hypot(sample.x - cx, sample.y - cy) }))
-      .sort((a, b) => b.r - a.r);
-    const field = far.slice(0, Math.max(1, Math.floor(far.length * 0.2)));
-    if (field.length > 100) globalDelta = quantile(field.map((sample) => sample.delta), 0.5);
-  }
+  const globalDelta = quantile(outside.map((sample) => sample.delta), 0.5);
   const coreDelta = quantile(deltas, 0.02);
   let darkened = 0;
   let weight = 0;
   let weightedX = 0;
   let weightedY = 0;
+  const cols = Math.ceil(reference.width / LOSS_CELL);
+  const rows = Math.ceil(reference.height / LOSS_CELL);
+  const lossSum = new Float64Array(cols * rows);
+  const lossCount = new Uint32Array(cols * rows);
   for (const sample of stable) {
     const residual = sample.delta - globalDelta;
+    // Fraction of light lost, not absolute luma: bright land and dark sea
+    // under the same shadow otherwise pull the surface toward the continents.
+    const loss = Math.max(0, -residual) / Math.max(sample.lit, 24);
+    const cell = Math.floor(sample.y / LOSS_CELL) * cols + Math.floor(sample.x / LOSS_CELL);
+    lossSum[cell] += loss;
+    lossCount[cell]++;
     if (residual >= -9) continue;
-    // Weight by the fraction of light lost, not absolute luma: bright land
-    // and dark sea under the same shadow otherwise pull the surface centroid
-    // toward the continents, while the air's even albedo does not.
     const amount = (-residual - 9) / Math.max(sample.lit, 24);
     darkened++;
     weight += amount;
     weightedX += sample.x * amount;
     weightedY += sample.y * amount;
   }
+  const lossMap = new Float64Array(cols * rows);
+  for (let i = 0; i < lossMap.length; i++) lossMap[i] = lossCount[i] ? lossSum[i] / lossCount[i] : 0;
   return {
     globalDelta,
     coreDelta,
-    // Local: the far field moves far less than the shadow core.
-    local: Math.abs(globalDelta) < Math.max(3, 0.12 * Math.abs(coreDelta)),
+    local: outside.length > 2000 && Math.abs(globalDelta) < 3,
+    outsidePixels: outside.length,
+    lossMap: { cols, rows, data: lossMap },
     stableFraction: stable.length / ((x1 - x0) * (y1 - y0)),
     darkenedFraction: darkened / Math.max(1, stable.length),
     centroid: weight > 0
       ? [weightedX / weight / reference.width, weightedY / weight / reference.height]
       : null,
   };
+}
+
+// Where a layer's shadow actually is near one predicted shadow axis: the
+// peak of the box-smoothed loss map within a search window, as a fraction of
+// the frame. Unlike a centroid over the whole frame, the peak does not follow
+// how each layer's brightness spreads the broad stellar penumbra.
+function shadowPeak(lossMap, predicted) {
+  const { cols, rows, data } = lossMap;
+  const smooth = (cx, cy) => {
+    let sum = 0, count = 0;
+    for (let y = cy - LOSS_SMOOTH; y <= cy + LOSS_SMOOTH; y++) {
+      for (let x = cx - LOSS_SMOOTH; x <= cx + LOSS_SMOOTH; x++) {
+        if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+        sum += data[y * cols + x]; count++;
+      }
+    }
+    return count ? sum / count : 0;
+  };
+  const px = Math.round(predicted[0] * cols), py = Math.round(predicted[1] * rows);
+  const reach = Math.round(LOSS_SEARCH * cols);
+  let best = { loss: -1, x: px, y: py };
+  for (let y = py - reach; y <= py + reach; y++) {
+    for (let x = px - reach; x <= px + reach; x++) {
+      if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+      const loss = smooth(x, y);
+      if (loss > best.loss) best = { loss, x, y };
+    }
+  }
+  const peak = [(best.x + 0.5) / cols, (best.y + 0.5) / rows];
+  return { peak, loss: best.loss, error: Math.hypot(peak[0] - predicted[0], peak[1] - predicted[1]) };
 }
 
 function centroidDistance(a, b) {
@@ -206,12 +238,15 @@ async function setMode(mode) {
       planet.cloudMesh2?.material,
       planet.cloudMeshNoctilucent?.material,
     ];
-    setColorWrite(planet.terrainMaterial, nextMode !== 'media');
-    setColorWrite(planet.liquidMat, nextMode !== 'media');
+    const opaque = nextMode !== 'media';
+    setColorWrite(planet.terrainMaterial, opaque);
+    setColorWrite(planet.liquidMat, opaque);
     for (const material of mediaMaterials) {
       setColorWrite(material, nextMode !== 'surface');
     }
     NMS.setAtmosphereVisible(nextMode !== 'surface');
+    // The screen-space cloud pass is participating media too.
+    NMS.setCloudsVisible(nextMode !== 'surface');
   }, mode);
   await page.waitForTimeout(900);
 }
@@ -227,6 +262,62 @@ async function setFixture(offsetRatio) {
     });
   }, offsetRatio);
   await page.waitForTimeout(500);
+}
+
+// Where each star's shadow axis through the fixture meets the ground, and the
+// outer penumbra radius there, in frame fractions (radius in frame heights),
+// from the same camera, star discs and light directions the frame used.
+async function predictShadows() {
+  return page.evaluate(() => {
+    const T = NMS._THREE;
+    const planet = NMS._planet(0);
+    const pass = NMS._pipeline.cloudPass;
+    const uniforms = pass.marchMaterial.uniforms;
+    const camera = pass.camera;
+    camera.updateMatrixWorld(true);
+    const localToWorld = new T.Matrix4().extractRotation(
+      new T.Matrix4().copy(uniforms.uWorldToLocal.value).invert());
+    const cameraLocal = uniforms.uCameraLocal.value;
+    const cameraWorld = new T.Vector3().setFromMatrixPosition(camera.matrixWorld);
+    const occluder = planet.eclipseOccluder?.centerLocal;
+    if (!occluder) return [];
+    const stars = planet.terrainMaterial?.userData?.shader?.uniforms?.uLocalStars?.value || [];
+    const occluderRadius = planet.eclipseOccluder.radius;
+    const toScreen = (local) => {
+      const screen = cameraWorld.clone()
+        .add(local.clone().sub(cameraLocal).applyMatrix4(localToWorld)).project(camera);
+      return [screen.x * 0.5 + 0.5, 0.5 - screen.y * 0.5];
+    };
+    const shadows = [];
+    for (const [index, key] of ['uSunDirection0', 'uSunDirection1'].entries()) {
+      if (key === 'uSunDirection1' && !(uniforms.uSunEnergy1?.value > 0.001)) continue;
+      const sun = uniforms[key].value.clone().normalize();
+      const b = occluder.dot(sun);
+      const disc = b * b - (occluder.lengthSq() - planet.R * planet.R);
+      if (disc < 0) continue;
+      const along = b - Math.sqrt(disc);
+      const ground = occluder.clone().addScaledVector(sun, -along);
+      const star = stars[index];
+      const starAngle = star ? Math.asin(Math.min(0.9999, star.w / star.clone().setW(0).length())) : 0;
+      const groundRadius = along * Math.tan(Math.asin(occluderRadius / along) + starAngle);
+      const point = toScreen(ground);
+      if (Math.abs(point[0] - 0.5) > 0.45 || Math.abs(point[1] - 0.5) > 0.45) continue;
+      const normal = ground.clone().normalize();
+      const tangent = new T.Vector3(0, 1, 0).cross(normal).normalize();
+      const bitangent = normal.clone().cross(tangent);
+      let penumbra = 0;
+      for (let k = 0; k < 8; k++) {
+        const angle = k * Math.PI / 4;
+        const edge = ground.clone()
+          .addScaledVector(tangent, Math.cos(angle) * groundRadius)
+          .addScaledVector(bitangent, Math.sin(angle) * groundRadius);
+        const screen = toScreen(edge);
+        penumbra = Math.max(penumbra, Math.hypot((screen[0] - point[0]) * camera.aspect, screen[1] - point[1]));
+      }
+      shadows.push({ point, penumbra, starAngle });
+    }
+    return shadows;
+  });
 }
 
 try {
@@ -278,23 +369,27 @@ try {
   const surfaceControl = await capture('surface-control');
   await setFixture(-0.28);
   const surfaceLeft = await capture('surface-shadow-left');
+  const predictedLeft = await predictShadows();
   await setFixture(0.28);
   const surfaceRight = await capture('surface-shadow-right');
-  const surfaceLeftStats = shadowStats(surfaceReference, surfaceControl, surfaceLeft);
-  const surfaceRightStats = shadowStats(surfaceReference, surfaceControl, surfaceRight);
+  const predictedRight = await predictShadows();
+  assert.ok(predictedLeft.length && predictedRight.length,
+    'the eclipse fixture must cast a shadow onto the visible disc');
+  const surfaceLeftStats = shadowStats(surfaceReference, surfaceControl, surfaceLeft, predictedLeft);
+  const surfaceRightStats = shadowStats(surfaceReference, surfaceControl, surfaceRight, predictedRight);
 
   assert.ok(surfaceLeftStats.darkenedFraction > 0.004
       && surfaceLeftStats.darkenedFraction < 0.45,
-  `left eclipse must form a bounded surface shadow: ${JSON.stringify(surfaceLeftStats)}`);
+  `left eclipse must form a bounded surface shadow: ${JSON.stringify(surfaceLeftStats.darkenedFraction)}`);
   assert.ok(surfaceRightStats.darkenedFraction > 0.004
       && surfaceRightStats.darkenedFraction < 0.45,
-  `right eclipse must form a bounded surface shadow: ${JSON.stringify(surfaceRightStats)}`);
+  `right eclipse must form a bounded surface shadow: ${JSON.stringify(surfaceRightStats.darkenedFraction)}`);
   assert.ok(centroidDistance(surfaceLeftStats.centroid, surfaceRightStats.centroid) > 0.035,
     `moving the satellite must move the surface-shadow centroid: `
     + `${JSON.stringify([surfaceLeftStats.centroid, surfaceRightStats.centroid])}`);
   assert.ok(surfaceLeftStats.local && surfaceRightStats.local,
     `local eclipse must not darken the full frame: `
-    + `${JSON.stringify([surfaceLeftStats, surfaceRightStats])}`);
+    + `${JSON.stringify([surfaceLeftStats.globalDelta, surfaceRightStats.globalDelta])}`);
 
   // Media-only shadow field. Opaque terrain still writes depth, but colorWrite
   // is disabled so atmosphere/cloud changes can be measured independently.
@@ -307,8 +402,23 @@ try {
   const mediaLeft = await capture('media-shadow-left');
   await setFixture(0.28);
   const mediaRight = await capture('media-shadow-right');
-  const mediaLeftStats = shadowStats(mediaReference, mediaControl, mediaLeft);
-  const mediaRightStats = shadowStats(mediaReference, mediaControl, mediaRight);
+  const mediaLeftStats = shadowStats(mediaReference, mediaControl, mediaLeft, predictedLeft);
+  const mediaRightStats = shadowStats(mediaReference, mediaControl, mediaRight, predictedRight);
+
+  // Each layer's shadow peak beside each predicted axis. The opaque surface
+  // mixes bright land with dark sea under one penumbra, which moves its peak
+  // more than the evenly bright air and cloud field moves theirs. (A
+  // clouds-only frame is too sparse to locate a shadow in: its loss map
+  // follows wherever the largest clouds are.)
+  const located = (left, right) => [
+    ...predictedLeft.map(({ point }) => shadowPeak(left.lossMap, point)),
+    ...predictedRight.map(({ point }) => shadowPeak(right.lossMap, point)),
+  ];
+  const overlay = {
+    surface: located(surfaceLeftStats, surfaceRightStats),
+    media: located(mediaLeftStats, mediaRightStats),
+  };
+  const surfaceShadowPlaced = overlay.surface.every((o) => o.error < 0.08);
 
   // Defer the media assertions until after the z-occlusion fixture so one
   // failed lighting contract does not hide an independent depth-order result.
@@ -318,10 +428,10 @@ try {
   const mediaAlignment = motionAlignment(
     surfaceLeftStats.centroid, surfaceRightStats.centroid,
     mediaLeftStats.centroid, mediaRightStats.centroid);
+  // The centroids only vouch for the direction the shadow moves; where it
+  // lies is checked against the predicted axes.
   const mediaShadowConcentric = mediaAlignment.cosine > 0.9
-    && mediaAlignment.scale > 0.65
-    && mediaAlignment.scale < 1.5
-    && mediaAlignment.midpointDistance < 0.06;
+    && overlay.media.every((o) => o.error < 0.05);
 
   // Restore the complete frame, remove the eclipse fixture, then use an actual
   // generated moon group for front/behind depth ownership. updateVisual runs
@@ -418,12 +528,15 @@ try {
     mediaShadowLocal,
     mediaShadowConcentric,
     mediaAlignment,
+    overlay,
+    predictedLeft,
+    predictedRight,
     satelliteFixture,
     behindChange,
     frontChange,
     satelliteHiddenByDepth,
     satelliteVisibleInFront,
-  }, null, 2));
+  }, (key, value) => (key === 'lossMap' ? undefined : value), 2));
   assert.ok(satelliteHiddenByDepth,
     `a moon behind the planet must be depth-occluded, not drawn on top: `
     + `${JSON.stringify(behindChange)}`);
@@ -432,16 +545,20 @@ try {
     + `${JSON.stringify({ behindChange, frontChange, satelliteFixture })}`);
   assert.ok(mediaShadowPresent,
     `cloud/atmosphere must receive the local satellite shadow: `
-    + `${JSON.stringify([mediaLeftStats, mediaRightStats])}`);
+    + `${JSON.stringify([mediaLeftStats.darkenedFraction, mediaRightStats.darkenedFraction])}`);
   assert.ok(mediaShadowLocal,
     `media eclipse must remain local rather than dim the whole frame: `
     + `${mediaLeftStats.globalDelta}, ${mediaRightStats.globalDelta}`);
+  assert.ok(surfaceShadowPlaced,
+    `the surface shadow must fall where the fixture's axis meets the ground: `
+    + `${JSON.stringify({ predictedLeft, predictedRight, surface: overlay.surface })}`);
   assert.ok(mediaShadowConcentric,
     `surface, cloud and atmosphere shadows must remain concentric: `
     + `${JSON.stringify({
       surface: [surfaceLeftStats.centroid, surfaceRightStats.centroid],
       media: [mediaLeftStats.centroid, mediaRightStats.centroid],
       alignment: mediaAlignment,
+      overlay,
     })}`);
   assert.equal(errors.length, 0, errors.join('\n'));
   console.log('PASS: satellite eclipse centroids, media alignment and z occlusion');
