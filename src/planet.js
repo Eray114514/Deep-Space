@@ -13,6 +13,7 @@ import { createOceanSurface, sampleOceanSurface } from './ocean-surface.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { TerrainSimplex } from './terrain-noise.js';
 import { TerrainHeightField } from './terrain-height-field.js';
+import { buildCoastalDrainage } from './coastal-drainage.js';
 import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
 import { NearWaterPatch } from './near-water-patch.js';
 import {
@@ -278,6 +279,9 @@ export class Planet extends TerrainHeightField {
     this.canonicalMaxLevel = clamp(Math.ceil(Math.log2(rootCell / 1.5)), 4, 16);
     this.canonicalFreqAtLevel = (lvl) => 0.4 * canonicalGridCells * Math.pow(2, lvl) / (Math.PI / 2);
     this.fullMaxFreq = this.canonicalFreqAtLevel(this.canonicalMaxLevel);
+    if (this.tidalCoast && this.tuning.estuarySite) {
+      this.coastalDrainage = buildCoastalDrainage(this, this.tuning.estuarySite);
+    }
     // Terrain noise, formation and sea-level inputs are complete before the
     // optional event reads them; placement never consumes the terrain RNG.
     if (this.oceanClimate?.event) this.oceanClimate.event = placeOceanTidalEvent(this.oceanClimate.event, {

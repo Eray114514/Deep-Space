@@ -37,6 +37,10 @@ export const WORLD_CONFIG = Object.freeze({
         // cloud pass owns its own shell (see src/cloud/lite-cloud-pass.js).
         '0,0,0': Object.freeze({
           'planet-0': Object.freeze({
+            estuarySite: Object.freeze({
+              direction: Object.freeze([-0.289610982091806, -0.15724754005537944, 0.9441391265053849]),
+              landward: Object.freeze([-0.9340368342676872, -0.16900839046615412, -0.31466070009334984]),
+            }),
             radiusMeters: 1200000,
             atmosphereHeightMeters: 126000,
             cloudCoverage: 0.64,
@@ -65,7 +69,7 @@ export const WORLD_CONFIG = Object.freeze({
           'planet-1': Object.freeze({
             type: 'ocean',
             radiusMeters: 560000,
-            seaLevelOffset: 1650,
+            seaLevelOffset: 210,
             cloudCoverage: 0.72,
             oceanProfile: 'pelagic-storm',
             bathymetryScale: 0.24,

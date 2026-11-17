@@ -8,8 +8,10 @@ import { resolveSystemChromePath } from './browser.js';
 // One ordinary scene and one coast. Only the initial placement teleports.
 // Each following frame goes through the game's continuous flight update;
 // at the dry endpoint the normal landing control takes over.
-const out = resolve(process.argv[2] || 'test-results/coastal-descent');
-const prior = process.argv[3] && process.argv[3] !== '-' ? JSON.parse(await readFile(process.argv[3], 'utf8')).route : null;
+const river = process.argv.includes('--river');
+const [directory, report, weather] = process.argv.slice(2).filter(arg => !arg.startsWith('--'));
+const out = resolve(directory || (river ? 'test-results/river-descent' : 'test-results/coastal-descent'));
+const prior = report && report !== '-' ? JSON.parse(await readFile(report, 'utf8')).route : null;
 await mkdir(out, { recursive: true });
 const { server, port } = await startServer(0);
 const browser = await chromium.launch({ executablePath: resolveSystemChromePath(), headless: true,
@@ -19,15 +21,16 @@ try {
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   page.on('console', m => { if (/shader error/i.test(m.text())) errors.push(m.text()); });
-  await page.goto(`http://127.0.0.1:${port}/?nohero=1${process.argv[4] === 'clear' ? '&weather=clear' : ''}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`http://127.0.0.1:${port}/?nohero=1${weather === 'clear' ? '&weather=clear' : ''}`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction('window.NMS?.booted', null, { timeout: 180000 });
   await page.addStyleTag({ content: 'body > *:not(#app) { visibility:hidden !important }' });
-  const route = await page.evaluate(async prior => {
-    const { coastalApproach } = await import('/src/coastal-approach.js');
+  const route = await page.evaluate(async ({ prior, river }) => {
+    const { coastalApproach, riverApproach } = await import('/src/coastal-approach.js');
     const planet = NMS._planet(0);
-    const course = coastalApproach(planet, prior || undefined);
-    NMS.teleport(0, 0.12, course.pose(75000, 0, 90000, -0.85, 0));
-    NMS.setLocalSunAltitude(0, 26, { azimuthHint: course.along });
+    const course = river ? riverApproach(planet) : coastalApproach(planet, prior || undefined);
+    const start = river ? [-12000, 0, 16000, -0.58, 0] : [75000, 0, 90000, -0.85, 0];
+    NMS.teleport(0, 0.12, course.pose(...start));
+    NMS.setLocalSunAltitude(0, river ? 32 : 26, { azimuthHint: course.along });
     window.coastalPose = (...params) => {
       const pose = course.pose(...params);
       NMS.setContinuousAtmosphereAltitude(0, 0, pose);
@@ -36,7 +39,7 @@ try {
         seaLevel: planet.seaLevel, state: NMS.state, dir: pose.dir };
     };
     return course.route;
-  }, prior);
+  }, { prior, river });
   if (process.argv.includes('--video')) {
     await page.evaluate(() => {
       const stream = NMS._internals.renderer.domElement.captureStream(30);
@@ -57,7 +60,14 @@ try {
       recorder.start();
     });
   }
-  const stops = [
+  const stops = river ? [
+    ['01-estuary', -12000, 0, 16000, -0.58, 0],
+    ['02-mouth', -6500, 800, 5200, -0.30, 0],
+    ['03-fork', 2800, 50, 1350, -0.30, 0],
+    ['04-canyon', 8200, 0, 180, -0.09, 0],
+    ['05-river', 9900, 0, 46, -0.12, 0],
+    ['06-terrace', ...route.pad, 36, -0.095, -0.32],
+  ] : [
     ['01-orbit', 75000, 0, 90000, -0.85, 0],
     ['02-bay', 17000, 0, 8500, -0.54, 0],
     ['03-shelf', 3200, 0, 470, -0.35, 0.22],
@@ -84,7 +94,8 @@ try {
     console.log(name, Math.round(sample.ground - sample.seaLevel));
   }
   assert(samples[3].ground < samples[3].seaLevel, 'Low flight must cross open water');
-  assert(Math.abs(samples[4].ground - samples[4].seaLevel + 2) < 0.2, 'Surf stop at two metres depth');
+  if (river) assert(samples[4].ground < samples[4].seaLevel, 'Connected tidal reach');
+  else assert(Math.abs(samples[4].ground - samples[4].seaLevel + 2) < 0.2, 'Surf stop at two metres depth');
   assert(samples.at(-1).ground > samples.at(-1).seaLevel, 'Dry approach endpoint');
   await page.keyboard.press('KeyL');
   await page.waitForFunction('NMS.state === "landed"', null, { timeout: 90000 });

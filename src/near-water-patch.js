@@ -106,6 +106,10 @@ export class NearWaterPatch {
     this._cameraDirection = new THREE.Vector3();
     this._centerPosition = new THREE.Vector3();
     this._indices = buildIndices(cells);
+    this._surveyGrid = cells >= 256 ? { cells: 64, size, coreCells: 20,
+      cellSize: Math.min(size / 64, centerCellSize * cells / 64) } : null;
+    this._surveyIndices = this._surveyGrid ? buildIndices(64) : null;
+    this._showingSurvey = false;
 
     this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
     this.mesh.name = `near-water:${planet.name}`;
@@ -143,7 +147,7 @@ export class NearWaterPatch {
             }
             return;
           }
-          const count = (this.cells+1)**2;
+          const count = (this.build.grid.cells + 1) ** 2;
           if (!WATER_GEOMETRY_ATTRIBUTES.every(key => data.attributes?.[key] instanceof Float32Array
             && data.attributes[key].length === count * (['depth', 'waterCell', 'depthDelta'].includes(key) ? 1 : 3))) {
             this._workerFailed('Invalid near-water worker attributes'); return;
@@ -161,7 +165,15 @@ export class NearWaterPatch {
         worker.postMessage({ type: 'init', snapshot: this.planet.createTerrainSnapshot() });
       } catch (error) { this._workerFailed(String(error)); }
     }
-    this.build = createWaterGeometryJob(direction, this.cells, this.planet.seaRadius, !this.worker);
+    // A dense optical patch can take longer to build than a ship takes to
+    // cross an inlet. Publish a first depth survey over the same footprint,
+    // then replace it atomically with the full graded wave mesh.
+    const usableRadius = this.radius * (this._showingSurvey ? 0.24 : 0.72);
+    const outside = !this.centerDirection || this.centerDirection.angleTo(direction) * this.planet.seaRadius > usableRadius;
+    const grid = this.worker && outside && this._surveyGrid
+      ? this._surveyGrid : { cells: this.cells, size: this.size, coreCells: this.coreCells, cellSize: this.cellSize };
+    this.build = createWaterGeometryJob(direction, grid.cells, this.planet.seaRadius, !this.worker);
+    this.build.grid = grid;
     if (this.worker) {
       this.build.worker = true;
       this.build.workerProgress = -1;
@@ -170,7 +182,7 @@ export class NearWaterPatch {
       this.workerToken++;
       try {
         this.worker.postMessage({ type: 'build', token: this.workerToken, direction: direction.toArray(),
-          grid: { cells: this.cells, size: this.size, coreCells: this.coreCells, cellSize: this.cellSize } });
+          grid });
       } catch (error) { this._workerFailed(String(error)); }
     }
   }
@@ -187,7 +199,8 @@ export class NearWaterPatch {
     this._stopWorker();
     if (this.build?.worker) {
       const job = this.build;
-      this.build = createWaterGeometryJob(job.centerDirection, this.cells, this.planet.seaRadius);
+      this.build = createWaterGeometryJob(job.centerDirection, job.grid.cells, this.planet.seaRadius);
+      this.build.grid = job.grid;
       for (const key of ['centerDirection', 'centerPosition', 'tangent', 'bitangent']) this.build[key] = job[key];
     }
   }
@@ -212,10 +225,11 @@ export class NearWaterPatch {
       }
       return;
     }
-    const result = buildWaterGeometryRows(job, this.planet, i => this._gridCoordinate(i),
-      this.cells, budgetMs, this.rowsPerFrame);
+    const grid = job.grid;
+    const result = buildWaterGeometryRows(job, this.planet, i => waterGridCoordinate(grid, i),
+      grid.cells, budgetMs, this.rowsPerFrame);
     this.lastBuildRows=result.rows; this.lastBuildMs=result.milliseconds;
-    if (job.row >= this.cells+1) this._commit();
+    if (job.row >= grid.cells+1) this._commit();
   }
 
   _commit() {
@@ -234,7 +248,8 @@ export class NearWaterPatch {
     geometry.setAttribute('aLodMorph', new THREE.BufferAttribute(new Float32Array(job.depth.length), 1));
     geometry.setAttribute('aNearPatchPass',
       new THREE.BufferAttribute(new Float32Array(job.depth.length).fill(1), 1));
-    geometry.setIndex(this._indices);
+    this._showingSurvey = job.grid === this._surveyGrid;
+    geometry.setIndex(this._showingSurvey ? this._surveyIndices : this._indices);
     // Radial projection of the tangent square cannot increase its distance
     // from the centre. Avoid a full vertex scan in the atomic commit frame.
     geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), this.size / Math.sqrt(2) + 24);
@@ -251,7 +266,7 @@ export class NearWaterPatch {
     this.centerDirection = job.centerDirection;
     this._centerPosition.copy(job.centerPosition);
     this.mesh.visible = this.hasWetVertices;
-    this.rebuilds++;
+    if (!this._showingSurvey) this.rebuilds++;
     this.build = null;
     previous.dispose();
 
@@ -284,10 +299,12 @@ export class NearWaterPatch {
     }
 
     const direction = this._cameraDirection.copy(cameraLocal).normalize();
-    if (this.build && Math.acos(THREE.MathUtils.clamp(
-      this.build.centerDirection.dot(direction), -1, 1)) * this.planet.seaRadius > this.radius) {
-      // A discontinuous relocation supersedes even a completed-but-unpublished
-      // result. Ordinary turns/flight keep the one active job, avoiding churn.
+    // The graded survey has large triangles at its outer edge. In fast
+    // flight recenter it before the pilot reaches that edge. Keep the old
+    // mesh visible and give completed detail priority over a survey.
+    const staleRadius = this.build?.worker && !this.build.ready && this._showingSurvey
+      && this.build.grid !== this._surveyGrid ? this.radius * 0.24 : this.radius;
+    if (this.build && this.build.centerDirection.angleTo(direction) * this.planet.seaRadius > staleRadius) {
       this.build = null;
       this._stopWorker();
     }
@@ -300,7 +317,7 @@ export class NearWaterPatch {
         this.centerDirection.dot(direction), -1, 1,
       ));
       this.anchorDistance = angular * this.planet.seaRadius;
-      if (this.anchorDistance > this.effectiveRebuildDistance) this._begin(direction);
+      if (this._showingSurvey || this.anchorDistance > this.effectiveRebuildDistance) this._begin(direction);
     }
     if (this.centerDirection && this.build) {
       this.anchorDistance = Math.acos(THREE.MathUtils.clamp(
@@ -322,7 +339,8 @@ export class NearWaterPatch {
   debugStats() {
     return {
       visible: this.mesh.visible,
-      pending: !!this.build,
+      pending: !!this.build || (this.mesh.visible && this._showingSurvey),
+      survey: this._showingSurvey,
       row: this.build?.row ?? null,
       column: this.build?.column ?? null,
       cells: this.cells,
@@ -332,7 +350,7 @@ export class NearWaterPatch {
       edgeCellSize: this.edgeCellSize,
       size: this.size,
       radius: this.radius,
-      triangles: this.cells * this.cells * 2,
+      triangles: this.mesh.geometry.index ? this.mesh.geometry.index.count / 3 : 0,
       rebuilds: this.rebuilds,
       rebuildDistance: this.effectiveRebuildDistance,
       anchorDistance: this.anchorDistance,

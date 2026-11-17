@@ -723,10 +723,14 @@ export class ChunkedLOD {
     // to levels < 3 left the moving fine/coarse frontier visibly unsealed.
     const faceSpan = 1 << node.level;
     const skirtEdgeIds = [];
-    if (!p.noSkirt || (p.faceBoundarySkirts && node.iy === 0)) skirtEdgeIds.push(0);
-    if (!p.noSkirt || (p.faceBoundarySkirts && node.iy === faceSpan - 1)) skirtEdgeIds.push(1);
-    if (!p.noSkirt || (p.faceBoundarySkirts && node.ix === 0)) skirtEdgeIds.push(2);
-    if (!p.noSkirt || (p.faceBoundarySkirts && node.ix === faceSpan - 1)) skirtEdgeIds.push(3);
+    const basinUp = p.coastalDrainage?.up;
+    const valleyEdge = basinUp && node.level >= 4 && node.centerDir.dot(_edgeD1.fromArray(basinUp))
+      > Math.cos((42000 + node.size) / p.R);
+    const sealEdges = !p.noSkirt || valleyEdge;
+    if (sealEdges || (p.faceBoundarySkirts && node.iy === 0)) skirtEdgeIds.push(0);
+    if (sealEdges || (p.faceBoundarySkirts && node.iy === faceSpan - 1)) skirtEdgeIds.push(1);
+    if (sealEdges || (p.faceBoundarySkirts && node.ix === 0)) skirtEdgeIds.push(2);
+    if (sealEdges || (p.faceBoundarySkirts && node.ix === faceSpan - 1)) skirtEdgeIds.push(3);
     const hasSkirt = skirtEdgeIds.length > 0;
     const skirtVerts = skirtEdgeIds.length * (N + 1);
     const total = gridVerts + skirtVerts;
@@ -1000,7 +1004,10 @@ export class ChunkedLOD {
       const src = edges[s], dst = gridVerts + s;
       const px = positions[src * 3], py = positions[src * 3 + 1], pz = positions[src * 3 + 2];
       const len = Math.hypot(px, py, pz);
-      const k = (len - skirtDrop) / len;
+      // Seal exposed canyon walls during mixed LOD, keeping skirts out of
+      // transparent shallow water and off the flat intertidal bench.
+      const drop = valleyEdge ? Math.min(skirtDrop, Math.max(0, len - p.seaRadius - 15)) : skirtDrop;
+      const k = (len - drop) / len;
       positions[dst * 3] = px * k; positions[dst * 3 + 1] = py * k; positions[dst * 3 + 2] = pz * k;
       if (aSurfaceHeight) {
         const actualDrop = len - Math.hypot(positions[dst * 3], positions[dst * 3 + 1], positions[dst * 3 + 2]);

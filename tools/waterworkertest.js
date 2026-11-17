@@ -72,6 +72,24 @@ try {
   const count=moving.rebuilds;moving.dispose();timed.onmessage({data:{token:moving.workerToken,attributes}});
   assert.equal(moving.rebuilds,count);moving._begin(direction);assert.equal(moving.build,null);
   const workerOriginal=globalThis.Worker;let workerUrl;
+  const staged = new NearWaterPatch(planet, material, { cells: 256, workerFactory: factory });
+  try {
+    staged.update(cam, true, 1/60, 2);
+    const surveyWorker = workers.at(-1);
+    for (const cells of [64, 256]) {
+      assert.equal(surveyWorker.messages.at(-1).grid.cells, cells);
+      const length = (cells + 1) ** 2;
+      const attributes = Object.fromEntries(WATER_GEOMETRY_ATTRIBUTES.map(key =>
+        [key, new Float32Array(length * (['depth', 'waterCell', 'depthDelta'].includes(key) ? 1 : 3))]));
+      surveyWorker.onmessage({ data: { token: staged.workerToken, attributes } });
+      staged.update(cam, true, 1/60, 2);
+      assert.equal(staged.mesh.geometry.index.count, cells * cells * 6);
+      assert.equal(staged.mesh.geometry.getAttribute('aDepth').count, length);
+      assert.equal(staged.debugStats().pending, cells === 64);
+      if (cells === 64) staged.update(cam, true, 1/60, 2);
+    }
+    assert.equal(staged.rebuilds, 1);
+  } finally { staged.dispose(); }
   try {
     globalThis.Worker=class {constructor(url){workerUrl=url;}postMessage(){}terminate(){}};
     const {NearWaterPatch:Versioned}=await import('../src/near-water-patch.js?v=worker-cache-contract');

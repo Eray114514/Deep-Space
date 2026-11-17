@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import { generateSystemSpec } from '../src/astronomy.js';
 import { GalaxyCatalog, HOME_SYSTEM_ID } from '../src/galaxy-layout.js';
 import { Planet } from '../src/planet.js';
+import { TerrainHeightField } from '../src/terrain-height-field.js';
+import { drainageDirection, drainageStation } from '../src/coastal-drainage.js';
 import { skirtDropForMorph } from '../src/quadtree.js';
 import {
   applySystemBodyTuning,
@@ -70,6 +72,36 @@ try {
   }).orbitRadiusMeters, 4320000);
 
   const directions = fibonacciDirections(6000);
+  const basin = home.coastalDrainage;
+  assert.equal(basin.channels.length, 2, 'charted inlet has two substantial upstream valleys');
+  const workerField = TerrainHeightField.fromSnapshot(home.createTerrainSnapshot());
+  for (const profile of basin.channels) {
+    for (let metres = 0; metres <= 15000; metres += 125) {
+      const centre = drainageStation(profile, metres);
+      const dir = drainageDirection(basin, home.R, metres, centre);
+      const h = home.height(dir, home.fullMaxFreq);
+      assert.ok(h < home.seaLevel - 3, 'the tide must reach both arms without a land dam');
+      for (const across of [0, 360, 1400]) {
+        const bank = drainageDirection(basin, home.R, metres, centre + across);
+        for (const cap of [240, home.fullMaxFreq]) {
+          assert.equal(workerField.height(bank, cap), home.height(bank, cap),
+            'streaming bathymetry, terrain and player collision must agree on the valley');
+        }
+      }
+    }
+  }
+  const branches = basin.channels.map(profile => drainageStation(profile, 12000));
+  for (const profile of basin.channels) {
+    for (let x = 3000; x <= 15000; x += 1000) {
+      for (const shift of [-750, -450, 450, 750]) {
+        const y = drainageStation(profile, x) + shift;
+        const at = dx => home.height(drainageDirection(basin, home.R, x + dx, y));
+        assert.ok(Math.abs(at(-0.01) - at(0.01)) < 0.25, 'deposited banks must join continuously');
+      }
+    }
+  }
+  const divide = drainageDirection(basin, home.R, 12000, (branches[0] + branches[1]) * 0.5);
+  assert.ok(home.height(divide) > home.seaLevel + 200, 'a dry ridge separates the upper reaches');
   const heights = directions.map((direction) => home.height(direction, home.fullMaxFreq));
   const relief = Math.max(...heights) - Math.min(...heights);
   assert.ok(relief / home.R < 0.025,

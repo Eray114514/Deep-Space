@@ -5678,9 +5678,12 @@ function frame(rafTs) {
 
   const nearTerrain = nearest && nearestAlt < Math.max(nearest.atmoHeight * 2.4, 90000);
   const heavySurfaceBacklog = nearTerrain && nearest?.lod && pendingChunks(nearest.lod) > 12;
+  // In narrow coastal valleys a coarse land triangle can cross the entire
+  // channel. Let the shoreline catch up during a high-quality descent.
+  const shorelineBacklog = heavySurfaceBacklog && !QUALITY_LOW && nearest.hasLiquid && nearestAlt < 18000;
   const terrainBuildMs=debugBuildBudgetMs || (!loadingCleared
     ? QUALITY_LOW ? 5.5 : 110
-    : heavySurfaceBacklog ? 4.2 : state === 'walk' ? 2.6 : nearTerrain ? 3.4 : 1.6);
+    : shorelineBacklog ? 9 : heavySurfaceBacklog ? 4.2 : state === 'walk' ? 2.6 : nearTerrain ? 3.4 : 1.6);
   const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
   sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),
     // plants are reserved like terrain: unreserved, a busy terrain frame left
@@ -8335,6 +8338,15 @@ if (DEV_SERVER && qs.get('scene') === 'bay-approach') {
   const pose = course.pose(17000, 0, 8500, -0.54, 0);
   window.NMS.teleport(0, 0.01, pose);
   window.NMS.setLocalSunAltitude(0, 26, { azimuthHint: course.along });
+  window.NMS.setContinuousAtmosphereAltitude(0, 0, pose);
+}
+
+if (DEV_SERVER && qs.get('scene') === 'river-approach' && universe.system.planets[0]?.coastalDrainage) {
+  const { riverApproach } = await import('./coastal-approach.js');
+  const course = riverApproach(universe.system.planets[0]);
+  const pose = course.pose(-6500, 800, 5200, -0.30, 0);
+  window.NMS.teleport(0, 0.01, pose);
+  window.NMS.setLocalSunAltitude(0, 32, { azimuthHint: course.along });
   window.NMS.setContinuousAtmosphereAltitude(0, 0, pose);
 }
 

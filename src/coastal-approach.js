@@ -1,4 +1,36 @@
 import { Vector3 } from 'three';
+import { drainageDirection, drainageStation } from './coastal-drainage.js';
+
+// Navigate the carved terrain using its own surveyed centreline. Down-valley
+// views follow the same bends and tidal reaches as the actual water geometry.
+export function riverApproach(planet) {
+  const basin = planet.coastalDrainage, profile = basin.channels[0];
+  function directionAt(inland, across) {
+    const point = drainageDirection(basin, planet.R, inland, drainageStation(profile, inland) + across);
+    return new Vector3(point.x, point.y, point.z);
+  }
+  const height = (x, y) => planet.height(directionAt(x, y), planet.fullMaxFreq) - planet.seaLevel;
+  let best = Infinity, pad;
+  for (let x = 10500; x <= 14000; x += 160) {
+    for (let y = 220; y <= 960; y += 30) {
+      const h = height(x, y);
+      if (h < 5 || h > 65) continue;
+      const relief = Math.max(...[[28, 0], [-28, 0], [0, 28], [0, -28]]
+        .map(([dx, dy]) => Math.abs(height(x + dx, y + dy) - h)));
+      if (relief < best) { best = relief; pad = [x, y]; }
+    }
+  }
+  if (!pad) throw new Error('No dry river terrace within the survey');
+  return {
+    along: basin.side, route: { pad },
+    pose(inland, across, clearance, pitch, yaw) {
+      const dir = directionAt(inland, across);
+      const forward = directionAt(inland + 1200, across).sub(dir).projectOnPlane(dir).normalize();
+      forward.applyAxisAngle(dir, yaw);
+      return { dir: dir.toArray(), forward: forward.toArray(), clearance, pitch };
+    },
+  };
+}
 
 // A charted inlet on the home planet. These are navigation coordinates;
 // every contour, water depth and landing site is evaluated by the generator.

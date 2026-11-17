@@ -15,7 +15,7 @@ assert.equal(home.provenance.radiusMeters,home.spec.radius);assert.equal(home.pr
 assert.equal(home.tuning.atmosphereHeightMeters,126000);assert.equal(home.tuning.cloudCoverage,.64);
 assert.equal(ocean.spec.bodyId,'planet-1');assert.equal(ocean.spec.radius,560000);assert.equal(ocean.spec.type,'ocean');
 assert.equal(ocean.tuning.radiusMeters,560000);assert.equal(ocean.tuning.oceanProfile,'pelagic-storm');
-assert.equal(ocean.tuning.seaLevelOffset,1650);assert.equal(ocean.provenance.mode,'authored');
+assert.equal(ocean.tuning.seaLevelOffset,210);assert.equal(ocean.provenance.mode,'authored');
 assert.deepEqual(ocean.spec.atmosphere,ocean.tuning.atmosphere);assert.deepEqual(ocean.spec.clouds,ocean.tuning.clouds);
 const seed=getGalaxyConfig(ACTIVE_GALAXY_ID).seed,star=new GalaxyCatalog(seed).getSystem(HOME_SYSTEM_ID);
 const raw=generateSystemSpec(seed,star);

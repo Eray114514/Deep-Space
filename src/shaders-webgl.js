@@ -582,6 +582,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               + (mC - 0.5) * 0.5 * fadeC + (mD - 0.5) * 0.35 * fadeD;
             vec3 lean = mix(vec3(1.10, 1.0, 0.82), vec3(0.86, 1.0, 0.9), clamp(mottle + 0.5, 0.0, 1.0));
             base *= mix(vec3(1.0), lean, 0.55) * (1.0 + mottle * 0.34);
+            // Exposed terrestrial bedding reads across a valley, beyond the
+            // range of the metre-scale rock scan. Warped heights and broken
+            // exposures keep the bands local to the outcrop.
+            float exposed = uEarthLike * smoothstep(0.095, 0.34, slope);
+            if (exposed > 0.001) {
+              float bedding = hgt + 95.0 * mA + 37.0 * mB;
+              float seam = terrainField(vec3(bedding * 0.021, mA * 1.4, 11.7));
+              float layers = smoothstep(0.29, 0.7, seam) - 0.5;
+              layers *= 1.0 - smoothstep(12.0, 70.0, pixelMetres);
+              vec3 shale = mix(vec3(0.64, 0.70, 0.74), vec3(1.16, 1.09, 0.97), mC);
+              base *= mix(vec3(1.0), shale * (0.92 + 0.52 * layers), exposed);
+            }
           }
           // Sheltered, low-gradient shores collect pale sand. Rock projects
           // through exposed banks and promontories, including underwater;
@@ -754,7 +766,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v26-meadow-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v27-bedding-' + hasSurfaceCloudMedium(planet);
   return prepareSurfaceAtmosphere(material, planet);
 }
 

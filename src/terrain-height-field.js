@@ -3,6 +3,7 @@
 import { worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
 import { TerrainSimplex } from './terrain-noise.js';
 import { TerrainCraterField } from './terrain-crater-field.js';
+import { carveCoastalDrainage } from './coastal-drainage.js';
 
 const _g = { x: 0, y: 0, z: 0 };
 
@@ -24,6 +25,7 @@ export class TerrainHeightField {
 
   createTerrainSnapshot() {
     return { version: 1,
+      coastalDrainage: this.coastalDrainage ? structuredClone(this.coastalDrainage) : null,
       parameters: Object.fromEntries(PARAMETERS.map(key => [key, this[key]])),
       duneAxis: this.duneAxis ? { x: this.duneAxis.x, y: this.duneAxis.y, z: this.duneAxis.z } : null,
       tuning: { bathymetryScale: this.tuning?.bathymetryScale },
@@ -36,6 +38,7 @@ export class TerrainHeightField {
   static fromSnapshot(snapshot) {
     if (snapshot.version !== 1) throw new Error('Unsupported terrain snapshot');
     const field = new TerrainHeightField();
+    if (snapshot.coastalDrainage) field.coastalDrainage = structuredClone(snapshot.coastalDrainage);
     for (const key of PARAMETERS) field[key] = snapshot.parameters[key];
     field.duneAxis = snapshot.duneAxis ? { ...snapshot.duneAxis } : null;
     field.tuning = { ...snapshot.tuning };
@@ -265,6 +268,7 @@ export class TerrainHeightField {
       h += coastBand * headland * (bluff + Math.max(-7, ledge));
     }
 
+    if (this.coastalDrainage) h = carveCoastalDrainage(this, dir, h, maxFreq);
     if (this.nOceanBasin && this.hasLiquid && h < this.seaLevel) {
       // The curated pelagic world is water-dominated but deliberately not a
       // kilometres-deep featureless bowl. An independent namespace lifts broad
