@@ -169,9 +169,10 @@ function cloudShadowRegistration(cloud, surfaceLossMap) {
 
 // The shift (in loss cells) at which the clouds' loss pattern best matches
 // the surface's, and how well. The centroids alone missed a cloud shadow
-// moved sideways by a quarter radius: the share of light the clouds lose
-// grows with the sun's height, which here runs up the screen, and that bias
-// pulls the centroid and the vertical shift but not the horizontal one.
+// moved sideways by a quarter radius. The share of light clouds lose
+// relative to the ground differs across the disc (where the clouds sit, the
+// companion star's light): in this fixture that pulls the best match 5-8
+// cells up the screen with the shadow in place, and sideways by at most 2.
 function bestCorrelation(cloud, surfaceLossMap) {
   const { cols, rows } = cloud;
   const at = (dx, dy) => {
@@ -532,8 +533,10 @@ try {
     && cloudRegistration.every((r) => r.offset < 0.07)
     // The loss patterns must match where they are (not merely somewhere):
     // a uniform or screen-fixed darkening correlates poorly, a sideways
-    // shift moves the best match off zero.
-    && cloudRegistration.every((r) => r.match.r > 0.5 && Math.abs(r.match.dx) <= 3);
+    // shift moves the best match off zero, a vertical one out of the 3-10
+    // band the fixture's own bias puts it in (a 0.08R drop reaches 0).
+    && cloudRegistration.every((r) => r.match.r > 0.5 && Math.abs(r.match.dx) <= 3
+      && r.match.dy >= 3 && r.match.dy <= 10);
 
   // Restore the complete frame, remove the eclipse fixture, then use an actual
   // generated moon group for front/behind depth ownership. updateVisual runs
