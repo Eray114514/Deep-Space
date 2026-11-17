@@ -89,9 +89,14 @@ await page.evaluate(`NMS.teleport(${dry.i}, 0.003)`);   // a few hundred metres 
 try {
   await page.waitForTimeout(800);   // landing needs no settle, just the prompt range
   await page.evaluate('NMS.tryLand()');
-  await page.waitForFunction('window.NMS.state === "walk"', null, { timeout: 60000 });
+  await page.waitForFunction('window.NMS.state === "landed"', null, { timeout: 60000 });
   await shot(`10-landed-${dry.type}`);
-  // the ship should be parked on its pad beside us
+  // step out of the parked ship onto the pad so 10b shows the exterior hull
+  await page.keyboard.press('KeyF');
+  await page.waitForFunction('window.NMS.state === "shipwalk" && window.NMS.shipViewState().seatT >= 0.999', null, { timeout: 30000 });
+  await page.evaluate(() => { window.NMS.shipViewDebug?.teleportNearRamp?.(); });
+  await page.evaluate('NMS.exitShip()');
+  await page.waitForFunction('window.NMS.state === "walk"', null, { timeout: 30000 });
   await page.evaluate('NMS.faceShip()');
   await shot('10b-parked-ship');
 } catch (e) {

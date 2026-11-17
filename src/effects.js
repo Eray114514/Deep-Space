@@ -48,11 +48,13 @@ export const SHIP_LANDING_PROFILE = Object.freeze({
     Object.freeze([0, 11.3]),
   ]),
   colliders: Object.freeze([
-    // Raised central fuselage plus wings and nacelles. Their upper faces are
-    // real walking surfaces, while the volumes stop the player ghosting
-    // through the parked ship. Coordinates are in the ship's own frame
-    // (nose at -Z, deck at y=0).
-    Object.freeze({ center: Object.freeze([0, 1.15, -2.15]), half: Object.freeze([3.7, 2.2, 13.45]) }),
+    // Central fuselage forward of the cargo ramp (nose z=-15.6 .. bulkhead z=6.15),
+    // raised upper tail boom above the open ramp (y >= 2.32 so a walker passes
+    // cleanly underneath it), ramp-tunnel side cheeks, wings and nacelles.
+    Object.freeze({ center: Object.freeze([0, 1.15, -4.725]), half: Object.freeze([3.55, 2.2, 10.875]) }),
+    Object.freeze({ center: Object.freeze([0, 2.84, 8.725]), half: Object.freeze([3.1, 0.52, 2.575]) }),
+    Object.freeze({ center: Object.freeze([2.56, 1.08, 7.42]), half: Object.freeze([0.78, 1.28, 1.28]) }),
+    Object.freeze({ center: Object.freeze([-2.56, 1.08, 7.42]), half: Object.freeze([0.78, 1.28, 1.28]) }),
     Object.freeze({ center: Object.freeze([6.9, 0.45, 6.3]), half: Object.freeze([3.8, 0.75, 4.4]) }),
     Object.freeze({ center: Object.freeze([-6.9, 0.45, 6.3]), half: Object.freeze([3.8, 0.75, 4.4]) }),
     Object.freeze({ center: Object.freeze([3.6, 0.7, 5.2]), half: Object.freeze([1.25, 1.25, 6.1]) }),
@@ -592,12 +594,13 @@ export class Ship {
     for (const s of this.ext.strobes) s.material.emissiveIntensity = blink;
     for (const glow of this.ext.strobeGlows || []) glow.material.opacity = blink > 1 ? 0.95 : 0;
 
-    /* cargo-ramp containment field ticks even while closed so opening it
-       never starts from a frozen lattice */
+    /* cargo-ramp containment field seals vacuum when open in space, and powers
+       down once landed in atmosphere so the ramp doorway is unobstructed */
     const bm = this.int.barrier.material;
     bm.uniforms.uTime.value = t;
-    bm.uniforms.uOpen.value = THREE.MathUtils.clamp((this.rampT - 0.15) / 0.6, 0, 1);
-    this.int.barrier.visible = this.rampT > 0.02;
+    const vacuumField = 1 - THREE.MathUtils.smoothstep(this.parkAmt, 0.65, 0.92);
+    bm.uniforms.uOpen.value = THREE.MathUtils.clamp((this.rampT - 0.15) / 0.6, 0, 1) * vacuumField;
+    this.int.barrier.visible = bm.uniforms.uOpen.value > 0.01;
 
     /* the holo instruments: sweep rate and plot gain follow live flight */
     this.int.cockpit.holo.update(t, speed, power);
@@ -830,11 +833,11 @@ export class Ship {
 
   update(dt, nav, state, speed, warp, boost = 0, flightInput = null, camera = null) {
     this.frameNo = (this.frameNo ?? 0) + 1;
-    const cinematicLanding = state === 'landing' && !!this.landingPose;
-    const wantsPark = (state === 'walk' || state === 'landing' || state === 'boarding' || state === 'shipwalk') && !!this.parkedPosUniv;
-    if (cinematicLanding) this.parkAmt = this.landingPose.progress;
+    const scriptedHull = (state === 'landing' || state === 'takeoff') && !!this.landingPose;
+    const wantsPark = (state === 'walk' || state === 'landing' || state === 'landed' || state === 'boarding' || state === 'shipwalk') && !!this.parkedPosUniv;
+    if (scriptedHull) this.parkAmt = this.landingPose.progress;
     else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
-    const foregroundOnly = !cinematicLanding && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
+    const foregroundOnly = !scriptedHull && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
       || (state === 'shipwalk' && !this.parkedPosUniv)
       || (state === 'landing' && this.parkAmt < 0.58));
     this.setForegroundOnly(foregroundOnly);
@@ -889,10 +892,9 @@ export class Ship {
       .multiply(_sq.setFromAxisAngle(X, this.lookPitch))
       .multiply(_sq.setFromAxisAngle(_sr.set(0, 0, 1), this.roll));
 
-    if (cinematicLanding) {
-      // During landing the camera is an independent third-person observer.
-      // Keep the hull in universe space instead of tying it to flight-camera
-      // formation coordinates.
+    if (scriptedHull) {
+      // During landing and liftoff the hull follows an authored planet-local
+      // trajectory in universe space while the camera rides cockpit or chase.
       this.group.position.copy(this.landingPose.posUniv).sub(nav.pos);
       this.group.quaternion.copy(this.landingPose.quat);
     } else if (this.parkedPosUniv && this.parkAmt > 0.002) {

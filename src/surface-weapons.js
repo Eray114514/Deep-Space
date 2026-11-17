@@ -191,7 +191,15 @@ export class SurfaceWeapons {
 
   syncHud() {
     const def = SURFACE_WEAPONS[this.index];
-    this.onChange?.({ index: this.index, weapon: def, ammo: this.models[this.index].ammo, reloading: this.reloadT > 0 });
+    const vm = this.models[this.index]?.viewmodel;
+    const holstered = Boolean(vm && (vm.isHolstered() || vm.isHolstering()));
+    this.onChange?.({
+      index: this.index,
+      weapon: def,
+      ammo: this.models[this.index].ammo,
+      reloading: this.reloadT > 0,
+      holstered,
+    });
   }
 
   reload() {
@@ -201,15 +209,19 @@ export class SurfaceWeapons {
     return true;
   }
 
-  // Mirror the viewmodel controller's ammo/reload state into the fields the
-  // HUD and the test API read.
+  // Mirror the viewmodel controller's ammo/reload/holster state into the fields
+  // the HUD and the test API read.
   syncViewmodelState(current) {
     const vm = current.viewmodel;
     const reloading = vm.isReloading();
+    const holstered = vm.isHolstered() || vm.isHolstering();
     const duration = vm.reloadDuration();
     const remaining = reloading ? duration * (1 - vm.reloadProgress()) : 0;
-    const changed = current.ammo !== vm.ammo || (this.reloadT > 0) !== reloading;
+    const changed = current.ammo !== vm.ammo
+      || (this.reloadT > 0) !== reloading
+      || current.holstered !== holstered;
     current.ammo = vm.ammo;
+    current.holstered = holstered;
     this.reloadDuration = duration;
     this.reloadT = remaining;
     if (changed) this.syncHud();
@@ -293,16 +305,21 @@ export class SurfaceWeapons {
     this.lighting.prepareEnvironment();
   }
 
-  // Toggle the weapon away / back (G). Manual choice holds until the next landing.
+    // Toggle the weapon away / back (G). Manual choice holds until the next landing.
   toggleHolster() {
-    const vm = this.models[this.index].viewmodel;
+    const current = this.models[this.index];
+    const vm = current.viewmodel;
+    let ok = false;
     if (vm.isHolstered() || vm.isHolstering()) {
       this.manualHolster = false;
-      return vm.draw();
+      ok = vm.draw();
+    } else {
+      this.manualHolster = true;
+      this.releaseInput();
+      ok = vm.holster();
     }
-    this.manualHolster = true;
-    this.releaseInput();
-    return vm.holster();
+    this.syncViewmodelState(current);
+    return ok;
   }
 
   // active: on foot on a surface. Entering draws the rifle (racking a round),
@@ -392,11 +409,13 @@ export class SurfaceWeapons {
     this.recoilY *= Math.pow(0.001, dt);
     const cameraRecoil = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.recoilP, this.recoilY, 0, 'XYZ'));
     this.camera.quaternion.multiply(cameraRecoil);
-    // World zoom follows the viewmodel's own eased ADS blend so the sight and
-    // the world arrive together.
-    const targetFov = THREE.MathUtils.lerp(BASE_FOV, def.adsFov, vm.ads);
-    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, Math.min(1, dt * 20));
-    this.camera.updateProjectionMatrix();
+    // World zoom follows the viewmodel's own eased ADS blend while on foot;
+    // when holstering into the ship, main.js owns the cabin FOV transition.
+    if (active) {
+      const targetFov = THREE.MathUtils.lerp(BASE_FOV, def.adsFov, vm.ads);
+      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, Math.min(1, dt * 20));
+      this.camera.updateProjectionMatrix();
+    }
     this.updateTransientEffects(dt);
   }
 

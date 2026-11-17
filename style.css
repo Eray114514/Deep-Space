@@ -252,7 +252,8 @@ kbd {
 
 /* Hidden states keep the stage in layout (visibility, not display) so the
    collapse can play before it disappears and the boot can play on return. */
-.ui-walk #ship-hud-stage, body.hero-active #ship-hud-stage, .hide-hud #ship-hud-stage,
+.ui-walk #ship-hud-stage, .ui-shipwalk #ship-hud-stage, .ui-cinematic-landing #ship-hud-stage,
+body.hero-active #ship-hud-stage, .hide-hud #ship-hud-stage,
 .travel-cinematic #ship-hud-stage, .starmap-open #ship-hud-stage, body.route-choice-active #ship-hud-stage {
   opacity: 0; visibility: hidden; transition: opacity .28s ease, visibility 0s linear .3s;
 }
@@ -554,6 +555,7 @@ body.route-choice-active #dev-fps {
 }
 #surface-weapon.reloading { --weapon-signal: #e9c885; }
 #surface-weapon.reloading .surface-weapon-ammo::before { color: var(--ui-gold); }
+#surface-weapon.holstered { opacity: .62; --weapon-signal: #6f8b96; }
 #surface-weapon.mining-laser { --weapon-ink: #c8fbff; --weapon-signal: #3ed4e8; }
 #surface-weapon.mining-laser .surface-weapon-label,
 #surface-weapon.mining-laser .surface-weapon-ammo { color: #c8fbff; }

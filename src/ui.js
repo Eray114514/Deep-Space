@@ -224,20 +224,23 @@ export class UI {
     this._setText(this.els.headingDegrees, `${String(Math.round(d)).padStart(3, '0')}°`);
   }
 
+  setHudMode(mode) {
+    const body = document.body;
+    body.classList.toggle('ui-walk', mode === 'walk');
+    body.classList.toggle('ui-shipwalk', mode === 'shipwalk');
+    body.classList.toggle('ui-cinematic-landing', mode === 'cinematic-landing');
+    body.classList.toggle('ui-space', mode === 'space');
+  }
+
   setHint(text, persistent = false) {
     if (this._hint === text) return;
     this._hint = text;
     clearTimeout(this._hintTimer);
     this.els.hint.innerHTML = text || '';
-    // setState is intentionally kept out of the DOM API. The two gameplay
-    // hints are stable state signals and let the HUD switch presentation
-    // without changing the runtime integration contract.
-    if (text && (/WASD|摇杆/.test(text))) {
-      document.body.classList.add('ui-walk');
-      document.body.classList.remove('ui-space');
+    if (text && (/WASD|摇杆/.test(text)) && !(/舱内/.test(text))) {
+      this.setHudMode('walk');
     } else if (text && (/鼠标|单指/.test(text))) {
-      document.body.classList.add('ui-space');
-      document.body.classList.remove('ui-walk');
+      this.setHudMode('space');
     }
     this.els.hint.classList.toggle('hidden', !text);
     this.els.hint.classList.remove('hint-faded');
@@ -247,8 +250,8 @@ export class UI {
   }
 
   showLand(show, text = 'LAND — walk the surface') {
-    this.els.land.textContent = text.startsWith('DIVE') ? '潜入并离开飞船  [L]' :
-      text.startsWith('LAND') ? '着陆并离开飞船  [L]' : text;
+    this.els.land.textContent = text.startsWith('DIVE') ? '潜入海底着陆  [L]' :
+      text.startsWith('LAND') ? '自动驾驶着陆  [L]' : text;
     this.els.land.classList.toggle('hidden', !show);
   }
 

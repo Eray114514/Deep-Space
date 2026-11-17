@@ -70,16 +70,39 @@ try {
     `every first-person weapon owns an active foreground pass ${JSON.stringify(surfaceWeaponVisibility)}`);
   const initialShipDistance = await page.evaluate('NMS.shipDistance()');
   check(initialShipDistance < 46, `parked ship is in boarding range (${initialShipDistance.toFixed(1)} m)`);
-  await page.keyboard.press('KeyE');
-  check(['boarding', 'shipwalk'].includes(await page.evaluate('NMS.state')),
-    'E starts the boarding sequence');
-  // The new flow walks up the ramp into the hold (shipwalk), then the pilot
-  // sits down at the seat. Use the debug takeoff to reach flight for the
-  // boost/pulse checks below — the manual path is covered by
+  // Step to the rear cargo ramp, press F to open it, and walk up the ramp into
+  // the hold (shipwalk); the full seat/takeoff loop is also exercised in
   // tools/halcyon-playtest.js.
-  await page.waitForFunction('NMS.state === "shipwalk"', null, { timeout: 30000 });
-  check(await page.evaluate(() => window.NMS.shipViewState().shipwalk),
-    'boarding completes into the interior walk');
+  await page.evaluate(() => {
+    const THREE = NMS._THREE;
+    const { ship, walkCtl, nav } = NMS._internals;
+    const planet = walkCtl.planet;
+    const footLocal = new THREE.Vector3(0, 0, 10.6)
+      .applyQuaternion(ship.parkedLocalQuat).add(ship.parkedLocal);
+    const dir = footLocal.clone().normalize();
+    const groundR = planet.surfaceRadius(dir);
+    const pos = dir.clone().multiplyScalar(groundR + walkCtl.eyeHeight);
+    const toHold = new THREE.Vector3(0, 0, -1).applyQuaternion(ship.parkedLocalQuat)
+      .projectOnPlane(dir).normalize();
+    walkCtl.enter(planet, pos, toHold);
+    planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(planet.frameOrientation).multiply(walkCtl.quat);
+  });
+  await page.waitForTimeout(120);
+  await page.keyboard.press('KeyF');
+  check(await page.evaluate(() => NMS.shipViewState().rampTarget > 0.5),
+    'F at exterior tail opens the cargo ramp');
+  await page.waitForFunction('NMS.shipViewState().rampWalkable', null, { timeout: 60000 });
+  await page.keyboard.down('ShiftLeft');
+  await page.keyboard.down('KeyW');
+  await page.waitForFunction('NMS.state === "shipwalk"', null, { timeout: 60000 });
+  await page.keyboard.up('KeyW');
+  await page.keyboard.up('ShiftLeft');
+  check(await page.evaluate(() => {
+    const w = window.NMS.surfaceWeaponState();
+    return window.NMS.shipViewState().shipwalk && (w.equip === 'holstering' || w.equip === 'holstered');
+  }),
+    'walking up the cargo ramp enters interior walk and auto-holsters the rifle');
   await page.evaluate('NMS.takeoff()');
   // SwiftShader needs ~50 s for the debug takeoff since the HALCYON moving-parts
   // build (measured 2026-11-16 on unmodified HEAD); a GPU takes ~2 s.
@@ -306,14 +329,14 @@ try {
       visible: !document.getElementById('land-btn').classList.contains('hidden'),
       text: document.getElementById('land-btn').textContent.trim(),
     }));
-    check(divePrompt.seabedAlt > 700 && divePrompt.visible && divePrompt.text === '潜入并离开飞船  [L]',
+    check(divePrompt.seabedAlt > 700 && divePrompt.visible && divePrompt.text === '潜入海底着陆  [L]',
       `deep ocean hover at 150 m sea clearance shows DIVE [L] prompt (${Math.round(divePrompt.seabedAlt)} m above seabed)`);
     await page.keyboard.press('KeyL');
-    check(['landing', 'walk'].includes(await page.evaluate(() => window.NMS.state)),
-      'KeyL over deep ocean begins seabed dive sequence');
-    await page.waitForFunction(() => window.NMS.state === 'walk', null, { timeout: 60000 });
-    check(await page.evaluate(() => window.NMS.state === 'walk'),
-      'KeyL over deep ocean completes dive into seabed walk mode');
+    check(['landing', 'landed'].includes(await page.evaluate(() => window.NMS.state)),
+      'KeyL over deep ocean begins seabed landing sequence');
+    await page.waitForFunction(() => window.NMS.state === 'landed', null, { timeout: 120000 });
+    check(await page.evaluate(() => window.NMS.state === 'landed' && window.NMS.shipViewState().viewMode === 'cockpit'),
+      'KeyL over deep ocean completes seamless landing into pilot seat on seabed');
   }
 } finally {
   await browser.close();

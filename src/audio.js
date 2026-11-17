@@ -364,9 +364,19 @@ export class FlightAudio {
       if (data.phase === 'magout') this.sfx.play('reload_magout');
       else if (data.phase === 'magin') this.sfx.play('reload_magin');
       else if (data.phase === 'bolt') this.sfx.play('reload_bolt');
-    } else if (type === 'weapon:draw' && data.phase === 'rack') {
-      // drawing racks a round: the charging-handle slam, a touch lighter
-      this.sfx.play('reload_bolt', { gain: 0.85, pitch: 1.06 });
+    } else if (type === 'weapon:draw') {
+      if (data.phase === 'start') {
+        // harness/sling rustle as the rifle comes up
+        this.noiseBurst({ duration: 0.22, gain: 0.032, from: 620, to: 1850, q: 0.9 });
+        this.tone({ from: 135, to: 195, duration: 0.14, gain: 0.025, lowpass: 520 });
+      } else if (data.phase === 'rack') {
+        // drawing racks a round: the charging-handle slam, a touch lighter
+        this.sfx.play('reload_bolt', { gain: 0.85, pitch: 1.06 });
+      }
+    } else if (type === 'weapon:holster' && data.phase === 'start') {
+      // stowing the rifle onto the chest/hip sling + magnetic catch
+      this.noiseBurst({ duration: 0.24, gain: 0.036, from: 1650, to: 480, q: 0.85 });
+      this.tone({ from: 190, to: 82, duration: 0.16, gain: 0.042, lowpass: 440, delay: 0.14 });
     }
   }
 

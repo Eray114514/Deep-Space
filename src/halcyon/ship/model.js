@@ -424,6 +424,6 @@ export function assembleShip(gltf, def) {
       group: intGroup, barrier, lights, doors: cabinDoors, fans, hook, lightSwitch, lockers, bunkLamps,
       cockpit: { group: cockpitGroup, holo, glass, screens, lights: [], stick, throttle },
     },
-    mats: { ...Object.fromEntries(surface.materials), screens: screenMaterials, glass: glassMaterial },
+    mats: { ...Object.fromEntries(surface.materials), screens: screenMaterials, glass: glassMaterial, glassCoat },
   };
 }
