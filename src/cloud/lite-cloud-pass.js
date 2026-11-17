@@ -115,16 +115,16 @@ const cloudFieldGLSL = /* glsl */`
   // it, so detail smaller than a pixel averages out instead of being dropped
   // early (blurry from orbit) or sampled raw (sparkle).
   float gFootprint = 0.0;
+  // Footprint that decides when cells merge into sheets. Unlike gFootprint it
+  // does not shrink with resolution: the same distance looks the same at 2K.
+  float gSheet = 0.0;
   float noiseLod(float period) { return log2(max(gFootprint * 64.0 / period, 1.0)); }
   // Height of the last sampled column's cloud top within the layer (0..1).
   float gCrown = 0.0;
 
   // lod 0: light march / shadow / far field. 1: view march. 2: near camera.
-  float cloudDensity(vec3 p, float cover, int lod, float near, float lift) {
-    float h = (length(p) - uShellBase - lift) / uShellDepth;
-    if (h < 0.0 || h > 1.0) return 0.0;
-    float cov = cover * 0.86;                       // never fully closed: the deck keeps its pores
-    if (cov < 0.02) return 0.0;
+  // Noise-space position of a point in the layer.
+  vec3 cloudSpace(vec3 p) {
     vec3 q = uCloudMat * p;
     // The cell noise tiles: unwarped, a whole hemisphere showed the same
     // evenly spaced puffs and pores. A slow, large displacement stretches
@@ -132,7 +132,24 @@ const cloudFieldGLSL = /* glsl */`
     // Horizontal only: a vertical component leans every cloud over.
     vec3 warp = textureLod(uNoise, q / 240000.0 + 0.13, 0.0).rgb - 0.5;
     vec3 up = q / length(q);
-    q += (warp - up * dot(warp, up)) * uWarp;
+    return q + (warp - up * dot(warp, up)) * uWarp;
+  }
+  float topBase(float thick) { return mix(0.21, 0.46, smoothstep(0.3, 0.72, thick)); }
+  float towerTop(float wide, float thick) { return 0.52 * smoothstep(0.55, 0.8, wide) * smoothstep(0.4, 0.74, thick); }
+  // Radius above which no cloud can be here: cloudDensity's top with every
+  // per-cell factor at its largest. Only the slow fields are read.
+  float cloudCeiling(vec3 p, float lift) {
+    vec3 q = cloudSpace(p);
+    float wide = textureLod(uNoise, q.yzx / 63000.0 + 0.5, noiseLod(63000.0)).r;
+    float thick = textureLod(uNoise, q.zxy / 149000.0 + 0.37, noiseLod(149000.0)).b;
+    return uShellBase + lift + (topBase(thick) + towerTop(wide, thick)) * uShellDepth;
+  }
+  float cloudDensity(vec3 p, float cover, int lod, float near, float lift) {
+    float h = (length(p) - uShellBase - lift) / uShellDepth;
+    if (h < 0.0 || h > 1.0) return 0.0;
+    float cov = cover * 0.86;                       // never fully closed: the deck keeps its pores
+    if (cov < 0.02) return 0.0;
+    vec3 q = cloudSpace(p);
     // Worley-led closed cells: values fall along cell walls, which opens a
     // natural pore network instead of blocky cut-outs.
     float base = textureLod(uNoise, q / 27000.0, noiseLod(27000.0)).r;
@@ -156,16 +173,16 @@ const cloudFieldGLSL = /* glsl */`
     // From far enough that a cell is a few pixels, single clouds are not
     // seen at all: the fields read as continuous sheets shaped by the
     // weather, and break into cells as the camera comes closer.
-    base = mix(base, 0.6, smoothstep(1500.0, 4200.0, gFootprint));
+    base = mix(base, 0.6, smoothstep(1500.0, 4200.0, gSheet));
     base = sat((base - 0.22) / 0.6);
     // Cumulus profile: flat base, cloud-top height driven by the slow
     // thickness field and by each cell (cell cores tower upward).
-    float top = mix(0.21, 0.46, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
+    float top = topBase(thick) * mix(0.5, 1.0, base * base);
     // Convective towers: where the wide cells and the thickness field agree,
     // a cumulus grows through the rest of the deck (cumulus congestus).
     // The layer is deeper than the deck needs: the upper half belongs to
     // the towers alone, which stand kilometres clear of everything else.
-    top += 0.52 * smoothstep(0.55, 0.8, wide) * smoothstep(0.4, 0.74, thick) * smoothstep(0.35, 0.7, base);
+    top += towerTop(wide, thick) * smoothstep(0.35, 0.7, base);
     // Every small cumulus is its own dome and carries finer bumps: seen from
     // above the deck is a relief of lit tops and shaded gaps, not a flat sheet.
     if (fine > 0.0) top *= 1.0 - fine * (0.22 * (1.0 - small) + 0.12 * (1.0 - textureLod(uNoise, q / 7300.0, noiseLod(7300.0)).g));
@@ -240,6 +257,7 @@ const shadowShader = /* glsl */`
     // Same octaves as the view march, faded by what one texel can resolve.
     float texel = uShadowExtent / 512.0;
     gFootprint = texel;
+    gSheet = texel;
     gFarSmall = smoothstep(500.0, 1500.0, texel);
     gFarWide = smoothstep(2500.0, 8000.0, texel);
     vec2 xy = uShadowCenter + (vUv * 2.0 - 1.0) * uShadowExtent;
@@ -293,7 +311,7 @@ const marchShader = /* glsl */`
   precision highp float;
   #define VIEW_STEPS 8
   uniform sampler2D tSceneDepth;
-  uniform float uFrame, uExtinction, uScatterGain, uShaftStrength, uAltocumulus, uPixelAngle, uCloudCast;
+  uniform float uFrame, uExtinction, uScatterGain, uShaftStrength, uAltocumulus, uPixelAngle, uSheetAngle, uCloudCast;
   uniform vec3 uCloudTint;
   uniform vec2 uSubpixel, uMarchTexel;
   ${atmosphereUniformGLSL}
@@ -466,24 +484,23 @@ const marchShader = /* glsl */`
         // ray straight over any cloud thinner than a coarse step.
         bool inside = false;
         int refine = 0, fine = 0;
-        float emptyRun = 0.0;
         for (int i = 0; i < MARCH_STEPS; i++) {
           if (t > t1) break;
-          float dt = max(dmin, 0.055 * (t - t0));
+          // Steps grow with distance, but never past a fair share of the
+          // span: looking down from 17 km the growth alone reached kilometre
+          // steps inside the layer and jumped whole small cumulus, which then
+          // came and went from frame to frame with the jitter.
+          float dt = max(dmin, min(0.055 * (t - t0), 1.5 * span / float(MARCH_STEPS)));
           // Only the first few samples past an entry are fine: a grazing ray
           // through a thin deck stayed "inside" for hundreds of steps and ran
           // out of budget before the far half of the sky.
           if (inside && fine > 0 && T > 0.35) { dt = max(dt * 0.3, 20.0); fine--; }
-          // Clear air between clouds is crossed in longer strides; an entry
-          // backs up into the stride, so no cloud is jumped.
-          else if (!inside) dt *= 1.0 + min(emptyRun * 0.12, 0.9);
-          // Each step samples a fresh random point of its own interval. With
-          // the grid only shifted at the start, steps that grow with distance
-          // fell at the same depths in neighbouring pixels and drew contour
-          // terraces on every sharp cloud top; dithered, the history averages
-          // them out.
-          float stepJitter = fract(jitter + float(i) * 0.7548777);
-          vec3 p = ro + rd * (t + dt * (stepJitter - 0.5));
+          // Samples stay one step apart; only the start is jittered. Picking
+          // a random point inside each step left gaps of up to two steps,
+          // which skipped thin cloud on some frames and not others: the whole
+          // deck flickered. (The contour terraces that dither was hiding came
+          // from steps too long for the layer, fixed by the cap above.)
+          vec3 p = ro + rd * t;
           if (t - tWeather > 3500.0) {
             if (t - tWeather > 7000.0) { tWeather = t; weatherA = weatherAt(p); }
             else { tWeather += 3500.0; weatherA = weatherB; }
@@ -501,6 +518,19 @@ const marchShader = /* glsl */`
           // Close-range billows last until a march texel outgrows them.
           float near = sat(1.0 - t / 60000.0);
           gFootprint = t * uPixelAngle;
+          gSheet = t * uSheetAngle;
+          // Above the highest top this spot can have, no sample can hit
+          // cloud: skip down toward it. Most of the layer's depth is kept for
+          // towers, so a ray looking down from orbit otherwise spent half its
+          // steps in empty air. The bound can rise along the ray (~0.4 m per
+          // metre at most), hence the shorter jump where the ray is flat.
+          if (!inside) {
+            float over = rp - cloudCeiling(p, weather.y);
+            if (over > 150.0) {
+              t += clamp(0.9 * over / (max(-dot(rd, p / rp), 0.0) + 0.4), dt, 6000.0);
+              continue;
+            }
+          }
           // Fade octaves the growing step can no longer resolve.
           // (by step length along grazing rays, by distance when looking down from orbit)
           gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(500.0, 1500.0, gFootprint));
@@ -510,8 +540,7 @@ const marchShader = /* glsl */`
           float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near, weather.y);
           float crown = gCrown;
           if (d > 0.002 && !inside) { inside = true; refine = 4; fine = 8; t -= dt * 0.85; continue; }
-          if (d <= 0.002) { if (refine > 0) refine--; else inside = false; emptyRun += 1.0; }
-          else emptyRun = 0.0;
+          if (d <= 0.002) { if (refine > 0) refine--; else inside = false; }
           if (d > 0.002) {
             if (tFront < 0.0) tFront = t;
             float h = sat((length(p) - uShellBase - weather.y) / uShellDepth);
@@ -881,6 +910,7 @@ export class LiteCloudPass extends Pass {
         uScatterGain: { value: 3.6 },
         uAltocumulus: { value: 1 },
         uPixelAngle: { value: 0.002 },
+        uSheetAngle: { value: 0.0013 },
         uCloudCast: { value: 1 },
         uShaftStrength: { value: 0.9 },
         uCloudTint: { value: new THREE.Color(1, 1, 1) },
@@ -1066,7 +1096,10 @@ export class LiteCloudPass extends Pass {
     } else sub.set(0, 0);
     u.uMarchTexel.value.set(1 / width, 1 / height);
     // Angle one march texel subtends; the shifted grid resolves a little finer.
-    u.uPixelAngle.value = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov || 60) / 2) / height * (ratio === 2 ? 0.6 : 1);
+    const viewSpan = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov || 60) / 2);
+    u.uPixelAngle.value = viewSpan / height * (ratio === 2 ? 0.6 : 1);
+    // A 1080p march texel, whatever the resolution.
+    u.uSheetAngle.value = viewSpan / 540 * 0.6;
 
     if (!this.targetTypeChosen) {
       this.targetTypeChosen = true;

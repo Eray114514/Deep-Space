@@ -160,10 +160,40 @@ function cloudShadowRegistration(cloud, surfaceLossMap) {
     const a = cloud.sum[c] / cloud.count[c], b = surfaceLossMap.data[c];
     wc += a; xc += a * x; yc += a * y; ws += b; xs += b * x; ys += b * y; n++;
   }
-  if (n < 50 || wc <= 0 || ws <= 0) return { cells: n, offset: Infinity };
+  if (n < 50 || wc <= 0 || ws <= 0) return { cells: n, offset: Infinity, match: { r: -1, dx: 99, dy: 99 } };
   const cloudCentroid = [xc / wc, yc / wc], surfaceCentroid = [xs / ws, ys / ws];
   return { cells: n, cloudCentroid, surfaceCentroid,
-    offset: Math.hypot(cloudCentroid[0] - surfaceCentroid[0], cloudCentroid[1] - surfaceCentroid[1]) };
+    offset: Math.hypot(cloudCentroid[0] - surfaceCentroid[0], cloudCentroid[1] - surfaceCentroid[1]),
+    match: bestCorrelation(cloud, surfaceLossMap) };
+}
+
+// The shift (in loss cells) at which the clouds' loss pattern best matches
+// the surface's, and how well. The centroids alone missed a cloud shadow
+// moved sideways by a quarter radius: the share of light the clouds lose
+// grows with the sun's height, which here runs up the screen, and that bias
+// pulls the centroid and the vertical shift but not the horizontal one.
+function bestCorrelation(cloud, surfaceLossMap) {
+  const { cols, rows } = cloud;
+  const at = (dx, dy) => {
+    let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      const c = y * cols + x;
+      if (cloud.count[c] < 6) continue;
+      const sx = x + dx, sy = y + dy;
+      if (sx < 0 || sy < 0 || sx >= cols || sy >= rows) continue;
+      const a = cloud.sum[c] / cloud.count[c], b = surfaceLossMap.data[sy * cols + sx];
+      n++; sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+    }
+    if (n < 50) return -1;
+    const covariance = sab / n - (sa / n) * (sb / n);
+    return covariance / Math.sqrt(Math.max((saa / n - (sa / n) ** 2) * (sbb / n - (sb / n) ** 2), 1e-12));
+  };
+  let best = { r: -2, dx: 0, dy: 0 };
+  for (let dy = -12; dy <= 12; dy++) for (let dx = -12; dx <= 12; dx++) {
+    const r = at(dx, dy);
+    if (r > best.r) best = { r, dx, dy };
+  }
+  return { r: +best.r.toFixed(3), dx: best.dx, dy: best.dy };
 }
 
 function shadowPeak(lossMap, predicted) {
@@ -499,7 +529,11 @@ try {
     // sky light, which varies with the sun's height across the disc), so the
     // two centroids differ by ~0.04 even when the shadow is the same one;
     // a misplaced or screen-space shadow is off by the penumbra itself.
-    && cloudRegistration.every((r) => r.offset < 0.07);
+    && cloudRegistration.every((r) => r.offset < 0.07)
+    // The loss patterns must match where they are (not merely somewhere):
+    // a uniform or screen-fixed darkening correlates poorly, a sideways
+    // shift moves the best match off zero.
+    && cloudRegistration.every((r) => r.match.r > 0.5 && Math.abs(r.match.dx) <= 3);
 
   // Restore the complete frame, remove the eclipse fixture, then use an actual
   // generated moon group for front/behind depth ownership. updateVisual runs
