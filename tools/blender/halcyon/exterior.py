@@ -7,7 +7,7 @@ from . import preview as pv
 from . import prims
 from .common import collection
 from .design import (DIMS, HULL_KEYS, NACELLE_KEYS, WING_KEYS, CANARD_KEYS, FIN_KEYS,
-                     CANT_KEYS, CANT_TILT, ENGINES, NX, NY)
+                     CANT_KEYS, CANT_TILT, ENGINES, NX, NY, R)
 from .loft import LoftSurface, J_B, J_C, J_D, J_E, JMAX
 
 HULL = LoftSurface(HULL_KEYS)
@@ -110,7 +110,7 @@ def build_hull(M, col):
                      | {GZ0 + 0.42})
     u_extra = sorted({v for p in PANES for v in p[2:]} | {13.0, 13.9})
     return HULL.build('hull', col, seams=hull_seams() + [('r', 11.0, 0.0, float(JMAX))], region=hull_region, mats=M,
-                      cap_start=True, cap_end=True, z_extra=z_extra, u_extra=u_extra, uv_fn=pane_uv)
+                      cap_start=True, cap_end='hullGrey', z_extra=z_extra, u_extra=u_extra, uv_fn=pane_uv)
 
 
 def build_ramp(M, col):
@@ -195,12 +195,14 @@ def build_nacelle(M, col, mirror):
             return 'hullDark'
         return 'hull'
 
-    outer = S.build('nacelle-' + tag, col, seams=seams, region=region, mats=M, cap_end=True,
+    outer = S.build('nacelle-' + tag, col, seams=seams, region=region, mats=M,
                     z_extra=(3.6, 6.9))
     duct = S.build('nacelle-duct-' + tag, col, region=lambda z, j, s: 'metalDark', mats=M,
                    inset=0.07, flip=True, z_range=(0.4, 2.6), cap_end=True)
     lip = S.lip('nacelle-lip-' + tag, col, 0.4, 0.085, M['hullDark'])
-    return [outer, duct, lip]
+    # Close the nacelle around the bell without covering its recessed injector.
+    socket = S.lip('nacelle-socket-' + tag, col, S.z1, 0.18, M['metalDark'], facing=1)
+    return [outer, duct, lip, socket]
 
 
 # ---------------------------------------------------------------- lifting surfaces
@@ -287,9 +289,31 @@ def build_cant(M, col, mirror):
 
 
 # ---------------------------------------------------------------- engines
+def build_auxiliary_housing(M, col, e, idx):
+    """A faired shoulder in the aft deck feeding an open, heat-shielded socket."""
+    x, y, z, r = e['x'], e['y'], e['z'], e['r']
+    stations = [
+        R(z - 4.1, y - 0.44, 0.13, 0.30, x),
+        R(z - 3.0, y - 0.24, 0.36, 0.57, x),
+        R(z - 1.6, y - 0.09, 0.55, 0.65, x),
+        R(z - 0.76, y - 0.03, 0.54, 0.59, x),
+        R(z - 0.33, y, 0.47, 0.49, x),
+        R(z - 0.15, y, r * 1.24, r * 1.24, x),
+    ]
+    casing = LoftSurface(stations).build('aux%d-fairing' % idx, col, mats=M,
+        seams=[('r', z - 1.6, 0, JMAX)], ring_step=0.22,
+        region=lambda at, j, side: 'hullGrey' if j > J_D else 'hull')
+    # Overlap the open end of the fairing. Keep the centre clear down to the injector.
+    socket = prims.lathe('aux%d-socket' % idx, col, [
+        (r * 1.20, z - 0.27), (r * 1.32, z - 0.15), (r * 1.30, z - 0.08),
+        (r * 1.11, z + 0.025), (r * 0.99, z + 0.025), (r * 0.96, z - 0.22),
+    ], (x, y), mat=M['metal'], segs=48)
+    return [casing, socket]
+
+
 def build_engine(M, col, e, idx):
     x, y, z, r = e['x'], e['y'], e['z'], e['r']
-    out = []
+    out = [] if e['main'] else build_auxiliary_housing(M, col, e, idx)
     L = r * 1.25
     out.append(prims.lathe('eng%d-shroud' % idx, col, [
         (r * 1.11, z - 0.02), (r * 1.09, z + L * 0.30), (r * 1.03, z + L * 0.34),

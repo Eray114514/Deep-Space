@@ -133,7 +133,7 @@ def library(debug=False):
     lib['hudGlass'] = glass('hudGlass', debug=False)
     lib['bellInner'] = make('bellInner', (0.16, 0.14, 0.13), 1.0, 0.35, debug=debug)
     lib['hudGlass'].node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_value = (0.45, 0.85, 0.95, 1)
-    lib['engineCore'] = emissive('engineCore', (0.45, 0.75, 1.0), 6.0, debug)
+    lib['engineCore'] = emissive('engineCore', (1.0, 0.83, 0.49), 6.0, debug)
     lib['lampWhite'] = emissive('lampWhite', (1.0, 0.97, 0.9), 8.0, debug)
     lib['trimTwoSided'] = make('trimTwoSided', (0.07, 0.072, 0.078), 0.3, 0.42, debug=False)
     lib['trimTwoSided'].use_backface_culling = False

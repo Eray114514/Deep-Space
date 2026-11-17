@@ -113,6 +113,6 @@ CANT_TILT = -0.42
 ENGINES = [
     dict(x=NX, y=NY, z=11.20, r=0.84, main=True),
     dict(x=-NX, y=NY, z=11.20, r=0.84, main=True),
-    dict(x=1.15, y=2.84, z=11.78, r=0.30, main=False),
-    dict(x=-1.15, y=2.84, z=11.78, r=0.30, main=False),
+    dict(x=1.48, y=3.30, z=12.22, r=0.36, main=False),
+    dict(x=-1.48, y=3.30, z=12.22, r=0.36, main=False),
 ]

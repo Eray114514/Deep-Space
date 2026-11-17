@@ -165,11 +165,16 @@ export class GameLegacyPipeline {
     // grade pass (radial CA / vignette / film grain): display-referred lens
     // character, so it runs after the tonemap in OutputPass.
     this.grade = gradePass({ realistic: realisticGrade });
-    this.composer.addPass(this.grade);
     this.smaa = !matchMedia('(pointer: coarse)').matches
-      ? new SMAAPass(1, 1)
+      ? new SMAAPass()
       : null;
-    if (this.smaa) this.composer.addPass(this.smaa);
+    if (this.smaa) {
+      // Catch low-contrast wing edges and panel boundaries in display space.
+      // Apply grain afterwards so it cannot mask or trigger edge detection.
+      this.smaa._materialEdges.defines.SMAA_THRESHOLD = '0.05';
+      this.composer.addPass(this.smaa);
+    }
+    this.composer.addPass(this.grade);
     if (temporalAA) this.setTemporalAAEnabled(true);
     renderer.info.autoReset = false;
   }

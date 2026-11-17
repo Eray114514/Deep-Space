@@ -94,7 +94,7 @@ export function plumeMaterial() {
       void main(){
         float drive = smoothstep(0.06, 1.7, uPower);
         float response = pow(drive, 0.72);
-        float lengthScale = mix(0.38, 1.14, response);
+        float lengthScale = mix(0.62, 1.18, response);
         mat4 instance = mat4(1.0);
         #ifdef USE_INSTANCING
           instance = instanceMatrix;
@@ -134,9 +134,9 @@ export function plumeMaterial() {
       /* Units are engine radii; y runs downstream from a root 0.3 R inside
          the bell, so the jet is born in the glowing throat, not at the lip.
          Three parts, each with its own job:
-           core    a tight white-blue potential core that lengthens with power
+           core    a hot ivory potential core that lengthens with power
            knots   shock diamonds on the axis, only under real thrust
-           mantle  a soft, wide, turbulent blue sheath that carries the length
+           mantle  a wider, golden shear layer that carries the length
          The result is premultiplied light over a light veil: it brightens what
          is behind it but never paints a flat sheet over the stars. */
       void main(){
@@ -158,11 +158,11 @@ export function plumeMaterial() {
         const int STEPS = 22;
         float stepLength = (exit - enter) / float(STEPS);
         float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-        float coreLen = mix(0.55, 2.1, drive);
-        float coreR = mix(0.26, 0.40, drive);
+        float coreLen = mix(1.10, 2.6, drive);
+        float coreR = mix(0.32, 0.42, drive);
         float cell = mix(1.35, 1.0, drive);
         float knotGain = smoothstep(0.38, 1.0, drive);
-        float mantleLen = mix(0.7, L * 0.30, drive);
+        float mantleLen = L * mix(0.34, 0.46, drive);
         /* End-on, a jet is optically thin: the downstream gas is a column you
            look along, not a sheet you look across.  Without this the chase
            camera, which sits nearly on the axis, sees every metre of plume
@@ -176,26 +176,31 @@ export function plumeMaterial() {
           float t = clamp(y / L, 0.0, 1.0);
           float rr = dot(q.xz, q.xz);
           float born = smoothstep(0.0, 0.32, y) * (1.0 - smoothstep(0.55, 1.0, t))
-            * mix(1.0, 0.18, axial * smoothstep(0.6, 2.2, y));
+            * mix(1.0, 0.48, axial * smoothstep(0.6, 2.2, y));
           float flicker = 0.9 + 0.1 * sin(uTime * 37.0 + y * 3.1);
           /* the potential core CONTRACTS downstream, as a real one does */
           float cr = coreR * (1.0 - 0.45 * smoothstep(0.0, coreLen * 1.8, y));
           float core = exp(-rr / (cr * cr)) * exp(-max(y - 0.15, 0.0) / coreLen) * born;
           float ph = fract((y - 0.45) / cell);
-          float knot = exp(-pow((ph - 0.5) / 0.09, 2.0)) * exp(-rr / 0.045)
+          float cellOffset = (ph - 0.5) / 0.12;
+          float knot = exp(-cellOffset * cellOffset) * exp(-rr / 0.045)
             * exp(-y / coreLen) * step(0.45, y) * (1.0 - smoothstep(coreLen * 1.6, coreLen * 2.4, y)) * knotGain;
-          float sr = 0.48 + 0.55 * t + 0.06 * drive;
+          float sr = (0.48 + 0.55 * t + 0.06 * drive)
+            * (1.0 - 0.20 * knotGain * (0.5 + 0.5 * cos(y * 6.2832 / cell)));
           float roll = 0.72 + 0.28 * sin(q.x * 5.0 + y * 2.3 - uTime * 9.0)
             * cos(q.z * 4.6 - y * 1.7 + uTime * 7.0);
           float mantle = exp(-rr / (sr * sr) * 2.2) * exp(-y / mantleLen) * roll * born;
-          light += (vec3(0.66, 0.84, 1.0) * core * 3.4 + vec3(0.92, 0.96, 1.0) * knot * 4.0
-            + vec3(0.10, 0.22, 1.0) * mantle * 0.45) * flicker * stepLength;
+          light += (vec3(1.0, 0.88, 0.58) * core * 3.8 + vec3(1.0, 0.96, 0.83) * knot * 4.0
+            + vec3(1.0, 0.57, 0.14) * mantle * 1.35) * flicker * stepLength;
           veil += (core * 0.5 + mantle * 0.2) * stepLength;
         }
-        float gain = mix(0.30, 1.3, drive);
-        vec3 col = min(light * gain, vec3(6.0));
-        float alpha = clamp(1.0 - exp(-veil * gain * 0.5), 0.0, 0.8) * 0.3;
-        if (max(col.r, max(col.g, col.b)) < 0.003) discard;
+        float gain = mix(1.0, 1.65, drive);
+        // Compress the brightest end-on column before bloom, preserving its hue.
+        float peak = max(light.r, max(light.g, light.b)) * gain;
+        vec3 col = light * gain / (1.0 + peak / 1.20);
+        // Gas at the mouth also attenuates the bright metal and injector behind it.
+        float alpha = min(0.94, 1.0 - exp(-veil * gain * 1.65));
+        if (peak < 0.00005) discard;
         gl_FragColor = vec4(col, alpha);
       }`,
   });
@@ -213,8 +218,8 @@ export function haloMaterial() {
     vertexShader: `
       #include <common>
       #include <logdepthbuf_pars_vertex>
-      varying float vRadius; varying float vEngineRadius;
-      varying vec2 vDisc; varying vec3 vWorld;
+      varying float vRadius;
+      varying vec2 vDisc;
       void main(){
         mat4 instance = mat4(1.0);
         #ifdef USE_INSTANCING
@@ -222,28 +227,25 @@ export function haloMaterial() {
         #endif
         vec4 wp = modelMatrix * instance * vec4(position, 1.0);
         vRadius = length(position.xy);
-        vEngineRadius = length(instance[0].xyz);
         vDisc = position.xy;
-        vWorld = wp.xyz;
         gl_Position = projectionMatrix * viewMatrix * wp;
         #include <logdepthbuf_vertex>
       }`,
     fragmentShader: `
       #include <logdepthbuf_pars_fragment>
       uniform float uPower; uniform float uTime;
-      varying float vRadius; varying float vEngineRadius;
-      varying vec2 vDisc; varying vec3 vWorld;
-      /* the hot throat at the bottom of the bell: a smooth white-to-blue
+      varying float vRadius;
+      varying vec2 vDisc;
+      /* the hot throat at the bottom of the bell: an ivory-to-amber
          dish, no rings, seen through the flame-holder struts */
       void main(){
         #include <logdepthbuf_fragment>
         float drive = smoothstep(0.06, 1.7, uPower);
         float g = 1.0 - smoothstep(0.0, 0.88, vRadius);
-        vec3 color = mix(vec3(0.16, 0.36, 1.0), vec3(0.86, 0.94, 1.0), g * g);
+        vec3 color = mix(vec3(1.0, 0.45, 0.09), vec3(1.0, 0.93, 0.72), g * g);
         float flicker = 0.94 + 0.06 * sin(uTime * 23.0 + vDisc.x * 3.0);
         float alpha = clamp((0.45 + drive * 0.45) * g, 0.0, 0.9);
-        float small = mix(3.2, 1.0, smoothstep(0.10, 0.28, vEngineRadius));
-        float radiance = (1.0 + drive * 2.2) * flicker * small;
+        float radiance = (1.65 + drive * 1.4) * flicker;
         gl_FragColor = clamp(vec4(color * radiance * alpha, alpha), 0.0, 4.0);
         if (alpha < 0.002) discard;
       }`,

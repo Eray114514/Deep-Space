@@ -157,14 +157,18 @@ uniform vec3 uShipHemiGround;
 float shipBreakup;
 float shipChip;
 float shipFootprint;
+float shipGroove;
 ${NOISE}
 ${RELIEF_LIB}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
   {
-    float tint = vShipPaint.r, groove = vShipPaint.g;
+    float tint = vShipPaint.r;
     /* detail fades out as it drops below a pixel, or it turns to sparkle */
     float footprint = length(fwidth(vShipPos));
     shipFootprint = footprint;
+    // The cut between plates is 10 mm wide. Limit the contrast of a hit
+    // to its pixel coverage once several centimetres project onto a pixel.
+    shipGroove = vShipPaint.g${spec.coat && !spec.interior ? ' * min(1.0, 0.010 / max(footprint, 0.001))' : ''};
     float fineFade = 1.0 - smoothstep(0.012, 0.045, footprint);
     float broad = shipNoise(vShipPos * 1.7);
     float fine = mix(0.5, shipNoise(vShipPos * 31.0), fineFade);
@@ -190,7 +194,7 @@ ${RELIEF_LIB}`)
     shipChip = ${glsl(wear)} * smoothstep(0.22, 0.50, vShipWear
       * (0.50 + 0.95 * mix(0.5, shipNoise(vShipPos * 85.0), fineFade) + 0.45 * broad));
     c = mix(c, vec3(${bare.map(glsl).join(', ')}), shipChip);
-    c *= 1.0 - groove * 0.82;
+    c *= 1.0 - shipGroove * 0.82;
     ${spec.temper ? `{
       /* heat tint: the oxide film on hot alloy runs straw, purple, blue with temperature */
       float band = vShipPos.z * 2.6 + broad * 1.3 + tint * 0.6;
@@ -204,10 +208,15 @@ ${RELIEF_LIB}`)
   }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
   roughnessFactor = clamp(roughnessFactor + (vShipPaint.r - 0.5) * ${glsl(spec.rough)}
-    + (shipBreakup - 0.5) * ${glsl(spec.noise * 2)} + vShipPaint.g * 0.3 + vShipPaint.b * 0.22, 0.045, 1.0);
+    + (shipBreakup - 0.5) * ${glsl(spec.noise * 2)} + shipGroove * 0.3 + vShipPaint.b * 0.22, 0.045, 1.0);
   roughnessFactor = mix(roughnessFactor, 0.36, shipChip * ${glsl(spec.bareMetal || 0)});`)
       .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
   metalnessFactor = mix(metalnessFactor, 1.0, shipChip * ${glsl(spec.bareMetal || 0)});`)
+      .replace('#include <normal_fragment_begin>', spec.coat && !spec.interior ? `
+  #include <normal_fragment_begin>
+  vec3 facet = cross(dFdx(vViewPosition), dFdy(vViewPosition));
+  normal = normalize(mix(normal, facet * inversesqrt(max(dot(facet, facet), 1e-20)), shipGroove));
+  nonPerturbedNormal = normal;` : '#include <normal_fragment_begin>')
       .replace('#include <normal_fragment_maps>', relief ? `#include <normal_fragment_maps>
   {
     vec3 an = abs(vShipNrm);
@@ -222,14 +231,14 @@ ${RELIEF_LIB}`)
     float depth = vShipPaint.r;
     float drive = smoothstep(0.06, 1.7, uShipEnginePower);
     float hot = pow(smoothstep(0.05, 1.0, depth), 1.6);
-    vec3 heat = mix(vec3(0.10, 0.18, 0.95), vec3(0.80, 0.90, 1.0), hot * hot);
-    totalEmissiveRadiance += heat * hot * (0.35 + drive * 2.4);
+    vec3 heat = mix(vec3(0.95, 0.39, 0.075), vec3(1.0, 0.87, 0.56), hot * hot);
+    totalEmissiveRadiance += heat * hot * (0.68 + drive * 2.4);
   }` : '#include <emissivemap_fragment>')
       .replace('#include <lights_fragment_end>', spec.interior ? '#include <lights_fragment_end>' : `#include <lights_fragment_end>
   {
     vec3 hemiUp = normalize((viewMatrix * vec4(uShipHemiUp, 0.0)).xyz);
     float hemi = dot(normal, hemiUp) * 0.5 + 0.5;
-    vec3 hemiIrradiance = mix(uShipHemiGround, uShipHemiSky, hemi) * (1.0 - vShipPaint.g * 0.7)
+    vec3 hemiIrradiance = mix(uShipHemiGround, uShipHemiSky, hemi) * (1.0 - shipGroove * 0.7)
       * (1.0 - vShipPaint.b * 0.75);
     reflectedLight.indirectDiffuse += hemiIrradiance * BRDF_Lambert(material.diffuseColor);
     /* metals have no diffuse term: give them the same hemisphere as a broad sheen */

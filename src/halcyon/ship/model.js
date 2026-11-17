@@ -295,7 +295,7 @@ export function assembleShip(gltf, def) {
     if (match[1] === 'strobe') strobeGlows.push(sprite);
   }
   const plumes = [addInstances(plumeGeometry(), plumeMaterial(), 'engine-plume-volume', 3)];
-  const glowRings = [addInstances(nozzleGlowGeometry(), haloMaterial(), 'engine-plume-throat', 5, true)];
+  const glowRings = [addInstances(nozzleGlowGeometry(), haloMaterial(), 'engine-plume-throat', 2, true)];
 
   /* ------------------------------------------------------------ interior */
   const intGroup = new THREE.Group();

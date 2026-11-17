@@ -396,7 +396,9 @@ class LoftSurface:
                         ov = uv_fn(key, zlines[qz][0], JE[qz][qc], side, zmid, jmid)
                         if ov is not None:
                             loop[uv_layer].uv = ov
-                    if not f.tag:
+                    # Painted grooves carry the uncut skin normal. The shader uses
+                    # the physical facet normal only while the groove is resolved.
+                    if not f.tag or key in ('hull', 'hullGrey', 'accent'):
                         s_m, s, s_p = secs[qz]
                         jn = JE[qz][qc] + (0.04 if jmid > JE[qz][qc] else -0.04)
                         if qz == zi:
@@ -407,14 +409,19 @@ class LoftSurface:
                             n = -n
                         loop[nrm_layer] = G(*n)
 
-        # caps
+        # Named caps are painted bulkheads. Keep them flat and out of the panel
+        # flood fill, but do not mark their entire face as a recessed seam.
+        painted_caps = set()
         for want, row, rev in ((cap_start, V[0], False), (cap_end, V[-1], True)):
             if not want:
                 continue
             ring = row[::-1] if (rev != flip) != (self.sign < 0) else row
             try:
                 f = bm.faces.new(ring)
-                f.material_index = slot_of.setdefault('cap', len(slot_of))
+                material = want if isinstance(want, str) else 'cap'
+                f.material_index = slot_of.setdefault(material, len(slot_of))
+                if isinstance(want, str):
+                    painted_caps.add(f)
                 f.tag = True
                 f.smooth = False
             except ValueError:
@@ -445,8 +452,9 @@ class LoftSurface:
         for f in bm.faces:
             if f.tag:
                 for loop in f.loops:
-                    loop[col_layer] = (0.5, 1.0, 0.0, 0.0)
-                    loop[nrm_layer] = f.normal
+                    loop[col_layer] = (0.5, 0.0 if f in painted_caps else 1.0, 0.0, 0.0)
+                    if loop[nrm_layer].length_squared < 1e-8:
+                        loop[nrm_layer] = f.normal
         for e in bm.edges:
             if len(e.link_faces) == 2 and e.link_faces[0].tag != e.link_faces[1].tag:
                 e.smooth = False

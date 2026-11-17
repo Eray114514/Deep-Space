@@ -7,12 +7,12 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { startServer } from './server.js';
-import { launchBrowser } from './browser.js';
+import { launchBrowser, launchHardwareBrowser } from './browser.js';
 
 const output = path.resolve('test-results/engine-plume');
 await mkdir(output, { recursive: true });
 const { server, port } = await startServer(0);
-const browser = await launchBrowser({ headless: true });
+const browser = process.argv.includes('--hardware') ? await launchHardwareBrowser() : await launchBrowser();
 const page = await browser.newPage({ viewport: { width: 2048, height: 994 } });
 const failures = [];
 const errors = [];
@@ -117,6 +117,36 @@ function plumeCrossSectionSymmetry(visible, hidden, projections) {
   });
 }
 
+// A paced renderer can skip several animation callbacks. Compare completed
+// frames of the requested pose and visibility even on software WebGL.
+async function waitForRender() {
+  const sequence = await page.evaluate(() => NMS._pipeline.frameState.sequence);
+  await page.waitForFunction((previous) => NMS._pipeline.frameState.sequence > previous, sequence);
+}
+
+async function projectThroats() {
+  return page.evaluate(() => {
+    const { ship, camera } = NMS._internals;
+    const THREE = NMS._THREE;
+    const rig = ship.ext.glowRings[0];
+    rig.updateWorldMatrix(true, false);
+    const bounds = rig.geometry.boundingBox;
+    const center = bounds.getCenter(new THREE.Vector3());
+    const toScreen = (local, matrix) => {
+      const p = local.clone().applyMatrix4(matrix).project(camera);
+      return [(p.x + 1) * innerWidth / 2, (1 - p.y) * innerHeight / 2];
+    };
+    return ship.ext.engines.map((_, i) => {
+      const matrix = new THREE.Matrix4();
+      rig.getMatrixAt(i, matrix);
+      matrix.premultiply(rig.matrixWorld);
+      const c = toScreen(center, matrix);
+      const rim = toScreen(new THREE.Vector3(bounds.max.x, center.y, center.z), matrix);
+      return { center: c, radius: Math.hypot(rim[0] - c[0], rim[1] - c[1]) };
+    });
+  });
+}
+
 async function projectEngines(mainOnly = true) {
   return page.evaluate((onlyMain) => {
     const { ship, camera } = NMS._internals;
@@ -154,13 +184,14 @@ try {
   await page.waitForFunction('window.NMS?.booted === true', null, { timeout: 120000 });
   await page.evaluate(() => {
     NMS.setAdaptiveQualityLocked(true);
-    if (NMS._pipeline.grade) NMS._pipeline.grade.enabled = false;
+    if (NMS._pipeline.grade) NMS._pipeline.grade.uniforms.uGrain.value = 0;
     const { ship } = NMS._internals;
     const THREE = NMS._THREE;
     const originalFx = ship.updateEngineFx.bind(ship);
     /* 877.4 km/s is the exact reported failure state.  The player-facing HUD
        frame is captured before any proof pose or scene isolation is applied. */
-    ship.updateEngineFx = (dt) => originalFx(dt, 877400, 0, 0);
+    ship.engineProofSpeed = 877400;
+    ship.updateEngineFx = (dt) => originalFx(dt, ship.engineProofSpeed, 0, 0);
     const originalUpdate = ship.update.bind(ship);
     const proofPose = new THREE.Quaternion()
       .setFromEuler(new THREE.Euler(-0.07, -0.34, -0.025, 'YXZ'));
@@ -186,14 +217,14 @@ try {
     for (const strobe of ship.ext.strobes) strobe.visible = false;
     scene.background = new NMS._THREE.Color(0x02050a);
   });
-  await page.waitForTimeout(260);
+  await waitForRender();
   await page.screenshot({ path: path.join(output, '00-player-hud-reported-angle.png') });
   await page.evaluate(() => {
     document.body.classList.add('hide-hud');
     NMS._internals.ship.engineProofPose
       .setFromEuler(new NMS._THREE.Euler(-0.07, -0.34, -0.025, 'YXZ'));
   });
-  await page.waitForTimeout(260);
+  await waitForRender();
 
   const contract = await page.evaluate(() => {
     const { ship, camera } = NMS._internals;
@@ -289,17 +320,18 @@ try {
     for (const strobe of ship.ext.strobes) strobe.visible = false;
     scene.background = new NMS._THREE.Color(0x02050a);
   });
-  await page.waitForTimeout(180);
+  await waitForRender();
   await page.evaluate(() => NMS._internals.ship.engineProofPose.identity());
-  await page.waitForTimeout(240);
+  await waitForRender();
   const chaseProjection = await projectEngines();
-  const allChaseProjection = await projectEngines(false);
+  // The glow dish is smaller than the opening and recessed by nearly one radius.
+  const throatProjection = await projectThroats();
   const chaseVisible = await page.screenshot({ path: path.join(output, '02-high-power-chase.png') });
   await page.evaluate(() => {
     const { ship } = NMS._internals;
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = false;
   });
-  await page.waitForTimeout(120);
+  await waitForRender();
   const chaseHidden = await page.screenshot({ path: path.join(output, '02a-chase-disabled-control.png') });
   const chaseVisiblePng = readPng(chaseVisible);
   const chaseHiddenPng = readPng(chaseHidden);
@@ -313,18 +345,17 @@ try {
     const { ship } = NMS._internals;
     for (const rig of ship.ext.glowRings) rig.visible = true;
   });
-  await page.waitForTimeout(90);
+  await waitForRender();
   const throatOnly = await page.screenshot({
     path: path.join(output, '02b-chase-throat-only.png'),
   });
   const throatBalances = nozzleSymmetry(
-    readPng(throatOnly), chaseHiddenPng, allChaseProjection);
+    readPng(throatOnly), chaseHiddenPng, throatProjection);
   const normalizedThroatEnergy = throatBalances.map((balance, index) =>
-    balance.total / Math.max(16, allChaseProjection[index].radius ** 2));
+    balance.total / Math.max(16, throatProjection[index].radius ** 2));
   check(throatBalances.every((balance, index) =>
-    /* the dorsal bells are 0.30 R engines whose throat dish sits 0.48 R deep:
-       their absolute energy is small, their normalised energy matches the mains */
-    balance.total > (allChaseProjection[index].authoredRadius > 0.5 ? 3000 : 350)
+    // Evaluate the same light per projected area for both aperture sizes.
+    normalizedThroatEnergy[index] > 3
       && balance.vertical > 0.38 && balance.horizontal > 0.38)
       && Math.min(...normalizedThroatEnergy) / Math.max(...normalizedThroatEnergy) > 0.22,
   `all four apertures illuminate around their full circumference (${throatBalances.map((balance, index) => `${balance.total.toFixed(0)}e/${normalizedThroatEnergy[index].toFixed(2)}n/${balance.vertical.toFixed(2)}v/${balance.horizontal.toFixed(2)}h`).join(', ')})`);
@@ -338,12 +369,12 @@ try {
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = true;
     ship.engineProofPose.setFromEuler(new NMS._THREE.Euler(-0.07, -0.34, -0.025, 'YXZ'));
   });
-  await page.waitForTimeout(180);
+  await waitForRender();
   await page.evaluate(() => {
     const { ship } = NMS._internals;
     for (const strobe of ship.ext.strobes) strobe.visible = false;
   });
-  await page.waitForTimeout(240);
+  await waitForRender();
   const leftProjection = await projectEngines();
   const highABuffer = await page.screenshot({ path: path.join(output, '03-dark-field-flow-a.png') });
   await page.waitForTimeout(420);
@@ -359,7 +390,7 @@ try {
       const layers = [...ship.ext.plumes, ...ship.ext.glowRings];
       layers.forEach((rig, index) => { rig.visible = index === activeLayer; });
     }, active);
-    await page.waitForTimeout(90);
+    await waitForRender();
     await page.screenshot({
       path: path.join(output, `${String(7 + active).padStart(2, '0')}-layer-${layerNames[active]}.png`),
     });
@@ -368,14 +399,14 @@ try {
     const { ship } = NMS._internals;
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = true;
   });
-  await page.waitForTimeout(90);
+  await waitForRender();
 
   const visibleControl = highBBuffer;
   await page.evaluate(() => {
     const { ship } = NMS._internals;
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = false;
   });
-  await page.waitForTimeout(180);
+  await waitForRender();
   const hiddenBuffer = await page.screenshot({ path: path.join(output, '05-plume-disabled-control.png') });
   const spill = imageDelta(readPng(visibleControl), readPng(hiddenBuffer), 8);
   const leftCrossSections = plumeCrossSectionSymmetry(
@@ -389,14 +420,14 @@ try {
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = true;
     ship.engineProofPose.setFromEuler(new NMS._THREE.Euler(-0.07, 0.34, 0.025, 'YXZ'));
   });
-  await page.waitForTimeout(220);
+  await waitForRender();
   const rightProjection = await projectEngines();
   const rightVisible = await page.screenshot({ path: path.join(output, '09-dark-field-right-oblique.png') });
   await page.evaluate(() => {
     const { ship } = NMS._internals;
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = false;
   });
-  await page.waitForTimeout(140);
+  await waitForRender();
   const rightHidden = await page.screenshot({ path: path.join(output, '09a-right-disabled-control.png') });
   const rightCrossSections = plumeCrossSectionSymmetry(
     readPng(rightVisible), readPng(rightHidden), rightProjection);
@@ -413,7 +444,7 @@ try {
       for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = true;
       ship.engineProofPose.setFromEuler(new NMS._THREE.Euler(...angles, 'YXZ'));
     }, euler);
-    await page.waitForTimeout(180);
+    await waitForRender();
     await page.screenshot({ path: path.join(output, name) });
   }
 
@@ -421,7 +452,7 @@ try {
     const { ship } = NMS._internals;
     ship.engineProofPose.setFromEuler(new NMS._THREE.Euler(0.02, -1.18, 0, 'YXZ'));
   });
-  await page.waitForTimeout(180);
+  await waitForRender();
   const sideVisible = await page.screenshot({
     path: path.join(output, '11a-dark-field-side.png'),
   });
@@ -429,7 +460,7 @@ try {
     const { ship } = NMS._internals;
     for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = false;
   });
-  await page.waitForTimeout(120);
+  await waitForRender();
   const sideHidden = await page.screenshot({
     path: path.join(output, '11b-side-disabled-control.png'),
   });
@@ -451,7 +482,7 @@ try {
     }
     for (const rig of ship.ext.plumes) rig.visible = true;
   });
-  await page.waitForTimeout(180);
+  await waitForRender();
   const allEngineProjection = await projectEngines(false);
   const allEngineVisible = await page.screenshot({
     path: path.join(output, '12-four-engine-volume-isolation.png'),
@@ -459,7 +490,7 @@ try {
   await page.evaluate(() => {
     for (const rig of NMS._internals.ship.ext.plumes) rig.visible = false;
   });
-  await page.waitForTimeout(120);
+  await waitForRender();
   const allEngineHidden = await page.screenshot({
     path: path.join(output, '12a-four-engine-disabled-control.png'),
   });
@@ -486,6 +517,32 @@ try {
     `visible energy stays spatially bounded (${(spill.ratio * 100).toFixed(2)}% affected pixels)`);
   check(attachedRoots.length === 4,
     'all four authored nozzle roots project into the proof frame');
+  await page.evaluate(() => {
+    const { ship } = NMS._internals;
+    ship.engineProofPose.identity();
+    ship.engineProofSpeed = 2;
+    // Settle the actual spool-down in simulation time even on software GL.
+    for (let frame = 0; frame < 120; frame++) ship.updateEngineFx(1 / 60);
+    for (const rig of [...ship.ext.plumes, ...ship.ext.glowRings]) rig.visible = true;
+  });
+  await page.waitForFunction(() => NMS._internals.ship.enginePower < 0.11);
+  const idle = readPng(await page.screenshot({ path: path.join(output, '13-low-speed-chase.png') }));
+  for (const [index, nozzle] of (await projectEngines(false)).entries()) {
+    const [cx, cy] = nozzle.center;
+    let warm = 0, sampled = 0;
+    const r = nozzle.radius * 0.70;
+    for (let y = Math.ceil(cy - r); y <= cy + r; y++) {
+      for (let x = Math.ceil(cx - r); x <= cx + r; x++) {
+        if (Math.hypot(x - cx, y - cy) > r) continue;
+        const p = (y * idle.width + x) * 4;
+        sampled++;
+        if (idle.data[p] > 135 && idle.data[p] - idle.data[p + 2] > 24
+            && idle.data[p + 1] > idle.data[p + 2] + 12) warm++;
+      }
+    }
+    check(warm > sampled * 0.22,
+      `nozzle ${index + 1} shows a warm, luminous jet at 2 m/s (${warm}/${sampled} pixels)`);
+  }
   check(errors.length === 0, `WebGL plume has no shader/page errors (${errors.length})`);
 } finally {
   await browser.close();
