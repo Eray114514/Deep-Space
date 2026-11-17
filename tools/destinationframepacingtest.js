@@ -5,7 +5,6 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as THREE from 'three';
-import { SpatialRift } from '../src/spatial-rift-webgl.js';
 const mainBytes = await readFile('src/main.js'), main = mainBytes.toString(), verifierBytes = await readFile(new URL(import.meta.url));
 const sha = value => createHash('sha256').update(value).digest('hex');
 const referenceBytes = await readFile(new URL('fixtures/portal-prewarm-dfc9e5c.json', import.meta.url));
@@ -78,7 +77,7 @@ function fixture(options = {}) {
     preparedDestinationIsActive(token, receivedRoute, receivedPrepared) { assert.equal(token, 4);assert.equal(receivedRoute, route);assert.equal(receivedPrepared, prepared);return active; },
     warpPreparedRiftWarmState: 'idle', warpPreparedRiftWarmError: null, warpPreparedRiftStructurePromise: Promise.resolve(),
     uploadPreparedLodMeshes: async () => {}, celestialClock: { hours: 1 }, RIFT_SPAWN_DISTANCE: 25,
-    renderRiftDestinationPortal() { assert.equal(executing, true);events.push('portal');fail('portal');return portalResult; }, console: { error(...args) { errors.push(args); } } };
+    riftFarBodyId: null, renderRiftFarView() { assert.equal(executing, true);events.push('portal');fail('portal');return portalResult; }, console: { error(...args) { errors.push(args); } } };
   context.standaloneSiteGroups = load('standaloneSiteGroups', context);
   const warm = load('renderPreparedDestinationWarmFrame', context);context.renderPreparedDestinationWarmFrame = warm;
   const portal = load('prewarmPreparedRiftPortal', context);
@@ -116,73 +115,6 @@ function fixture(options = {}) {
   };
 }
 
-// Compose the actual prewarm + main wrapper + destination scene lease + actual
-// SpatialRift method. Only queue admission and the native renderer are doubles.
-// This catches the old closed gate, which an always-drawing portal stub hid.
-function integratedPortalFixture({ old = false, traversed = false, portalFault = null } = {}) {
-  const f = fixture(), context = f.context, renderer = context.renderer, scene = new THREE.Scene();
-  let color = new THREE.Color(.1, .2, .3), alpha = .4, portalDraws = 0;
-  renderer.xr = { enabled: true };renderer.autoClear = false;renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.getClearColor = out => out.copy(color);renderer.getClearAlpha = () => alpha;
-  renderer.setClearColor = (value, next) => { color.set(value);alpha = next; };
-  renderer.clear = () => {};
-  const rift = new SpatialRift({ scene, renderer, mainCamera: f.rawCamera });
-  if (old) rift.renderPortal = new Function('_center', `return ({${reference.sources.renderPortal.source}}).renderPortal;`)(new THREE.Vector3());
-  rift.traversed = traversed;
-  context.spatialRift = rift;context.scene = scene;context.RIFT_PORTAL_LAYER = 7;
-  context.ship = { group: new THREE.Group() };context.weapons = {};
-  context.headlamp = new THREE.Group();context.skyDome = { mesh: new THREE.Group() };
-  context.hemi = new THREE.Group();context.ambient = new THREE.Group();context.riftPortalAmbient = new THREE.Group();
-  context.riftPortalAmbient.visible = false;
-  context.riftPortalVisibility = [];context.riftPortalCloudState = [];context.riftPortalLayerState = [];
-  context.riftPortalClearColor = new THREE.Color();context.riftPortalSceneActive = false;
-  f.targetBody.bodyId = f.route.bodyId;
-  f.prepared.planets[1].bodyId = 'destination-other';
-  f.targetBody.volCloudMat = new THREE.ShaderMaterial({ depthTest: true });
-  const directCloud = f.targetBody.volCloudMat.clone();
-  const targetMesh = new THREE.Mesh(new THREE.BoxGeometry(), f.targetBody.volCloudMat);
-  f.targetBody.volCloudMesh = targetMesh;
-  f.targetBody.getDirectCloudMaterial = () => directCloud;
-  targetMesh.layers.set(2);f.targetBody.group.add(targetMesh);
-  for (const system of [f.rawUniverse.system, f.rawUniverse.fadingSystem, f.prepared]) {
-    for (const view of system.starViews) scene.add(view.group, view.light);
-    for (const body of system.planets) scene.add(body.group);
-    for (const site of system.artificialSites) scene.add(site.group);
-  }
-  scene.add(context.riftPortalAmbient, context.ship.group, context.headlamp, context.skyDome.mesh, context.hemi, context.ambient);
-  const fog = new THREE.Fog(0x102030, 10, 20);scene.fog = fog;
-  for (const name of ['setRiftPreviewVisible', 'addRiftPortalHidden', 'moveToRiftPortalLayer',
-    'hideSystemForRiftPortal', 'beginRiftPortalScene', 'endRiftPortalScene']) context[name] = load(name, context);
-  context.renderRiftDestinationPortal = old
-    ? vm.runInNewContext(`(${reference.sources.renderRiftDestinationPortal.source})`, context)
-    : load('renderRiftDestinationPortal', context);
-  const run = old ? vm.runInNewContext(`(${reference.sources.prewarmPreparedRiftPortal.source})`, context)
-    : load('prewarmPreparedRiftPortal', context);
-  renderer.render = (receivedScene, camera) => {
-    portalDraws++;assert.equal(receivedScene, scene);assert.equal(camera, rift.portalCamera);
-    assert.equal(renderer.getRenderTarget(), rift.portalRT);assert.equal(camera.layers.mask, 1 << 7);
-    assert.equal(rift.group.visible, false);assert.equal(f.targetBody.group.visible, true);
-    assert.equal(f.prepared.planets[1].group.visible, false);
-    assert.equal(context.universe.system.planets[0].group.visible, false);
-    assert.equal(targetMesh.layers.mask, 1 << 7);assert.equal(targetMesh.material, directCloud);
-    assert.equal(directCloud.depthTest, false);assert.equal(f.targetBody.volCloudMat.depthTest, true);
-    assert.equal(scene.fog, null);assert.equal(renderer.toneMapping, THREE.NoToneMapping);
-    if (portalFault) throw portalFault;
-  };
-  const layerState = [];scene.traverse(object => layerState.push([object, object.layers.mask]));
-  return { ...f, rift, get portalDraws() { return portalDraws; },
-    portal() { return run(f.targetBody, 4, f.route, f.prepared); },
-    portalRestored() {
-      for (const [object, mask] of layerState) assert.equal(object.layers.mask, mask);
-      assert.equal(targetMesh.material, f.targetBody.volCloudMat);assert.equal(directCloud.depthTest, true);
-      assert.equal(f.targetBody.volCloudMat.depthTest, true);assert.equal(scene.fog, fog);
-      assert.equal(renderer.toneMapping, THREE.ACESFilmicToneMapping);assert.equal(renderer.xr.enabled, true);assert.equal(renderer.autoClear, false);
-      assert.equal(color.getHex(), new THREE.Color(.1, .2, .3).getHex());assert.equal(alpha, .4);
-      assert.equal(context.riftPortalSceneActive, false);assert.equal(rift.open, 0);assert.equal(rift.traversed, traversed);assert.equal(rift.group.visible, false);
-    },
-    dispose() { rift.dispose();targetMesh.geometry.dispose();f.targetBody.volCloudMat.dispose();directCloud.dispose(); },
-  };
-}
 
 await test('queued private draw waits without borrowing visibility/camera/shadow/target/medium state', async () => {
   const f = fixture(), before = f.capture(), pending = f.run();assert.equal(f.jobs.length, 1);assert.equal(f.touches.length, 0);f.restored(before);
@@ -242,44 +174,6 @@ await test('a portal no-draw result cannot become complete or enqueue the privat
   assert.equal(f.jobs.length, 0);assert.equal(f.pipeline.renderCalls, 0);assert.equal(f.errors.length, 1);
 });
 
-for (const traversed of [false, true]) await test(`frozen dfc9e5c negative: closed portal marked complete without any portal draw (${traversed})`, async () => {
-  const f = integratedPortalFixture({ old: true, traversed });
-  try {
-    const pending = f.portal();await microtasks();f.admit();await microtasks();
-    assert.equal(f.portalDraws, 0);assert.equal(f.jobs.length, 1);f.admit();await pending;
-    assert.equal(f.context.warpPreparedRiftWarmState, 'complete');assert.equal(f.portalDraws, 0);assert.equal(f.pipeline.renderCalls, 1);f.portalRestored();
-  } finally { f.dispose(); }
-});
-
-for (const traversed of [false, true]) await test(`actual forced closed destination draws before completion and preserves the passage (${traversed})`, async () => {
-  const f = integratedPortalFixture({ traversed });
-  try {
-    const before = f.capture(), pending = f.portal();await microtasks();assert.equal(f.portalDraws, 0);assert.equal(f.touches.length, 0);
-    assert.equal(f.context.warpPreparedRiftWarmState, 'compiling');f.admit();await microtasks();
-    const firstDraws = f.portalDraws, firstState = f.context.warpPreparedRiftWarmState;
-    if (f.jobs.length) f.admit();await pending;
-    assert.equal(firstDraws, 1);assert.equal(firstState, 'compiling');
-    assert.equal(f.context.warpPreparedRiftWarmState, 'complete');assert.equal(f.portalDraws, 1);f.portalRestored();f.restored(before);
-  } finally { f.dispose(); }
-});
-
-await test('actual forced portal renderer failure restores the destination scene and prevents completion', async () => {
-  const error = Error('actual portal native failure'), f = integratedPortalFixture({ portalFault: error });
-  try {
-    const before = f.capture(), pending = f.portal();await microtasks();f.admit();await microtasks();if (f.jobs.length) f.admit();await pending;
-    assert.equal(f.context.warpPreparedRiftWarmState, 'failed');assert.equal(f.portalDraws, 1);
-    assert.equal(f.jobs.length, 0);assert.equal(f.pipeline.renderCalls, 0);f.portalRestored();f.restored(before);
-  } finally { f.dispose(); }
-});
-
-for (const cancel of ['token', 'warp-request']) await test(`actual forced portal ${cancel} while queued draws nothing`, async () => {
-  const f = integratedPortalFixture();
-  try {
-    const pending = f.portal();await microtasks();if (cancel === 'token') f.cancel();else f.route.warpRequested = true;
-    f.admit();await pending;assert.equal(f.portalDraws, 0);assert.equal(f.pipeline.renderCalls, 0);assert.equal(f.touches.length, 0);
-    assert.notEqual(f.context.warpPreparedRiftWarmState, 'complete');f.portalRestored();
-  } finally { f.dispose(); }
-});
 for (const cancel of ['token', 'warp-request']) await test(`portal ${cancel} while private work waits never publishes completion`, async () => {
   const f = fixture(), before = f.capture(), pending = f.portal();await f.reachPrivateFromPortal();assert.equal(f.touches.length, 0);
   if (cancel === 'token') f.cancel();else f.route.warpRequested = true;f.admit();await pending;

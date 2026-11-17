@@ -195,8 +195,7 @@ export const TransitShader = {
       float zc = max(z, 0.0);
       float w = z - uFlow;
       // The passage turns slowly about its own axis; its filaments are wound
-      // helically, so perspective draws them as spiral arms - a vortex rather
-      // than a bundle of radial speed lines.
+      // helically, so perspective draws them as spiral arms.
       float phi = wallHit.z + uTime * .06;
       vec2 cs = vec2(cos(phi + uTwist * zc * .05), sin(phi + uTwist * zc * .05));
       float phiH = phi + uTwist * zc * .16;
@@ -204,82 +203,85 @@ export const TransitShader = {
 
       // Palette: deep indigo near the camera, electric blue mid-tube, and a
       // white core tinted by the destination star - the Doppler gradient of
-      // the starflow continued as light. A few filaments run warm.
+      // the starflow continued as light. Some filaments burn amber.
       float depthT = 1.0 - exp(-zc / 120.0);
-      vec3 nearCol = vec3(.04, .06, .24);
-      vec3 midCol = vec3(.20, .50, 1.0);
+      vec3 nearCol = vec3(.05, .05, .22);
+      vec3 midCol = vec3(.18, .46, 1.0);
       vec3 coreCol = mix(vec3(.80, .92, 1.0), star, .35);
       vec3 grad = depthT < .4 ? mix(nearCol, midCol, depthT / .4)
         : mix(midCol, coreCol, (depthT - .4) / .6);
+      vec3 endColor = mix(coreCol, hot, .55);
 
-      // Luminous plasma clouds carry most of the energy. Every structure is a
-      // few radii long, so it is seen approaching and rushing past.
+      // wall: luminous plasma with helical filaments and passing ripples
       float plasma = fbm(vec3(cs * 2.2, w * .09));
-      float clouds = .025 + 1.5 * pow(plasma, 3.4);
+      float clouds = .02 + 1.5 * pow(plasma, 3.4);
       float filaments = fbm(vec3(csH * 5.0, w * .06 + 3.0));
-      float strands = pow(smoothstep(.6, .92, filaments), 2.2);
-      float fine = noise3(vec3(csH * 24.0, w * .3 + 9.0));
-      float sparks = pow(smoothstep(.8, .98, fine), 5.0);
-      float warm = smoothstep(.62, .78, fbm(vec3(cs * 2.6, w * .03 + 40.0)));
-      vec3 strandCol = mix(mix(grad, vec3(1.0), .35), vec3(1.0, .62, .32), warm * .75);
-      // Gravitational ripples: broken, uneven rings that rush past - they give
-      // the passage readable depth segments.
+      float strands = pow(smoothstep(.6, .93, filaments), 2.0);
+      float warm = smoothstep(.6, .76, fbm(vec3(cs * 2.6, w * .03 + 40.0)));
+      vec3 strandCol = mix(mix(grad, vec3(1.0), .3), vec3(1.0, .58, .28), warm * .85);
       float ringPhase = fract(w * .022 + .18 * noise3(vec3(cs * 1.6, floor(w * .022) * 3.1)));
       float ripple = exp(-pow((ringPhase - .5) * 11.0, 2.0)) * smoothstep(.25, .7, plasma + .2);
-      vec3 wall = grad * clouds * (1.0 + ripple * 1.4)
-        + strandCol * strands * (.75 + ripple)
-        + mix(grad, vec3(1.0), .6) * sparks * .6;
-      wall *= mix(.55, 1.5, depthT);
-      // the far wall dissolves into the exit light
+      float fine = noise3(vec3(csH * 26.0, w * .5 + 9.0));
+      float sparks = pow(smoothstep(.78, .98, fine), 4.0);
+      vec3 wall = grad * clouds * (1.0 + ripple * 1.4) + strandCol * strands * (1.15 + ripple)
+        + mix(grad, vec3(1.0), .6) * sparks * .4;
+      wall *= mix(.5, 1.6, depthT);
       float far = 1.0 - exp(-zc / 420.0);
-      vec3 endColor = mix(coreCol, hot, .55);
       wall = mix(wall, endColor * (.3 + 1.1 * uEndGlow), far * far);
 
-      // translucent inner veil: a parallax layer that sells depth and speed
-      vec3 veilHit = tubeHit(ray, e1, e2, .55);
-      float vz = veilHit.y;
-      float vphi = veilHit.z + uTwist * max(vz, 0.0) * .09 - uTime * .09;
-      float veil = fbm(vec3(cos(vphi) * 2.6, sin(vphi) * 2.6, (vz - uFlow * 1.2) * .06 + 11.0));
-      float veilA = smoothstep(.6, .88, veil) * .30 * (1.0 - smoothstep(30.0, 260.0, vz)) * step(0.0, vz);
-      float veilDepth = 1.0 - exp(-max(vz, 0.0) / 120.0);
-      vec3 veilCol = mix(midCol, coreCol, veilDepth) * (.3 + 1.1 * veil);
+      // Participating medium inside the tube: a few samples along the view ray
+      // through drifting plasma give soft volumetric glow with real parallax
+      // (near wisps rush past, deep ones crawl).
+      vec3 medium = vec3(0.0);
+      float transmit = 1.0;
+      float sHit = wallHit.x;
+      for (int i = 0; i < 5; i++) {
+        float s = sHit * (float(i) + .5) / 5.0;
+        float pz = s * dot(ray, uAxis);
+        if (pz < uMouth) continue;
+        vec2 radial = s * vec2(dot(ray, e1), dot(ray, e2)) - bendAt(pz);
+        float rr = clamp(length(radial), 0.0, 1.0);
+        float pa = atan(radial.y, radial.x) + uTwist * max(pz, 0.0) * .1 - uTime * .12;
+        float d = fbm(vec3(cos(pa) * 2.4 * rr, sin(pa) * 2.4 * rr, (pz - uFlow * .85) * .05 + 23.0));
+        float dens = smoothstep(.5, .86, d) * mix(.2, 1.0, rr * rr) * (1.0 - smoothstep(60.0, 500.0, pz));
+        float pd = 1.0 - exp(-max(pz, 0.0) / 120.0);
+        vec3 pc = pd < .4 ? mix(nearCol, midCol, pd / .4) : mix(midCol, coreCol, (pd - .4) / .6);
+        medium += transmit * pc * dens * .3;
+        transmit *= exp(-dens * .45);
+      }
 
-      // debris streaks: the starflow continues inside the tube
-      vec3 dustHit = tubeHit(ray, e1, e2, .8);
-      float dz = dustHit.y;
-      vec2 cell = vec2((dustHit.z / TAU + .5) * 180.0, (dz - uFlow * 1.1) * .22);
-      vec2 id = floor(cell), f = fract(cell);
-      float on = step(.965, hash12(id));
-      float across = abs(f.x - .5);
-      float dust = on * exp(-across * across * 300.0) * smoothstep(0.0, .25, f.y) * (1.0 - smoothstep(.45, .9, f.y))
-        * (1.0 - smoothstep(20.0, 160.0, dz)) * step(0.0, dz);
-      vec3 dustColor = mix(midCol, vec3(1.0), .55) * dust * .8;
-
-      // Mouth and exit are depth planes in the tube: the mouth sweeps outward
-      // from the vanishing point as the ship enters, the exit opens from it.
+      // Mouth and exit are depth planes in the tube. Their edges are ragged:
+      // the plasma surges ahead in tongues instead of a geometric circle.
+      float edgeNoise = noise3(vec3(cs * 2.5, uTime * .7)) - .5;
+      float mouth = uMouth * (1.0 + .45 * edgeNoise);
       float mouthSoft = max(2.0, uMouth * .6);
-      float zIn = smoothstep(uMouth - mouthSoft, uMouth, z);
-      float exitSoft = max(.8, uExit * .25);
-      float zOut = 1.0 - smoothstep(uExit - exitSoft, uExit, z);
+      float zIn = smoothstep(mouth - mouthSoft, mouth, z);
+      float exitZ = uExit * (1.0 + .4 * edgeNoise);
+      float exitSoft = max(.8, uExit * .3);
+      float zOut = 1.0 - smoothstep(exitZ - exitSoft, exitZ, z);
       float density = smoothstep(.15, 1.0, uTunnel);
       float wallA = density * zIn * zOut;
-      float dustA = smoothstep(.0, .4, uTunnel) * smoothstep(uMouth - mouthSoft, uMouth, dz)
-        * (1.0 - smoothstep(uExit - exitSoft, uExit, dz));
 
-      vec3 tunnel = mix(wall, veilCol, veilA);
+      vec3 tunnel = wall * transmit + medium;
       vec3 col = mix(scene, tunnel, wallA);
-      col += dustColor * dustA;
 
-      // a thin incandescent lip where the exit opens, and the end light
-      float rimW = .5 + uExit * .04;
-      float rim = exp(-pow((z - uExit) / rimW, 2.0)) * step(uExit, 1e3) * density;
-      col += endColor * rim * uEndGlow * .7;
-      float farZ = 900.0;
+      // incandescent lip where the exit opens
+      float rimW = .5 + uExit * .05;
+      float rim = exp(-pow((z - exitZ) / rimW, 2.0)) * step(uExit, 1e3) * density;
+      col += endColor * rim * uEndGlow * .8;
+
+      // the end light, with a soft corona and an anamorphic streak
+      // aim the end light at the actual exit section while it is in view
+      float farZ = uExit < 900.0 ? max(uExit, 1.0) : 900.0;
       vec2 fc = bendAt(farZ);
       vec3 endDir = normalize(uAxis * farZ + e1 * fc.x + e2 * fc.y);
       float ang = acos(clamp(dot(ray, endDir), -1.0, 1.0));
-      float endLight = (exp(-ang * ang * 3200.0) * 2.4 + exp(-ang * 16.0) * .25) * uEndGlow;
-      col += endColor * endLight * wallA;
+      vec3 endView = endDir / max(-endDir.z, 1e-3);
+      vec2 endUv = vec2(endView.x / (uTanHalfFov * uAspect), endView.y / uTanHalfFov) * .5 + .5;
+      vec2 dv = (vUv - endUv) * vec2(uAspect, 1.0);
+      float streak = exp(-abs(dv.y) * 220.0) * exp(-abs(dv.x) * 4.5);
+      float endLight = (exp(-ang * ang * 3200.0) * 2.4 + exp(-ang * 14.0) * .3) * uEndGlow;
+      col += endColor * (endLight * wallA + streak * .2 * uEndGlow * density);
 
       gl_FragColor = vec4(col, 1.0);
     }

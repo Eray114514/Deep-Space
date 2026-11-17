@@ -106,7 +106,7 @@ const STARFLOW_VERTEX_CORE = /* glsl */`
     vHalf = h;
     // A streak spreads the same light over a longer path; keep it readable
     // without letting long trails turn into flat bars.
-    vEnergy = inversesqrt(1.0 + len / (2.0 * h)) * (1.0 + 0.6 * uStreak);
+    vEnergy = inversesqrt(1.0 + len / (4.0 * h)) * (1.0 + 0.8 * uStreak);
   }
 `;
 
@@ -117,17 +117,33 @@ const STARFLOW_FRAGMENT_CORE = /* glsl */`
   varying float vEnergy;
   varying float vShift;
 
+  // 0 at the tail, 1 at the head (the star's current position). At rest the
+  // capsule is a disc and every pixel counts as head.
+  float starflowAlong() {
+    return vLen > 1.0 ? clamp(vSeg.x / vLen, 0.0, 1.0) : 1.0;
+  }
+
   // Same profile as the former round point sprite, swept along the segment.
+  // A streak is an exposure of a moving point: widest and brightest at the
+  // head, thinning toward the tail, so it never reads as a drawn line.
   float starflowRadius() {
     float dx = max(0.0, max(-vSeg.x, vSeg.x - vLen));
-    return length(vec2(dx, vSeg.y)) / vHalf;
+    float width = vHalf * mix(0.45, 1.0, starflowAlong());
+    return length(vec2(dx, vSeg.y)) / width;
+  }
+
+  float starflowTrail() {
+    float a = starflowAlong();
+    return mix(0.06, 1.0, a * a * (3.0 - 2.0 * a));
   }
 
   vec3 starflowShift(vec3 color) {
     vec3 blue = color * vec3(0.72, 0.92, 1.38) + vec3(0.02, 0.05, 0.12);
     vec3 red = color * vec3(1.25, 0.78, 0.55);
-    return vShift >= 0.0 ? mix(color, blue, clamp(vShift, 0.0, 1.0))
+    vec3 shifted = vShift >= 0.0 ? mix(color, blue, clamp(vShift, 0.0, 1.0))
       : mix(color, red, clamp(-vShift, 0.0, 1.0));
+    // the older end of the exposure runs slightly warmer
+    return mix(shifted * vec3(1.12, 0.92, 0.78), shifted, starflowAlong());
   }
 `;
 
@@ -169,7 +185,7 @@ export function makeStarflowStarMaterial() {
         if (r >= 1.0) discard;
         float a = smoothstep(1.0, 0.15, r);
         vec3 c = starflowShift(vColor) * (1.0 + 0.5 * (1.0 - r));
-        gl_FragColor = vec4(c, 1.0) * a * vBright * vEnergy * (1.0 - uDim * 0.97);
+        gl_FragColor = vec4(c, 1.0) * a * starflowTrail() * vBright * vEnergy * (1.0 - uDim * 0.97);
       }`,
     transparent: true,
     depthWrite: false,
@@ -208,7 +224,7 @@ export function makeStarflowBackdropMaterial() {
         if (r >= 1.0) discard;
         float a = smoothstep(1.0, 0.1, r);
         gl_FragColor = vec4(starflowShift(vColor) * 0.78,
-          a * vAlpha * pow(vEnergy, 1.8) * (1.0 - uDim * 0.985));
+          a * starflowTrail() * vAlpha * pow(vEnergy, 1.8) * (1.0 - uDim * 0.985));
       }`,
     transparent: true,
     depthWrite: false,

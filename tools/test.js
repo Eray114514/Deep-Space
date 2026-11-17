@@ -39,7 +39,7 @@ const { startDevServer, startServer } = await import('./server.js');
 const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon,
   applyFlightSteering, flightBoostSpeedLimit, pulseBurstDistance } = await import('../src/controls.js');
 const { Ship, landingDescentProgress, SHIP_LANDING_PROFILE } = await import('../src/effects.js');
-const { PULSE_TIMING, pulseChannels, pulseDisplacement, warpApproachRemaining, warpChannels,
+const { PULSE_TIMING, pulseChannels, pulseChargeFromHold, pulseChargeScaling, pulseDisplacement, warpApproachRemaining, warpChannels,
   warpDepartureTravel, warpPlan } = await import('../src/transit.js');
 const { cockpitShakeAmplitude, solveHullQuaternion } = await import('../src/ship-view.js');
 const { DEFAULT_POWER, powerEffectsFor } = await import('../src/ship-hud.js');
@@ -80,6 +80,19 @@ if (pulseDisplacement(0) !== 0 || pulseDisplacement(PULSE_TIMING.total) !== 1
     if (kick) last = kick;
   }
   if (signChanges > 2) throw new Error(`Pulse camera kick oscillates (${signChanges} sign changes)`);
+}
+// Holding the pulse charges a longer fold: a tap stays the base reach, a full
+// hold reaches 8x for 2.5x the fuel, and the charge never moves the ship
+// before release (the timeline parks before the jump window).
+if (pulseChargeFromHold(0.1) !== 0 || pulseChargeFromHold(PULSE_TIMING.tapWindow + PULSE_TIMING.fullCharge + 1) !== 1
+    || pulseChargeScaling(0).distance !== 1 || Math.abs(pulseChargeScaling(1).distance - 8) > 1e-9
+    || Math.abs(pulseChargeScaling(1).fuel - 2.5) > 1e-9
+    || pulseDisplacement(PULSE_TIMING.hold) !== 0) {
+  throw new Error('Pulse charge contract drifted');
+}
+{
+  const tap = pulseChannels(0.28), charged = pulseChannels(0.28, undefined, { power: pulseChargeScaling(1).power });
+  if (!(charged.fold > tap.fold && charged.fov > tap.fov)) throw new Error('A charged pulse does not fold harder than a tap');
 }
 const openPulseDistance = pulseBurstDistance(620, Infinity, false);
 const atmosphericPulseDistance = pulseBurstDistance(620, 1000, true);

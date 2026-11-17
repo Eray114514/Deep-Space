@@ -52,43 +52,73 @@ export function emptyTransitChannels() {
 // Pulse: a miniature fold. Charge, jump, release in ~1.15 s. Almost all of the
 // displacement happens inside the ~0.12 s window where the starflow is longest
 // and space is most compressed, so the player reads a skip, not a sprint.
+//
+// Holding the key parks the timeline at `hold` (just before the jump) while
+// the charge builds; releasing continues from there with a longer reach and a
+// proportionally stronger fold.
 export const PULSE_TIMING = Object.freeze({
   charge: 0.20,
+  hold: 0.15,
   jumpStart: 0.16,
   jumpEnd: 0.40,
   retrigger: 0.40,
   total: 1.15,
+  tapWindow: 0.18, // a press shorter than this is a plain tap
+  fullCharge: 1.6, // seconds of holding (after the tap window) to full charge
 });
+
+// Charge 0..1 from how long the key has been held.
+export function pulseChargeFromHold(holdSeconds) {
+  return clamp01((holdSeconds - PULSE_TIMING.tapWindow) / PULSE_TIMING.fullCharge);
+}
+
+// Reach and fuel both grow with charge; a full charge folds 8x the tap reach
+// for 2.5x the fuel.
+export function pulseChargeScaling(charge) {
+  const k = clamp01(charge);
+  return {
+    distance: 1 + 7 * Math.pow(k, 1.4),
+    fuel: 1 + 1.5 * k,
+    power: 1 + 0.55 * k,
+  };
+}
 
 export function pulseDisplacement(t) {
   return smootherstep(PULSE_TIMING.jumpStart, PULSE_TIMING.jumpEnd, t);
 }
 
-export function pulseChannels(t, out = emptyTransitChannels()) {
+// options: power (>=1, released charge), charge (0..1 while holding),
+// holdTime (seconds held, drives the charging breath).
+export function pulseChannels(t, out = emptyTransitChannels(), { power = 1, charge = 0, holdTime = 0 } = {}) {
   if (t < 0 || t >= PULSE_TIMING.total) return out;
-  const charge = smoothstep(0, PULSE_TIMING.charge, t);
-  out.streak = Math.max(out.streak,
-    Math.max(0.3 * charge, smoothstep(0.17, 0.27, t)) * (1 - smoothstep(0.30, 0.80, t)));
-  out.aberr += 0.13 * charge * (1 - smoothstep(0.30, 0.48, t))
-    + 0.40 * envelope(t, 0.18, 0.28, 0.30, 0.46)
-    - 0.085 * envelope(t, 0.38, 0.52, 0.58, 0.98);
-  out.doppler = Math.max(out.doppler, 0.55 * envelope(t, 0.14, 0.26, 0.32, 0.62));
+  const p = Math.max(1, power);
+  const ramp = smoothstep(0, PULSE_TIMING.charge, t);
+  const breath = charge > 0 ? 0.5 + 0.5 * Math.sin(holdTime * 7.5) : 0;
+  const streak = Math.max(0.3 * ramp + 0.32 * charge, smoothstep(0.17, 0.27, t)) * (1 - smoothstep(0.30, 0.80, t));
+  out.streak = Math.max(out.streak, Math.min(1, streak * (0.85 + 0.15 * p)));
+  out.aberr += (0.13 * ramp * (1 - smoothstep(0.30, 0.48, t))
+    + 0.40 * envelope(t, 0.18, 0.28, 0.30, 0.46)) * p
+    + 0.2 * charge
+    - 0.085 * envelope(t, 0.38, 0.52, 0.58, 0.98) * p;
+  out.doppler = Math.max(out.doppler, 0.55 * envelope(t, 0.14, 0.26, 0.32, 0.62) * p + 0.4 * charge);
   out.fold = Math.max(out.fold,
-    0.34 * charge * (1 - smoothstep(0.26, 0.40, t)) + 0.66 * envelope(t, 0.18, 0.27, 0.29, 0.42));
-  out.blur = Math.max(out.blur, 0.85 * envelope(t, 0.15, 0.25, 0.31, 0.55));
+    (0.34 * ramp * (1 - smoothstep(0.26, 0.40, t)) + 0.66 * envelope(t, 0.18, 0.27, 0.29, 0.42)) * p
+    + charge * (0.28 + 0.06 * breath));
+  out.blur = Math.max(out.blur, Math.min(1, 0.85 * envelope(t, 0.15, 0.25, 0.31, 0.55) * p) + 0.25 * charge);
   if (t > 0.33) {
-    const amp = envelope(t, 0.33, 0.40, 0.52, 1.08);
+    const amp = envelope(t, 0.33, 0.40, 0.52, 1.08) * p;
     if (amp >= out.shockAmp) {
       out.shockAmp = amp;
       out.shockRadius = (t - 0.33) / 0.72 * 1.55;
     }
   }
-  out.flash = Math.max(out.flash, 0.32 * envelope(t, 0.23, 0.29, 0.31, 0.46));
-  out.fov += -3.2 * envelope(t, 0, 0.17, 0.19, 0.27)
+  out.flash = Math.max(out.flash, 0.32 * envelope(t, 0.23, 0.29, 0.31, 0.46) * p);
+  out.fov += (-3.2 * envelope(t, 0, 0.17, 0.19, 0.27)
     + 14.5 * envelope(t, 0.19, 0.29, 0.33, 0.72)
-    - 2.2 * envelope(t, 0.56, 0.72, 0.80, 1.12);
-  out.kick += transitKick(t, 0.25);
-  out.hull = Math.max(out.hull, 0.9 * envelope(t, 0.18, 0.28, 0.32, 0.7));
+    - 2.2 * envelope(t, 0.56, 0.72, 0.80, 1.12)) * p
+    - 4.5 * charge * (0.9 + 0.1 * breath);
+  out.kick += transitKick(t, 0.25) * p;
+  out.hull = Math.max(out.hull, 0.9 * envelope(t, 0.18, 0.28, 0.32, 0.7) * p + 0.7 * charge * (0.8 + 0.2 * breath));
   return out;
 }
 
@@ -182,6 +212,8 @@ export function warpChannels(t, plan, out = emptyTransitChannels()) {
     // Flares as the opening sweeps past, then hands the frame to the real sky.
     out.endGlow = (1 + 1.1 * envelope(u, 0, 0.35, 0.55, 1)) * (1 - smoothstep(0.5, 1, u));
     out.flowSpeed = 40 - 20 * s;
+    // the eye adapting as daylight-bright real space floods in through the exit
+    out.flash = 0.45 * envelope(u, 0.25, 0.5, 0.6, 0.98);
     out.colorMix = 1;
     out.fov = 20 - 8 * s;
     out.hull = 1 - 0.6 * s;

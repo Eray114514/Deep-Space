@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as THREE from 'three';
 import * as transit from '../src/transit.js';
+import { SpacePortal } from '../src/portal/space-portal.js';
 
 const mainPath = process.argv.find(value => value.startsWith('--main-source='))?.slice('--main-source='.length) || 'src/main.js';
 const bytes = await readFile(mainPath), main = bytes.toString(), verifier = await readFile(new URL(import.meta.url));
@@ -75,49 +76,34 @@ await test('preview visibility owns standalone sites while keeping non-target bo
   change(false, destination, destination.body.bodyId);assert.equal(destination.orphan.visible, false);assert.equal(destination.body.group.visible, false);
 });
 
-function portalFixture(fault) {
+function farViewFixture() {
   const source = system('source'), fading = system('fading'), destination = system('destination', false);
-  const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera();scene.fog = new THREE.Fog(0x123456, 1, 100);
-  destination.child.visible = false;destination.child.layers.set(2);const expected = Error('portal ownership fault');
-  const near = new THREE.ShaderMaterial(), direct = new THREE.ShaderMaterial();
-  const cloud = new THREE.Mesh(new THREE.BufferGeometry(), near);
-  destination.body.group.add(cloud);
-  Object.assign(destination.body, { volCloudMesh: cloud, volCloudMat: near, getDirectCloudMaterial: () => direct });
-  let clear = new THREE.Color(0x123456), alpha = .4;
-  const context = helpers({ THREE, scene, universe: { system: source, fadingSystem: fading },
-    riftPortalVisibility: [], riftPortalCloudState: [], riftPortalLayerState: [], riftPortalClearColor: new THREE.Color(), riftPortalSceneActive: false,
+  const scene = new THREE.Scene();scene.fog = new THREE.Fog(0x123456, 1, 100);
+  const stars = Object.assign(new THREE.Object3D(), { name: 'stars' });stars.position.set(-1, -2, -3);
+  const backdrop = Object.assign(new THREE.Object3D(), { name: 'backdrop' });backdrop.position.set(-4, -5, -6);
+  const live = { synced: 0, syncAtmoMaterial() { this.synced++; }, syncVolCloudMaterial() {} };
+  const context = helpers({ THREE, scene, universe: { system: source, fadingSystem: fading, nearStarsMesh: stars, backdropMesh: backdrop, nebulas: new THREE.Group() },
+    riftRoute: { arrived: false }, riftFarBodyId: destination.body.bodyId, atmospherePass: { activePlanet: live },
     ship: { group: group(true) }, weapons: { glowMesh: group(true), coreMesh: group(false) }, sunShadow: group(true), headlamp: group(false),
-    skyDome: { mesh: group(true) }, hemi: group(true), ambient: group(false), riftPortalAmbient: group(false), RIFT_PORTAL_LAYER: 5,
-    renderer: { toneMapping: THREE.ACESFilmicToneMapping, getClearColor(out) { return out.copy(clear); }, getClearAlpha: () => alpha,
-      setClearColor(value, next) { clear.set(value);alpha = next; } },
-  });
-  for (const name of ['addRiftPortalHidden', 'moveToRiftPortalLayer', 'setRiftPreviewVisible', 'hideSystemForRiftPortal', 'beginRiftPortalScene', 'endRiftPortalScene']) context[name] = load(name, context);
-  const realMove = context.moveToRiftPortalLayer;
-  context.moveToRiftPortalLayer = object => { realMove(object);if (fault === 'partial-layer' && object === destination.orphan) throw expected; };
-  context.spatialRift = { renderPortal(options) {
-    try {
-      options.beforeRender(camera);
-      assert.equal(source.orphan.visible, false);assert.equal(fading.orphan.visible, false);assert.equal(destination.orphan.visible, true);
-      assert.equal(destination.orphan.layers.mask, 1 << 5);assert.equal(destination.child.layers.mask, 1 << 5);
-      assert.equal(destination.body.group.visible, true);assert.equal(destination.other.group.visible, false);
-      assert.equal(cloud.material, direct);assert.equal(direct.depthTest, false);assert.equal(near.depthTest, true);
-      if (fault === 'draw') throw expected;
-    } finally { options.afterRender(); }
-  } };
-  return { context, source, fading, destination, expected, run() {
-    return load('renderRiftDestinationPortal', context)({ previewSystem: destination, targetBodyId: destination.body.bodyId });
-  }, restored() {
-    assert.equal(source.orphan.visible, true);assert.equal(fading.orphan.visible, true);assert.equal(destination.orphan.visible, false);
-    assert.equal(destination.orphan.layers.mask, 1);assert.equal(destination.child.layers.mask, 1 << 2);assert.equal(destination.child.visible, false);
-    assert.equal(destination.body.group.visible, false);assert.equal(destination.other.group.visible, false);
-    assert.equal(context.riftPortalSceneActive, false);assert.equal(context.renderer.toneMapping, THREE.ACESFilmicToneMapping);
-    assert.equal(scene.fog.color.getHex(), 0x123456);assert.equal(clear.getHex(), 0x123456);assert.equal(alpha, .4);
-    assert.equal(context.riftPortalVisibility.length, 0);assert.equal(context.riftPortalLayerState.length, 0);
-    assert.equal(cloud.material, near);assert.equal(direct.depthTest, true);assert.equal(context.riftPortalCloudState.length, 0);
-  } };
+    skyDome: { mesh: group(true) }, hemi: group(true), ambient: group(false), riftPortalAmbient: group(false) });
+  return { context, source, fading, destination, scene, stars, backdrop, live };
 }
-for (const fault of [null, 'draw', 'partial-layer']) await test(`portal owns standalone visibility/layers and restores after ${fault || 'success'}`, () => {
-  const f = portalFixture(fault);if (fault) assert.throws(() => f.run(), error => error === f.expected);else f.run();f.restored();
+await test('far view lease hides the near worlds, shows only the far target, moves the sky and restores everything', () => {
+  const f = farViewFixture(), setup = load('setupRiftFarScene', f.context), farCamera = new THREE.Vector3(100, 200, 300);
+  let bound = null;
+  const restore = setup({ setActiveAtmosphere(body, origin) { bound = [body, origin.clone()]; } }, f.destination, farCamera, f.destination.body);
+  assert.equal(f.source.orphan.visible, false);assert.equal(f.fading.orphan.visible, false);assert.equal(f.source.body.group.visible, false);
+  assert.equal(f.destination.orphan.visible, true);assert.equal(f.destination.body.group.visible, true);assert.equal(f.destination.other.group.visible, false);
+  assert.equal(f.destination.starViews[0].light.visible, true);assert.equal(f.context.ship.group.visible, false);assert.equal(f.context.sunShadow.visible, false);
+  assert.equal(f.context.riftPortalAmbient.visible, true);assert.equal(f.scene.fog, null);
+  assert.deepEqual(f.stars.position.toArray(), [-100, -200, -300]);assert.deepEqual(f.backdrop.position.toArray(), [-100, -200, -300]);
+  assert.equal(bound[0], f.destination.body);assert.deepEqual(bound[1].toArray(), [100, 200, 300]);
+  restore();
+  assert.equal(f.source.orphan.visible, true);assert.equal(f.fading.orphan.visible, true);assert.equal(f.source.body.group.visible, true);
+  assert.equal(f.destination.orphan.visible, false);assert.equal(f.destination.body.group.visible, false);assert.equal(f.destination.starViews[0].light.visible, false);
+  assert.equal(f.context.ship.group.visible, true);assert.equal(f.context.sunShadow.visible, true);assert.equal(f.context.riftPortalAmbient.visible, false);
+  assert.equal(f.scene.fog.color.getHex(), 0x123456);assert.deepEqual(f.stars.position.toArray(), [-1, -2, -3]);assert.deepEqual(f.backdrop.position.toArray(), [-4, -5, -6]);
+  assert.equal(f.live.synced, 1, 'the near medium is rebound after the far draw');
 });
 
 function adoptionFixture() {
@@ -164,11 +150,33 @@ await test('an early stellar warp hides sites produced while finishing the prepa
   assert.equal(f.destination.orphan.visible, false);assert.equal(f.destination.body.group.visible, false);assert.equal(f.context.universe.system, f.source);
   step(.6);f.verify();
 });
-await test('rift crossing transfers standalone ownership and retains deferred non-target bodies', () => {
-  const f = adoptionFixture();f.context.riftPreviewSystem = f.destination;
-  f.context.riftRoute = { arrived: false, anchorLocked: false, openStarted: true, lastHintBand: 0,
-    arrival: { bodyId: f.destination.body.bodyId, entry: new THREE.Vector3(0, 0, 110), quat: new THREE.Quaternion() } };
-  load('updateRiftRoute', f.context)(.016);f.verify();assert.equal(f.context.riftRoute.arrived, true);
+await test('rift crossing maps the pose through the fold and keeps the departure world as the closing far side', () => {
+  const f = adoptionFixture(), portal = new SpacePortal({ halfWidth: 500, halfHeight: 400 });
+  const source = new THREE.Vector3(0, 0, -1000), target = new THREE.Vector3(5e9, 0, 0);
+  const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.4);
+  portal.setFrames(source, new THREE.Quaternion(), target, targetQuat);
+  portal.phase = 'open';portal.open = { x: 1, y: 1, tension: 0, flash: 0 };
+  let exchanged = 0;
+  Object.assign(f.context, { riftPortal: portal, riftPreviewSystem: f.destination, riftPreviewReady: true, riftBackSystem: null,
+    riftEntranceUniv: source.clone(), riftOrientation: new THREE.Quaternion(), riftInverse: new THREE.Quaternion(), riftLocalVel: new THREE.Vector3(),
+    RIFT_CAPTURE_DISTANCE: 1900, lerp: (a, b, t) => a + (b - a) * t, riftSpill: new THREE.Color(), clock: { elapsedTime: 10 },
+    nodePipeline: { setActiveAtmosphere() {}, cloudPass: { exchangeTemporalState() { exchanged++; } }, portalComposite: { enabled: true } },
+    portalView: { pipeline: { cloudPass: {} } }, systemBuildResumeAt: 0, focusPlanet: null, _v: new THREE.Vector3() });
+  f.context.riftRoute = { arrived: false, anchorLocked: true, openStarted: true, lastHintBand: 0, label: 'route',
+    arrival: { bodyId: f.destination.body.bodyId, entry: target.clone(), quat: targetQuat.clone() } };
+  f.context.prevNavPos.set(0, 0, -995);f.context.nav.pos.set(0, 0, -1004);f.context.nav.vel.set(0, 0, -76);
+  f.context.finishRiftCrossing = load('finishRiftCrossing', f.context);
+  load('updateRiftRoute', f.context)(.016);
+  assert.equal(f.context.riftRoute.arrived, true);assert.equal(f.context.universe.system, f.destination);
+  assert.equal(f.context.riftBackSystem, f.source, 'the departure world stays drawable behind the fold');
+  assert.equal(f.context.universe.fadingSystem, null);assert.equal(f.source.orphan.visible, false);assert.equal(f.source.body.group.visible, false);
+  assert.equal(f.destination.orphan.visible, true);assert.equal(f.destination.body.group.visible, true);assert.equal(f.destination.other.group.visible, false);
+  assert.equal(f.context.deferredSystemWarmQueue.length, 1);assert.equal(exchanged, 1);
+  // 4 m past the opening along the source normal == 4 m past the target frame
+  const expected = new THREE.Vector3(0, 0, -4).applyQuaternion(targetQuat).add(target);
+  assert.ok(f.context.nav.pos.distanceTo(expected) < 1e-6, 'position continues through the fold');
+  assert.ok(f.context.nav.vel.clone().normalize().distanceTo(new THREE.Vector3(0, 0, -1).applyQuaternion(targetQuat)) < 1e-9, 'velocity is carried, not re-aimed');
+  assert.ok(f.context.prevNavPos.distanceTo(new THREE.Vector3(0, 0, 5).applyQuaternion(targetQuat).add(target)) < 1e-6, 'frame history follows the fold');
 });
 
 const failures = cases.filter(row => !row.passed), sourceStable = (await readFile(mainPath)).equals(bytes)

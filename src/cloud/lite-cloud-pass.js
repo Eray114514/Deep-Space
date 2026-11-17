@@ -997,6 +997,27 @@ export class LiteCloudPass extends Pass {
     }
   }
 
+  // Portal hand-off: two views of one renderer exchange worlds at a threshold.
+  // Swapping the temporal reconstruction with the planet keeps each world's
+  // cloud history continuous, so crossing never restarts the 2x convergence.
+  exchangeTemporalState(other) {
+    if (!other || other === this) return;
+    for (const key of ['history', 'historyIndex', 'historyValid', 'frame', 'previousCamera',
+      'previousPlanet', 'previousSun', 'previousLocalToView', 'previousDeck', 'settleFrames',
+      'subpixelIndex', 'historyRatio']) {
+      const value = this[key];
+      this[key] = other[key];
+      other[key] = value;
+    }
+    const mine = this.activePlanet, theirs = other.activePlanet;
+    this.activePlanet = null;
+    other.activePlanet = null;
+    this.setActivePlanet(theirs);
+    other.setActivePlanet(mine);
+    if (mine) mine.liteCloudActive = true;
+    if (theirs) theirs.liteCloudActive = true;
+  }
+
   setActivePlanet(planet) {
     const next = LiteCloudPass.supports(planet) ? planet : null;
     if (next !== this.activePlanet) {

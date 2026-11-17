@@ -9,8 +9,8 @@ import { ForegroundPass } from './foreground-pass.js';
 import { VolumetricPass, lightBatchNoLongerPrepared } from './volumetric-pass-webgl.js';
 import { LiteCloudPass } from './cloud/lite-cloud-pass.js';
 import { AtmospherePass } from './atmosphere-pass-webgl.js';
-import { RiftDistortionShader } from './legacy-post-shaders.js';
 import { TransitShader } from './transit-shader.js';
+import { PortalCompositePass } from './portal/portal-composite-pass.js';
 import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
 import {CloudLightBank} from './cloud/cloud-light-bank.js';
@@ -26,11 +26,6 @@ import { compilePrograms } from './program-preparation.js';
 import { CloudProgramPreparation } from './cloud-program-preparation.js';
 import { TemporalAAPass } from './temporal-aa-pass.js';
 
-function aliasUniforms(uniforms, aliases) {
-  for (const [alias, original] of Object.entries(aliases)) {
-    if (uniforms[original]) uniforms[alias] = uniforms[original];
-  }
-}
 
 // Exact WebGL production chain from the pre-WebGPU renderer. The small alias
 // layer keeps the current game state machine renderer-agnostic without
@@ -126,6 +121,12 @@ export class GameLegacyPipeline {
     this.cloudPass = liteClouds ? new LiteCloudPass(camera, this.atmospherePass, liteCloudOptions) : null;
     if (this.cloudPass) this.composer.addPass(this.cloudPass);
 
+    // Portal openings: the far side (rendered by a second pipeline instance)
+    // replaces the pixels whose view ray meets the opening before any opaque
+    // geometry. Linear HDR, so both spaces share the display transforms below.
+    this.portalComposite = new PortalCompositePass(camera);
+    this.composer.addPass(this.portalComposite);
+
     // Pulse/warp transit: tunnel, fold and motion blur of the lit scene. It
     // runs before the foreground ship pass so the hull stays in front of it.
     this.warp = new ShaderPass(TransitShader);
@@ -143,14 +144,6 @@ export class GameLegacyPipeline {
     this.temporalAA.volumeSource = this.volumePass;
     this.composer.addPass(this.temporalAA);
 
-    this.rift = new ShaderPass(RiftDistortionShader);
-    this.rift.enabled = false;
-    aliasUniforms(this.rift.uniforms, {
-      center: 'uCenter', radius: 'uRadius', open: 'uOpen', time: 'uTime',
-      strength: 'uStrength', tension: 'uTension', burst: 'uBurst',
-    });
-    this.composer.addPass(this.rift);
-
     this.bloom = new UnrealBloomPass(
       new THREE.Vector2(1, 1), bloomStrength, bloomRadius, bloomThreshold,
     );
@@ -161,7 +154,8 @@ export class GameLegacyPipeline {
     // frame through the bloom downsample chain — see halcyon/gfx/sanitize.js.
     hardenBloom(this.bloom, 64);
     this.composer.addPass(this.bloom);
-    this.composer.addPass(new OutputPass());
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.outputPass);
     // grade pass (radial CA / vignette / film grain): display-referred lens
     // character, so it runs after the tonemap in OutputPass.
     this.grade = gradePass({ realistic: realisticGrade });
@@ -581,7 +575,7 @@ export class GameLegacyPipeline {
       }
       addQuad(this.grade?.fsQuad);
       addQuad(this.warp?.fsQuad);
-      addQuad(this.rift?.fsQuad);
+      addQuad(this.portalComposite?.quad);
       if (!group.children.length) return Promise.resolve(group);
       const saved = this.renderer.getRenderTarget();
       const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();

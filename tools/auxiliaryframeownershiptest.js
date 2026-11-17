@@ -136,35 +136,29 @@ test(() => {
   assert.equal(disposed, 1);assert.equal(probe.target, oldTarget);assert.equal(probe.key, 'old');
 });
 
-for (const failBegin of [false, true]) test(() => {
+for (const failSetup of [false, true]) test(() => {
+  // The far-view lease of the space-fold portal: hides the near world, reveals
+  // the far one, moves the sky, binds the far medium - and restores all of it
+  // whether the bind succeeds or throws midway.
   const group = () => new THREE.Group(), source = group(), target = group(), extra = group(), sourceOrphan = group(), targetOrphan = group();
-  const stationLight = new THREE.PointLight();stationLight.layers.set(2);stationLight.visible = false;targetOrphan.add(stationLight);
-  const star = { group: group(), light: new THREE.DirectionalLight() }, planet = { group: target, volCloudMat: { depthTest: true } };
-  const preview = { starViews: [star], planets: [planet], compactObjects: [{ group: extra }], artificialSites: [{ parentBody: null, group: targetOrphan }] };
+  const star = { group: group(), light: new THREE.DirectionalLight() }, planet = { group: target, bodyId: 'far-body' };
+  const far = { starViews: [star], planets: [planet], compactObjects: [{ group: extra }], artificialSites: [{ parentBody: null, group: targetOrphan }] };
   target.visible = false;extra.visible = true;star.light.visible = false;targetOrphan.visible = false;
-  const clear = new THREE.Color(.1, .2, .3), originalClear = clear.clone(), fog = {};
-  let alpha = .4, injected = false;
-  const context = { THREE, RIFT_PORTAL_LAYER: 7, scene: { fog }, universe: {
+  const fog = {}, stars = group(), error = new Error('far medium bind');stars.position.set(1, 2, 3);
+  const context = { THREE, scene: { fog }, universe: { nearStarsMesh: stars, backdropMesh: null,
     system: { starViews: [], planets: [{ group: source }], compactObjects: [], artificialSites: [{ parentBody: null, group: sourceOrphan }] }, fadingSystem: null },
-    ship: { group: group() }, weapons: {}, sunShadow: group(), headlamp: group(), skyDome: {}, hemi: group(), ambient: group(),
-    riftPortalAmbient: group(), riftPortalVisibility: [], riftPortalCloudState: [], riftPortalLayerState: [],
-    riftPortalClearColor: new THREE.Color(), riftPortalClearAlpha: 1, riftPortalFog: null, riftPortalToneMapping: 0,
-    riftPortalSceneActive: false, renderer: {
-      toneMapping: THREE.ACESFilmicToneMapping, getClearColor: color => color.copy(clear), getClearAlpha: () => alpha,
-      setClearColor(color, nextAlpha) { clear.set(color);alpha = nextAlpha;
-        if (failBegin && !injected) { injected = true;throw null; } },
-    } };
-  context.skyDome.mesh = group();context.riftPortalAmbient.visible = false;
-  for (const name of ['standaloneSiteGroups', 'addRiftPortalHidden', 'moveToRiftPortalLayer', 'hideSystemForRiftPortal', 'setRiftPreviewVisible']) context[name] = load(name, context);
-  const before = [source, target, extra, sourceOrphan, targetOrphan, stationLight, star.group, star.light, context.riftPortalAmbient].map(object => ({ object, visible: object.visible, mask: object.layers.mask }));
-  const begin = load('beginRiftPortalScene', context), end = load('endRiftPortalScene', context), camera = new THREE.PerspectiveCamera();
-  if (failBegin) assert.equal(captured(() => begin(camera, preview, null)), null);else begin(camera, preview, null);
-  assert.equal(sourceOrphan.visible, false);
-  if (!failBegin) { assert.equal(targetOrphan.visible, true);assert.equal(targetOrphan.layers.mask, 1 << 7);assert.equal(stationLight.layers.mask, 1 << 7); }
-  end(preview, null);end(preview, null);
-  for (const row of before) { assert.equal(row.object.visible, row.visible);assert.equal(row.object.layers.mask, row.mask); }
-  assert.equal(planet.volCloudMat.depthTest, true);assert.equal(context.scene.fog, fog);
-  assert.equal(context.renderer.toneMapping, THREE.ACESFilmicToneMapping);assert.ok(clear.equals(originalClear));assert.equal(alpha, .4);
-  assert.equal(context.riftPortalSceneActive, false);
+    ship: { group: group() }, weapons: {}, sunShadow: group(), headlamp: group(), skyDome: { mesh: group() }, hemi: group(), ambient: group(),
+    riftPortalAmbient: group(), riftRoute: { arrived: false }, riftFarBodyId: 'far-body', atmospherePass: { activePlanet: null } };
+  context.riftPortalAmbient.visible = false;
+  context.standaloneSiteGroups = load('standaloneSiteGroups', context);
+  const before = [source, target, extra, sourceOrphan, targetOrphan, star.group, star.light, context.riftPortalAmbient, context.ship.group]
+    .map(object => ({ object, visible: object.visible }));
+  const setup = load('setupRiftFarScene', context);
+  const pipeline = { setActiveAtmosphere() { assert.equal(sourceOrphan.visible, false);assert.equal(target.visible, true);
+    assert.equal(extra.visible, false);assert.equal(context.scene.fog, null);if (failSetup) throw error; } };
+  if (failSetup) assert.equal(captured(() => setup(pipeline, far, new THREE.Vector3(9, 9, 9), planet)), error);
+  else setup(pipeline, far, new THREE.Vector3(9, 9, 9), planet)();
+  for (const row of before) assert.equal(row.object.visible, row.visible);
+  assert.equal(context.scene.fog, fog);assert.deepEqual(stars.position.toArray(), [1, 2, 3]);
 });
 console.log(JSON.stringify({ passed: true, cases: passed, scope: 'Actual main/auxiliary CPU contracts; no native GPU, image or performance claim' }));

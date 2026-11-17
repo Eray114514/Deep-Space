@@ -151,6 +151,25 @@ export class FlightAudio {
     this.warpTone.connect(this.warpToneGain).connect(this.master);
     this.warpTone.start();
 
+    // Held pulse charge: a rising, slightly beating hum plus filtered air.
+    this.chargeGain = ctx.createGain();
+    this.chargeGain.gain.value = 0;
+    this.chargeFilter = ctx.createBiquadFilter();
+    this.chargeFilter.type = 'lowpass';
+    this.chargeFilter.frequency.value = 400;
+    this.chargeFilter.connect(this.chargeGain).connect(this.master);
+    this.chargeOsc = ctx.createOscillator();
+    this.chargeOsc.type = 'sawtooth';
+    this.chargeOsc.frequency.value = 46;
+    this.chargeOsc.connect(this.chargeFilter);
+    this.chargeOsc.start();
+    this.chargeBeat = ctx.createOscillator();
+    this.chargeBeat.type = 'sine';
+    this.chargeBeat.frequency.value = 93;
+    this.chargeBeat.connect(this.chargeFilter);
+    this.chargeBeat.start();
+    this.chargeLevel = -1;
+
     // A spatial rift has its own resonant bed rather than borrowing the warp
     // whoosh. Three restrained layers make it feel like a large energized
     // volume; cue transients below provide the tear and the final seal.
@@ -234,7 +253,24 @@ export class FlightAudio {
     src.stop(now + duration + 0.03);
   }
 
-  cue(kind) {
+  // Held pulse: k in 0..1 while charging, -1 when released or cancelled.
+  pulseCharge(k) {
+    if (this.disposed || !this.ready || !this.ctx || !this.chargeGain) return;
+    const now = this.ctx.currentTime;
+    if (k < 0) {
+      this.chargeGain.gain.setTargetAtTime(0, now, 0.04);
+      this.chargeLevel = -1;
+      return;
+    }
+    const level = Math.max(0, Math.min(1, k));
+    this.chargeGain.gain.setTargetAtTime(this.paused ? 0 : 0.035 + 0.11 * level, now, 0.06);
+    this.chargeOsc.frequency.setTargetAtTime(46 + 70 * level, now, 0.08);
+    this.chargeBeat.frequency.setTargetAtTime(93 + 147 * level + 2.5, now, 0.08);
+    this.chargeFilter.frequency.setTargetAtTime(380 + 2600 * level * level, now, 0.08);
+    this.chargeLevel = level;
+  }
+
+  cue(kind, options = {}) {
     if (this.disposed) return;
     this.lastCue = kind;
     if (!this.ready || !this.ctx) {
@@ -249,12 +285,14 @@ export class FlightAudio {
       this.noiseBurst({ duration: 0.72, gain: 0.19, from: 360, to: 2300, q: 0.5 });
       this.tone({ from: 48, to: 118, duration: 0.62, gain: 0.2, type: 'sawtooth', lowpass: 1500 });
     } else if (kind === 'pulse') {
-      // inhale (charge) -> low thump on the fold -> airy release
-      this.noiseBurst({ duration: 0.24, gain: 0.07, from: 2600, to: 420, q: 0.8 });
-      this.tone({ from: 140, to: 62, duration: 0.22, gain: 0.07, type: 'triangle', lowpass: 700 });
-      this.tone({ from: 74, to: 31, duration: 0.55, gain: 0.26, type: 'sine', lowpass: 180, delay: 0.22 });
-      this.noiseBurst({ duration: 0.75, gain: 0.12, from: 380, to: 3600, q: 0.45, delay: 0.24 });
-      this.tone({ from: 260, to: 520, duration: 0.6, gain: 0.03, type: 'sine', lowpass: 1600, delay: 0.3 });
+      // inhale -> low thump on the fold -> airy release; a charged fold is
+      // deeper, louder and longer
+      const p = Math.max(1, options.power || 1), k = p - 1;
+      this.noiseBurst({ duration: 0.2, gain: 0.07, from: 2600, to: 420, q: 0.8 });
+      this.tone({ from: 140, to: 62, duration: 0.2, gain: 0.07, type: 'triangle', lowpass: 700 });
+      this.tone({ from: 74 - k * 30, to: 31 - k * 10, duration: 0.55 + k * 0.9, gain: 0.26 + k * 0.12, type: 'sine', lowpass: 180, delay: 0.2 });
+      this.noiseBurst({ duration: 0.75 + k * 1.1, gain: 0.12 + k * 0.08, from: 380, to: 3600 + k * 2000, q: 0.45, delay: 0.22 });
+      this.tone({ from: 260, to: 520, duration: 0.6, gain: 0.03, type: 'sine', lowpass: 1600, delay: 0.28 });
     } else if (kind === 'warp-spool') {
       // reactor spool over the 3 s spool phase
       this.tone({ from: 38, to: 96, duration: 3.1, gain: 0.16, type: 'sawtooth', lowpass: 900 });
@@ -420,6 +458,8 @@ export class FlightAudio {
     stop(this.engine);
     stop(this.sub);
     stop(this.warpTone);
+    stop(this.chargeOsc);
+    stop(this.chargeBeat);
     stop(this.riftLow);
     stop(this.riftHarmonic);
     stop(this.airNoise);
