@@ -69,8 +69,8 @@ export function atmosphereRenderProfile(planet) {
   // radius). The density is divided by limbScale^0.6, not by the full factor:
   // a straight division kept the vertical column but cut the grazing column
   // (which scales with sqrt(R*H)) to 1/sqrt(k), so sunsets lost their red and
-  // twilight went pale. This split keeps the grazing column within ~10% and
-  // thickens the vertical one by ~1.35x at k = 2.2. Bodies of 6,000 km and
+  // twilight went pale. Aerosols get the full height adjustment; the
+  // molecular profile uses a softer adjustment below. Bodies of 6,000 km and
   // above keep physical scale heights; small moons keep their physical top.
   const limbScale = clamp(Math.min(Math.sqrt(6000000 / groundRadiusMeters),
     groundRadiusMeters * 0.017 / 8000), 1, 2.2);
@@ -83,7 +83,10 @@ export function atmosphereRenderProfile(planet) {
   // Ideal-gas reference density at the authored surface pressure/temperature.
   // atmoDensity is only the fallback for worlds without a physical pressure.
   const densityScale = pressure * 286 / temperatureK / limbScale ** 0.6;
-  const rayleighScaleHeightMeters = 8000 * temperatureScale * limbScale;
+  // Keep most of the enhanced limb on compact worlds, but let molecular
+  // density fall off sooner so the outer blue fringe fades into space.
+  const molecularScale = 1 + 0.7 * (limbScale - 1);
+  const rayleighScaleHeightMeters = 8000 * temperatureScale * molecularScale;
   const mieScaleHeightMeters = (type === 'desert' || type === 'toxic' ? 1800 : 1200)
     * Math.sqrt(temperatureScale) * limbScale;
   const profile = createAtmosphereProfile({
