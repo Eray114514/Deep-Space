@@ -263,7 +263,7 @@ function buildPodPlant(rng, pal) {
   return { geo: shadeVertical(mergeGeos(parts), 0.78, 1.1), glow: pal.accent.clone() };
 }
 
-function buildGrassTuft(rng, bladeRange = [7, 10], rows = 4) {
+function buildGrassTuft(rng, bladeRange = [12, 18], rows = 4, widthScale = 1) {
   // real blades (white — each instance is tinted per-planet at placement).
   // The baked root→tip brightness gradient is what makes grass read as
   // grass instead of spikes: dark at the soil, light where the sun sits.
@@ -272,8 +272,10 @@ function buildGrassTuft(rng, bladeRange = [7, 10], rows = 4) {
   const n = bladeRange[0] + (rng() * (bladeRange[1] - bladeRange[0])) | 0;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rng();
-    const len = 0.55 + rng() * 0.45;
-    const f = new THREE.PlaneGeometry(0.055, len, 1, rows);
+    // a tuft is a few tall blades over many short ones
+    const len = 0.22 + Math.pow(rng(), 1.6) * 0.7;
+    // thin blades; coarser levels widen theirs to keep the same coverage
+    const f = new THREE.PlaneGeometry(0.022 * widthScale * (0.75 + rng() * 0.5), len, 1, rows);
     f.translate(0, len / 2, 0);
     const fp = f.attributes.position;
     for (let v = 0; v < fp.count; v++) {
@@ -283,6 +285,13 @@ function buildGrassTuft(rng, bladeRange = [7, 10], rows = 4) {
     }
     paint(f, white, rng, 0.12);
     const pos = f.attributes.position, col = f.attributes.color;
+    // one blade in five has dried to straw; the rest vary in depth of green
+    const dry = rng() < 0.2;
+    const shade = 0.78 + rng() * 0.36;
+    const tint = dry ? [1.55, 1.3, 0.62] : [shade * 0.96, shade, shade * 0.9];
+    for (let v = 0; v < pos.count; v++) {
+      col.setXYZ(v, col.getX(v) * tint[0], col.getY(v) * tint[1], col.getZ(v) * tint[2]);
+    }
     for (let v = 0; v < pos.count; v++) {
       const t = Math.max(0, Math.min(1, pos.getY(v) / len));
       // Strong root occlusion is more important than a bright tip.  The old
@@ -297,11 +306,17 @@ function buildGrassTuft(rng, bladeRange = [7, 10], rows = 4) {
     parts.push(place(f, (rng() - 0.5) * 0.22, 0, (rng() - 0.5) * 0.22, _q.clone()));
   }
   const g = mergeGeos(parts);
-  // blades light like the field, not like spinning planes: every normal
-  // points straight up (instance rotation aligns it to the terrain), so a
-  // meadow shades softly with the ground instead of flickering dark/bright
+  // Blades light mostly like the field (normals near straight up, so a
+  // meadow shades softly with the ground instead of flickering), but keep a
+  // third of their own facing: neighbouring blades then catch the sun
+  // differently and the tuft has depth instead of reading as paint.
   const nrm = g.attributes.normal;
-  for (let i = 0; i < nrm.count; i++) nrm.setXYZ(i, 0, 1, 0);
+  for (let i = 0; i < nrm.count; i++) {
+    const x = nrm.getX(i) * 0.35, z = nrm.getZ(i) * 0.35;
+    const y = 1;
+    const l = Math.hypot(x, y, z);
+    nrm.setXYZ(i, x / l, y / l, z / l);
+  }
   return g;
 }
 
@@ -376,8 +391,8 @@ export function buildFlora(planet) {
     // their blade complexity changes with distance: a dense meadow therefore
     // keeps its silhouette without paying near-blade cost at the far rim.
     grass,
-    grassMid: buildGrassTuft(rng, [4, 6], 2),
-    grassFar: buildGrassTuft(rng, [2, 3], 1),
+    grassMid: buildGrassTuft(rng, [6, 9], 2, 1.6),
+    grassFar: buildGrassTuft(rng, [3, 4], 1, 2.6),
     // meadows lean toward the planet's canopy colour instead of bare dirt —
     // the ground tint alone made grass vanish on dark soils
     grassTint: pal.canopy.clone().offsetHSL(0, 0.08, 0.025),

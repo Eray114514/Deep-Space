@@ -44,6 +44,7 @@ const SCENES = [
   { name: '07-flight-400m', js: flight(400, -0.14) },
   { name: '08-walk', js: (i) => `NMS.land(${i}, 0, 'meadow')` },
   { name: '09-walk-turn', js: (i) => `NMS.land(${i}, 140, 'meadow')` },
+  { name: '10-walk-ground', js: (i) => `NMS.land(${i}, 60, 'meadow'); NMS.lookPitch(-55)` },
 ];
 
 await mkdir(OUT, { recursive: true });

@@ -586,13 +586,24 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
             vec2 pbrUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
             vec2 pbrRockUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
-            vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb;
-            vec3 pbrStone = texture2D(uRockColor, pbrRockUv).rgb;
-            vec3 pbrSample = mix(pbrGrass, pbrStone, pbrRock);
+            // The scans are tints around their own average colour: divide by
+            // that average (their last mip) so the near ground keeps the
+            // planet palette and gains the scan's full contrast. Scaling the
+            // raw texel instead pushed every value under the clamp floor and
+            // left one flat darkened olive.
+            vec3 grassMean = max(textureLod(uGrassColor, vec2(0.5), 12.0).rgb, vec3(0.02));
+            vec3 rockMean = max(textureLod(uRockColor, vec2(0.5), 12.0).rgb, vec3(0.02));
+            vec3 pbrGrass = texture2D(uGrassColor, pbrUv).rgb / grassMean;
+            vec3 pbrStone = texture2D(uRockColor, pbrRockUv).rgb / rockMean;
+            // a second, rotated and larger sampling breaks up the 12 m tile
+            vec3 pbrGrass2 = texture2D(uGrassColor, vec2(pbrUv.y, -pbrUv.x) * 0.31 + vec2(0.37, 0.71)).rgb / grassMean;
+            vec3 pbrStone2 = texture2D(uRockColor, vec2(-pbrRockUv.y, pbrRockUv.x) * 0.27 + vec2(0.13, 0.52)).rgb / rockMean;
+            vec3 pbrSample = mix(pbrGrass * (0.55 + 0.45 * pbrGrass2), pbrStone * (0.6 + 0.4 * pbrStone2), pbrRock);
             float pbrLum = dot(pbrSample, vec3(0.2126, 0.7152, 0.0722));
-            vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, uEarthLike * 0.42);
-            pbrStructure = clamp(pbrStructure * 1.45, vec3(0.58), vec3(1.42));
-            diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.48);
+            // keep the planet's hue on alien worlds, the scan's on earth-like ones
+            vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, 0.25 + uEarthLike * 0.45);
+            pbrStructure = clamp(pbrStructure, vec3(0.25), vec3(2.2));
+            diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.85);
             gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
               texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
           }
@@ -683,7 +694,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v23-climate-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v25-scan-mean-'+hasSurfaceCloudMedium(planet);
   return prepareSurfaceAtmosphere(material, planet);
 }
 

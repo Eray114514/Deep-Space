@@ -9,6 +9,22 @@ import { applyWindSway, GROW } from './shaders.js';
 import { buildFlora } from './flora.js';
 import { VegetationFrame } from './vegetation-frame.js';
 
+// Smooth value noise over planet-local metres (a pure function of position,
+// independent of the planet's terrain fields) for meadow patchiness.
+function smoothHash(ix, iy, iz) { return hashFloat(hash3i(ix, iy, iz, 0x6d2b), 0); }
+function meadowNoise(x, y, z) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const fx = x - ix, fy = y - iy, fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy), uz = fz * fz * (3 - 2 * fz);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  return lerp(
+    lerp(lerp(smoothHash(ix, iy, iz), smoothHash(ix + 1, iy, iz), ux),
+      lerp(smoothHash(ix, iy + 1, iz), smoothHash(ix + 1, iy + 1, iz), ux), uy),
+    lerp(lerp(smoothHash(ix, iy, iz + 1), smoothHash(ix + 1, iy, iz + 1), ux),
+      lerp(smoothHash(ix, iy + 1, iz + 1), smoothHash(ix + 1, iy + 1, iz + 1), ux), uy), uz);
+}
+const _straw = new THREE.Color(0.42, 0.34, 0.13);
+
 // WebGL 2 baseline: the instance-architecture Stage C rewrite targeted the
 // shelved WebGPU/TSL line. The classic InstancedMesh deck is authoritative.
 export const SCATTER_ENABLED = true;
@@ -566,8 +582,15 @@ export class Scatter {
       // tufts blend the ground colour with the planet's canopy tint: they
       // still belong to the terrain, but read as living growth on any soil
       job.p.colorAt(_jd, _plantHeight, 0.08, 64, _ic);
-      _ic.lerp(this.flora.grassTint, 0.72).multiplyScalar(0.92).offsetHSL(
-        (hashFloat(hc, 0) - 0.5) * 0.045, 0.035, (hashFloat(hc, 1) - 0.5) * 0.065);
+      _ic.lerp(this.flora.grassTint, 0.72);
+      // Patches a few metres across dry toward straw or stay lush; the
+      // whole meadow sits darker than the bare-ground palette it grows from.
+      const wx = _jd.x * job.p.R, wy = _jd.y * job.p.R, wz = _jd.z * job.p.R;
+      const patch = meadowNoise(wx / 7.5, wy / 7.5, wz / 7.5) * 0.65
+        + meadowNoise(wx / 2.2 + 17, wy / 2.2, wz / 2.2) * 0.35;
+      const dryness = Math.min(1, Math.max(0, (patch - 0.52) * 3.2));
+      _ic.lerp(_straw, dryness * 0.55).multiplyScalar(0.58 + (1 - patch) * 0.22).offsetHSL(
+        (hashFloat(hc, 0) - 0.5) * 0.05, 0.12, (hashFloat(hc, 1) - 0.5) * 0.08);
       grass.color[i * 3] = _ic.r; grass.color[i * 3 + 1] = _ic.g; grass.color[i * 3 + 2] = _ic.b;
     }
   }
