@@ -374,6 +374,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         float gMeadow = 0.0;
         float gPatch = 0.0;
         float gShoreWet = 0.0;
+        float gSand = 0.0;
         float gSurfaceRoughness = 0.82;
         float eclipseVisibility(vec3 samplePosition) {
           if (uEclipseEnabled < 0.5) return 1.0;
@@ -582,6 +583,22 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             vec3 lean = mix(vec3(1.10, 1.0, 0.82), vec3(0.86, 1.0, 0.9), clamp(mottle + 0.5, 0.0, 1.0));
             base *= mix(vec3(1.0), lean, 0.55) * (1.0 + mottle * 0.34);
           }
+          // Sheltered, low-gradient shores collect pale sand. Rock projects
+          // through exposed banks and promontories, including underwater;
+          // the strand narrows with slope instead of outlining every coast.
+          float shoreHeight = hgt - uT0;
+          if (uEarthLike > 0.5 && uHasSea > 0.5 && abs(shoreHeight) < 36.0) {
+            float exposure = terrainField(vLocalPos * 0.00071 + 13.6);
+            float gravel = terrainField(vLocalPos.zxy * 0.0087 + exposure * 2.4);
+            float rocky = smoothstep(0.012, 0.085, slope + (exposure - 0.5) * 0.055);
+            float upperBeach = mix(3.0, 15.0, 1.0 - exposure);
+            float strand = (1.0 - smoothstep(upperBeach * 0.48, upperBeach, shoreHeight))
+              * smoothstep(-34.0, -9.0, shoreHeight);
+            gSand = strand * (1.0 - rocky);
+            vec3 sand = uLandC[0] * vec3(1.05, 1.01, 0.91) * (0.82 + gravel * 0.36);
+            vec3 outcrop = uRockC * (0.60 + 0.54 * gravel);
+            base = mix(base, mix(sand, outcrop, rocky), strand * 0.86);
+          }
           diffuseColor.rgb = base;
 
           // ---- baked ray-marched sun shadows: mountains shade whole
@@ -639,10 +656,13 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             pbrStructure = clamp(pbrStructure, vec3(0.25), vec3(2.2));
             // Inside the grass ring the ground is the base of the sward:
             // its colour, deep in shade, with only a hint of the scan.
-            float meadowNear = gMeadow * (1.0 - smoothstep(40.0, 130.0, viewDist));
+            float meadowNear = gMeadow * (1.0 - gSand) * (1.0 - smoothstep(40.0, 130.0, viewDist));
             vec3 swardBase = mix(diffuseColor.rgb, uMeadowC, 0.75) * 0.7
               * mix(vec3(1.0), pbrStructure, 0.35);
-            diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.85 * (1.0 - meadowNear));
+            // Sand carries fine granular contrast without the green blades
+            // and deep crevices photographed in the grassland scan.
+            diffuseColor.rgb *= mix(vec3(1.0), mix(pbrStructure, vec3(0.83 + 0.17 * pbrLum), gSand),
+              pbrNear * 0.85 * (1.0 - meadowNear));
             diffuseColor.rgb = mix(diffuseColor.rgb, swardBase, meadowNear);
             gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
               texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
@@ -788,12 +808,77 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     dryShellDiscard: true,
     directionalWake: true,
   };
+  const unitAxis = (a) => {
+    const inv = 1 / Math.hypot(a[0], a[1], a[2]);
+    return [a[0] * inv, a[1] * inv, a[2] * inv];
+  };
+  const crossAxis = (a, b) => unitAxis([
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ]);
+  const mesoA0 = unitAxis([-0.412, 0.793, -0.449]);
+  const mesoB0 = crossAxis(mesoA0, [0.23, 0.41, 0.88]);
+  const mesoA1 = unitAxis([0.618, -0.341, 0.708]);
+  const mesoB1 = crossAxis(mesoA1, [0.47, 0.78, -0.41]);
+  const mesoScale0 = 0.014;
+  const mesoScale1 = 0.0055;
+  const fract01 = (v) => v - Math.floor(v);
+  const dot3 = (a, p) => a[0] * p.x + a[1] * p.y + a[2] * p.z;
+  const glslVec3 = (a) => `vec3(${a.map((v) => Number(v).toPrecision(17)).join(', ')})`;
+
+  const resolveOceanOptics = () => {
+    const absorption = planet?.oceanClimate?.absorption || extinctionValues;
+    const tx = absorption.map((a) => Math.exp(-a * 16));
+    const txMax = Math.max(tx[0], tx[1], tx[2], 1e-4);
+    const txNorm = tx.map((v) => v / txMax);
+    const deep = planet?.pal?.sea
+      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor, 0.34)
+      : new THREE.Color(0.02, 0.08, 0.15);
+    let shelf = planet?.pal?.sea
+      ? planet.pal.sea[planet.pal.sea.length - 1].c.clone().lerp(planet.liquidColor, 0.28)
+      : new THREE.Color(0.06, 0.25, 0.30);
+    let shallow = planet
+      ? planet.liquidColor.clone().lerp(new THREE.Color(0.16, 0.72, 0.62), 0.38)
+      : new THREE.Color(0.12, 0.56, 0.62);
+    if (planet?.oceanClimate) {
+      deep.setRGB(...planet.oceanClimate.scatter);
+      shelf = deep.clone().multiplyScalar(1.05).add(
+        new THREE.Color(txNorm[0] * 0.13, txNorm[1] * 0.13, txNorm[2] * 0.13));
+      const sand = planet?.pal?.land?.[0]?.c;
+      if (sand) {
+        const sandTx = new THREE.Color(
+          sand.r * Math.exp(-absorption[0] * 4.5),
+          sand.g * Math.exp(-absorption[1] * 4.5),
+          sand.b * Math.exp(-absorption[2] * 4.5),
+        );
+        shallow = shelf.clone().multiplyScalar(1.45).lerp(sandTx, 0.36);
+      } else {
+        shallow = shelf.clone().multiplyScalar(1.55);
+      }
+    }
+    return { absorption, deep, shelf, shallow };
+  };
+  const initialOptics = resolveOceanOptics();
+  const shelfSpan = THREE.MathUtils.clamp(
+    (planet?.palU?.seaDepthSpan || (planet?.hAmp || 8000) * 0.04) * clarity,
+    140, 560,
+  );
+
   const oceanFrame = new OceanRenderFrame(planet);
   const drawUniforms = {
     ...oceanFrame.uniforms,
     uNearPatchCenter: { value: new THREE.Vector3(1e9, 1e9, 1e9) },
     uNearPatchRadius: { value: 0 },
     uRippleCount: { value: 0 },
+    uDeepC: { value: initialOptics.deep.clone() },
+    uShelfC: { value: initialOptics.shelf.clone() },
+    uShallowC: { value: initialOptics.shallow.clone() },
+    uAbsorption: { value: new THREE.Vector3(...initialOptics.absorption) },
+    uShelfSpan: { value: shelfSpan },
+    uBiologicalActivity: { value: planet?.oceanClimate?.composition === 'bioluminescent'
+      ? (planet.oceanClimate.biologicalActivity || 0) : 0 },
+    uMesoOffsets: { value: new THREE.Vector4() },
   };
   drawUniforms.uOceanModes = { value: oceanField.modes.map((mode) =>
     new THREE.Vector4(...mode.axis, mode.k)) };
@@ -821,6 +906,12 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     drawUniforms.uOceanTime.value = seconds;
     oceanDetailOffsets(detailFrame, oceanFrame.anchor).forEach((offset, i) =>
       drawUniforms.uOceanDetailOffsets.value[i].set(...offset));
+    drawUniforms.uMesoOffsets.value.set(
+      fract01(dot3(mesoA0, oceanFrame.anchor) * mesoScale0),
+      fract01(dot3(mesoB0, oceanFrame.anchor) * mesoScale0),
+      fract01(dot3(mesoA1, oceanFrame.anchor) * mesoScale1),
+      fract01(dot3(mesoB1, oceanFrame.anchor) * mesoScale1),
+    );
     const phases = oceanWavePhases(oceanField, oceanFrame.anchor, seconds);
     for (let i = 0; i < phases.length; i++) drawUniforms.uOceanPhases.value[i].set(...phases[i]);
     if (tidalField) {
@@ -834,11 +925,6 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
       const state = planet.oceanAt?.(center.clone().normalize());
       if (state) {
         drawUniforms.uOceanHeight.value = state.offshoreSignificantHeight;
-        drawUniforms.uAbsorption?.value.set(...state.absorption);
-        drawUniforms.uDeepC?.value.setRGB(...state.scatter);
-        if (drawUniforms.uShallowC) {
-          drawUniforms.uShallowC.value.setRGB(...state.scatter).multiplyScalar(2.2);
-        }
         if (drawUniforms.uBiologicalActivity) {
           drawUniforms.uBiologicalActivity.value = state.bioluminescence;
         }
@@ -932,27 +1018,19 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, oceanFrame.uniforms);
     const cloudTex = planet.cloudShadowTex || blankTexture();
-    const deep = planet?.pal?.sea
-      ? planet.pal.sea[0].c.clone().lerp(planet.liquidColor, 0.34)
-      : new THREE.Color(0.02, 0.08, 0.15);
-    const shallow = planet
-      ? planet.liquidColor.clone().lerp(new THREE.Color(0.16, 0.72, 0.62), 0.38)
-      : new THREE.Color(0.12, 0.56, 0.62);
-    if (planet.oceanClimate) {
-      deep.setRGB(...planet.oceanClimate.scatter);
-      shallow.copy(deep).multiplyScalar(2.2).lerp(new THREE.Color(0.16, 0.46, 0.37),
-        planet.type === 'lush' ? 0.48 : 0.08);
-    }
     const sky = planet?.skyColor || new THREE.Color(0.25, 0.4, 0.55);
     shader.uniforms.uDetailTex = { value: tex };
     shader.uniforms.uTime = drawUniforms.uOceanTime;
     shader.uniforms.uWaveS = { value: waveScale };
     shader.uniforms.uSwell = { value: planet?.waterStyle?.swell || 1 };
     shader.uniforms.uFoamK = { value: planet?.waterStyle?.foam || 1 };
-    shader.uniforms.uDeepC = { value: deep };
-    shader.uniforms.uShallowC = { value: shallow };
-    shader.uniforms.uAbsorption = { value: new THREE.Vector3(...extinctionValues) };
-    shader.uniforms.uBiologicalActivity = { value: 0 };
+    shader.uniforms.uDeepC = drawUniforms.uDeepC;
+    shader.uniforms.uShelfC = drawUniforms.uShelfC;
+    shader.uniforms.uShallowC = drawUniforms.uShallowC;
+    shader.uniforms.uAbsorption = drawUniforms.uAbsorption;
+    shader.uniforms.uShelfSpan = drawUniforms.uShelfSpan;
+    shader.uniforms.uBiologicalActivity = drawUniforms.uBiologicalActivity;
+    shader.uniforms.uMesoOffsets = drawUniforms.uMesoOffsets;
     shader.uniforms.uDepthHazeDistance = { value: depthScale * 0.4 };
     shader.uniforms.uNearPatchCenter = drawUniforms.uNearPatchCenter;
     shader.uniforms.uNearPatchRadius = drawUniforms.uNearPatchRadius;
@@ -1028,7 +1106,8 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         varying float vWaveHeight;
         varying float vWaveNear;
         varying float vDepth;
-        varying float vNearPatchPass;`)
+        varying float vNearPatchPass;
+        varying float vWaterCell;`)
       .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
         objectNormal = normalize(objectNormal + aNormalDelta * aLodMorph);`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
@@ -1036,6 +1115,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         vLocalPos = aLocal + aPositionDelta * aLodMorph;
         vDepth = aDepth + aDepthDelta * aLodMorph;
         vNearPatchPass = aNearPatchPass;
+        vWaterCell = aWaterCell;
         vec3 waveUp = normalize(vLocalPos);
         vec3 waveT = normalize(cross(waveUp,
           abs(waveUp.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
@@ -1082,10 +1162,13 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform float uWaveS;
         uniform float uFoamK;
         uniform vec3 uDeepC;
+        uniform vec3 uShelfC;
         uniform vec3 uShallowC;
         uniform vec3 uAbsorption;
+        uniform float uShelfSpan;
         uniform float uBiologicalActivity;
         uniform float uDepthHazeDistance;
+        uniform vec4 uMesoOffsets;
         ${oceanRenderFrameGLSL}
         uniform float uNearPatchRadius;
         uniform vec3 uSkyZenith;
@@ -1115,6 +1198,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         varying float vWaveNear;
         varying float vDepth;
         varying float vNearPatchPass;
+        varying float vWaterCell;
         float gWaterFoam = 0.0;
         float gWaterWakeFoam = 0.0;
         float gWaterRoughness = 0.16;
@@ -1123,6 +1207,8 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         float gWaterCloud = 0.0;
         float gWaterShallow = 0.0;
         float gWaterFacetLight = 0.5;
+        float gWaterCrest = 0.0;
+        float gWaterShoalMask = 1.0;
         float waterHash21(vec2 p) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
           p3 += dot(p3, p3.yzx + 33.33);
@@ -1200,7 +1286,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 detailPosition = vOceanRelative + localUp * vWaveHeight;
           float detailFade = 1.0 - smoothstep(22000.0, 48000.0, viewDist);
           vec2 detailSample = detailFade > 0.001
-            ? mix(vec2(0.5), waterDetail(detailPosition, uWaveS, vec2(uTime * 0.017, -uTime * 0.011)), detailFade)
+            ? mix(vec2(0.5), waterDetail(detailPosition, uWaveS, vec2(uTime * 0.095, -uTime * 0.065)), detailFade)
             : vec2(0.5);
           gWaterDetail = detailSample;
           // A real waterline advances and retreats over the authored contour.
@@ -1210,27 +1296,24 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           float swashField = (detailSample.r - 0.5) * 2.6
             + (detailSample.g - 0.5) * 1.2 + vWaveHeight * 0.42;
           float edgeDepth = vDepth + swashField;
-          if (gl_FrontFacing && edgeDepth <= -0.85) discard;
-          float edgeCoverage = gl_FrontFacing ? smoothstep(-0.85, 0.22, edgeDepth) : 1.0;
-          float dep = max(edgeDepth, 0.0);
+          // Kilometre-wide triangles can interpolate a dry cape across a
+          // deep inlet. Opaque terrain already occludes inland water. Let it
+          // own the silhouette until the bathymetry resolves the shoreline.
+          float coarseShell = (1.0 - vNearPatchPass) * smoothstep(150.0, 720.0, vWaterCell);
+          if (gl_FrontFacing && coarseShell < 0.001 && edgeDepth <= -0.85) discard;
+          float edgeCoverage = gl_FrontFacing
+            ? mix(smoothstep(-0.85, 0.22, edgeDepth), 1.0, coarseShell) : 1.0;
+          float dep = max(edgeDepth, coarseShell * 36.0);
           float opticalFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
           float farBathymetry = smoothstep(2.0, 22.0, opticalFootprint);
-          // Once a depth sample covers tens of metres, interpolating the raw
-          // shelf at patch vertices exposes triangle planes rather than useful
-          // underwater detail. Preserve exact depth nearby and converge the
-          // unresolved far field to a stable optical column.
           // Orbital footprints cannot resolve metre-scale shelf triangles,
           // but their authored depth still identifies shelf, slope or abyss.
-          // Compress that real column instead of mapping every value above
-          // 80 m to one luminous 48 m cyan plate.
-          // [2026-11-15] The compression used to map a 500 m shelf to ~20 m,
-          // so from orbit whole oceans wore the bright shallow-shelf colour
-          // and read as a milky turquoise plate. Light does not return from
-          // a 100 m+ column of real water either way; keep the true depth and
-          // only lift the first metres so unresolved shoals stay continuous.
+          // Lift only the first metres so unresolved shoals stay continuous
+          // while preserving full shelf-to-abyss contrast from high altitude.
           float unresolvedDepth = max(dep, mix(3.0, 0.0, smoothstep(0.0, 12.0, dep)));
           float opticalDepth = mix(dep, unresolvedDepth, farBathymetry);
           gWaterShallow = 1.0 - smoothstep(0.08, 6.0, dep);
+          gWaterShoalMask = mix(0.28, 1.0, clamp(dep / max(uOceanHeight * 2.2, 2.0), 0.0, 1.0));
           float viewCos = clamp(abs(dot(normalize(vWaveUp),
             normalize(vViewPosition))), 0.015, 1.0);
           // Sea-floor light makes a down/up trip through the column. The
@@ -1266,69 +1349,71 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
                 + vec2(uTime * 0.19, -uTime * 0.13))), 2.0)
               * exp(-dep * 0.024) * uDay * causticFade;
           }
-          vec3 seabed = uShallowC * (0.68 + caustic * 0.72)
+          vec3 seabed = uShallowC * (0.76 + caustic * 0.72)
             * (0.92 + refractiveWarp * 0.2);
-          vec3 inScatter = uDeepC * (0.38 + uDay * 0.28);
-          diffuseColor.rgb = seabed * bodyTransmit + inScatter * (1.0 - bodyTransmit);
-          float shelfToAbyss = smoothstep(5.0, 108.0, opticalDepth);
-          vec3 authoredDepthColor = mix(uShallowC * 1.14,
-            uDeepC * (0.43 + uDay * 0.16), shelfToAbyss);
+          float shelfSpan = max(80.0, uShelfSpan);
+          float innerShelf = smoothstep(1.5, max(26.0, shelfSpan * 0.14), opticalDepth);
+          float outerShelf = smoothstep(max(24.0, shelfSpan * 0.09), shelfSpan * 1.4, opticalDepth);
+          float abyssRamp = smoothstep(shelfSpan * 0.85, shelfSpan * 3.0, opticalDepth);
+          vec3 shelfColumn = mix(uShallowC * (0.86 + uDay * 0.28),
+            uShelfC * (0.74 + uDay * 0.34), innerShelf);
+          vec3 abyssColumn = uDeepC * (0.76 + uDay * 0.38) * mix(1.0, 0.78, abyssRamp);
+          vec3 waterScatter = mix(shelfColumn, abyssColumn, outerShelf);
+          diffuseColor.rgb = seabed * bodyTransmit + waterScatter * (1.0 - bodyTransmit);
+          vec3 authoredDepthColor = mix(shelfColumn, abyssColumn, outerShelf);
           diffuseColor.rgb = mix(diffuseColor.rgb, authoredDepthColor,
-            0.28 + shelfToAbyss * 0.46);
-          // Looking down through a clear shelf retains its turquoise water
-          // column; at grazing angles the body darkens before the sky
-          // reflection is added later. This is the missing depth cue that a
-          // constant grey PBR plane could never provide.
-          diffuseColor.rgb *= mix(0.62, 1.08, smoothstep(0.16, 0.78, viewCos));
+            0.22 + outerShelf * 0.42);
+          // Looking down through a clear shelf retains its bright water column;
+          // at grazing angles the body darkens before Fresnel sky reflection
+          // takes over in emissivemap_fragment.
+          diffuseColor.rgb *= mix(0.76, 1.06, smoothstep(0.16, 0.78, viewCos));
           diffuseColor.rgb *= 0.88 + smallDetail * 0.18;
           // Approximate unresolved facet skylight below the specular lobe.
-          // The normal spectrum is finer than a pixel near the horizon; if
-          // its integrated energy is discarded the entire shelf collapses to
-          // one grey value even though the geometric swell is moving.
           float facetLight = clamp(0.12 + smallDetail * 0.7
             + detailSample.g * 0.34
             + dot(gWaterMacroSlope, vec2(0.71, -0.49)) * 0.16, 0.0, 1.0);
-          // Broad analytic sine bands remain visibly periodic under an oblique
-          // flight camera even when several directions are crossed. The two
-          // rotated triplanar detail octaves above already provide stochastic
-          // facet energy without screen-spanning rails, so retain that field
-          // and let the long Gerstner spectrum own directional swell.
           gWaterFacetLight = facetLight;
           diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.77, 0.88, 0.94),
             diffuseColor.rgb * vec3(1.12, 1.1, 1.03), facetLight);
-          float shoreFade = 1.0 - smoothstep(1200.0, 9000.0, viewDist);
+          float shoreFade = 1.0 - smoothstep(1800.0, 11500.0, viewDist);
           float shoreFoam = 0.0;
           float crestHeight = smoothstep(0.0, 0.12,
             vWaveHeight / max(uOceanHeight, 0.25));
+          gWaterCrest = crestHeight;
           float macroSlopeLen = length(gWaterMacroSlope);
-          bool needAlongShore = (dep < 10.0 && shoreFade > 0.001)
+          bool needAlongShore = (dep < 24.0 && shoreFade > 0.001)
             || (crestHeight > 0.001 && macroSlopeLen > 0.035 && dep > 5.0)
             ${tidalField ? '|| true' : ''};
           float alongShoreBreak = needAlongShore
-            ? oceanShore(vOceanRelative, vec2(uTime * 0.025, -uTime * 0.018))
+            ? oceanShore(vOceanRelative, vec2(uTime * 0.032, -uTime * 0.024))
             : 0.5;
-          if (dep < 10.0 && shoreFade > 0.001) {
+          if (dep < 24.0 && shoreFade > 0.001) {
             vec2 shoreCoordinates = oceanShorePhase(vOceanRelative, vec2(0.0, uTime * 0.37 / 6.28318530718));
-            float shorePhase = dep * 1.12 - uTime * 1.54
-              + smallDetail * 6.2 + sin(shoreCoordinates.x * 6.28318530718) * 1.7
-              + sin(shoreCoordinates.y * 6.28318530718) * 1.35;
+            float shoreWarp = (alongShoreBreak - 0.5) * 3.4
+              + sin(shoreCoordinates.x * 6.28318530718) * 1.15
+              + sin(shoreCoordinates.y * 6.28318530718) * 0.85;
+            float shorePhase = sqrt(max(dep, 0.08)) * 3.35 - uTime * 1.75 + shoreWarp;
             float waveLine = sin(shorePhase);
-            float shoreBand = pow(1.0 - smoothstep(0.08, 9.5, dep), 0.68);
-            float breakingCrest = smoothstep(0.36, 0.88, waveLine)
-              * smoothstep(0.38, 0.73, smallDetail);
-            float swashNoise = smoothstep(0.48, 0.78,
-              alongShoreBreak * 0.68
-                + (sin(shorePhase * 0.73 + smallDetail * 3.1) * 0.5 + 0.5) * 0.42);
-            float swashRibbon = (1.0 - smoothstep(0.025, 1.65, dep))
-              * swashNoise * uFoamK * 0.24;
-            shoreFoam = (shoreBand * breakingCrest
-              * (0.34 + alongShoreBreak * 0.66) * uFoamK * 0.76
+            float shoreBand = pow(1.0 - smoothstep(0.12, 22.0, dep), 0.82);
+            float poreBreak = mix(0.68, smoothstep(0.32, 0.72, smallDetail),
+              1.0 - smoothstep(1.0, 9.0, opticalFootprint));
+            float alongBreak = smoothstep(0.28, 0.76, alongShoreBreak);
+            float breakingCrest = smoothstep(0.42, 0.90, waveLine) * poreBreak;
+            float trailingLace = smoothstep(0.08, 0.62, sin(shorePhase - 0.52))
+              * (1.0 - smoothstep(0.8, 12.0, dep)) * poreBreak * 0.34;
+            float swashNoise = smoothstep(0.40, 0.75,
+              alongShoreBreak * 0.62
+                + (sin(shorePhase * 0.65 + (alongShoreBreak - 0.5) * 2.2) * 0.5 + 0.5) * 0.44);
+            float swashRibbon = (1.0 - smoothstep(0.03, 2.2, dep))
+              * swashNoise * uFoamK * 0.40;
+            shoreFoam = ((shoreBand * breakingCrest + trailingLace)
+              * (0.36 + alongBreak * 0.64) * uFoamK * 0.82
               + swashRibbon) * shoreFade;
           }
           float openWhitecap = 0.0;
           if (crestHeight > 0.001 && macroSlopeLen > 0.035 && dep > 5.0) {
             vec2 foamPoreUv = oceanCapillary(vOceanRelative + localUp * vWaveHeight,
-              vec2(uTime * 0.017, -uTime * 0.011));
+              vec2(uTime * 0.08, -uTime * 0.055));
             vec2 foamPore = texture2D(uDetailTex, foamPoreUv).rg;
             float resolvedPores = smoothstep(0.46, 0.61, foamPore.x * 0.6 + foamPore.y * 0.4);
             openWhitecap = crestHeight * resolvedPores
@@ -1403,28 +1488,22 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           }
           gWaterWakeFoam = clamp(wakeFoam, 0.0, 0.5);
           gWaterFoam = clamp(shoreFoam * 0.9 + openWhitecap + wakeFoam, 0.0, 0.95);
-          diffuseColor.rgb = mix(diffuseColor.rgb,
-            vec3(0.92, 0.97, 0.99), gWaterFoam * 0.9);
+          vec3 foamAlbedo = mix(vec3(0.92, 0.96, 0.98),
+            normalize(max(uShallowC, vec3(0.02))) * 0.94, 0.18);
+          diffuseColor.rgb = mix(diffuseColor.rgb, foamAlbedo, gWaterFoam * 0.92);
           float cloud = waterCloud(vLocalPos);
           gWaterCloud = cloud;
           // Preserve a coherent water surface while allowing the actual shelf
           // geometry to read through clear shallows. Deep water is fully
           // opaque; foam locally restores full coverage.
-          // Hold a nearly constant optical coverage across the shelf. Making
-          // alpha react strongly to every interpolated metre exposed the
-          // planar bathymetry of otherwise continuous grid triangles as large
-          // trapezoids at grazing angles. Spectral colour still carries depth;
-          // alpha closes only in genuinely deep water.
-          // Transmission is a ray property, not a fixed shelf opacity. At
-          // grazing incidence the reflected interface must occlude the floor;
-          // retaining 66% floor visibility made an eye-level ocean look like
-          // dry sand even though the wave normals and geometry were present.
           float interfaceFresnel = 0.0201 + 0.9799 * pow(1.0 - viewCos, 5.0);
           float transmittedEnergy = dot(transmission, vec3(0.2126, 0.7152, 0.0722));
-          diffuseColor.a = clamp(1.0 - transmittedEnergy * (1.0 - interfaceFresnel), 0.18, 1.0);
+          float alphaFloor = mix(0.10, 0.18, farBathymetry);
+          diffuseColor.a = clamp(1.0 - transmittedEnergy * (1.0 - interfaceFresnel), alphaFloor, 1.0);
           diffuseColor.a = mix(diffuseColor.a, 1.0, gWaterFoam) * edgeCoverage;
-          gWaterRoughness = clamp(0.105 + (1.0 - smallDetail) * 0.16
-            + gWaterFoam * 0.42 + cloud * 0.08, 0.09, 0.72);
+          float distanceRough = smoothstep(2.0, 32.0, opticalFootprint) * 0.12;
+          gWaterRoughness = clamp(0.052 + (1.0 - smallDetail) * 0.085 + distanceRough
+            + gWaterFoam * 0.48 + cloud * 0.05, 0.045, 0.76);
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         roughnessFactor = gWaterRoughness;`)
@@ -1436,14 +1515,33 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 bitL = cross(upL, tanL);
           // The stochastic fBm channels are unrelated slope axes. Keeping the
           // normal field noise-owned removes the perspective-compressed sine
-          // rails that previously read as a brushed-metal plane.
-          vec2 g = (gWaterDetail - 0.5) * 2.2;
-          vec2 capillaryUv = oceanCapillary(vOceanRelative, vec2(uTime * 0.035, -uTime * 0.028));
-          vec2 capillary = texture2D(uDetailTex,
-            capillaryUv).rg - 0.5;
-          g += capillary * 0.8;
+          // rails that previously read as a brushed-metal plane. Cross-fade
+          // scales smoothly with pixelFootprint so total wave slope stays
+          // fluid and liquid at every altitude rather than stacking.
+          vec2 g = (gWaterDetail - 0.5) * 1.45;
           float pixelFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
-          g *= (1.0 - smoothstep(2.5, 18.0, pixelFootprint)) * vWaveNear;
+          g *= (1.0 - smoothstep(1.8, 12.0, pixelFootprint)) * vWaveNear;
+          float capFade = (1.0 - smoothstep(0.25, 2.2, pixelFootprint)) * vWaveNear;
+          if (capFade > 0.001) {
+            vec2 capillaryUv = oceanCapillary(vOceanRelative, vec2(uTime * 0.42, -uTime * 0.29));
+            vec2 capillary = texture2D(uDetailTex, capillaryUv).rg - 0.5;
+            g += capillary * 0.50 * capFade;
+          }
+          if (pixelFootprint < 90.0 && vWaveNear > 0.001) {
+            vec2 mesoUv0 = vec2(dot(vOceanRelative, ${glslVec3(mesoA0)}),
+              dot(vOceanRelative, ${glslVec3(mesoB0)})) * ${Number(mesoScale0).toPrecision(17)}
+              + uMesoOffsets.xy + vec2(uTime * 0.052, -uTime * 0.036);
+            vec2 mesoUv1 = vec2(dot(vOceanRelative, ${glslVec3(mesoA1)}),
+              dot(vOceanRelative, ${glslVec3(mesoB1)})) * ${Number(mesoScale1).toPrecision(17)}
+              + uMesoOffsets.zw + vec2(-uTime * 0.034, uTime * 0.026);
+            vec2 meso0 = texture2D(uDetailTex, mesoUv0).rg - 0.5;
+            vec2 meso1 = texture2D(uDetailTex, mesoUv1).rg - 0.5;
+            float mesoFade0 = mix(0.32, 0.58, smoothstep(1.5, 6.0, pixelFootprint))
+              * (1.0 - smoothstep(8.0, 32.0, pixelFootprint));
+            float mesoFade1 = mix(0.14, 0.48, smoothstep(4.0, 16.0, pixelFootprint))
+              * (1.0 - smoothstep(18.0, 85.0, pixelFootprint));
+            g += (meso0 * mesoFade0 + meso1 * mesoFade1) * gWaterShoalMask * vWaveNear;
+          }
           if (uRippleCount > 0 && length(vViewPosition) < 4500.0)
           for (int i = 0; i < ${WATER_IMPULSE_CAP}; i++) {
             if (i >= uRippleCount) break;
@@ -1479,9 +1577,11 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
               dot(wakeGradientObject, bitL));
             g += mix(impactGradient, wakeGradient, step(0.5, rdir.w));
           }
+          float opticalSwellBoost = mix(1.0, 1.48,
+            vWaveNear * (1.0 - smoothstep(30.0, 240.0, pixelFootprint)));
           normal = normalize(normal
-            - vWaveT * (gWaterMacroSlope.x + g.x * 0.5)
-            - vWaveB * (gWaterMacroSlope.y + g.y * 0.5));
+            - vWaveT * (gWaterMacroSlope.x * opticalSwellBoost + g.x * 0.5)
+            - vWaveB * (gWaterMacroSlope.y * opticalSwellBoost + g.y * 0.5));
         }`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         {
@@ -1489,6 +1589,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 reflectionDir = reflect(-viewDir, normal);
           float ndv = clamp(abs(dot(normal, viewDir)), 0.0, 1.0);
           float fresnel = 0.0201 + 0.9799 * pow(1.0 - ndv, 5.0);
+          diffuseColor.rgb *= mix(1.0 - fresnel * 0.54, 1.0, gWaterFoam);
           float skyHeight = clamp(dot(reflectionDir,
             normalize(vWaveUp)), 0.0, 1.0);
           vec3 reflectedSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
@@ -1504,27 +1605,29 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           );
           float sunDot = max(dot(reflectionDir, normalize(vSunDirView)), 0.0);
           float glitterField = (sunDot > 0.01 || (uSunset > 1e-3 && sunDot > 1e-4))
-            ? oceanGlitter(vOceanRelative, vec2(uTime * 0.11, -uTime * 0.073))
+            ? oceanGlitter(vOceanRelative, vec2(uTime * 0.16, -uTime * 0.11))
             : 0.5;
           float glitterBreak = 0.12 + 0.88 * smoothstep(0.48, 0.81,
             glitterField * 0.72 + gWaterFacetLight * 0.28);
           float glintPower = mix(1400.0, 180.0, gWaterRoughness);
           float sunGlint = sunDot > 1e-5
-            ? pow(sunDot, glintPower) * mix(0.72, 0.24, gWaterRoughness) * min(uSunEnergy, 1.6) * glitterBreak
+            ? pow(sunDot, glintPower) * mix(0.76, 0.24, gWaterRoughness) * min(uSunEnergy, 1.6) * glitterBreak
             : 0.0;
           float secondDot = max(dot(reflectionDir,
             normalize(vSecondarySunDirView)), 0.0);
           float secondGlint = (secondDot > 1e-5 && uSecondarySunEnergy > 1e-5)
-            ? pow(secondDot, glintPower) * mix(0.52, 0.18, gWaterRoughness) * min(uSecondarySunEnergy, 1.6)
+            ? pow(secondDot, glintPower) * mix(0.54, 0.18, gWaterRoughness) * min(uSecondarySunEnergy, 1.6)
             : 0.0;
           totalEmissiveRadiance += reflectedSky
-            * (0.016 + gWaterShallow * 0.035
-              + fresnel * (0.16 + uDay * 0.24))
-            * (1.0 - gWaterFoam * 0.68);
-          totalEmissiveRadiance += mix(uDeepC, uShallowC, gWaterShallow)
-            * (0.012 + gWaterFacetLight * mix(0.08, 0.45, vWaveNear))
-            * (0.36 + uDay * 0.64)
-            * (1.0 - gWaterFoam * 0.75);
+            * (0.012 + gWaterShallow * 0.024
+              + fresnel * mix(0.36, 0.64, max(uDay, uSunset * 0.85)))
+            * (1.0 - gWaterFoam * 0.72);
+          float subsurfaceWave = clamp(gWaterCrest * 0.75 + gWaterShallow * 0.65, 0.0, 1.0);
+          float crestBacklight = 0.25 + 0.75 * max(0.0, dot(viewDir, -normalize(vSunDirView)));
+          totalEmissiveRadiance += mix(uDeepC, uShallowC, max(gWaterShallow, gWaterCrest * 0.55))
+            * (0.024 + gWaterFacetLight * mix(0.02, 0.16, vWaveNear) * (0.25 + subsurfaceWave * crestBacklight))
+            * (0.24 + uDay * 0.76)
+            * (1.0 - gWaterFoam * 0.85);
           // The broad low-sun lobe stays chromatic while the much narrower
           // solar core remains bright. Separating them avoids a clipped white
           // pillar and preserves the warm path across individual wave facets.
@@ -1562,7 +1665,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v35-underwater-handoff:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v36-coast-optics:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
   return prepareSurfaceAtmosphere(material, planet);
 }
 

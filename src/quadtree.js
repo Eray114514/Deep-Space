@@ -1113,6 +1113,8 @@ export class ChunkedLOD {
     geo.setAttribute('aLodMorph', lodMorphAttribute);
     if (p.bakeDepth) {
       geo.setAttribute('aNearPatchPass', new THREE.BufferAttribute(new Float32Array(total), 1));
+      const waterCellMetres = (Math.PI / 2) * p.R / (N * 2 ** node.level);
+      geo.setAttribute('aWaterCell', new THREE.BufferAttribute(new Float32Array(total).fill(waterCellMetres), 1));
     }
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeBoundingSphere();

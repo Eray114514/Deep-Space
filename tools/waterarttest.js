@@ -790,20 +790,25 @@ try {
       `supplement cannot contain complete packet support: ${decayMask.visibleSupportFraction}`);
     await page.evaluate((pose) => {
       const pipeline = NMS._pipeline, camera = NMS._internals.camera;
-      const original = pipeline.render;
-      pipeline.render = function (...args) {
-        const position = camera.position.clone(), quaternion = camera.quaternion.clone();
-        try {
-          camera.position.fromArray(pose.position);
-          camera.quaternion.fromArray(pose.quaternion);
-          camera.updateMatrixWorld(true);
-          return original.apply(this, args);
-        } finally {
-          camera.position.copy(position); camera.quaternion.copy(quaternion);
-          camera.updateMatrixWorld(true);
-        }
+      const original = pipeline.submitFrame;
+      window.__wakeSupplementFrames = 0;
+      pipeline.submitFrame = function (work) {
+        return original.call(this, draw => work(options => {
+          const position = camera.position.clone(), quaternion = camera.quaternion.clone();
+          try {
+            camera.position.fromArray(pose.position);
+            camera.quaternion.fromArray(pose.quaternion);
+            camera.updateMatrixWorld(true);
+            window.__wakeSupplementFrames++;
+            return draw(options);
+          } finally {
+            camera.position.copy(position);
+            camera.quaternion.copy(quaternion);
+            camera.updateMatrixWorld(true);
+          }
+        }));
       };
-      window.__restoreWakeSupplement = () => { pipeline.render = original; };
+      window.__restoreWakeSupplement = () => { pipeline.submitFrame = original; };
     }, decayMask.supplementPose);
     try {
       assert.equal(await page.evaluate(() => NMS.muteWaterWake(false)), true);
@@ -812,6 +817,8 @@ try {
       await shot('04c-complete-packet-supplement-player');
       await page.keyboard.press('KeyH');
       decayOn = await shot('04d-complete-packet-supplement-on-clean');
+      assert.ok(await page.evaluate(() => window.__wakeSupplementFrames > 0),
+        'complete-packet camera must render through the foreground draw');
       assert.equal(await page.evaluate(() => NMS.muteWaterWake(true)), true);
       await page.waitForTimeout(150);
       decayOff = await shot('04e-complete-packet-supplement-off-clean');

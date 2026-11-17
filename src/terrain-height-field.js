@@ -15,7 +15,7 @@ const PARAMETERS = [
   'blobFreq', 'duneAmp', 'duneFreq', 'spikeAmp', 'spikeFreq',
   // generator v2: physical-wavelength relief (see height())
   'landDatum', 'landRise', 'rangeFreq', 'rangeBias', 'ridgeFreq', 'ridgeAmp',
-  'hillFreq', 'hillAmp', 'roughFreq', 'roughAmp', 'microFreq', 'microAmp',
+  'hillFreq', 'hillAmp', 'roughFreq', 'roughAmp', 'microFreq', 'microAmp', 'tidalCoast',
 ];
 const NOISE_FIELDS = ['nA', 'nB', 'nC', 'nD', 'nOceanBasin'];
 
@@ -168,7 +168,11 @@ export class TerrainHeightField {
             Math.max(0, h - this.seaLevel) * 0.55 + this.hAmp * 0.002);
           h -= valleyShape * valleyDepth * band;
         }
-        const channelWidth = Math.max(this.canyonWidth * 0.72, 2.5 / maxFreq);
+        // In a drowned valley the tidal mouth is wider than the upstream
+        // channel. Use the natural datum so moving the water level does not
+        // move the valley. A tributary can open into the same floodplain.
+        const mouth = this.tidalCoast ? 1 - smoothstep(5, 95, h - this.landDatum) : 0;
+        const channelWidth = Math.max(this.canyonWidth * (0.72 + mouth * 0.86), 2.5 / maxFreq);
         const channelT = 1 - Math.abs(cv) / channelWidth;
         if (channelT > 0) {
           const channelShape = channelT * channelT * (3 - 2 * channelT);
@@ -244,6 +248,21 @@ export class TerrainHeightField {
       if ((w.h & 7) < 3) {
         h += sp * sp * sp * this.spikeAmp * (0.4 + (w.h % 97) / 97 * 0.6) * spikeBlend;
       }
+    }
+
+    if (this.tidalCoast && Math.abs(h - this.landDatum) < 180) {
+      // Resistant headlands rise behind a wave-cut bench; intervening soft
+      // coast stays open to beaches. Both follow the actual terrain, so the
+      // shelf seen offshore, collision surface and dry landing pads agree.
+      const elevation = h - this.landDatum;
+      const coastBand = 1 - smoothstep(46, 180, Math.abs(elevation));
+      const strata = this.bandFbm(this.nC, x + 19, y - 6, z + 14,
+        this.R / 7400, 3, 0.48, 2.09, maxFreq);
+      const headland = smoothstep(-0.18, 0.34, strata)
+        * frequencyBlend(this.R / 7400, maxFreq);
+      const bluff = smoothstep(3, 18, elevation) * (21 + 16 * belt);
+      const ledge = 0.55 * Math.min(0, -elevation - 2) * smoothstep(-2, 4, elevation);
+      h += coastBand * headland * (bluff + Math.max(-7, ledge));
     }
 
     if (this.nOceanBasin && this.hasLiquid && h < this.seaLevel) {

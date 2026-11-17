@@ -179,6 +179,7 @@ export class Planet extends TerrainHeightField {
     // liquids
     this.liquid = this.cfg.liquid;
     this.hasLiquid = this.liquid !== null;
+    this.tidalCoast = this.liquid === 'water';
     this.oceanClimate = ['water', 'toxic'].includes(this.liquid)
       ? createOceanClimate(seed, { type, gravity: this.gravity,
         oceanClass: this.tuning.oceanClass || this.tuning.oceanProfile }) : null;

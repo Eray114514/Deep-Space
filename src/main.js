@@ -7231,7 +7231,9 @@ window.NMS = {
     const localDir = opts.dir
       ? new THREE.Vector3(...opts.dir).normalize()
       : p.worldPositionToLocal(nav.pos, new THREE.Vector3()).normalize();
-    const altitude = Math.max(0, Number(metres) || 0);
+    const altitude = Number.isFinite(opts.clearance)
+      ? Math.max(p.height(localDir, p.fullMaxFreq), p.hasLiquid ? p.seaLevel : -Infinity) + Math.max(0, opts.clearance)
+      : Math.max(0, Number(metres) || 0);
     p.localPositionToWorld(localDir.clone().multiplyScalar(p.R + altitude), nav.pos);
     nav.vel.set(0, 0, 0);
     const sunDir = p.sunDirLocal.clone();
@@ -7999,6 +8001,15 @@ window.NMS = {
 if (qs.get('scene') === 'walk') {
   window.NMS.land(Number(qs.get('planet') || 0), Number(qs.get('yaw') || 0), qs.get('bias') || 'meadow');
   if (qs.get('face') === 'ship') window.NMS.faceShip();
+}
+
+if (DEV_SERVER && qs.get('scene') === 'bay-approach') {
+  const { coastalApproach } = await import('./coastal-approach.js');
+  const course = coastalApproach(universe.system.planets[0]);
+  const pose = course.pose(17000, 0, 8500, -0.54, 0);
+  window.NMS.teleport(0, 0.01, pose);
+  window.NMS.setLocalSunAltitude(0, 26, { azimuthHint: course.along });
+  window.NMS.setContinuousAtmosphereAltitude(0, 0, pose);
 }
 
 if (qs.get('scene') === 'lowflight') {
