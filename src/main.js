@@ -1533,6 +1533,8 @@ async function closeStarMap(restoreInput = true) {
   }
 }
 
+window.addEventListener('ui-sound', (event) => audio.playUi?.(event.detail));
+
 function pauseGame() {
   if (paused) return;
   // The start page owns the screen; opening the pause surface while it is
@@ -1544,6 +1546,7 @@ function pauseGame() {
   presentedFrames.setPaused(true,performance.now());
   spaceCtl.enabled = false;
   pauseOverlay.classList.remove('hidden');
+  ui.pauseMenu?.reset({ focus: true });
   pausePanel.classList.remove('is-acquiring');
   pauseStatus.textContent = '指针已释放 · 点击继续以重新接管视角';
   audio.setPaused(true);
@@ -5273,7 +5276,16 @@ ui.setLoading(true, '加载中');
 // Bootstrap shows the pre-hero splash (clean "Deep Space" title card) behind
 // the loading veil; a click dissolves into the full hero start page.
 ui.showSplash(SHOW_HERO);
-if (SHOW_HERO) spaceCtl.enabled = false;
+if (SHOW_HERO) {
+  spaceCtl.enabled = false;
+  // The hero backdrop is the home world; its dossier balances the menu card.
+  try {
+    ui.setHeroDossier(starMap?.bodyDossier(universe.system.star, universe.system.planets[0]?.name) || null);
+  } catch (error) {
+    console.warn('[hero] dossier unavailable', error);
+    ui.setHeroDossier(null);
+  }
+}
 const bootstrapSurfacePlanet = universe.system.planets[0];
 nearest = bootstrapSurfacePlanet || null;
 if (nearest) {

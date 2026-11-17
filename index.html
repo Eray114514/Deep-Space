@@ -32,6 +32,7 @@
     <div class="ship-hud-label" id="ship-hud-pulse"><span class="ship-hud-key" id="ship-hud-key-space">Space</span><span id="pulse-fuel">140/140</span><span id="ship-hud-pulse-label">脉冲</span></div>
 
     <section class="ship-hud-panel" id="ship-hud-power" aria-label="舰船电力分配">
+      <div class="ship-hud-panel-title"><span>POWER</span><b>配电</b></div>
       <div class="ship-hud-power-cols" id="ship-hud-power-cols">
         <div class="ship-hud-power-col" data-power="weapon"><div class="ship-hud-pips"></div></div>
         <div class="ship-hud-power-col" data-power="nav"><div class="ship-hud-pips"></div></div>
@@ -59,14 +60,16 @@
     </section>
 
     <section class="ship-hud-panel" id="ship-hud-integrity" aria-label="飞船状态">
-      <svg id="ship-hud-shield" width="230" height="216" viewBox="-115 -108 230 216" aria-hidden="true">
-        <g id="ship-hud-shield-rings" fill="none"></g>
-        <path id="ship-hud-silhouette" fill="rgba(8,18,22,.92)" stroke="#6fc9dd" stroke-width="1.6" stroke-linejoin="round"
-          d="M0.0,-49.5 L0.4,-46.7 L3.5,-41.7 L7.4,-30.5 L8.1,-22.0 L16.2,-15.0 L16.2,-11.5 L9.7,-9.7 L11.6,4.8 L12.5,9.7 L15.9,10.0 L16.9,13.9 L37.7,36.1 L38.0,41.7 L37.3,41.0 L16.9,36.5 L16.9,45.3 L15.9,49.5 L9.7,49.5 L8.6,44.9 L8.8,47.0 L0.0,47.0 L0.0,47.0 L-8.8,47.0 L-8.6,44.9 L-9.7,49.5 L-15.9,49.5 L-16.9,45.3 L-16.9,36.5 L-37.3,41.0 L-38.0,41.7 L-37.7,36.1 L-16.9,13.9 L-15.9,10.0 L-12.5,9.7 L-11.6,4.8 L-9.7,-9.7 L-16.2,-11.5 L-16.2,-15.0 L-8.1,-22.0 L-7.4,-30.5 L-3.5,-41.7 L-0.4,-46.7 L0.0,-49.5 Z"/>
-      </svg>
-      <div class="ship-hud-hull-number" id="ship-hud-hull-number">100</div>
-      <div class="ship-hud-hull-label">船体</div>
-      <div class="ship-hud-hull-bar" id="ship-hud-hull-bar"></div>
+      <div class="ship-hud-panel-title"><span>HULL · SHIELD</span><b>HX-2291</b></div>
+      <div class="ship-hud-status-grid">
+        <div class="ship-hud-status-meter" data-kind="shield"><div class="ship-hud-status-cells" id="ship-hud-shield-cells"></div><span>盾</span></div>
+        <div class="ship-hud-status-meter" data-kind="hull"><div class="ship-hud-status-cells" id="ship-hud-hull-cells"></div><span>体</span></div>
+        <div class="ship-hud-status-readouts">
+          <div class="ship-hud-status-readout" data-kind="shield"><small>护盾 · SHIELD</small><strong id="ship-hud-shield-number">100</strong></div>
+          <div class="ship-hud-status-readout" data-kind="hull"><small>船体 · HULL</small><strong id="ship-hud-hull-number">100</strong></div>
+        </div>
+      </div>
+      <div class="ship-hud-condition"><i aria-hidden="true"></i><span id="ship-hud-condition">系统正常</span></div>
     </section>
 
     <div id="ship-hud-altitude"><span id="altitude-reference">地表高度</span><strong id="altitude-value">—</strong><small id="altitude-unit"></small></div>
@@ -136,63 +139,50 @@
     </button>
   </div>
 
+  <!-- Boot title card. #loading and #hero-splash render the same card at the
+       same place; when loading ends the veil is simply removed and the card
+       underneath reads "点击进入". Nothing moves. -->
   <div id="loading">
-    <div class="loading-inner">
-      <div class="loading-ring"></div>
-      <div id="loading-text">加载中</div>
+    <div class="title-card">
+      <div class="title-card-eyebrow"><i class="brand-stripe" aria-hidden="true"></i><span>ASTERION FRONTIER</span></div>
+      <div class="title-card-mark">DEEP SPACE</div>
+      <div class="title-card-bar loading-ring"><i></i></div>
+      <div class="title-card-status"><span id="loading-text">加载中</span><b id="loading-percent">0%</b></div>
     </div>
   </div>
 
   <section id="hero-splash" class="hidden" role="button" tabindex="0" aria-label="点击进入深空">
-    <div class="hero-splash-veil" aria-hidden="true"></div>
-    <div class="hero-splash-inner">
-      <span class="hero-splash-eyebrow">ASTERION FRONTIER · CONTINUOUS UNIVERSE</span>
-      <h1 class="hero-splash-title"><span>DEEP</span> <span>SPACE</span></h1>
-      <i class="hero-splash-rule" aria-hidden="true"></i>
-      <span class="hero-splash-cta">点击进入</span>
+    <div class="title-card">
+      <div class="title-card-eyebrow"><i class="brand-stripe" aria-hidden="true"></i><span>ASTERION FRONTIER</span></div>
+      <h1 class="title-card-mark">DEEP SPACE</h1>
+      <div class="title-card-bar is-full"><i></i></div>
+      <div class="title-card-status"><span class="title-card-cta">点击进入</span><b>深空 · 连续宇宙</b></div>
     </div>
   </section>
 
   <section id="hero-overlay" class="hidden" aria-label="启动深空">
-    <div class="hero-frame" aria-hidden="true">
-      <span class="hero-corner hero-corner-nw"></span><span class="hero-corner hero-corner-ne"></span>
-      <span class="hero-corner hero-corner-sw"></span><span class="hero-corner hero-corner-se"></span>
-    </div>
     <div class="hero-topline" aria-hidden="true">
-      <span>AF/S9 航行系统</span><b>远征序列 01</b>
+      <span>HALCYON VII · 飞行计算机</span><span>远征序列 <b>01</b></span>
     </div>
+    <!-- The splash title card travels here and the menu unfolds under its bar:
+         one object from boot to main menu. -->
     <div class="hero-content">
-      <div class="hero-wordmark">
-        <span class="hero-wordmark-eyebrow">ASTERION FRONTIER · CONTINUOUS UNIVERSE</span>
-        <h1 class="hero-wordmark-main">DEEP SPACE</h1>
-        <span class="hero-wordmark-cn">深 空</span>
-        <i class="hero-wordmark-rule" aria-hidden="true"></i>
-      </div>
-      <div class="hero-menu-block">
-        <nav class="hero-menu" aria-label="主菜单">
-          <button id="hero-start-btn" class="hero-menu-item">
-            <span class="hero-menu-copy">
-              <span class="hero-menu-eyebrow">开始</span>
-              <span class="hero-menu-label">开始游戏</span>
-            </span>
-            <kbd>ENTER</kbd>
+      <div class="hero-card title-card">
+        <div class="title-card-eyebrow"><i class="brand-stripe" aria-hidden="true"></i><span>ASTERION FRONTIER</span></div>
+        <h1 class="title-card-mark">DEEP SPACE</h1>
+        <div class="title-card-bar is-full"><i></i></div>
+        <nav class="hero-menu menu-list" aria-label="主菜单">
+          <button id="hero-start-btn" class="hero-menu-item menu-item">
+            <span class="menu-item-label">开始游戏</span><kbd>ENTER</kbd>
           </button>
-          <button class="hero-menu-item" disabled aria-disabled="true">
-            <span class="hero-menu-copy">
-              <span class="hero-menu-eyebrow">继续</span>
-              <span class="hero-menu-label">继续航行</span>
-            </span>
-            <kbd>—</kbd>
+          <button class="hero-menu-item menu-item" disabled aria-disabled="true">
+            <span class="menu-item-label">继续航行</span><small>暂无存档</small>
           </button>
-          <button id="hero-settings-btn" class="hero-menu-item" type="button" aria-controls="graphics-settings-panel" aria-expanded="false">
-            <span class="hero-menu-copy">
-              <span class="hero-menu-eyebrow">系统</span>
-              <span class="hero-menu-label">图形设置</span>
-            </span>
-            <kbd>→</kbd>
+          <button id="hero-settings-btn" class="hero-menu-item menu-item" type="button" aria-controls="graphics-settings-panel" aria-expanded="false">
+            <span class="menu-item-label">图形设置</span>
           </button>
         </nav>
-        <p class="hero-note">音频链路将在接管后启动 · 建议佩戴耳机</p>
+        <div class="hero-card-foot"><span>深空 · 连续宇宙</span><span><kbd>↑</kbd><kbd>↓</kbd> 选择 <kbd>ENTER</kbd> 确认</span></div>
         <button id="hero-perf-hint" class="hero-perf-hint hidden" type="button" aria-haspopup="dialog" aria-controls="perf-tutorial">
           <i class="hero-perf-hint-glyph" aria-hidden="true"></i>
           <span class="hero-perf-hint-copy">
@@ -203,6 +193,19 @@
         </button>
       </div>
     </div>
+    <!-- Dossier of the world the backdrop is showing (filled from the star map). -->
+    <aside id="hero-dossier" class="hero-dossier" aria-label="母星档案">
+      <header><span>母星档案</span><b id="hero-dossier-catalog">—</b></header>
+      <strong id="hero-dossier-name">—</strong>
+      <small id="hero-dossier-system">—</small>
+      <dl>
+        <div><dt>类型</dt><dd id="hero-dossier-type">—</dd></div>
+        <div><dt>重力</dt><dd id="hero-dossier-gravity">—</dd></div>
+        <div><dt>温度</dt><dd id="hero-dossier-temperature">—</dd></div>
+        <div><dt>大气</dt><dd id="hero-dossier-atmosphere">—</dd></div>
+        <div><dt>卫星</dt><dd id="hero-dossier-moons">—</dd></div>
+      </dl>
+    </aside>
     <section id="graphics-settings-panel" class="graphics-settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="graphics-settings-title">
       <header>
         <div><span>AF/S9 · RENDER CONTROL</span><h2 id="graphics-settings-title">图形设置</h2></div>
@@ -221,13 +224,13 @@
           <label><input type="radio" name="graphics-quality" value="ultra"><span><b>极致</b><small>高密度体积与远景</small></span></label>
         </div>
       </fieldset>
-      <p id="graphics-settings-note" class="graphics-settings-note">支持设备默认使用 WebGPU；初始化失败时自动回落 WebGL 2。重型图形资源将在重新启动后生效。</p>
+      <p id="graphics-settings-note" class="graphics-settings-note">画质档位决定体积云、远景植被与采样密度。重型图形资源将在重新启动后生效。</p>
       <footer><button id="graphics-settings-cancel" type="button">取消</button><button id="graphics-settings-apply" type="button">应用并重新启动</button></footer>
     </section>
     <div class="hero-bottomline" aria-hidden="true">
-      <span>UNIVERSE <b id="hero-seed">DEEP SPACE</b></span>
-      <span>BUILD <b id="hero-build">—</b></span>
-      <span>INPUT <b>POINTER LOCK</b></span>
+      <span>宇宙 <b id="hero-seed">DEEP SPACE</b></span>
+      <span>版本 <b id="hero-build">—</b></span>
+      <span>音频将在开始后启动 · 建议佩戴耳机</span>
     </div>
   </section>
 
@@ -241,25 +244,24 @@
     <div class="pause-panel">
       <header class="pause-header">
         <div class="pause-titleblock">
-          <span class="pause-eyebrow">AF/S9 · CONTROL HANDOFF</span>
+          <span class="pause-eyebrow"><i class="brand-stripe" aria-hidden="true"></i>HALCYON VII</span>
           <h2 id="pause-title">航行暂停</h2>
-          <i class="pause-titlerule" aria-hidden="true"></i>
         </div>
         <div class="pause-state"><i></i><span>姿态保持</span><b>HOLD</b></div>
       </header>
-      <div class="pause-actions">
+      <div class="pause-actions menu-list">
         <section class="pause-primary" aria-label="继续航行">
-          <button id="resume-btn" class="pause-resume"><span><small>返回驾驶位</small>继续航行</span><kbd>ESC</kbd></button>
-          <button id="pause-map-btn"><span><small>导航</small>打开银河星图</span><kbd>M</kbd></button>
+          <button id="resume-btn" class="pause-resume menu-item"><span class="menu-item-label">继续航行</span><kbd>ESC</kbd></button>
+          <button id="pause-map-btn" class="menu-item"><span class="menu-item-label">银河星图</span><kbd>M</kbd></button>
         </section>
         <section class="pause-time" aria-label="星历快进">
           <header><span>星历快进</span><small>恢复控制后实时推进</small></header>
-          <button id="wait-sunrise-btn"><i class="event-glyph sunrise"></i><span><small>地平事件</small>下一次日出</span><b>→</b></button>
-          <button id="wait-sunset-btn"><i class="event-glyph sunset"></i><span><small>地平事件</small>下一次日落</span><b>→</b></button>
-          <button id="wait-eclipse-btn"><i class="event-glyph eclipse"></i><span><small>轨道事件</small>下一次食象</span><b>→</b></button>
+          <button id="wait-sunrise-btn" class="menu-item"><i class="event-glyph sunrise"></i><span class="menu-item-label">下一次日出</span><small>地平事件</small></button>
+          <button id="wait-sunset-btn" class="menu-item"><i class="event-glyph sunset"></i><span class="menu-item-label">下一次日落</span><small>地平事件</small></button>
+          <button id="wait-eclipse-btn" class="menu-item"><i class="event-glyph eclipse"></i><span class="menu-item-label">下一次食象</span><small>轨道事件</small></button>
         </section>
       </div>
-      <footer><span id="pause-status" role="status" aria-live="polite">指针已释放 · 点击继续以重新接管视角</span><b>ESC</b></footer>
+      <footer><span id="pause-status" role="status" aria-live="polite">指针已释放 · 点击继续以重新接管视角</span><span><kbd>↑</kbd><kbd>↓</kbd> 选择 <kbd>ENTER</kbd> 确认</span></footer>
     </div>
   </div>
   <div id="time-warp-indicator" class="hidden" role="status" aria-live="polite">

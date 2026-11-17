@@ -679,6 +679,29 @@ export class StarMap {
     return Math.round(THREE.MathUtils.clamp(status.coverage + (rand() - 0.5) * 14, 18, 72));
   }
 
+  // Short fact sheet for one body, used by the hero screen's home-world dossier.
+  bodyDossier(star, bodyName) {
+    const preview = this.systemPreview(star);
+    const body = preview.bodies.find((entry) => entry.name === bodyName)
+      || preview.bodies.find((entry) => !entry.isMoon);
+    if (!body) return null;
+    const profile = bodyProfile(body, 100);
+    const atmosphere = body.atmosphere?.composition
+      ? `${body.atmosphere.composition.slice(0, 3).join(' / ')}${body.atmosphere.pressureBar == null ? '' : ` · ${body.atmosphere.pressureBar.toFixed(2)} bar`}`
+      : '近真空';
+    const moons = preview.bodies.filter((entry) => entry.isMoon && entry.parentSpec === body.index).length;
+    return {
+      name: body.name,
+      system: preview.properName || preview.name,
+      catalog: preview.catalogId || '',
+      type: profile.type,
+      gravity: profile.gravity,
+      temperature: profile.temperature,
+      atmosphere,
+      moons: moons ? `${moons} 颗` : '无',
+    };
+  }
+
   systemPreview(star) {
     if (!this.previewCache.has(star.id)) {
       this.previewCache.set(star.id, previewSystem(this.getSeed(), star, this.getUniverse().system));

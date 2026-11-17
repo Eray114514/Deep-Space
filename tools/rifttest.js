@@ -122,8 +122,11 @@ try {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.locator('#route-rift-btn').click();
   await page.waitForFunction(() => document.body.classList.contains('travel-cinematic'));
+  await page.waitForFunction(() => getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden',
+    null, { timeout: 3000 }).catch(() => {});
   const riftHudHidden = await page.evaluate(() => ({
-    display: getComputedStyle(document.getElementById('ship-hud-stage')).display,
+    // The HUD collapses via visibility (it stays in layout so the exit can animate).
+    display: getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden' ? 'none' : 'shown',
     routeHidden: getComputedStyle(document.getElementById('route-choice')).display,
   }));
   check(riftHudHidden.display === 'none' && riftHudHidden.routeHidden === 'none',
@@ -389,7 +392,7 @@ try {
     const waiting = await page.evaluate(() => ({
       rift: NMS.riftState(),
       cinematic: document.body.classList.contains('travel-cinematic'),
-      hud: getComputedStyle(document.getElementById('ship-hud-stage')).display,
+      hud: getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden' ? 'none' : 'shown',
       hint: document.getElementById('hint').textContent,
     }));
     check(waiting.rift.active && !waiting.rift.visible && !waiting.cinematic
@@ -490,9 +493,11 @@ try {
     && document.body.classList.contains('travel-cinematic'), null, { timeout: 10000 });
   check(immediatePreparation.routeStarId === warpTarget.starId,
     `stellar warp accepts the real button immediately (pre-click terrain ${immediatePreparation.lodWarmState}, water ${immediatePreparation.waterWarmState})`);
-  const warpHudHidden = await page.evaluate(() => getComputedStyle(
+  await page.waitForFunction(() => getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden',
+    null, { timeout: 3000 }).catch(() => {});
+  const warpHudHidden = await page.evaluate(() => (getComputedStyle(
     document.getElementById('ship-hud-stage'),
-  ).display);
+  ).visibility === 'hidden' ? 'none' : 'shown'));
   check(warpHudHidden === 'none', 'stellar warp hides the complete cockpit HUD');
   await page.waitForFunction(() => NMS.state === 'warp' && NMS.warp() > 0.72,
     null, { timeout: 20000 });

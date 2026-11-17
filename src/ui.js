@@ -2,6 +2,7 @@
 // HUD, transitions and input affordances. Pure DOM, no dependencies.
 
 import { ShipHUD } from './ship-hud.js';
+import { bindMenuList } from './menu-nav.js';
 
 export class UI {
   constructor(callbacks = {}) {
@@ -13,7 +14,7 @@ export class UI {
       hint: $('hint'), land: $('land-btn'), crosshair: $('crosshair'),
       interactPrompt: $('interact-prompt'),
       fade: $('fade'), stats: $('stats'), devFps: $('dev-fps'),
-      loading: $('loading'), loadingText: $('loading-text'),
+      loading: $('loading'), loadingText: $('loading-text'), loadingPercent: $('loading-percent'),
       altitude: $('flight-telemetry'),
       altitudeValue: $('altitude-value'), altitudeUnit: $('altitude-unit'),
       speedValue: $('speed-value'), speedUnit: $('speed-unit'),
@@ -88,15 +89,16 @@ export class UI {
       }
     };
     document.addEventListener('keydown', this._perfTutorialKey);
-    // Pre-hero splash: click / Enter / Space dissolves into the hero. The
-    // loading veil sits above the splash until bootstrap finishes, so this
-    // stays inert until setLoading(false) plays the entrance animation.
+    // Pre-hero title card: click / Enter / Space dissolves into the hero. The
+    // loading veil draws the same card above it until bootstrap finishes.
     if (this.els.heroSplash) {
       this.els.heroSplash.addEventListener('click', () => this.hideSplash());
       this.els.heroSplash.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.hideSplash(); }
       });
     }
+    this.heroMenu = bindMenuList(document.querySelector('.hero-menu'));
+    this.pauseMenu = bindMenuList(document.querySelector('.pause-actions'));
     this.setupTouch();
   }
 
@@ -184,7 +186,7 @@ export class UI {
   }
 
   setFlightTelemetry({ speed = 0, speedLimit = 1, boost = 0, atmosphere = 0,
-    pulse = 0, pulseFuel = 100, pulseFuelMax = 100, pulseRecharging = false }) {
+    pulse = 0, pulseFuel = 100, pulseFuelMax = 100, pulseRecharging = false, shield, hull, gun }) {
     const speedK = Math.max(0, Math.min(1, speed / Math.max(1, speedLimit)));
     const boostK = Math.max(0, Math.min(1, boost));
     const atmoK = Math.max(0, Math.min(1, atmosphere));
@@ -198,10 +200,8 @@ export class UI {
     if (this.els.driveSpeedFill) this.els.driveSpeedFill.style.width = `${Math.max(3, speedK * 100).toFixed(1)}%`;
     if (this.els.driveBoostFill) this.els.driveBoostFill.style.width = `${(Math.max(boostK, pulseK) * 100).toFixed(1)}%`;
     if (this.els.driveAtmoFill) this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
-    this._setText(this.els.pulseFuel,
-      `${Math.ceil(Math.max(0, pulseFuel))}/${Math.ceil(pulseFuelMax)}${pulseRecharging ? ' ↑' : ''}`);
-    this.els.pulseFuel?.parentElement?.classList.toggle('pulse-recharging', pulseRecharging);
-    this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax });
+    // ShipHUD is the single owner of the pulse / hull / shield readouts.
+    this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax, pulseRecharging, shield, hull, gun });
     this.shipHud.tick(performance.now());
   }
 
@@ -263,7 +263,7 @@ export class UI {
     el.classList.toggle('hidden', !text);
   }
 
-  showHero(show = true) {
+  showHero(show = true, { fromSplash = false } = {}) {
     const hero = this.els.hero;
     hero.classList.toggle('hidden', !show);
     hero.classList.remove('hero-leaving');
@@ -275,7 +275,11 @@ export class UI {
         : 'DEEP SPACE';
     }
     if (this.els.heroBuild) this.els.heroBuild.textContent = document.getElementById('version')?.textContent || '—';
-    if (show) {
+    if (show && fromSplash) {
+      // The splash hand-off animates the card itself; no overlay fade.
+      hero.classList.add('hero-entering', 'hero-settling', 'hero-over-splash');
+      queueMicrotask(() => this.els.heroStart.focus({ preventScroll: true }));
+    } else if (show) {
       // Fade the overlay in (used when dissolving from the splash). hero-faded
       // holds opacity 0 for one committed frame before the transition fires.
       hero.classList.add('hero-faded');
@@ -286,40 +290,68 @@ export class UI {
     }
   }
 
-  // Pre-hero title card. Shown behind the loading veil at init; the entrance
-  // animation is triggered by setLoading(false) once bootstrap completes.
+  // Pre-hero title card. Shown behind the loading veil at init and drawn
+  // identically to it, so lifting the veil is invisible apart from the status
+  // line changing to "点击进入". Deliberately static.
   showSplash(show = true) {
     const splash = this.els.heroSplash;
     if (!splash || !show) return;
-    this._splashAnimated = false;
     document.body.classList.add('hero-active');
     document.body.classList.remove('hud-cloaked');
-    splash.classList.remove('hidden', 'splash-leaving', 'hero-splash-in');
-  }
-
-  playSplashEntrance() {
-    const splash = this.els.heroSplash;
-    if (!splash || splash.classList.contains('hidden') || this._splashAnimated) return;
-    this._splashAnimated = true;
-    // Restart the keyframes from a clean frame.
-    splash.classList.remove('hero-splash-in');
-    void splash.offsetWidth;
-    splash.classList.add('hero-splash-in');
+    splash.classList.remove('hidden', 'splash-leaving');
   }
 
   hideSplash() {
     const splash = this.els.heroSplash;
     if (!splash || splash.classList.contains('hidden')) return;
+    const from = splash.querySelector('.title-card')?.getBoundingClientRect();
     splash.classList.add('splash-leaving');
-    // Cross-dissolve: hero fades in behind the splash veil as it fades out.
-    this.showHero(true);
+    this.showHero(true, { fromSplash: true });
+    // One object from boot to menu: the hero card starts exactly where the
+    // splash card sits (FLIP), above the fading splash plate, then glides to
+    // its resting place while the menu unfolds under the bar.
+    const hero = this.els.hero;
+    const card = hero.querySelector('.hero-card');
+    if (from && card) {
+      const to = card.getBoundingClientRect();
+      card.style.transition = 'none';
+      card.style.transform = `translate(${(from.left - to.left).toFixed(1)}px, ${(from.top - to.top).toFixed(1)}px)`;
+      splash.querySelector('.title-card').style.visibility = 'hidden';
+      void card.offsetWidth;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        card.style.transition = '';
+        card.style.transform = '';
+        hero.classList.remove('hero-entering');
+      }));
+    } else {
+      hero.classList.remove('hero-entering');
+    }
+    clearTimeout(this._heroSettleTimer);
+    this._heroSettleTimer = setTimeout(() => hero.classList.remove('hero-settling', 'hero-over-splash'), 1500);
     // First user gesture — unlock audio so the hero start page has sound.
     this.cb.onEnterHero?.();
     setTimeout(() => {
       splash.classList.add('hidden');
-      splash.classList.remove('splash-leaving', 'hero-splash-in');
-      this._splashAnimated = false;
+      splash.classList.remove('splash-leaving');
+      const splashCard = splash.querySelector('.title-card');
+      if (splashCard) splashCard.style.visibility = '';
     }, 620);
+  }
+
+  setHeroDossier(dossier) {
+    const panel = document.getElementById('hero-dossier');
+    if (!panel) return;
+    panel.classList.toggle('is-empty', !dossier);
+    if (!dossier) return;
+    const set = (id, value) => this._setText(document.getElementById(id), value || '—');
+    set('hero-dossier-catalog', dossier.catalog);
+    set('hero-dossier-name', dossier.name);
+    set('hero-dossier-system', dossier.system);
+    set('hero-dossier-type', dossier.type);
+    set('hero-dossier-gravity', dossier.gravity);
+    set('hero-dossier-temperature', dossier.temperature);
+    set('hero-dossier-atmosphere', dossier.atmosphere);
+    set('hero-dossier-moons', dossier.moons);
   }
 
   // Lifts a chrome-hiding state (hero-active / travel-cinematic) with a fade
@@ -428,30 +460,6 @@ export class UI {
     if (show) this._setText(this.els.routeChoiceName, name || '未命名星系');
   }
 
-  setGraphicsSettings(settings, profile, { gpu = '', requestedBackend = 'auto', actualBackend = '', reason = '' } = {}) {
-    const panel = this.els.graphicsPanel;
-    if (!panel) return;
-    const quality = panel.querySelector(`input[name="graphics-quality"][value="${settings.quality}"]`);
-    if (quality) quality.checked = true;
-    for (const label of panel.querySelectorAll('.graphics-quality-grid label')) {
-      label.classList.toggle('is-recommended', label.querySelector('input')?.value === profile.id);
-    }
-    this._setText(this.els.graphicsGpu, gpu || '未能读取设备名称');
-    this._setText(this.els.graphicsBackend,
-      `自动 WebGPU · 实际 ${(actualBackend || 'unknown').toUpperCase()} · 当前 ${profile.label}`);
-    if (reason?.includes('fallback')) {
-      this._setText(this.els.graphicsNote, `WebGPU 未能启动，已自动回落 WebGL 2（${reason}）。调整画质后将重新启动。`);
-    }
-  }
-
-  showGraphicsSettings(show = true) {
-    const panel = this.els.graphicsPanel;
-    if (!panel) return;
-    panel.classList.toggle('hidden', !show);
-    this.els.heroSettings?.setAttribute('aria-expanded', String(show));
-    if (show) queueMicrotask(() => panel.querySelector('input:checked')?.focus());
-    else this.els.heroSettings?.focus();
-  }
 
   beginTravel() {
     clearTimeout(this._arrivalTimer);
@@ -518,11 +526,6 @@ export class UI {
   setLoading(show, text) {
     this.els.loading.classList.toggle('hidden', !show);
     if (text) this.els.loadingText.textContent = text;
-    if (!show) {
-      // The loading veil has just lifted — now play the pre-hero splash
-      // entrance so the title animation isn't wasted behind the veil.
-      this.playSplashEntrance();
-    }
   }
 
   // Drives the loading bar from the per-frame startup readiness check in
@@ -534,6 +537,7 @@ export class UI {
     if (this._loadingProgress === p) return;
     this._loadingProgress = p;
     this.els.loading.style.setProperty('--loading-progress', p.toFixed(4));
+    if (this.els.loadingPercent) this.els.loadingPercent.textContent = `${Math.floor(p * 100)}%`;
   }
 
   setStats(text) { this.els.stats.textContent = text; }

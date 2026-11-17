@@ -15,7 +15,7 @@
   --marker-scale: 1;
   position: fixed; z-index: 60; inset: 0; overflow: hidden; isolation: isolate;
   color: var(--ink);
-  font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  font-family: var(--font-latin);
   user-select: none;
 }
 #starmap-overlay * { box-sizing: border-box; }
@@ -52,7 +52,7 @@
   min-width: 29px; height: 24px; padding: 2px 7px; display: inline-grid; place-items: center;
   border: 1px solid rgba(198, 211, 213, .24); border-radius: 3px;
   background: rgba(198, 211, 213, .055); color: #cbd4d5;
-  font: 700 13px/1 Consolas, "Cascadia Mono", monospace; box-shadow: none;
+  font: 600 13px/1 var(--font-hud); box-shadow: none;
 }
 
 /* ---- HUD anchors ----------------------------------------------------------- */
@@ -66,7 +66,7 @@
 #sm-leftHud #sm-planetLeft, #sm-leftHud #sm-galaxyTools { left: 48px; top: 278px; width: 370px; }
 #sm-rightHud #sm-faction { right: 0; top: 0; width: 360px; height: 78px; }
 #sm-rightHud #sm-planetRight { right: 0; top: 278px; width: 360px; height: 225px; }
-#sm-bottomHud #sm-controls { position: relative; right: auto; bottom: auto; gap: 14px; font-size: 17px; }
+#sm-bottomHud #sm-controls { position: relative; right: auto; bottom: auto; gap: 14px; font-size: 14px; }
 
 /* ---- left rail -------------------------------------------------------------- */
 #sm-leftRail {
@@ -82,25 +82,25 @@
 #sm-leftRail .back:hover { background: rgba(224, 232, 232, .26); color: #fff; }
 #sm-leftRail .vertical {
   writing-mode: vertical-rl; margin: 17px auto 0;
-  font-weight: 900; font-size: 15px; letter-spacing: 3px; color: #b9c0c1;
+  font-weight: 600; font-size: 15px; letter-spacing: 3px; color: #b9c0c1;
 }
 
 /* ---- system panel ----------------------------------------------------------- */
 #sm-sysPanel { position: absolute; min-height: 266px; }
 #sm-sysPanel .head {
   height: 34px; padding: 5px 14px 4px; display: flex; justify-content: space-between; align-items: center;
-  font-size: 19px; font-weight: 950; letter-spacing: .5px; border-bottom: 1px solid rgba(208, 220, 220, .18);
+  font-size: 19px; font-weight: 600; letter-spacing: .5px; border-bottom: 1px solid rgba(208, 220, 220, .18);
 }
-#sm-sysPanel .head span:last-child { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .08em; }
+#sm-sysPanel .head span:last-child { font-size: 11px; font-weight: 500; color: var(--muted); letter-spacing: .08em; }
 #sm-sysPanel .identity {
   min-height: 67px; padding: 8px 14px 7px; display: grid; grid-template-columns: 1fr auto; align-items: center;
   border-bottom: 1px solid rgba(208, 220, 220, .18);
 }
-.eyebrow { font-size: 12px; font-weight: 900; line-height: 1.4; color: #8d9799; letter-spacing: .06em; }
-.sysName { margin-top: 3px; font-size: 22px; line-height: 1.08; font-weight: 950; letter-spacing: -.7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eyebrow { font-size: 12px; font-weight: 600; line-height: 1.4; color: #8d9799; letter-spacing: .06em; }
+.sysName { margin-top: 3px; font-size: 22px; line-height: 1.08; font-weight: 600; letter-spacing: -.7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .level { display: flex; flex-direction: column; align-items: center; gap: 3px; margin-right: 8px; }
-.level strong { font-size: 13px; font-weight: 900; color: #b8c0c2; }
-.level span { display: grid; place-items: center; width: 34px; height: 25px; background: var(--green); color: #041007; font-size: 17px; font-weight: 950; text-shadow: none; }
+.level strong { font-size: 13px; font-weight: 600; color: #b8c0c2; }
+.level span { display: grid; place-items: center; width: 34px; height: 25px; background: var(--green); color: #041007; font-size: 17px; font-weight: 600; text-shadow: none; }
 
 #sm-systemGlyph { position: relative; height: 99px; border-bottom: 1px solid rgba(208, 220, 220, .16); overflow: hidden; }
 #sm-systemGlyph::before { content: ""; position: absolute; left: 0; right: 0; top: 56px; height: 1px; background: rgba(229, 236, 236, .52); }
@@ -113,10 +113,10 @@
 #sm-systemGlyph .gNode:hover { transform: translate(-50%, -50%) scale(1.35); }
 
 #sm-survey { height: 66px; padding: 8px 14px 6px; }
-#sm-survey .label { font-size: 16px; line-height: 19px; font-weight: 950; }
+#sm-survey .label { font-size: 16px; line-height: 19px; font-weight: 600; }
 #starmap-overlay .bar { position: relative; margin-top: 5px; height: 3px; background: rgba(206, 220, 220, .28); }
 #starmap-overlay .bar::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; width: var(--survey-progress, 0%); background: #dfe6e6; }
-.barValue { text-align: center; margin-top: 2px; font-size: 17px; line-height: 18px; font-weight: 950; color: #c9d0d1; letter-spacing: 1px; }
+.barValue { text-align: center; margin-top: 2px; font-size: 17px; line-height: 18px; font-weight: 600; color: #c9d0d1; letter-spacing: 1px; }
 
 /* galaxy-level meta + actions live at the bottom of the system panel */
 #sm-galaxyMeta { padding: 10px 14px 12px; }
@@ -124,7 +124,7 @@
 .metaRow {
   display: flex; justify-content: space-between; align-items: center; padding: 6px 8px;
   background: rgba(183, 194, 196, .055); border-top: 1px solid rgba(222, 231, 231, .055); border-bottom: 1px solid rgba(0, 0, 0, .2);
-  font-size: 13px; font-weight: 850; color: #b9c1c2;
+  font-size: 13px; font-weight: 500; color: #b9c1c2;
 }
 .metaRow b { color: #d1d7d8; font-weight: 650; }
 /* ---- galaxy tools (search / filter) ----------------------------------------- */
@@ -133,7 +133,7 @@
 .mode-galaxy #sm-planetLeft, .mode-galaxy #sm-planetRight, .mode-galaxy #sm-faction { display: none; }
 .mode-system #sm-galaxyMeta, .mode-system #sm-galaxyTools { display: none; }
 .toolRow { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; }
-.toolRow span { font-size: 14px; font-weight: 950; color: #c5cccd; }
+.toolRow span { font-size: 14px; font-weight: 600; color: #c5cccd; }
 .toolRow input {
   width: 100%; padding: 8px 10px; color: #edf8fa; background: rgba(3, 12, 17, .78);
   border: 1px solid rgba(117, 165, 172, .27); outline: none; font-size: 13px; pointer-events: auto;
@@ -151,9 +151,9 @@
 .toolFilters button:hover { color: var(--ink); }
 .toolFilters button.active {
   color: #ecfbfd; background: #245c66; border-color: rgba(130, 221, 232, .62);
-  box-shadow: inset 0 0 0 1px rgba(5, 19, 23, .55); font-weight: 800;
+  box-shadow: inset 0 0 0 1px rgba(5, 19, 23, .55); font-weight: 500;
 }
-.toolMeta { display: flex; justify-content: space-between; margin-top: 9px; color: rgba(235, 238, 233, .42); font: 11px/1 Consolas, monospace; }
+.toolMeta { display: flex; justify-content: space-between; margin-top: 9px; color: rgba(235, 238, 233, .42); font: 11px/1 var(--font-hud); }
 
 /* ---- faction ----------------------------------------------------------------- */
 #sm-faction { position: absolute; padding: 7px 92px 7px 12px; overflow: hidden; }
@@ -163,8 +163,8 @@
   transform: scale(1.35, 1) rotate(45deg); pointer-events: none;
 }
 #sm-faction .small, #sm-faction .big, #sm-faction .panelRule { position: relative; z-index: 1; }
-#sm-faction .small { font-size: 16px; line-height: 19px; font-weight: 950; }
-#sm-faction .big { font-size: 25px; line-height: 1.18; font-weight: 950; white-space: nowrap; }
+#sm-faction .small { font-size: 16px; line-height: 19px; font-weight: 600; }
+#sm-faction .big { font-size: 25px; line-height: 1.18; font-weight: 600; white-space: nowrap; }
 
 /* ---- planet detail panels ----------------------------------------------------- */
 .planetInfo { visibility: hidden; opacity: 0; transform: translateY(8px); transition: opacity .16s ease, transform .16s ease, visibility .16s; overflow: hidden; }
@@ -177,13 +177,13 @@
 .detailTitle .name { font-size: 28px; line-height: 30px; font-weight: 500; letter-spacing: -1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .detailTitle .system { margin-top: 3px; color: #aeb7b9; font-size: 15px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .detailSurvey { height: 58px; flex: 0 0 58px; padding: 7px 14px; background: rgba(191, 201, 202, .075); border-bottom: 1px solid rgba(205, 218, 218, .12); }
-.detailSurveyTop { display: flex; justify-content: space-between; align-items: center; color: #bac2c3; font-size: 16px; font-weight: 900; }
+.detailSurveyTop { display: flex; justify-content: space-between; align-items: center; color: #bac2c3; font-size: 16px; font-weight: 600; }
 .detailSurvey .bar { margin-top: 7px; }
 .detailRows { flex: 1; min-height: 0; padding: 8px 14px 10px; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(8, minmax(0, 1fr)); }
 .detailRow {
   min-height: 0; min-width: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 7px;
   background: rgba(183, 194, 196, .055); border-top: 1px solid rgba(222, 231, 231, .055); border-bottom: 1px solid rgba(0, 0, 0, .20);
-  font-size: 15px; font-weight: 850; color: #b9c1c2;
+  font-size: 15px; font-weight: 500; color: #b9c1c2;
 }
 .detailRow span:first-child { flex-shrink: 0; }
 .detailRow span:last-child { color: #d1d7d8; text-align: right; margin-left: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
@@ -194,7 +194,7 @@
   border: 1px solid rgba(197, 211, 213, .24); border-left: 2px solid rgba(113, 177, 187, .62);
   background: rgba(177, 190, 192, .10); color: #d6dedf;
   display: grid; grid-template-columns: 38px 1fr auto; align-items: center; padding: 0 9px 0 6px;
-  font: 850 16px/1 "Microsoft YaHei UI", "PingFang SC", sans-serif; letter-spacing: .2px; text-shadow: none;
+  font: 500 16px/1 var(--font-latin); letter-spacing: .2px; text-shadow: none;
   cursor: pointer; box-shadow: none; transition: background .14s ease, border-color .14s ease, color .14s ease;
 }
 #sm-routeAction:hover:not(:disabled) { background: rgba(191, 205, 207, .16); border-color: rgba(213, 226, 227, .34); border-left-color: rgba(126, 201, 212, .82); }
@@ -205,7 +205,7 @@
 .routeActionLabel { text-align: left; padding-left: 2px; }
 
 #sm-planetRight { position: absolute; padding: 14px 14px 13px; }
-.resourceHead { display: flex; justify-content: space-between; align-items: center; color: #c5cccd; font-size: 18px; font-weight: 950; }
+.resourceHead { display: flex; justify-content: space-between; align-items: center; color: #c5cccd; font-size: 18px; font-weight: 600; }
 .resourceTiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; margin-top: 9px; }
 .resourceTile {
   height: 54px; display: flex; align-items: flex-end; padding: 6px 5px;
@@ -219,10 +219,10 @@
 .traitText { margin-top: 82px; color: #d2d8d9; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- hints -------------------------------------------------------------------- */
-#sm-controls { display: flex; gap: 14px; align-items: center; font-weight: 950; font-size: 17px; white-space: nowrap; }
+#sm-controls { display: flex; gap: 14px; align-items: center; font-weight: 500; font-size: 14px; letter-spacing: .06em; white-space: nowrap; }
 #sm-controls .hint { display: flex; gap: 6px; align-items: center; }
 #sm-controls .key {
-  min-width: 35px; height: 30px; padding: 3px 8px; border-radius: 7px; font-size: 16px;
+  min-width: 28px; height: 24px; padding: 3px 7px; border-radius: 2px; font-size: 12px;
   border-color: rgba(231, 236, 236, .62); background: rgba(8, 14, 16, .58); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .7);
 }
 
@@ -246,7 +246,7 @@
 #sm-nameTag {
   position: absolute; display: none; min-width: 82px; height: 27px; padding: 3px 9px 3px 11px;
   background: rgba(12, 23, 28, .78); border: 1px solid rgba(150, 185, 190, .20); border-left: 2px solid rgba(111, 190, 202, .70);
-  color: #d9e1e2; font-size: 13px; font-weight: 750; letter-spacing: .2px; text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
+  color: #d9e1e2; font-size: 13px; font-weight: 500; letter-spacing: .2px; text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
   white-space: nowrap; transform: translate(10px, -50%) scale(var(--marker-scale)); transform-origin: left center;
 }
 #sm-crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border: 1px solid rgba(255, 255, 255, .10); border-radius: 50%; transform: translate(-50%, -50%); opacity: .28; }
@@ -264,8 +264,8 @@
   --label-color: #fff; grid-row: 1 / -1; width: 6px; height: 6px; margin-left: -5px;
   border-radius: 50%; background: var(--label-color); box-shadow: 0 0 8px var(--label-color);
 }
-.sm-map-label strong { font-size: 12px; font-weight: 680; line-height: 1.08; white-space: nowrap; }
-.sm-map-label small { color: rgba(235, 238, 233, .42); font: 9px/1.1 Consolas, monospace; }
+.sm-map-label strong { font-size: 12px; font-weight: 500; line-height: 1.08; white-space: nowrap; }
+.sm-map-label small { color: rgba(235, 238, 233, .42); font: 9px/1.1 var(--font-hud); }
 .sm-map-label.current { opacity: 1; }
 .sm-map-label.current strong { color: #eaf8fa; font-size: 13px; }
 .sm-map-label.selected:not(.current) {
@@ -293,7 +293,7 @@
   position: absolute; left: 28px; top: 50%; min-width: max-content; padding: 4px 8px 5px;
   transform: translateY(-50%); border-left: 1px solid rgba(126, 207, 220, .72);
   background: rgba(6, 15, 21, .88); color: #e8f2f3; text-shadow: 0 2px 4px #000;
-  font-size: 13px; font-weight: 760; letter-spacing: .2px;
+  font-size: 13px; font-weight: 500; letter-spacing: .2px;
   box-shadow: 0 0 0 1px rgba(177, 207, 212, .12), 0 4px 14px rgba(0, 0, 0, .38);
 }
 #sm-hoverMark[hidden] { display: none; }
@@ -302,7 +302,7 @@
 #sm-loading { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; background: #0a1011; transition: opacity .7s; }
 #sm-loading.done { opacity: 0; pointer-events: none; }
 #sm-loading .loadBox { width: 230px; text-align: center; }
-#sm-loading .loadTitle { font-weight: 950; letter-spacing: 5px; }
+#sm-loading .loadTitle { font-weight: 600; letter-spacing: 5px; }
 #sm-loading .loadBar { height: 2px; background: #263436; margin-top: 14px; overflow: hidden; }
 #sm-loading .loadBar i { display: block; height: 100%; width: 100%; background: #dfe7e7; transform-origin: left; animation: sm-load 1.4s cubic-bezier(.2, .7, .2, 1); }
 @keyframes sm-load { from { transform: scaleX(0); } to { transform: scaleX(1); } }

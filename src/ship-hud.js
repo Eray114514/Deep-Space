@@ -1,6 +1,7 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const POWER_MAX = 8;
 const POWER_CAPACITY = 23;
+const INTEGRITY_CELLS = 12;
 export const DEFAULT_POWER = Object.freeze({
   weapon: 4,
   nav: 3,
@@ -19,6 +20,8 @@ const POWER_SYSTEMS = [
 ];
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
+const REDUCED_MOTION = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+const HUD_HIDDEN_CLASSES =['hero-active', 'ui-walk', 'travel-cinematic', 'hide-hud', 'starmap-open', 'route-choice-active'];
 
 function powerMultiplier(value, baseline, gain) {
   const points = Math.max(0, Number(value) || 0);
@@ -50,8 +53,6 @@ export class ShipHUD {
     this.pulseLabel = document.getElementById('ship-hud-pulse-label');
     this.boostLabel = document.querySelector('#ship-hud-boost span:last-child');
     this.gunValue = document.getElementById('gun-value');
-    this.hullNumber = document.getElementById('ship-hud-hull-number');
-    this.hullBar = document.getElementById('ship-hud-hull-bar');
     this.powerHelp = document.getElementById('ship-hud-power-help');
     this.powerCounter = document.getElementById('ship-hud-power-counter');
     this.powerCells = document.getElementById('ship-hud-power-cells');
@@ -59,6 +60,8 @@ export class ShipHUD {
     this.powerDpad = document.getElementById('ship-hud-dpad');
     this.powerCols = [...document.querySelectorAll('#ship-hud-power-cols .ship-hud-power-col')];
     this.powerLabels = [...document.querySelectorAll('#ship-hud-power-labels span')];
+    this.powerPanel = document.getElementById('ship-hud-power');
+    this.integrityPanel = document.getElementById('ship-hud-integrity');
 
     this.power = { ...DEFAULT_POWER };
     this.selectedPower = 3;
@@ -84,6 +87,7 @@ export class ShipHUD {
 
     this.buildCockpitGeometry();
     this.buildPowerPanel();
+    this.buildIntegrityPanel();
     this.bindInput();
     this.resize();
     document.fonts?.ready.then(() => this.layoutControlLabels());
@@ -108,6 +112,12 @@ export class ShipHUD {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(document.documentElement);
     this.lastFrame = performance.now();
+    this.lastPowerInput = -Infinity;
+    this.bootStart = -Infinity;
+    this.hudVisible = false;
+    this.visibilityObserver = new MutationObserver(() => this.syncVisibility());
+    this.visibilityObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    this.syncVisibility();
     if (this.externalTick) {
       this.tick(this.lastFrame);
     } else {
@@ -120,6 +130,17 @@ export class ShipHUD {
     for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
     parent.appendChild(element);
     return element;
+  }
+
+  // Static line art: a dark halo underlay keeps it legible over bright cloud,
+  // and pathLength=1 lets the boot sequence draw it on with one dash offset.
+  staticStroke(name, attrs, delay = 0, parent = this.svg) {
+    const draw = { pathLength: 1, 'stroke-dasharray': 1, style: `--d:${delay}ms` };
+    this.svgElement(name, {
+      ...attrs, ...draw, class: 'hud-draw hud-halo', opacity: 1,
+      stroke: 'rgba(0, 8, 12, .5)', 'stroke-width': (Number(attrs['stroke-width']) || 1) + 3,
+    }, parent);
+    return this.svgElement(name, { ...attrs, ...draw, class: 'hud-draw' }, parent);
   }
 
   point(radius, angle) {
@@ -146,44 +167,53 @@ export class ShipHUD {
     };
     this.innerRadius = innerRadius;
 
-    this.svgElement('circle', {
-      cx: centerX, cy: centerY, r: innerRadius, fill: 'none', stroke: '#73bbc8',
-      'stroke-width': 1.6, opacity: .9,
-    });
+    this.staticStroke('circle', {
+      cx: centerX, cy: centerY, r: innerRadius, fill: 'none', stroke: '#8fcad6',
+      'stroke-width': 1.6, opacity: .9, transform: `rotate(-90 ${centerX} ${centerY})`,
+    }, 0);
+    // Fine bearing scale just inside the ring: 5 degree minor, 30 degree major.
+    let ticks = '';
+    for (let angle = 0; angle < 360; angle += 5) {
+      const major = angle % 30 === 0;
+      const [x1, y1] = this.point(innerRadius - 3, angle);
+      const [x2, y2] = this.point(innerRadius - (major ? 13 : 7), angle);
+      ticks += `M${x1.toFixed(1)} ${y1.toFixed(1)}L${x2.toFixed(1)} ${y2.toFixed(1)}`;
+    }
+    this.staticStroke('path', { d: ticks, fill: 'none', stroke: '#9fd4df', 'stroke-width': 1.1, opacity: .42 }, 120);
     [
       [outerRadius, 64, 116, '#8a949a', 4.5, .95],
       [outerRadius, 133, 162, '#ece8d4', 5, 1],
       [outerRadius, 18, 47, '#ece8d4', 5, 1],
-    ].forEach(([radius, from, to, color, width, opacity]) => this.svgElement('path', {
+    ].forEach(([radius, from, to, color, width, opacity], index) => this.staticStroke('path', {
       d: this.arc(radius, from, to), fill: 'none', stroke: color,
       'stroke-width': width, opacity, 'stroke-linecap': 'butt',
-    }));
+    }, 60 + index * 70));
 
     const yTop = centerY + outerRadius * Math.sin(6 * Math.PI / 180);
     const yBottom = centerY + outerRadius * Math.sin(33 * Math.PI / 180);
     const topAngle = Math.asin((yTop - centerY) / outerRadius) * 180 / Math.PI;
     const bottomAngle = Math.asin((yBottom - centerY) / outerRadius) * 180 / Math.PI;
-    this.svgElement('path', {
-      d: this.arc(outerRadius, 162.8, 180 + topAngle - 1), fill: 'none', stroke: '#536166',
+    this.staticStroke('path', {
+      d: this.arc(outerRadius, 162.8, 180 + topAngle - 1), fill: 'none', stroke: '#6a7a80',
       'stroke-width': 2.2, opacity: .82, 'stroke-linecap': 'butt',
-    });
-    this.svgElement('path', {
-      d: this.arc(outerRadius, -topAngle + 1, 17.2), fill: 'none', stroke: '#536166',
+    }, 200);
+    this.staticStroke('path', {
+      d: this.arc(outerRadius, -topAngle + 1, 17.2), fill: 'none', stroke: '#6a7a80',
       'stroke-width': 2.2, opacity: .82, 'stroke-linecap': 'butt',
-    });
-    this.svgElement('path', {
+    }, 200);
+    this.staticStroke('path', {
       d: `M ${centerX - 70} ${centerY + 14} H ${centerX - 44} L ${centerX - 34} ${centerY + 2}
           M ${centerX + 70} ${centerY + 14} H ${centerX + 44} L ${centerX + 34} ${centerY + 2}`,
       fill: 'none', stroke: '#ece8d4', 'stroke-width': 2, opacity: .84,
       'stroke-linecap': 'round', 'stroke-linejoin': 'round',
-    });
-    this.svgElement('path', {
+    }, 340);
+    this.staticStroke('path', {
       d: `M ${centerX - 20} ${centerY} H ${centerX - 12} M ${centerX + 12} ${centerY} H ${centerX + 20}`,
-      fill: 'none', stroke: '#73bbc8', 'stroke-width': 2.4, opacity: .9,
+      fill: 'none', stroke: '#8fcad6', 'stroke-width': 2.4, opacity: .9,
       'stroke-linecap': 'round',
-    });
+    }, 380);
     this.svgElement('circle', {
-      cx: centerX, cy: centerY, r: 2.8, fill: '#86cdd8', opacity: .98,
+      cx: centerX, cy: centerY, r: 2.8, fill: '#a6dbe5', opacity: .98, class: 'hud-pop', style: '--d:420ms',
     });
 
     const rowCount = 20;
@@ -206,13 +236,14 @@ export class ShipHUD {
       const row = this.rows[index];
       const x0 = row.leftOuter;
       const x1 = row.leftInner - this.meterGap;
+      const rowDelay = `--d:${180 + (rowCount - 1 - index) * 18}ms`;
       this.svgElement('rect', {
         x: x0, y: row.y - 1.55, width: Math.max(1, x1 - x0), height: 3.1,
-        fill: '#39474d', opacity: .78,
+        fill: '#2c373c', opacity: .82, class: 'hud-pop', style: rowDelay,
       });
       this.engineFills.push(this.svgElement('rect', {
         x: x1 - 8, y: row.y - 1.65, width: 8, height: 3.3,
-        fill: '#82c7d2', opacity: .94,
+        fill: '#8fcfda', opacity: .94, class: 'hud-pop', style: rowDelay,
       }));
       this.engineSeeds.push({
         speed: 3.4 + random(index + 40) * 3,
@@ -222,42 +253,82 @@ export class ShipHUD {
     }
     this.fuelMain = [];
     this.fuelRim = [];
-    for (const row of this.rows) {
+    this.rows.forEach((row, index) => {
+      const rowDelay = `--d:${200 + (rowCount - 1 - index) * 18}ms`;
       this.fuelMain.push(this.svgElement('rect', {
         x: row.rightInner + this.meterGap, y: row.y - 1.65,
-        width: 12.5, height: 3.3, fill: '#82c7d2',
+        width: 12.5, height: 3.3, fill: '#82c7d2', class: 'hud-pop', style: rowDelay,
       }));
       this.fuelRim.push(this.svgElement('rect', {
         x: row.rightInner + this.meterGap + 16.5, y: row.y - 1.65,
-        width: 4, height: 3.3, fill: '#a0dce4',
+        width: 4, height: 3.3, fill: '#a0dce4', class: 'hud-pop', style: rowDelay,
       }));
-    }
-    this.svgElement('path', {
+    });
+    this.staticStroke('path', {
       d: this.arc(outerRadius, 180 + topAngle - .35, 180 + bottomAngle + .55),
-      fill: 'none', stroke: '#687277', 'stroke-width': 7, opacity: .96, 'stroke-linecap': 'butt',
-    });
-    this.svgElement('path', {
+      fill: 'none', stroke: '#7b878c', 'stroke-width': 7, opacity: .96, 'stroke-linecap': 'butt',
+    }, 140);
+    this.staticStroke('path', {
       d: this.arc(outerRadius, -bottomAngle - .55, -topAngle + .35),
-      fill: 'none', stroke: '#687277', 'stroke-width': 7, opacity: .96, 'stroke-linecap': 'butt',
-    });
-    this.speedPointer = this.svgElement('line', { stroke: '#ece8d4', 'stroke-width': 3.2, 'stroke-linecap': 'round' });
-    this.fuelPointer = this.svgElement('line', { stroke: '#ece8d4', 'stroke-width': 3.2, 'stroke-linecap': 'round' });
+      fill: 'none', stroke: '#7b878c', 'stroke-width': 7, opacity: .96, 'stroke-linecap': 'butt',
+    }, 140);
+    // Scale marks on the outside of both meters: quarters of the travel.
+    let scale = '';
+    for (let step = 0; step <= 4; step++) {
+      const y = yBottom - (yBottom - yTop) * step / 4;
+      const deltaY = y - centerY;
+      const left = centerX - Math.sqrt(leftOuterRadius * leftOuterRadius - deltaY * deltaY);
+      const right = centerX + Math.sqrt(rightOuterRadius * rightOuterRadius - deltaY * deltaY);
+      const length = step % 2 ? 6 : 11;
+      scale += `M${(left - 4).toFixed(1)} ${y.toFixed(1)}h${-length}M${(right + 4).toFixed(1)} ${y.toFixed(1)}h${length}`;
+    }
+    this.staticStroke('path', { d: scale, fill: 'none', stroke: '#9fd4df', 'stroke-width': 1.4, opacity: .6 }, 240);
+    this.speedPointer = this.svgElement('line', { stroke: '#ece8d4', 'stroke-width': 3.2, 'stroke-linecap': 'round', class: 'hud-pop', style: '--d:560ms' });
+    this.fuelPointer = this.svgElement('line', { stroke: '#ece8d4', 'stroke-width': 3.2, 'stroke-linecap': 'round', class: 'hud-pop', style: '--d:600ms' });
 
     this.yTop = yTop;
     this.yBottom = yBottom;
     this.outerRadius = outerRadius;
+  }
 
-    const rings = document.getElementById('ship-hud-shield-rings');
-    this.ringDefinitions = [
-      { base: 60, amplitude: 2.2, lobes: 10, speed: .46, phase: .2, alpha: .64, width: 1.35 },
-      { base: 68, amplitude: 2.8, lobes: 12, speed: -.34, phase: 1.7, alpha: .52, width: 1.25 },
-      { base: 76, amplitude: 3.3, lobes: 9, speed: .27, phase: 3.1, alpha: .38, width: 1.18 },
-      { base: 84, amplitude: 3.8, lobes: 13, speed: -.21, phase: 4.4, alpha: .27, width: 1.12 },
-    ];
-    this.ringElements = this.ringDefinitions.map((definition) => this.svgElement('path', {
-      fill: 'none', stroke: '#8fd1dc', 'stroke-width': definition.width,
-      opacity: definition.alpha, 'vector-effect': 'non-scaling-stroke',
-    }, rings));
+  // Ship status mirrors the power panel: segmented vertical meters (shield,
+  // hull) in the same cell language, big readouts, and a one-word condition.
+  buildIntegrityPanel() {
+    this.integrityMeters = {};
+    for (const kind of ['shield', 'hull']) {
+      const host = document.getElementById(`ship-hud-${kind}-cells`);
+      const cells = [];
+      for (let index = 0; index < INTEGRITY_CELLS; index++) {
+        const cell = document.createElement('span');
+        cell.className = 'ship-hud-status-cell';
+        cell.style.setProperty('--d', `${560 + index * 30 + (kind === 'hull' ? 60 : 0)}ms`);
+        host?.appendChild(cell);
+        cells.push(cell);
+      }
+      this.integrityMeters[kind] = {
+        cells,
+        lit: -1,
+        number: document.getElementById(`ship-hud-${kind}-number`),
+      };
+    }
+    this.integrityState = document.getElementById('ship-hud-condition');
+    this.integrityStateText = '';
+  }
+
+  renderIntegrityMeter(kind, value, max, boot) {
+    const meter = this.integrityMeters?.[kind];
+    if (!meter) return;
+    const ratio = clamp(value / max) * boot;
+    const lit = Math.ceil(ratio * INTEGRITY_CELLS - 1e-6);
+    if (lit !== meter.lit) {
+      meter.cells.forEach((cell, index) => {
+        cell.classList.toggle('is-on', index < lit);
+        cell.classList.toggle('is-tip', index === lit - 1);
+      });
+      meter.lit = lit;
+    }
+    const text = String(Math.round(value * boot));
+    if (meter.number && meter.number.textContent !== text) meter.number.textContent = text;
   }
 
   buildPowerPanel() {
@@ -267,6 +338,7 @@ export class ShipHUD {
       for (let pipIndex = 0; pipIndex < POWER_MAX; pipIndex++) {
         const pip = document.createElement('span');
         pip.className = 'ship-hud-pip';
+        pip.style.setProperty('--d', `${520 + pipIndex * 42 + index * 24}ms`);
         pips.appendChild(pip);
       }
       const title = `${system.short} · ${system.name}：${system.description}`;
@@ -277,6 +349,7 @@ export class ShipHUD {
     for (let index = 0; index < POWER_CAPACITY; index++) {
       const cell = document.createElement('span');
       cell.className = 'ship-hud-power-cell';
+      cell.style.setProperty('--d', `${640 + index * 16}ms`);
       fragment.appendChild(cell);
     }
     this.powerCells.style.setProperty('--power-total', POWER_CAPACITY);
@@ -289,6 +362,8 @@ export class ShipHUD {
       const powerKey = event.code.startsWith('Arrow')
         || (event.altKey && ['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(event.code));
       if (!powerKey || this.warpRouting || !document.body.classList.contains('ui-space')) return;
+      // Arrow keys belong to the pause menu while it is open.
+      if (!this.hudVisible || document.getElementById('pause-overlay')?.classList.contains('hidden') === false) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.code === 'ArrowLeft' || event.code === 'KeyA') this.selectPower(this.selectedPower - 1);
@@ -318,13 +393,44 @@ export class ShipHUD {
     });
   }
 
+  // The stage hides through body state classes owned by main.js / ui.js. The
+  // HUD watches them so every return to the cockpit replays the boot and every
+  // exit collapses the modules instead of blinking out.
+  syncVisibility() {
+    const body = document.body.classList;
+    const visible = !HUD_HIDDEN_CLASSES.some((name) => body.contains(name));
+    if (visible === this.hudVisible) return;
+    this.hudVisible = visible;
+    clearTimeout(this.bootTimer);
+    if (visible) {
+      this.stage.classList.remove('hud-off', 'hud-boot');
+      void this.stage.offsetWidth;
+      this.stage.classList.add('hud-boot');
+      this.bootStart = performance.now();
+      this.lastPowerInput = this.bootStart;
+      this.bootTimer = setTimeout(() => this.stage.classList.remove('hud-boot'), 1500);
+    } else {
+      this.stage.classList.remove('hud-boot');
+      this.stage.classList.add('hud-off');
+    }
+  }
+
+  // 0 -> 1 over the boot; readouts count up from zero while it runs.
+  bootProgress(now) {
+    if (REDUCED_MOTION?.matches) return 1;
+    const t = clamp((now - this.bootStart - 300) / 700);
+    return t * t * (3 - 2 * t);
+  }
+
   selectPower(index) {
+    this.lastPowerInput = performance.now();
     this.selectedPower = (index + POWER_SYSTEMS.length) % POWER_SYSTEMS.length;
     this.flashDpad();
     this.renderPower();
   }
 
   adjustSelectedPower(delta) {
+    this.lastPowerInput = performance.now();
     const system = POWER_SYSTEMS[this.selectedPower];
     const allocated = Object.values(this.power).reduce((sum, value) => sum + value, 0);
     if (delta > 0 && (allocated >= POWER_CAPACITY || this.power[system.id] >= POWER_MAX)) {
@@ -441,7 +547,13 @@ export class ShipHUD {
     this.pulseFuelValue = Math.max(0, Number(pulseFuel) || 0);
     this.pulseFuelMax = Math.max(1, Number(pulseFuelMax) || 1);
     this.shield = clamp(Number(shield) || 0, 0, 150);
-    this.hull = clamp(Number(hull) || 0, 0, 100);
+    const nextHull = clamp(Number(hull) || 0, 0, 100);
+    if (nextHull < this.hull - .5 && this.integrityPanel) {
+      this.integrityPanel.classList.remove('is-hit');
+      void this.integrityPanel.offsetWidth;
+      this.integrityPanel.classList.add('is-hit');
+    }
+    this.hull = nextHull;
     this.gun = clamp(Number(gun) || 0, 0, 150);
     const speedText = this.speed >= 1e6
       ? `${(this.speed / 1e6).toFixed(1)}M`
@@ -593,22 +705,6 @@ export class ShipHUD {
     this.lastHeight = height;
   }
 
-  ringPath(definition, time, shieldRatio) {
-    const phase = definition.phase + time * definition.speed;
-    const breathe = 1 + .022 * Math.sin(time * .72 + definition.phase * 1.9);
-    const energy = .55 + .45 * shieldRatio;
-    let path = '';
-    const steps = 112;
-    for (let index = 0; index <= steps; index++) {
-      const angle = index / steps * Math.PI * 2;
-      const waveA = Math.sin(angle * definition.lobes + phase);
-      const waveB = .48 * Math.sin(angle * (definition.lobes + 3) - phase * 1.36);
-      const waveC = .22 * Math.sin(angle * 3 - time * .31 + definition.phase);
-      const radius = definition.base * breathe + definition.amplitude * energy * (waveA + waveB + waveC);
-      path += `${index ? 'L' : 'M'}${(radius * Math.cos(angle)).toFixed(2)} ${(radius * Math.sin(angle)).toFixed(2)}`;
-    }
-    return `${path}Z`;
-  }
 
   tick(now) {
     const delta = Math.min(.05, (now - this.lastFrame) / 1000);
@@ -633,12 +729,15 @@ export class ShipHUD {
       }
     }
 
-    if (document.body.classList.contains('ui-walk') || document.body.classList.contains('hero-active')) {
+    // Hidden (any HUD_HIDDEN_CLASSES state): skip the per-frame SVG rewrite.
+    if (!this.hudVisible) {
       if (!this.externalTick) this.frame = requestAnimationFrame((frameTime) => this.tick(frameTime));
       return;
     }
 
-    const speedRatio = clamp(this.speed / this.speedLimit);
+    const boot = this.bootProgress(now);
+    this.powerPanel?.classList.toggle('is-idle', !this.warpRouting && now - this.lastPowerInput > 6000);
+    const speedRatio = clamp(this.speed / this.speedLimit) * boot;
     for (let index = 0; index < this.rows.length; index++) {
       const row = this.rows[index];
       const seed = this.engineSeeds[index];
@@ -657,8 +756,9 @@ export class ShipHUD {
       fill.setAttribute('opacity', .7 + .28 * speedRatio);
     }
 
-    const fuelRatio = clamp(this.pulseFuelValue / this.pulseFuelMax);
-    const lowFuel = fuelRatio < .3;
+    const fuelLevel = clamp(this.pulseFuelValue / this.pulseFuelMax);
+    const lowFuel = fuelLevel < .3;
+    const fuelRatio = fuelLevel * boot;
     const filledRows = Math.round(fuelRatio * this.rows.length);
     for (let index = 0; index < this.rows.length; index++) {
       const filled = index >= this.rows.length - filledRows;
@@ -688,17 +788,14 @@ export class ShipHUD {
     this.fuelPointer.setAttribute('x2', rightInner + 37);
     this.fuelPointer.setAttribute('y2', fuelY);
     this.fuelPointer.setAttribute('stroke', lowFuel ? '#e2483d' : '#ece8d4');
-    const shieldRatio = this.shield / 100;
-    this.ringDefinitions.forEach((definition, index) => {
-      const ring = this.ringElements[index];
-      ring.setAttribute('d', this.ringPath(definition, time + index * .19, shieldRatio));
-      ring.setAttribute('opacity', (definition.alpha * (.38 + .62 * shieldRatio)
-        * (.92 + .08 * Math.sin(time * (.52 + index * .07) + definition.phase))).toFixed(3));
-      ring.setAttribute('transform', `rotate(${(time * definition.speed * 7 + index * 11).toFixed(2)})`);
-    });
-    this.hullNumber.textContent = Math.round(this.hull);
-    this.hullBar.style.transform = `scaleX(${(this.hull / 100).toFixed(3)})`;
-    this.hullBar.style.background = this.hull < 30 ? '#e2483d' : '#f2ecd8';
+    this.renderIntegrityMeter('shield', this.shield, 100, boot);
+    this.renderIntegrityMeter('hull', this.hull, 100, boot);
+    const condition = this.hull < 30 ? 'critical' : (this.hull < 70 || this.shield <= 0) ? 'damaged' : 'nominal';
+    if (condition !== this.integrityStateText && this.integrityState) {
+      this.integrityStateText = condition;
+      this.integrityPanel.dataset.condition = condition;
+      this.integrityState.textContent = { nominal: '系统正常', damaged: '船体受损', critical: '结构危急' }[condition];
+    }
 
     if (!this.externalTick) {
       this.frame = requestAnimationFrame((frameTime) => this.tick(frameTime));

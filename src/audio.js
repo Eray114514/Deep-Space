@@ -67,6 +67,12 @@ export class FlightAudio {
     this.sfx.prewarm(['rifle_shot', 'rifle_tail_out', 'rifle_dry', 'reload_magout', 'reload_magin',
       'reload_bolt', 'shell_bounce', 'rain', 'thunder']);
 
+    // Menu foley bypasses the master so it still plays while the game (and
+    // therefore the master gain) is paused.
+    this.uiSfx = new SaltlineSfx();
+    this.uiSfx.attach(ctx, this.compressor, 0.55);
+    this.uiSfx.prewarm(['ui_hover', 'ui_click']);
+
     this.engineBus = ctx.createGain();
     this.engineBus.gain.value = 0;
     this.engineBus.connect(this.master);
@@ -365,6 +371,11 @@ export class FlightAudio {
     this.lastWater = waterK;
     this.wasBoosting = !!boostK;
     this.wasWarping = warpK > 0.08;
+  }
+
+  playUi(name) {
+    if (this.disposed || !this.ctx || !this.uiSfx || this.ctx.state === 'suspended') return;
+    this.uiSfx.play(name);
   }
 
   setPaused(paused) {
