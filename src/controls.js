@@ -24,13 +24,8 @@ const _e = new THREE.Euler();
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
-// A pulse is a discrete displacement owned by the flight state, not a second
-// cruise tier. It starts at full authority and brakes through the burst.
-export function pulseBurstProgress(t) {
-  const k = clamp(t, 0, 1);
-  return 1 - Math.pow(1 - k, 3);
-}
-
+// A pulse is a discrete fold owned by the flight state, not a second cruise
+// tier; its timing lives in transit.js. This is only its reach.
 export function pulseBurstDistance(speedScale, altitude = Infinity, hasBody = false) {
   let distance = clamp(Math.max(0, speedScale) * 10, 90, 1.2e6);
   if (hasBody && Number.isFinite(altitude)) {

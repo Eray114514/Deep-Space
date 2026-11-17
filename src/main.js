@@ -10,7 +10,10 @@ import { StarSystem, Universe } from './galaxy.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad,
   setTerrainScreenError } from './quadtree.js';
 import { SpaceControls, WalkControls, guidePlanetApproach, keys,
-  flightBoostSpeedLimit, pulseBurstDistance, pulseBurstProgress } from './controls.js';
+  flightBoostSpeedLimit, pulseBurstDistance } from './controls.js';
+import { PULSE_TIMING, emptyTransitChannels, pulseChannels, pulseDisplacement, transitIntensity,
+  warpApproachRemaining, warpChannels, warpDepartureTravel, warpPlan } from './transit.js';
+import { setStarflowViewport, starflowUniforms } from './starflow.js';
 import { Scatter } from './scatter.js';
 import { FarFlora } from './farflora.js';
 import { createSurfaceWarmupScene } from './surface-warmup.js';
@@ -22,7 +25,7 @@ import { FrameWorkBudget } from './frame-work-budget.js';
 import { PresentedFrameStats } from './presented-frame-stats.js';
 import { AdaptiveQualityGovernor, FrameGpuTimer } from './adaptive-quality.js';
 import { landingDescentProgress, SHIP_LANDING_PROFILE,
-  warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
+  SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
 import { loadShipModel, loadShipProbes } from './halcyon/ship/model.js';
 import { ShipAudio } from './halcyon/ship/ship-audio.js';
@@ -706,6 +709,7 @@ function sizePost(force = false) {
     return false;
   }
   nodePipeline.setSize(window.innerWidth, window.innerHeight, renderDpr);
+  setStarflowViewport(window.innerWidth * renderDpr, window.innerHeight * renderDpr);
   pipelineResizePending = false;
   return true;
 }
@@ -779,17 +783,29 @@ let boostVisual = 0;
 let pulseVisual = 0;
 const PULSE_FUEL_MAX = 140;
 const PULSE_FUEL_COST = 18;
-const PULSE_DURATION = 0.56;
 let pulseFuel = PULSE_FUEL_MAX;
 let pulseActive = false;
+// The newest pulse owns the displacement; earlier pulses that were chained
+// after their jump keep finishing their release visuals as echoes.
 let pulseBurst = null;
+const pulseEchoes = [];
 let pulseRechargeDelay = 0;
-// 脉冲结束后行星接近限速不能硬切回普通档,否则向内速度会从脉冲延续值
-// (boostLimit 量级)瞬间被砍到 safeInward(~55-几百),体感骤降。settle
-// 期间 approachLimit 从 boostLimit 平滑收紧到 safeInwardBase,nav.vel
-// 随之渐进被限,避免硬切跳变。
-let pulseSettle = 0;
-const PULSE_SETTLE_SECONDS = 0.8;
+// One transit timeline (pulse and/or warp) drives starflow, the transit pass,
+// FOV, the camera kick and the hull light. See transit.js.
+const transitChannels = emptyTransitChannels();
+let transitFlow = 0;
+let warpTransit = null;
+let transitHold = null; // NMS.holdTransit visual lab
+const transitAxisWorld = new THREE.Vector3(0, 0, -1);
+const transitAxisView = new THREE.Vector3(0, 0, -1);
+const transitColorA = new THREE.Color(1, 0.92, 0.82);
+const transitColorB = new THREE.Color(0.75, 0.85, 1);
+const transitHullLight = new THREE.PointLight(0xbcd4ff, 0, 0, 0);
+transitHullLight.layers.set(SHIP_FOREGROUND_LAYER);
+scene.add(transitHullLight);
+const transitHullAmbient = new THREE.HemisphereLight(0x5f86ff, 0x1a2a66, 0);
+transitHullAmbient.layers.set(SHIP_FOREGROUND_LAYER);
+scene.add(transitHullAmbient);
 let weaponCooldown = 0;
 let flightPower = {
   weapon: 1, navigation: 1, thermal: 1, gravity: 1, shield: 1, warp: 0,
@@ -1044,7 +1060,6 @@ setTimeout(() => {
 // the weapon layer renders through the rig's own view camera.
 foregroundPass.setLayerCamera(WEAPON_FOREGROUND_LAYER, surfaceWeapons.viewCamera);
 let warpIntensity = 0;
-let warpArrival = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
 let activeWeather = null;
@@ -1184,29 +1199,138 @@ const walkCtl = new WalkControls(renderer.domElement, {
   resolveCollision: resolveParkedShipCollision,
 });
 
+// Abort any pulse: finish its remaining displacement visuals as an echo, but
+// never move the ship again (landing, rifts and pressure protection call this).
 function cancelPulseBurst() {
+  if (!pulseBurst) return;
+  if (pulseBurst.elapsed > PULSE_TIMING.jumpStart) pulseEchoes.push(pulseBurst);
   pulseBurst = null;
-  // 启动 settle 窗口:让 approachLimit 从 boostLimit 平滑收紧到
-  // safeInwardBase,避免脉冲结束注入的 nav.vel 被行星限速硬切跳变。
-  if (pulseSettle <= 0) pulseSettle = PULSE_SETTLE_SECONDS;
 }
 
 function triggerPulse() {
-  if (state !== 'space' || paused || riftRoute || pulseBurst) return false;
+  if (state !== 'space' || paused || riftRoute) return false;
+  // Chaining is allowed once the previous jump has landed; its release keeps
+  // playing as an echo so the new charge picks up from the current visuals.
+  if (pulseBurst && pulseBurst.elapsed < PULSE_TIMING.retrigger) return false;
   if (pulseFuel + 1e-6 < PULSE_FUEL_COST) {
     ui.setHint(`脉冲燃料不足 · 需要 ${PULSE_FUEL_COST}`, false);
     return false;
   }
+  if (pulseBurst) pulseEchoes.push(pulseBurst);
   const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
   const distance = pulseBurstDistance(spaceCtl.speedScale, nearestAlt, !!nearest);
   pulseFuel = Math.max(0, pulseFuel - PULSE_FUEL_COST);
   pulseRechargeDelay = 1.4 / Math.max(.1, flightPower.thermal);
   pulseBurst = { elapsed: 0, progress: 0, direction, distance };
   pulseActive = true;
-  // 新脉冲开始:清掉上次脉冲的 settle,避免 cancelPulseBurst 因 pulseSettle
-  // 仍 >0 而不重启 settle 窗口。
-  pulseSettle = 0;
+  audio.cue('pulse');
   return true;
+}
+
+const TRANSIT_REST = Object.freeze(emptyTransitChannels());
+const transitInverseView = new THREE.Quaternion();
+const transitEndColor = new THREE.Color();
+const TRANSIT_COOL = new THREE.Color(0.55, 0.7, 1.0);
+
+// Sample the pulse and warp timelines into one set of channels.
+function updateTransitChannels(dt) {
+  Object.assign(transitChannels, TRANSIT_REST);
+  // Any path that abandons a warp tween (new universe, debug teleports) also
+  // abandons its timeline.
+  if (warpTransit && state !== 'warp') warpTransit = null;
+  if (transitHold) {
+    if (transitHold.kind === 'pulse') pulseChannels(transitHold.t, transitChannels);
+    else warpChannels(transitHold.t, transitHold.plan, transitChannels);
+    pulseVisual = 0;
+    warpIntensity = 0;
+    transitFlow += transitChannels.flowSpeed * dt;
+    transitAxisWorld.set(0, 0, -1).applyQuaternion(nav.quat);
+    return;
+  }
+  for (let i = pulseEchoes.length - 1; i >= 0; i--) {
+    const echo = pulseEchoes[i];
+    echo.elapsed += dt;
+    if (echo.elapsed >= PULSE_TIMING.total) pulseEchoes.splice(i, 1);
+    else pulseChannels(echo.elapsed, transitChannels);
+  }
+  if (pulseBurst) pulseChannels(pulseBurst.elapsed, transitChannels);
+  pulseVisual = transitIntensity(transitChannels);
+  if (warpTransit) warpChannels(warpTransit.t, warpTransit.plan, transitChannels);
+  warpIntensity = warpTransit ? clamp(Math.max(transitChannels.streak, transitChannels.tunnel), 0, 1) : 0;
+  transitFlow += transitChannels.flowSpeed * dt;
+  if (warpTransit) transitAxisWorld.copy(warpTransit.dir);
+  else if (pulseBurst) transitAxisWorld.copy(pulseBurst.direction);
+  else if (pulseEchoes.length) transitAxisWorld.copy(pulseEchoes.at(-1).direction);
+  else transitAxisWorld.set(0, 0, -1).applyQuaternion(nav.quat);
+}
+
+// Push the channels into starflow, the transit pass and the hull light. Runs
+// after the camera pose is final for this frame.
+function applyTransitVisuals() {
+  const ch = transitChannels;
+  transitInverseView.copy(camera.quaternion).invert();
+  transitAxisView.copy(transitAxisWorld).applyQuaternion(transitInverseView).normalize();
+  starflowUniforms.uFlowAxis.value.copy(transitAxisView);
+  starflowUniforms.uStreak.value = ch.streak;
+  starflowUniforms.uAberr.value = ch.aberr;
+  starflowUniforms.uDoppler.value = ch.doppler;
+
+  transitEndColor.copy(transitColorA).lerp(transitColorB, ch.colorMix);
+  // Both lights stay in the scene permanently (intensity 0 at rest): toggling
+  // visibility would change the light count and recompile every hull program
+  // on the first frame of a pulse or warp.
+  transitHullLight.intensity = 0;
+  transitHullAmbient.intensity = 0;
+  if (ch.hull > 0.002 && (state === 'space' || state === 'warp')) {
+    // Key from the exit light ahead, plus the tunnel wall's surround glow.
+    transitHullLight.position.copy(ship.group.position).addScaledVector(transitAxisWorld, 40);
+    transitHullLight.color.copy(TRANSIT_COOL).lerp(transitEndColor, 0.55);
+    transitHullLight.intensity = ch.hull * 2.4;
+    transitHullAmbient.color.setRGB(0.22, 0.42, 1.0).lerp(transitEndColor, 0.2);
+    transitHullAmbient.intensity = ch.tunnel * 0.9;
+    if (ship.sun) ship.sun.intensity *= 1 - 0.85 * ch.tunnel;
+    if (ship.secondarySun) ship.secondarySun.intensity *= 1 - 0.85 * ch.tunnel;
+  }
+
+  const active = ch.blur > 0.002 || ch.fold > 0.002 || ch.shockAmp > 0.002
+    || ch.flash > 0.002 || ch.tunnel > 0.002 || ch.exit < 1e3;
+  warpDrivePass.enabled = active;
+  if (!active) return;
+  const u = warpDrivePass.uniforms;
+  const time = clock.elapsedTime;
+  const tanHalf = Math.tan(camera.fov * Math.PI / 360);
+  u.uTime.value = time;
+  u.uAspect.value = camera.aspect;
+  u.uTanHalfFov.value = tanHalf;
+  u.uAxis.value.copy(transitAxisView);
+  if (transitAxisView.z < -0.05) {
+    u.uCenter.value.set(
+      clamp(0.5 + 0.5 * (transitAxisView.x / -transitAxisView.z) / (tanHalf * camera.aspect), 0, 1),
+      clamp(0.5 + 0.5 * (transitAxisView.y / -transitAxisView.z) / tanHalf, 0, 1));
+  } else {
+    u.uCenter.value.set(0.5, 0.5);
+  }
+  u.uBlur.value = ch.blur;
+  u.uFold.value = ch.fold;
+  u.uShockR.value = ch.shockRadius;
+  u.uShockAmp.value = ch.shockAmp;
+  u.uFlash.value = ch.flash;
+  u.uTunnel.value = ch.tunnel;
+  u.uMouth.value = ch.mouth;
+  u.uExit.value = ch.exit;
+  u.uFlow.value = transitFlow;
+  u.uEndGlow.value = ch.endGlow;
+  // The passage wanders, so the far end is always just around a bend. It
+  // straightens at the mouth and at the exit, where the vanishing point must
+  // line up with the real sky (and the destination) behind it.
+  const bendScale = clamp(1 - ch.mouth / 40, 0, 1) * (ch.exit < 1e3 ? clamp(ch.exit / 70, 0, 1) : 1);
+  u.uBend.value.set(
+    Math.sin(time * 0.13) * 0.26 + Math.sin(time * 0.051 + 1.3) * 0.12,
+    Math.cos(time * 0.11 + 0.4) * 0.2 + Math.sin(time * 0.037) * 0.1).multiplyScalar(bendScale);
+  u.uTwist.value = 1;
+  u.uColorA.value.copy(transitColorA);
+  u.uColorB.value.copy(transitColorB);
+  u.uColorMix.value = ch.colorMix;
 }
 
 renderer.domElement.addEventListener('pointerdown', () => {
@@ -3484,14 +3608,16 @@ function renderRiftPortal() {
   }
 }
 
-// A warp is a flight, not a teleport: align with the target, spool up, then
-// cross real space at ferocious speed — every star in the sky parallaxes past,
-// the destination sun grows from a dot — and decelerate into the new system.
+// A warp is one continuous shot in five phases (transit.js): the sky streaks
+// and gathers forward while the ship spools, the streaks thicken into a long
+// curving tunnel, the destination is swapped in out of sight, the tunnel's
+// end light opens from the centre, and the ship brakes onto its target along
+// a straight line it is already facing, so nothing snaps on arrival.
 function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArrival = null) {
   if (state !== 'space') return;
   ui.beginWarpPower();
+  cancelPulseBurst();
   setState('warp');
-  warpArrival = 0;
   warpRevealBody = null;
   warpRevealCameraOffset = null;
   warpRevealActive = false;
@@ -3499,20 +3625,124 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
   spaceCtl.focus = null;
   const startPos = nav.pos.clone();
   const startQuat = nav.quat.clone();
-  // Begin with a safe stellar-system arrival point. Once the destination
-  // system exists, the trajectory is redirected toward its hero planet.
+  // Safe stellar arrival point; replaced by the hero body once the
+  // destination system exists.
   const arriveDir = startPos.clone().sub(star.pos).normalize();
-  let endPos = star.pos.clone().addScaledVector(arriveDir, Math.max(star.radius * 72, 1.4e9));
-  const dist = startPos.distanceTo(endPos);
-  const dur = clamp(8.5 + dist / 8e8, 10, 18);
-  let targetQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
-  const SPOOL = 0.12;
-  let swapped = false;
-  let arrivalPlanetName = null;
-  let arrivalSystem = null, arrivalSpec = null, revealDirection = null;
+  const starArrivalDistance = Math.max(star.radius * 72, 1.4e9);
+  const endPos = star.pos.clone().addScaledVector(arriveDir, starArrivalDistance);
+  const lookTarget = star.pos.clone();
+  const approachDir = arriveDir.clone();
+  let approachDistance = starArrivalDistance * 14;
+  const plan = warpPlan(startPos.distanceTo(endPos));
+  const departDir = star.pos.clone().sub(startPos).normalize();
+  const departQuat = lookQuatAt(startPos, star.pos, new THREE.Quaternion());
+  // The spool covers real distance (nearby bodies visibly fall behind), but
+  // never far enough to run into one.
+  let spoolDistance = 6e6;
+  for (const body of universe.planets()) {
+    const toBody = body.posUniv.clone().sub(startPos);
+    const along = toBody.dot(departDir);
+    if (along <= 0) continue;
+    const miss = toBody.addScaledVector(departDir, -along).length();
+    const clearRadius = body.R + Math.max(body.atmoHeight || 0, body.hAmp || 0) * 1.5;
+    if (miss < clearRadius * 1.2) {
+      spoolDistance = Math.min(spoolDistance, Math.max(0, along - clearRadius * 1.3) * 0.5);
+    }
+  }
+  // The tunnel's light drifts from the departure star's colour to the
+  // destination star's colour.
+  const departColor = universe.system?.star?.color || star.color;
+  if (departColor) transitColorA.copy(departColor).lerp(TRANSIT_COOL, 0.25);
+  if (star.color) transitColorB.copy(star.color).lerp(TRANSIT_COOL, 0.25);
+  transitFlow = 0;
+  warpTransit = { t: 0, plan, dir: departDir.clone() };
   nav.vel.set(0, 0, 0);
+  audio.cue('warp-spool');
+  let swapped = false;
+  let enterCued = false;
+  let exitCued = false;
+  let arrivalPlanetName = null;
+  let arrivalSystem = null, arrivalSpec = null;
 
-  addTween(dur, (k) => {
+  const swapDestination = () => {
+    swapped = true;
+    let destination;
+    if (preparedSystem?.star.id === star.id) {
+      for (const view of preparedSystem.starViews) {
+        view.group.visible = true;
+        view.light.visible = true;
+      }
+      for (const group of standaloneSiteGroups(preparedSystem)) group.visible = true;
+      let revealBodyId = preferBodyId;
+      const selectedSpec = revealBodyId
+        ? preparedSystem._specs.find((spec) => spec.bodyId === revealBodyId)
+        : null;
+      if (selectedSpec?.isMoon) revealBodyId = selectedSpec.parentId;
+      const preparedRevealBody = revealBodyId
+        ? preparedSystem.bodyById.get(revealBodyId) || null
+        : null;
+      deferredSystemWarmQueue.length = 0;
+      for (const body of [...preparedSystem.planets, ...preparedSystem.compactObjects]) {
+        const visibleDuringWarp = !preparedRevealBody || body === preparedRevealBody;
+        body.group.visible = visibleDuringWarp;
+        if (!visibleDuringWarp) {
+          deferredSystemWarmQueue.push({ system: preparedSystem, body });
+        }
+      }
+      destination = universe.adoptSystem(preparedSystem);
+      transferredPreparedDestination = null;
+      // The tunnel hides both systems. Keeping the departure system as
+      // Universe.fadingSystem would change the active light count and force
+      // every destination PBR program to compile a combined-light variant on
+      // the hand-off frame. Park it and dispose it under the next overlay.
+      retiredRiftSystem = universe.fadingSystem;
+      universe.fadingSystem = null;
+      for (const view of retiredRiftSystem?.starViews || []) {
+        view.group.visible = false;
+        view.light.visible = false;
+      }
+      for (const body of [
+        ...(retiredRiftSystem?.planets || []),
+        ...(retiredRiftSystem?.compactObjects || []),
+      ]) body.group.visible = false;
+      for (const group of standaloneSiteGroups(retiredRiftSystem)) group.visible = false;
+      preparedSystem = null;
+    } else {
+      destination = universe.setSystem(star, true);
+    }
+    // Route-choice idle time normally builds the selected body. A very fast
+    // confirmation can still arrive first; build at most one body here.
+    if (preferBodyId && !destination.bodyById.has(preferBodyId)) destination.buildNext();
+    let hero = null;
+    if (preferBodyId) {
+      let picked = destination._specs.find((spec) => spec.bodyId === preferBodyId);
+      if (picked?.isMoon) picked = destination._specs.find((spec) => spec.bodyId === picked.parentId);
+      if (picked && !picked.isMoon) hero = picked;
+    }
+    if (hero) {
+      const heroPos = destination.frames.get(hero.bodyId).position;
+      warpRevealBody = destination.bodyById.get(hero.bodyId) || null;
+      approachDir.copy(preparedArrival?.bodyId === hero.bodyId
+        ? preparedArrival.entry.clone().sub(preparedArrival.center).normalize()
+        : startPos.clone().sub(heroPos).normalize());
+      arrivalSystem = destination;
+      arrivalSpec = hero;
+      const arrivalDistance = blackHoleArrivalDistance(hero);
+      warpRevealCameraOffset = approachDir.clone().multiplyScalar(arrivalDistance);
+      // From ~38x the framing distance the planet is a lit point at the end
+      // of the tunnel; it grows continuously until the authored framing.
+      approachDistance = arrivalDistance * (hero.type === 'blackHole' ? 24 : 38);
+      arrivalPlanetName = hero.name;
+    }
+    // The camera pose jumps across the galaxy while the tunnel is opaque;
+    // temporal history from the departure frame must not be reprojected.
+    nodePipeline.invalidateTemporalHistory?.('warp-handoff');
+    nodePipeline.invalidateVolumeHistory?.('warp-handoff');
+  };
+
+  addTween(plan.total, (k) => {
+    const t = k * plan.total;
+    warpTransit.t = t;
     if (preparedSystem && preferBodyId && !preparedSystem.bodyById.has(preferBodyId)
         && !preparedSystem.built) {
       const previousBodyCount = preparedSystem.planets.length + preparedSystem.compactObjects.length;
@@ -3525,116 +3755,35 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
         primePreparedBodyTextures(builtBody, preparedSystem);
       }
     }
-    if (k < SPOOL) {
-      // turn toward the target and charge the jump
-      nav.quat.copy(startQuat).slerp(targetQuat, smoothstep(0, 1, k / SPOOL));
-      camera.fov = BASE_FOV - 4 * (k / SPOOL);
-    } else {
-      const kf = (k - SPOOL) / (1 - SPOOL);
-      const s = warpTravelProgress(kf);
-      if (arrivalSpec) {
-        const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
-        endPos.copy(heroPos).addScaledVector(revealDirection, blackHoleArrivalDistance(arrivalSpec));
-        targetQuat = lookQuatAt(nav.pos, heroPos, targetQuat);
-      }
-      nav.pos.lerpVectors(startPos, endPos, s);
-      nav.quat.copy(targetQuat);
-      // Keep the tunnel at full authority until the destination is close,
-      // then make the braking phase legible: streaks collapse, FOV compresses
-      // briefly below neutral, and rebounds as the real system is revealed.
-      const ramp = smoothstep(0, 0.075, kf) * (1 - smoothstep(0.86, 0.95, kf));
-      const brakeIn = smoothstep(0.78, 0.9, kf);
-      const brakeOut = 1 - smoothstep(0.9, 1, kf);
-      warpArrival = brakeIn * brakeOut;
-      if (warpRevealBody && warpArrival > 0.02) warpRevealActive = true;
-      camera.fov = BASE_FOV - 4 + 34 * ramp - 7.5 * warpArrival;
-      warpIntensity = ramp;
-      if (kf >= 0.04 && !swapped) {
-        // Swap early enough that the real destination can materialise during
-        // the tunnel, then converge on a large planet for the exit reveal.
-        swapped = true;
-        let destination;
-        if (preparedSystem?.star.id === star.id) {
-          for (const view of preparedSystem.starViews) {
-            view.group.visible = true;
-            view.light.visible = true;
-          }
-          for (const group of standaloneSiteGroups(preparedSystem)) group.visible = true;
-          let revealBodyId = preferBodyId;
-          const selectedSpec = revealBodyId
-            ? preparedSystem._specs.find((spec) => spec.bodyId === revealBodyId)
-            : null;
-          if (selectedSpec?.isMoon) revealBodyId = selectedSpec.parentId;
-          const preparedRevealBody = revealBodyId
-            ? preparedSystem.bodyById.get(revealBodyId) || null
-            : null;
-          deferredSystemWarmQueue.length = 0;
-          for (const body of [...preparedSystem.planets, ...preparedSystem.compactObjects]) {
-            const visibleDuringWarp = !preparedRevealBody || body === preparedRevealBody;
-            body.group.visible = visibleDuringWarp;
-            if (!visibleDuringWarp) {
-              deferredSystemWarmQueue.push({ system: preparedSystem, body });
-            }
-          }
-          destination = universe.adoptSystem(preparedSystem);
-          transferredPreparedDestination = null;
-          // A stellar warp is already millions of kilometres beyond the source
-          // when the destination graph is adopted. Keeping the departure system
-          // as Universe.fadingSystem cannot contribute a visible pixel behind
-          // starflow, but it changes the active light count and forces every
-          // destination PBR program to compile a combined-light variant on the
-          // hand-off frame. Park it exactly like the spatial-rift hand-off and
-          // dispose it under the next route overlay.
-          retiredRiftSystem = universe.fadingSystem;
-          universe.fadingSystem = null;
-          for (const view of retiredRiftSystem?.starViews || []) {
-            view.group.visible = false;
-            view.light.visible = false;
-          }
-          for (const body of [
-            ...(retiredRiftSystem?.planets || []),
-            ...(retiredRiftSystem?.compactObjects || []),
-          ]) body.group.visible = false;
-          for (const group of standaloneSiteGroups(retiredRiftSystem)) group.visible = false;
-          preparedSystem = null;
-        } else {
-          destination = universe.setSystem(star, true);
-        }
-        // Route-choice idle time normally builds the selected body. A very fast
-        // confirmation can still arrive first; build at most one body in this
-        // frame and let the arrival guard handle an exceptionally early click.
-        if (preferBodyId && !destination.bodyById.has(preferBodyId)) destination.buildNext();
-        // A selected planet exclusively owns the destination reveal. Letting the
-        // generic nearest-body scan jump across every orbital intersection made
-        // hidden planets allocate terrain, volume pipelines and textures while
-        // the starflow was supposed to remain uninterrupted.
-        let hero = null;
-        if (preferBodyId) {
-          let picked = destination._specs.find((spec) => spec.bodyId === preferBodyId);
-          if (picked?.isMoon) picked = destination._specs.find((spec) => spec.bodyId === picked.parentId);
-          if (picked && !picked.isMoon) hero = picked;
-        }
-        if (hero) {
-          const heroPos = destination.frames.get(hero.bodyId).position;
-          warpRevealBody = destination.bodyById.get(hero.bodyId) || null;
-          revealDirection = preparedArrival?.bodyId === hero.bodyId
-            ? preparedArrival.entry.clone().sub(preparedArrival.center).normalize()
-            : startPos.clone().sub(heroPos).normalize();
-          arrivalSystem = destination; arrivalSpec = hero;
-          warpRevealCameraOffset = revealDirection.clone()
-            .multiplyScalar(blackHoleArrivalDistance(hero));
-          endPos = heroPos.clone().add(warpRevealCameraOffset);
-          targetQuat = lookQuatAt(startPos, heroPos, new THREE.Quaternion());
-          arrivalPlanetName = hero.name;
-        }
-      }
+    if (!enterCued && t >= plan.tunnelStart - 0.45) {
+      enterCued = true;
+      audio.cue('warp-enter');
     }
-    camera.updateProjectionMatrix();
+    if (t < plan.swapAt) {
+      nav.quat.copy(startQuat).slerp(departQuat, smoothstep(0.05, 1.5, t));
+      nav.pos.copy(startPos).addScaledVector(departDir, spoolDistance * warpDepartureTravel(t, plan));
+      warpTransit.dir.copy(departDir);
+      return;
+    }
+    if (!swapped) swapDestination();
+    if (arrivalSpec) {
+      const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
+      lookTarget.copy(heroPos);
+      endPos.copy(heroPos).add(warpRevealCameraOffset);
+    }
+    nav.pos.copy(endPos).addScaledVector(approachDir, approachDistance * warpApproachRemaining(t, plan));
+    lookQuatAt(nav.pos, lookTarget, nav.quat);
+    warpTransit.dir.copy(lookTarget).sub(nav.pos).normalize();
+    if (t >= plan.exitStart && warpRevealBody) warpRevealActive = true;
+    if (!exitCued && t >= plan.exitStart - 0.2) {
+      exitCued = true;
+      audio.cue('warp-exit');
+    }
   }, () => {
-    camera.fov = BASE_FOV;
-    camera.updateProjectionMatrix();
+    warpTransit = null;
     warpIntensity = 0;
-    warpArrival = 0;
+    camera.fov = BASE_FOV + shipView.fovOffset();
+    camera.updateProjectionMatrix();
     let arrivalDisplayName = universe.system.name;
     if (arrivalSpec?.type === 'blackHole') {
       const blackHole = universe.system.bodyById.get(arrivalSpec.bodyId);
@@ -3645,23 +3794,18 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
     } else if (arrivalPlanetName) {
       const arrivalPlanet = universe.system.planets.find((planet) => planet.name === arrivalPlanetName);
       if (arrivalPlanet) {
+        // Already facing it: the approach ran along this exact line.
         focusPlanet = arrivalPlanet;
         spaceCtl.focus = arrivalPlanet;
-        lookQuatAt(nav.pos, arrivalPlanet.posUniv, nav.quat);
         arrivalDisplayName = arrivalPlanet.name;
       }
     } else {
       ui.setHint(`已抵达 ${universe.system.name} · 星系安全入口`, true);
     }
-    // The route preloader normally guarantees the selected reveal body. Never
-    // complete unrelated bodies in this arrival callback: constructors and
-    // their root terrain meshes are synchronous and would freeze the last
-    // tunnel frame. Resume one-body-per-frame background completion only after
-    // the first stable post-arrival frames have been presented.
+    // Never complete unrelated bodies in this callback: constructors and their
+    // root terrain meshes are synchronous and would hitch the first free frame.
     setState('space');
-    // Water is deliberately withheld only while starflow owns the reveal.
-    // Restore the selected ocean before dropping the warp reference so normal
-    // orbital/walking LOD updates cannot inherit the hidden state.
+    // Water is withheld only while the transit owns the reveal.
     warpRevealBody?.waterLod?.setVisible(true);
     warpRevealBody = null;
     warpRevealCameraOffset = null;
@@ -4433,24 +4577,11 @@ function frame(rafTs) {
       spaceCtl.horizonAssist = 0;
     }
     pulseActive = !!pulseBurst;
-    if (pulseSettle > 0 && !pulseBurst) {
-      pulseSettle = Math.max(0, pulseSettle - dt);
-    }
-    // 行星接近限速目标。脉冲期间沿用原 1.18 放大;settle 期间从 boostLimit
-    // 平滑收紧到 safeInwardBase,让脉冲结束注入的 nav.vel 不会被硬切,
-    // 而是随 settle 进度渐进被限;正常飞行用 safeInwardBase。
+    // Planet approach cap. A pulse never injects velocity (it displaces the
+    // ship and hands back the exact pre-pulse velocity), so the cap needs no
+    // post-pulse settle window any more.
     const safeInwardBase = 55 + Math.pow(Math.max(0, nearestAlt), 0.75) * 0.6;
-    const boostLimitForApproach = flightBoostSpeedLimit(
-      spaceCtl.speedScale, spaceCtl.atmosphereFactor, spaceCtl.gravityPower);
-    let approachLimit;
-    if (pulseBurst) {
-      approachLimit = safeInwardBase * 1.18;
-    } else if (pulseSettle > 0) {
-      const settleProgress = 1 - pulseSettle / PULSE_SETTLE_SECONDS;
-      approachLimit = lerp(boostLimitForApproach, safeInwardBase, settleProgress);
-    } else {
-      approachLimit = safeInwardBase;
-    }
+    const approachLimit = pulseBurst ? safeInwardBase * 1.18 : safeInwardBase;
     if (nearest) {
       // Planet approach is intentionally much slower than tangential flight.
       // A distance-shaped radial cap preserves the scale of the world and
@@ -4469,25 +4600,15 @@ function frame(rafTs) {
     flightStepStart.copy(nav.pos);
     spaceCtl.update(dt);
     if (pulseBurst) {
-      pulseBurst.elapsed = Math.min(PULSE_DURATION, pulseBurst.elapsed + dt);
-      const progress = pulseBurstProgress(pulseBurst.elapsed / PULSE_DURATION);
+      // A fold, not a sprint: almost all of the distance is covered inside the
+      // short window where the starflow is longest (see transit.js).
+      pulseBurst.elapsed += dt;
+      const progress = pulseDisplacement(pulseBurst.elapsed);
       nav.pos.addScaledVector(pulseBurst.direction,
         pulseBurst.distance * Math.max(0, progress - pulseBurst.progress));
       pulseBurst.progress = progress;
-      if (pulseBurst.elapsed >= PULSE_DURATION) {
-        // 脉冲末段 pulseVisual≈0,HUD 显示 ≈ boostLimit(加力上限)。
-        // 但 nav.vel 在脉冲期间被 drag 衰减到接近 0;脉冲结束瞬间
-        // pulseDisplaySpeed 归零,显示从 boostLimit 暴跌到 nav.vel,体感
-        // “超快减速”。沿脉冲方向把 nav.vel 补到加力上限(不超限),
-        // 让显示速度连续,之后由 drag 平滑接管减速。
-        const boostLimit = flightBoostSpeedLimit(
-          spaceCtl.speedScale, spaceCtl.atmosphereFactor, spaceCtl.gravityPower);
-        const currentAlong = nav.vel.dot(pulseBurst.direction);
-        if (currentAlong < boostLimit) {
-          nav.vel.addScaledVector(pulseBurst.direction, boostLimit - currentAlong);
-        }
-        cancelPulseBurst();
-      }
+      if (pulseBurst.elapsed >= PULSE_TIMING.total) pulseBurst = null;
+      pulseActive = !!pulseBurst;
     }
     if (nearest) {
       _v.copy(nav.pos).sub(nearest.posUniv);
@@ -4572,32 +4693,20 @@ function frame(rafTs) {
   const boostTarget = state === 'space' && !shipView.rmbLookActive()
     && (spaceCtl.boosting || keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
   boostVisual += (boostTarget - boostVisual) * (1 - Math.exp(-dt * (boostTarget ? 7.5 : 8.5)));
-  const pulseK = pulseBurst ? clamp(pulseBurst.elapsed / PULSE_DURATION, 0, 1) : 1;
-  const pulseTarget = pulseBurst
-    ? smoothstep(0, 0.04, pulseK) * (1 - smoothstep(0.55, 1, pulseK))
-    : 0;
-  pulseVisual = pulseTarget > pulseVisual
-    ? pulseTarget
-    : pulseVisual + (pulseTarget - pulseVisual) * (1 - Math.exp(-dt * 14));
   weaponVisual += ((weaponTrigger ? 1 : 0) - weaponVisual) * (1 - Math.exp(-dt * 16));
-  if ((state === 'space' || state === 'shipwalk') && warpIntensity < 0.01) {
+  updateTransitChannels(dt);
+  if (state === 'warp') {
+    // The warp timeline owns the lens outright; it is already continuous.
+    camera.fov = BASE_FOV + shipView.fovOffset() + transitChannels.fov;
+    camera.updateProjectionMatrix();
+  } else if (state === 'space' || state === 'shipwalk') {
     const riftFov = riftRoute && !riftRoute.arrived ? spatialRift.burst * 4.0 : 0;
-    const fovResponse = pulseTarget > pulseVisual ? 14 : 6.2;
-    camera.fov += ((BASE_FOV + shipView.fovOffset() + boostVisual * 6.5 + pulseVisual * 19.0 + riftFov) - camera.fov)
+    const fovResponse = pulseBurst || pulseEchoes.length ? 30 : 6.2;
+    camera.fov += ((BASE_FOV + shipView.fovOffset() + boostVisual * 6.5 + transitChannels.fov + riftFov) - camera.fov)
       * (1 - Math.exp(-dt * fovResponse));
     camera.updateProjectionMatrix();
   }
   document.body.classList.toggle('weapon-firing', weaponVisual > 0.12);
-
-  // One WebGL pass now owns both interstellar warp and the discrete local
-  // pulse. It runs before the foreground ship pass, so rays never float over
-  // the hull as a separate screen layer.
-  warpDrivePass.enabled = Math.max(warpIntensity, pulseVisual, warpArrival) > 0.005;
-  warpDrivePass.uniforms.time.value = clock.elapsedTime;
-  warpDrivePass.uniforms.warp.value = warpIntensity;
-  warpDrivePass.uniforms.pulse.value = pulseVisual;
-  warpDrivePass.uniforms.arrival.value = warpArrival;
-  warpDrivePass.uniforms.aspect.value = camera.aspect;
 
   // Deterministic development fixture: keep a constant-altitude tangent run
   // long enough for terrain/water LODs and the wake lifecycle to settle.
@@ -4878,11 +4987,6 @@ function frame(rafTs) {
       Math.sin(t * 13.1 + 2.4) * amp * 0.35,
     );
   }
-  if (pulseVisual > 0.01 && state === 'space') {
-    const t = clock.elapsedTime;
-    camera.position.x += Math.sin(t * 29.0) * 0.045 * pulseVisual;
-    camera.position.y += Math.sin(t * 37.0 + 0.8) * 0.028 * pulseVisual;
-  }
   if (riftRoute && !riftRoute.arrived && spatialRift.burst > 0.01) {
     const t = clock.elapsedTime;
     const impact = spatialRift.burst * 0.72;
@@ -4903,6 +5007,14 @@ function frame(rafTs) {
   }
   // first-person modes re-place the hull around the camera
   shipView.applyShipPose(dt, nav);
+  // Transit kick: one low-frequency push back into the seat (cockpit) or away
+  // from the hull (chase), applied after the hull is placed so it reads as
+  // the ship surging, never as a shaking image.
+  if (Math.abs(transitChannels.kick) > 1e-4 && (state === 'space' || state === 'warp')) {
+    const kickScale = shipView.isCockpit() ? 0.14 : 1.8;
+    camera.position.add(_v.set(0, 0, transitChannels.kick * kickScale).applyQuaternion(camera.quaternion));
+  }
+  applyTransitVisuals();
   // contextual F/E prompt inside the hull
   ui.setInteractPrompt(state === 'shipwalk' && !paused
     ? shipView.interactPrompt(!!ship.parkedPosUniv && ship.parkAmt > 0.98) : '');
@@ -4919,7 +5031,7 @@ function frame(rafTs) {
     state,
     speed: flightSpd,
     atmosphere: envInAtmo,
-    boosting: boostVisual > 0.12 || pulseVisual > 0.12,
+    boosting: boostVisual > 0.12,
     warp: Math.max(warpIntensity, pulseVisual * 0.68),
     rift: riftRoute ? spatialRift.open * (spatialRift.handoffActive ? 0.35 : 1) : 0,
     water: waterContact,
@@ -4962,10 +5074,11 @@ function frame(rafTs) {
   // directly and may be terrain-capped, so its cockpit value is expressed as
   // full boost speed plus the pulse envelope, while still honoring a larger
   // true frame displacement. The pointer itself remains capped at full boost.
-  // 仅在脉冲进行中(pulseBurst 存在)虚高显示;settle 期间交由 nav.vel 真实
-  // 值(被 approachLimit 平滑限速)驱动指针,避免脉冲结束显示硬切跳变。
+  // 仅在脉冲进行中(pulseBurst 存在)虚高显示;脉冲不改 nav.vel,结束后读数
+  // 直接回到玩家原本的巡航速度。
   const pulseDisplaySpeed = state === 'space' && pulseBurst
-    ? Math.max(_velActual.length(), boostSpeedLimit * (1 + pulseVisual * 1.8))
+    ? lerp(nav.vel.length(), Math.max(_velActual.length(), boostSpeedLimit * (1 + pulseVisual * 1.8)),
+      smoothstep(0, 0.15, pulseVisual))
     : 0;
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
     : state === 'space' ? Math.max(nav.vel.length(), pulseDisplaySpeed) : _velActual.length();
@@ -5710,7 +5823,8 @@ window.NMS = {
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
       pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
       power: { ...flightPower },
-      warpArrival,
+      transit: warpTransit ? { t: warpTransit.t, total: warpTransit.plan.total } : null,
+      transitChannels: { ...transitChannels },
       firing: spaceCtl.firing, bolts: activeBolts,
       cosmicHours: celestialClock.hours, timeScale: celestialClock.scale,
       dayLight: envDay, eclipse: envEclipse, environment: { ...environmentState },
@@ -6999,6 +7113,18 @@ window.NMS = {
   },
   setPulse(active) {
     return !!active && triggerPulse();
+  },
+  // Visual lab: freeze the transit look at one timeline instant without
+  // moving the ship (fixed-camera captures of every phase).
+  holdTransit(kind = 'warp', t = 0, distance = 5e12) {
+    if (!['pulse', 'warp'].includes(kind)) return false;
+    transitHold = { kind, t: Number(t), plan: warpPlan(distance) };
+    return { kind, t: transitHold.t, total: kind === 'pulse' ? PULSE_TIMING.total : transitHold.plan.total,
+      plan: kind === 'warp' ? { ...transitHold.plan } : null };
+  },
+  releaseTransit() {
+    transitHold = null;
+    return true;
   },
   fireWeapon() {
     if (state !== 'space' || flightPower.weapon <= 0) return false;

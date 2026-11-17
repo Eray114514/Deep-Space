@@ -248,9 +248,29 @@ export class FlightAudio {
     } else if (kind === 'boost') {
       this.noiseBurst({ duration: 0.72, gain: 0.19, from: 360, to: 2300, q: 0.5 });
       this.tone({ from: 48, to: 118, duration: 0.62, gain: 0.2, type: 'sawtooth', lowpass: 1500 });
-    } else if (kind === 'warp') {
-      this.noiseBurst({ duration: 1.8, gain: 0.2, from: 620, to: 5200, q: 0.42 });
-      this.tone({ from: 54, to: 420, duration: 1.85, gain: 0.2, type: 'sawtooth', lowpass: 3800 });
+    } else if (kind === 'pulse') {
+      // inhale (charge) -> low thump on the fold -> airy release
+      this.noiseBurst({ duration: 0.24, gain: 0.07, from: 2600, to: 420, q: 0.8 });
+      this.tone({ from: 140, to: 62, duration: 0.22, gain: 0.07, type: 'triangle', lowpass: 700 });
+      this.tone({ from: 74, to: 31, duration: 0.55, gain: 0.26, type: 'sine', lowpass: 180, delay: 0.22 });
+      this.noiseBurst({ duration: 0.75, gain: 0.12, from: 380, to: 3600, q: 0.45, delay: 0.24 });
+      this.tone({ from: 260, to: 520, duration: 0.6, gain: 0.03, type: 'sine', lowpass: 1600, delay: 0.3 });
+    } else if (kind === 'warp-spool') {
+      // reactor spool over the 3 s spool phase
+      this.tone({ from: 38, to: 96, duration: 3.1, gain: 0.16, type: 'sawtooth', lowpass: 900 });
+      this.tone({ from: 120, to: 610, duration: 3.0, gain: 0.05, type: 'triangle', lowpass: 2600, delay: 0.2 });
+      this.noiseBurst({ duration: 3.1, gain: 0.08, from: 260, to: 2400, q: 0.6 });
+    } else if (kind === 'warp-enter') {
+      // the streak field closes into the tunnel: rising rush, then the punch
+      this.noiseBurst({ duration: 0.5, gain: 0.16, from: 900, to: 6200, q: 0.4 });
+      this.tone({ from: 62, to: 24, duration: 1.4, gain: 0.32, type: 'sine', lowpass: 160, delay: 0.38 });
+      this.noiseBurst({ duration: 1.6, gain: 0.14, from: 5200, to: 700, q: 0.5, delay: 0.4 });
+      this.tone({ from: 220, to: 110, duration: 1.2, gain: 0.05, type: 'triangle', lowpass: 1200, delay: 0.42 });
+    } else if (kind === 'warp-exit') {
+      // the end light opens: reverse rush and a settling low tone
+      this.noiseBurst({ duration: 1.1, gain: 0.12, from: 700, to: 5600, q: 0.5 });
+      this.noiseBurst({ duration: 2.2, gain: 0.1, from: 4200, to: 260, q: 0.55, delay: 0.9 });
+      this.tone({ from: 46, to: 33, duration: 2.6, gain: 0.16, type: 'sine', lowpass: 150, delay: 0.85 });
     } else if (kind === 'rift-open') {
       this.noiseBurst({ duration: 2.45, gain: 0.13, from: 150, to: 3600, q: 0.34 });
       this.tone({ from: 29, to: 47, duration: 2.35, gain: 0.20, type: 'sine', lowpass: 170 });
@@ -364,7 +384,9 @@ export class FlightAudio {
     }
     if (atmosphere > 0.18 && this.lastAtmosphere <= 0.18 && speed > 180) this.cue('atmosphere');
     if (boostK && !this.wasBoosting) this.cue('boost');
-    if (warpK > 0.08 && !this.wasWarping) this.cue('warp');
+    // Pulse and warp transients are cued explicitly by the transit timeline
+    // ('pulse', 'warp-spool', 'warp-enter', 'warp-exit'); the bed above only
+    // follows its intensity.
     if (waterK > 0.18 && this.lastWater <= 0.18) this.cue('water-splash');
     this.lastState = state;
     this.lastAtmosphere = atmosphere;

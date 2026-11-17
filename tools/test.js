@@ -37,10 +37,10 @@ if (!runtimeVersion || pkg.version !== runtimeVersion || lock.version !== runtim
 const THREE = await import('three');
 const { startDevServer, startServer } = await import('./server.js');
 const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon,
-  applyFlightSteering, flightBoostSpeedLimit, pulseBurstDistance,
-  pulseBurstProgress } = await import('../src/controls.js');
-const { Ship, landingDescentProgress, SHIP_LANDING_PROFILE,
-  warpTravelProgress } = await import('../src/effects.js');
+  applyFlightSteering, flightBoostSpeedLimit, pulseBurstDistance } = await import('../src/controls.js');
+const { Ship, landingDescentProgress, SHIP_LANDING_PROFILE } = await import('../src/effects.js');
+const { PULSE_TIMING, pulseChannels, pulseDisplacement, warpApproachRemaining, warpChannels,
+  warpDepartureTravel, warpPlan } = await import('../src/transit.js');
 const { cockpitShakeAmplitude, solveHullQuaternion } = await import('../src/ship-view.js');
 const { DEFAULT_POWER, powerEffectsFor } = await import('../src/ship-hud.js');
 
@@ -58,11 +58,28 @@ if (vacuumCockpitShake >= atmosphericCockpitShake * 0.06
   throw new Error('Cockpit shake no longer follows atmospheric density');
 }
 
-// Pulse begins with immediate authority, remains a bounded displacement near
-// terrain, and is never disabled merely because the player is in atmosphere.
-if (pulseBurstProgress(0) !== 0 || pulseBurstProgress(1) !== 1
-    || pulseBurstProgress(0.05) < 0.14) {
-  throw new Error('Pulse burst still has a slow cruise-style acceleration ramp');
+// Pulse is a fold, not a sprint: almost nothing moves while it charges, most
+// of the distance is covered inside the short streak window, and the release
+// is pure visuals. It stays a bounded displacement near terrain and is never
+// disabled merely because the player is in atmosphere.
+if (pulseDisplacement(0) !== 0 || pulseDisplacement(PULSE_TIMING.total) !== 1
+    || pulseDisplacement(0.18) > 0.05
+    || pulseDisplacement(0.34) - pulseDisplacement(0.22) < 0.75) {
+  throw new Error('Pulse displacement is no longer concentrated in the fold window');
+}
+{
+  const rest = pulseChannels(PULSE_TIMING.total + 0.01);
+  if (rest.streak || rest.fold || rest.kick || rest.fov) {
+    throw new Error('Pulse visuals outlive the pulse timeline');
+  }
+  // The camera is pushed once and settles; no sustained high-frequency shake.
+  let signChanges = 0, last = 0;
+  for (let t = 0; t < PULSE_TIMING.total; t += 1 / 240) {
+    const kick = pulseChannels(t).kick;
+    if (Math.sign(kick) && Math.sign(kick) !== Math.sign(last) && last !== 0) signChanges++;
+    if (kick) last = kick;
+  }
+  if (signChanges > 2) throw new Error(`Pulse camera kick oscillates (${signChanges} sign changes)`);
 }
 const openPulseDistance = pulseBurstDistance(620, Infinity, false);
 const atmosphericPulseDistance = pulseBurstDistance(620, 1000, true);
@@ -78,20 +95,40 @@ if (Math.abs(flightBoostSpeedLimit(620, 0, 1) - 6832.4) > 1e-8
   throw new Error('RMB boost governor no longer owns the HUD full-scale speed');
 }
 
-// Warp travel is monotonic but allocates the final phase to a decisive brake:
-// by 88% it is already at 98.5%, leaving only a short arrival settle.
-let lastWarpProgress = -1;
-for (let i = 0; i <= 100; i++) {
-  const progress = warpTravelProgress(i / 100);
-  if (progress + 1e-9 < lastWarpProgress || progress < 0 || progress > 1.000001) {
-    throw new Error(`Warp travel curve is invalid at ${i}%`);
+// Warp is one continuous shot: no channel may jump between frames at any
+// phase boundary, the destination is swapped while the tunnel is opaque, and
+// the approach brakes to exactly zero speed at the authored framing.
+for (const distance of [2e11, 5e12, 8e13]) {
+  const plan = warpPlan(distance);
+  const dt = 1 / 120;
+  const limits = { streak: 0.05, aberr: 0.05, tunnel: 0.05, fov: 0.9, blur: 0.05, endGlow: 0.12, colorMix: 0.05 };
+  let previous = warpChannels(0, plan);
+  for (let t = dt; t <= plan.total; t += dt) {
+    const current = warpChannels(t, plan);
+    for (const [key, limit] of Object.entries(limits)) {
+      if (Math.abs(current[key] - previous[key]) > limit) {
+        throw new Error(`Warp channel ${key} jumps at ${t.toFixed(3)} s (${previous[key]} -> ${current[key]})`);
+      }
+    }
+    previous = current;
   }
-  lastWarpProgress = progress;
-}
-if (warpTravelProgress(0.08) < 0.044
-    || warpTravelProgress(0.72) < 0.89
-    || warpTravelProgress(0.88) < 0.985) {
-  throw new Error('Warp arrival brake no longer lands in the authored timing window');
+  const atSwap = warpChannels(plan.swapAt, plan);
+  if (atSwap.tunnel < 0.999 || atSwap.mouth > 0) throw new Error('Warp swaps the destination while the tunnel is not opaque');
+  let lastRemaining = 1;
+  for (let t = 0; t <= plan.total; t += dt) {
+    const remaining = warpApproachRemaining(t, plan);
+    if (remaining > lastRemaining + 1e-12) throw new Error('Warp approach is not monotonic');
+    lastRemaining = remaining;
+  }
+  const endSpeed = (warpApproachRemaining(plan.total - dt, plan) - warpApproachRemaining(plan.total, plan)) / dt;
+  if (warpApproachRemaining(plan.total, plan) > 1e-12 || endSpeed > 1e-6) {
+    throw new Error('Warp approach does not brake to rest at the arrival framing');
+  }
+  if (warpDepartureTravel(0, plan) !== 0) throw new Error('Warp departure does not start at rest');
+  const settled = warpChannels(plan.total, plan);
+  if (settled.streak > 1e-6 || settled.tunnel > 1e-6 || Math.abs(settled.fov) > 1e-6) {
+    throw new Error('Warp visuals do not settle at arrival');
+  }
 }
 
 // Landing is a world-space third-person shot, with enough authored clearance

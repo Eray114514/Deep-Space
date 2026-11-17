@@ -9,7 +9,8 @@ import { ForegroundPass } from './foreground-pass.js';
 import { VolumetricPass, lightBatchNoLongerPrepared } from './volumetric-pass-webgl.js';
 import { LiteCloudPass } from './cloud/lite-cloud-pass.js';
 import { AtmospherePass } from './atmosphere-pass-webgl.js';
-import { RiftDistortionShader, WarpDriveShader } from './legacy-post-shaders.js';
+import { RiftDistortionShader } from './legacy-post-shaders.js';
+import { TransitShader } from './transit-shader.js';
 import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
 import {CloudLightBank} from './cloud/cloud-light-bank.js';
@@ -125,11 +126,10 @@ export class GameLegacyPipeline {
     this.cloudPass = liteClouds ? new LiteCloudPass(camera, this.atmospherePass, liteCloudOptions) : null;
     if (this.cloudPass) this.composer.addPass(this.cloudPass);
 
-    this.warp = new ShaderPass(WarpDriveShader);
+    // Pulse/warp transit: tunnel, fold and motion blur of the lit scene. It
+    // runs before the foreground ship pass so the hull stays in front of it.
+    this.warp = new ShaderPass(TransitShader);
     this.warp.enabled = false;
-    aliasUniforms(this.warp.uniforms, {
-      time: 'uTime', warp: 'uWarp', pulse: 'uPulse', arrival: 'uArrival', aspect: 'uAspect',
-    });
     this.composer.addPass(this.warp);
 
     this.foregroundPass = new ForegroundPass(

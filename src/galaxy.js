@@ -16,6 +16,7 @@ import { ArtificialHabitat, createCivilizationVisual, disposeCivilizationVisual 
 import { applySystemBodyTuning } from './world-config.js';
 import { adaptedStellarRgb, buildStellarLightField, referenceStellarTemperature } from './stellar-radiometry.js';
 import { SpaceRadiance } from './space-radiance.js';
+import { buildStarflowGeometry, makeStarflowBackdropMaterial, makeStarflowStarMaterial } from './starflow.js';
 
 export { CELL } from './galaxy-layout.js';
 
@@ -29,78 +30,8 @@ const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _extC = new THREE.Color();
 
-// Every star in the sky is a real lattice star. Apparent size and brightness
-// fall off with true distance (computed in view space, where the f64 group
-// offset has already been applied).
-function makeStarPointsMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      uDim: { value: 0 },
-      uPixelRatio: { value: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2) },
-      uProj: { value: 600 },
-    },
-    vertexShader: /* glsl */`
-      uniform float uPixelRatio;
-      uniform float uProj;
-      attribute float aSize;
-      varying vec3 vColor;
-      varying float vBright;
-      void main() {
-        vColor = color;
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        float dist = length(mv.xyz);
-        float discPx = 1.2e7 * aSize * uProj / max(dist, 1.0);
-        gl_PointSize = clamp(max(1.8 + aSize * 0.55, discPx), 1.8, 28.0) * uPixelRatio;
-        vBright = clamp(2.2e10 / max(dist, 1.0), 0.42, 1.0)
-          * (1.0 - smoothstep(7.5e10, 9.2e10, dist));
-        gl_Position = projectionMatrix * mv;
-      }`,
-    fragmentShader: /* glsl */`
-      uniform float uDim;
-      varying vec3 vColor;
-      varying float vBright;
-      void main() {
-        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-        float a = smoothstep(1.0, 0.15, r);
-        gl_FragColor = vec4(vColor * (1.0 + 0.5 * (1.0 - r)), 1.0)
-          * a * vBright * (1.0 - uDim * 0.97);
-      }`,
-    vertexColors: true,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  });
-}
-
-function makeBackdropPointsMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: { uDim: { value: 0 } },
-    vertexShader: /* glsl */`
-      attribute float aSize;
-      attribute float aAlpha;
-      varying vec3 vColor;
-      varying float vAlpha;
-      void main() {
-        vColor = color;
-        vAlpha = aAlpha;
-        gl_PointSize = aSize;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: /* glsl */`
-      uniform float uDim;
-      varying vec3 vColor;
-      varying float vAlpha;
-      void main() {
-        float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
-        float a = smoothstep(1.0, 0.1, r);
-        gl_FragColor = vec4(vColor * 0.78, a * vAlpha * (1.0 - uDim * 0.985));
-      }`,
-    vertexColors: true,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  });
-}
+// Every star in the sky is a real lattice star, drawn through starflow.js so
+// a pulse or a warp streaks the actual sky instead of a screen overlay.
 
 function glowTexture(size = 128, inner = 0.0, tight = false) {
   const canvas = document.createElement('canvas');
@@ -281,13 +212,13 @@ export class Universe {
       sizes[i] = rand() < 0.94 ? 1 : 1.45 + rand() * 0.8;
       alphas[i] = 0.26 + Math.pow(rand(), 2.4) * 0.68;
     }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-    geometry.setAttribute('aAlpha', new THREE.BufferAttribute(alphas, 1));
-    this.backdropMaterial = makeBackdropPointsMaterial();
-    this.backdropMesh = new THREE.Points(geometry, this.backdropMaterial);
+    const geometry = buildStarflowGeometry(positions, {
+      aColor: { array: colors, itemSize: 3 },
+      aSize: { array: sizes, itemSize: 1 },
+      aAlpha: { array: alphas, itemSize: 1 },
+    });
+    this.backdropMaterial = makeStarflowBackdropMaterial();
+    this.backdropMesh = new THREE.Mesh(geometry, this.backdropMaterial);
     this.backdropMesh.frustumCulled = false;
     this.backdropMesh.renderOrder = -10;
     this.scene.add(this.backdropMesh);
@@ -417,12 +348,12 @@ export class Universe {
       col[i * 3] = s.color.r; col[i * 3 + 1] = s.color.g; col[i * 3 + 2] = s.color.b;
       siz[i] = s.radius / 6e6;           // true stellar radius scale
     });
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    geo.setAttribute('aSize', new THREE.BufferAttribute(siz, 1));
-    if (!this.starMaterial) this.starMaterial = makeStarPointsMaterial();
-    this.nearStarsMesh = new THREE.Points(geo, this.starMaterial);
+    const geo = buildStarflowGeometry(pos, {
+      aColor: { array: col, itemSize: 3 },
+      aSize: { array: siz, itemSize: 1 },
+    });
+    if (!this.starMaterial) this.starMaterial = makeStarflowStarMaterial();
+    this.nearStarsMesh = new THREE.Mesh(geo, this.starMaterial);
     this.nearStarsMesh.frustumCulled = false;
     this.nearStarsMesh.renderOrder = -8;
     this.scene.add(this.nearStarsMesh);

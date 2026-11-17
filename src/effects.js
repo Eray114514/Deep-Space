@@ -66,34 +66,6 @@ export function landingDescentProgress(t) {
   return 1 - Math.pow(1 - k, 2.35);
 }
 
-function hermite(t, p0, p1, m0, m1, span) {
-  const t2 = t * t;
-  const t3 = t2 * t;
-  return (2 * t3 - 3 * t2 + 1) * p0
-    + (t3 - 2 * t2 + t) * m0 * span
-    + (-2 * t3 + 3 * t2) * p1
-    + (t3 - t2) * m1 * span;
-}
-
-// Staged motion keeps the opening charge, covers most of the route at speed,
-// then brakes hard into a brief final settle instead of spending the last
-// quarter of the jump in an indistinct smootherstep slowdown.
-export function warpTravelProgress(t) {
-  const k = THREE.MathUtils.clamp(t, 0, 1);
-  const stops = [
-    [0.00, 0.000, 0.00],
-    [0.08, 0.045, 1.20],
-    [0.62, 0.790, 1.55],
-    [0.86, 0.982, 0.38],
-    [1.00, 1.000, 0.00],
-  ];
-  for (let i = 1; i < stops.length; i++) {
-    const a = stops[i - 1], b = stops[i];
-    if (k <= b[0]) return hermite((k - a[0]) / (b[0] - a[0]), a[1], b[1], a[2], b[2], b[0] - a[0]);
-  }
-  return 1;
-}
-
 // ============================================================================
 // Sky dome: a camera-centred gradient hemisphere — horizon glow, zenith
 // depth, a sun halo — blended in by atmosphere density and daylight.

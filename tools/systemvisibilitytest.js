@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as THREE from 'three';
+import * as transit from '../src/transit.js';
 
 const mainPath = process.argv.find(value => value.startsWith('--main-source='))?.slice('--main-source='.length) || 'src/main.js';
 const bytes = await readFile(mainPath), main = bytes.toString(), verifier = await readFile(new URL(import.meta.url));
@@ -125,9 +126,11 @@ function adoptionFixture() {
     nav: { pos: new THREE.Vector3(0, 0, 500), quat: new THREE.Quaternion(), vel: new THREE.Vector3() }, camera: new THREE.PerspectiveCamera(),
     ui: { beginWarpPower() {}, showArrival() {}, setHint() {} }, spaceCtl: {}, clock: { elapsedTime: 0 }, celestialClock: { hours: 0 },
     performance: { now: () => 1000 }, clamp: (value, low, high) => Math.max(low, Math.min(high, value)),
-    smoothstep: (low, high, value) => Math.max(0, Math.min(1, (value - low) / (high - low))), warpTravelProgress: value => value,
+    smoothstep: (low, high, value) => Math.max(0, Math.min(1, (value - low) / (high - low))), ...transit,
+    TRANSIT_COOL: new THREE.Color(0.55, 0.7, 1), transitColorA: new THREE.Color(), transitColorB: new THREE.Color(),
+    shipView: { fovOffset: () => 0 }, nodePipeline: {},
     lookQuatAt: (_from, _to, out) => out.identity(), blackHoleArrivalDistance: () => 10,
-    universe: { system: source, fadingSystem: null, relativizeSystem() {}, adoptSystem(prepared) { this.fadingSystem = this.system;this.system = prepared;return prepared; } },
+    universe: { system: source, fadingSystem: null, relativizeSystem() {}, planets: () => [], adoptSystem(prepared) { this.fadingSystem = this.system;this.system = prepared;return prepared; } },
     deferredSystemWarmQueue: [], transferredPreparedDestination: {}, retiredRiftSystem: null, cancelPulseBurst() {},
     riftEntranceUniv: new THREE.Vector3(), riftTargetUniv: new THREE.Vector3(), riftPreviewOriginUniv: new THREE.Vector3(),
     riftOrientation: new THREE.Quaternion(), riftAssistQuat: new THREE.Quaternion(), prevNavPos: new THREE.Vector3(), _v2: new THREE.Vector3(), _v3: new THREE.Vector3(),
@@ -145,7 +148,7 @@ function adoptionFixture() {
 await test('stellar warp transfers standalone ownership and retains deferred non-target bodies', () => {
   const f = adoptionFixture();let step;
   f.context.addTween = (_duration, update) => { step = update; };
-  load('warpTo', f.context)(f.destination.star, f.destination.body.bodyId, f.destination);step(.2);f.verify();
+  load('warpTo', f.context)(f.destination.star, f.destination.body.bodyId, f.destination);step(.6);f.verify();
 });
 await test('an early stellar warp hides sites produced while finishing the prepared target, then adopts them', () => {
   const f = adoptionFixture(), sites = f.destination.artificialSites;let step;
@@ -159,7 +162,7 @@ await test('an early stellar warp hides sites produced while finishing the prepa
   f.context.addTween = (_duration, update) => { step = update; };
   load('warpTo', f.context)(f.destination.star, f.destination.body.bodyId, f.destination);step(.05);
   assert.equal(f.destination.orphan.visible, false);assert.equal(f.destination.body.group.visible, false);assert.equal(f.context.universe.system, f.source);
-  step(.2);f.verify();
+  step(.6);f.verify();
 });
 await test('rift crossing transfers standalone ownership and retains deferred non-target bodies', () => {
   const f = adoptionFixture();f.context.riftPreviewSystem = f.destination;
