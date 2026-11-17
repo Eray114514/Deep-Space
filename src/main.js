@@ -7,6 +7,7 @@ import { selectStellarOccluders } from './stellar-occlusion.js';
 
 import * as THREE from 'three';
 import { StarSystem, Universe } from './galaxy.js';
+import { computeBlackHoleBasis } from './black-hole.js';
 import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, setPxPerRad,
   setTerrainScreenError } from './quadtree.js';
 import { SpaceControls, WalkControls, guidePlanetApproach, keys,
@@ -2892,15 +2893,27 @@ function selectRouteBody(systemSpec, bodyId = null) {
 
 function blackHoleArrivalDistance(body) {
   return body.type === 'blackHole'
-    ? body.accretionRadius * 2.75
+    ? body.accretionRadius * 2.15
     : body.radius * PLANET_ARRIVAL_FACTOR;
 }
 
+function shapeBlackHoleApproachDirection(direction, spec) {
+  const basis = computeBlackHoleBasis(spec);
+  const planar = direction.clone().projectOnPlane(basis.normal);
+  if (planar.lengthSq() < 1e-4) planar.copy(basis.forward);
+  planar.normalize();
+  const sign = direction.dot(basis.normal) < -0.05 ? -1 : 1;
+  const elev = clamp(Math.abs(direction.dot(basis.normal)), 0.115, 0.155);
+  return planar.multiplyScalar(Math.sqrt(1 - elev * elev))
+    .addScaledVector(basis.normal, sign * elev)
+    .normalize();
+}
+
 function approachBlackHole(blackHole) {
-  const direction = nav.pos.clone().sub(blackHole.posUniv);
-  if (direction.lengthSq() < 1) direction.set(0.28, 0.12, 1);
-  direction.normalize();
-  nav.pos.copy(blackHole.posUniv).addScaledVector(direction, blackHole.spec.accretionRadius * 2.75);
+  const rawDir = nav.pos.clone().sub(blackHole.posUniv);
+  if (rawDir.lengthSq() < 1) rawDir.set(0.28, 0.24, 1);
+  const direction = shapeBlackHoleApproachDirection(rawDir.normalize(), blackHole.spec);
+  nav.pos.copy(blackHole.posUniv).addScaledVector(direction, blackHoleArrivalDistance(blackHole.spec));
   nav.vel.set(0, 0, 0);
   lookQuatAt(nav.pos, blackHole.posUniv, nav.quat);
   focusPlanet = null;
@@ -2940,6 +2953,9 @@ function routeArrival(star, bodyId = null, forwardHint = null) {
     const polarBias = new THREE.Vector3(0, 1, 0).projectOnPlane(approach);
     if (polarBias.lengthSq() < 0.01) polarBias.set(1, 0, 0).projectOnPlane(approach);
     approach.addScaledVector(polarBias.normalize(), 0.16).normalize();
+    if (body.type === 'blackHole') {
+      approach.copy(shapeBlackHoleApproachDirection(approach, body));
+    }
   } else {
     approach = forwardHint
       ? forwardHint.clone().normalize().negate()
@@ -5209,6 +5225,20 @@ function frame(rafTs) {
       nav.vel.addScaledVector(_v, Math.max(900, -nav.vel.dot(_v) + 900));
       ui.setHint('压力临界 · 自动驾驶强制拉升', true);
       cancelPulseBurst();
+    }
+    const nearBh = nearbyBlackHole();
+    if (nearBh) {
+      _v.copy(nav.pos).sub(nearBh.posUniv);
+      const bhDist = _v.length();
+      const minSafeRadius = nearBh.R * 2.85;
+      if (bhDist < minSafeRadius) {
+        if (bhDist < 1) _v.set(0, 0.25, 1);
+        _v.normalize();
+        nav.pos.copy(nearBh.posUniv).addScaledVector(_v, minSafeRadius * 1.06);
+        nav.vel.addScaledVector(_v, Math.max(1800, -nav.vel.dot(_v) + 1800));
+        ui.setHint('时空曲率临界 · 引力护航强制脱离光子球', true);
+        cancelPulseBurst();
+      }
     }
   } else if (!paused && state === 'landed') {
     if (landedRequireKeyRelease && !keys.KeyW && !keys.Space) landedRequireKeyRelease = false;

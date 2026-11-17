@@ -39,11 +39,13 @@ function glowTexture(size = 128, inner = 0.0, tight = false) {
   const ctx = canvas.getContext('2d');
   const g = ctx.createRadialGradient(size / 2, size / 2, size * 0.02, size / 2, size / 2, size / 2);
   if (tight) {
-    // a compact corona: bright core, fast falloff — the star's blowout is
-    // bloom's job, and bloom is correctly occluded by planets
+    // a compact corona: bright core, C1-smooth Gaussian tail to zero so close
+    // system stars never exhibit a Mach-band circular edge against deep space
     g.addColorStop(0, 'rgba(255,255,255,1)');
-    g.addColorStop(0.12, 'rgba(255,255,255,0.6)');
-    g.addColorStop(0.35, 'rgba(255,255,255,0.12)');
+    g.addColorStop(0.12, 'rgba(255,255,255,0.58)');
+    g.addColorStop(0.32, 'rgba(255,255,255,0.14)');
+    g.addColorStop(0.58, 'rgba(255,255,255,0.028)');
+    g.addColorStop(0.80, 'rgba(255,255,255,0.004)');
     g.addColorStop(1, 'rgba(255,255,255,0)');
   } else {
     g.addColorStop(0, 'rgba(255,255,255,1)');
@@ -53,7 +55,9 @@ function glowTexture(size = 128, inner = 0.0, tight = false) {
   }
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
-  return new THREE.CanvasTexture(canvas);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 // cloudy blotch texture: dozens of soft blobs accumulated, then masked so
@@ -546,7 +550,7 @@ export class StarSystem {
     const s = this._specs[this._buildIdx++];
     const frame = this.frames.get(s.bodyId);
     if (s.type === 'blackHole') {
-      const blackHole = new BlackHole({ spec: s, posUniv: frame.position, fadeIn: this._fadeInPlanets });
+      const blackHole = new BlackHole({ spec: s, posUniv: frame.position, fadeIn: this._fadeInPlanets, scene: this.universe.scene });
       blackHole.orbit = s.orbit;
       blackHole.orbitPeriodHours = s.orbit.periodHours;
       blackHole.positionAt = (time, out = new THREE.Vector3()) => this.positionAt(s.bodyId, time, out);

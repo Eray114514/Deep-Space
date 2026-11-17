@@ -11,6 +11,7 @@ import { LiteCloudPass } from './cloud/lite-cloud-pass.js';
 import { AtmospherePass } from './atmosphere-pass-webgl.js';
 import { TransitShader } from './transit-shader.js';
 import { PortalCompositePass } from './portal/portal-composite-pass.js';
+import { BlackHolePass } from './black-hole-pass.js';
 import { gradePass } from './halcyon/gfx/grade.js';
 import { hardenBloom } from './halcyon/gfx/sanitize.js';
 import {CloudLightBank} from './cloud/cloud-light-bank.js';
@@ -120,6 +121,11 @@ export class GameLegacyPipeline {
     // the lit scene. The legacy VolumetricPass above only exists with ?clouds=legacy.
     this.cloudPass = liteClouds ? new LiteCloudPass(camera, this.atmospherePass, liteCloudOptions) : null;
     if (this.cloudPass) this.composer.addPass(this.cloudPass);
+
+    // Relativistic black hole & background star lensing (enabled only when a
+    // compact object is visible in the scene; zero cost in planetary systems).
+    this.blackHolePass = new BlackHolePass(camera, this.atmospherePass);
+    this.composer.addPass(this.blackHolePass);
 
     // Portal openings: the far side (rendered by a second pipeline instance)
     // replaces the pixels whose view ray meets the opening before any opaque
@@ -370,6 +376,9 @@ export class GameLegacyPipeline {
         // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
         this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
           this.volumePass?.activePlanet,this.profiler);
+        if (this.blackHolePass && (this.scene?.userData?.blackHoles?.size || this.blackHolePass.activeBlackHole)) {
+          this.blackHolePass.syncFromScene(this.scene);
+        }
         this.composer.render();
       } catch(error) {
         failed=true;throw error;
@@ -575,6 +584,7 @@ export class GameLegacyPipeline {
       }
       addQuad(this.grade?.fsQuad);
       addQuad(this.warp?.fsQuad);
+      addQuad(this.blackHolePass?.quad);
       addQuad(this.portalComposite?.quad);
       if (!group.children.length) return Promise.resolve(group);
       const saved = this.renderer.getRenderTarget();
@@ -616,6 +626,7 @@ export class GameLegacyPipeline {
     this.cloudPass?.dispose();
     this.temporalAA?.dispose();
     this.atmospherePass.dispose();
+    this.blackHolePass?.dispose?.();
     this.parkedInteriorPass?.dispose?.();
     this.foregroundPass.dispose?.();
     this.target.dispose();

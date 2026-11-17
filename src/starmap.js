@@ -248,6 +248,65 @@ function makeSoftDisc(size = 256, rgb = '215,200,170') {
   return t;
 }
 
+// Screen-space miniature relativistic black-hole glyph for the galaxy chart:
+// dark event-horizon core, asymmetric Doppler photon ring, and subtle warm halo,
+// keeping the exact cartographic scale discipline of ordinary star sprites.
+function makeBlackHoleMarkerTexture(size = 128) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c = size * 0.5;
+  ctx.clearRect(0, 0, size, size);
+
+  const halo = ctx.createRadialGradient(c, c, size * 0.14, c, c, size * 0.48);
+  halo.addColorStop(0, 'rgba(255, 208, 152, 0.34)');
+  halo.addColorStop(0.38, 'rgba(232, 146, 78, 0.14)');
+  halo.addColorStop(1, 'rgba(20, 12, 8, 0)');
+  ctx.fillStyle = halo;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.save();
+  ctx.translate(c, c);
+  ctx.rotate(-0.22);
+
+  // Subtle equatorial accretion sweep
+  const discGrad = ctx.createLinearGradient(-size * 0.38, 0, size * 0.38, 0);
+  discGrad.addColorStop(0, 'rgba(255, 244, 222, 0)');
+  discGrad.addColorStop(0.24, 'rgba(255, 245, 224, 0.85)');
+  discGrad.addColorStop(0.5, 'rgba(255, 206, 142, 0.55)');
+  discGrad.addColorStop(0.78, 'rgba(226, 124, 58, 0.48)');
+  discGrad.addColorStop(1, 'rgba(180, 74, 28, 0)');
+  ctx.strokeStyle = discGrad;
+  ctx.lineWidth = size * 0.036;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, size * 0.34, size * 0.085, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Pure dark event-horizon shadow core
+  ctx.fillStyle = '#030507';
+  ctx.beginPath();
+  ctx.arc(0, 0, size * 0.155, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Crisp asymmetric photon ring
+  const ringGrad = ctx.createLinearGradient(-size * 0.2, -size * 0.08, size * 0.2, size * 0.08);
+  ringGrad.addColorStop(0, '#fff7e6');
+  ringGrad.addColorStop(0.45, '#f6cb8e');
+  ringGrad.addColorStop(1, '#cf7638');
+  ctx.strokeStyle = ringGrad;
+  ctx.lineWidth = size * 0.028;
+  ctx.beginPath();
+  ctx.arc(0, 0, size * 0.168, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
+}
+
 export class StarMap {
   constructor({ getUniverse, getNav, getSeed, getState, getTime, onRequestClose, onWarpTarget }) {
     this.getUniverse = getUniverse;
@@ -431,6 +490,7 @@ export class StarMap {
     this.starTexture = makePointTexture();
     this.selectionTexture = makeSelectionTexture();
     this.softTexture = makeSoftDisc();
+    this.blackHoleMarkerTexture = makeBlackHoleMarkerTexture();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -576,6 +636,7 @@ export class StarMap {
     this.starTexture?.dispose();
     this.selectionTexture?.dispose();
     this.softTexture?.dispose();
+    this.blackHoleMarkerTexture?.dispose();
     disposeObject(this.world);
     this.renderer?.dispose();
     this.renderer?.forceContextLoss?.();
@@ -854,15 +915,17 @@ export class StarMap {
       const discs = new THREE.InstancedMesh(geometry, material, layerStars.length);
       const matrix = new THREE.Matrix4();
       const scale = new THREE.Vector3(1, 1, 1);
+      const zeroScale = new THREE.Vector3(0, 0, 0);
       const rotation = new THREE.Quaternion();
       for (let i = 0; i < layerStars.length; i++) {
-        matrix.compose(positions[i], rotation, scale);
+        matrix.compose(positions[i], rotation, layerStars[i].kind === 'blackHole' ? zeroScale : scale);
         discs.setMatrixAt(i, matrix);
         discs.setColorAt(i, layerStars[i].color.clone().lerp(new THREE.Color(0xffffff), 0.32));
       }
       discs.instanceMatrix.needsUpdate = true;
       if (discs.instanceColor) discs.instanceColor.needsUpdate = true;
       discs.frustumCulled = false;
+      discs.userData.stars = layerStars;
       discs.userData.starPositions = positions;
       discs.userData.pixelSize = pixelSize;
       discs.userData.worldSize = 0;
@@ -902,9 +965,9 @@ export class StarMap {
     }));
     this.world.add(this.galaxyBackdrop);
 
-    // Authored destinations must be discoverable without hunting through
-    // hundreds of identical point sprites.  Keep the black hole marked at
-    // every zoom level with a compact lensing target, not a second star dot.
+    // Authored destinations remain clearly identifiable at every zoom level
+    // using a screen-space miniature relativistic glyph rather than oversized
+    // world-space rings that swallow neighboring star systems.
     for (const destination of this.getUniverse().specialDestinations) {
       const localIndex = stars.findIndex((star) => star.id === destination.id);
       const globalIndex = globalStars.findIndex((star) => star.id === destination.id);
@@ -914,23 +977,15 @@ export class StarMap {
       marker.userData.localPosition = this.localMapPositions[localIndex];
       marker.userData.globalPosition = this.globalMapPositions[globalIndex];
       marker.name = `special-destination:${destination.id}`;
-      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: this.softTexture, color: 0xff7f32, transparent: true, opacity: 0.38,
-        blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      const emblem = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.blackHoleMarkerTexture,
+        transparent: true,
+        depthWrite: false,
+        fog: false,
+        toneMapped: false,
       }));
-      glow.scale.set(9, 9, 1);
-      marker.add(glow);
-      for (const [radius, opacity] of [[1.55, 0.92], [2.35, 0.34]]) {
-        const ring = new THREE.Mesh(
-          new THREE.TorusGeometry(radius, radius === 1.55 ? 0.12 : 0.055, 8, 72),
-          new THREE.MeshBasicMaterial({
-            color: 0xffb36a, transparent: true, opacity,
-            blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-          }),
-        );
-        ring.rotation.x = Math.PI / 2;
-        marker.add(ring);
-      }
+      emblem.renderOrder = 4;
+      marker.add(emblem);
       this.world.add(marker);
       this.centralMarker = marker;
     }
@@ -974,8 +1029,10 @@ export class StarMap {
     this.updateStarLayerScale(this.localStarLight, distance);
     this.updateSelectionMarkerScale(distance);
     if (this.centralMarker) {
+      const worldPerPixel = 2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5))
+        / Math.max(1, this.renderer.domElement.clientHeight);
       this.centralMarker.position.copy(this.centralMarker.userData.globalPosition);
-      this.centralMarker.scale.setScalar(THREE.MathUtils.lerp(1, 0.72, amount));
+      this.centralMarker.scale.setScalar(worldPerPixel * THREE.MathUtils.lerp(24, 19, amount));
     }
     const active = amount >= 0.55;
     const activeChanged = active !== this.overviewActive;
@@ -998,8 +1055,14 @@ export class StarMap {
     const matrix = new THREE.Matrix4();
     const rotation = new THREE.Quaternion();
     const scale = new THREE.Vector3(worldSize, worldSize, worldSize);
+    const zeroScale = new THREE.Vector3(0, 0, 0);
+    const layerStars = layer.userData.stars;
     for (let i = 0; i < layer.userData.starPositions.length; i++) {
-      matrix.compose(layer.userData.starPositions[i], rotation, scale);
+      matrix.compose(
+        layer.userData.starPositions[i],
+        rotation,
+        layerStars?.[i]?.kind === 'blackHole' ? zeroScale : scale,
+      );
       layer.setMatrixAt(i, matrix);
     }
     layer.instanceMatrix.needsUpdate = true;
@@ -1177,8 +1240,9 @@ export class StarMap {
     this.els.targetName.textContent = siteLabel ? `${preview.properName} · ${siteLabel}` : preview.properName;
     this.els.classBox.textContent = cls.code;
     this.els.classBox.style.background = preview.isBlackHoleSystem
-      ? 'radial-gradient(circle, #000 34%, #ffae67 38%, #4a1608 62%, #050709 68%)'
-      : `#${preview.stars[0] ? new THREE.Color(preview.stars[0].color).getHexString() : '#17e31a'}`;
+      ? '#e8bd82'
+      : `#${preview.stars[0] ? new THREE.Color(preview.stars[0].color).getHexString() : '17e31a'}`;
+    this.els.classBox.style.color = '#041007';
     this.els.surveyValue.textContent = `${survey}%`;
     this.els.surveyBar.style.setProperty('--survey-progress', this.els.surveyValue.textContent);
     this.els.surveyBar.title = survey === 100 ? '已到访：完整星系数据' : `远程传感器覆盖 · ${status.advisory}`;
@@ -1199,26 +1263,34 @@ export class StarMap {
   buildGlyph(preview) {
     const allPrimaries = preview.bodies.filter((body) => !body.isMoon);
     const compact = allPrimaries.find((body) => body.type === 'blackHole');
-    const primaries = allPrimaries.filter((body) => body.type !== 'blackHole').slice(0, compact ? 6 : 7);
-    if (compact) primaries.push(compact);
+    const primaries = allPrimaries.filter((body) => body.type !== 'blackHole').slice(0, 7);
     const starColor = new THREE.Color(preview.stars[0]?.color ?? 0xffffff);
-    const binary = preview.stars.length > 1;
+    const binary = !preview.isBlackHoleSystem && preview.stars.length > 1;
     const starBackground = binary
       ? `linear-gradient(100deg, #${starColor.getHexString()} 0 48%, #${new THREE.Color(preview.stars[1].color).getHexString()} 52% 100%)`
       : `#${starColor.getHexString()}`;
-    const mainBackground = preview.isBlackHoleSystem
-      ? 'radial-gradient(circle, #000 0 38%, #ffd3a0 41%, #ff7a32 46%, #170803 58%, #050709 70%)'
-      : starBackground;
-    const parts = [`<i class="gMain" style="background:${mainBackground};box-shadow:0 0 18px #${preview.isBlackHoleSystem ? 'ff934f' : starColor.getHexString()}88"></i>`];
-    // distribute planet slots outward from the star, alternating sides
     const slots = [57, 31.5, 68, 22, 78, 12, 86];
-    primaries.forEach((body, i) => {
-      const size = body.type === 'blackHole' ? 18 : 10 + Math.min(16, (body.radius / 310_000) * 16) * (body.type === 'gasGiant' || body.type === 'iceGiant' ? 1.35 : 1);
-      const color = TYPE_COLORS[body.type] || 0x9ea7aa;
-      parts.push(`<i class="gNode" role="button" data-glyph-index="${body.index}" title="${body.name}" style="left:${slots[i] ?? 90}%;width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:rgba(13,19,27,.82);border-color:#${new THREE.Color(color).getHexString()}"></i>`);
-    });
+    const parts = [];
+    if (preview.isBlackHoleSystem) {
+      const mainAttrs = compact
+        ? ` role="button" data-glyph-index="${compact.index}" title="${compact.name} · 单击查看"`
+        : '';
+      parts.push(`<i class="gMain gMainBh"${mainAttrs}></i>`);
+      preview.stars.slice(0, 6).forEach((capturedStar, i) => {
+        const cHex = new THREE.Color(capturedStar.color).getHexString();
+        const size = 12 + Math.min(5, (capturedStar.radiusRender / 7e6) * 5);
+        parts.push(`<i class="gNode gCapturedStar" title="${capturedStar.displayName || '伴星'}" style="left:${slots[i] ?? 86}%;width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:#${cHex};border-color:#fff6e5;box-shadow:0 0 8px #${cHex}88"></i>`);
+      });
+    } else {
+      parts.push(`<i class="gMain" style="background:${starBackground};box-shadow:0 0 18px #${starColor.getHexString()}88"></i>`);
+      primaries.forEach((body, i) => {
+        const size = 10 + Math.min(16, (body.radius / 310_000) * 16) * (body.type === 'gasGiant' || body.type === 'iceGiant' ? 1.35 : 1);
+        const color = TYPE_COLORS[body.type] || 0x9ea7aa;
+        parts.push(`<i class="gNode" role="button" data-glyph-index="${body.index}" title="${body.name}" style="left:${slots[i] ?? 90}%;width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:rgba(13,19,27,.82);border-color:#${new THREE.Color(color).getHexString()}"></i>`);
+      });
+    }
     this.els.glyph.innerHTML = parts.join('');
-    for (const node of this.els.glyph.querySelectorAll('.gNode')) {
+    for (const node of this.els.glyph.querySelectorAll('[data-glyph-index]')) {
       node.addEventListener('click', () => {
         const body = preview.bodies[Number(node.dataset.glyphIndex)];
         if (!body) return;
