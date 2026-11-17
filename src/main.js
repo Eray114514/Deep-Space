@@ -1542,6 +1542,7 @@ window.addEventListener('keydown', (e) => {
   if (!e.repeat && e.code === 'KeyV'
     && (state === 'space' || state === 'warp' || state === 'landed' || state === 'takeoff') && !paused) {
     shipView.toggleView({ scriptedHull: state === 'landed' || state === 'takeoff' });
+    nodePipeline.invalidateTemporalHistory('ship-view-cut');
     ui.setCockpitView(shipView.isCockpit());
     if (state === 'space') ui.setHint(spaceControlHint(), false);
   }

@@ -194,29 +194,17 @@ export class ShipView {
 
   toggleView({ scriptedHull = false } = {}) {
     if (this.shipwalk) return;
-    if (this.parkedSeated || scriptedHull) {
-      // While the hull is parked on a pad or riding a liftoff curve, the hull
-      // stays on its world anchor and the camera glides in ship-local space.
-      this.captureShipLocalCamera(this.parkedCamFrom.p, this.parkedCamFrom.q);
-      this.parkedCamBlend = 0;
-      this.viewMode = this.viewMode === 'cockpit' ? 'chase' : 'cockpit';
-      if (this.viewMode === 'cockpit') {
-        this.freeYaw = 0;
-        this.freePitch = 0;
-      } else {
-        this.parkedOrbitYaw = 0;
-        this.parkedOrbitPitch = 0;
-      }
-      return;
-    }
-    // Both directions start from the pose that is actually on screen.
-    this.viewBlendFrom.p.copy(this.ship.group.position);
-    this.viewBlendFrom.q.copy(this.ship.group.quaternion);
-    this.viewBlend = 0;
+    // V selects a camera mount. Interpolating between these mounts crosses
+    // the rear bulkhead before reaching the pilot's eye.
+    this.viewBlend = 1;
+    this.parkedCamBlend = 1;
     this.viewMode = this.viewMode === 'cockpit' ? 'chase' : 'cockpit';
     if (this.viewMode === 'cockpit') {
       this.freeYaw = 0;
       this.freePitch = 0;
+    } else if (this.parkedSeated || scriptedHull) {
+      this.parkedOrbitYaw = 0;
+      this.parkedOrbitPitch = 0;
     }
   }
 

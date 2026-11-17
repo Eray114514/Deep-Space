@@ -35,21 +35,13 @@ await settle(800);
 await shot('01-chase');
 
 // --- cockpit: press V, wait, capture
-const chasePose = await page.evaluate(() => ({
-  p: NMS._internals.ship.group.position.toArray(),
-  q: NMS._internals.ship.group.quaternion.toArray(),
-}));
-await page.keyboard.press('KeyV');
-await page.waitForFunction(() => {
-  const { viewBlend } = NMS.shipViewState();
-  return viewBlend > 0.04 && viewBlend < 0.96;
-}, null, { timeout: 15000 });
-const viewMid = await page.evaluate(() => ({
-  blend: NMS.shipViewState().viewBlend,
-  p: NMS._internals.ship.group.position.toArray(),
-}));
-await page.waitForFunction('NMS.shipViewState().viewBlend >= 0.999', null, { timeout: 30000 });
-await settle(300);
+for (const mode of ['cockpit', 'chase', 'cockpit']) {
+  await page.keyboard.press('KeyV');
+  const state = await page.evaluate(() => NMS.shipViewState());
+  check(state.viewMode === mode && state.viewBlend === 1 && state.parkedCamBlend === 1,
+    `V cuts directly to the ${mode} mount`);
+  await settle(100);
+}
 const cockpit = await page.evaluate(() => ({
   mode: window.NMS.shipViewState?.().viewMode,
   blend: window.NMS.shipViewState?.().viewBlend,
@@ -67,10 +59,6 @@ const cockpit = await page.evaluate(() => ({
 }));
 console.log('cockpit:', JSON.stringify(cockpit));
 const distance3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-check(viewMid.blend > 0 && viewMid.blend < 1
-    && distance3(chasePose.p, viewMid.p) > 0.5
-    && distance3(viewMid.p, cockpit.p) > 0.5,
-  `V uses one continuous chase-to-cockpit path (mid blend ${viewMid.blend.toFixed(3)})`);
 check(cockpit.glass.exists && cockpit.glass.visible
     && cockpit.glass.cover >= 0.18 && cockpit.glass.envGain >= 0.8,
   `canopy glazing is rendered with bright-scene coverage ${JSON.stringify(cockpit.glass)}`);
