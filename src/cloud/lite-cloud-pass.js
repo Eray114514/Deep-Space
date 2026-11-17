@@ -453,7 +453,10 @@ const marchShader = /* glsl */`
     else if (r0 > uShellBase) { t0 = 0.0; t1 = inner.x > 0.0 ? inner.x : outer.y; }
     else if (!ground) { t0 = inner.y; t1 = outer.y; }
     if (t1 > t0) {
-      t1 = min(t1, t0 + 320000.0);
+      // A ray grazing the limb crosses up to ~700 km of layer. Cut at 320 km,
+      // the far half of the curving deck vanished, and the cut moved with the
+      // camera, so distant clouds appeared and disappeared.
+      t1 = min(t1, t0 + 900000.0);
       float span = t1 - t0;
       // Weather is looked up where the sample is, every few kilometres of
       // travel. Interpolating a handful of samples across the whole ray made
@@ -484,13 +487,21 @@ const marchShader = /* glsl */`
         // ray straight over any cloud thinner than a coarse step.
         bool inside = false;
         int refine = 0, fine = 0;
-        for (int i = 0; i < MARCH_STEPS; i++) {
-          if (t > t1) break;
+        // Long rays (the horizon band from low altitude, the limb from high)
+        // cross hundreds of kilometres of layer; 96 steps ran out before the
+        // far end and the clouds there were missing, at a distance that moved
+        // with the camera. They get up to twice the steps, decided by the
+        // span alone so every pixel's samples stay at the same distances as
+        // its neighbours'. Only that thin band pays for them.
+        float reach = clamp(span / 60000.0, 1.0, 2.0);
+        int steps = int(float(MARCH_STEPS) * reach);
+        for (int i = 0; i < MARCH_STEPS * 2; i++) {
+          if (i >= steps || t > t1) break;
           // Steps grow with distance, but never past a fair share of the
           // span: looking down from 17 km the growth alone reached kilometre
           // steps inside the layer and jumped whole small cumulus, which then
           // came and went from frame to frame with the jitter.
-          float dt = max(dmin, min(0.055 * (t - t0), 1.5 * span / float(MARCH_STEPS)));
+          float dt = max(dmin, min(0.055 * (t - t0), (1.2 + 0.3 * reach) * span / float(steps)));
           // Only the first few samples past an entry are fine: a grazing ray
           // through a thin deck stayed "inside" for hundreds of steps and ran
           // out of budget before the far half of the sky.
@@ -500,7 +511,12 @@ const marchShader = /* glsl */`
           // which skipped thin cloud on some frames and not others: the whole
           // deck flickered. (The contour terraces that dither was hiding came
           // from steps too long for the layer, fixed by the cap above.)
-          vec3 p = ro + rd * t;
+          // Far steps are kilometres long. Without an offset every pixel samples
+          // the same distances and the clouds are cut into arcs around the
+          // camera that slide as it moves; shifted by a fraction of the step
+          // per pixel and frame, the history averages them out. Near steps
+          // stay put (shifting them made the deck flicker).
+          vec3 p = ro + rd * (t + dt * (jitter - 0.5) * smoothstep(2500.0, 5000.0, dt));
           if (t - tWeather > 3500.0) {
             if (t - tWeather > 7000.0) { tWeather = t; weatherA = weatherAt(p); }
             else { tWeather += 3500.0; weatherA = weatherB; }
