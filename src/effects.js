@@ -217,6 +217,10 @@ export class Ship {
     this.parkedQuat = new THREE.Quaternion();
     this.parkAmt = 0;
     this.landingPose = null;
+    this.hoverMode = null; // null | 'high' | 'extract'
+    this.orbitalStandby = false;
+    this.gearOffsets = [0, 0, 0];
+    this.suppressHoverSway = false;
     // Hero start cinematic: a camera-relative offset that fades to zero as the
     // pull-back runs, so the ship slides into formation from off-screen.
     this.introOffset = new THREE.Vector3();
@@ -610,7 +614,7 @@ export class Ship {
    *  flight, extended for the last half of the descent. */
   updateGear(dt) {
     if (!this.ext?.gear) return;
-    const want = THREE.MathUtils.smoothstep(this.parkAmt, 0.35, 0.85);
+    const want = this.hoverMode ? 0 : THREE.MathUtils.smoothstep(this.parkAmt, 0.35, 0.85);
     const goingDown = want > 0.5;
     if (this.gearGoingDown !== undefined && goingDown !== this.gearGoingDown) {
       this.emit(goingDown ? 'gear-down' : 'gear-up', [0, -0.8, -2.5]);
@@ -621,7 +625,8 @@ export class Ship {
        the same timeline backwards, so the doors shut behind the stowed leg */
     const doorT = THREE.MathUtils.smoothstep(this.gearT, 0.0, 0.35);
     const legT = THREE.MathUtils.smoothstep(this.gearT, 0.3, 1.0);
-    for (const leg of this.ext.gear) {
+    for (let legIdx = 0; legIdx < this.ext.gear.length; legIdx++) {
+      const leg = this.ext.gear[legIdx];
       const stowed = 1 - legT;
       leg.visible = doorT > 0.04;
       /* two joints: the strut swings up about the trunnion while the lower
@@ -635,6 +640,10 @@ export class Ship {
       if (lower) {
         if (leg.userData.nose) lower.rotation.set(-knee * 1.9, 0, 0);
         else lower.rotation.set(0, 0, leg.userData.side * knee * 1.7);
+        if (lower.userData.baseY !== undefined) {
+          const padOffset = (this.gearOffsets?.[legIdx] || 0) * legT * (1 - knee);
+          lower.position.y = lower.userData.baseY + padOffset;
+        }
       }
       for (const door of leg.userData.doors) {
         _gq.setFromAxisAngle(_gz, door.userData.side * -1.815 * (1 - doorT));
@@ -833,13 +842,18 @@ export class Ship {
 
   update(dt, nav, state, speed, warp, boost = 0, flightInput = null, camera = null) {
     this.frameNo = (this.frameNo ?? 0) + 1;
-    const scriptedHull = (state === 'landing' || state === 'takeoff') && !!this.landingPose;
-    const wantsPark = (state === 'walk' || state === 'landing' || state === 'landed' || state === 'boarding' || state === 'shipwalk') && !!this.parkedPosUniv;
+    if (this.orbitalStandby && !this.landingPose) {
+      this.group.visible = false;
+      return;
+    }
+    this.group.visible = true;
+    const scriptedHull = !!this.landingPose;
+    const wantsPark = (state === 'walk' || state === 'skydive' || state === 'landing' || state === 'landed' || state === 'boarding' || state === 'shipwalk') && !!this.parkedPosUniv;
     if (scriptedHull) this.parkAmt = this.landingPose.progress;
     else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
     const foregroundOnly = !scriptedHull && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
       || (state === 'shipwalk' && !this.parkedPosUniv)
-      || (state === 'landing' && this.parkAmt < 0.58));
+      || (state === 'landing' && this.parkAmt < 0.58 && !this.hoverMode));
     this.setForegroundOnly(foregroundOnly);
 
     // The hull's mass response is driven by raw pilot intent, never by speed
@@ -898,8 +912,13 @@ export class Ship {
       this.group.position.copy(this.landingPose.posUniv).sub(nav.pos);
       this.group.quaternion.copy(this.landingPose.quat);
     } else if (this.parkedPosUniv && this.parkAmt > 0.002) {
-      // glide between flying formation and the landing pad
+      // glide between flying formation and the landing/hover anchor
       _sp.copy(this.parkedPosUniv).sub(nav.pos);      // camera-relative pad
+      if (this.hoverMode && !this.suppressHoverSway && state === 'walk') {
+        const hoverBob = Math.sin((this.animT ?? 0) * 1.9) * 0.055;
+        _su.set(0, 1, 0).applyQuaternion(this.parkedQuat);
+        _sp.addScaledVector(_su, hoverBob);
+      }
       const e = this.parkAmt * this.parkAmt * (3 - 2 * this.parkAmt);
       this.group.position.lerpVectors(_sv, _sp, e);
       this.group.quaternion.copy(formQuat).slerp(this.parkedQuat, e);
@@ -909,7 +928,8 @@ export class Ship {
     }
 
     this.lastInput = flightInput;
-    this.updateEngineFx(dt, speed, warp, boost);
+    const effectiveBoost = this.hoverMode || scriptedHull ? Math.max(boost, 0.34) : boost;
+    this.updateEngineFx(dt, speed, warp, effectiveBoost);
     this.updateGear(dt);
     this.updateMotion(dt);
     // the cabin probes are baked in ship space: turn them with the hull

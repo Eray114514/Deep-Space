@@ -21,7 +21,7 @@ const POWER_SYSTEMS = [
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const REDUCED_MOTION = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
-const HUD_HIDDEN_CLASSES = ['hero-active', 'ui-walk', 'ui-shipwalk', 'ui-cinematic-landing', 'travel-cinematic', 'hide-hud', 'starmap-open', 'route-choice-active'];
+const HUD_HIDDEN_CLASSES = ['hero-active', 'ui-walk', 'ui-shipwalk', 'ui-skydive', 'ui-cinematic-landing', 'travel-cinematic', 'hide-hud', 'starmap-open', 'route-choice-active'];
 
 function powerMultiplier(value, baseline, gain) {
   const points = Math.max(0, Number(value) || 0);

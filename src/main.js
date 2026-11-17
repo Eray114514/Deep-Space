@@ -31,7 +31,19 @@ import { landingDescentProgress, SHIP_LANDING_PROFILE,
 import { loadShipModel, loadShipProbes } from './halcyon/ship/model.js';
 import { ShipAudio } from './halcyon/ship/ship-audio.js';
 import { ShipView, SHIP_WALK_EYE_HEIGHT } from './ship-view.js';
-import { findLandingSite, createLandingSequence, createTakeoffSequence } from './ship-landing.js';
+import {
+  GEAR_GROUND_Y,
+  GEAR_PADS,
+  evaluateTripodPad,
+  findLandingSite,
+  createLandingSequence,
+  createHoverEntrySequence,
+  findRecallSite,
+  createRecallFlyInSequence,
+  createAutoDepartSequence,
+  createTakeoffSequence,
+} from './ship-landing.js';
+import { SkydiveController } from './skydive.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
@@ -999,6 +1011,19 @@ const ship = new Ship(scene, {
 const shipView = new ShipView(ship, camera);
 shipView.onHint = (text) => { if (!paused && !starMap?.isOpen) ui.setHint(text, true); };
 shipView.onStep = () => audio.cabinStep();
+const skydiveCtl = new SkydiveController(renderer.domElement, scene, {
+  onDeploy: () => audio.cue('chute-open'),
+  onAadWarning: () => audio.cue('aad-warn'),
+  onLand: ({ planet, posLocal, viewDir, carryHoriz }) => {
+    audio.cue('chute-land');
+    walkCtl.enter(planet, posLocal, viewDir);
+    walkCtl.hSpeed.copy(carryHoriz);
+    walkCtl.grounded = true;
+    planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(planet.frameOrientation).multiply(walkCtl.quat);
+    setState('walk');
+  },
+});
 riftPortal = new SpacePortal({ halfWidth: 512, halfHeight: 360 });
 portalView = new PortalView({
   mainCamera: camera,
@@ -1400,7 +1425,7 @@ function applyTransitVisuals() {
 
 renderer.domElement.addEventListener('pointerdown', () => {
   unlockAudio();
-  if ((state === 'walk' || state === 'shipwalk' || state === 'landed') && !document.pointerLockElement
+  if ((state === 'walk' || state === 'skydive' || state === 'shipwalk' || state === 'landed') && !document.pointerLockElement
     && !window.NMS_NOLOCK && pointerLockInput) {
     renderer.domElement.requestPointerLock();
   }
@@ -1411,7 +1436,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM' || e.code === 'Tab') {
     e.preventDefault();
     if (starMap?.isOpen) closeStarMap();
-    else if (!paused && !['warp', 'landing', 'takeoff', 'flyto'].includes(state)) openStarMap();
+    else if (!paused && !['warp', 'landing', 'takeoff', 'flyto', 'skydive'].includes(state)) openStarMap();
     return;
   }
   if (starMap?.isOpen) {
@@ -1438,6 +1463,10 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (shipView.seatT >= 1) launchParkedShip();
   }
+  if (!e.repeat && e.code === 'Space' && state === 'skydive' && !paused) {
+    e.preventDefault();
+    skydiveCtl.deployParachute({ automatic: false });
+  }
   if (!e.repeat && e.code === 'KeyV'
     && (state === 'space' || state === 'warp' || state === 'landed' || state === 'takeoff') && !paused) {
     shipView.toggleView({ scriptedHull: state === 'landed' || state === 'takeoff' });
@@ -1452,6 +1481,8 @@ window.addEventListener('keydown', (e) => {
       if (shipView.standUp(nav, { landed: true })) setState('shipwalk');
     } else if (state === 'shipwalk') {
       shipView.interact(nav);
+    } else if (state === 'skydive') {
+      skydiveCtl.deployParachute({ automatic: false });
     } else if (state === 'walk' && isNearExteriorRamp()) {
       shipView.toggleRamp();
     }
@@ -1717,7 +1748,7 @@ function clearFlightInput() {
 }
 
 function openStarMap() {
-  if (!starMap || starMap.isOpen || paused || riftRoute || ['warp', 'landing', 'takeoff', 'flyto'].includes(state)) return;
+  if (!starMap || starMap.isOpen || paused || riftRoute || ['warp', 'landing', 'takeoff', 'flyto', 'skydive'].includes(state)) return;
   cancelTimeWarp();
   clearFlightInput();
   spaceCtl.enabled = false;
@@ -1733,9 +1764,9 @@ async function closeStarMap(restoreInput = true) {
   clearFlightInput();
   audio.setPaused(false);
   spaceCtl.enabled = state === 'space';
-  ui.setCrosshair(state === 'space' || state === 'walk');
+  ui.setCrosshair(state === 'space' || state === 'walk' || state === 'skydive');
   if (restoreInput && !window.NMS_NOLOCK && pointerLockInput
-    && ['space', 'walk', 'shipwalk', 'landed'].includes(state)) {
+    && ['space', 'walk', 'skydive', 'shipwalk', 'landed'].includes(state)) {
     try { await renderer.domElement.requestPointerLock(); } catch { /* next click can reacquire */ }
   }
 }
@@ -1762,7 +1793,7 @@ function pauseGame() {
 }
 
 function requestGameplayPointerLock() {
-  if (window.NMS_NOLOCK || !pointerLockInput || !['space', 'walk', 'shipwalk', 'landed'].includes(state)) return Promise.resolve(true);
+  if (window.NMS_NOLOCK || !pointerLockInput || !['space', 'walk', 'skydive', 'shipwalk', 'landed'].includes(state)) return Promise.resolve(true);
   if (document.pointerLockElement === renderer.domElement) return Promise.resolve(true);
   if (pointerLockRequest) return pointerLockRequest;
   pausePanel.classList.add('is-acquiring');
@@ -1796,7 +1827,7 @@ function requestGameplayPointerLock() {
 async function resumeGame() {
   if (!paused) return true;
   let locked = await requestGameplayPointerLock();
-  if (locked && !window.NMS_NOLOCK && pointerLockInput && ['space', 'walk', 'shipwalk', 'landed'].includes(state)) {
+  if (locked && !window.NMS_NOLOCK && pointerLockInput && ['space', 'walk', 'skydive', 'shipwalk', 'landed'].includes(state)) {
     // Some Chromium builds briefly report a successful lock and release it in
     // the following rendering task. Keep the game paused until ownership is
     // stable, so cursor-hidden/controller-disabled can never leak to play.
@@ -1880,7 +1911,7 @@ document.addEventListener('pointerlockchange', () => {
   }
   if (!window.NMS_NOLOCK && pointerLockInput && !document.pointerLockElement
       && !paused && !starMap?.isOpen && !pendingRoute && !riftRoute
-      && (state === 'space' || state === 'walk' || state === 'shipwalk' || state === 'landed')) {
+      && (state === 'space' || state === 'walk' || state === 'skydive' || state === 'shipwalk' || state === 'landed')) {
     pauseGame();
   }
 });
@@ -1924,6 +1955,7 @@ function spaceControlHint() {
 
 let landedRequireKeyRelease = false;
 let takeoffEngineBoost = 0;
+let recallInFlight = false;
 
 function setState(s) {
   state = s;
@@ -1935,7 +1967,7 @@ function setState(s) {
     spaceCtl.clearTransientInput();
   }
   spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
-  ui.setCrosshair(s === 'walk' || s === 'space');
+  ui.setCrosshair(s === 'walk' || s === 'space' || s === 'skydive');
   ui.showTouchUI(IS_TOUCH && s === 'walk');
   walkDial?.setActive(s === 'walk');
   if (s === 'walk') dialAcc = 1;
@@ -1944,6 +1976,7 @@ function setState(s) {
   if (s === 'flyto') shipView.forceChase();
   ui.setCockpitView(shipView.isCockpit());
   if (s === 'walk') ui.setHudMode('walk');
+  else if (s === 'skydive') ui.setHudMode('skydive');
   else if (s === 'shipwalk' || s === 'boarding') ui.setHudMode('shipwalk');
   else if (s === 'landing' && !shipView.isCockpit()) ui.setHudMode('cinematic-landing');
   else ui.setHudMode('space');
@@ -1955,30 +1988,38 @@ function setState(s) {
     shipView.shipwalk = false;
     shipView.seatT = 1;
   }
-  if (s !== 'shipwalk' && s !== 'landed' && s !== 'walk') ui.setInteractPrompt('');
+  if (s !== 'skydive' && skydiveCtl.active) skydiveCtl.exit();
+  if (s !== 'shipwalk' && s !== 'landed' && s !== 'walk' && s !== 'skydive') ui.setInteractPrompt('');
   const landed = !!ship.parkedPosUniv && ship.parkAmt > 0.98;
+  const jumpHint = ship.hoverMode === 'high'
+    ? ' · 开启尾舱门后向前跃出跳伞'
+    : (landed ? ' · 开启尾舱门后沿坡道走出' : '');
   const hints = IS_TOUCH ? {
     space: spaceControlHint(),
     flyto: '自动接近中…',
-    landing: '正在平稳降落…',
+    landing: ship.hoverMode === 'high' ? '正在进入低空定高悬停…' : '正在平稳降落…',
     landed: '',
+    skydive: '',
     walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>空格</b> 跳跃 · 走至尾舱按 <b>F</b> 开门登舰',
-    shipwalk: '<b>摇杆</b> 舱内移动 · <b>F</b> 坐入驾驶座 / 开关尾舱门' + (landed ? ' · 沿尾舱坡道步行离船' : ''),
+    shipwalk: '<b>摇杆</b> 舱内移动 · <b>F</b> 坐入驾驶座 / 开关尾舱门' + jumpHint,
     boarding: '正在登船…',
     takeoff: '引擎点火升空中…',
     warp: '空间折叠中…',
   } : {
     space: spaceControlHint(),
     flyto: '自动接近中… <b>Esc</b> 中止',
-    landing: shipView.isCockpit() ? '第一人称着陆程序中… <b>RMB</b> 自由环视' : '自动着陆程序中…',
+    landing: ship.hoverMode === 'high'
+      ? '地形崎岖 · 正在进入定高悬停…'
+      : (shipView.isCockpit() ? '第一人称着陆程序中… <b>RMB</b> 自由环视' : '自动着陆程序中…'),
     landed: '',
+    skydive: '',
     walk: '<b>WASD</b> 移动 · <b>LMB</b> 射击 · <b>RMB</b> 瞄准 · <b>R</b> 换弹 · <b>G</b> 收枪 · <b>T</b> 召回飞船',
-    shipwalk: '<b>WASD</b> 舱内移动 · <b>Shift</b> 疾行 · <b>F</b> 坐入驾驶座 / 开关尾舱门' + (landed ? ' · 开启尾舱门后沿坡道走出' : ''),
+    shipwalk: '<b>WASD</b> 舱内移动 · <b>Shift</b> 疾行 · <b>F</b> 坐入驾驶座 / 开关尾舱门' + jumpHint,
     boarding: '正在登船…',
     takeoff: '引擎点火升空中… <b>V</b> 切换视角',
     warp: '空间折叠中…',
   };
-  ui.setHint(hints[s] || '', !['space', 'walk', 'shipwalk', 'landed'].includes(s));
+  ui.setHint(hints[s] || '', !['space', 'walk', 'shipwalk', 'landed', 'skydive'].includes(s));
 }
 
 // ---- actions ------------------------------------------------------------------
@@ -2021,8 +2062,12 @@ function shipFootprintRange(planet, centerDir, localQuat) {
 }
 
 function resolveParkedShipCollision(controller, previousPosition) {
-  if (controller.planet !== ship.parkedPlanet || !ship.parkedLocal
-      || !ship.parkedLocalQuat || ship.parkAmt < 0.98) return;
+  if (recallInFlight || ship.orbitalStandby
+      || controller.planet !== ship.parkedPlanet || !ship.parkedLocal
+      || !ship.parkedLocalQuat || ship.parkAmt < 0.98) {
+    ship.suppressHoverSway = false;
+    return;
+  }
 
   shipCollisionInverse.copy(ship.parkedLocalQuat).invert();
   shipCollisionCurrent.copy(controller.posLocal).sub(ship.parkedLocal)
@@ -2035,25 +2080,28 @@ function resolveParkedShipCollision(controller, previousPosition) {
   let resolved = false;
   const rampOpen = shipView.rampWalkable(true);
   const rampTip = shipView.rampTipLocal();
+  ship.suppressHoverSway = ship.hoverMode === 'extract'
+    && Math.abs(shipCollisionCurrent.x) < 2.6
+    && shipCollisionCurrent.z > 2.5
+    && shipCollisionCurrent.z < rampTip.z + 3.6;
 
-  // Open cargo ramp: walkable sloped deck leading smoothly from the terrain up
-  // into the cargo hold (y = 0 at z = 6.2). A sprint step on WalkControls (18 m/s)
-  // can climb > 0.9 m along the ramp in a single frame, so evaluate both current
-  // and previous ramp elevations.
+  // Open cargo ramp: walkable sloped deck leading smoothly from the terrain (or
+  // low-hover extraction lip) up into the cargo hold (y = 0 at z = 6.2).
   let onOpenRamp = false;
   if (rampOpen
-      && Math.abs(shipCollisionCurrent.x) <= 1.54
+      && Math.abs(shipCollisionCurrent.x) <= 1.56
       && shipCollisionCurrent.z >= 3.2
-      && shipCollisionCurrent.z <= rampTip.z + 0.55) {
+      && shipCollisionCurrent.z <= rampTip.z + 0.65) {
     const deckY = shipView.rampFloorY(shipCollisionCurrent.z);
     const prevDeckY = shipView.rampFloorY(shipCollisionPrevious.z);
     const feet = shipCollisionCurrent.y - eyeHeight;
     const prevFeet = shipCollisionPrevious.y - eyeHeight;
+    const stepUpTolerance = ship.hoverMode === 'extract' ? 0.98 : 0.78;
     if (feet <= deckY + 0.85
-        && prevFeet >= Math.min(prevDeckY, rampTip.y) - 0.75
-        && controller.vR <= 0.65) {
+        && prevFeet >= Math.min(prevDeckY, rampTip.y) - stepUpTolerance
+        && controller.vR <= 0.85) {
       onOpenRamp = true;
-      if (feet <= deckY + 0.14) {
+      if (feet <= deckY + 0.22) {
         shipCollisionCurrent.y = deckY + eyeHeight;
         controller.vR = 0;
         controller.grounded = true;
@@ -2127,8 +2175,8 @@ function resolveParkedShipCollision(controller, previousPosition) {
     .add(ship.parkedLocal);
 }
 
-// Set the ship down on flat, dry ground ~22 m from where the player lands
-// (used by NMS.land and recallShip).
+// Set the ship down on flat, dry tripod-conforming ground ~22 m from where the
+// player spawns (used by NMS.land deterministic surface fixtures).
 function parkShipNear(planet, landDir) {
   const up = _v.copy(landDir);
   const e1 = new THREE.Vector3();
@@ -2136,70 +2184,59 @@ function parkShipNear(planet, landDir) {
   else e1.set(0, -up.z, up.y).normalize();
   const e2 = new THREE.Vector3().crossVectors(up, e1);
   const cand = new THREE.Vector3();
-  const exitOffset = new THREE.Vector3();
-  const exitDir = new THREE.Vector3();
   const landH = planet.height(up, planet.fullMaxFreq);
-  let best = null, bestH = 0, bestQuat = null, bestScore = Infinity;
-  for (const rad of [22, 28, 34, 38]) {
+  let bestEval = null, bestScore = Infinity;
+  for (const rad of [22, 28, 34, 40]) {
     for (let k = 0; k < 12; k++) {
       const a = (k / 12) * Math.PI * 2;
       cand.copy(up)
-        .addScaledVector(e1, Math.cos(a) * rad / planet.R)
-        .addScaledVector(e2, Math.sin(a) * rad / planet.R)
+        .addScaledVector(e1, (Math.cos(a) * rad) / planet.R)
+        .addScaledVector(e2, (Math.sin(a) * rad) / planet.R)
         .normalize();
-      const h = planet.height(cand, planet.fullMaxFreq);
-      if (planet.hasLiquid && h < planet.seaLevel + 1) continue;
-      // Point the tail ramp roughly toward the player so walking up to board
-      // meets the cargo ramp directly.
       const candidateForward = cand.clone().sub(landDir).projectOnPlane(cand).normalize();
       if (candidateForward.lengthSq() < 1e-4) candidateForward.copy(e1);
-      const candidateQuat = horizonQuat(cand, candidateForward, new THREE.Quaternion());
-      const footprint = shipFootprintRange(planet, cand, candidateQuat);
-      exitOffset.set(0, 0, 10.2).applyQuaternion(candidateQuat);
-      exitDir.copy(cand).multiplyScalar(planet.R).add(exitOffset).normalize();
-      const exitH = planet.height(exitDir, planet.fullMaxFreq);
-      if (planet.hasLiquid && exitH < planet.seaLevel + 0.6) continue;
-      const slope = (footprint.max - footprint.min)
-        / (SHIP_LANDING_PROFILE.bounds.halfZ * 2);
-      const clearH = footprint.max;
-      const playerDistance = Math.hypot(rad, clearH - landH);
+      const evalRes = evaluateTripodPad(planet, cand, candidateForward, { horizonQuat });
+      if (!evalRes) continue;
+      const candH = evalRes.padLocal.length() - planet.R;
+      const playerDistance = Math.hypot(rad, candH - landH);
       if (playerDistance > BOARD_DISTANCE - 3) continue;
-      const score = slope * 24 + rad * 0.03 + Math.abs(clearH - landH) * 0.08 + Math.abs(clearH - exitH) * 0.25;
+      const score = evalRes.slopeDeg * 0.16 + rad * 0.03 + Math.abs(candH - landH) * 0.08 + evalRes.rampDelta * 0.35;
       if (score < bestScore) {
-        bestScore = score; best = cand.clone();
-        bestH = clearH - SHIP_LANDING_PROFILE.bounds.minY
-          + SHIP_LANDING_PROFILE.groundClearance;
-        bestQuat = candidateQuat;
+        bestScore = score;
+        bestEval = evalRes;
       }
     }
-    if (best && bestScore < 1.4) break;
+    if (bestEval && bestScore < 1.3) break;
   }
-  const dryFound = Boolean(best);
-  if (!best) {
+  const dryFound = Boolean(bestEval);
+  if (!bestEval) {
     cand.copy(up).addScaledVector(e1, 22 / planet.R).normalize();
-    best = cand.clone();
     const candidateForward = cand.clone().sub(landDir).projectOnPlane(cand).normalize();
     if (candidateForward.lengthSq() < 1e-4) candidateForward.copy(e1);
-    bestQuat = horizonQuat(cand, candidateForward, new THREE.Quaternion());
-    const footprint = shipFootprintRange(planet, cand, bestQuat);
-    bestH = clamp(footprint.max, landH - 28, landH + 28)
-      - SHIP_LANDING_PROFILE.bounds.minY + SHIP_LANDING_PROFILE.groundClearance;
+    const bestQuat = horizonQuat(cand, candidateForward, new THREE.Quaternion());
+    bestEval = findLandingSite(planet, cand.clone().multiplyScalar(planet.R + landH + 40), bestQuat, {
+      horizonQuat,
+      allowSubmerged: true,
+      forceFallback: true,
+    });
   }
-  const padLocal = best.clone().multiplyScalar(planet.R + bestH);
-  const padUniv = planet.localPositionToWorld(padLocal, new THREE.Vector3());
-  const parkedLocalQuat = bestQuat;
-  const parkedWorldQuat = planet.frameOrientation.clone().multiply(parkedLocalQuat);
-  ship.parkedPlanet = planet; ship.parkedLocal = padLocal; ship.parkedLocalQuat = parkedLocalQuat;
-  ship.setParked(padUniv, parkedWorldQuat);
+  ship.orbitalStandby = false;
+  ship.hoverMode = null;
+  ship.gearOffsets = bestEval.gearOffsets || [0, 0, 0];
+  ship.parkedPlanet = planet;
+  ship.parkedLocal = bestEval.padLocal;
+  ship.parkedLocalQuat = bestEval.parkedLocalQuat;
+  ship.setParked(bestEval.padUniv, bestEval.parkedWorldQuat);
   ship.parkAmt = 1;
   vegetationDisturbance.setPlanet(planet.bodyId || planet.seed);
-  const padGround = groundPointUnder(planet, padLocal, new THREE.Vector3());
+  const padGround = groundPointUnder(planet, bestEval.padLocal, new THREE.Vector3());
   const parkedScar = vegetationDisturbance.addScar(padGround, LANDING_SCAR_RADIUS);
   vegetationDisturbance.setFell(parkedScar, 1);
-  return { padLocal, padUniv, parkedLocalQuat, parkedWorldQuat, dryFound };
+  return { ...bestEval, dryFound };
 }
 
 const LANDING_CLEARANCE_METERS = 420;
+const HALO_CLEARANCE_METERS = 1650;
 
 function hasDiveableOcean(planet) {
   return Boolean(planet?.hasLiquid
@@ -2215,29 +2252,120 @@ function landingClearanceMeters(planet, worldPos = nav.pos, terrainAlt = nearest
 }
 
 let scriptedFlightSpd = 0;
+let _landingProbeAt = -1;
+let _landingProbeBody = null;
+let _landingProbeLandable = true;
+const _landingProbePos = new THREE.Vector3(Infinity, Infinity, Infinity);
 
-// Seamless landing: zero camera cuts. Starts from the exact live flight frame
-// (1st-person cockpit stays 1st-person; 3rd-person runs one unbroken flank
-// crane sweep to touchdown and glides smoothly into the pilot's seat), settling
-// in `landed` so the player stands up (F), opens the ramp (F) and walks out.
+function evaluateFlightLanding(planet, allowSubmerged = false) {
+  const shipLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
+  const shipLocalQuat = planet.frameOrientation.clone().invert()
+    .multiply(nav.quat).normalize();
+  return findLandingSite(planet, shipLocal, shipLocalQuat, {
+    horizonQuat,
+    allowSubmerged,
+  });
+}
+
+function probeCanTripodLand(planet) {
+  const now = performance.now();
+  if (_landingProbeBody === planet
+    && now - _landingProbeAt < 180
+    && _landingProbePos.distanceToSquared(nav.pos) < 9) {
+    return _landingProbeLandable;
+  }
+  _landingProbeAt = now;
+  _landingProbeBody = planet;
+  _landingProbePos.copy(nav.pos);
+  const res = evaluateFlightLanding(planet, false);
+  _landingProbeLandable = Boolean(res?.landable);
+  return _landingProbeLandable;
+}
+
+function enterHighHover(planet, minClearance = 92) {
+  shipView.closeRamp();
+  ship.orbitalStandby = false;
+  ship.hoverMode = 'high';
+  ship.gearOffsets = [0, 0, 0];
+  recallInFlight = false;
+
+  const seq = createHoverEntrySequence({
+    planet,
+    ship,
+    shipView,
+    nav,
+    camera,
+    horizonQuat,
+    minClearance,
+    onCockpitReached: () => {
+      ui.setCockpitView(true);
+      ui.setHudMode('space');
+    },
+  });
+
+  ship.parkedPlanet = planet;
+  ship.parkedLocal = seq.hoverLocal;
+  ship.parkedLocalQuat = seq.hoverLocalQuat;
+  ship.setParked(seq.hoverUniv, seq.hoverWorldQuat);
+
+  const entrySpd = clamp(nav.vel.length(), 35, 220);
+  scriptedFlightSpd = entrySpd;
+  seq.step(0);
+  setState('landing');
+  ui.showLand(false);
+  nav.vel.set(0, 0, 0);
+  addTween(seq.duration, (k) => {
+    seq.step(k);
+    scriptedFlightSpd = entrySpd * (1 - k);
+  }, () => {
+    scriptedFlightSpd = 0;
+    ship.finishLanding();
+    shipView.viewMode = 'cockpit';
+    shipView.viewBlend = 1;
+    shipView.parkedCamBlend = 1;
+    shipView.freeYaw = 0;
+    shipView.freePitch = 0;
+    landedRequireKeyRelease = Boolean(keys.KeyW || keys.Space);
+    setState('landed');
+  });
+}
+
+// Seamless landing or atmospheric hover entry (zero camera cuts):
+// - Below 420 m over landable terrain: 3-pad tripod landing into `landed`.
+// - Below 420 m over steep/rugged terrain (> 15.5° or rocky): enters stationary
+//   level hover (`hoverMode = 'high'`) so the pilot can open the rear ramp and skydive!
+// - Between 420 m and 1650 m: enters high-altitude HALO jump hover!
 function tryLand() {
   if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false
-    || landingClearanceMeters(nearest, nav.pos, nearestAlt) >= LANDING_CLEARANCE_METERS
     || nav.vel.length() >= 4000) return;
+  const clearance = landingClearanceMeters(nearest, nav.pos, nearestAlt);
+  if (clearance >= HALO_CLEARANCE_METERS) return;
+
   const planet = nearest;
-  shipView.closeRamp();
   if (!window.NMS_NOLOCK && pointerLockInput) renderer.domElement.requestPointerLock();
 
-  const shipStartWorld = nav.pos.clone().add(ship.group.position);
-  const shipStartLocal = planet.worldPositionToLocal(shipStartWorld, new THREE.Vector3());
-  const shipStartLocalQuat = planet.frameOrientation.clone().invert()
-    .multiply(ship.group.quaternion).normalize();
+  const overOpenWater = Boolean(hasDiveableOcean(planet)
+    && (waterSurfaceHeight < 2
+      || (nav.pos.distanceTo(planet.posUniv) - planet.seaRadius) < nearestAlt - 1.5));
 
-  const landing = findLandingSite(planet, shipStartLocal, shipStartLocalQuat, {
-    horizonQuat,
-    footprintRange: shipFootprintRange,
-    profile: SHIP_LANDING_PROFILE,
-  });
+  if (clearance >= LANDING_CLEARANCE_METERS) {
+    if (overOpenWater) return;
+    enterHighHover(planet, Math.max(96, clearance));
+    return;
+  }
+
+  const landing = evaluateFlightLanding(planet, overOpenWater);
+
+  if (!landing.landable) {
+    enterHighHover(planet, 92);
+    return;
+  }
+
+  shipView.closeRamp();
+  ship.orbitalStandby = false;
+  ship.hoverMode = null;
+  ship.gearOffsets = landing.gearOffsets || [0, 0, 0];
+  recallInFlight = false;
   ship.parkedPlanet = planet;
   ship.parkedLocal = landing.padLocal;
   ship.parkedLocalQuat = landing.parkedLocalQuat;
@@ -2300,7 +2428,7 @@ function playerShipLocal(out = _rampLocalProbe) {
 }
 
 function isNearExteriorRamp() {
-  if (state !== 'walk' || ship.parkAmt < 0.98) return false;
+  if (state !== 'walk' || recallInFlight || ship.orbitalStandby || ship.parkAmt < 0.98) return false;
   const p = playerShipLocal();
   if (!p) return false;
   return Math.abs(p.x) < 3.4 && p.z > 5.2 && p.z < 14.2 && Math.abs(p.y) < 4.5;
@@ -2311,13 +2439,18 @@ function exteriorRampPrompt() {
   const p = _rampLocalProbe;
   if (shipView.rampTarget < 0.5) return '[F] 打开尾舱门';
   if (!shipView.rampWalkable(true)) return '正在开启尾舱门…';
-  if (p.z > shipView.rampTipLocal().z - 0.35) return '沿坡道走入飞船 · [F] 关闭尾舱门';
+  if (p.z > shipView.rampTipLocal().z - 0.35) {
+    return ship.hoverMode === 'extract'
+      ? '悬停接应就绪 · 沿尾舱门跑入飞船 · [F] 关闭尾舱门'
+      : '沿坡道走入飞船 · [F] 关闭尾舱门';
+  }
   return '';
 }
 
 // Continuous walk -> shipwalk handoff when walking up the open cargo ramp.
 function tryEnterShipFromRamp() {
-  if (state !== 'walk' || !walkCtl.planet || walkCtl.planet !== ship.parkedPlanet
+  if (state !== 'walk' || recallInFlight || ship.orbitalStandby
+      || !walkCtl.planet || walkCtl.planet !== ship.parkedPlanet
       || !ship.parkedLocal || ship.parkAmt < 0.98 || !shipView.rampWalkable(true)) {
     return false;
   }
@@ -2351,7 +2484,32 @@ function tryEnterShipFromRamp() {
   return true;
 }
 
-// Continuous shipwalk -> walk handoff when stepping off the foot of the open ramp.
+function scheduleHoverShipAutoDepart(planet) {
+  let departed = false;
+  addTween(1.8, () => {}, () => {
+    if (departed || ship.hoverMode !== 'high' || ship.parkedPlanet !== planet) return;
+    if (state === 'shipwalk' || state === 'landed' || state === 'landing') return;
+    departed = true;
+    ship.emit('ramp-close', [0, 1.2, 6.6]);
+    const autoSeq = createAutoDepartSequence({ planet, ship, shipView });
+    addTween(autoSeq.duration, (k) => {
+      if (ship.hoverMode !== 'high' || recallInFlight) return;
+      autoSeq.step(k);
+    }, () => {
+      if (ship.hoverMode !== 'high' || recallInFlight) return;
+      ship.landingPose = null;
+      ship.orbitalStandby = true;
+      ship.hoverMode = null;
+      ship.parkedLocal = null;
+      ship.parkedLocalQuat = null;
+      ship.parkedPosUniv = null;
+      ship.parkAmt = 0;
+    });
+  });
+}
+
+// Continuous shipwalk -> walk (or skydive when hovering high!) handoff when
+// stepping off the end of the open cargo ramp.
 function handOffRampExitToSurface() {
   if (state !== 'shipwalk' || !shipView.pendingSurfaceExit || !ship.parkedPlanet) return false;
   shipView.pendingSurfaceExit = false;
@@ -2360,14 +2518,32 @@ function handOffRampExitToSurface() {
   const localCamQ = _q.copy(planet.frameOrientation).invert().multiply(nav.quat).normalize();
   const viewDir = new THREE.Vector3(0, 0, -1).applyQuaternion(localCamQ).normalize();
 
-  // Carry horizontal stride speed smoothly onto the surface controller.
   const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
   const s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
   const run = keys.ShiftLeft || keys.ShiftRight;
-  const spd = run ? 3.6 : 1.85;
+  const spd = run ? 4.8 : 2.2;
   const dirX = Math.sin(shipView.walkYaw), dirZ = Math.cos(shipView.walkYaw);
   const carryLocal = new THREE.Vector3((-dirX * f + dirZ * s) * spd, 0, (-dirZ * f - dirX * s) * spd)
     .applyQuaternion(ship.parkedLocalQuat);
+
+  const posR = posLocal.length();
+  const upDir = _v2.copy(posLocal).multiplyScalar(1 / Math.max(posR, 1));
+  const surfaceR = planet.hasLiquid && Number.isFinite(planet.seaRadius)
+    ? Math.max(planet.surfaceRadius(upDir), planet.seaRadius)
+    : planet.surfaceRadius(upDir);
+  const dropClearance = posR - surfaceR - walkCtl.eyeHeight;
+
+  if (ship.hoverMode === 'high' || dropClearance > 8.5) {
+    // HALO / hover jump! Leap clear of the aft ramp lip into freefall.
+    const aftPush = new THREE.Vector3(0, 1.2, 6.4).applyQuaternion(ship.parkedLocalQuat);
+    carryLocal.add(aftPush);
+    skydiveCtl.enter(planet, posLocal, viewDir, carryLocal);
+    planet.localPositionToWorld(skydiveCtl.posLocal, nav.pos);
+    nav.quat.copy(planet.frameOrientation).multiply(skydiveCtl.quat);
+    setState('skydive');
+    scheduleHoverShipAutoDepart(planet);
+    return true;
+  }
 
   walkCtl.enter(planet, posLocal, viewDir);
   walkCtl.hSpeed.copy(carryLocal);
@@ -2379,18 +2555,79 @@ function handOffRampExitToSurface() {
 }
 
 function parkedShipDistance() {
-  return ship.parkedPosUniv ? ship.parkedPosUniv.distanceTo(nav.pos) : Infinity;
+  if (ship.orbitalStandby || !ship.parkedPosUniv) return Infinity;
+  return ship.parkedPosUniv.distanceTo(nav.pos);
 }
 
+// Cinematic out-of-sight fly-in recall (`T`): relocates the ship outside the
+// player's camera frustum, sweeps in tail-first toward the clearing the player
+// is facing (or executes a low-altitude Hot Extraction hover with the open
+// cargo ramp resting right above a steep slope when no flat ground exists),
+// and automatically opens the rear cargo ramp so the player can run aboard!
 function recallShip() {
-  if (state !== 'walk' || !walkCtl.planet) return false;
+  if (state !== 'walk' || !walkCtl.planet || recallInFlight) return false;
   const planet = walkCtl.planet;
-  const playerDir = planet.worldPositionToLocal(nav.pos, _v).normalize().clone();
-  shipView.closeRamp();
-  shipView.rampT = 0;
-  parkShipNear(planet, playerDir);
-  audio.cue('recall');
-  ui.setHint('飞船已响应召回信标，并在附近安全着陆 · 走至尾舱按 <b>F</b> 开启舱门', true);
+  const up = _v.copy(walkCtl.posLocal).normalize();
+  walkCtl.frame(up, _v2, _v3); // east in _v2, north in _v3
+  const lookFwd = new THREE.Vector3()
+    .copy(_v3).multiplyScalar(Math.cos(walkCtl.yaw))
+    .addScaledVector(_v2, Math.sin(walkCtl.yaw))
+    .normalize();
+
+  const target = findRecallSite(planet, walkCtl.posLocal, lookFwd, {
+    horizonQuat,
+    rampTipAt: (t) => shipView.rampTipAt(t),
+  });
+  if (!target) return false;
+
+  recallInFlight = true;
+  surveyUnits.recall();
+  ship.orbitalStandby = false;
+  ship.hoverMode = target.mode === 'hover-extract' ? 'extract' : null;
+  ship.gearOffsets = target.gearOffsets || [0, 0, 0];
+  ship.parkedPlanet = planet;
+  ship.parkedLocal = target.padLocal;
+  ship.parkedLocalQuat = target.parkedLocalQuat;
+  ship.setParked(target.padUniv, target.parkedWorldQuat);
+
+  const flyIn = createRecallFlyInSequence({
+    planet,
+    ship,
+    shipView,
+    playerPosLocal: walkCtl.posLocal,
+    playerLookFwd: lookFwd,
+    target,
+  });
+  const padGround = groundPointUnder(planet, target.padLocal, new THREE.Vector3());
+  vegetationDisturbance.setPlanet(planet.bodyId || planet.seed);
+  const recallScar = target.mode === 'landed'
+    ? vegetationDisturbance.addScar(padGround, LANDING_SCAR_RADIUS)
+    : null;
+
+  audio.cue('recall-flyin');
+  ui.setHint(target.mode === 'hover-extract'
+    ? '附近地形陡峭 · 飞船正飞来执行超低空悬停接应，尾舱门将自动打开'
+    : '飞船正在进场着陆，尾舱门将朝着你自动打开', true);
+
+  flyIn.step(0);
+  addTween(flyIn.duration, (k) => {
+    if (!recallInFlight) return;
+    flyIn.step(k);
+    if (recallScar) {
+      vegetationDisturbance.setFell(recallScar, (k - 0.35) / 0.55);
+    }
+    if (k > 0.35) {
+      vegetationDisturbance.setDownwash(padGround, DOWNWASH_RADIUS, smoothstep(0.35, 0.92, k) * 0.9);
+    }
+  }, () => {
+    if (!recallInFlight) return;
+    recallInFlight = false;
+    ship.finishLanding();
+    shipView.openRamp();
+    shipView.rampMax = shipView.groundClampedRampMax();
+    shipView.rampT = shipView.rampMax;
+    if (target.mode === 'landed') audio.cue('touchdown');
+  });
   return true;
 }
 
@@ -2500,6 +2737,9 @@ function launchParkedShip() {
     scriptedFlightSpd = 0;
     seq.finish();
     ship.landingPose = null;
+    ship.hoverMode = null;
+    ship.orbitalStandby = false;
+    ship.gearOffsets = [0, 0, 0];
     ship.parkedPlanet = null;
     ship.parkedLocal = null;
     ship.parkedLocalQuat = null;
@@ -2512,12 +2752,14 @@ function launchParkedShip() {
 
 // Debug/capture utility (NMS.takeoff, used by screenshot.js and seamtest.js):
 // launches straight up from the camera's current position or parked ship.
-function takeoff(planet = walkCtl.planet ?? ship.parkedPlanet, launchPos = nav.pos.clone(), launchUp = null) {
+function takeoff(planet = walkCtl.planet ?? skydiveCtl.planet ?? ship.parkedPlanet, launchPos = nav.pos.clone(), launchUp = null) {
   if (state === 'landed' && ship.parkedPlanet && !launchUp) return launchParkedShip();
   if (!planet) return false;
   if (walkCtl.active) walkCtl.exit();
+  if (skydiveCtl.active) skydiveCtl.exit();
   shipView.closeRamp();
   surveyUnits.recall();
+  recallInFlight = false;
   const startLocal = planet.worldPositionToLocal(launchPos, new THREE.Vector3());
   const upLocal = launchUp
     ? planet.worldOffsetToLocal(launchUp, new THREE.Vector3()).normalize()
@@ -2527,6 +2769,9 @@ function takeoff(planet = walkCtl.planet ?? ship.parkedPlanet, launchPos = nav.p
   planet.localPositionToWorld(startLocal, nav.pos);
   const launchGround = groundPointUnder(planet, startLocal, new THREE.Vector3());
   ship.landingPose = null;
+  ship.hoverMode = null;
+  ship.orbitalStandby = false;
+  ship.gearOffsets = [0, 0, 0];
   ship.parkedPlanet = null;
   ship.parkedLocal = null;
   ship.parkedLocalQuat = null;
@@ -3368,7 +3613,7 @@ function renderRiftFarView(far, farCamera, farQuat, dt = 1 / 60) {
   portalView.syncCamera(farQuat);
   far.updateCelestial(celestialClock.hours);
   const focusBody = riftRoute?.arrived
-    ? nearestBodyOf(far, farCamera)
+    ? nearestBodyOf(far, farCamera, true)
     : far.bodyById.get(riftFarBodyId) || null;
   for (const planet of far.planets) {
     if (!planet.group.visible && planet !== focusBody && !riftRoute?.arrived) continue;
@@ -3515,7 +3760,9 @@ function startRiftOpening() {
   ui.beginTravel();
   riftPortal.beginOpening();
   audio.cue('rift-open');
-  ui.setHint('弦界坐标钉定 · 空间正在船头折叠', true);
+  ui.setHint(riftDestinationPreparationReady()
+    ? '弦界坐标钉定 · 虫洞口正在船头成形'
+    : '弦界坐标钉定 · 虫洞口成形中 · 目标世界预载中', true);
 }
 
 function riftDestinationPreparationReady() {
@@ -4647,17 +4894,23 @@ function frame(rafTs) {
       }
     }
   }
-  if (ship.parkedPlanet && universe.planets().includes(ship.parkedPlanet) && ship.parkedLocal) {
+  if (ship.parkedPlanet && universe.planets().includes(ship.parkedPlanet)
+      && ship.parkedLocal && ship.parkedPosUniv && !ship.orbitalStandby) {
     ship.parkedPlanet.localPositionToWorld(ship.parkedLocal, ship.parkedPosUniv);
     ship.parkedQuat.copy(ship.parkedPlanet.frameOrientation).multiply(ship.parkedLocalQuat);
   }
   if (paused && state === 'walk' && walkCtl.planet && universe.planets().includes(walkCtl.planet)) {
     walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
+  } else if (paused && state === 'skydive' && skydiveCtl.active && skydiveCtl.planet
+      && universe.planets().includes(skydiveCtl.planet)) {
+    skydiveCtl.planet.localPositionToWorld(skydiveCtl.posLocal, nav.pos);
+    nav.quat.copy(skydiveCtl.planet.frameOrientation).multiply(skydiveCtl.quat);
   }
 
   // nearest body & altitude
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet
+    : state === 'skydive' && skydiveCtl.planet ? skydiveCtl.planet
     : (state === 'landed' || state === 'shipwalk' || state === 'landing' || state === 'takeoff')
       && ship.parkedPlanet && universe.planets().includes(ship.parkedPlanet)
       ? ship.parkedPlanet : null;
@@ -4798,6 +5051,13 @@ function frame(rafTs) {
     // airborne the hull keeps drifting on its standing velocity — the demo's
     // behaviour — and a parked hull stays put with the pad.
     shipView.integrateDrift(dt, nav);
+  } else if (!paused && state === 'skydive') {
+    cancelPulseBurst();
+    skydiveCtl.update(dt);
+    if (skydiveCtl.active && skydiveCtl.planet) {
+      skydiveCtl.planet.localPositionToWorld(skydiveCtl.posLocal, nav.pos);
+      nav.quat.copy(skydiveCtl.planet.frameOrientation).multiply(skydiveCtl.quat);
+    }
   } else if (!paused && state === 'walk') {
     cancelPulseBurst();
     walkCtl.update(dt);
@@ -4866,6 +5126,9 @@ function frame(rafTs) {
   if (state === 'warp') {
     // The warp timeline owns the lens outright; it is already continuous.
     camera.fov = BASE_FOV + shipView.fovOffset() + transitChannels.fov;
+    camera.updateProjectionMatrix();
+  } else if (state === 'skydive') {
+    camera.fov += ((BASE_FOV + skydiveCtl.fovOffset()) - camera.fov) * (1 - Math.exp(-dt * 7.5));
     camera.updateProjectionMatrix();
   } else if (state === 'space' || state === 'shipwalk' || state === 'landed' || state === 'landing' || state === 'takeoff') {
     const riftFov = riftRoute && !riftRoute.arrived ? riftPortal.open.flash * 3.0 : 0;
@@ -5022,25 +5285,37 @@ function frame(rafTs) {
     document.body.classList.remove('gas-danger');
   }
 
-  // land prompt
-  const canLand = state === 'space' && nearest && !nearest.isGasGiant && nearest.landable !== false
-    && landingClearanceMeters(nearest, nav.pos, nearestAlt) < LANDING_CLEARANCE_METERS
-    && nav.vel.length() < 4000;
-  const overOpenWater = Boolean(canLand && hasDiveableOcean(nearest)
+  // land / hover / HALO skydive prompt
+  const clearanceForLand = state === 'space' && nearest && !nearest.isGasGiant && nearest.landable !== false
+    && nav.vel.length() < 4000
+    ? landingClearanceMeters(nearest, nav.pos, nearestAlt)
+    : Infinity;
+  const overWaterColumn = Boolean(nearest && hasDiveableOcean(nearest)
     && (waterSurfaceHeight < 2
       || (nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius) < nearestAlt - 1.5));
-  ui.showLand(!!canLand, overOpenWater
-    ? 'DIVE — walk the seabed (L)' : 'LAND — walk the surface (L)');
+  const inLowLandBand = clearanceForLand < LANDING_CLEARANCE_METERS;
+  const inHaloBand = !inLowLandBand && !overWaterColumn && clearanceForLand < HALO_CLEARANCE_METERS;
+  const overOpenWater = Boolean(inLowLandBand && overWaterColumn);
+  let landPromptCode = 'LAND — walk the surface (L)';
+  if (overOpenWater) landPromptCode = 'DIVE — walk the seabed (L)';
+  else if (inLowLandBand && !probeCanTripodLand(nearest)) landPromptCode = 'HOVER_RUGGED';
+  else if (inHaloBand) landPromptCode = 'HOVER_HALO';
+  ui.showLand(inLowLandBand || inHaloBand, landPromptCode);
 
   if (state === 'walk') {
     if (exteriorRampPrompt()) {
       ui.setHint('', false);
+    } else if (recallInFlight) {
+      // keep the active fly-in hint while the ship sweeps in overhead
+    } else if (ship.orbitalStandby) {
+      ui.setHint('飞船正在高空巡弋待命 · 面朝空地按 <b>T</b> 呼叫飞船进场接应', true);
     } else {
       const shipDist = parkedShipDistance();
       if (shipDist <= BOARD_DISTANCE) {
-        ui.setHint(`走至飞船尾舱按 <b>F</b> 开启舱门登舰 · 距离 ${Math.max(0, Math.round(shipDist))} m`, true);
+        const modeNote = ship.hoverMode === 'extract' ? '跑上悬停尾舱门登舰' : '走至飞船尾舱按 <b>F</b> 开启舱门登舰';
+        ui.setHint(`${modeNote} · 距离 ${Math.max(0, Math.round(shipDist))} m`, true);
       } else {
-        ui.setHint(`飞船距离 ${Number.isFinite(shipDist) ? Math.round(shipDist) + ' m' : '未知'} · 按 <b>T</b> 召回飞船`, true);
+        ui.setHint(`飞船距离 ${Number.isFinite(shipDist) ? Math.round(shipDist) + ' m' : '未知'} · 面朝空地按 <b>T</b> 呼叫飞船`, true);
       }
     }
   }
@@ -5072,13 +5347,15 @@ function frame(rafTs) {
   activeBolts = paused ? activeBolts : weapons.update(dt, nav, nearest);
   const surfaceShotDistance = state === 'walk' ? surfaceBeamDistance(120) : 120;
   // Survey units patrol the parked ship while you are on its planet (on foot
-  // or aboard); taking off recalls them.
+  // or aboard, when actually landed on the ground); taking off or hovering recalls them.
   if (surveyUnits.materials && ship.parkedPlanet && ship.parkedLocal
+    && !ship.hoverMode && !ship.orbitalStandby && !recallInFlight
     && (state === 'walk' || state === 'shipwalk' || state === 'landed')
     && (state !== 'walk' || walkCtl.planet === ship.parkedPlanet)) {
     surveyUnits.deploy(ship.parkedPlanet, ship.parkedLocal);
   } else if (surveyUnits.deployed
-    && (!ship.parkedPlanet || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
+    && (!ship.parkedPlanet || ship.hoverMode || ship.orbitalStandby || recallInFlight
+      || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
     surveyUnits.recall();
   }
   if (surveyUnits.deployed) {
@@ -5154,6 +5431,7 @@ function frame(rafTs) {
   // absolute universe displacement here made a zero-speed hover inherit the
   // planet's rotation and falsely trigger continuous atmospheric buffeting.
   const flightSpd = state === 'space' ? nav.vel.length()
+    : state === 'skydive' ? skydiveCtl.airspeed
     : (state === 'landed' || state === 'shipwalk' || state === 'walk') ? 0
     : (state === 'landing' || state === 'takeoff') ? scriptedFlightSpd
     : trueSpd;
@@ -5200,10 +5478,14 @@ function frame(rafTs) {
     camera.position.add(_v.set(0, 0, transitChannels.kick * kickScale).applyQuaternion(camera.quaternion));
   }
   applyTransitVisuals();
-  // contextual F/E prompt inside the hull, in the pilot's seat, or at the exterior ramp
+  // contextual F/E prompt inside the hull, in the pilot's seat, skydiving, or at the exterior ramp
   const interactText = paused ? ''
+    : state === 'skydive' ? skydiveCtl.interactPrompt()
     : state === 'shipwalk' ? shipView.interactPrompt(shipLanded)
-    : state === 'landed' && shipView.seatT >= 1 ? '[SPACE / W] 点火起飞 · [F] 离开驾驶座 · [V] 切换视角'
+    : state === 'landed' && shipView.seatT >= 1
+      ? (ship.hoverMode === 'high'
+        ? '[F] 起身前往尾舱跳伞 · [SPACE / W] 恢复飞行 · [V] 切换视角'
+        : '[SPACE / W] 点火起飞 · [F] 离开驾驶座 · [V] 切换视角')
     : state === 'walk' ? exteriorRampPrompt()
     : '';
   ui.setInteractPrompt(interactText);
@@ -5281,6 +5563,7 @@ function frame(rafTs) {
       smoothstep(0, 0.15, pulseVisual))
     : 0;
   const spd = state === 'walk' ? walkCtl.hSpeed.length()
+    : state === 'skydive' ? skydiveCtl.airspeed
     : state === 'landed' ? 0
     : (state === 'landing' || state === 'takeoff') ? scriptedFlightSpd
     : state === 'space' ? Math.max(nav.vel.length(), pulseDisplaySpeed)
@@ -5416,7 +5699,7 @@ function frame(rafTs) {
   // foreground layer. Walking parks the ship back in world space, but the gun
   // still owns this pass; tying it only to ship.foregroundOnly hid all four
   // weapon models after landing.
-  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible;
+  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible || skydiveCtl.rig.root.visible;
   if (RENDER_LOOK_NEXT) {
     // The cabin is fully occluded by the hull in a settled chase view. Keeping
     // its independent light layer alive there paid for every cabin material
@@ -6132,6 +6415,8 @@ window.NMS = {
       lookQuatAt(nav.pos, p.posUniv, nav.quat);
     }
     focusPlanet = p; spaceCtl.focus = p;
+    _landingProbeAt = -1;
+    ship.shipQuat?.copy(nav.quat);
     return true;
   },
   // hover low over a sunlit stretch of coastline, facing out to sea —
@@ -6179,6 +6464,8 @@ window.NMS = {
     nav.quat.copy(p.frameOrientation).multiply(horizonQuat(best, seaward, new THREE.Quaternion()));
     nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), -0.32));
     focusPlanet = p; spaceCtl.focus = p;
+    _landingProbeAt = -1;
+    ship.shipQuat?.copy(nav.quat);
     return true;
   },
   // instantly stand on planet i at its scenic spot (no pointer lock).
@@ -6407,9 +6694,12 @@ window.NMS = {
   },
   // aim the walker at the parked ship (testing the landing pad)
   faceShip() {
-    if (state !== 'walk' || !ship.parkedPosUniv) return false;
+    const targetUniv = (recallInFlight && ship.landingPose?.pos)
+      ? ship.landingPose.pos
+      : ship.parkedPosUniv;
+    if (state !== 'walk' || !targetUniv) return false;
     const p = walkCtl.planet;
-    p.worldPositionToLocal(ship.parkedPosUniv, _v).sub(walkCtl.posLocal);
+    p.worldPositionToLocal(targetUniv, _v).sub(walkCtl.posLocal);
     _up.copy(walkCtl.posLocal).normalize();
     const e1 = new THREE.Vector3();
     if (Math.abs(_up.y) < 0.93) e1.set(_up.z, 0, -_up.x).normalize();
@@ -6425,11 +6715,13 @@ window.NMS = {
   },
   lookYaw(deg) {
     if (state === 'walk') { walkCtl.yaw += deg * Math.PI / 180; walkCtl.update(0.001); }
+    else if (state === 'skydive') { skydiveCtl.yaw += deg * Math.PI / 180; skydiveCtl.updateQuat(); }
     else if (state === 'shipwalk') shipView.walkYaw += deg * Math.PI / 180;
     else nav.quat.multiply(_q.setFromAxisAngle(_v3.set(0, 1, 0), -deg * Math.PI / 180));
   },
   lookPitch(deg) {
     if (state === 'walk') { walkCtl.pitch = clamp(walkCtl.pitch + deg * Math.PI / 180, -1.45, 1.45); walkCtl.update(0.001); }
+    else if (state === 'skydive') { skydiveCtl.pitch = clamp(skydiveCtl.pitch + deg * Math.PI / 180, -1.48, 1.46); skydiveCtl.updateQuat(); }
     else if (state === 'shipwalk') shipView.walkPitch = clamp(
       shipView.walkPitch + deg * Math.PI / 180, -1.4, 1.4);
     else nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), deg * Math.PI / 180));
@@ -6440,6 +6732,37 @@ window.NMS = {
   board: () => boardShip(),
   exitShip: () => exitShip(),
   shipDistance: () => parkedShipDistance(),
+  skydiveState: () => ({
+    active: skydiveCtl.active,
+    phase: skydiveCtl.phase,
+    agl: +skydiveCtl.agl.toFixed(2),
+    airspeed: +skydiveCtl.airspeed.toFixed(2),
+    deployT: +skydiveCtl.deployT.toFixed(3),
+    canopyVisible: skydiveCtl.rig.root.visible,
+    aadTriggered: skydiveCtl.aadTriggered,
+  }),
+  shipLandingState: () => {
+    const padGaps = [];
+    if (ship.parkedPlanet && ship.parkedLocal && ship.parkedLocalQuat && !ship.hoverMode && !ship.orbitalStandby) {
+      for (let i = 0; i < GEAR_PADS.length; i++) {
+        const [px, pz] = GEAR_PADS[i];
+        const padY = GEAR_GROUND_Y + (ship.gearOffsets?.[i] || 0);
+        const worldPt = _v.set(px, padY, pz).applyQuaternion(ship.parkedLocalQuat).add(ship.parkedLocal);
+        const r = worldPt.length();
+        const dir = worldPt.multiplyScalar(1 / Math.max(r, 1));
+        padGaps.push(+(r - ship.parkedPlanet.surfaceRadius(dir)).toFixed(4));
+      }
+    }
+    return {
+      hoverMode: ship.hoverMode,
+      orbitalStandby: ship.orbitalStandby,
+      recallInFlight,
+      gearOffsets: [...(ship.gearOffsets || [0, 0, 0])].map((v) => +v.toFixed(4)),
+      padGaps,
+      gearT: +(ship.gearT ?? 0).toFixed(3),
+      parkAmt: +ship.parkAmt.toFixed(3),
+    };
+  },
   // HALCYON first-person layer: exposed for the playtest harness.
   shipViewState: () => ({
     viewMode: shipView.viewMode,

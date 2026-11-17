@@ -654,12 +654,17 @@ export class ShipView {
    */
   applyShipPose(dt, nav, state = 'space') {
     const g = this.ship.group;
-    const scriptedOrParked = state === 'landing' || state === 'takeoff' || state === 'landed'
-      || state === 'walk' || state === 'boarding'
+    if (this.ship.orbitalStandby && !this.ship.landingPose) return;
+    const scriptedOrParked = !!this.ship.landingPose
+      || state === 'landing' || state === 'takeoff' || state === 'landed'
+      || state === 'walk' || state === 'skydive' || state === 'boarding'
       || (this.shipwalk && !!this.ship.parkedPosUniv && this.ship.parkAmt > 0.98);
     if (scriptedOrParked) {
-      if ((state === 'landed' || state === 'walk' || state === 'boarding'
-        || (this.shipwalk && this.ship.parkAmt > 0.98)) && this.ship.parkedPosUniv) {
+      if (!this.ship.landingPose
+        && (state === 'landed' || state === 'boarding'
+          || (state === 'walk' && (!this.ship.hoverMode || this.ship.suppressHoverSway))
+          || (this.shipwalk && this.ship.parkAmt > 0.98))
+        && this.ship.parkedPosUniv) {
         g.position.copy(this.ship.parkedPosUniv).sub(nav.pos);
         g.quaternion.copy(this.ship.parkedQuat);
       }
@@ -741,6 +746,14 @@ export class ShipView {
     const dSeat = Math.hypot(p.x, p.z - seatZ);
     if (dSeat < 1.9 && p.z < -5.5) return '[F] 坐入驾驶座';
     if (p.z > 3.2) {
+      if (this.ship.hoverMode === 'high') {
+        if (this.rampTarget > 0.5) {
+          return this.rampWalkable(true)
+            ? '跳伞尾舱门已开启 · 向前跃出舱门开始高空跳伞 · [F] 关闭尾舱门'
+            : '正在开启尾舱门…';
+        }
+        return '[F] 打开跳伞尾舱门';
+      }
       if (landed) {
         if (this.rampTarget > 0.5) {
           return this.rampWalkable(true)
@@ -763,13 +776,17 @@ export class ShipView {
    * under the tip. Cached to avoid per-frame high-frequency terrain sampling.
    */
   groundClampedRampMax() {
+    if (this.ship.hoverMode === 'high') return 0.58;
     const planet = this.ship.parkedPlanet;
     const D = this.def.dims;
     if (!planet || !this.ship.parkedLocal || !this.ship.parkedLocalQuat || !D) return 1;
     const now = this.t;
     if (this._rampClampAt !== undefined && now - this._rampClampAt < 0.4
-      && this._rampClampVal !== undefined) return this._rampClampVal;
+      && this._rampClampVal !== undefined
+      && this._rampClampMode === this.ship.hoverMode) return this._rampClampVal;
     this._rampClampAt = now;
+    this._rampClampMode = this.ship.hoverMode;
+    const clearance = this.ship.hoverMode === 'extract' ? 0.12 : -0.04;
     let best = 0.54;
     for (let t = 1; t >= 0.54; t -= 0.02) {
       const tip = this.rampTipAt(t);
@@ -779,7 +796,7 @@ export class ShipView {
       const dist = _v.length();
       const dir = _v.multiplyScalar(1 / Math.max(dist, 1));
       const groundRadius = planet.surfaceRadius(dir);
-      if (dist >= groundRadius - 0.04) { best = t; break; }
+      if (dist >= groundRadius + clearance) { best = t; break; }
     }
     this._rampClampVal = best;
     return best;

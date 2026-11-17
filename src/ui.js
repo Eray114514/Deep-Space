@@ -228,6 +228,7 @@ export class UI {
     const body = document.body;
     body.classList.toggle('ui-walk', mode === 'walk');
     body.classList.toggle('ui-shipwalk', mode === 'shipwalk');
+    body.classList.toggle('ui-skydive', mode === 'skydive');
     body.classList.toggle('ui-cinematic-landing', mode === 'cinematic-landing');
     body.classList.toggle('ui-space', mode === 'space');
   }
@@ -237,7 +238,7 @@ export class UI {
     this._hint = text;
     clearTimeout(this._hintTimer);
     this.els.hint.innerHTML = text || '';
-    if (text && (/WASD|摇杆/.test(text)) && !(/舱内/.test(text))) {
+    if (text && (/WASD|摇杆/.test(text)) && !(/舱内|控伞|滑翔/.test(text))) {
       this.setHudMode('walk');
     } else if (text && (/鼠标|单指/.test(text))) {
       this.setHudMode('space');
@@ -250,8 +251,11 @@ export class UI {
   }
 
   showLand(show, text = 'LAND — walk the surface') {
-    this.els.land.textContent = text.startsWith('DIVE') ? '潜入海底着陆  [L]' :
-      text.startsWith('LAND') ? '自动驾驶着陆  [L]' : text;
+    this.els.land.textContent = text.startsWith('DIVE') ? '潜入海底着陆  [L]'
+      : text.startsWith('HOVER_RUGGED') ? '地形崎岖 · 悬停跳伞  [L]'
+      : text.startsWith('HOVER_HALO') ? '高空悬停 · 舱门跳伞  [L]'
+      : text.startsWith('LAND') ? '自动驾驶着陆  [L]'
+      : text;
     this.els.land.classList.toggle('hidden', !show);
   }
 

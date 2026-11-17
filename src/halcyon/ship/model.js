@@ -203,6 +203,7 @@ export function assembleShip(gltf, def) {
       root.updateMatrixWorld(true);
       node.attach(lower);
       lower.userData.baseQuat = lower.quaternion.clone();
+      lower.userData.baseY = lower.position.y;
       node.userData.lower = lower;
     }
     for (const door of node.userData.doors) {

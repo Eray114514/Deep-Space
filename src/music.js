@@ -64,7 +64,7 @@ export function pickTrack({ state, planetType, snowWeight = 0, nearBlackHole = f
   }
   if (state === 'warp') return 'interstellar-flight';
   if (state === 'space' || state === 'flyto' || state === 'landing' || state === 'landed'
-    || state === 'shipwalk' || state === 'takeoff' || state === 'boarding') {
+    || state === 'shipwalk' || state === 'skydive' || state === 'takeoff' || state === 'boarding') {
     // signal: pick a random member of the cruise pool
     return 'cruise:any';
   }
