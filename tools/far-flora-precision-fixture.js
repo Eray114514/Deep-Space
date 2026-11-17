@@ -14,7 +14,11 @@ export function farFloraPrecisionFixture(radius = 6000000, terrainProfile = 'fla
     ? 17000 * (direction.x * 0.31 + direction.y * 0.47 + direction.z * 0.19) : 0);
   const planet = {
     R: radius, intSeed: 76123, fullMaxFreq: 128, hasLiquid: false,
-    group: new THREE.Group(), flora: { far0: geometry, far1: geometry },
+    group: new THREE.Group(),
+    flora: { trees: { atlas: new THREE.Texture(), species: [0, 1].map((slot) => ({
+      name: 'fixture' + slot,
+      geometries: { near: geometry, mid: geometry, far: geometry, horizon: geometry },
+    })) } },
     biomeAt: () => 'forest',
     height(direction, frequency) {
       const height = heightAt(direction);
@@ -22,11 +26,11 @@ export function farFloraPrecisionFixture(radius = 6000000, terrainProfile = 'fla
         cell.copy(direction);
         pending = true;
       } else if (frequency === 128 && pending) {
-        const Q = this.R / 32;
+        const Q = this.R / 16;   // the tree field plants on a 16 m lattice
         const hash = hash3i(Math.round(cell.x * Q), Math.round(cell.y * Q),
           Math.round(cell.z * Q), this.intSeed ^ 0xfa12);
-        expected[hashFloat(hash, 3) < 0.72 ? 0 : 1]
-          .push(direction.clone().multiplyScalar(this.R + height - 0.4));
+        expected[hashFloat(hash, 3) < 0.7 ? 0 : 1]
+          .push(direction.clone().multiplyScalar(this.R + height - 0.25));
         pending = false;
       }
       return height;

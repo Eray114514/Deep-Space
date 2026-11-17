@@ -497,17 +497,21 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             float chill = smoothstep(0.55, 0.92, abs(nd.y) + t * 0.5);
             float forestW = clamp(vExtra.x / 0.85, 0.0, 1.0);
             if (uEarthLike > 0.5) {
-              float dryW = (1.0 - smoothstep(0.3, 0.44, moisture)) * (1.0 - forestW);
+              // woodland mapped on the CPU (where trees are planted) keeps a
+              // forest floor whatever the per-pixel moisture says
+              float wooded = smoothstep(0.12, 0.4, forestW);
+              float dryW = (1.0 - smoothstep(0.3, 0.44, moisture)) * (1.0 - wooded);
               vec3 steppe = mix(uLandC[0], base, 0.55) * vec3(1.0, 0.97, 0.88);
               base = mix(base, steppe, dryW * 0.7);
               // the driest country is bare: pale sand and ochre rock
-              float aridW = (1.0 - smoothstep(0.14, 0.27, moisture)) * (1.0 - forestW);
+              float aridW = (1.0 - smoothstep(0.14, 0.27, moisture)) * (1.0 - wooded);
               base = mix(base, uLandC[0] * vec3(1.02, 0.93, 0.78), aridW * 0.8);
               vec3 tundra = mix(uRockC, base, 0.35) * vec3(0.96, 0.94, 0.9);
               base = mix(base, tundra, chill * 0.7);
-              forestW = smoothstep(0.3, 0.62, forestW * 0.75 + (moisture - 0.5) * 0.9
+              forestW = max(smoothstep(0.3, 0.62, forestW * 0.75 + (moisture - 0.5) * 0.9
                 + (standField - 0.5) * 0.8) * (1.0 - chill * 0.8)
-                * smoothstep(0.02, 0.07, t) * (1.0 - smoothstep(0.42, 0.56, t));
+                * smoothstep(0.02, 0.07, t) * (1.0 - smoothstep(0.42, 0.56, t)),
+                wooded * (0.6 + 0.4 * standField));
               base *= 0.9 + 0.2 * terrainField(vLocalPos.yxz * 0.00017 + 9.1);
               // wet country is deeper and bluer-green, dry country warmer
               float wetW = smoothstep(0.46, 0.7, moisture);
@@ -678,7 +682,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v21-climate-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v23-climate-'+hasSurfaceCloudMedium(planet);
   return prepareSurfaceAtmosphere(material, planet);
 }
 

@@ -6,6 +6,7 @@
 
 import * as THREE from 'three';
 import { makeRng } from './rng.js';
+import { buildTreeSpecies, disposeTreeSpecies } from './vegetation/tree-species.js';
 
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
@@ -354,13 +355,21 @@ export function buildFlora(planet) {
   const rng = makeRng(planet.seed + ':flora');
   const pal = planet.floraPal || floraPalette(planet, rng);
   const pod = buildPodPlant(rng, pal);
+  // The low-poly tree builders still consume their draws so pods and grass
+  // keep the shapes they had; their geometry is no longer shown.
   const t0 = buildTree(rng, pal, pal.canopy);
   const t1 = buildTree(rng, pal, pal.canopy2);
   const grass = buildGrassTuft(rng);
+  const legacyShrub = buildShrub(rng, pal);
+  t0.geo.dispose(); t1.geo.dispose(); legacyShrub.dispose();
+  // Trees and shrubs: grown by src/vegetation/tree-species.js, drawn at every
+  // distance by the tree field (farflora.js). `dispose` lets the planet's
+  // generic flora teardown release the species geometry and atlas.
+  const trees = buildTreeSpecies(planet, pal);
+  trees.dispose = () => disposeTreeSpecies(trees);
   return {
-    tree0: t0.geo,
-    tree1: t1.geo,
-    shrub: buildShrub(rng, pal),
+    trees,
+    shrub: trees.shrub.geometries.mid,
     pod: pod.geo,
     podGlow: pod.glow,
     // The three meshes share the same deterministic placement field. Only
@@ -372,8 +381,5 @@ export function buildFlora(planet) {
     // meadows lean toward the planet's canopy colour instead of bare dirt —
     // the ground tint alone made grass vanish on dark soils
     grassTint: pal.canopy.clone().offsetHSL(0, 0.08, 0.025),
-    // horizon-range proxies for the far tier
-    far0: buildFarTree(rng, pal, t0.style, t0.h, pal.canopy),
-    far1: buildFarTree(rng, pal, t1.style, t1.h, pal.canopy2),
   };
 }

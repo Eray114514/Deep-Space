@@ -81,6 +81,37 @@ const site = await page.evaluate(`(() => {
   };
 })()`);
 
+// --site forest: move every shot to closed woodland near the meadow, in the
+// same daylight, and add shots from inside the trees with the ship hidden
+if (option('site', 'meadow') === 'forest') {
+  const forest = await page.evaluate(`(() => {
+    const p = NMS._ff.planet;
+    if (!p) return null;
+    const base = ${JSON.stringify(site.dir)};
+    const V = p.sunDirLocal.constructor;
+    const up = new V(...base), e1 = new V(-up.z, 0, up.x).normalize(), e2 = new V().crossVectors(up, e1);
+    const at = (x, y) => new V().copy(up).addScaledVector(e1, x / p.R).addScaledVector(e2, y / p.R).normalize();
+    const wooded = (d) => { const h = p.height(d, p.fullMaxFreq); return p.biomeAt(d, h) === 'forest' ? h : null; };
+    for (let ring = 1; ring < 400; ring++) {
+      for (let k = 0; k < 12; k++) {
+        const a = k / 12 * Math.PI * 2 + ring * 0.7, r = ring * 1500;
+        const x = Math.cos(a) * r, y = Math.sin(a) * r, d = at(x, y), h = wooded(d);
+        if (h == null || d.dot(p.sunDirLocal) < 0.45) continue;
+        if ([[400, 0], [-400, 0], [0, 400], [0, -400]].every(([ox, oy]) => wooded(at(x + ox, y + oy)) != null)) {
+          return { dir: d.toArray(), terrainRadius: p.R + h, R: p.R };
+        }
+      }
+    }
+    return null;
+  })()`);
+  if (!forest) throw new Error('no sunlit woodland found near the landing site');
+  Object.assign(site, forest);
+  SCENES.splice(SCENES.findIndex((scene) => scene.name === '08-walk'), 2,
+    { name: '08-canopy-60m', js: flight(60, -0.3) },
+    { name: '09-eye-level', js: (i, s) => 'NMS.shipVisible(false); ' + flight(2.2, 0)(i, s) },
+    { name: '10-eye-level-up', js: flight(2.2, 0.35) });
+}
+
 const report = [];
 for (const scene of SCENES) {
   if (ONLY.length && !ONLY.some((part) => scene.name.includes(part))) continue;
@@ -94,8 +125,15 @@ for (const scene of SCENES) {
   await page.waitForTimeout(2500);
   await page.screenshot({ path: `${OUT}/${scene.name}.png` });
   const stats = await page.evaluate('window.NMS.stats()');
-  report.push({ scene: scene.name, draws: stats.calls, tris: stats.tris, chunks: stats.chunks, alt: Math.round(stats.alt) });
-  console.log(`ok ${scene.name}  draws=${stats.calls} tris=${(stats.tris / 1e6).toFixed(2)}M chunks=${stats.chunks} alt=${Math.round(stats.alt)}`);
+  // frames presented over two seconds (headless Chrome is capped at 60)
+  const fps = await page.evaluate(() => new Promise((resolve) => {
+    let frames = 0; const start = performance.now();
+    const tick = () => { frames++; if (performance.now() - start < 2000) requestAnimationFrame(tick); else resolve(frames / 2); };
+    requestAnimationFrame(tick);
+  }));
+  stats.fps = fps;
+  report.push({ scene: scene.name, fps, draws: stats.calls, tris: stats.tris, chunks: stats.chunks, alt: Math.round(stats.alt) });
+  console.log(`ok ${scene.name}  fps=${fps} draws=${stats.calls} tris=${(stats.tris / 1e6).toFixed(2)}M chunks=${stats.chunks} alt=${Math.round(stats.alt)}`);
 }
 
 await writeFile(`${OUT}/report.json`, JSON.stringify({ query, planet: PLANET, width: WIDTH, height: HEIGHT, site, report, errors }, null, 2));

@@ -13,7 +13,8 @@ export function vegetationPrecisionFixture(radius = 6000000, profile = 'flat') {
     R: radius, seed: 'VEGETATION-PRECISION', bodyId: 'fixture', intSeed: 76123,
     type: 'terrestrial', fullMaxFreq: 128, hasLiquid: false,
     group: new THREE.Group(), pal: { rock: new THREE.Color(0.4, 0.3, 0.2) },
-    flora: { tree0: geometry, tree1: geometry, shrub: geometry, pod: geometry,
+    flora: { shrub: geometry, pod: geometry,
+      trees: { atlas: new THREE.Texture(), shrub: { leafColor: new THREE.Color(0.1, 0.2, 0.05) } },
       grass: geometry, grassMid: geometry, grassFar: geometry, grassTint: new THREE.Color(0.2, 0.4, 0.1) },
     height: heightAt, biomeAt: () => 'grass',
     colorAt(direction, height, _strength, _frequency, color) {

@@ -46,7 +46,7 @@ const DEFAULT_RANGE = 5;     // overridden by the central quality profile
 // up as props sliding around while you walk
 const CAPS = {
   grassNear: 14000, grassMid: 30000, grassFar: 60000,
-  shrub: 2600, tree0: 1500, tree1: 1500, pod: 1200, default: 2000,
+  shrub: 900, pod: 1200, default: 2000,
 };
 export function capFor(kind) { return CAPS[kind] ?? CAPS.default; }
 const SHOW_BELOW_ALT = 600;  // metres
@@ -83,7 +83,9 @@ function baseGeo() {
   };
 }
 let GEO = null;
-const FLORA_KINDS = ['tree0', 'tree1', 'shrub', 'pod'];
+// Trees are not scattered here: the tree field (farflora.js) plants and
+// draws every tree at every distance, so there is no near bubble to fall out of.
+const FLORA_KINDS = ['shrub', 'pod'];
 const GRASS_LODS = [
   ['grassNear', 'grass', 0, 8],
   ['grassMid', 'grassMid', 8, 24],
@@ -92,19 +94,19 @@ const GRASS_LODS = [
 
 // per-biome prop recipes: [kind, density 0..1, minScale, maxScale]
 const RECIPES = {
-  grass:    [['grass', 0.78, 0.9, 1.7], ['shrub', 0.1, 0.7, 1.4], ['tree0', 0.05, 0.7, 1.2], ['pod', 0.02, 0.8, 1.4], ['rock', 0.03, 0.3, 0.9]],
-  forest:   [['tree0', 0.4, 0.7, 1.3], ['tree1', 0.16, 0.6, 1.15], ['shrub', 0.15, 0.8, 1.5], ['grass', 0.22, 0.8, 1.5], ['rock', 0.03, 0.3, 0.8]],
+  grass:    [['grass', 0.78, 0.9, 1.7], ['shrub', 0.06, 0.45, 1.0], ['pod', 0.02, 0.8, 1.4], ['rock', 0.03, 0.3, 0.9]],
+  forest:   [['shrub', 0.22, 0.5, 1.15], ['grass', 0.22, 0.8, 1.5], ['rock', 0.03, 0.3, 0.8]],
   snow:     [['rock', 0.07, 0.3, 1.0], ['boulder', 0.02, 0.5, 1.2]],
-  sand:     [['cactus', 0.05, 0.7, 1.5], ['shrub', 0.025, 0.5, 1.0], ['rock', 0.06, 0.3, 1.0]],
+  sand:     [['cactus', 0.05, 0.7, 1.5], ['shrub', 0.025, 0.35, 0.7], ['rock', 0.06, 0.3, 1.0]],
   rock:     [['rock', 0.18, 0.4, 1.3], ['boulder', 0.05, 0.6, 1.6]],
   regolith: [['rock', 0.16, 0.3, 1.4], ['boulder', 0.05, 0.5, 2.0]],
   ice:      [['crystal', 0.06, 0.6, 1.8], ['rock', 0.07, 0.3, 1.0]],
   ash:      [['rock', 0.12, 0.3, 1.2], ['boulder', 0.03, 0.5, 1.5]],
   ember:    [['rock', 0.06, 0.3, 1.0]],
-  slime:    [['pod', 0.14, 1.0, 2.0], ['tree1', 0.05, 0.8, 1.6], ['blob', 0.14, 0.6, 2.0], ['grass', 0.2, 1.0, 1.8], ['crystal', 0.03, 0.5, 1.4]],
-  weird:    [['tree1', 0.12, 0.9, 2.0], ['crystal', 0.11, 0.7, 2.6], ['pod', 0.08, 1.0, 2.0], ['blob', 0.06, 0.8, 2.2]],
-  shore:    [['rock', 0.03, 0.2, 0.7], ['shrub', 0.02, 0.5, 1.0]],
-  dryland:  [['grass', 0.3, 0.7, 1.3], ['shrub', 0.06, 0.6, 1.2], ['rock', 0.04, 0.3, 0.9]],
+  slime:    [['pod', 0.14, 1.0, 2.0], ['blob', 0.14, 0.6, 2.0], ['grass', 0.2, 1.0, 1.8], ['crystal', 0.03, 0.5, 1.4]],
+  weird:    [['crystal', 0.11, 0.7, 2.6], ['pod', 0.08, 1.0, 2.0], ['blob', 0.06, 0.8, 2.2]],
+  shore:    [['rock', 0.03, 0.2, 0.7], ['shrub', 0.02, 0.35, 0.7]],
+  dryland:  [['grass', 0.3, 0.7, 1.3], ['shrub', 0.06, 0.4, 0.85], ['rock', 0.04, 0.3, 0.9]],
 };
 
 const MEADOW_DENSITY = {
@@ -172,15 +174,26 @@ export class Scatter {
     // The planet owns the geometries — the far tier shares them.
     this.flora = planet.flora || (planet.flora = buildFlora(planet));
     for (const kind of FLORA_KINDS) {
-      let mat = new THREE.MeshStandardMaterial({
+      // shrubs share the tree atlas (bark + alpha-tested foliage cards); pods
+      // keep their flat-shaded alien look until they are redone
+      const textured = kind === 'shrub';
+      let mat = new THREE.MeshStandardMaterial(textured ? {
+        color: 0xffffff, vertexColors: true, roughness: 0.88, side: THREE.DoubleSide,
+        map: this.flora.trees.atlas, alphaTest: 0.42,
+      } : {
         color: 0xffffff, vertexColors: true, roughness: 0.9,
-        // grass carries hand-authored up-normals (field-soft lighting) that
-        // flat shading would discard
-        flatShading: kind !== 'grass', side: THREE.DoubleSide,
+        flatShading: true, side: THREE.DoubleSide,
       });
-      mat.emissive.setScalar(FLORA_GLOW[kind]);
-      mat = applyWindSway(mat, SWAY[kind] || 0, false, this.frame);
+      // the same stand-in for transmitted light the tree field uses
+      if (textured) mat.emissive.copy(this.flora.trees.shrub.leafColor).multiplyScalar(0.16);
+      else mat.emissive.setScalar(FLORA_GLOW[kind]);
+      // textured foliage keeps its crown normals on back faces (see farflora.js)
+      mat = applyWindSway(mat, SWAY[kind] || 0, textured, this.frame);
       const im = this.addMesh(planet, kind, this.flora[kind], mat);
+      if (textured) {
+        im.customDepthMaterial.map = this.flora.trees.atlas;
+        im.customDepthMaterial.alphaTest = 0.42;
+      }
     }
     for (const [kind, geometryKey] of GRASS_LODS) {
       let mat = new THREE.MeshStandardMaterial({

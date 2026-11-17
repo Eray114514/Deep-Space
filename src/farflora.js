@@ -1,41 +1,58 @@
-// Far flora: the detailed scatter bubble only reaches ~200 m, so without
-// this tier a forested world looks BARE from anywhere above walking height
-// and trees visibly grow in as you approach. Here every vegetated cell out
-// to ~4.5 km gets a low-poly proxy tree (same species silhouette/colours),
-// instanced in two draw calls. A vertex-shader fade dissolves proxies just
-// inside the detailed bubble and at the far rim, so trees stand on the
-// horizon from 10+ km up and nothing ever pops or "grows".
+// The tree field: every tree on a world, from arm's length to the horizon.
 //
-// Placement is a pure function of (planet seed, coarse surface cell) —
-// tiles are cached, built a few per update, and repacked into the global
-// InstancedMesh, so flying laps around a planet always regrows the same
-// forest.
+// A tree is planted once, by a pure function of (planet seed, surface cell),
+// and stands in that exact spot at that exact size at every distance. Only
+// its level of detail changes:
+//
+//   near     < ~45 m     full branches and leaves
+//   mid      < ~140 m    thinned mesh
+//   far      < ~800 m    trunk, limbs and a few dozen foliage cards
+//   horizon  to 4.4 km   two crossed quads with the species' silhouette
+//
+// Nothing pops. Neighbouring levels hand over across a band of distance with
+// complementary screen-door dither, each tree at its own slightly different
+// distance. At the outer rim a tree grows from nothing while it is still a
+// few pixels tall, and the horizon level thins out gradually (again per tree)
+// where the terrain's own canopy colour takes over. The earlier design drew
+// dense detailed trees inside a 45 m bubble and sparse inflated proxies
+// outside it, so the forest visibly ended a few steps ahead of the player.
+//
+// Tiles are cached, built a few per update inside a time budget and started
+// well before they can be seen.
 
 import * as THREE from 'three';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
+import { TIME, WIND } from './shaders.js';
 
-// WebGL 2 baseline: proxy trees run on the classic GLSL fade below. The TSL
-// rewrite (flora-system.js) was shelved with the WebGPU line.
 export const FAR_FLORA_ENABLED = true;
 
 const TILE_M = 1024;         // metres per cache tile
-const CELL_M = 32;           // metres per proxy-tree cell (32 per tile edge)
+const CELL_M = 16;           // metres per planting cell
 const RADIUS = 4.4;          // tiles of reach around the camera (~4.5 km)
-const CAP = 24000;           // per species
+const RIM_M = 4400;
 const PREWARM_BELOW = 26000; // build while invisible, well before the tree line appears
 const SHOW_BELOW = 16000;    // retained cache band; visual fade starts at 13 km
 const STREAM_BUDGET_MS = 1.25;
 const REPACK_INTERVAL_MS = 160;
 const CACHE_LIMIT = 384;
 
-// per-biome CLUMP probability per 32 m cell and the tree0 share. One proxy
-// stands for several near-tier trees (they inflate with distance), so these
-// chase the near tier's per-m² density as far as the instance budget allows —
-// a 12× density cliff at the bubble edge reads as "the forest ends here"
+// level bands in metres; each tree jitters them by ±15% (see the shader)
+const TIERS = [
+  { name: 'horizon', geometry: 'horizon', lo: 800, hi: Infinity, cap: 70000, shadow: false },
+  { name: 'far', geometry: 'far', lo: 140, hi: 800, cap: 14000, shadow: false },
+  { name: 'mid', geometry: 'mid', lo: 45, hi: 140, cap: 1000, shadow: true },
+  { name: 'near', geometry: 'near', lo: 0, hi: 45, cap: 160, shadow: true },
+];
+const BAND_JITTER = 0.15;
+const TIER_MARGIN_M = 48;     // slack so a level is resident before its band begins
+const RECLASSIFY_M = 24;      // camera travel that re-sorts trees into levels
+
+// trees per 16 m cell and the share of species 0. Open country is scattered
+// with single trees, woodland is close to a closed canopy.
 const FAR_DENSITY = {
-  forest: [0.8, 0.72], grass: [0.32, 0.95], snow: [0.0, 0.0],
-  slime: [0.38, 0.0], weird: [0.5, 0.0], dryland: [0.1, 0.9],
+  forest: [0.62, 0.7], grass: [0.035, 0.9], snow: [0.0, 0.0],
+  slime: [0.16, 0.0], weird: [0.2, 0.0], dryland: [0.012, 0.9],
 };
 
 const _dir = new THREE.Vector3();
@@ -53,47 +70,92 @@ const _q2 = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _offset = new THREE.Vector3();
+const _cam = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 
-// shader hooks: proxies dissolve at the far rim and when the camera climbs
-// out — all on the GPU, no per-instance updates. Keep the sparse proxy trees
-// at close range as stable landmarks: scaling them to zero at the detailed
-// bubble boundary made every tree the pilot approached appear to sink into
-// the terrain before the ship could reach it.
-function applyFarFade(mat, uniforms) {
-  mat.onBeforeCompile = (shader) => {
+// Level hand-over, rim growth, horizon thinning and wind, all per instance on
+// the GPU. `aRand` is the tree's stable random number.
+function applyTreeField(material, uniforms, tier, depthOnly = false) {
+  const lo = tier.lo.toFixed(1), hi = Number.isFinite(tier.hi) ? tier.hi.toFixed(1) : '1.0e9';
+  material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
           uniform vec3 uCamL;
-          uniform float uAltK;`)
+          uniform float uAltK;
+          uniform float uTreeTime;
+          uniform vec4 uTreeWind;
+          attribute float aRand;
+          varying vec2 vTreeFade;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
           #ifdef USE_INSTANCING
           {
-            float d = distance(instanceMatrix[3].xyz, uCamL);
-            float g = (1.0 - smoothstep(3900.0, 4400.0, d)) * uAltK;
-            g *= 1.15 + 1.15 * smoothstep(450.0, 2400.0, d);
-            vec4 instCenterView = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-            if (!isOrthographic && instCenterView.z > 40.0) g = 0.0;
+            vec3 treeBase = instanceMatrix[3].xyz;
+            float d = distance(treeBase, uCamL);
+            float jitter = 1.0 + (aRand - 0.5) * ${(BAND_JITTER * 2).toFixed(2)};
+            float lo = ${lo} * jitter, hi = ${hi} * jitter;
+            // x: fading in from the coarser side, y: fading out to the finer
+            // side. The neighbouring level evaluates the same two edges, so
+            // the dither masks are exact complements.
+            vTreeFade = vec2(smoothstep(hi, hi * 0.9, d), smoothstep(lo * 0.9, lo, d));
+            float g = uAltK * step(lo * 0.9, d) * step(d, hi);
+            ${tier.name === 'horizon' ? `
+            float r2 = fract(aRand * 7.13);
+            float rim = ${RIM_M.toFixed(1)} * (0.72 + 0.28 * r2);
+            g *= 1.0 - smoothstep(rim * 0.82, rim, d);
+            // thin the horizon out with distance, one tree at a time
+            float keep = mix(1.0, 0.34, smoothstep(1100.0, ${RIM_M.toFixed(1)}, d));
+            g *= 1.0 - smoothstep(keep - 0.07, keep, r2);` : ''}
+            vec4 treeView = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+            if (!isOrthographic && treeView.z > 40.0) g = 0.0;
+            // wind: the crown leans and shivers, the trunk base stays put
+            float lift = max(transformed.y, 0.0);
+            float phase = treeBase.x * 0.37 + treeBase.z * 0.29 + aRand * 6.28;
+            float sway = (0.6 * sin(uTreeTime * 0.9 + phase) + 0.3 * sin(uTreeTime * 2.1 + phase * 1.7))
+              * (0.35 + uTreeWind.w) + 0.4;
+            float bend = lift * lift * 0.0011 * uTreeWind.z * ${tier.name === 'horizon' ? '0.0' : '1.0'};
+            transformed.x += uTreeWind.x * sway * bend;
+            transformed.z += uTreeWind.y * sway * bend;
             transformed *= g;
           }
           #endif`);
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <emissivemap_fragment>',
-      `#include <emissivemap_fragment>
-        #ifdef USE_COLOR
-          totalEmissiveRadiance *= vColor.rgb;
-        #endif`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+          varying vec2 vTreeFade;
+          float treeDither(vec2 p) {
+            return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+          }`)
+      .replace('void main() {', `void main() {
+          ${depthOnly ? '' : `{
+            float n = treeDither(gl_FragCoord.xy);
+            if (n > vTreeFade.x) discard;
+            if (n <= 1.0 - vTreeFade.y) discard;
+          }`}`)
+      // Foliage normals describe the crown as one rounded volume. Flipping
+      // them on back faces would shade the far side of every card as if it
+      // faced into the tree, turning half the canopy black.
+      .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
+          #ifdef DOUBLE_SIDED
+            normal *= faceDirection;
+          #endif`)
+      // Leaves pass and scatter light; a crown's shaded side is dim green,
+      // never black. A fraction of the albedo stands in for that transmitted
+      // and bounced light until the tree field joins the sky-ambient model.
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          #ifdef USE_COLOR
+            totalEmissiveRadiance += diffuseColor.rgb * 0.2;
+          #endif`);
   };
-  mat.customProgramCacheKey = () => 'far-flora';
-  return mat;
+  material.customProgramCacheKey = () => 'tree-field-' + tier.name + (depthOnly ? '-depth' : '');
+  return material;
 }
 
 export class FarFlora {
   constructor({ streamBudgetMs = STREAM_BUDGET_MS, repackIntervalMs = REPACK_INTERVAL_MS,
     density = 1 } = {}) {
     this.planet = null;
-    this.meshes = null;       // [tree0 proxies, tree1 proxies]
+    this.meshes = null;       // flat list, horizon level first: [h0, h1, far0, far1, mid0, ...]
+    this.tiers = null;        // [{ tier, meshes: [species0, species1] }]
     this.tiles = new Map();   // signed x:y:z -> tile-local matrices + double-precision origin
     this.queue = [];
     this.queued = new Set();
@@ -113,10 +175,17 @@ export class FarFlora {
       streamMs: 0, repackMs: 0,
       worstStreamMs: 0, worstRepackMs: 0,
     };
-    this.uCamL = { value: new THREE.Vector3() };
-    this.uAltK = { value: 1 };
+    this.uniforms = {
+      uCamL: { value: new THREE.Vector3() },
+      uAltK: { value: 1 },
+      uTreeTime: TIME,
+      uTreeWind: { value: WIND },
+    };
+    this.uCamL = this.uniforms.uCamL;
+    this.uAltK = this.uniforms.uAltK;
     this.origin = new THREE.Vector3();
     this.cameraLocal = new THREE.Vector3();
+    this.classifiedAt = new THREE.Vector3(Infinity, 0, 0);
   }
 
   setPlanet(planet) {
@@ -124,21 +193,37 @@ export class FarFlora {
     this.planet = planet;
     if (!planet) return;
     const flora = planet.flora || (planet.flora = buildFlora(planet));
-    this.meshes = [flora.far0, flora.far1].map((geo) => {
-      let mat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, vertexColors: true, roughness: 0.95, flatShading: true,
-      });
-      mat.emissive.setScalar(0.22);
-      mat = applyFarFade(mat, { uCamL: this.uCamL, uAltK: this.uAltK });
-      const im = new THREE.InstancedMesh(geo, mat, CAP);
-      im.count = 0;
-      im.visible = false;
-      im.frustumCulled = false;
-      im.receiveShadow = true;
-      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      planet.group.add(im);
-      return im;
-    });
+    const trees = flora.trees;
+    this.tiers = TIERS.map((tier) => ({
+      tier,
+      meshes: trees.species.map((species) => {
+        // the planet owns the species geometry; the per-instance random
+        // number lives on this field's own shallow copy
+        const geometry = species.geometries[tier.geometry].clone();
+        geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(new Float32Array(tier.cap), 1));
+        geometry.getAttribute('aRand').setUsage(THREE.DynamicDrawUsage);
+        const material = applyTreeField(new THREE.MeshStandardMaterial({
+          map: trees.atlas, alphaTest: 0.42, vertexColors: true, roughness: 0.86,
+          side: THREE.DoubleSide,
+        }), this.uniforms, tier);
+        const im = new THREE.InstancedMesh(geometry, material, tier.cap);
+        im.name = 'trees:' + tier.name + ':' + species.name;
+        im.count = 0;
+        im.visible = false;
+        im.frustumCulled = false;
+        im.receiveShadow = true;
+        im.castShadow = tier.shadow;
+        if (tier.shadow) {
+          im.customDepthMaterial = applyTreeField(new THREE.MeshDepthMaterial({
+            depthPacking: THREE.RGBADepthPacking, map: trees.atlas, alphaTest: 0.42,
+          }), this.uniforms, tier, true);
+        }
+        im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        planet.group.add(im);
+        return im;
+      }),
+    }));
+    this.meshes = this.tiers.flatMap((entry) => entry.meshes);
   }
 
   clear() {
@@ -146,10 +231,13 @@ export class FarFlora {
       for (const im of this.meshes) {
         this.planet.group.remove(im);
         im.material.dispose();
-        im.dispose();      // geometry is planet-owned
+        im.customDepthMaterial?.dispose();
+        im.geometry.dispose();   // this field's copy; the species keeps its own
+        im.dispose();
       }
     }
     this.meshes = null;
+    this.tiers = null;
     this.planet = null;
     this.tiles.clear();
     this.queue.length = 0;
@@ -163,6 +251,7 @@ export class FarFlora {
     this.lastRepackAt = -Infinity;
     this.origin.set(0, 0, 0);
     this.cameraLocal.set(0, 0, 0);
+    this.classifiedAt.set(Infinity, 0, 0);
     this.uCamL.value.set(0, 0, 0);
   }
 
@@ -183,6 +272,8 @@ export class FarFlora {
       cachedTiles: this.tiles.size,
       activeTiles: this.activeKeys.size,
       instances: this.meshes ? this.meshes[0].count + this.meshes[1].count : 0,
+      levels: this.tiers ? Object.fromEntries(this.tiers.map((entry) => [entry.tier.name,
+        entry.meshes.reduce((sum, mesh) => sum + mesh.count, 0)])) : {},
       origin: this.origin.toArray(),
     };
   }
@@ -289,6 +380,10 @@ export class FarFlora {
       this.pruneCache();
     }
 
+    if (!this.dirty && visible && this.cameraLocal.distanceTo(this.classifiedAt) > RECLASSIFY_M) {
+      this.repack(true);
+    }
+
     if (this.dirty) {
       const firstVisibleBatch = visible
         && this.meshes[0].count + this.meshes[1].count === 0 && completed > 0;
@@ -342,8 +437,8 @@ export class FarFlora {
       // Write matrices straight into their long-lived typed storage. The old
       // JS arrays created 16 boxed-number entries per tree and then copied the
       // whole tile again on completion, producing severe GC pauses in flight.
-      m0: new Float32Array(128 * 16), n0: 0,
-      m1: new Float32Array(128 * 16), n1: 0,
+      m0: new Float32Array(128 * 16), n0: 0, r0: new Float32Array(128),
+      m1: new Float32Array(128 * 16), n1: 0, r1: new Float32Array(128),
       seen: new Set(),
     };
   }
@@ -390,14 +485,15 @@ export class FarFlora {
           // surface by tens of metres — trees planted with it are BURIED
           const hh = p.height(_jd, p.fullMaxFreq);
           if (p.hasLiquid && hh < p.seaLevel + 0.6) continue;
-          _p.copy(_jd).multiplyScalar(p.R + hh - 0.4).sub(job.origin);
+          _p.copy(_jd).multiplyScalar(p.R + hh - 0.25).sub(job.origin);
           _q.setFromUnitVectors(Y, _jd);
           _q2.setFromAxisAngle(Y, hashFloat(h0, 1) * Math.PI * 2);
           _q.multiply(_q2);
-          const sc = 0.75 + hashFloat(h0, 2) * 0.65;
-          _s.set(sc, sc * (0.85 + hashFloat(h0, 0) * 0.4), sc);
+          const sc = 0.7 + hashFloat(h0, 2) * 0.6;
+          _s.set(sc, sc * (0.9 + hashFloat(h0, 0) * 0.25), sc);
           _m.compose(_p, _q, _s);
-          appendMatrix(job, hashFloat(h0, 3) < dens[1] ? 0 : 1, _m.elements);
+          appendMatrix(job, hashFloat(h0, 3) < dens[1] ? 0 : 1, _m.elements,
+            hashFloat(hash3i(ux, uy, uz, job.seedI ^ 0x3d1f), 0));
         }
       }
       if (performance.now() >= deadline) return false;
@@ -408,8 +504,7 @@ export class FarFlora {
   finishTileJob(job) {
     return {
       origin: job.origin,
-      m0: job.m0, n0: job.n0,
-      m1: job.m1, n1: job.n1,
+      m: [job.m0, job.m1], n: [job.n0, job.n1], r: [job.r0, job.r1],
     };
   }
 
@@ -419,9 +514,12 @@ export class FarFlora {
     return this.finishTileJob(job);
   }
 
-  repack() {
+  // Copies the live ring into the level meshes. `nearOnly` re-sorts just the
+  // three close levels after the camera has moved; the horizon level holds
+  // every tree in reach and only changes when tiles do.
+  repack(nearOnly = false) {
     const started = performance.now();
-    this.dirty = false;
+    if (!nearOnly) this.dirty = false;
     if (!this.meshes) return;
     // Only the live ring consumes the instance budget. Completed tiles just
     // outside it remain cached, ready for a quick turn-back.
@@ -430,28 +528,69 @@ export class FarFlora {
       .filter((k) => this.tiles.has(k))
       .sort((a, b) => (tileDistanceSq(a, ax, ay, az) - tileDistanceSq(b, ax, ay, az))
         || compareTileKeys(a, b));
-    if (keys.length) this.origin.copy(this.tiles.get(keys[0]).origin);
-    // These translations combine with the camera-relative planet transform
-    // on the CPU. The GPU only adds nearby tile offsets and tree geometry.
-    for (const mesh of this.meshes) mesh.position.copy(this.origin);
+    if (!nearOnly) {
+      if (keys.length) this.origin.copy(this.tiles.get(keys[0]).origin);
+      // These translations combine with the camera-relative planet transform
+      // on the CPU. The GPU only adds nearby tile offsets and tree geometry.
+      for (const mesh of this.meshes) mesh.position.copy(this.origin);
+    }
     this.uCamL.value.copy(this.cameraLocal).sub(this.origin);
-    let n0 = 0, n1 = 0;
-    const a0 = this.meshes[0].instanceMatrix.array;
-    const a1 = this.meshes[1].instanceMatrix.array;
+    this.classifiedAt.copy(this.cameraLocal);
+    _cam.copy(this.uCamL.value);
+
+    const counts = this.tiers.map(() => [0, 0]);
     for (const k of keys) {
       const t = this.tiles.get(k);
       _offset.copy(t.origin).sub(this.origin);
-      // Tiles are generated in stable hash order; retaining a prefix is a
-      // deterministic far-density reduction and does not make trees shuffle.
-      const c0 = Math.min(Math.floor(t.n0 * this.displayDensity), CAP - n0);
-      const c1 = Math.min(Math.floor(t.n1 * this.displayDensity), CAP - n1);
-      if (c0 > 0) { copyTileMatrices(a0, t.m0, n0, c0, _offset); n0 += c0; }
-      if (c1 > 0) { copyTileMatrices(a1, t.m1, n1, c1, _offset); n1 += c1; }
+      // every tree of a tile is within TILE_M of its origin
+      const tileDistance = Math.max(0, _offset.distanceTo(_cam) - TILE_M);
+      for (let level = nearOnly ? 1 : 0; level < this.tiers.length; level++) {
+        const { tier, meshes } = this.tiers[level];
+        const reach = tier.hi * (1 + BAND_JITTER) + TIER_MARGIN_M;
+        if (tileDistance > reach) continue;
+        const from = tier.lo * (1 - BAND_JITTER) * 0.9 - TIER_MARGIN_M;
+        for (let species = 0; species < 2; species++) {
+          const source = t.m[species], rand = t.r[species];
+          // Tiles are generated in stable hash order; retaining a prefix is a
+          // deterministic density reduction and does not make trees shuffle.
+          const available = Math.floor(t.n[species] * this.displayDensity);
+          const mesh = meshes[species];
+          const target = mesh.instanceMatrix.array;
+          const targetRand = mesh.geometry.getAttribute('aRand').array;
+          let n = counts[level][species];
+          if (level === 0) {
+            const take = Math.min(available, tier.cap - n);
+            if (take > 0) {
+              copyTileMatrices(target, source, n, take, _offset);
+              targetRand.set(rand.subarray(0, take), n);
+              n += take;
+            }
+          } else {
+            for (let i = 0; i < available && n < tier.cap; i++) {
+              const x = source[i * 16 + 12] + _offset.x - _cam.x;
+              const y = source[i * 16 + 13] + _offset.y - _cam.y;
+              const z = source[i * 16 + 14] + _offset.z - _cam.z;
+              const d = Math.sqrt(x * x + y * y + z * z);
+              if (d > reach || d < from) continue;
+              target.set(source.subarray(i * 16, i * 16 + 16), n * 16);
+              target[n * 16 + 12] += _offset.x;
+              target[n * 16 + 13] += _offset.y;
+              target[n * 16 + 14] += _offset.z;
+              targetRand[n] = rand[i];
+              n++;
+            }
+          }
+          counts[level][species] = n;
+        }
+      }
     }
-    this.meshes[0].count = n0;
-    this.meshes[1].count = n1;
-    this.markInstanceUpload(this.meshes[0], n0);
-    this.markInstanceUpload(this.meshes[1], n1);
+    for (let level = nearOnly ? 1 : 0; level < this.tiers.length; level++) {
+      for (let species = 0; species < 2; species++) {
+        const mesh = this.tiers[level].meshes[species];
+        mesh.count = counts[level][species];
+        this.markInstanceUpload(mesh, mesh.count);
+      }
+    }
     const elapsed = performance.now() - started;
     this.metrics.repackMs = elapsed;
     this.metrics.worstRepackMs = Math.max(this.metrics.worstRepackMs, elapsed);
@@ -465,6 +604,12 @@ export class FarFlora {
       attribute.addUpdateRange(0, count * 16);
     }
     attribute.needsUpdate = true;
+    const rand = mesh.geometry.getAttribute('aRand');
+    if (rand.clearUpdateRanges && rand.addUpdateRange) {
+      rand.clearUpdateRanges();
+      rand.addUpdateRange(0, count);
+    }
+    rand.needsUpdate = true;
   }
 }
 
@@ -500,8 +645,9 @@ function sameKeys(a, b) {
   return true;
 }
 
-function appendMatrix(job, species, elements) {
+function appendMatrix(job, species, elements, random) {
   const matrixKey = species === 0 ? 'm0' : 'm1';
+  const randKey = species === 0 ? 'r0' : 'r1';
   const countKey = species === 0 ? 'n0' : 'n1';
   let buffer = job[matrixKey];
   const offset = job[countKey] * 16;
@@ -509,8 +655,12 @@ function appendMatrix(job, species, elements) {
     const grown = new Float32Array(buffer.length * 2);
     grown.set(buffer);
     job[matrixKey] = buffer = grown;
+    const grownRand = new Float32Array(job[randKey].length * 2);
+    grownRand.set(job[randKey]);
+    job[randKey] = grownRand;
   }
   buffer.set(elements, offset);
+  job[randKey][job[countKey]] = random;
   job[countKey]++;
 }
 

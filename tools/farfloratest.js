@@ -8,7 +8,12 @@ const tileMeters = 1024;
 const geometry = new THREE.BoxGeometry(1, 5, 1);
 const planet = {
   R: 6000000, intSeed: 76123, fullMaxFreq: 128, hasLiquid: false,
-  group: new THREE.Group(), flora: { far0: geometry, far1: geometry },
+  group: new THREE.Group(),
+  // the tree field draws one geometry per detail level and species
+  flora: { trees: { atlas: new THREE.Texture(), species: [0, 1].map((slot) => ({
+    name: 'test' + slot,
+    geometries: { near: geometry, mid: geometry, far: geometry, horizon: geometry },
+  })) } },
   height: () => 13.125, biomeAt: () => 'forest',
 };
 const directions = [
@@ -18,7 +23,8 @@ const directions = [
 const flora = new FarFlora({ streamBudgetMs: 0 });
 const cameraAt = (direction, radius = planet.R) => new THREE.Vector3(...direction)
   .normalize().multiplyScalar(radius + 800);
-const usedMatrices = (tile, species) => tile[`m${species}`].subarray(0, tile[`n${species}`] * 16);
+const usedMatrices = (tile, species) => tile.m[species].subarray(0, tile.n[species] * 16);
+const treeCount = (tile) => tile.n[0] + tile.n[1];
 let checkedTiles = 0;
 let checkedTrees = 0;
 
@@ -46,15 +52,15 @@ try {
       const key = flora.job?.key ?? flora.queue[0];
       const job = flora.createTileJob(planet, key);
       const tile = flora.buildTile(planet, key);
-      assert.ok(tile.n0 + tile.n1 > 20, 'Controlled forest must populate the nearest tile.');
-      const center = job.anchor.clone().multiplyScalar(radius + planet.height() - 0.4);
+      assert.ok(treeCount(tile) > 20, 'Controlled forest must populate the nearest tile.');
+      const center = job.anchor.clone().multiplyScalar(radius + planet.height() - 0.25);
       for (const species of [0, 1]) {
         const matrices = usedMatrices(tile, species);
         for (let i = 0; i < matrices.length; i += 16) {
           const position = new THREE.Vector3(matrices[i + 12], matrices[i + 13], matrices[i + 14]).add(tile.origin);
           assert.ok(position.distanceTo(center) < 800,
             'Generated trees must belong to this tile, including jitter near its edge.');
-          assert.ok(Math.abs(position.length() - (radius + planet.height() - 0.4)) < 0.001,
+          assert.ok(Math.abs(position.length() - (radius + planet.height() - 0.25)) < 0.001,
             'Trees must stay on the terrain shell within a millimetre.');
           checkedTrees++;
         }
@@ -65,7 +71,8 @@ try {
       while (!flora.stepTileJob(planet, sliced, -Infinity)) {}
       const streamed = flora.finishTileJob(sliced);
       for (const species of [0, 1]) {
-        assert.equal(streamed[`n${species}`], tile[`n${species}`]);
+        assert.equal(streamed.n[species], tile.n[species]);
+        assert.deepEqual(streamed.r[species].subarray(0, tile.n[species]), tile.r[species].subarray(0, tile.n[species]));
         assert.deepEqual(usedMatrices(streamed, species), usedMatrices(tile, species));
       }
     }
@@ -103,13 +110,14 @@ try {
   assert.deepEqual([formerlyAliased.qx, formerlyAliased.qy, formerlyAliased.qz], [0, 4835, 1]);
   planet.biomeAt = () => 'snow';
   const barren = flora.buildTile(planet, key);
-  assert.equal(barren.n0 + barren.n1, 0, 'A barren biome must not gain trees.');
+  assert.equal(treeCount(barren), 0, 'A barren biome must not gain trees.');
   planet.biomeAt = () => 'forest';
   planet.hasLiquid = true;
   planet.seaLevel = 100;
   const submerged = flora.buildTile(planet, key);
-  assert.equal(submerged.n0 + submerged.n1, 0, 'Submerged ground must not gain trees.');
-  console.log(`PASS: far-flora ${checkedTiles} discovered tiles, ${checkedTrees} trees; signed directions, three radii, sliced generation, streaming, eviction and return.`);
+  assert.equal(treeCount(submerged), 0, 'Submerged ground must not gain trees.');
+  assert.ok(Object.values(flora.debugStats().levels).some((count) => count > 0), 'The level meshes must be populated.');
+  console.log(`PASS: tree field ${checkedTiles} discovered tiles, ${checkedTrees} trees; signed directions, three radii, sliced generation, streaming, eviction and return.`);
 } finally {
   flora.clear();
   geometry.dispose();

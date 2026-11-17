@@ -24,6 +24,9 @@ try {
   console.log(JSON.stringify({ planetType: diagnostic.planetType, grass: diagnostic.grassField,
     terrainQueue: diagnostic.terrainQueue, adaptiveStage: diagnostic.adaptiveStage }));
   await page.waitForFunction(() => NMS.stats().grassField.total > 20, null, { timeout: 30000 });
+  // The reference signature must be a finished ring: a streaming job publishes
+  // partial previews, and a preview can never match the completed return visit.
+  await page.waitForFunction(() => !NMS.stats().grassField.pending, null, { timeout: 60000 });
   await page.waitForTimeout(500);
 
   const initial = await page.evaluate(() => ({
@@ -66,7 +69,8 @@ try {
   nodePage.on('pageerror', (error) => nodeErrors.push(String(error)));
   await nodePage.goto(`http://127.0.0.1:${port}/?worldlab=1&seed=NAVEMI-382&nolock=1&nohero=1`
     + '&scene=walk&planet=0&bias=meadow&quality=performance&renderer=webgpu&farflora=0&post=0&buildms=45');
-  await nodePage.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
+  // two software-rendered pages share the CPU here; boot alone takes ~10 s
+  await nodePage.waitForFunction('window.NMS?.booted', null, { timeout: 240000 });
   await nodePage.waitForFunction(() => NMS.stats().grassField.total > 20, null, { timeout: 60000 });
   await nodePage.keyboard.down('KeyW');
   await nodePage.waitForTimeout(400);

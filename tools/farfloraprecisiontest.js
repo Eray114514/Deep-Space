@@ -3,6 +3,9 @@ import * as THREE from 'three';
 import { FarFlora } from '../src/farflora.js';
 import { farFloraPrecisionFixture } from './far-flora-precision-fixture.js';
 
+// flora.meshes[0..1] are the horizon level: it holds every tree in reach, so
+// placement and rebasing are checked against it.
+
 const directions = [
   [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
   [1, 1, 1], [-1, -1, -1], [-2963, 5053, 134], [1, -2, -3],
@@ -28,8 +31,8 @@ for (const { radius, terrainProfile } of scenarios) {
       fixture.reset();
       const tile = flora.buildTile(planet, key);
       for (const species of [0, 1]) {
-        assert.equal(tile[`n${species}`], expected[species].length, 'Terrain queries must describe every drawn tree.');
-        const matrices = tile[`m${species}`];
+        assert.equal(tile.n[species], expected[species].length, 'Terrain queries must describe every drawn tree.');
+        const matrices = tile.m[species];
         for (let i = 0; i < expected[species].length; i++) {
           position.fromArray(matrices, i * 16 + 12).add(tile.origin || new THREE.Vector3());
           const error = position.distanceTo(expected[species][i]);
@@ -64,8 +67,8 @@ for (const { radius, terrainProfile } of scenarios) {
       const reference = [new Map(), new Map()];
       const record = (value) => {
         for (const species of [0, 1]) {
-          for (let i = 0; i < value[`n${species}`]; i++) {
-            const identity = value[`m${species}`].subarray(i * 16, i * 16 + 12).join(':');
+          for (let i = 0; i < value.n[species]; i++) {
+            const identity = value.m[species].subarray(i * 16, i * 16 + 12).join(':');
             if (!reference[species].has(identity)) reference[species].set(identity, []);
             reference[species].get(identity).push(expected[species][i].clone());
           }
@@ -76,7 +79,7 @@ for (const { radius, terrainProfile } of scenarios) {
       const distantTile = flora.buildTile(planet, distantKey);
       record(distantTile);
       flora.tiles.set(distantKey, distantTile);
-      const cached = [new Float32Array(tile.m0), new Float32Array(tile.m1)];
+      const cached = [new Float32Array(tile.m[0]), new Float32Array(tile.m[1])];
       let first;
       for (const anchor of [originalAnchor, distantKey.split(':').map(Number), originalAnchor]) {
         flora.anchorK = anchor;
@@ -100,11 +103,11 @@ for (const { radius, terrainProfile } of scenarios) {
             assert.deepEqual(mesh.instanceMatrix.array.subarray(0, mesh.count * 16), first[species]);
           }
         }
-        if (!first) first = flora.meshes.map(mesh => new Float32Array(mesh.instanceMatrix.array.subarray(0, mesh.count * 16)));
+        if (!first) first = flora.meshes.slice(0, 2).map(mesh => new Float32Array(mesh.instanceMatrix.array.subarray(0, mesh.count * 16)));
         assert.ok(flora.uCamL.value.distanceTo(camera.clone().sub(flora.origin)) < 1e-9);
       }
-      assert.deepEqual(tile.m0, cached[0], 'Repacking must never mutate cached tile-local matrices.');
-      assert.deepEqual(tile.m1, cached[1]);
+      assert.deepEqual(tile.m[0], cached[0], 'Repacking must never mutate cached tile-local matrices.');
+      assert.deepEqual(tile.m[1], cached[1]);
     }
   } finally {
     flora.clear();
