@@ -124,9 +124,10 @@ vec4 plantDisturbance(vec3 base, vec3 upW, float r, float fallAngle, float scarR
     // scar: inside the core the plant goes all the way over, staggered so the
     // nearest fall first; the rim only leans
     float core = 1.0 - smoothstep(radius * 0.72, radius * scarReach, d);
+    float innerPad = 1.0 - smoothstep(radius * 0.58, radius * 0.78, d);
     float stagger = clamp(uDistData[i].x * 1.7 - (d / max(radius, 1.0)) * 0.55 - r * 0.25, 0.0, 1.0);
     stagger = stagger * stagger * (3.0 - 2.0 * stagger);
-    float scarAngle = fallAngle * (0.82 + 0.18 * r) * core * stagger;
+    float scarAngle = fallAngle * mix(0.82 + 0.18 * r, 1.0, innerPad) * core * stagger;
     // downwash: everything under the ship leans away, strongest at the centre
     float wash = uDistData[i].y * (1.0 - smoothstep(0.0, radius, d));
     float washAngle = fallAngle * 0.42 * wash;
@@ -134,6 +135,24 @@ vec4 plantDisturbance(vec3 base, vec3 upW, float r, float fallAngle, float scarR
     if (a > angle) { angle = a; lean = dir; }
   }
   return vec4(lean, angle);
+}
+// Pad clear (0..1): strictly inside the landed hull and ramp footprint, plants
+// lean outward during descent and scale down cleanly to zero on touchdown so
+// side branches and grass never poke through the cabin deck or open ramp and
+// never flatten into coplanar Z-fighting planes.
+float plantPadCrush(vec3 base, vec3 upW, float r, float innerFrac, float outerFrac) {
+  float crush = 0.0;
+  for (int i = 0; i < ${DISTURBANCE_CAP}; i++) {
+    if (uDistData[i].x <= 1e-4) continue;
+    vec3 off = base - uDistPos[i].xyz;
+    off -= upW * dot(off, upW);
+    float d = length(off);
+    float radius = uDistPos[i].w;
+    float pad = 1.0 - smoothstep(radius * innerFrac, radius * outerFrac, d);
+    float stagger = clamp(uDistData[i].x * 1.7 - (d / max(radius, 1.0)) * 0.55 - r * 0.25, 0.0, 1.0);
+    crush = max(crush, pad * smoothstep(0.45, 0.95, stagger));
+  }
+  return crush;
 }
 // rotation about the plant's base: tip moves toward the local lean direction
 mat3 plantBendMatrix(vec4 dist, mat3 instanceRotation) {

@@ -3,7 +3,7 @@
 // shader copies.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { DISTURBANCE_CAP, SCAR_CAP, VegetationDisturbance, disturbanceUniforms }
+import { DISTURBANCE_CAP, DISTURBANCE_GLSL, SCAR_CAP, VegetationDisturbance, disturbanceUniforms }
   from '../src/vegetation/disturbance.js';
 
 const field = new VegetationDisturbance();
@@ -38,4 +38,6 @@ assert.equal(field.scars.length, SCAR_CAP, 'only the newest scars are kept');
 field.setPlanet('a');
 assert.equal(field.scars.length, 1, 'scars survive leaving and returning to a planet');
 assert.equal(field.scars[0], scar);
-console.log(`PASS: vegetation disturbance (${SCAR_CAP} scars + downwash, per-planet persistence, monotonic fall, fade-out).`);
+assert.match(DISTURBANCE_GLSL, /float plantPadCrush\(vec3 base, vec3 upW, float r, float innerFrac, float outerFrac\)/,
+  'shared disturbance GLSL exposes hull-pad clear helper');
+console.log(`PASS: vegetation disturbance (${SCAR_CAP} scars + downwash, per-planet persistence, monotonic fall, fade-out, hull-pad clear).`);

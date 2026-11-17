@@ -2192,6 +2192,10 @@ function parkShipNear(planet, landDir) {
   ship.parkedPlanet = planet; ship.parkedLocal = padLocal; ship.parkedLocalQuat = parkedLocalQuat;
   ship.setParked(padUniv, parkedWorldQuat);
   ship.parkAmt = 1;
+  vegetationDisturbance.setPlanet(planet.bodyId || planet.seed);
+  const padGround = groundPointUnder(planet, padLocal, new THREE.Vector3());
+  const parkedScar = vegetationDisturbance.addScar(padGround, LANDING_SCAR_RADIUS);
+  vegetationDisturbance.setFell(parkedScar, 1);
   return { padLocal, padUniv, parkedLocalQuat, parkedWorldQuat, dryFound };
 }
 
@@ -4434,9 +4438,9 @@ function updateWaterInteraction(dt) {
 }
 
 let surfacePressureTimer = 0;
-// metres: trees inside a landing scar are blown over; grass is flattened ~1.6x
-// further out. The hull is 21 m wide and 31 m long.
-const LANDING_SCAR_RADIUS = 20;
+// metres: trees inside a landing scar are blown radially outward and cleared
+// beneath the hull/ramp pad; grass leans ~1.6x further out.
+const LANDING_SCAR_RADIUS = 26;
 const DOWNWASH_RADIUS = 30;
 const HOVER_DOWNWASH_ALT = 45;
 
@@ -4647,6 +4651,10 @@ function frame(rafTs) {
     ship.parkedPlanet.localPositionToWorld(ship.parkedLocal, ship.parkedPosUniv);
     ship.parkedQuat.copy(ship.parkedPlanet.frameOrientation).multiply(ship.parkedLocalQuat);
   }
+  if (paused && state === 'walk' && walkCtl.planet && universe.planets().includes(walkCtl.planet)) {
+    walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
+    nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
+  }
 
   // nearest body & altitude
   nearest = state === 'walk' && walkCtl.planet ? walkCtl.planet
@@ -4797,6 +4805,28 @@ function frame(rafTs) {
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
     tryEnterShipFromRamp();
   }
+  // Export parked-seat and interior-walk nav BEFORE stepTweens, LOD, scatter,
+  // farFlora and ambience read nav.pos; otherwise planetary orbital motion
+  // (~300–650 m/frame at 60x cosmic time) leaves vegetation and terrain one
+  // frame behind the rendered camera, misclassifying nearby trees into 8.5x
+  // far foliage cards that slice through the cabin and dither-flicker with dt.
+  const shipLanded = !ship.orbitalStandby && !!ship.parkedPosUniv && ship.parkAmt > 0.98;
+  shipView.tick(paused ? 0 : dt, {
+    nav,
+    landed: shipLanded,
+    seatedOnPad: state === 'landed',
+    planet: ship.parkedPlanet,
+  });
+  if (state === 'shipwalk' && shipView.pendingSurfaceExit && !paused) {
+    handOffRampExitToSurface();
+  } else if (state === 'shipwalk' && !shipView.shipwalk && !paused) {
+    if (shipLanded) {
+      landedRequireKeyRelease = Boolean(keys.KeyW || keys.Space);
+      setState('landed');
+    } else {
+      setState('space');
+    }
+  }
   // Gameplay/collision tweens use the bounded simulation delta. The title
   // pull-back is explicitly wall-clock driven, so a temporary shader/LOD long
   // frame cannot stretch a 2.8 s shot into a 13 s apparent freeze.
@@ -4849,6 +4879,13 @@ function frame(rafTs) {
   // Deterministic development fixture: keep a constant-altitude tangent run
   // long enough for terrain/water LODs and the wake lifecycle to settle.
   updateDevWaterWakeFixture();
+
+  // Refresh altitude against the final post-control / post-tween nav.pos so
+  // terrain LOD, scatter, farFlora and ambience never see pre-step coordinates.
+  if (nearest) {
+    _v.copy(nav.pos).sub(nearest.posUniv);
+    nearestAlt = nearest.altitudeAt(_v);
+  }
 
   // true frame velocity (a warp moves nav.pos directly, not via nav.vel)
   if (frameNo > 2) _velActual.copy(nav.pos).sub(prevNavPos).multiplyScalar(1 / dt);
@@ -5021,26 +5058,7 @@ function frame(rafTs) {
   const built = sceneBuildBudget.run('terrain',terrainBuildMs,flushChunkQueue);
   if (built > 0) lastBuildFrame = frameNo;
 
-  // camera-relative placement. shipView.tick runs first: while the interior
-  // owns the camera it exports nav (the walk stance) before anything reads it.
-  const shipLanded = !!ship.parkedPosUniv && ship.parkAmt > 0.98;
-  shipView.tick(dt, {
-    nav,
-    landed: shipLanded,
-    seatedOnPad: state === 'landed',
-    planet: ship.parkedPlanet,
-  });
-  ship.updateInterior(dt, shipView, ship.telemetry);
-  if (state === 'shipwalk' && shipView.pendingSurfaceExit && !paused) {
-    handOffRampExitToSurface();
-  } else if (state === 'shipwalk' && !shipView.shipwalk && !paused) {
-    if (shipLanded) {
-      landedRequireKeyRelease = Boolean(keys.KeyW || keys.Space);
-      setState('landed');
-    } else {
-      setState('space');
-    }
-  }
+  ship.updateInterior(paused ? 0 : dt, shipView, ship.telemetry);
   universe.updateRelative(nav.pos);
   camera.position.set(0, 0, 0);
   camera.quaternion.copy(nav.quat);

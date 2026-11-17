@@ -94,6 +94,7 @@ const Y = new THREE.Vector3(0, 1, 0);
 // the GPU. `aRand` is the tree's stable random number.
 function applyTreeField(material, uniforms, tier, depthOnly = false) {
   const lo = tier.lo.toFixed(1), hi = Number.isFinite(tier.hi) ? tier.hi.toFixed(1) : '1.0e9';
+  const hasHi = Number.isFinite(tier.hi), hasLo = tier.lo > 0;
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
@@ -113,7 +114,7 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
           mat3 treeBend() {
             #ifdef USE_INSTANCING
               vec4 dist = plantDisturbance(instanceMatrix[3].xyz, normalize(instanceMatrix[1].xyz),
-                aRand, 1.5, 1.0);
+                aRand, 1.53, 1.0);
               return plantBendMatrix(dist, mat3(instanceMatrix));
             #else
               return mat3(1.0);
@@ -129,10 +130,10 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             float jitter = 1.0 + (aRand - 0.5) * ${(BAND_JITTER * 2).toFixed(2)};
             float lo = ${lo} * jitter, hi = ${hi} * jitter;
             // x: fading in from the coarser side, y: fading out to the finer
-            // side. The neighbouring level evaluates the same two edges, so
-            // the dither masks are exact complements.
-            vTreeFade = vec2(smoothstep(hi, hi * 0.9, d), smoothstep(lo * 0.9, lo, d));
-            float g = uAltK * step(lo * 0.9, d) * step(d, hi);
+            // side. Keep smoothstep edges strictly ordered (edge0 < edge1) so
+            // GLSL/HLSL never hits undefined edge0 >= edge1 behaviour.
+            vTreeFade = vec2(${hasHi ? '1.0 - smoothstep(hi * 0.9, hi, d)' : '1.0'}, ${hasLo ? 'smoothstep(lo * 0.9, lo, d)' : '1.0'});
+            float g = uAltK * ${hasLo ? 'step(lo * 0.9, d)' : '1.0'} * ${hasHi ? 'step(d, hi)' : '1.0'};
             ${tier.name === 'horizon' ? `
             float r2 = fract(aRand * 7.13);
             float rim = ${RIM_M.toFixed(1)} * (0.72 + 0.28 * r2);
@@ -143,11 +144,13 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             vec4 treeView = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
             if (!isOrthographic && treeView.z > 40.0) g = 0.0;
             // wind: the crown leans and shivers, the trunk base stays put
+            float crush = plantPadCrush(treeBase, normalize(instanceMatrix[1].xyz), aRand, 0.46, 0.58);
+            g *= 1.0 - crush;
             float lift = max(transformed.y, 0.0);
             float phase = treeBase.x * 0.37 + treeBase.z * 0.29 + aRand * 6.28;
             float sway = (0.6 * sin(uTreeTime * 0.9 + phase) + 0.3 * sin(uTreeTime * 2.1 + phase * 1.7))
               * (0.35 + uTreeWind.w) + 0.4;
-            float bend = lift * lift * 0.0011 * uTreeWind.z * ${tier.name === 'horizon' ? '0.0' : '1.0'};
+            float bend = lift * lift * 0.0011 * uTreeWind.z * (1.0 - crush) * ${tier.name === 'horizon' ? '0.0' : '1.0'};
             transformed.x += uTreeWind.x * sway * bend;
             transformed.z += uTreeWind.y * sway * bend;
             transformed = treeBend() * transformed;
@@ -181,7 +184,7 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             totalEmissiveRadiance += diffuseColor.rgb * 0.2;
           #endif`);
   };
-  material.customProgramCacheKey = () => 'tree-field-v2-' + tier.name + (depthOnly ? '-depth' : '');
+  material.customProgramCacheKey = () => 'tree-field-v3-' + tier.name + (depthOnly ? '-depth' : '');
   return material;
 }
 
@@ -418,9 +421,6 @@ export class FarFlora {
       this.pruneCache();
     }
 
-    vegetationDisturbance.copyRelative(this.uniforms.uDistPos.value, this.uniforms.uDistData.value,
-      this.origin, p.bodyId || p.seed);
-
     this.completedSinceRepack = (this.completedSinceRepack || 0) + completed;
     let repacked = false;
     if (this.dirty) {
@@ -443,6 +443,11 @@ export class FarFlora {
     if (!repacked && visible && this.cameraLocal.distanceTo(this.classifiedAt) > RECLASSIFY_M) {
       this.repack(true);
     }
+
+    // Copy disturbance records after repack() so uDistPos always uses the
+    // exact render origin that the meshes will draw with on this frame.
+    vegetationDisturbance.copyRelative(this.uniforms.uDistPos.value, this.uniforms.uDistData.value,
+      this.origin, p.bodyId || p.seed);
   }
 
   sortQueue() {

@@ -1721,10 +1721,10 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         // normals, and turning them with a flattened blade shades it black.
         mat3 plantBend() {
           #ifdef USE_INSTANCING
-            vec3 ip = instanceMatrix[3].xyz;
+            ${amount > 0 ? `vec3 ip = instanceMatrix[3].xyz;
             float r = fract((ip.x * 0.61 + ip.y * 0.53 + ip.z * 0.47) * 0.137);
             return plantBendMatrix(plantDisturbance(ip, normalize(instanceMatrix[1].xyz), r, 1.25, 1.65),
-              mat3(instanceMatrix));
+              mat3(instanceMatrix));` : 'return mat3(1.0);'}
           #else
             return mat3(1.0);
           #endif
@@ -1735,7 +1735,9 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
           transformed *= uGrow;
           vec3 ip = instanceMatrix[3].xyz;
           float ph = ip.x * 0.61 + ip.y * 0.53 + ip.z * 0.47;
-          float k = uSway * max(transformed.y, 0.0) * uWind.z;
+          float crush = plantPadCrush(ip, normalize(instanceMatrix[1].xyz), fract(ph * 0.137),
+            ${amount > 0 ? '0.46, 0.58' : '0.36, 0.46'});
+          float k = uSway * max(transformed.y, 0.0) * uWind.z * (1.0 - crush * 0.85);
           float gustEnvelope = 1.0 + uWind.w
             * (0.52 + 0.48 * sin(uTime * 0.23 + ph * 0.11 + uWindPhase.w));
           float along = (0.56 * sin(uTime * 0.82 + ph + uWindPhase.x)
@@ -1757,6 +1759,7 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
           transformed.z += cos(ph + uWindPhase.x) * pressure * tip * 0.7;
           transformed.y *= 1.0 - pressure * tip * 0.68;
           transformed = plantBend() * transformed;
+          transformed *= 1.0 - crush;
         }
         #endif`);
     if (material.vertexColors) {
@@ -1775,6 +1778,6 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         #endif`);
     }
   };
-  material.customProgramCacheKey = () => 'wind-sway-v5-disturb-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
+  material.customProgramCacheKey = () => 'wind-sway-v6-disturb-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
   return material;
 }
