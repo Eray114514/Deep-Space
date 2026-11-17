@@ -24,6 +24,7 @@ import * as THREE from 'three';
 import { hash3i, hashFloat } from './rng.js';
 import { buildFlora } from './flora.js';
 import { TIME, WIND } from './shaders.js';
+import { DISTURBANCE_GLSL, disturbanceUniforms, vegetationDisturbance } from './vegetation/disturbance.js';
 
 export const FAR_FLORA_ENABLED = true;
 
@@ -86,7 +87,20 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
           uniform float uTreeTime;
           uniform vec4 uTreeWind;
           attribute float aRand;
-          varying vec2 vTreeFade;`)
+          varying vec2 vTreeFade;
+          ${DISTURBANCE_GLSL}
+          // a blown-over tree pivots about its base, away from the downwash
+          mat3 treeBend() {
+            #ifdef USE_INSTANCING
+              vec4 dist = plantDisturbance(instanceMatrix[3].xyz, normalize(instanceMatrix[1].xyz),
+                aRand, 1.5, 1.0);
+              return plantBendMatrix(dist, mat3(instanceMatrix));
+            #else
+              return mat3(1.0);
+            #endif
+          }`)
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+          objectNormal = treeBend() * objectNormal;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
           #ifdef USE_INSTANCING
           {
@@ -116,6 +130,7 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             float bend = lift * lift * 0.0011 * uTreeWind.z * ${tier.name === 'horizon' ? '0.0' : '1.0'};
             transformed.x += uTreeWind.x * sway * bend;
             transformed.z += uTreeWind.y * sway * bend;
+            transformed = treeBend() * transformed;
             transformed *= g;
           }
           #endif`);
@@ -146,7 +161,7 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             totalEmissiveRadiance += diffuseColor.rgb * 0.2;
           #endif`);
   };
-  material.customProgramCacheKey = () => 'tree-field-' + tier.name + (depthOnly ? '-depth' : '');
+  material.customProgramCacheKey = () => 'tree-field-v2-' + tier.name + (depthOnly ? '-depth' : '');
   return material;
 }
 
@@ -180,6 +195,7 @@ export class FarFlora {
       uAltK: { value: 1 },
       uTreeTime: TIME,
       uTreeWind: { value: WIND },
+      ...disturbanceUniforms(),
     };
     this.uCamL = this.uniforms.uCamL;
     this.uAltK = this.uniforms.uAltK;
@@ -379,6 +395,9 @@ export class FarFlora {
       this.dirty = true;
       this.pruneCache();
     }
+
+    vegetationDisturbance.copyRelative(this.uniforms.uDistPos.value, this.uniforms.uDistData.value,
+      this.origin, p.bodyId || p.seed);
 
     if (!this.dirty && visible && this.cameraLocal.distanceTo(this.classifiedAt) > RECLASSIFY_M) {
       this.repack(true);

@@ -53,6 +53,7 @@ import { SceneRadianceState } from './scene-radiance.js';
 import { waterInteraction } from './water-interaction.js';
 import { oceanSeconds, oceanClockJumped } from './ocean-clock.js';
 import { surfaceInteraction } from './surface-interaction.js';
+import { vegetationDisturbance } from './vegetation/disturbance.js';
 import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
 import { WeatherEffects } from './weather-effects.js';
 import {
@@ -1962,6 +1963,11 @@ function tryLand() {
   const ground = planet.surfaceRadius(dirLocal);
   if (!window.NMS_NOLOCK && pointerLockInput) renderer.domElement.requestPointerLock();
   const landing = parkShipNear(planet, dirLocal);
+  // The downwash blows over the trees on the pad as the ship comes down;
+  // they stay down after it leaves (see vegetation/disturbance.js).
+  vegetationDisturbance.setPlanet(planet.bodyId || planet.seed);
+  const padGround = groundPointUnder(planet, landing.padLocal, new THREE.Vector3());
+  const landingScar = vegetationDisturbance.addScar(padGround, LANDING_SCAR_RADIUS);
   const endLocal = dirLocal.clone().multiplyScalar(ground + 1.7);
   // If the ship was hovering just off a shoreline (wet directly underneath)
   // while parkShipNear found a dry coastal pad nearby, step the player onto
@@ -2011,6 +2017,8 @@ function tryLand() {
     planet.localPositionToWorld(shipLocal, shipWorld);
     shipWorldQuat.copy(planet.frameOrientation).multiply(shipLocalQuat);
     ship.setLandingPose(shipWorld, shipWorldQuat, descent);
+    vegetationDisturbance.setFell(landingScar, (descent - 0.2) / 0.7);
+    vegetationDisturbance.setDownwash(padGround, DOWNWASH_RADIUS, 0.35 + 0.65 * descent);
 
     cameraLocal.lerpVectors(cameraStartLocal, cameraEndLocal, easeInOut(k));
     planet.localPositionToWorld(cameraLocal, nav.pos);
@@ -2142,9 +2150,11 @@ function takeoff(planet = walkCtl.planet ?? ship.parkedPlanet, launchPos = nav.p
   const endLocal = startLocal.clone().addScaledVector(upLocal, 420);
   const localQuat = planet._invFrame.clone().multiply(nav.quat);
   planet.localPositionToWorld(startLocal, nav.pos);
+  const launchGround = groundPointUnder(planet, startLocal, new THREE.Vector3());
   setState('takeoff');
   addTween(1.5, (k) => {
     planet.localPositionToWorld(_v.lerpVectors(startLocal, endLocal, easeInOut(k)), nav.pos);
+    vegetationDisturbance.setDownwash(launchGround, DOWNWASH_RADIUS, 1 - k);
     nav.quat.copy(planet.frameOrientation).multiply(localQuat);
   }, () => {
     setState('space');
@@ -4157,14 +4167,35 @@ function updateWaterInteraction(dt) {
 }
 
 let surfacePressureTimer = 0;
+// metres: trees inside a landing scar are blown over; grass is flattened ~1.6x
+// further out. The hull is 21 m wide and 31 m long.
+const LANDING_SCAR_RADIUS = 20;
+const DOWNWASH_RADIUS = 30;
+const HOVER_DOWNWASH_ALT = 45;
+
+function groundPointUnder(planet, local, out) {
+  _up.copy(local).normalize();
+  return out.copy(_up).multiplyScalar(planet.surfaceRadius(_up));
+}
+
+const downwashPoint = new THREE.Vector3();
 function updateSurfaceInteraction(dt) {
   surfaceInteraction.update(dt);
+  vegetationDisturbance.update(dt);
   const p = nearest;
   if (!p || p.isGasGiant || p.type === 'artificialHabitat') {
     surfaceInteraction.setPlanet(null);
+    vegetationDisturbance.setPlanet(null);
     return;
   }
   surfaceInteraction.setPlanet(p.bodyId || p.seed);
+  vegetationDisturbance.setPlanet(p.bodyId || p.seed);
+  // a ship hovering low pushes everything beneath it away
+  if (state === 'space' && nearestAlt < HOVER_DOWNWASH_ALT) {
+    groundPointUnder(p, p.worldPositionToLocal(nav.pos, downwashPoint), downwashPoint);
+    const k = 1 - nearestAlt / HOVER_DOWNWASH_ALT;
+    vegetationDisturbance.setDownwash(downwashPoint, DOWNWASH_RADIUS, k * k);
+  }
   surfacePressureTimer -= dt;
   if (surfacePressureTimer > 0) return;
   p.worldPositionToLocal(nav.pos, waterWakePoint);

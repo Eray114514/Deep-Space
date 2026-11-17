@@ -9,6 +9,7 @@ import { hasSurfaceCloudMedium } from './cloud/surface-clouds.js';
 // doing lights/shadows/morphs/fog for us.
 
 import * as THREE from 'three';
+import { DISTURBANCE_GLSL, disturbanceUniforms } from './vegetation/disturbance.js';
 import { Simplex } from './noise.js';
 import { makeRng } from './rng.js';
 import { WATER_IMPULSE_CAP, waterInteraction } from './water-interaction.js';
@@ -1677,6 +1678,7 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
     shader.uniforms.uBendData = { value: surfaceInteraction.data };
     shader.uniforms.uWindPhase = { value: new THREE.Vector4() };
     shader.uniforms.uWindFlutterPhase = { value: 0 };
+    Object.assign(shader.uniforms, disturbanceUniforms());
     if (frame) Object.assign(shader.uniforms, frame.uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
@@ -1687,7 +1689,21 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         uniform vec4 uWindPhase;
         uniform float uWindFlutterPhase;
         uniform vec4 uBendPos[${SURFACE_INTERACTION_CAP}];
-        uniform vec4 uBendData[${SURFACE_INTERACTION_CAP}];`)
+        uniform vec4 uBendData[${SURFACE_INTERACTION_CAP}];
+        ${DISTURBANCE_GLSL}
+        // under a landing ship grass is flattened well past the hull and shrubs
+        // bend over. Normals stay as authored: grass carries up-facing field
+        // normals, and turning them with a flattened blade shades it black.
+        mat3 plantBend() {
+          #ifdef USE_INSTANCING
+            vec3 ip = instanceMatrix[3].xyz;
+            float r = fract((ip.x * 0.61 + ip.y * 0.53 + ip.z * 0.47) * 0.137);
+            return plantBendMatrix(plantDisturbance(ip, normalize(instanceMatrix[1].xyz), r, 1.25, 1.65),
+              mat3(instanceMatrix));
+          #else
+            return mat3(1.0);
+          #endif
+        }`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         #ifdef USE_INSTANCING
         {
@@ -1715,6 +1731,7 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
           transformed.x += sin(ph + uWindPhase.x) * pressure * tip * 0.7;
           transformed.z += cos(ph + uWindPhase.x) * pressure * tip * 0.7;
           transformed.y *= 1.0 - pressure * tip * 0.68;
+          transformed = plantBend() * transformed;
         }
         #endif`);
     if (material.vertexColors) {
@@ -1733,6 +1750,6 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         #endif`);
     }
   };
-  material.customProgramCacheKey = () => 'wind-sway-v4-local-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
+  material.customProgramCacheKey = () => 'wind-sway-v5-disturb-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
   return material;
 }

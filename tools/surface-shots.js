@@ -112,6 +112,39 @@ if (option('site', 'meadow') === 'forest') {
     { name: '10-eye-level-up', js: flight(2.2, 0.35) });
 }
 
+// --landing: land in the chosen site with the real L-key flow and record the
+// downwash: mid-descent, from the ramp after touchdown, and the scar from above
+if (flag('landing')) {
+  const shoot = async (name) => {
+    await page.screenshot({ path: `${OUT}/${name}.png` });
+    console.log('ok', name);
+  };
+  await page.evaluate(flight(110, -0.55)(PLANET, site));
+  try { await page.waitForFunction('window.NMS.idle()', null, { timeout: 90000 }); } catch {}
+  await page.waitForTimeout(1500);
+  await shoot('L1-before');
+  await page.keyboard.press('KeyL');
+  await page.waitForTimeout(1900);
+  await shoot('L2-descent');
+  await page.waitForTimeout(3200);
+  await shoot('L3-touchdown');
+  const pad = await page.evaluate(() => NMS.referenceState().shipLocal);
+  if (pad) {
+    const len = Math.hypot(...pad);
+    const padSite = { ...site, dir: pad.map((v) => v / len) };
+    await page.evaluate('NMS.shipVisible(false); ' + flight(60, -1.35)(PLANET, padSite));
+    await page.waitForTimeout(3000);
+    await shoot('L4-scar-above');
+    const side = { ...padSite, dir: padSite.dir.map((v, i) => v + [0.7, -0.4, 0.3][i] * 55 / site.R) };
+    await page.evaluate('NMS.shipVisible(false); ' + flight(6, -0.1)(PLANET, side));
+    await page.waitForTimeout(3000);
+    await shoot('L5-scar-side');
+  }
+  await browser.close();
+  server.close();
+  process.exit(errors.length ? 1 : 0);
+}
+
 const report = [];
 for (const scene of SCENES) {
   if (ONLY.length && !ONLY.some((part) => scene.name.includes(part))) continue;
