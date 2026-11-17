@@ -78,6 +78,12 @@ const cloudFieldGLSL = /* glsl */`
     return vec2(-b - h, -b + h);
   }
 
+  float liftAt(vec3 p) {
+    if (uLiftOn <= 0.5) return 0.0;
+    float surface = (weatherAtlasSample(uSurfaceTex, p).g * 2.0 - 1.0) * uSurfaceRange;
+    return min(max(surface + 500.0 - uLiftBase, 0.0) * 0.85, uLiftMax);
+  }
+
   // Synoptic coverage from the shared weather atlas, with a mid-scale breakup
   // so the 256-texel atlas does not draw straight, blurry weather borders.
   // Returns (coverage, lift). Lift raises the local cloud base over high
@@ -98,12 +104,7 @@ const cloudFieldGLSL = /* glsl */`
     // Mesoscale regimes inside a weather system: closed decks with cracks
     // alternate with broken, open-cell fields instead of one uniform texture.
     float regime = textureLod(uNoise, q.yzx / 310000.0 + 0.61, 0.0).b;
-    float lift = 0.0;
-    if (uLiftOn > 0.5) {
-      float surface = (weatherAtlasSample(uSurfaceTex, p).g * 2.0 - 1.0) * uSurfaceRange;
-      lift = min(max(surface + 500.0 - uLiftBase, 0.0) * 0.85, uLiftMax);
-    }
-    return vec2(c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime)), lift);
+    return vec2(c * mix(0.42, 0.95, smoothstep(0.34, 0.66, regime)), liftAt(p));
   }
 
   // Distance fades set by the view march. A step grows with distance, so
@@ -218,10 +219,31 @@ const shadowLookupGLSL = /* glsl */`
   uniform vec2 uShadowCenter;
   uniform float uShadowExtent, uShadowOn;
   // Transmittance of the cloud column between a point below the clouds and the sun.
+  // Explicit level-0 lookup keeps non-uniform ray-march loops free of derivative spikes.
   float cloudShadowAt(vec3 p) {
     vec2 uv = (vec2(dot(p, uShadowX), dot(p, uShadowY)) - uShadowCenter) / uShadowExtent * 0.5 + 0.5;
     vec2 edge = smoothstep(vec2(0.0), vec2(0.06), uv) * smoothstep(vec2(0.0), vec2(0.06), 1.0 - uv);
-    return mix(1.0, texture2D(tShadow, uv).r, edge.x * edge.y);
+    return mix(1.0, textureLod(tShadow, uv, 0.0).r, edge.x * edge.y);
+  }
+  // Surface shadow lookup filtered over the screen pixel's oblique ground ellipse.
+  // From ~50 km altitude, distant ground pixels span several shadow-map texels along
+  // the view ray; unfiltered level-0 lookups shimmered across scanlines in flight.
+  float cloudSurfaceShadowAt(vec3 p, vec3 up, vec3 rd, float distance, float pixelAngle) {
+    vec2 uv = (vec2(dot(p, uShadowX), dot(p, uShadowY)) - uShadowCenter) / uShadowExtent * 0.5 + 0.5;
+    vec2 edge = smoothstep(vec2(0.0), vec2(0.06), uv) * smoothstep(vec2(0.0), vec2(0.06), 1.0 - uv);
+    float shadowTexel = uShadowExtent / 512.0;
+    float crossWidth = distance * pixelAngle;
+    float ndotv = max(abs(dot(rd, up)), 0.06);
+    vec3 tangent = rd - up * dot(rd, up);
+    float tLen = length(tangent);
+    vec3 majorDir = tLen > 1e-5 ? tangent / tLen : uShadowX;
+    vec2 majorSpanUv = vec2(dot(majorDir, uShadowX), dot(majorDir, uShadowY)) * ((crossWidth / ndotv) / (2.0 * uShadowExtent));
+    float minorTexels = crossWidth / shadowTexel;
+    float majorTexels = length(majorSpanUv) * 1024.0;
+    float lod = log2(max(max(minorTexels, majorTexels * 0.5), 1.0));
+    vec2 stepUv = majorSpanUv * 0.25;
+    float s = 0.5 * (textureLod(tShadow, uv - stepUv, lod).r + textureLod(tShadow, uv + stepUv, lod).r);
+    return mix(1.0, s, edge.x * edge.y);
   }
   // Optical depth between a point inside the layer and the sun, from the same
   // map: the ray's total, taken up linearly between where its cloud begins
@@ -231,7 +253,7 @@ const shadowLookupGLSL = /* glsl */`
   float cloudCastTau(vec3 p, vec3 sun) {
     vec2 uv = (vec2(dot(p, uShadowX), dot(p, uShadowY)) - uShadowCenter) / uShadowExtent * 0.5 + 0.5;
     vec2 edge = smoothstep(vec2(0.0), vec2(0.06), uv) * smoothstep(vec2(0.0), vec2(0.06), 1.0 - uv);
-    vec3 map = texture2D(tShadow, uv).rgb;
+    vec3 map = textureLod(tShadow, uv, 0.0).rgb;
     if (map.r > 0.985) return 0.0;
     float along = dot(p, sun);
     vec3 origin = p - sun * along;
@@ -254,11 +276,13 @@ const shadowShader = /* glsl */`
   varying vec2 vUv;
   void main() {
     vec3 sun = normalize(uSunDirection0);
-    // Same octaves as the view march, faded by what one texel can resolve.
+    // Unlike the 2x temporally upsampled view march, the shadow map is drawn
+    // in a single pass: bandlimit density contrast to ~2 texels so sub-texel
+    // rims do not stair-step or shimmer as clouds and sun move.
     float texel = uShadowExtent / 512.0;
-    gFootprint = texel;
+    gFootprint = texel * 2.2;
     gSheet = texel;
-    gFarSmall = smoothstep(500.0, 1500.0, texel);
+    gFarSmall = smoothstep(350.0, 1200.0, texel);
     gFarWide = smoothstep(2500.0, 8000.0, texel);
     vec2 xy = uShadowCenter + (vUv * 2.0 - 1.0) * uShadowExtent;
     vec3 origin = uShadowX * xy.x + uShadowY * xy.y;
@@ -268,39 +292,65 @@ const shadowShader = /* glsl */`
       vec2 base = shellHits(origin, sun, uShellBase);
       float s0 = base.y > base.x ? base.y : top.x, s1 = top.y;
       if (s1 > s0) {
-        vec2 w0 = weatherAt(origin + sun * mix(s0, s1, 0.2));
-        vec2 w1 = weatherAt(origin + sun * mix(s0, s1, 0.8));
-        if (max(w0.x, w1.x) > 0.03) {
-          // Walk down from the sunward side and note where the cloud on
-          // this ray begins and ends (as fractions of the layer crossing):
-          // the view march uses them to shade cloud with cloud.
-          float ds = (s1 - s0) / 16.0, tau = 0.0;
-          bool hit = false;
-          float previous = 0.0;
-          // A low sun stretches each step to kilometres: hard-edged density
-          // sampled that coarsely drew square, flickering shadows.
-          gFootprint = max(texel, ds * 0.3);
-          for (int i = 0; i < 16; i++) {
-            float k = 1.0 - (float(i) + 0.5) / 16.0;
-            float density = cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(w0.x, w1.x, k), 1, 0.0, mix(w0.y, w1.y, k));
-            // Where the cloud begins and ends, found within the step from the
-            // two densities around the crossing: whole steps drew parallel
-            // bands across the deck at a low sun.
-            // Sample i sits at (i + 0.5) / 16 of the crossing; the threshold
-            // is crossed between it and the previous one.
-            if (density > 0.002) {
-              if (!hit) {
-                front = max(float(i) - 0.5 + sat((0.002 - previous) / max(density - previous, 1e-4)), 0.0) / 16.0;
-                hit = true;
-              }
-              back = (float(i) + 1.0) / 16.0;
-            } else if (hit && previous > 0.002) {
-              back = (float(i) - 0.5 + sat((previous - 0.002) / max(previous - density, 1e-4))) / 16.0;
+        // Bound the march to the local lifted base and local cloud ceiling.
+        // Marching 16 steps across the full [uShellBase, uShellTop] envelope
+        // wasted most samples in empty tower/lift headroom and sliced low-sun
+        // cumulus shadows into kilometres-apart flickering bands.
+        float lift0 = liftAt(origin + sun * s0);
+        float lift1 = liftAt(origin + sun * mix(s0, s1, 0.5));
+        float rBase = uShellBase + max(min(lift0, lift1) - 150.0, 0.0);
+        float rLiftTop = min(uShellTop, uShellBase + max(lift0, lift1) + uShellDepth);
+        vec2 bHit = rBase > uShellBase ? shellHits(origin, sun, rBase) : base;
+        vec2 lHit = rLiftTop < uShellTop ? shellHits(origin, sun, rLiftTop) : top;
+        float m0 = bHit.y > bHit.x ? bHit.y : lHit.x;
+        float m1 = lHit.y > lHit.x ? lHit.y : s0;
+        if (m1 > m0) {
+          float m0Init = m0, mSpanInit = max(m1 - m0, 1.0);
+          vec2 w0 = weatherAt(origin + sun * mix(m0, m1, 0.2));
+          vec2 w1 = weatherAt(origin + sun * mix(m0, m1, 0.8));
+          if (max(w0.x, w1.x) > 0.03) {
+            float c0 = cloudCeiling(origin + sun * mix(m0, m1, 0.15), mix(w0.y, w1.y, 0.0));
+            float c1 = cloudCeiling(origin + sun * mix(m0, m1, 0.50), mix(w0.y, w1.y, 0.5));
+            float c2 = cloudCeiling(origin + sun * mix(m0, m1, 0.85), mix(w0.y, w1.y, 1.0));
+            float rCeil = min(rLiftTop, max(max(c0, c1), c2) + 500.0);
+            if (rCeil < rLiftTop) {
+              vec2 cHit = shellHits(origin, sun, rCeil);
+              if (cHit.y > cHit.x) {
+                m0 = bHit.y > bHit.x ? bHit.y : cHit.x;
+                m1 = cHit.y;
+              } else m1 = m0;
             }
-            previous = density;
-            tau += density * ds;
+            if (m1 > m0) {
+              float mSpan = m1 - m0, fullSpan = max(s1 - s0, 1.0);
+              int steps = clamp(int(16.0 + mSpan / 1400.0), 16, 28);
+              float ds = mSpan / float(steps), tau = 0.0;
+              bool hit = false;
+              float previous = 0.0, prevDepth = (s1 - m1) / fullSpan;
+              gFootprint = max(texel * 2.2, ds * 0.5);
+              for (int i = 0; i < 28; i++) {
+                if (i >= steps) break;
+                float s = m1 - (float(i) + 0.5) * ds;
+                float uw = sat(((s - m0Init) / mSpanInit - 0.2) / 0.6);
+                float currDepth = (s1 - s) / fullSpan;
+                float density = cloudDensity(origin + sun * s, mix(w0.x, w1.x, uw), 1, 0.0, mix(w0.y, w1.y, uw));
+                if (density > 0.002) {
+                  if (!hit) {
+                    float frac = sat((0.002 - previous) / max(density - previous, 1e-4));
+                    front = mix(prevDepth, currDepth, frac);
+                    hit = true;
+                  }
+                  back = (s1 - (s - 0.5 * ds)) / fullSpan;
+                } else if (hit && previous > 0.002) {
+                  float frac = sat((previous - 0.002) / max(previous - density, 1e-4));
+                  back = mix(prevDepth, currDepth, frac);
+                }
+                previous = density;
+                prevDepth = currDepth;
+                tau += density * ds;
+              }
+              transmittance = exp(-tau * uExtinction);
+            }
           }
-          transmittance = exp(-tau * uExtinction);
         }
       }
     }
@@ -776,7 +826,7 @@ const compositeShader = /* glsl */`
   uniform sampler2D tBase, tSceneDepth, tCloud, tCloudAux, tShaft;
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal;
   uniform vec3 uCameraLocal, uSunDirection0;
-  uniform float uCameraFar, uShadowFloor;
+  uniform float uCameraFar, uShadowFloor, uFullPixelAngle;
   uniform vec2 uCloudTexel, uHistTexel, uSubpixel;
   ${cloudFieldGLSL}
   ${shadowLookupGLSL}
@@ -813,12 +863,13 @@ const compositeShader = /* glsl */`
         // Surfaces under the clouds lose their direct sun to the cloud column.
         vec3 p = uCameraLocal + rd * distance;
         float r = length(p);
+        vec3 up = p / r;
         // The base rides over high ground with the same lift the march uses.
-        float localBase = uShellBase + (r < uShellBase + uLiftMax + 2600.0 ? weatherAt(p).y : uLiftMax);
+        float localBase = uShellBase + (r < uShellBase + uLiftMax + 2600.0 ? liftAt(p) : uLiftMax);
         float under = 1.0 - smoothstep(localBase, localBase + 2600.0, r);
         if (under > 0.0) {
-          float day = smoothstep(0.0, 0.14, dot(p / r, normalize(uSunDirection0)));
-          shade = mix(1.0, mix(uShadowFloor, 1.0, cloudShadowAt(p)), day * under);
+          float day = smoothstep(0.0, 0.14, dot(up, normalize(uSunDirection0)));
+          shade = mix(1.0, mix(uShadowFloor, 1.0, cloudSurfaceShadowAt(p, up, rd, distance, uFullPixelAngle)), day * under);
         }
       }
     }
@@ -855,9 +906,16 @@ export class LiteCloudPass extends Pass {
     this.target.textures[1].minFilter = this.target.textures[1].magFilter = THREE.NearestFilter;
     this.targetTypeChosen = false;
     this.shadowTarget = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, {
-      depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      minFilter: THREE.LinearMipmapLinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: true,
     });
     this.shadowTarget.texture.name = 'lite-cloud.shadow';
+    this.shadowAnchor = new THREE.Vector3();
+    this.shadowRight = new THREE.Vector3(1, 0, 0);
+    this.previousShadowPlanet = null;
+    this.previousShadowExtent = 0;
     this.history = [0, 1].map((index) => {
       const target = new THREE.WebGLRenderTarget(1, 1, {
         type: THREE.HalfFloatType, depthBuffer: false,
@@ -959,6 +1017,7 @@ export class LiteCloudPass extends Pass {
         uCameraLocal: air.uCameraLocal, uSunDirection0: air.uSunDirection0, uCameraFar: air.uCameraFar,
         // Sky and bounce light left under a fully opaque cloud.
         uShadowFloor: { value: 0.4 },
+        uFullPixelAngle: { value: 0.001 },
         uCloudTexel: marchTexel,
         uHistTexel: { value: new THREE.Vector2(1, 1) },
         uSubpixel: subpixel,
@@ -1020,16 +1079,10 @@ export class LiteCloudPass extends Pass {
     if (!other || other === this) return;
     for (const key of ['history', 'historyIndex', 'historyValid', 'frame', 'previousCamera',
       'previousPlanet', 'previousSun', 'previousLocalToView', 'previousDeck', 'settleFrames',
-      'subpixelIndex', 'historyRatio', 'target', 'targetTypeChosen']) {
+      'subpixelIndex', 'historyRatio']) {
       const value = this[key];
       this[key] = other[key];
       other[key] = value;
-    }
-    // the resolve pass reprojects with the previous frame's camera
-    const mineU = this.resolveMaterial?.uniforms, theirsU = other.resolveMaterial?.uniforms;
-    for (const name of ['uPrevLocalToView', 'uPrevProjection']) {
-      const a = mineU?.[name]?.value, b = theirsU?.[name]?.value;
-      if (a?.clone && b?.copy) { const t = a.clone(); a.copy(b); b.copy(t); }
     }
     const mine = this.activePlanet, theirs = other.activePlanet;
     this.activePlanet = null;
@@ -1087,19 +1140,41 @@ export class LiteCloudPass extends Pass {
   #renderShadowMap(renderer, planet) {
     const u = this.marchMaterial.uniforms;
     _sun.copy(u.uSunDirection0.value).normalize();
-    const x = u.uShadowX.value, y = u.uShadowY.value;
-    x.set(0, 1, 0); if (Math.abs(_sun.y) > 0.92) x.set(1, 0, 0);
-    x.cross(_sun).normalize();
-    y.crossVectors(_sun, x).normalize();
     const camera = u.uCameraLocal.value;
     const altitude = Math.max(0, camera.length() - planet.R);
-    // Cover what the camera can see; quantise the size so it does not breathe.
+    // Cover what the camera can see; quantise the size with hysteresis so hovering near a step never toggles.
     const wanted = Math.max(25000, altitude * 3 + 25000);
-    const extent = Math.min(planet.R * 1.15, 25000 * 2 ** (Math.ceil(Math.log2(wanted / 25000) * 2) / 2));
+    let extent = Math.min(planet.R * 1.15, 25000 * 2 ** (Math.ceil(Math.log2(wanted / 25000) * 2) / 2));
+    if (planet === this.previousShadowPlanet && this.previousShadowExtent > extent
+      && wanted > this.previousShadowExtent / Math.SQRT2 * 0.92) {
+      extent = this.previousShadowExtent;
+    }
     const texel = 2 * extent / SHADOW_SIZE;
     _ground.copy(camera).setLength(planet.R);
-    // Snap to whole texels: a sliding map would make shadow edges crawl.
-    u.uShadowCenter.value.set(Math.round(_ground.dot(x) / texel) * texel, Math.round(_ground.dot(y) / texel) * texel);
+    // Anchor the snapping lattice to a nearby surface point instead of the
+    // planet centre: at 1,200 km lever arm, the sun's rotation under the x60
+    // clock otherwise swept the shadow grid across the clouds at ~4 km/s.
+    if (planet !== this.previousShadowPlanet || extent !== this.previousShadowExtent
+      || _ground.distanceToSquared(this.shadowAnchor) > (extent * 0.35) ** 2) {
+      this.shadowAnchor.copy(_ground);
+      this.previousShadowPlanet = planet;
+      this.previousShadowExtent = extent;
+    }
+    const x = u.uShadowX.value, y = u.uShadowY.value;
+    x.copy(this.shadowRight).addScaledVector(_sun, -this.shadowRight.dot(_sun));
+    if (x.lengthSq() < 1e-6) {
+      x.set(0, 1, 0);
+      if (Math.abs(_sun.y) > 0.92) x.set(1, 0, 0);
+      x.cross(_sun);
+    }
+    x.normalize();
+    this.shadowRight.copy(x);
+    y.crossVectors(_sun, x).normalize();
+    const ax = this.shadowAnchor.dot(x), ay = this.shadowAnchor.dot(y);
+    u.uShadowCenter.value.set(
+      ax + Math.round((_ground.dot(x) - ax) / texel) * texel,
+      ay + Math.round((_ground.dot(y) - ay) / texel) * texel,
+    );
     u.uShadowExtent.value = extent;
     renderer.setRenderTarget(this.shadowTarget);
     this.shadowQuad.render(renderer);
@@ -1156,6 +1231,7 @@ export class LiteCloudPass extends Pass {
 
     const c = this.compositeMaterial.uniforms;
     c.uHistTexel.value.set(1 / (width * ratio), 1 / (height * ratio));
+    c.uFullPixelAngle.value = viewSpan / Math.max(1, readBuffer.height);
 
     // Temporal resolve into the other history target.
     const r = this.resolveMaterial.uniforms;
