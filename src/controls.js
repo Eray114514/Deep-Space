@@ -435,11 +435,23 @@ export class SpaceControls {
 // ============================================================================
 
 export class WalkControls {
-  constructor(dom, { lookScale = () => 1, onLook = null, resolveCollision = null } = {}) {
+  constructor(dom, {
+    lookScale = () => 1,
+    onLook = null,
+    resolveCollision = null,
+    onStep = null,
+    onJump = null,
+    onLand = null,
+    onSlide = null,
+  } = {}) {
     this.dom = dom;
     this.lookScale = lookScale;
     this.onLook = onLook;
     this.resolveCollision = resolveCollision;
+    this.onStep = onStep;
+    this.onJump = onJump;
+    this.onLand = onLand;
+    this.onSlide = onSlide;
     this.active = false;
     this.planet = null;
     this.posLocal = new THREE.Vector3();   // eye position, planet-local
@@ -448,6 +460,15 @@ export class WalkControls {
     this.vR = 0;                            // radial (vertical) velocity
     this.grounded = false;
     this.eyeHeight = 1.7;
+    this.standEyeHeight = 1.7;
+    this.crouching = false;
+    this.sliding = false;
+    this.stance = 'stand';
+    this.slideT = 0;
+    this.slideDir = new THREE.Vector3();
+    this._wasCrouchKey = false;
+    this._stepPhase = 0;
+    this._rollTilt = 0;
     this.hSpeed = new THREE.Vector3();
     this.running = false;
     this.moveInput = { x: 0, y: 0 };   // last walk input: x strafe, y forward
@@ -498,6 +519,14 @@ export class WalkControls {
     this.posLocal.copy(posLocal);
     this.vR = 0;
     this.hSpeed.set(0, 0, 0);
+    this.eyeHeight = this.standEyeHeight;
+    this.crouching = false;
+    this.sliding = false;
+    this.stance = 'stand';
+    this.slideT = 0;
+    this._wasCrouchKey = false;
+    this._stepPhase = 0;
+    this._rollTilt = 0;
     _u.copy(posLocal).normalize();
     this.frame(_u, _r, _f);                       // east in _r, north in _f
     _v.copy(viewDir).projectOnPlane(_u).normalize();
@@ -508,8 +537,15 @@ export class WalkControls {
   }
 
   exit() {
+    if (this.sliding) this.onSlide?.('stop');
     this.active = false;
     this.planet = null;
+    this.crouching = false;
+    this.sliding = false;
+    this.stance = 'stand';
+    this.slideT = 0;
+    this._rollTilt = 0;
+    this.eyeHeight = this.standEyeHeight;
   }
 
   updateQuat() {
@@ -522,6 +558,12 @@ export class WalkControls {
     if (_r.lengthSq() < 1e-6) _r.set(1, 0, 0);
     _r.normalize();
     _f.crossVectors(_r, _v2);                     // camera-up
+    if (Math.abs(this._rollTilt) > 1e-4) {
+      const c = Math.cos(this._rollTilt), s = Math.sin(this._rollTilt);
+      const rx = _r.x, ry = _r.y, rz = _r.z;
+      _r.set(rx * c + _f.x * s, ry * c + _f.y * s, rz * c + _f.z * s).normalize();
+      _f.crossVectors(_r, _v2).normalize();
+    }
     _m.makeBasis(_r, _f, _v.copy(_v2).negate());
     this.quat.setFromRotationMatrix(_m);
     return _v2; // viewDir (in _v2)
@@ -530,6 +572,7 @@ export class WalkControls {
   update(dt) {
     if (!this.active || !this.planet) return;
     const p = this.planet;
+    const wasGrounded = this.grounded;
     this.previousPosLocal.copy(this.posLocal);
     _u.copy(this.posLocal).normalize();
     this.frame(_u, _r, _f);
@@ -540,26 +583,71 @@ export class WalkControls {
     const fIn = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0) + this.touchMove.y;
     const rIn = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) + this.touchMove.x;
     const stickMag = Math.hypot(this.touchMove.x, this.touchMove.y);
-    const run = keys.ShiftLeft || keys.ShiftRight || stickMag > 0.92;  // slam the stick to run
-    const speed = run ? 18 : 7;
+    const crouchHeld = Boolean(keys.KeyC || keys.ControlLeft);
+    const crouchPressed = crouchHeld && !this._wasCrouchKey;
+    this._wasCrouchKey = crouchHeld;
+    const wantRun = Boolean(keys.ShiftLeft || keys.ShiftRight || stickMag > 0.92);
+
+    // Sprint-slide (Golden Hour feel): pressing crouch while sprinting on ground
+    // launches a low momentum slide that settles into crouch.
+    if (crouchPressed && this.grounded && !this.sliding && wantRun && (fIn > 0.1 || this.hSpeed.lengthSq() > 110)) {
+      this.sliding = true;
+      this.slideT = 0.62;
+      this.slideDir.copy(this.hSpeed);
+      if (this.slideDir.lengthSq() < 1) this.slideDir.copy(fwd);
+      this.slideDir.projectOnPlane(_u).normalize();
+      this.hSpeed.copy(this.slideDir).multiplyScalar(22.5);
+      this.onSlide?.('start');
+    }
+    if (this.sliding) {
+      this.slideT -= dt;
+      if (!this.grounded || this.slideT <= 0 || (!crouchHeld && this.slideT < 0.35)) {
+        this.sliding = false;
+        this.onSlide?.('stop');
+      }
+    }
+
+    this.crouching = this.sliding || crouchHeld;
+    this.stance = this.sliding ? 'slide' : this.crouching ? 'crouch' : 'stand';
+    const targetEye = this.sliding ? 0.86 : this.crouching ? 1.08 : this.standEyeHeight;
+    const prevEye = this.eyeHeight;
+    this.eyeHeight += (targetEye - this.eyeHeight) * (1 - Math.exp(-dt * 14));
+    const targetRoll = this.sliding ? -0.055 : 0;
+    this._rollTilt += (targetRoll - this._rollTilt) * (1 - Math.exp(-dt * 12));
+
+    const run = wantRun && !this.crouching;
+    const speed = this.crouching ? 4.4 : run ? 18 : 7;
     this.running = !!run && (fIn !== 0 || rIn !== 0);
     this.moveInput.x = rIn;
     this.moveInput.y = fIn;
-    _f.set(0, 0, 0).addScaledVector(fwd, fIn).addScaledVector(right, rIn);
-    if (_f.lengthSq() > 1) _f.normalize();          // keep analog magnitudes
-    _f.multiplyScalar(speed);
-    // smooth accelerate / decelerate
-    this.hSpeed.lerp(_f, 1 - Math.exp(-dt * 10));
+
+    if (this.sliding) {
+      const slideSpd = 6 + 16.5 * Math.max(0, this.slideT / 0.62);
+      _f.copy(this.slideDir).multiplyScalar(slideSpd);
+      this.hSpeed.lerp(_f, 1 - Math.exp(-dt * 8));
+    } else {
+      _f.set(0, 0, 0).addScaledVector(fwd, fIn).addScaledVector(right, rIn);
+      if (_f.lengthSq() > 1) _f.normalize();          // keep analog magnitudes
+      _f.multiplyScalar(speed);
+      // smooth accelerate / decelerate
+      this.hSpeed.lerp(_f, 1 - Math.exp(-dt * 10));
+    }
     this.posLocal.addScaledVector(this.hSpeed, dt);
 
     // vertical: gravity toward the core, ground = the height function
-    let r = this.posLocal.length();
+    let r = this.posLocal.length() + (this.eyeHeight - prevEye);
     _u.copy(this.posLocal).multiplyScalar(1 / r);
+    const preLandingVr = this.vR;
     this.vR -= p.gravity * dt;
     if (this.grounded && (keys.Space || this.touchJump)) {
+      if (this.sliding) {
+        this.sliding = false;
+        this.onSlide?.('stop');
+      }
       this.vR = Math.sqrt(2 * p.gravity * 1.4);
       this.grounded = false;
       this.touchJump = false;   // latched: a quick tap survives slow frames
+      this.onJump?.();
     }
     r += this.vR * dt;
     const groundR = p.R + p.height(_u, p.fullMaxFreq) + this.eyeHeight;
@@ -571,6 +659,28 @@ export class WalkControls {
     // The resolver may push the capsule out of a volume or replace the terrain
     // floor with a walkable top face.
     this.resolveCollision?.(this, this.previousPosLocal);
+
+    if (!wasGrounded && this.grounded && preLandingVr < -1.8) {
+      this.onLand?.(Math.min(1, -preLandingVr / 14));
+      this._stepPhase = 0.25;
+    } else if (this.grounded && !this.sliding) {
+      const horizSpeed = this.hSpeed.length();
+      if (horizSpeed > 0.55) {
+        const stride = this.running ? 3.35 : this.crouching ? 1.65 : 2.15;
+        this._stepPhase += (horizSpeed * dt) / stride;
+        if (this._stepPhase >= 1) {
+          this._stepPhase -= Math.floor(this._stepPhase);
+          this.onStep?.({
+            running: this.running,
+            crouching: this.crouching,
+            speed: horizSpeed,
+            posLocal: this.posLocal,
+          });
+        }
+      } else {
+        this._stepPhase = Math.min(this._stepPhase, 0.65);
+      }
+    }
 
     this.updateQuat();
   }
