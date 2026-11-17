@@ -158,6 +158,13 @@ def build_seat(kit):
                 name='seat-wing')
         kit.box('fabricOrange', (0.045, 0.66, 0.010), bc + back @ Vector((sx * 0.12, 0.02, -0.052)), bevel=0.002, rot=back,
                 name='harness')
+        # Sliding shoulder adjuster threaded onto each strap.
+        for dy in (0.17, 0.205):
+            kit.box('metal', (0.058, 0.008, 0.014), bc + back @ Vector((sx*0.12, dy, -0.060)),
+                    bevel=0.003, rot=back, name='adjuster-bar')
+        for dx in (-0.026, 0.026):
+            kit.box('metal', (0.007, 0.039, 0.014), bc + back @ Vector((sx*0.12+dx, 0.188, -0.060)),
+                    bevel=0.003, rot=back, name='adjuster-cheek')
         kit.box('panelDark', (0.085, 0.045, 0.42), (sx * 0.335, 0.70, z - 0.02), bevel=0.018, name='armrest')
         kit.box('metalDark', (0.04, 0.24, 0.05), (sx * 0.335, 0.56, z + 0.14), bevel=0.01, name='armrest-post')
     kit.box('cushion', (0.30, 0.20, 0.09), bc + back @ Vector((0, 0.50, -0.03)), bevel=0.035, seg=3, rot=back, name='headrest')

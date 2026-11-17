@@ -201,6 +201,49 @@ def portal_frame(kit, z, half_w, y0, y1, depth, key='metalDark', chamfer=0.22, t
 
 
 # ====================================================================== mid-deck
+def sewn_pad(kit, name, material, centre, width, length, loft, phase, quilt=False):
+    """Closed sewn envelope: a pinched perimeter, lofted fill and local compression."""
+    x, base, z = centre
+    bm = bmesh.new()
+    nx, nz = 24, 40 if quilt else 24
+    rows = []
+    for j in range(nz + 1):
+        v = 2 * j / nz - 1
+        row = []
+        for i in range(nx + 1):
+            u = 2 * i / nx - 1
+            fullness = max(0, (1 - u*u) * (1 - v*v)) ** 0.45
+            px = x + width * 0.5 * u * (1 - 0.09 * v**8)
+            pz = z + length * 0.5 * v * (1 - 0.06 * u**8)
+            if quilt:
+                stitch = math.cos(math.pi * (2.5*v + 0.18*u + 0.08*math.sin(3*u + phase))) ** 12
+                height = loft * fullness * (1 - 0.65*stitch)
+                # The bound side falls over the mattress edge.
+                height -= 0.055 * abs(u)**6
+                pz += 0.020 * math.sin(3*u + phase) * v*v
+            else:
+                dent = math.exp(-5*((u - 0.16)**2 + (v + 0.12)**2))
+                gathers = math.sin(15*v + 3*u + phase) * abs(u)**3
+                height = loft * fullness * (1 - 0.36*dent + 0.15*gathers)
+            row.append(bm.verts.new(G(px, base + height, pz)))
+        rows.append(row)
+    for j in range(nz):
+        for i in range(nx):
+            bm.faces.new((rows[j][i], rows[j+1][i], rows[j+1][i+1], rows[j][i+1]))
+    rim = rows[0][:] + [row[-1] for row in rows[1:]] + rows[-1][-2::-1] + [row[0] for row in rows[-2:0:-1]]
+    underside = [bm.verts.new(v.co - G(0, 0.012, 0)) for v in rim]
+    for i in range(len(rim)):
+        bm.faces.new((rim[i-1], rim[i], underside[i], underside[i-1]))
+    # Fan the shallow underside to a point under the fill; the draped hem is non-planar.
+    middle = bm.verts.new(G(x, base - 0.014, z))
+    for i in range(len(rim)):
+        bm.faces.new((underside[i-1], underside[i], middle))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    binding = [(v.co.x, v.co.z, -v.co.y) for v in rim]
+    kit.add(prims._finish(name, bm, kit.col, kit.M[material]))
+    kit.tube(material, binding + [binding[0]], 0.004, 8, name + '-welt')
+
+
 def build_mid(kit):
     M = kit.M
     z0, z1 = MID_Z0, MID_Z1
@@ -278,7 +321,16 @@ def build_mid(kit):
                 bevel=0.012, name='ration', tint=0.2 + 0.3 * k)
     for zz in (zc - 0.1, zc + 0.08):
         kit.rev('panelWhite', [(0.0, 0.0), (0.036, 0.0), (0.042, 0.085), (0.036, 0.085), (0.031, 0.008), (0.0, 0.008)],
-                (xb + 0.44, yc, zz), (0, 1, 0), 14, 'mug')
+                (xb + 0.44, yc, zz), (0, 1, 0), 32, 'mug')
+        kit.tube('panelWhite', [(xb + 0.474, yc + 0.072, zz), (xb + 0.501, yc + 0.073, zz),
+                 (xb + 0.508, yc + 0.062, zz), (xb + 0.505, yc + 0.034, zz),
+                 (xb + 0.477, yc + 0.024, zz)], 0.006, name='cup-handle')
+    # Captive insulated carafe with separate lid, pouring lip and carry bail.
+    fx, fz = xb + 0.22, na + 0.72
+    kit.rev('rubber', [(0.044, 0), (0.048, 0.007), (0.048, 0.023), (0.036, 0.026), (0, 0.026)],
+            (fx, yc + 0.239, fz), (0, 1, 0), 32, 'flask-cap')
+    kit.tube('panelDark', [(fx, yc + 0.19, fz + 0.05), (fx, yc + 0.18, fz + 0.095),
+             (fx, yc + 0.08, fz + 0.095), (fx, yc + 0.065, fz + 0.05)], 0.011, name='flask-grip')
     # ---------------- bunks (starboard)
     xo, xb = w, 2.10
     kit.alcove('panelWhite', xo, xb, yD, yC, na, nb, xo)
@@ -286,8 +338,11 @@ def build_mid(kit):
     kit.box('panelGrey', (xb - xo, 0.05, L), ((xo + xb) / 2, ymid, zc), bevel=0.01, name='bunk-shelf')
     for y in (yD + 0.02, ymid + 0.03):
         kit.box('fabric', (0.70, 0.11, L - 0.10), (xo + 0.40, y + 0.055, zc), bevel=0.03, seg=3, name='mattress')
-        kit.box('cushion', (0.44, 0.07, 0.30), (xo + 0.42, y + 0.145, na + 0.24), bevel=0.03, seg=3, name='pillow')
-        kit.box('fabricOrange', (0.60, 0.05, 0.62), (xo + 0.40, y + 0.135, nb - 0.42), bevel=0.02, seg=3, name='blanket')
+        phase = 0.4 if y < ymid else 2.2
+        sewn_pad(kit, 'pillow', 'linen', (xo + 0.40, y + 0.122, na + 0.30),
+                 0.55, 0.40, 0.112, phase)
+        sewn_pad(kit, 'sleep-quilt', 'fabricOrange', (xo + 0.40, y + 0.134, nb - 0.62),
+                 0.755, 1.04, 0.098, phase, quilt=True)
         kit.box('metal', (0.025, 0.07, L - 0.02), (xo + 0.012, y + 0.06, zc), bevel=0.008, name='bunk-lip')
         kit.begin('bunk-lamp-%d' % (0 if y < ymid else 1), (xb - 0.004, y + 0.52, na + 0.30))
         kit.rev('lampWarm', [(0.035, 0.0), (0.0, 0.004)], (xb - 0.004, y + 0.52, na + 0.30), (-1, 0, 0), 14, 'reading-lamp')
@@ -470,8 +525,17 @@ def build_hold(kit):
     for k, (zz, hh) in enumerate(((bz0 + 0.95, 0.30), (bz0 + 1.07, 0.24), (bz0 + 1.19, 0.34), (bz0 + 1.31, 0.20))):
         kit.box('metal' if k % 2 else 'accent', (0.012, hh, 0.035), (w - 0.058, 1.36 + hh / 2 - 0.15, zz), bevel=0.004, name='tool')
     kit.box('crateOrange', (0.26, 0.16, 0.38), (bx + 0.1, 1.005, bz1 - 0.34), bevel=0.02, name='toolbox', tint=0.4)
-    kit.box('metal', (0.03, 0.03, 0.22), (bx + 0.1, 1.10, bz1 - 0.34), bevel=0.008, name='toolbox-handle')
+    kit.tube('rubber', [(bx+0.1, 1.082, bz1-0.44), (bx+0.1, 1.14, bz1-0.43),
+             (bx+0.1, 1.14, bz1-0.25), (bx+0.1, 1.082, bz1-0.24)], 0.013, name='toolbox-bail')
+    for zz in (bz1 - 0.46, bz1 - 0.22):
+        kit.box('metal', (0.015, 0.053, 0.03), (bx - 0.032, 1.026, zz), bevel=0.004, name='case-latch')
     kit.box('metalDark', (0.14, 0.12, 0.16), (bx - 0.22, 0.985, bz0 + 1.0), bevel=0.012, name='vise')
+    vx, vz = bx - 0.22, bz0 + 1.0
+    for dz in (-0.064, 0.055):
+        kit.box('metal', (0.16, 0.053, 0.032), (vx, 1.062, vz + dz), bevel=0.004, name='vise-jaw')
+    kit.rev('chrome', [(0.014, 0), (0.014, 0.07), (0.025, 0.075), (0.025, 0.10), (0, 0.10)],
+            (vx, 1.009, vz - 0.075), (0, 0, -1), 20, 'vise-screw')
+    kit.tube('metal', [(vx-0.07, 0.975, vz-0.16), (vx+0.055, 1.036, vz-0.16)], 0.006, name='vise-tommy-bar')
     kit.rev('panelDark', [(0.0, 0.0), (0.17, 0.0), (0.17, 0.03), (0.03, 0.05), (0.03, 0.42), (0.16, 0.44), (0.16, 0.50), (0.0, 0.50)],
             (bx - 0.05, 0.0, bz1 - 1.15), (0, 1, 0), 16, 'stool')
     # ---------------- hazard chevrons round the ramp mouth, status lamps
@@ -642,18 +706,40 @@ def dress_mid(kit):
         kit.box('panelWhite', (0.006, 0.10, 0.075), (xb - 0.005, yy, zz), bevel=0.0, name='photo', tint=0.2 + 0.5 * k)
         kit.box('screen', (0.003, 0.08, 0.055), (xb - 0.009, yy, zz), bevel=0.0, name='photo-face')
     # a jacket on a hook beside the bunks (aft of the alcove, clear of the lockers)
-    kit.box('fabricOrange', (0.06, 0.56, 0.36), (w - 0.06, 1.40, nb + 0.28), bevel=0.04, seg=3, name='jacket')
+    jz = nb + 0.28
+    kit.box('fabricOrange', (0.085, 0.49, 0.28), (w - 0.068, 1.41, jz),
+            taper=(0.72, 1.15), bevel=0.034, seg=4, name='jacket-body')
+    for side in (-1, 1):
+        kit.box('fabricOrange', (0.074, 0.39, 0.087), (w - 0.09, 1.44, jz + side*0.162),
+                rot=Matrix.Rotation(side*0.14, 3, 'X'), taper=(1.12, 1.28), bevel=0.028, seg=4, name='jacket-sleeve')
+    kit.tube('fabric', [(w-0.10, 1.64, jz-0.065), (w-0.115, 1.58, jz),
+             (w-0.107, 1.65, jz+0.066)], 0.013, name='jacket-collar')
+    kit.tube('rubber', [(w-0.111, 1.18, jz+0.01), (w-0.113, 1.39, jz),
+             (w-0.114, 1.58, jz)], 0.004, name='jacket-zip')
     kit.rev('metal', [(0.012, 0.0), (0.012, 0.05), (0.0, 0.06)], (w - 0.005, 1.70, nb + 0.28), (-1, 0, 0), 8, 'hook')
     # galley: a screen with the menu, a towel, a plant
     xg = -2.06
     kit.box('panelDark', (0.02, 0.22, 0.32), (xg + 0.01, 1.62, (na + nb) / 2), bevel=0.008, name='galley-screen')
     kit.box('screen', (0.004, 0.18, 0.28), (xg + 0.022, 1.62, (na + nb) / 2), bevel=0.0, name='galley-screen-face')
     kit.box('fabric', (0.03, 0.30, 0.16), (xg + 0.64, 0.66, nb - 0.18), bevel=0.012, seg=3, name='towel')
-    kit.rev('panelGrey', [(0.0, 0.0), (0.05, 0.0), (0.06, 0.10), (0.0, 0.10)], (xg + 0.18, 0.80, nb - 0.12), (0, 1, 0), 12, 'pot')
-    for k in range(5):
-        a = k * 1.256
-        kit.box('btnGreen', (0.012, 0.11, 0.04), (xg + 0.18 + math.cos(a) * 0.03, 0.94, nb - 0.12 + math.sin(a) * 0.03), bevel=0.004,
-                rot=Matrix.Rotation(0.3, 3, 'X') @ Matrix.Rotation(a, 3, 'Y'), name='leaf')
+    pot = Vector((xg + 0.44, MID['yD'] + 0.798, nb - 0.18))
+    kit.rev('panelGrey', [(0, 0), (0.048, 0), (0.063, 0.095), (0.064, 0.105), (0.055, 0.105),
+            (0.052, 0.085), (0, 0.085)], pot, (0, 1, 0), 28, 'pot')
+    for k in range(9):
+        angle = k * 2.40
+        outward = Vector((math.cos(angle), 0, math.sin(angle)))
+        across = Vector((-outward.z, 0, outward.x))
+        left, ridge, right = [], [], []
+        for j in range(7):
+            t = j / 6
+            span = 0.019 * math.sin(math.pi*t) + 0.0008
+            mid = pot + outward*(0.008 + (0.085 if k < 6 else 0.05)*t*t)
+            mid.y += 0.085 + (0.15 + 0.015*(k % 3))*t - 0.065*t*t
+            left.append(mid - across*span)
+            right.append(mid + across*span)
+            ridge.append(mid + Vector((0, span*0.42, 0)))
+        kit.add(prims.quads('leaf', kit.col, prims.strip_between(left, ridge) + prims.strip_between(ridge, right),
+                            kit.M['foliage'], smooth=True))
     # hazard-striped door surround into the flight deck
     for k in range(8):
         for sx in (-1, 1):

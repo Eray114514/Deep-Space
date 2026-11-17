@@ -59,11 +59,13 @@ const RELIEF = {
   quilt:   { span: 0.26, glsl: 'shipQuilt(p)' },
 };
 FINISH.bellInner = { tint: 0, rough: 0, grime: 0.1, noise: 0.12, relief: 'brushed', glow: true };
+FINISH.foliage = { tint: 0.15, rough: 0.08, grime: 0, noise: 0.05, side: THREE.DoubleSide };
+FINISH.linen = { tint: 0.05, rough: 0.04, grime: 0.06, noise: 0.08, relief: 'weave' };
 const DEFAULT_FINISH = { tint: 0.1, rough: 0.1, grime: 0.1, noise: 0.08 };
 
 /* display intensities: the file's values are tuned as Cycles light sources */
 const EMISSIVE = {
-  lampWarm: 1.9, lampCool: 1.55, lampAmber: 2.6, lampCyan: 1.5, lampStrip: 2.2,
+  lampWarm: 1.26, lampCool: 1.24, lampAmber: 2.6, lampCyan: 1.5, lampStrip: 2.2,
   lampWhite: 4.0, lampRed: 5.0, lampGreen: 5.0, strobe: 0.05,
   btnGreen: 1.8, btnAmber: 1.8, btnWhite: 1.8, engineCore: 3.2, screen: 1.0,
 };
@@ -125,7 +127,7 @@ vec3 shipBump(vec3 pos, vec3 n, float h) {
 function install(material, spec, name) {
   const tile = spec.tile ? 2 / spec.tile : 0;   // uv is metres / 2
   const relief = RELIEF[spec.relief];
-  const wear = spec.wear || 0;
+  const wear = (spec.wear || 0) * (spec.interior ? 0.48 : 1);
   const bare = spec.bare || [0.4, 0.4, 0.42];
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, shipAmbient, shipEngine);
