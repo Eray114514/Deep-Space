@@ -25,7 +25,7 @@ export const QUALITY_PROFILES = Object.freeze({
       'shadowDistance', 'treeDensity', 'dpr'],
   }),
   ultra: Object.freeze({
-    id: 'ultra', liteClouds: Object.freeze({ scale: 0.5, steps: 96, maxPixels: 560000 }), label: '极致', dprMin: 0.9, dprTarget: 1.0, dprMax: 1.5,
+    id: 'ultra', liteClouds: Object.freeze({ scale: 0.5, steps: 96, maxPixels: 940000 }), label: '极致', dprMin: 0.9, dprTarget: 1.0, dprMax: 1.5,
     volumeScale: 0.75, cloudSteps: 124, cloudStepsWebGPU: 56, shadowMap: 2048, shadowDistance: 650,
     terrainScreenError: 0.72, grassRadius: 70, grassDensity: 1,
     treeDensity: 1, waterInteractionSize: 1024, waterReflectionHz: 60,

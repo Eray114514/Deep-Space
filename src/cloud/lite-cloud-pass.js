@@ -23,6 +23,10 @@ import { weatherAtlasGLSL } from './weather-atlas.js';
 import { liteCloudNoiseTexture } from './lite-cloud-noise.js';
 
 const SHADOW_SIZE = 1024;
+// Depth of the cumulus layer. The deck fills under half of it; towers use the rest.
+const LAYER_DEPTH = 11000;
+// Game hours for one form-and-dissolve cycle of the cloud fields.
+const EVOLVE_HOURS = 5;
 const _matrix = new THREE.Matrix4();
 const _quaternion = new THREE.Quaternion();
 const _sun = new THREE.Vector3();
@@ -44,10 +48,23 @@ const cloudFieldGLSL = /* glsl */`
   uniform sampler2D uCloudTex;
   uniform mat3 uCloudMat;
   uniform sampler2D uSurfaceTex;
-  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn, uLiftMax, uSharp, uHaze, uBillow, uLightLod;
+  uniform float uSynoptic, uShellBase, uShellTop, uShellDepth, uSurfaceRange, uLiftBase, uLiftOn, uLiftMax, uSharp, uHaze, uBillow, uLightLod, uEvolve, uWarp;
   ${weatherAtlasGLSL}
 
   float sat(float x) { return clamp(x, 0.0, 1.0); }
+  // Two copies of a noise field at unrelated offsets, cross-faded in turn:
+  // each is frozen while visible and re-seeded while its weight is zero, so
+  // the pattern grows and dissolves in place instead of sliding. Returns the
+  // weight of the first copy; the offsets are noise-space translations.
+  float evolvePhase(float cycles, out vec3 offsetA, out vec3 offsetB) {
+    offsetA = fract(vec3(0.731, 0.317, 0.547) * floor(cycles));
+    offsetB = fract(vec3(0.413, 0.871, 0.229) * floor(cycles + 0.5)) + 0.5;
+    return 1.0 - abs(2.0 * fract(cycles) - 1.0);
+  }
+  float evolveBlend(float a, float b, float w) {
+    // Keep the contrast a single field has.
+    return 0.5 + (a * w + b * (1.0 - w) - 0.5) / sqrt(w * w + (1.0 - w) * (1.0 - w));
+  }
   float remap(float v, float a, float b, float c, float d) { return c + (v - a) / (b - a) * (d - c); }
 
   // Cancellation-safe sphere intersection: h = (r-|d|)(r+|d|). The textbook
@@ -73,7 +90,10 @@ const cloudFieldGLSL = /* glsl */`
     // into a long margin and the breakup noise eats into it, so a deck thins
     // into scattered cumulus before the sky clears.
     if (uSynoptic > 0.5) c = synopticCoverage(c, 0.42);
-    float breakup = textureLod(uNoise, q / 93000.0, 0.0).b;
+    vec3 oa, ob;
+    float wa = evolvePhase(uEvolve, oa, ob);
+    float breakup = evolveBlend(textureLod(uNoise, q / 93000.0 + oa, 0.0).b,
+      textureLod(uNoise, q / 93000.0 + ob, 0.0).b, wa);
     c = sat(c * 1.15 + (breakup - 0.5) * 0.8 * (1.0 - 0.6 * c) - 0.07);
     // Mesoscale regimes inside a weather system: closed decks with cracks
     // alternate with broken, open-cell fields instead of one uniform texture.
@@ -106,6 +126,13 @@ const cloudFieldGLSL = /* glsl */`
     float cov = cover * 0.86;                       // never fully closed: the deck keeps its pores
     if (cov < 0.02) return 0.0;
     vec3 q = uCloudMat * p;
+    // The cell noise tiles: unwarped, a whole hemisphere showed the same
+    // evenly spaced puffs and pores. A slow, large displacement stretches
+    // cells into lines here and packs or opens them there.
+    // Horizontal only: a vertical component leans every cloud over.
+    vec3 warp = textureLod(uNoise, q / 240000.0 + 0.13, 0.0).rgb - 0.5;
+    vec3 up = q / length(q);
+    q += (warp - up * dot(warp, up)) * uWarp;
     // Worley-led closed cells: values fall along cell walls, which opens a
     // natural pore network instead of blocky cut-outs.
     float base = textureLod(uNoise, q / 27000.0, noiseLod(27000.0)).r;
@@ -117,18 +144,28 @@ const cloudFieldGLSL = /* glsl */`
       // Break every ~9 km cell into 2-3 km cumulus. Seen from the ground a
       // sky needs many small clouds receding to the horizon; a few huge
       // blobs overhead read as a ceiling.
-      small = textureLod(uNoise, q.zxy / 8300.0 + 0.29, noiseLod(8300.0)).r;
+      // Single cumulus live and die faster than the fields they belong to.
+      vec3 sa, sb;
+      float sw = evolvePhase(uEvolve * 2.7 + 0.3, sa, sb);
+      small = evolveBlend(textureLod(uNoise, q.zxy / 8300.0 + 0.29 + sa, noiseLod(8300.0)).r,
+        textureLod(uNoise, q.zxy / 8300.0 + 0.29 + sb, noiseLod(8300.0)).r, sw);
       float nearField = base * 0.46 + wide * 0.2 + small * 0.34;
       float midField = base * 0.7 + wide * 0.3;
       base = mix(mix(midField, nearField, fine), base * 0.35 + wide * 0.65, gFarWide);
     } else base = base * 0.35 + wide * 0.65;
+    // From far enough that a cell is a few pixels, single clouds are not
+    // seen at all: the fields read as continuous sheets shaped by the
+    // weather, and break into cells as the camera comes closer.
+    base = mix(base, 0.6, smoothstep(1500.0, 4200.0, gFootprint));
     base = sat((base - 0.22) / 0.6);
     // Cumulus profile: flat base, cloud-top height driven by the slow
     // thickness field and by each cell (cell cores tower upward).
-    float top = mix(0.3, 0.66, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
+    float top = mix(0.21, 0.46, smoothstep(0.3, 0.72, thick)) * mix(0.5, 1.0, base * base);
     // Convective towers: where the wide cells and the thickness field agree,
     // a cumulus grows through the rest of the deck (cumulus congestus).
-    top += 0.42 * smoothstep(0.6, 0.84, wide) * smoothstep(0.42, 0.78, thick) * smoothstep(0.35, 0.7, base);
+    // The layer is deeper than the deck needs: the upper half belongs to
+    // the towers alone, which stand kilometres clear of everything else.
+    top += 0.52 * smoothstep(0.55, 0.8, wide) * smoothstep(0.4, 0.74, thick) * smoothstep(0.35, 0.7, base);
     // Every small cumulus is its own dome and carries finer bumps: seen from
     // above the deck is a relief of lit tops and shaded gaps, not a flat sheet.
     if (fine > 0.0) top *= 1.0 - fine * (0.22 * (1.0 - small) + 0.12 * (1.0 - textureLod(uNoise, q / 7300.0, noiseLod(7300.0)).g));
@@ -185,7 +222,7 @@ const shadowLookupGLSL = /* glsl */`
     float s0 = base.y > base.x ? base.y : top.x, s1 = top.y;
     float depth = sat((s1 - along) / max(s1 - s0, 1.0));
     // One map step of bias keeps a sunlit top out of its own shadow.
-    float taken = sat((depth - map.g - 0.07) / max(map.b - map.g, 0.08));
+    float taken = sat((depth - map.g - 0.07) / max(map.b - map.g, 0.15));
     return -log(max(map.r, 0.004)) * taken * edge.x * edge.y;
   }`;
 
@@ -221,13 +258,28 @@ const shadowShader = /* glsl */`
           // the view march uses them to shade cloud with cloud.
           float ds = (s1 - s0) / 16.0, tau = 0.0;
           bool hit = false;
+          float previous = 0.0;
+          // A low sun stretches each step to kilometres: hard-edged density
+          // sampled that coarsely drew square, flickering shadows.
+          gFootprint = max(texel, ds * 0.3);
           for (int i = 0; i < 16; i++) {
             float k = 1.0 - (float(i) + 0.5) / 16.0;
             float density = cloudDensity(origin + sun * (s0 + (s1 - s0) * k), mix(w0.x, w1.x, k), 1, 0.0, mix(w0.y, w1.y, k));
+            // Where the cloud begins and ends, found within the step from the
+            // two densities around the crossing: whole steps drew parallel
+            // bands across the deck at a low sun.
+            // Sample i sits at (i + 0.5) / 16 of the crossing; the threshold
+            // is crossed between it and the previous one.
             if (density > 0.002) {
-              if (!hit) { front = float(i) / 16.0; hit = true; }
-              back = float(i + 1) / 16.0;
+              if (!hit) {
+                front = max(float(i) - 0.5 + sat((0.002 - previous) / max(density - previous, 1e-4)), 0.0) / 16.0;
+                hit = true;
+              }
+              back = (float(i) + 1.0) / 16.0;
+            } else if (hit && previous > 0.002) {
+              back = (float(i) - 0.5 + sat((previous - 0.002) / max(previous - density, 1e-4))) / 16.0;
             }
+            previous = density;
             tau += density * ds;
           }
           transmittance = exp(-tau * uExtinction);
@@ -389,7 +441,10 @@ const marchShader = /* glsl */`
       // travel. Interpolating a handful of samples across the whole ray made
       // a cloud's existence depend on the view: it vanished as the camera moved.
       float coverMax = 1.0;
-      vec2 weather = vec2(0.0);
+      // Interpolated between lookups 3.5 km apart along the ray. Held
+      // constant instead, coverage and base lift stepped at fixed distances
+      // from the camera and cut every cloud into terraces around the viewer.
+      vec2 weather = vec2(0.0), weatherA = vec2(0.0), weatherB = vec2(0.0);
       float tWeather = -1e9;
       if (coverMax >= 0.03) {
         vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
@@ -405,13 +460,36 @@ const marchShader = /* glsl */`
         // the ray backs up and continues in fine steps; otherwise the first
         // sample sat deep on average and every top read grey with a bright
         // rim and contour rings (worst looking straight down).
+        // The fine steps cover the lit skin only (while the ray is still
+        // mostly clear), and a few empty fine samples are tolerated after
+        // backing up: leaving fine mode on the first empty sample jumped the
+        // ray straight over any cloud thinner than a coarse step.
         bool inside = false;
+        int refine = 0, fine = 0;
+        float emptyRun = 0.0;
         for (int i = 0; i < MARCH_STEPS; i++) {
           if (t > t1) break;
           float dt = max(dmin, 0.055 * (t - t0));
-          if (inside) dt = max(dt * 0.3, 20.0);
-          vec3 p = ro + rd * t;
-          if (t - tWeather > 3500.0) { weather = weatherAt(p); tWeather = t; }
+          // Only the first few samples past an entry are fine: a grazing ray
+          // through a thin deck stayed "inside" for hundreds of steps and ran
+          // out of budget before the far half of the sky.
+          if (inside && fine > 0 && T > 0.35) { dt = max(dt * 0.3, 20.0); fine--; }
+          // Clear air between clouds is crossed in longer strides; an entry
+          // backs up into the stride, so no cloud is jumped.
+          else if (!inside) dt *= 1.0 + min(emptyRun * 0.12, 0.9);
+          // Each step samples a fresh random point of its own interval. With
+          // the grid only shifted at the start, steps that grow with distance
+          // fell at the same depths in neighbouring pixels and drew contour
+          // terraces on every sharp cloud top; dithered, the history averages
+          // them out.
+          float stepJitter = fract(jitter + float(i) * 0.7548777);
+          vec3 p = ro + rd * (t + dt * (stepJitter - 0.5));
+          if (t - tWeather > 3500.0) {
+            if (t - tWeather > 7000.0) { tWeather = t; weatherA = weatherAt(p); }
+            else { tWeather += 3500.0; weatherA = weatherB; }
+            weatherB = weatherAt(ro + rd * (tWeather + 3500.0));
+          }
+          weather = mix(weatherA, weatherB, sat((t - tWeather) / 3500.0));
           float rp = length(p);
           float above = rp - (uShellBase + weather.y + uShellDepth);
           if (above > 200.0) {
@@ -426,13 +504,14 @@ const marchShader = /* glsl */`
           // Fade octaves the growing step can no longer resolve.
           // (by step length along grazing rays, by distance when looking down from orbit)
           gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(500.0, 1500.0, gFootprint));
-          gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(1500000.0, 4000000.0, t));
+          gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(800.0, 2000.0, gFootprint));
           gFarSmall = max(gFarSmall, edgeOn);
           gFarWide = max(gFarWide, edgeOn * 0.7);
           float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near, weather.y);
           float crown = gCrown;
-          if (d > 0.002 && !inside) { inside = true; t -= dt * 0.85; continue; }
-          if (d <= 0.002) inside = false;
+          if (d > 0.002 && !inside) { inside = true; refine = 4; fine = 8; t -= dt * 0.85; continue; }
+          if (d <= 0.002) { if (refine > 0) refine--; else inside = false; emptyRun += 1.0; }
+          else emptyRun = 0.0;
           if (d > 0.002) {
             if (tFront < 0.0) tFront = t;
             float h = sat((length(p) - uShellBase - weather.y) / uShellDepth);
@@ -759,13 +838,15 @@ export class LiteCloudPass extends Pass {
       uCloudMat: { value: new THREE.Matrix3() },
       uSynoptic: { value: 0 },
       // Density contrast, rim billows, detailed first light step (see cloudDensity).
+      uEvolve: { value: 0 },
+      uWarp: { value: 11000 },
       uSharp: { value: 5 },
       uHaze: { value: 0.05 },
       uBillow: { value: 0.4 },
       uLightLod: { value: 1 },
       uShellBase: { value: 1 },
       uShellTop: { value: 2 },
-      uShellDepth: { value: 7600 },
+      uShellDepth: { value: LAYER_DEPTH },
       uSurfaceTex: { value: null },
       uSurfaceRange: { value: 1 },
       uLiftBase: { value: 0 },
@@ -911,9 +992,9 @@ export class LiteCloudPass extends Pass {
         u.uLiftBase.value = base;
         u.uSurfaceRange.value = synoptic ? next.weatherField.surfaceRangeMeters || 1 : 1;
         u.uShellBase.value = next.R + base;
-        u.uShellTop.value = next.R + base + 7600 + maxLift;
+        u.uShellTop.value = next.R + base + LAYER_DEPTH + maxLift;
         u.uCloudTint.value.set(next.type === 'toxic' ? 0xc8e890 : 0xffffff);
-        this.layerMeters = { base, top: base + 7600 };
+        this.layerMeters = { base, top: base + LAYER_DEPTH };
       }
     }
     this.#refresh();
@@ -961,6 +1042,7 @@ export class LiteCloudPass extends Pass {
     u.uCloudMat.value.setFromMatrix4(_matrix);
     u.uFrame.value = this.temporalEnabled || this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
 
+    u.uEvolve.value = ((planet.weatherHours || 0) / EVOLVE_HOURS) % 1024;
     u.uShadowOn.value = this.shadowsEnabled ? 1 : 0;
     if (this.shadowsEnabled) this.#renderShadowMap(renderer, planet);
 

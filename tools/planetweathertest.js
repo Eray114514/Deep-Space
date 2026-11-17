@@ -32,7 +32,8 @@ for (let i = 0; i < 256; i++) {
 assert.ok(samples.filter((s) => s.coverage < 0.01).length > 20, 'Actual broad clear regions');
 assert.ok(samples.filter((s) => s.coverage > 0.9).length > 20, 'Actual occupied regions');
 assert.ok(samples.some((s) => s.morphology.front > 0.3), 'Synoptic fronts reach production source');
-assert.equal(field.windRadiansPerHour, 20 * 3600 / 6000000);
+// The deck drifts in real time: wind x 2.5, divided by the clock's x60.
+assert.equal(field.windRadiansPerHour, 20 * 2.5 * 3600 / 6000000 / 60);
 assert.equal(advanceWeatherField(field, 7).version, 9);
 assert.match(weatherFieldFingerprint(field, 7), /^weather-v9:/);
 

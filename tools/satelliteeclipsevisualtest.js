@@ -121,6 +121,51 @@ function shadowStats(referenceBuffer, controlBuffer, shadowBuffer, shadows) {
 // peak of the box-smoothed loss map within a search window, as a fraction of
 // the frame. Unlike a centroid over the whole frame, the peak does not follow
 // how each layer's brightness spreads the broad stellar penumbra.
+// Loss on cloud pixels only, per loss cell, from a frame that shows nothing
+// but clouds over black. Clouds are too sparse for a peak to locate a shadow
+// in, but each cloud pixel still says how much light it lost.
+function cloudLossCells(referenceBuffer, controlBuffer, shadowBuffer) {
+  const reference = decode(referenceBuffer);
+  const control = decode(controlBuffer);
+  const shadow = decode(shadowBuffer);
+  const cols = Math.ceil(reference.width / LOSS_CELL);
+  const rows = Math.ceil(reference.height / LOSS_CELL);
+  const sum = new Float64Array(cols * rows);
+  const count = new Uint32Array(cols * rows);
+  for (let y = Math.floor(reference.height * 0.04); y < Math.ceil(reference.height * 0.96); y++) {
+    for (let x = 0; x < reference.width; x++) {
+      const pixel = y * reference.width + x;
+      const lit = luma(reference, pixel);
+      if (lit < 40 || rgbDifference(reference, control, pixel) > 3) continue;
+      const cell = Math.floor(y / LOSS_CELL) * cols + Math.floor(x / LOSS_CELL);
+      sum[cell] += Math.max(0, lit - luma(shadow, pixel)) / lit;
+      count[cell]++;
+    }
+  }
+  return { cols, rows, sum, count };
+}
+
+// Whether the clouds were darkened where the ground was. On the same set of
+// cells (those holding cloud), the centroid weighted by the clouds' own loss
+// must match the one weighted by the surface loss there: sharing the support
+// removes the bias of where clouds happen to be, which is what defeated a
+// peak or a whole-frame centroid. A shifted or screen-space cloud shadow
+// moves the first centroid and not the second.
+function cloudShadowRegistration(cloud, surfaceLossMap) {
+  const { cols } = cloud;
+  let wc = 0, xc = 0, yc = 0, ws = 0, xs = 0, ys = 0, n = 0;
+  for (let c = 0; c < cloud.count.length; c++) {
+    if (cloud.count[c] < 6) continue;
+    const x = (c % cols + 0.5) / cols, y = (Math.floor(c / cols) + 0.5) / cloud.rows;
+    const a = cloud.sum[c] / cloud.count[c], b = surfaceLossMap.data[c];
+    wc += a; xc += a * x; yc += a * y; ws += b; xs += b * x; ys += b * y; n++;
+  }
+  if (n < 50 || wc <= 0 || ws <= 0) return { cells: n, offset: Infinity };
+  const cloudCentroid = [xc / wc, yc / wc], surfaceCentroid = [xs / ws, ys / ws];
+  return { cells: n, cloudCentroid, surfaceCentroid,
+    offset: Math.hypot(cloudCentroid[0] - surfaceCentroid[0], cloudCentroid[1] - surfaceCentroid[1]) };
+}
+
 function shadowPeak(lossMap, predicted) {
   const { cols, rows, data } = lossMap;
   const smooth = (cx, cy) => {
@@ -238,15 +283,15 @@ async function setMode(mode) {
       planet.cloudMesh2?.material,
       planet.cloudMeshNoctilucent?.material,
     ];
-    const opaque = nextMode !== 'media';
+    const opaque = nextMode !== 'air' && nextMode !== 'clouds';
     setColorWrite(planet.terrainMaterial, opaque);
     setColorWrite(planet.liquidMat, opaque);
     for (const material of mediaMaterials) {
       setColorWrite(material, nextMode !== 'surface');
     }
-    NMS.setAtmosphereVisible(nextMode !== 'surface');
+    NMS.setAtmosphereVisible(nextMode !== 'surface' && nextMode !== 'clouds');
     // The screen-space cloud pass is participating media too.
-    NMS.setCloudsVisible(nextMode !== 'surface');
+    NMS.setCloudsVisible(nextMode !== 'surface' && nextMode !== 'air');
   }, mode);
   await page.waitForTimeout(900);
 }
@@ -260,6 +305,10 @@ async function setFixture(offsetRatio) {
       offset: planet.R * ratio,
       starAngularRadius: 0.012,
     });
+    // The fixture moves the shadow in one frame, which no real eclipse does.
+    // A held view averages the cloud history over many frames, so start it
+    // over rather than measure the old shadow still fading out of it.
+    requestAnimationFrame(() => NMS._pipeline.cloudPass?.resetHistory?.());
   }, offsetRatio);
   await page.waitForTimeout(500);
 }
@@ -391,9 +440,9 @@ try {
     `local eclipse must not darken the full frame: `
     + `${JSON.stringify([surfaceLeftStats.globalDelta, surfaceRightStats.globalDelta])}`);
 
-  // Media-only shadow field. Opaque terrain still writes depth, but colorWrite
-  // is disabled so atmosphere/cloud changes can be measured independently.
-  await setMode('media');
+  // Air-only shadow field. Opaque terrain still writes depth, but colorWrite
+  // is disabled so the atmosphere's change can be measured on its own.
+  await setMode('air');
   await setFixture(null);
   const mediaReference = await capture('media-reference');
   await page.waitForTimeout(350);
@@ -405,11 +454,25 @@ try {
   const mediaLeftStats = shadowStats(mediaReference, mediaControl, mediaLeft, predictedLeft);
   const mediaRightStats = shadowStats(mediaReference, mediaControl, mediaRight, predictedRight);
 
-  // Each layer's shadow peak beside each predicted axis, on a loss map
-  // smoothed over ~100 px so one bright cloud or coastline cannot own the
-  // peak. Air and cirrus at altitude are seen along a slanted column, hence
-  // the looser media bound. (A clouds-only frame is too sparse to locate a
-  // shadow in: its loss map follows wherever the largest clouds are.)
+  // Clouds alone, over black.
+  await setMode('clouds');
+  await setFixture(null);
+  const cloudReference = await capture('cloud-reference');
+  await page.waitForTimeout(350);
+  const cloudControl = await capture('cloud-control');
+  await setFixture(-0.28);
+  const cloudLeft = await capture('cloud-shadow-left');
+  await setFixture(0.28);
+  const cloudRight = await capture('cloud-shadow-right');
+  const cloudRegistration = [
+    cloudShadowRegistration(cloudLossCells(cloudReference, cloudControl, cloudLeft), surfaceLeftStats.lossMap),
+    cloudShadowRegistration(cloudLossCells(cloudReference, cloudControl, cloudRight), surfaceRightStats.lossMap),
+  ];
+
+  // The surface's and the air's shadow peak beside each predicted axis, on a
+  // loss map smoothed over ~100 px so one coastline cannot own the peak. The
+  // air is seen along a slanted column, hence its looser bound. Clouds are
+  // checked by registration instead (see cloudShadowRegistration).
   const located = (left, right) => [
     ...predictedLeft.map(({ point }) => shadowPeak(left.lossMap, point)),
     ...predictedRight.map(({ point }) => shadowPeak(right.lossMap, point)),
@@ -431,7 +494,12 @@ try {
   // The centroids only vouch for the direction the shadow moves; where it
   // lies is checked against the predicted axes.
   const mediaShadowConcentric = mediaAlignment.cosine > 0.9
-    && overlay.media.every((o) => o.error < 0.06);
+    && overlay.media.every((o) => o.error < 0.06)
+    // Clouds and ground lose different shares of their light (direct versus
+    // sky light, which varies with the sun's height across the disc), so the
+    // two centroids differ by ~0.04 even when the shadow is the same one;
+    // a misplaced or screen-space shadow is off by the penumbra itself.
+    && cloudRegistration.every((r) => r.offset < 0.07);
 
   // Restore the complete frame, remove the eclipse fixture, then use an actual
   // generated moon group for front/behind depth ownership. updateVisual runs
@@ -529,6 +597,7 @@ try {
     mediaShadowConcentric,
     mediaAlignment,
     overlay,
+    cloudRegistration,
     predictedLeft,
     predictedRight,
     satelliteFixture,
@@ -559,6 +628,7 @@ try {
       media: [mediaLeftStats.centroid, mediaRightStats.centroid],
       alignment: mediaAlignment,
       overlay,
+      cloudRegistration,
     })}`);
   assert.equal(errors.length, 0, errors.join('\n'));
   console.log('PASS: satellite eclipse centroids, media alignment and z occlusion');

@@ -3,6 +3,10 @@ import { createWeatherSystem, sampleWeather } from './weather-system.js';
 import { sampleCloudColumn } from './cloud-environment.js';
 import { sampleWeatherAtlas, decodeSynopticCoverage } from './weather-atlas.js';
 import { calibrateProductionCoverage } from './production-coverage.js';
+import { TIME_SCALE } from '../astronomy.js';
+
+// Real-time cloud drift relative to the physical wind speed (16 m/s -> ~40 m/s).
+const CLOUD_DRIFT_GAIN = 2.5;
 
 const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
 const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
@@ -53,7 +57,12 @@ export function createPlanetWeatherField(body, options = {}) {
   let lowAtlas = null, highAtlas = null,windAtlas=null;
   // Keep bulk advection in physical units; small planets do not inherit a
   // 6,000 km planet's linear cloud speed. weatherSpeed is an explicit time gain.
-  const angularSpeed = profile.windSpeed * 3600 / body.R * profile.weatherSpeed;
+  // The celestial clock runs TIME_SCALE times real time. Wind carried at
+  // that rate crossed the sky at kilometres per second: no ship could keep
+  // up with a cloud and nothing could be watched forming. The deck drifts
+  // at a real-time speed instead, a little faster than the physical wind so
+  // the motion still reads from the ground.
+  const angularSpeed = profile.windSpeed * CLOUD_DRIFT_GAIN * 3600 / body.R / TIME_SCALE;
   system.advectionRadiansPerHour = angularSpeed;
   // System attaches the read-only ephemeris after constructing the body.
   // Every absolute-time query then uses actual stars in that body's frame.
