@@ -25,6 +25,7 @@ import { landingDescentProgress, SHIP_LANDING_PROFILE,
   warpTravelProgress, SkyDome, Ship, ShipWeapons, SHIP_FOREGROUND_LAYER,
   SHIP_INTERIOR_LAYER } from './effects.js';
 import { loadShipModel, loadShipProbes } from './halcyon/ship/model.js';
+import { ShipAudio } from './halcyon/ship/ship-audio.js';
 import { ShipView } from './ship-view.js';
 import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
@@ -996,6 +997,7 @@ spatialRift = new SpatialRift({
 spatialRift.resize(window.innerWidth, window.innerHeight, renderDpr);
 const weapons = new ShipWeapons(scene);
 const audio = new FlightAudio();
+const shipAudio = new ShipAudio(audio);
 const music = new BackgroundMusic();
 // Unlock the shared AudioContext on first user gesture, then bind the music
 // bus to the same context (avoids opening a second AudioContext per tab).
@@ -4916,6 +4918,21 @@ function frame(rafTs) {
     underwater: envUnderwater,
     paused,
   });
+  // the ship's own sounds: cabin bed while aboard, events placed in ship space
+  {
+    const seated = shipView.isCockpit() && !shipView.shipwalk;
+    const aboard = state === 'shipwalk' || (state === 'space' && seated);
+    shipAudio.update({
+      aboard,
+      seated: seated && state === 'space',
+      listener: shipView.shipwalk
+        ? { x: shipView.walkPos.x, z: shipView.walkPos.z, yaw: shipView.walkYaw }
+        : { x: 0, z: ship.def.dims.eyeZ, yaw: 0 },
+      cabin: ship.cabinLightT ?? 1,
+      paused,
+      events: ship.events,
+    });
+  }
   // Background music director: pickTrack decides what should be playing based
   // on state, planet biome, snow coverage, black-hole vicinity and star-map
   // open state. Only switches when the target changes.

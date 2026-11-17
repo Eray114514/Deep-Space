@@ -636,6 +636,11 @@ export class Ship {
   updateGear(dt) {
     if (!this.ext?.gear) return;
     const want = THREE.MathUtils.smoothstep(this.parkAmt, 0.35, 0.85);
+    const goingDown = want > 0.5;
+    if (this.gearGoingDown !== undefined && goingDown !== this.gearGoingDown) {
+      this.emit(goingDown ? 'gear-down' : 'gear-up', [0, -0.8, -2.5]);
+    }
+    this.gearGoingDown = goingDown;
     this.gearT = THREE.MathUtils.lerp(this.gearT ?? want, want, 1 - Math.exp(-Math.max(0, dt) * 3.2));
     /* bay doors swing first, then the leg drops and unfolds; retraction runs
        the same timeline backwards, so the doors shut behind the stowed leg */
@@ -644,9 +649,18 @@ export class Ship {
     for (const leg of this.ext.gear) {
       const stowed = 1 - legT;
       leg.visible = doorT > 0.04;
-      leg.position.y = leg.userData.deployedY + stowed * 0.55;
-      if (leg.userData.nose) leg.rotation.set(stowed * 0.9, 0, 0);
-      else leg.rotation.set(-stowed * 0.35, 0, -leg.userData.side * stowed * 0.55);
+      /* two joints: the strut swings up about the trunnion while the lower
+         leg folds back at the knee, then the whole leg rises into the bay */
+      const swing = THREE.MathUtils.smoothstep(stowed, 0.0, 0.75);
+      const knee = THREE.MathUtils.smoothstep(stowed, 0.15, 0.9);
+      leg.position.y = leg.userData.deployedY + THREE.MathUtils.smoothstep(stowed, 0.6, 1.0) * 0.38;
+      if (leg.userData.nose) leg.rotation.set(swing * 1.25, 0, 0);
+      else leg.rotation.set(0, 0, -leg.userData.side * swing * 1.2);
+      const lower = leg.userData.lower;
+      if (lower) {
+        if (leg.userData.nose) lower.rotation.set(-knee * 1.9, 0, 0);
+        else lower.rotation.set(0, 0, leg.userData.side * knee * 1.7);
+      }
       for (const door of leg.userData.doors) {
         _gq.setFromAxisAngle(_gz, door.userData.side * -1.815 * (1 - doorT));
         door.quaternion.copy(door.userData.baseQuat).premultiply(_gq);
@@ -679,7 +693,87 @@ export class Ship {
   /** switch the cabin between normal and night-watch lighting */
   toggleCabinLights() {
     this.cabinNight = !this.cabinNight;
+    this.emit('switch', [-1.25, 1.05, -1.32]);
+    this.emit(this.cabinNight ? 'lights-down' : 'lights-up', [0, 2.0, -2.0]);
     return this.cabinNight;
+  }
+
+  /** queue a sound event at a ship-local position (ShipAudio drains it) */
+  emit(type, pos = null) {
+    (this.events ??= []).push({ type, pos });
+    if (this.events.length > 16) this.events.shift();
+  }
+
+  /**
+   * Things the walker can use with F, nearest first within reach.  Each has
+   * a ship-local deck position (x, z), a reach, a prompt and an action.
+   */
+  get interactables() {
+    return this._interactables ??= [
+      { id: 'lights', x: -0.9, z: -1.45, reach: 0.65,
+        prompt: () => (this.cabinNight ? '[F] 舱内灯光：恢复标准照明' : '[F] 舱内灯光：切换夜间模式'),
+        act: () => this.toggleCabinLights() },
+      { id: 'locker-stbd', x: 0.85, z: -4.95, reach: 0.6,
+        prompt: () => (this.lockerOpen?.stbd ? '[F] 关上宇航服柜' : '[F] 打开宇航服柜'),
+        act: () => this.toggleLocker('stbd') },
+      { id: 'locker-port', x: -0.85, z: -4.95, reach: 0.6,
+        prompt: () => (this.lockerOpen?.port ? '[F] 关上储物柜' : '[F] 打开储物柜'),
+        act: () => this.toggleLocker('port') },
+      { id: 'bunk', x: 0.85, z: -3.64, reach: 0.65,
+        prompt: () => (this.bunkLampsOn ? '[F] 关闭床头灯' : '[F] 打开床头灯'),
+        act: () => { this.bunkLampsOn = !this.bunkLampsOn; this.emit('switch', [1.9, 1.0, -4.2]); } },
+      { id: 'galley', x: -0.85, z: -3.64, reach: 0.65,
+        prompt: () => (this.brewT > 0 ? '冲泡中…' : '[F] 冲一杯热饮'),
+        act: () => this.brew() },
+    ];
+  }
+
+  toggleLocker(side) {
+    this.lockerOpen ??= { stbd: false, port: false };
+    this.lockerOpen[side] = !this.lockerOpen[side];
+    this.emit(this.lockerOpen[side] ? 'locker-open' : 'locker-close', [side === 'stbd' ? 1.4 : -1.4, 1.0, -4.95]);
+  }
+
+  brew() {
+    if (this.brewT > 0) return;
+    this.brewT = 7.5;
+    this.emit('brew', [-1.85, 1.05, -3.9]);
+  }
+
+  /** steam off the fresh drink: a handful of soft sprites rising and fading */
+  updateSteam(dt) {
+    if (!this.int) return;
+    if (!this.steam) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 64;
+      const g = canvas.getContext('2d');
+      const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+      grd.addColorStop(0, 'rgba(255,255,255,0.55)');
+      grd.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 64, 64);
+      const map = new THREE.CanvasTexture(canvas);
+      this.steam = [];
+      for (let i = 0; i < 14; i++) {
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthWrite: false, opacity: 0 }));
+        sprite.visible = false;
+        sprite.userData.phase = i / 14;
+        sprite.layers.mask = this.int.group.layers.mask;
+        this.int.group.add(sprite);
+        this.steam.push(sprite);
+      }
+    }
+    this.brewT = Math.max(0, (this.brewT ?? 0) - dt);
+    const brewing = this.brewT > 0 ? Math.min(1, this.brewT / 1.5) * Math.min(1, (7.5 - this.brewT) / 2.0) : 0;
+    this.steamClock = (this.steamClock ?? 0) + dt;
+    for (const sprite of this.steam) {
+      const life = (this.steamClock * 0.45 + sprite.userData.phase) % 1;
+      const drift = Math.sin((this.steamClock + sprite.userData.phase * 9) * 1.7) * 0.025;
+      sprite.position.set(-1.62 + drift, 0.96 + life * 0.42, -3.74 + drift * 0.6);
+      sprite.scale.setScalar(0.05 + life * 0.16);
+      sprite.material.opacity = brewing * Math.sin(life * Math.PI) * 0.35;
+      sprite.visible = brewing > 0.01;
+    }
   }
 
   /**
@@ -695,6 +789,10 @@ export class Ship {
     const p = view?.walkPos;
     for (const door of this.int.doors || []) {
       const near = walking && p && Math.hypot(p.x, p.z - door.position.z) < 2.1;
+      if (door.userData.side > 0 && door.userData.wasNear !== undefined && near !== door.userData.wasNear) {
+        this.emit(near ? 'door-open' : 'door-close', [0, 1.1, door.position.z]);
+      }
+      if (door.userData.side > 0) door.userData.wasNear = near;
       const open = THREE.MathUtils.lerp(door.userData.openT ?? 0, near ? 1 : 0, 1 - Math.exp(-step * (near ? 7 : 3.5)));
       door.userData.openT = open;
       door.position.x = door.userData.closedX + door.userData.side * door.userData.travel * open * open * (3 - 2 * open);
@@ -712,6 +810,22 @@ export class Ship {
       this.int.hook.rotation.set(h.x, 0, h.z);
     }
     if (this.int.lightSwitch) this.int.lightSwitch.rotation.z = THREE.MathUtils.lerp(-0.3, 0.3, this.cabinLightT);
+    // locker doors swing out on their outer hinges
+    for (const leaf of this.int.lockers || []) {
+      const group = this.lockerOpen?.[leaf.userData.side > 0 ? 'stbd' : 'port'] ? 1 : 0;
+      const t = THREE.MathUtils.lerp(leaf.userData.openT ?? 0, group, 1 - Math.exp(-step * 5));
+      leaf.userData.openT = t;
+      const swing = t * t * (3 - 2 * t) * 1.75;
+      leaf.rotation.y = leaf.userData.side * (leaf.userData.leaf === 0 ? swing : -swing);
+    }
+    // bunk lamps fade on and off
+    for (const lamp of this.int.bunkLamps || []) {
+      const t = THREE.MathUtils.lerp(lamp.userData.onT ?? 0, this.bunkLampsOn ? 1 : 0, 1 - Math.exp(-step * 8));
+      lamp.userData.onT = t;
+      lamp.userData.light.intensity = t * 1.4;
+      lamp.traverse((object) => { if (object.isMesh) object.material.emissiveIntensity = 0.15 + t * 2.4; });
+    }
+    this.updateSteam(step);
     const input = this.lastInput;
     const cockpit = this.int.cockpit;
     if (cockpit?.stick) {

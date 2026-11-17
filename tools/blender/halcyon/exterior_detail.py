@@ -50,10 +50,11 @@ def gear_leg(M, col, tag, x, z, top_y, pad_r=0.40):
     P.append(prims.revolve('gear-strut', col, [
         (0.0, top_y - 0.10), (0.17, top_y - 0.10), (0.17, -1.02), (0.19, -1.02),
         (0.19, -1.10), (0.14, -1.10), (0.14, -1.13), (0.0, -1.13)][::-1], o, up, 20, M['hullGrey']))
-    P.append(prims.revolve('gear-piston', col, [
+    lower = []
+    lower.append(prims.revolve('gear-piston', col, [
         (0.0, -1.10), (0.10, -1.10), (0.10, -1.44), (0.0, -1.44)][::-1], o, up, 18, M['chrome']))
     # footpad: dished plate with a rolled rim and a ball joint
-    P.append(prims.revolve('gear-pad', col, [
+    lower.append(prims.revolve('gear-pad', col, [
         (0.0, GROUND_Y), (pad_r * 0.92, GROUND_Y), (pad_r, GROUND_Y + 0.025),
         (pad_r, GROUND_Y + 0.05), (pad_r * 0.9, GROUND_Y + 0.085), (0.22, GROUND_Y + 0.13),
         (0.15, GROUND_Y + 0.20), (0.0, GROUND_Y + 0.20)], o, up, 28, M['metalDark']))
@@ -61,7 +62,7 @@ def gear_leg(M, col, tag, x, z, top_y, pad_r=0.40):
     for k in range(6):
         t = math.pi * k / 3
         rot = Matrix.Rotation(t, 3, 'Y')
-        P.append(prims.box('gear-rib', col, (pad_r * 0.62, 0.05, 0.03), M['metalDark'], bevel=0.006,
+        lower.append(prims.box('gear-rib', col, (pad_r * 0.62, 0.05, 0.03), M['metalDark'], bevel=0.006,
                            origin=Vector(o) + rot @ Vector((pad_r * 0.52, GROUND_Y + 0.085, 0)), rot=rot))
     # torque links (scissor) on the aft side
     for (y0, y1, zz) in ((-0.98, -1.20, 0.30), (-1.20, -1.40, 0.30)):
@@ -69,7 +70,7 @@ def gear_leg(M, col, tag, x, z, top_y, pad_r=0.40):
         b = Vector((x, (y0 + y1) / 2, z + zz))
         c = Vector((x, y1, z + 0.09))
         for p0, p1 in ((a, b), (b, c)):
-            P.append(prims.tube('gear-link', col, [p0, p1], 0.022, M['metal'], 8))
+            lower.append(prims.tube('gear-link', col, [p0, p1], 0.022, M['metal'], 8))
     # drag brace up into the bay, and a hydraulic line down the strut
     P.append(prims.tube('gear-brace', col, [(x, top_y + 0.02, z + 0.95), (x, -0.98, z + 0.14)],
                         0.04, M['metal'], 10))
@@ -83,7 +84,7 @@ def gear_leg(M, col, tag, x, z, top_y, pad_r=0.40):
         hinge = Vector((x + sx * 0.48, top_y - 0.02, z + 0.25))
         doors[sx] = ([prims.box('gear-door', col, (0.03, 0.46, 1.6), M['hullDark'], bevel=0.008,
                                 origin=hinge + rot @ Vector((0, -0.23, 0)), rot=rot)], tuple(hinge))
-    return P, doors
+    return P, lower, doors
 
 
 # ---------------------------------------------------------------- reaction control
@@ -216,9 +217,11 @@ def build(M, col, groups):
     pivots = groups['pivots']
 
     def leg(name, x, z, top_y, pad_r):
-        parts, doors = gear_leg(M, col, name, x, z, top_y, pad_r=pad_r)
+        parts, lower, doors = gear_leg(M, col, name, x, z, top_y, pad_r=pad_r)
         groups[name] = parts
         pivots[name] = (x, top_y, z)
+        groups[name + '-lower'] = lower          # folds at the knee (the gland nut)
+        pivots[name + '-lower'] = (x, -1.10, z)
         for sx, (objs, hinge) in doors.items():
             key = '%s-door-%s' % (name, 'stbd' if sx > 0 else 'port')
             groups[key] = objs

@@ -33,13 +33,22 @@ try {
       gearDoors: ship.ext.gear.reduce((n, leg) => n + leg.userData.doors.length, 0),
       doors: ship.int.doors?.length, fans: ship.int.fans?.length, hook: !!ship.int.hook,
       lightSwitch: !!ship.int.lightSwitch, stick: !!ship.int.cockpit.stick, throttle: !!ship.int.cockpit.throttle,
+      lockers: ship.int.lockers?.length, bunkLamps: ship.int.bunkLamps?.length,
+      knees: ship.ext.gear.filter((leg) => leg.userData.lower).length,
       gearVisible: ship.ext.gear.map((leg) => leg.visible), gearT: ship.gearT,
     };
   });
   check(nodes.petals === 4 && nodes.flaps === 2 && nodes.sensor && nodes.gearDoors === 6,
     `exterior movers present (${JSON.stringify(nodes)})`);
-  check(nodes.doors === 4 && nodes.fans === 3 && nodes.hook && nodes.lightSwitch && nodes.stick && nodes.throttle,
-    'interior movers present');
+  check(nodes.doors === 4 && nodes.fans === 3 && nodes.hook && nodes.lightSwitch && nodes.stick && nodes.throttle
+      && nodes.lockers === 4 && nodes.bunkLamps === 2 && nodes.knees === 3,
+    'interior movers present (doors, fans, hook, switch, stick, throttle, 4 locker leaves, 2 bunk lamps, 3 gear knees)');
+  await page.evaluate(() => {
+    const { ship } = NMS._internals;
+    window.__shipEvents = [];
+    const emit = ship.emit.bind(ship);
+    ship.emit = (type, pos) => { window.__shipEvents.push(type); emit(type, pos); };
+  });
   check(nodes.gearT < 0.05 && nodes.gearVisible.every((v) => !v), `gear stowed and hidden in flight (gearT ${nodes.gearT?.toFixed(3)})`);
 
   // ailerons answer the bank, petals iris with power
@@ -119,6 +128,43 @@ try {
   await page.waitForFunction(() => NMS._internals.ship.cabinLightT > 0.85, null, { timeout: 30000 }).catch(() => {});
   const day = await page.evaluate(() => NMS._internals.ship.cabinLightT);
   check(day > 0.8, `switching back restores normal lighting (${day.toFixed(2)})`);
+
+  // lockers, bunk lamp, galley
+  const use = (x, z, yaw) => page.evaluate(([x, z, yaw]) => {
+    const { shipView } = NMS._internals;
+    shipView.walkPos.set(x, 0, z);
+    shipView.walkYaw = yaw;
+    return shipView.interactPrompt(false);
+  }, [x, z, yaw]);
+  const lockerPrompt = await use(0.85, -4.95, -Math.PI / 2);
+  check(/宇航服柜/.test(lockerPrompt), `EVA locker prompt (${lockerPrompt})`);
+  await page.keyboard.press('KeyF');
+  const swung = await page.waitForFunction(() => NMS._internals.ship.int.lockers
+    .filter((l) => l.userData.side > 0).every((l) => Math.abs(l.rotation.y) > 1.2), null, { timeout: 30000 }).then(() => true, () => false);
+  check(swung, 'EVA locker doors swing open');
+  await page.evaluate(() => { NMS._internals.shipView.walkPos.set(-0.2, 0, -4.6); NMS._internals.shipView.walkYaw = -Math.PI / 2 - 0.35; });
+  await page.waitForTimeout(800);
+  await page.screenshot({ path: `${OUT}/04-eva-locker-open.png` });
+  const bunkPrompt = await use(0.85, -3.64, -Math.PI / 2);
+  check(/床头灯/.test(bunkPrompt), `bunk lamp prompt (${bunkPrompt})`);
+  await page.keyboard.press('KeyF');
+  const lit = await page.waitForFunction(() => NMS._internals.ship.int.bunkLamps
+    .every((l) => l.userData.light.intensity > 1.0), null, { timeout: 30000 }).then(() => true, () => false);
+  check(lit, 'bunk reading lamps switch on');
+  const galleyPrompt = await use(-0.85, -3.64, Math.PI / 2);
+  check(/热饮/.test(galleyPrompt), `galley prompt (${galleyPrompt})`);
+  await page.keyboard.press('KeyF');
+  const steaming = await page.waitForFunction(() => NMS._internals.ship.steam?.some((s) => s.visible && s.material.opacity > 0.02),
+    null, { timeout: 30000 }).then(() => true, () => false);
+  check(steaming, 'the brewer steams');
+  await page.evaluate(() => { NMS._internals.shipView.walkPos.set(0.2, 0, -3.3); NMS._internals.shipView.walkYaw = Math.PI / 2 + 0.25; });
+  await page.waitForTimeout(800);
+  await page.screenshot({ path: `${OUT}/05-galley-steam.png` });
+  const events = await page.evaluate(() => [...new Set(window.__shipEvents)]);
+  check(['door-open', 'door-close', 'switch', 'lights-down', 'lights-up', 'locker-open', 'brew'].every((e) => events.includes(e)),
+    `sound events raised (${events.join(', ')})`);
+  const drained = await page.evaluate(() => (NMS._internals.ship.events || []).length);
+  check(drained === 0, 'ship audio drains its event queue every frame');
 } finally {
   check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.slice(0, 3).join(' | ') : ''}`);
   await browser.close();

@@ -35,6 +35,7 @@ HOLD_S = LoftSurface(_keys(HOLD_Z0, HOLD_Z1, HOLD))
 MID_BAY = (MID_Z1 - MID_Z0) / 5          # 0.88
 HOLD_BAY = (HOLD_Z1 - HOLD_Z0) / 5       # 1.36
 NICHE = (MID_Z0 + MID_BAY, MID_Z0 + 3 * MID_BAY)     # galley / bunk alcoves
+LOCKER = (MID_Z0 + 0.10, MID_Z0 + MID_BAY - 0.04)  # recessed lockers, forward bay
 # half-cell lines on the ceiling, walls and deck so baked light has somewhere to live
 FINE_U = [j + 0.5 for j in list(range(0, 6)) + list(range(16, 21)) + list(range(29, 35))]
 
@@ -215,6 +216,8 @@ def build_mid(kit):
         b = bay_of(z)
         if NICHE[0] < z < NICHE[1] and J_C < jf < J_D:
             return None                                   # alcove openings
+        if LOCKER[0] < z < LOCKER[1] and J_C < jf < J_D:
+            return None                                   # locker recesses
         if jf > 32:
             return 'deckMat'
         if jf > J_E:
@@ -234,7 +237,8 @@ def build_mid(kit):
         return 'panelGrey'
 
     kit.add(MID_S.build('mid-liner', kit.col, seams=seams, region=region, mats=M, flip=True,
-                        ring_step=0.22, tile=1.5, seam_half=0.004, seam_depth=0.006, u_extra=FINE_U))
+                        ring_step=0.22, tile=1.5, seam_half=0.004, seam_depth=0.006, u_extra=FINE_U,
+                        z_extra=LOCKER))
     w, yC, yD = MID['w'], MID['yC'], MID['yD']
     na, nb = NICHE
     # alcove surrounds
@@ -285,21 +289,16 @@ def build_mid(kit):
         kit.box('cushion', (0.44, 0.07, 0.30), (xo + 0.42, y + 0.145, na + 0.24), bevel=0.03, seg=3, name='pillow')
         kit.box('fabricOrange', (0.60, 0.05, 0.62), (xo + 0.40, y + 0.135, nb - 0.42), bevel=0.02, seg=3, name='blanket')
         kit.box('metal', (0.025, 0.07, L - 0.02), (xo + 0.012, y + 0.06, zc), bevel=0.008, name='bunk-lip')
+        kit.begin('bunk-lamp-%d' % (0 if y < ymid else 1), (xb - 0.004, y + 0.52, na + 0.30))
         kit.rev('lampWarm', [(0.035, 0.0), (0.0, 0.004)], (xb - 0.004, y + 0.52, na + 0.30), (-1, 0, 0), 14, 'reading-lamp')
+        kit.end()
         kit.rev('metalDark', [(0.05, 0.0), (0.05, 0.012), (0.035, 0.012), (0.035, 0.0)], (xb - 0.002, y + 0.52, na + 0.30),
                 (-1, 0, 0), 14, 'reading-bezel')
         kit.box('panelGrey', (0.10, 0.02, 0.5), (xb - 0.05, y + 0.36, zc + 0.3), bevel=0.006, name='bunk-ledge')
         kit.box('crateOrange', (0.05, 0.12, 0.16), (xb - 0.055, y + 0.43, zc + 0.38), bevel=0.006, name='book', tint=0.7)
         kit.box('panelDark', (0.045, 0.14, 0.11), (xb - 0.055, y + 0.44, zc + 0.24), bevel=0.006, name='book', tint=0.3)
-    # ---------------- lockers, forward bay, both sides
-    zb = (bays[0] + bays[1]) / 2
-    for sx in (-1, 1):
-        for i in range(2):
-            zz = bays[0] + MID_BAY * (i + 0.5) / 2
-            kit.box('panelGrey', (0.03, 1.56, MID_BAY / 2 - 0.05), (sx * (w - 0.012), 1.0, zz), bevel=0.01, name='locker')
-            kit.box('metal', (0.03, 0.16, 0.022), (sx * (w - 0.035), 1.05, zz + sx * 0.14), bevel=0.006, name='pull')
-            for k in range(5):
-                kit.box('metalDark', (0.012, 0.012, 0.22), (sx * (w - 0.03), 1.62 - 0.03 * k, zz), bevel=0.003, name='vent')
+    # ---------------- lockers, forward bay, both sides: recessed, with what is in them
+    build_lockers(kit)
     # ---------------- aft bay: life-support bottles (stbd), service panel (port)
     za = (bays[4] + bays[5]) / 2
     kit.box('panelDark', (0.05, 1.3, 0.7), (w - 0.02, 0.95, za), bevel=0.012, name='o2-backplate')
@@ -522,6 +521,70 @@ def pipe_run(kit, S, jf, side, z0, z1, radius, inset, key, clamp_every=0.62):
         z += clamp_every
 
 
+def build_lockers(kit):
+    """Two recessed lockers in the forward bay: an EVA suit to starboard,
+    stowage shelves to port.  Each has a pair of doors, one node per leaf,
+    hinged on its outer edge (the game swings them about y)."""
+    w, yD, yC = MID['w'], MID['yD'], MID['yC']
+    z0, z1 = LOCKER
+    zm = (z0 + z1) / 2
+    depth = 0.46
+    for sx in (-1, 1):
+        xo, xb = sx * w, sx * (w + depth)
+        kit.alcove('panelGrey', min(xo, xb), max(xo, xb), yD, yC, z0, z1, xo)
+        for zz in (z0, z1):
+            kit.box('metalDark', (0.05, yC - yD + 0.05, 0.05), (sx * (w - 0.012), (yC + yD) / 2, zz), bevel=0.012, name='locker-frame')
+        for yy in (yD, yC):
+            kit.box('metalDark', (0.05, 0.05, z1 - z0 + 0.05), (sx * (w - 0.012), yy, zm), bevel=0.012, name='locker-frame')
+        kit.box('lampWarm', (0.02, 0.012, z1 - z0 - 0.14), (sx * (w + 0.10), yC - 0.02, zm), bevel=0.0, name='locker-lamp')
+        if sx > 0:
+            # EVA suit on its rack: torso, helmet, arms, legs, life-support pack
+            cx = sx * (w + 0.24)
+            kit.box('metalDark', (0.06, 0.06, z1 - z0 - 0.06), (sx * (w + depth - 0.05), 1.56, zm), bevel=0.01, name='suit-rail')
+            kit.box('panelWhite', (0.26, 0.50, 0.42), (cx, 1.20, zm), bevel=0.06, seg=3, name='suit-torso')
+            kit.box('fabricOrange', (0.27, 0.06, 0.43), (cx, 1.02, zm), bevel=0.02, name='suit-belt')
+            kit.box('panelGrey', (0.16, 0.42, 0.34), (sx * (w + 0.40), 1.24, zm), bevel=0.04, seg=3, name='suit-pack')
+            kit.rev('panelWhite', [(0.0, -0.13), (0.10, -0.12), (0.135, -0.04), (0.135, 0.05), (0.10, 0.12), (0.0, 0.14)],
+                    (cx - sx * 0.02, 1.62, zm), (0, 1, 0), 24, 'suit-helmet')
+            # domed gold visor on the helmet's face
+            kit.rev('heat', [(0.105, 0.0), (0.098, 0.03), (0.075, 0.058), (0.04, 0.072), (0.0, 0.076)],
+                    (cx - sx * 0.09, 1.63, zm), (-sx, 0, 0), 24, 'suit-visor')
+            for dz in (-0.25, 0.25):
+                kit.tube('panelWhite', [(cx, 1.40, zm + dz * 0.95), (cx - sx * 0.02, 1.10, zm + dz * 1.05), (cx - sx * 0.05, 0.86, zm + dz)],
+                         0.055, 10, 'suit-arm')
+                kit.box('fabric', (0.08, 0.10, 0.08), (cx - sx * 0.05, 0.80, zm + dz), bevel=0.03, name='suit-glove')
+            for dz in (-0.10, 0.10):
+                kit.tube('panelWhite', [(cx, 0.96, zm + dz), (cx, 0.55, zm + dz * 1.1), (cx, 0.30, zm + dz * 1.1)], 0.07, 10, 'suit-leg')
+                kit.box('rubber', (0.14, 0.12, 0.26), (cx - sx * 0.03, yD + 0.08, zm + dz * 1.1), bevel=0.04, seg=3, name='suit-boot')
+            kit.label('EVA  SUIT  1', 0.035, (sx * (w + depth - 0.003), 1.86 - 0.12, zm), (0, 0, 1) if sx > 0 else (0, 0, -1), (0, 1, 0), 'decal')
+        else:
+            # stowage: three shelves of cases, bags and canisters
+            for k, yy in enumerate((0.55, 1.05, 1.50)):
+                kit.box('metalDark', (depth - 0.04, 0.025, z1 - z0 - 0.04), (sx * (w + depth / 2), yy, zm), bevel=0.006, name='shelf')
+                kit.box('crateOrange' if k == 1 else 'crateGrey', (0.30, 0.22, 0.26), (sx * (w + 0.22), yy + 0.125, z0 + 0.20),
+                        bevel=0.02, name='case', tint=0.2 + 0.25 * k)
+                kit.box('fabric', (0.28, 0.20, 0.30), (sx * (w + 0.24), yy + 0.11, zm + 0.08), bevel=0.06, seg=3, name='bag')
+                for j in range(2):
+                    kit.rev('panelWhite' if (j + k) % 2 else 'accent', [(0.0, 0.0), (0.05, 0.0), (0.05, 0.20), (0.03, 0.23), (0.0, 0.23)],
+                            (sx * (w + 0.20 + 0.11 * j), yy + 0.013, z1 - 0.16), (0, 1, 0), 12, 'canister')
+        # the doors: two leaves hinged at the outer edges, opening into the corridor
+        for k, (za, zb) in enumerate(((z0, zm), (zm, z1))):
+            hinge_z = za if k == 0 else zb
+            tag = 'locker-%s-%d' % ('stbd' if sx > 0 else 'port', k)
+            kit.begin(tag, (sx * (w - 0.02), 1.0, hinge_z))
+            zc = (za + zb) / 2
+            kit.box('panelGrey', (0.028, yC - yD - 0.04, zb - za - 0.012), (sx * (w - 0.02), (yC + yD) / 2, zc), bevel=0.008,
+                    name='locker-door', tint=0.3 + 0.3 * k)
+            free_z = zb - 0.06 if k == 0 else za + 0.06
+            kit.box('metal', (0.03, 0.20, 0.024), (sx * (w - 0.045), 1.05, free_z), bevel=0.008, name='locker-pull')
+            for j in range(6):
+                kit.box('metalDark', (0.006, 0.012, (zb - za) * 0.6), (sx * (w - 0.036), 1.62 - 0.03 * j, zc), bevel=0.002, name='locker-vent')
+            if k == 0:
+                kit.label('EVA  LOCKER  S-1' if sx > 0 else 'STOWAGE  P-1', 0.034,
+                          (sx * (w - 0.036), 1.38, zc), (0, 0, 1) if sx > 0 else (0, 0, -1), (0, 1, 0), 'decal')
+            kit.end()
+
+
 def dress_hold(kit, bays):
     """what makes the hold a working space: services overhead, kit on the walls"""
     z0, z1 = HOLD_Z0 + 0.12, HOLD_Z1 - 0.25
@@ -578,10 +641,9 @@ def dress_mid(kit):
     for k, (yy, zz) in enumerate(((MID['yD'] + 0.36, nb - 0.25), (ymid + 0.38, nb - 0.30))):
         kit.box('panelWhite', (0.006, 0.10, 0.075), (xb - 0.005, yy, zz), bevel=0.0, name='photo', tint=0.2 + 0.5 * k)
         kit.box('screen', (0.003, 0.08, 0.055), (xb - 0.009, yy, zz), bevel=0.0, name='photo-face')
-    kit.box('fabricOrange', (0.06, 0.62, 0.36), (w - 0.06, 1.25, na - 0.25), bevel=0.04, seg=3, name='jacket')
-    kit.rev('metal', [(0.012, 0.0), (0.012, 0.05), (0.0, 0.06)], (w - 0.005, 1.58, na - 0.25), (-1, 0, 0), 8, 'hook')
-    for dz in (-0.07, 0.07):
-        kit.box('rubber', (0.11, 0.13, 0.28), (w - 0.22, 0.065, na - 0.12 + dz), bevel=0.03, seg=3, name='boot')
+    # a jacket on a hook beside the bunks (aft of the alcove, clear of the lockers)
+    kit.box('fabricOrange', (0.06, 0.56, 0.36), (w - 0.06, 1.40, nb + 0.28), bevel=0.04, seg=3, name='jacket')
+    kit.rev('metal', [(0.012, 0.0), (0.012, 0.05), (0.0, 0.06)], (w - 0.005, 1.70, nb + 0.28), (-1, 0, 0), 8, 'hook')
     # galley: a screen with the menu, a towel, a plant
     xg = -2.06
     kit.box('panelDark', (0.02, 0.22, 0.32), (xg + 0.01, 1.62, (na + nb) / 2), bevel=0.008, name='galley-screen')
@@ -603,8 +665,6 @@ def build_labels(kit):
     PX, SX, UP = (0, 0, -1), (0, 0, 1), (0, 1, 0)     # reading direction on the port / starboard wall
     wm, wh = MID['w'] - 0.002, HOLD['w'] - 0.002
     b0 = MID_Z0 + MID_BAY * 0.5
-    kit.label('STOWAGE  P-1', 0.045, (-wm + 0.03, 1.74, b0), PX, UP)
-    kit.label('EVA  LOCKER  S-1', 0.045, (wm - 0.03, 1.74, b0), SX, UP)
     za = MID_Z0 + MID_BAY * 4.5
     kit.label('O2  RESERVE  35 MPa', 0.04, (wm - 0.05, 1.66, za), SX, UP, 'decalLight')
     kit.label('ENV  CTRL', 0.04, (-wm + 0.045, 1.63, za), PX, UP, 'decalLight')

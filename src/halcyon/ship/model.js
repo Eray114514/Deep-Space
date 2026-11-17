@@ -197,6 +197,14 @@ export function assembleShip(gltf, def) {
     node.userData.nose = name === 'gear-nose';
     node.userData.side = name === 'gear-nose' ? 0 : sideOf(name);
     node.userData.doors = ['port', 'stbd'].map((side) => optional(`${name}-door-${side}`)).filter(Boolean);
+    /* the lower leg folds at the knee: parent it to the strut so it rides along */
+    const lower = optional(`${name}-lower`);
+    if (lower) {
+      root.updateMatrixWorld(true);
+      node.attach(lower);
+      lower.userData.baseQuat = lower.quaternion.clone();
+      node.userData.lower = lower;
+    }
     for (const door of node.userData.doors) {
       door.userData.side = sideOf(door.name);
       door.userData.baseQuat = door.quaternion.clone();
@@ -306,6 +314,24 @@ export function assembleShip(gltf, def) {
     fans.push(node);
     intGroup.add(node);
   }
+  const lockers = ['stbd-0', 'stbd-1', 'port-0', 'port-1'].map((tag) => optional(`locker-${tag}`)).filter(Boolean);
+  for (const leaf of lockers) {
+    leaf.userData.side = leaf.name.includes('stbd') ? 1 : -1;
+    leaf.userData.leaf = leaf.name.endsWith('-0') ? 0 : 1;
+    intGroup.add(leaf);
+  }
+  /* bunk reading lamps: own material each, plus a small light, so they switch */
+  const bunkLamps = [0, 1].map((i) => optional(`bunk-lamp-${i}`)).filter(Boolean);
+  for (const lamp of bunkLamps) {
+    lamp.traverse((object) => {
+      if (object.isMesh) object.material = object.material.clone();
+    });
+    const light = new THREE.PointLight(0xffc68a, 0, 1.6, 2);
+    light.position.set(-0.08, 0, 0);
+    lamp.add(light);
+    lamp.userData.light = light;
+    intGroup.add(lamp);
+  }
   const hook = optional('crane-hook');
   if (hook) intGroup.add(hook);
   const lightSwitch = optional('light-switch');
@@ -395,7 +421,7 @@ export function assembleShip(gltf, def) {
     ext: { group: extGroup, rampPivot, plumes, glowRings, strobes, strobeGlows, gear, engines, petals, flaps, sensor },
     bakedLight,
     int: {
-      group: intGroup, barrier, lights, doors: cabinDoors, fans, hook, lightSwitch,
+      group: intGroup, barrier, lights, doors: cabinDoors, fans, hook, lightSwitch, lockers, bunkLamps,
       cockpit: { group: cockpitGroup, holo, glass, screens, lights: [], stick, throttle },
     },
     mats: { ...Object.fromEntries(surface.materials), screens: screenMaterials, glass: glassMaterial },

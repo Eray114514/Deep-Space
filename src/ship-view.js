@@ -208,19 +208,26 @@ export class ShipView {
     }
     if (p.z > 3.4) {
       this.rampTarget = this.rampTarget > 0.5 ? 0 : 1;
+      this.ship.emit?.(this.rampTarget > 0.5 ? 'ramp-open' : 'ramp-close', [0, 1.2, 6.6]);
       return true;
     }
-    if (this.nearLightSwitch()) {
-      this.ship.toggleCabinLights?.();
+    const near = this.nearestInteractable();
+    if (near) {
+      near.act();
       return true;
     }
     return false;
   }
 
-  /** the environment panel on the mid-deck's port wall, aft bay */
-  nearLightSwitch() {
+  /** the closest thing within reach that the walker can use */
+  nearestInteractable() {
     const p = this.walkPos;
-    return p.x < -0.45 && p.z > -2.05 && p.z < -0.95;
+    let best = null, bestD = Infinity;
+    for (const item of this.ship.interactables || []) {
+      const d = Math.hypot(p.x - item.x, p.z - item.z);
+      if (d < item.reach && d < bestD) { best = item; bestD = d; }
+    }
+    return best;
   }
 
   /** the ship-local camera pose the cockpit view settles at */
@@ -488,8 +495,8 @@ export class ShipView {
       if (landed) return this.rampTarget > 0.5 ? '[F] 关闭尾舱门 · [E] 离船' : '[F] 打开尾舱门 · [E] 离船';
       return this.rampTarget > 0.5 ? '[F] 关闭尾舱门' : '[F] 打开尾舱门';
     }
-    if (this.nearLightSwitch()) return this.ship.cabinNight ? '[F] 舱内灯光：恢复标准照明' : '[F] 舱内灯光：切换夜间模式';
-    return '';
+    const near = this.nearestInteractable();
+    return near ? near.prompt() : '';
   }
 
   /* ---- ramp ground clamp ------------------------------------------------ */
