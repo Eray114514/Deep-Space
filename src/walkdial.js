@@ -9,11 +9,11 @@ const NS = 'http://www.w3.org/2000/svg';
 const VIEW = 932;
 const CX = 466;
 const CY = 448;
-const INK = 'rgba(3, 18, 30, .72)';      // translucent blue watch face over terrain
-const BEZEL = 'rgba(2, 11, 20, .84)';
-const WHITE = '#bfefff';
-const GREY = 'rgba(66, 169, 207, .68)';
-const RED = '#39c8ff';
+const INK = 'rgba(8, 14, 18, .54)';       // light neutral-dark crystal over terrain
+const BEZEL = 'rgba(10, 15, 19, .76)';
+const WHITE = '#dceef2';
+const GREY = 'rgba(141, 206, 217, .80)';
+const RED = '#ece8d4';
 
 const clamp = (n, a = 0, b = 1) => Math.max(a, Math.min(b, Number(n)));
 const deepMerge = (target, patch) => {
@@ -169,20 +169,20 @@ class SpaceExplorationDial extends HTMLElement {
         .planetHit{pointer-events:auto;cursor:pointer;fill:transparent}
         .txt{
           fill:${WHITE};
-          font-family:Consolas,"Cascadia Mono","Courier New","Microsoft YaHei UI",monospace;
-          font-weight:700;
-          letter-spacing:1.2px;
+          font-family:"Barlow Semi Condensed","Barlow","Microsoft YaHei UI","PingFang SC",sans-serif;
+          font-weight:600;
+          letter-spacing:1.4px;
           paint-order:stroke;
-          stroke:${WHITE};
-          stroke-width:.35px;
+          stroke:rgba(0,8,12,.55);
+          stroke-width:1.6px;
           text-rendering:geometricPrecision;
         }
-        .time{font-size:65px;letter-spacing:7px}
-        .dateLabel{font-size:53px;letter-spacing:2px}
-        .sideLabel{font-size:53px;letter-spacing:1px}
-        .planetLabel{font-size:55px;letter-spacing:0}
-        .dateNumber{font-size:53px}
-        .scan{position:absolute;inset:0;z-index:4;pointer-events:none;opacity:.11;mix-blend-mode:soft-light;background:repeating-linear-gradient(to bottom,rgba(110,220,255,.2) 0,rgba(110,220,255,.2) 1px,rgba(0,12,22,.18) 2px,transparent 4px)}
+        .time{font-size:66px;font-weight:700;letter-spacing:5px}
+        .dateLabel{font-size:48px;letter-spacing:2.5px}
+        .sideLabel{font-size:48px;letter-spacing:2px}
+        .planetLabel{font-size:52px;letter-spacing:2px}
+        .dateNumber{font-size:52px;font-weight:700}
+        .scan{position:absolute;inset:0;z-index:4;pointer-events:none;opacity:.07;mix-blend-mode:soft-light;background:repeating-linear-gradient(to bottom,rgba(200,235,242,.18) 0,rgba(200,235,242,.18) 1px,rgba(0,10,16,.14) 2px,transparent 4px)}
         @media (prefers-reduced-motion:reduce){.scan{display:none}}
       </style>
       <div class="wrap">
@@ -206,14 +206,14 @@ class SpaceExplorationDial extends HTMLElement {
     back.append(defs);
 
     // outer bezel: dark ring with thin ivory outlines
-    back.append(svgEl('circle', { cx: CX, cy: CY, r: 431, fill: BEZEL, stroke: WHITE, 'stroke-width': 4.2, filter: 'url(#edgeGlow)' }));
-    back.append(svgEl('circle', { cx: CX, cy: CY, r: 408, fill: 'none', stroke: 'rgba(2,13,24,.84)', 'stroke-width': 20 }));
-    back.append(svgEl('circle', { cx: CX, cy: CY, r: 397, fill: 'none', stroke: WHITE, 'stroke-width': 4.2, filter: 'url(#edgeGlow)' }));
-    back.append(svgEl('circle', { cx: CX, cy: CY, r: 383, fill: INK, stroke: WHITE, 'stroke-width': 4.2, filter: 'url(#edgeGlow)' }));
+    back.append(svgEl('circle', { cx: CX, cy: CY, r: 431, fill: BEZEL, stroke: WHITE, 'stroke-width': 3.6, filter: 'url(#edgeGlow)' }));
+    back.append(svgEl('circle', { cx: CX, cy: CY, r: 408, fill: 'none', stroke: 'rgba(6,11,14,.76)', 'stroke-width': 20 }));
+    back.append(svgEl('circle', { cx: CX, cy: CY, r: 397, fill: 'none', stroke: WHITE, 'stroke-width': 3.6, filter: 'url(#edgeGlow)' }));
+    back.append(svgEl('circle', { cx: CX, cy: CY, r: 383, fill: INK, stroke: WHITE, 'stroke-width': 3.6, filter: 'url(#edgeGlow)' }));
 
     // lower AP / BAT arc beds
-    back.append(svgEl('path', { d: annularSector(277, 356, 180, 90), fill: 'rgba(18,62,82,.56)' }));
-    back.append(svgEl('path', { d: annularSector(277, 356, 90, 0), fill: 'rgba(18,62,82,.56)' }));
+    back.append(svgEl('path', { d: annularSector(277, 356, 180, 90), fill: 'rgba(159,212,223,.16)' }));
+    back.append(svgEl('path', { d: annularSector(277, 356, 90, 0), fill: 'rgba(159,212,223,.16)' }));
     this.apArc = svgEl('path', { fill: GREY });
     this.batArc = svgEl('path', { fill: GREY });
     back.append(this.apArc, this.batArc);
@@ -368,12 +368,11 @@ class SpaceExplorationDial extends HTMLElement {
         if (rr > 1) { data[i + 3] = 0; continue; }
         const nz = Math.sqrt(Math.max(0, 1 - rr));
         const lit = nx * lx + ny * ly + nz * lz > 0;
-        const scan = ((y & 3) === 0 ? -5 : 0) + (((x * 13 + y * 7) & 31) === 0 ? 3 : 0);
-        const base = lit ? 237 : 8;
-        data[i] = Math.max(0, Math.min(255, lit ? base - 62 + scan : base));
-        data[i + 1] = Math.max(0, Math.min(255, lit ? base - 10 + scan : base + 10 + scan));
-        data[i + 2] = Math.max(0, Math.min(255, lit ? base + scan : base + 20 + scan));
-        data[i + 3] = 255;
+        const scan = ((y & 3) === 0 ? -4 : 0) + (((x * 13 + y * 7) & 31) === 0 ? 2 : 0);
+        data[i] = Math.max(0, Math.min(255, lit ? 210 + scan : 11 + scan));
+        data[i + 1] = Math.max(0, Math.min(255, lit ? 228 + scan : 17 + scan));
+        data[i + 2] = Math.max(0, Math.min(255, lit ? 232 + scan : 21 + scan));
+        data[i + 3] = 242;
       }
     }
     ctx.clearRect(0, 0, W, H);
@@ -404,7 +403,7 @@ class SpaceExplorationDial extends HTMLElement {
       if (rr >= 0.985) return;
       const nz = Math.sqrt(Math.max(0, 1 - rr));
       const lit = nx * lx + ny * ly + nz * lz > 0;
-      ctx.strokeStyle = lit ? 'rgba(19,103,139,.76)' : 'rgba(191,239,255,.92)';
+      ctx.strokeStyle = lit ? 'rgba(20,46,56,.68)' : 'rgba(186,226,235,.82)';
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
     };
     ctx.save();

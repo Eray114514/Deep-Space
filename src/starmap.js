@@ -90,6 +90,15 @@ const RESOURCE_PROFILE = {
   gasGiant: ['H₂', 'He', 'NH₃', 'CH₄'], iceGiant: ['CH₄', 'H₂', 'He', 'H₂O'],
 };
 const RESOURCE_POOL = ['H₂O', 'Fe', 'Cu', 'Ar', 'Ni', 'Co', 'Si', 'He₃', 'Pb', 'Al', 'C', 'NH₃', 'CH₄', 'S', 'Xe', 'Ir', 'Au', 'Cl', 'N', 'Na'];
+const VOLATILE_RESOURCES = new Set(['H₂O', 'CH₄', 'NH₃', 'He₃', 'N', 'Cl', 'F']);
+const RARE_RESOURCES = new Set(['Au', 'Ir', 'Xe', 'Ar', '引力透镜', 'X 射线', '相对论喷流', '时延信号', '吸积盘', '???']);
+const playMapSound = (name) => window.dispatchEvent(new CustomEvent('ui-sound', { detail: name }));
+
+function resourceCategory(symbol) {
+  if (VOLATILE_RESOURCES.has(symbol)) return 'volatile';
+  if (RARE_RESOURCES.has(symbol)) return 'rare';
+  return 'metal';
+}
 
 function bodyProfile(body, survey) {
   if (body.type === 'blackHole') {
@@ -413,17 +422,25 @@ export class StarMap {
                   </svg>
                 </span>
                 <span class="routeActionLabel">设定航线</span>
-                <span class="routeKey">X</span>
+                <kbd class="routeKey">X</kbd>
               </button>
             </div>
           </section>
         </div>
         <div id="sm-rightHud" class="hudAnchor">
-          <section id="sm-faction" class="panel"><div class="small">管辖 / 航行状态</div><div class="panelRule"></div><div class="big" id="sm-factionName">—</div></section>
+          <section id="sm-faction" class="panel">
+            <div class="small">管辖 / 航行状态</div>
+            <div class="panelRule"></div>
+            <div class="big" id="sm-factionName">—</div>
+            <div class="factionSub"><i aria-hidden="true"></i><span id="sm-factionSub">标准星系入口</span></div>
+          </section>
           <section id="sm-planetRight" class="panel planetInfo" aria-hidden="true">
-            <div class="resourceHead"><span>资源</span><span id="sm-resourceCount">(0/5)</span></div>
+            <div class="resourceHead"><span>地表与轨道资源</span><span id="sm-resourceCount">(0/5)</span></div>
             <div class="resourceTiles" id="sm-resourceTiles"></div>
-            <div class="traitText" id="sm-traitText">特征：不明 (0/3)</div>
+            <div class="traitSection">
+              <div class="traitHead"><span>勘测特征</span><small>SURVEY TRAITS</small></div>
+              <div class="traitText" id="sm-traitText">特征：不明 (0/3)</div>
+            </div>
           </section>
         </div>
         <div id="sm-bottomHud" class="hudAnchor">
@@ -460,7 +477,7 @@ export class StarMap {
       routeAction: $('#sm-routeAction'),
       resourceCount: $('#sm-resourceCount'), resourceTiles: $('#sm-resourceTiles'),
       traitText: $('#sm-traitText'),
-      factionName: $('#sm-factionName'), faction: $('#sm-faction'),
+      factionName: $('#sm-factionName'), factionSub: $('#sm-factionSub'), faction: $('#sm-faction'),
       controls: $('#sm-controls'),
       leftHud: $('#sm-leftHud'), rightHud: $('#sm-rightHud'), bottomHud: $('#sm-bottomHud'),
       navArrow: $('#sm-navArrow'), nameTag: $('#sm-nameTag'),
@@ -523,9 +540,12 @@ export class StarMap {
   }
 
   bindUI() {
+    this.els.back.addEventListener('pointerenter', () => playMapSound('ui_hover'));
     this.els.back.addEventListener('click', () => this.goBack());
     for (const button of this.root.querySelectorAll('[data-sm-filter]')) {
+      button.addEventListener('pointerenter', () => playMapSound('ui_hover'));
       button.addEventListener('click', () => {
+        playMapSound('ui_click');
         this.filter = button.dataset.smFilter;
         this.root.querySelectorAll('[data-sm-filter]').forEach((item) => item.classList.toggle('active', item === button));
         if (this.mode === 'galaxy') this.buildGalaxy(true);
@@ -534,8 +554,12 @@ export class StarMap {
     this.els.search.addEventListener('input', () => {
       if (this.mode === 'galaxy') this.buildGalaxy(true);
     });
+    this.els.routeAction.addEventListener('pointerenter', () => {
+      if (!this.els.routeAction.disabled) playMapSound('ui_hover');
+    });
     this.els.routeAction.addEventListener('click', (event) => {
       event.stopPropagation();
+      playMapSound('ui_click');
       this.warpToSelection();
     });
     const canvas = this.renderer.domElement;
@@ -549,14 +573,19 @@ export class StarMap {
       if (moved < 7) this.pick(event);
     });
     canvas.addEventListener('pointermove', (event) => {
-      if (this.mode !== 'galaxy' || this.pointerStart) {
+      if (this.mode !== 'galaxy' || this._viewTransition || this.pointerStart) {
         this.els.hoverMark.hidden = true;
         return;
       }
       const hit = this.pickStarAt(event);
       if (!hit) {
         this.els.hoverMark.hidden = true;
+        this._lastHoverStar = null;
         return;
+      }
+      if (hit.star !== this._lastHoverStar) {
+        this._lastHoverStar = hit.star;
+        playMapSound('ui_hover');
       }
       // 预热 preview 缓存，减少点击时的生成延迟
       this.systemPreview(hit.star);
@@ -564,7 +593,10 @@ export class StarMap {
       this.els.hoverName.textContent = this.systemLabelIdentity(hit.star).properName;
       this.els.hoverMark.style.transform = `translate3d(${hit.sx.toFixed(1)}px,${hit.sy.toFixed(1)}px,0)`;
     });
-    canvas.addEventListener('pointerleave', () => { this.els.hoverMark.hidden = true; });
+    canvas.addEventListener('pointerleave', () => {
+      this.els.hoverMark.hidden = true;
+      this._lastHoverStar = null;
+    });
   }
 
   handleKey(event) {
@@ -583,11 +615,25 @@ export class StarMap {
     else this.onRequestClose?.();
   }
 
+  _clearTransition({ suspendSysview = false } = {}) {
+    this._viewTransition = null;
+    this.root.classList.remove('sm-transitioning-in', 'sm-transitioning-out');
+    this.els.canvas.style.opacity = '';
+    this.els.sysviewHost.style.opacity = '';
+    if (this.controls) this.controls.enabled = true;
+    if (suspendSysview) this.sysview.suspend();
+  }
+
   open() {
     if (this.isOpen) return;
     this.isOpen = true;
+    this._clearTransition({ suspendSysview: true });
     this.root.classList.remove('hidden');
+    this.root.classList.add('sm-opening');
+    clearTimeout(this._openTimer);
+    this._openTimer = setTimeout(() => this.root.classList.remove('sm-opening'), 320);
     document.body.classList.add('starmap-open');
+    playMapSound('ui_click');
     this.previewCache.clear();
     this.refreshDiscoveryState();
     this.markSystemVisited(this.getUniverse().system.star.id);
@@ -611,9 +657,13 @@ export class StarMap {
   close() {
     if (!this.isOpen) return;
     this.isOpen = false;
+    clearTimeout(this._openTimer);
+    this._clearTransition({ suspendSysview: this.mode === 'system' });
+    this.root.classList.remove('sm-opening');
     this.root.classList.add('hidden');
     document.body.classList.remove('starmap-open');
     this.els.hoverMark.hidden = true;
+    this._lastHoverStar = null;
     this.els.loading.classList.add('done');
     cancelAnimationFrame(this.raf);
     if (this.mode === 'system') this.sysview.suspend();
@@ -623,6 +673,7 @@ export class StarMap {
   // in-game "hide and pause" path; dispose() actually releases GPU memory
   // so a stale map renderer does not linger across a session rebuild.
   dispose() {
+    clearTimeout(this._openTimer);
     cancelAnimationFrame(this.raf);
     window.removeEventListener('resize', this._resize);
     // Tear down the embedded system viewer first — it owns its own WebGL
@@ -647,41 +698,92 @@ export class StarMap {
   setMode(mode) {
     if (mode === 'system') { this.enterSystem(); return; }
     if (this.mode === 'galaxy') return;
+    const focusStar = this.selectedStar || this.getUniverse().system.star;
+    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const hadSystemScene = this.sysview.world.children.length > 0;
+    this._clearTransition({ suspendSysview: false });
     this.mode = 'galaxy';
     this.root.classList.add('mode-galaxy');
     this.root.classList.remove('mode-system');
     this.els.loading.classList.add('done');
-    this.selectedStar = this.getUniverse().system.star;
+    this.selectedStar = focusStar;
     this.sysview.selectBody(null);
-    this.sysview.suspend();
     this.selectedPlanet = null;
+    playMapSound('ui_click');
     this.updateRail();
     this.updateHints();
     this.resize();
-    this.buildGalaxy();
+    if (!this.globalStarLight) this.buildGalaxy(false);
     this.selectStar(this.selectedStar, false);
+    this.updateGalaxyOverview(true);
+    this.updateMapLabels();
+    const starPos = this.globalPositionById?.get(focusStar.id)?.clone() || new THREE.Vector3();
+    if (!reduced && hadSystemScene) {
+      this.controls.enabled = false;
+      this.root.classList.add('sm-transitioning-out');
+      this.els.canvas.style.opacity = '0';
+      this.els.sysviewHost.style.opacity = '1';
+      this.sysview.beginOutro();
+      this.controls.target.copy(starPos);
+      this.camera.position.set(starPos.x, 3.2, starPos.z + 0.01);
+      this.controls.update();
+      this._viewTransition = {
+        kind: 'to-galaxy',
+        startedAt: performance.now(),
+        duration: 0.44,
+        fromDist: 3.2,
+        toDist: GALAXY_DEFAULT_DISTANCE,
+        fromTarget: starPos.clone(),
+        toTarget: starPos.clone(),
+      };
+    } else {
+      this.sysview.suspend();
+      this.resetGalaxyView(starPos);
+    }
   }
 
   async enterSystem() {
     if (this.mode === 'system' || !this.selectedStar) return;
+    const selectedStar = this.selectedStar;
+    const starPos = this.globalPositionById?.get(selectedStar.id)?.clone() || this.controls.target.clone();
+    const fromTarget = this.controls.target.clone();
+    const fromDist = Math.max(GALAXY_MIN_DISTANCE * 0.6, this.camera.position.distanceTo(fromTarget));
+    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this._clearTransition({ suspendSysview: false });
     this.mode = 'system';
     this.els.hoverMark.hidden = true;
+    this._lastHoverStar = null;
     this.root.classList.remove('mode-galaxy');
     this.root.classList.add('mode-system');
-    this.els.loading.classList.remove('done');
+    playMapSound('ui_click');
+    if (!reduced) {
+      this.controls.enabled = false;
+      this.root.classList.add('sm-transitioning-in');
+      this.els.canvas.style.opacity = '1';
+      this.els.sysviewHost.style.opacity = '0';
+      this._viewTransition = {
+        kind: 'to-system',
+        startedAt: performance.now(),
+        duration: 0.50,
+        fromDist,
+        toDist: 2.2,
+        fromTarget,
+        toTarget: starPos,
+        systemBuilt: false,
+      };
+    }
     this.updateRail();
     this.updateHints();
     this.resize();
-    // 让浏览器先渲染一帧"已切换到星系模式"的 UI，再同步构建 3D 场景，
-    // 避免 buildSystem 阻塞导致点击后整体卡顿无响应。
+    // 让浏览器先渲染一帧潜入过渡，再构建 3D 星系场景，避免点击瞬间卡顿
     await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    if (this.mode !== 'system') return; // 期间用户可能已返回银河图
-    const selectedStar = this.selectedStar;
+    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
     await this.sysview.suspend();
     if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
     await this.sysview.readyPromise;
     if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
     if (!this.sysview.rendererReady) {
+      this._clearTransition();
       this.els.loading.classList.add('done');
       console.error('System preview renderer did not initialize.', this.sysview.rendererInitError);
       return;
@@ -692,6 +794,11 @@ export class StarMap {
     this.onBodySelect(null);
     this.resize();
     this.sysview.frame(0);
+    if (!reduced) this.sysview.beginIntro();
+    if (this._viewTransition?.kind === 'to-system') {
+      this._viewTransition.startedAt = performance.now();
+      this._viewTransition.systemBuilt = true;
+    }
     this.els.loading.classList.add('done');
   }
 
@@ -1247,7 +1354,12 @@ export class StarMap {
     this.els.surveyBar.style.setProperty('--survey-progress', this.els.surveyValue.textContent);
     this.els.surveyBar.title = survey === 100 ? '已到访：完整星系数据' : `远程传感器覆盖 · ${status.advisory}`;
     this.els.factionName.textContent = siteLabel ? '人类边疆共同体' : status.name;
-    this.els.faction.title = siteLabel ? `${siteLabel} · 已登记文明航标` : status.advisory;
+    const advisoryText = siteLabel ? `${siteLabel} · 已登记文明航标` : status.advisory;
+    this.els.faction.title = advisoryText;
+    if (this.els.factionSub) this.els.factionSub.textContent = advisoryText;
+    this.els.faction.dataset.tone = preview.isBlackHoleSystem || /高风险|禁区/.test(status.name + status.advisory)
+      ? 'hazard'
+      : (preview.isHome || siteLabel) ? 'core' : 'normal';
     this.buildGlyph(preview);
     this.els.distance.textContent = isCurrent ? '当前位置' : distanceText(distance);
     this.els.planets.textContent = `${primaryCount} 行星 / ${moonCount - compactCount} 卫星${compactCount ? ` / ${compactCount} 致密天体` : ''}`;
@@ -1291,9 +1403,11 @@ export class StarMap {
     }
     this.els.glyph.innerHTML = parts.join('');
     for (const node of this.els.glyph.querySelectorAll('[data-glyph-index]')) {
+      node.addEventListener('pointerenter', () => playMapSound('ui_hover'));
       node.addEventListener('click', () => {
         const body = preview.bodies[Number(node.dataset.glyphIndex)];
         if (!body) return;
+        playMapSound('ui_click');
         if (this.mode !== 'system') this.enterSystem().then(() => this.onBodySelect(body));
         else this.onBodySelect(body);
       });
@@ -1306,8 +1420,10 @@ export class StarMap {
   }
 
   onBodySelect(body) {
+    const changed = body && body !== this.selectedPlanet;
     this.selectedPlanet = body;
     this.sysview.selectBody(body);
+    if (changed) playMapSound('ui_click');
     const has = !!body;
     for (const panel of [this.els.planetLeft, this.els.planetRight]) {
       panel.classList.toggle('active', has);
@@ -1333,7 +1449,11 @@ export class StarMap {
     this.els.detailWater.textContent = profile.water;
     this.els.resourceCount.textContent = `(${profile.knownResources}/${profile.resources.length})`;
     this.els.resourceTiles.innerHTML = profile.resources
-      .map((value, index) => `<div class="resourceTile${index >= profile.knownResources ? ' unknown' : ''}">${index < profile.knownResources ? value : '未识别'}</div>`).join('');
+      .map((value, index) => {
+        const known = index < profile.knownResources;
+        const cat = known ? ` data-cat="${resourceCategory(value)}"` : '';
+        return `<div class="resourceTile${known ? '' : ' unknown'}"${cat}>${known ? value : '未识别'}</div>`;
+      }).join('');
     this.els.traitText.textContent = profile.traits;
     this.updateRouteAction();
   }
@@ -1390,12 +1510,12 @@ export class StarMap {
 
   // ---- frame / layout -----------------------------------------------------------
   resize() {
-    const w = Math.max(1, this.els.canvas.clientWidth || innerWidth);
-    const h = Math.max(1, this.els.canvas.clientHeight || innerHeight);
+    const w = Math.max(1, this.els.canvas.clientWidth || this.root.clientWidth || innerWidth);
+    const h = Math.max(1, this.els.canvas.clientHeight || this.root.clientHeight || innerHeight);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    if (this.mode === 'system') this.sysview.resize();
+    if (this.mode === 'system' || this._viewTransition) this.sysview.resize();
     this.updateResponsiveLayout(w, h);
   }
 
@@ -1425,13 +1545,12 @@ export class StarMap {
     const localBottom = (detailsBottom - top) / hudScale;
     const leftDetailTop = 278;
     const leftDetailHeight = THREE.MathUtils.clamp(localBottom - leftDetailTop, 338, 560);
-    const rightDetailHeight = h < 760 ? 204 : 225;
+    const rightDetailHeight = h < 760 ? 196 : 208;
     const rightDetailTop = Math.max(112, localBottom - rightDetailHeight);
     this.els.planetLeft.style.top = `${leftDetailTop}px`;
     this.els.planetLeft.style.height = `${leftDetailHeight}px`;
     this.els.planetRight.style.top = `${rightDetailTop}px`;
     this.els.planetRight.style.height = `${rightDetailHeight}px`;
-    this.els.traitText.style.marginTop = rightDetailHeight < 220 ? '62px' : '82px';
     // galaxy tools sit below the (taller) galaxy-mode system panel
     this.els.galaxyTools.style.top = '392px';
   }
@@ -1440,6 +1559,41 @@ export class StarMap {
     if (!this.isOpen) return;
     this.raf = requestAnimationFrame(() => this.animate());
     const dt = Math.min(this.clock.getDelta(), 0.05);
+    const tr = this._viewTransition;
+    if (tr) {
+      const elapsed = (performance.now() - tr.startedAt) / 1000;
+      const p = THREE.MathUtils.clamp(elapsed / Math.max(0.001, tr.duration), 0, 1);
+      const easeOut = 1 - Math.pow(1 - p, 3);
+      const zoomMix = p * p * (3 - 2 * p);
+      const dist = tr.fromDist * Math.pow(tr.toDist / tr.fromDist, zoomMix);
+      this.controls.target.lerpVectors(tr.fromTarget, tr.toTarget, easeOut);
+      this.camera.position.set(this.controls.target.x, this.controls.target.y + dist, this.controls.target.z + 0.01);
+      this.camera.up.set(0, 0, -1);
+      this.camera.lookAt(this.controls.target);
+      this.updateGalaxyOverview();
+      if (tr.kind === 'to-system') {
+        const galaxyAlpha = 1 - THREE.MathUtils.smoothstep(p, 0.16, 0.88);
+        const sysAlpha = tr.systemBuilt ? THREE.MathUtils.smoothstep(p, 0.12, 0.92) : 0;
+        this.els.canvas.style.opacity = galaxyAlpha.toFixed(3);
+        this.els.sysviewHost.style.opacity = sysAlpha.toFixed(3);
+        if (this.rendererReady && galaxyAlpha > 0.005) this.renderer.render(this.scene, this.camera);
+        if (tr.systemBuilt) this.sysview.frame(dt);
+        if (p >= 1 && tr.systemBuilt) this._clearTransition({ suspendSysview: false });
+      } else {
+        const sysAlpha = 1 - THREE.MathUtils.smoothstep(p, 0.0, 0.68);
+        const galaxyAlpha = THREE.MathUtils.smoothstep(p, 0.10, 0.86);
+        this.els.sysviewHost.style.opacity = sysAlpha.toFixed(3);
+        this.els.canvas.style.opacity = galaxyAlpha.toFixed(3);
+        this.updateMapLabels();
+        if (sysAlpha > 0.005) this.sysview.frame(dt);
+        if (this.rendererReady) this.renderer.render(this.scene, this.camera);
+        if (p >= 1) {
+          this.resetGalaxyView(tr.toTarget);
+          this._clearTransition({ suspendSysview: true });
+        }
+      }
+      return;
+    }
     if (this.mode === 'galaxy') {
       this.controls.update();
       this.updateGalaxyOverview();

@@ -253,7 +253,7 @@ kbd {
   content: "·"; margin-right: 10px; opacity: .55;
 }
 body:has(#fold-nav:not([hidden])) #ship-hud-altitude,
-body:has(#fold-nav:not([hidden])) #ship-hud-context { opacity: 0; }
+body:has(#fold-nav:not([hidden])) #ship-hud-context { opacity: 0; visibility: hidden; }
 #sys-seed { display: none; }
 .hide-hud #ship-hud-stage { transition: none; }
 
@@ -1035,13 +1035,15 @@ body.walking #app, body.walking #app * { cursor: none !important; }
   #destination-marker span { max-width: 116px; }
   #bottom { bottom: 88px; }
   .ui-walk #bottom { bottom: calc(min(160px, 38vw, 24vh) + 18px); }
+  #interact-prompt { padding: 6px 12px; font-size: 11px; }
   #hint { max-width: 88vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #walk-hud { left: max(6px, env(safe-area-inset-left)); bottom: max(6px, env(safe-area-inset-bottom)); width: min(160px, 38vw, 24vh); }
   #surface-weapon { right: max(8px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom)); width: min(198px, 46vw); padding: 8px 4px 4px 10px; }
   .surface-weapon-label { padding-left: 52px; font-size: 9px; }
   .surface-weapon-ammo { font-size: 24px; }
   .surface-weapon-slots { gap: 6px; font-size: 9px; }
-  #joystick { bottom: calc(min(174px, 42vw, 27vh) + 16px); }
+  #joystick { left: 16px; width: 100px; height: 100px; bottom: calc(min(174px, 42vw, 27vh) + 22px); }
+  #joystick-knob { left: 28px; top: 28px; width: 44px; height: 44px; }
   #btn-jump { bottom: calc(min(174px, 42vw, 27vh) + 18px); }
   #btn-takeoff { bottom: calc(min(174px, 42vw, 27vh) + 96px); }
   .hero-topline { left: 16px; right: 16px; top: 22px; }

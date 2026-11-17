@@ -74,6 +74,7 @@ export class ShipHUD {
     this.pulseFuelValue = 140;
     this.pulseFuelMax = 140;
     this.pulseInfinite = false;
+    this.pulseRecharging = false;
     this.boost = 0;
     this.cockpitView = false;
     this.rmbHeld = false;
@@ -367,10 +368,22 @@ export class ShipHUD {
       if (!this.hudVisible || document.getElementById('pause-overlay')?.classList.contains('hidden') === false) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (event.code === 'ArrowLeft' || event.code === 'KeyA') this.selectPower(this.selectedPower - 1);
-      if (event.code === 'ArrowRight' || event.code === 'KeyD') this.selectPower(this.selectedPower + 1);
-      if (event.code === 'ArrowUp' || event.code === 'KeyW') this.adjustSelectedPower(1);
-      if (event.code === 'ArrowDown' || event.code === 'KeyS') this.adjustSelectedPower(-1);
+      if (event.code === 'ArrowLeft' || event.code === 'KeyA') {
+        this.selectPower(this.selectedPower - 1);
+        window.dispatchEvent(new CustomEvent('ui-sound', { detail: 'ui_hover' }));
+      }
+      if (event.code === 'ArrowRight' || event.code === 'KeyD') {
+        this.selectPower(this.selectedPower + 1);
+        window.dispatchEvent(new CustomEvent('ui-sound', { detail: 'ui_hover' }));
+      }
+      if (event.code === 'ArrowUp' || event.code === 'KeyW') {
+        const ok = this.adjustSelectedPower(1);
+        window.dispatchEvent(new CustomEvent('ui-sound', { detail: ok ? 'ui_click' : 'ui_hover' }));
+      }
+      if (event.code === 'ArrowDown' || event.code === 'KeyS') {
+        const ok = this.adjustSelectedPower(-1);
+        window.dispatchEvent(new CustomEvent('ui-sound', { detail: ok ? 'ui_click' : 'ui_hover' }));
+      }
     };
     window.addEventListener('keydown', this.onKeyDown, { capture: true });
     window.addEventListener('pointerdown', (event) => {
@@ -538,6 +551,7 @@ export class ShipHUD {
     pulseFuel = 140,
     pulseFuelMax = 140,
     pulseInfinite = false,
+    pulseRecharging = false,
     shield = 100,
     hull = 100,
     gun = 100,
@@ -549,6 +563,7 @@ export class ShipHUD {
     this.pulseFuelValue = Math.max(0, Number(pulseFuel) || 0);
     this.pulseFuelMax = Math.max(1, Number(pulseFuelMax) || 1);
     this.pulseInfinite = !!pulseInfinite;
+    this.pulseRecharging = !!pulseRecharging;
     this.shield = clamp(Number(shield) || 0, 0, 150);
     const nextHull = clamp(Number(hull) || 0, 0, 100);
     if (nextHull < this.hull - .5 && this.integrityPanel) {
@@ -570,6 +585,11 @@ export class ShipHUD {
     document.getElementById('ship-hud-key-rmb')?.classList.toggle('is-on',
       this.cockpitView ? this.rmbHeld : this.boost > .12);
     document.getElementById('ship-hud-key-space')?.classList.toggle('is-on', this.pulse > .12);
+    this.stage?.classList.toggle('is-boosting', !this.cockpitView && this.boost > .12);
+    this.stage?.classList.toggle('is-pulsing', this.pulse > .12);
+    this.stage?.classList.toggle('is-recharging', this.pulseRecharging && !this.pulseInfinite && this.pulseFuelValue < this.pulseFuelMax - .5);
+    this.stage?.classList.toggle('is-warp-routing', this.warpRouting);
+    document.getElementById('ship-hud-gun')?.classList.toggle('is-gun-low', this.gun < 25);
   }
 
   setCockpitView(active) {

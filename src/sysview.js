@@ -464,6 +464,7 @@ export class SystemView {
     this.cleanupPromise = null;
 
     this._elapsed = 0;
+    this._cameraTween = null;
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2();
     this._drag = null;
@@ -481,6 +482,7 @@ export class SystemView {
       if (!this._drag) return;
       const dx = e.clientX - this._drag.x, dy = e.clientY - this._drag.y;
       this._drag.moved += Math.hypot(dx, dy);
+      if (this._drag.moved > 2) this._cameraTween = null;
       this._drag.x = e.clientX;
       this._drag.y = e.clientY;
       this.cameraAzimuth -= dx * 0.0052;
@@ -496,6 +498,7 @@ export class SystemView {
     el.addEventListener('pointercancel', () => { this._drag = null; });
     el.addEventListener('wheel', (e) => {
       e.preventDefault();
+      this._cameraTween = null;
       this.cameraDistance *= Math.exp(e.deltaY * 0.00072);
       this.cameraDistance = THREE.MathUtils.clamp(this.cameraDistance, this.defaultView.distance * 0.55, this.defaultView.distance * 1.65);
       this.updateCamera();
@@ -532,11 +535,83 @@ export class SystemView {
     this.camera.lookAt(this.cameraTarget);
   }
 
-  resetView() {
-    this.cameraAzimuth = this.defaultView.azimuth;
-    this.cameraElevation = this.defaultView.elevation;
-    this.cameraDistance = this.defaultView.distance;
+  tweenCamera({
+    fromAzimuth = this.cameraAzimuth, toAzimuth = this.cameraAzimuth,
+    fromElevation = this.cameraElevation, toElevation = this.cameraElevation,
+    fromDistance = this.cameraDistance, toDistance = this.cameraDistance,
+    fromTarget = this.cameraTarget, toTarget = this.cameraTarget,
+    duration = 0.42,
+  } = {}) {
+    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced || duration <= 0.01) {
+      this._cameraTween = null;
+      this.cameraAzimuth = toAzimuth;
+      this.cameraElevation = toElevation;
+      this.cameraDistance = toDistance;
+      this.cameraTarget.copy(toTarget);
+      this.updateCamera();
+      return;
+    }
+    this._cameraTween = {
+      startedAt: performance.now(),
+      duration,
+      fromAzimuth,
+      toAzimuth,
+      fromElevation,
+      toElevation,
+      fromDistance,
+      toDistance,
+      fromTarget: fromTarget.clone(),
+      toTarget: toTarget.clone(),
+    };
+    this.cameraAzimuth = fromAzimuth;
+    this.cameraElevation = fromElevation;
+    this.cameraDistance = fromDistance;
+    this.cameraTarget.copy(fromTarget);
     this.updateCamera();
+  }
+
+  beginIntro() {
+    this.tweenCamera({
+      fromAzimuth: this.defaultView.azimuth - 0.14,
+      toAzimuth: this.defaultView.azimuth,
+      fromElevation: Math.min(1.22, this.defaultView.elevation + 0.15),
+      toElevation: this.defaultView.elevation,
+      fromDistance: this.defaultView.distance * 1.72,
+      toDistance: this.defaultView.distance,
+      fromTarget: new THREE.Vector3(0, 1.1, 0),
+      toTarget: new THREE.Vector3(0, 1.1, 0),
+      duration: 0.56,
+    });
+  }
+
+  beginOutro() {
+    this.tweenCamera({
+      toAzimuth: this.cameraAzimuth + 0.08,
+      toElevation: Math.min(1.22, this.cameraElevation + 0.12),
+      toDistance: this.cameraDistance * 1.48,
+      toTarget: new THREE.Vector3(0, 1.1, 0),
+      duration: 0.42,
+    });
+  }
+
+  resetView({ immediate = false } = {}) {
+    if (immediate) {
+      this._cameraTween = null;
+      this.cameraAzimuth = this.defaultView.azimuth;
+      this.cameraElevation = this.defaultView.elevation;
+      this.cameraDistance = this.defaultView.distance;
+      this.cameraTarget.set(0, 1.1, 0);
+      this.updateCamera();
+      return;
+    }
+    this.tweenCamera({
+      toAzimuth: this.defaultView.azimuth,
+      toElevation: this.defaultView.elevation,
+      toDistance: this.defaultView.distance,
+      toTarget: new THREE.Vector3(0, 1.1, 0),
+      duration: 0.38,
+    });
   }
 
   setLabelsVisible(visible) {
@@ -631,7 +706,7 @@ export class SystemView {
     // frame the whole system: outermost orbit decides the default distance
     this.defaultView.elevation = preview.isBlackHoleSystem ? 0.21 : 0.557;
     this.defaultView.distance = THREE.MathUtils.clamp(outermost * 1.42, 34, 72);
-    this.resetView();
+    this.resetView({ immediate: true });
     return primaryRecords;
   }
 
@@ -1056,6 +1131,10 @@ export class SystemView {
       this.reticle.visible = false;
       if (this.navArrow) this.navArrow.style.display = 'none';
       if (this.nameTag) this.nameTag.style.display = 'none';
+      if (this._cameraTween) this._cameraTween.toTarget.set(0, 1.1, 0);
+      else if (this.cameraTarget.distanceToSquared(new THREE.Vector3(0, 1.1, 0)) > 0.01) {
+        this.tweenCamera({ toTarget: new THREE.Vector3(0, 1.1, 0), duration: 0.34 });
+      }
       return;
     }
     this.reticle.visible = true;
@@ -1064,11 +1143,30 @@ export class SystemView {
       this.nameTag.textContent = this.selected.body.name;
       this.nameTag.style.display = 'block';
     }
+    const pos = this.selected.group.position;
+    const focusTarget = new THREE.Vector3(pos.x * 0.22, 1.1, pos.z * 0.22);
+    if (this._cameraTween) {
+      this._cameraTween.toTarget.copy(focusTarget);
+    } else {
+      this.tweenCamera({ toTarget: focusTarget, duration: 0.36 });
+    }
   }
 
   frame(dt) {
     this._elapsed = (this._elapsed || 0) + dt;
     const t = this._elapsed;
+    if (this._cameraTween) {
+      const tw = this._cameraTween;
+      const elapsed = (performance.now() - tw.startedAt) / 1000;
+      const p = THREE.MathUtils.clamp(elapsed / Math.max(0.001, tw.duration), 0, 1);
+      const ease = 1 - Math.pow(1 - p, 3);
+      this.cameraAzimuth = THREE.MathUtils.lerp(tw.fromAzimuth, tw.toAzimuth, ease);
+      this.cameraElevation = THREE.MathUtils.lerp(tw.fromElevation, tw.toElevation, ease);
+      this.cameraDistance = THREE.MathUtils.lerp(tw.fromDistance, tw.toDistance, ease);
+      this.cameraTarget.lerpVectors(tw.fromTarget, tw.toTarget, ease);
+      this.updateCamera();
+      if (p >= 1) this._cameraTween = null;
+    }
     for (const uniforms of this.starUniformsList) uniforms.uTime.value = t;
     for (const star of this.starRecords || []) {
       star.core.rotation.y = t * 0.032;
