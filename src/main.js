@@ -83,6 +83,14 @@ window.addEventListener('error', (e) => {
 
 document.body.classList.toggle('debug-hud', qs.get('debug') === '1');
 const DEV_SERVER = window.__NMS_DEV_SERVER__ === true;
+const IS_LOCAL_HOST = location.hostname === '127.0.0.1'
+  || location.hostname === 'localhost'
+  || location.hostname === '[::1]'
+  || location.hostname === '::1';
+const DEV_INFINITE_PULSE = DEV_SERVER
+  && IS_LOCAL_HOST
+  && window.__NMS_DEV_INFINITE_PULSE__ === true
+  && qs.get('infinitePulse') !== '0';
 const WORLD_LAB = DEV_SERVER && qs.get('worldlab') === '1';
 const GALAXY = getGalaxyConfig(WORLD_LAB ? qs.get('galaxy') || ACTIVE_GALAXY_ID : ACTIVE_GALAXY_ID);
 const GALAXY_ID = GALAXY.id;
@@ -1212,7 +1220,7 @@ function triggerPulse({ hold = false } = {}) {
   // Chaining is allowed once the previous jump has landed; its release keeps
   // playing as an echo so the new charge picks up from the current visuals.
   if (pulseBurst && pulseBurst.elapsed < PULSE_TIMING.retrigger) return false;
-  if (pulseFuel + 1e-6 < PULSE_FUEL_COST) {
+  if (!DEV_INFINITE_PULSE && pulseFuel + 1e-6 < PULSE_FUEL_COST) {
     ui.setHint(`脉冲燃料不足 · 需要 ${PULSE_FUEL_COST}`, false);
     return false;
   }
@@ -1224,7 +1232,7 @@ function triggerPulse({ hold = false } = {}) {
     charging: hold, holdTime: 0, charge: 0, power: 1,
   };
   pulseActive = true;
-  pulseRechargeDelay = 1.4 / Math.max(.1, flightPower.thermal);
+  pulseRechargeDelay = DEV_INFINITE_PULSE ? 0 : 1.4 / Math.max(.1, flightPower.thermal);
   audio.pulseCharge?.(0);
   if (!hold) releasePulseCharge();
   return true;
@@ -1232,6 +1240,7 @@ function triggerPulse({ hold = false } = {}) {
 
 // The most charge the remaining fuel can pay for.
 function affordablePulseCharge() {
+  if (DEV_INFINITE_PULSE) return 1;
   const scale = pulseFuel / PULSE_FUEL_COST;
   return clamp((scale - 1) / 1.5, 0, 1);
 }
@@ -1254,8 +1263,13 @@ function releasePulseCharge() {
     const toward = Math.max(0, -burst.direction.dot(_v.copy(nav.pos).sub(nearest.posUniv).normalize()));
     if (toward > 0.05) burst.distance = Math.min(burst.distance, Math.max(80, nearestAlt * 0.33 / toward + 100));
   }
-  pulseFuel = Math.max(0, pulseFuel - PULSE_FUEL_COST * scaling.fuel);
-  pulseRechargeDelay = 1.4 / Math.max(.1, flightPower.thermal);
+  if (DEV_INFINITE_PULSE) {
+    pulseFuel = PULSE_FUEL_MAX;
+    pulseRechargeDelay = 0;
+  } else {
+    pulseFuel = Math.max(0, pulseFuel - PULSE_FUEL_COST * scaling.fuel);
+    pulseRechargeDelay = 1.4 / Math.max(.1, flightPower.thermal);
+  }
   audio.pulseCharge?.(-1);
   audio.cue('pulse', { power: scaling.power });
 }
@@ -4793,7 +4807,10 @@ function frame(rafTs) {
   // The ship reactor recharges pulse energy after a short thermal cooldown.
   // Recharge continues while landed so pulse fuel can never become a dead-end
   // resource that requires restarting the session.
-  if (!pulseActive) {
+  if (DEV_INFINITE_PULSE) {
+    pulseFuel = PULSE_FUEL_MAX;
+    pulseRechargeDelay = 0;
+  } else if (!pulseActive) {
     pulseRechargeDelay = Math.max(0, pulseRechargeDelay - dt);
     if (pulseRechargeDelay <= 0 && pulseFuel < PULSE_FUEL_MAX) {
       pulseFuel = Math.min(PULSE_FUEL_MAX, pulseFuel + dt * 7.0 * flightPower.thermal);
@@ -5271,6 +5288,7 @@ function frame(rafTs) {
     pulse: pulseVisual,
     pulseFuel,
     pulseFuelMax: PULSE_FUEL_MAX,
+    pulseInfinite: DEV_INFINITE_PULSE,
     pulseRecharging: !pulseActive && pulseRechargeDelay <= 0 && pulseFuel < PULSE_FUEL_MAX - 0.005,
     shield: 100 * flightPower.shield,
     gun: 100 * flightPower.weapon,
@@ -5974,7 +5992,7 @@ window.NMS = {
       nearWater,
       pending: pendingChunks(), state, alt: nearestAlt,
       paused, boost: boostVisual, fov: camera.fov, audio: audio.ready,
-      pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10,
+      pulse: pulseActive, pulseVisual, pulseFuel: Math.round(pulseFuel * 10) / 10, pulseInfinite: DEV_INFINITE_PULSE,
       power: { ...flightPower },
       transit: warpTransit ? { t: warpTransit.t, total: warpTransit.plan.total } : null,
       transitChannels: { ...transitChannels },

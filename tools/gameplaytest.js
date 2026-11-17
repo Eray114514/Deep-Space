@@ -1,11 +1,12 @@
 // Focused regression for boarding, procedural audio unlock and RMB boost.
-import { startServer } from './server.js';
+import { startDevServer, startServer } from './server.js';
 import { launchBrowser } from './browser.js';
 import { SURFACE_WEAPONS } from '../src/surface-weapons.js';
 
 const SURFACE_WEAPON_COUNT = SURFACE_WEAPONS.length;
 
 const { server, port } = await startServer(0);
+let devServer = null;
 const browser = await launchBrowser();
 const page = await browser.newPage({ viewport: { width: 1100, height: 700 } });
 const errors = [];
@@ -338,8 +339,57 @@ try {
     check(await page.evaluate(() => window.NMS.state === 'landed' && window.NMS.shipViewState().viewMode === 'cockpit'),
       'KeyL over deep ocean completes seamless landing into pilot seat on seabed');
   }
+
+  // Local `npm run dev` sessions (`startDevServer`) enable infinite pulse
+  // energy on localhost/127.0.0.1 while keeping `?infinitePulse=0` as opt-out.
+  devServer = await startDevServer(18000, 30);
+  await page.goto(`http://127.0.0.1:${devServer.port}/?renderer=webgl&nolock=1&nohero=1&post=0&farflora=0&buildms=25`);
+  await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
+  await page.evaluate(() => {
+    const { universe, nav } = NMS._internals;
+    const p = universe.system.planets[0];
+    const THREE = NMS._THREE;
+    const radial = p.localOffsetToWorld(new THREE.Vector3(1, 0, 0), new THREE.Vector3()).normalize();
+    const position = p.posUniv.clone().addScaledVector(radial, p.R + p.atmoHeight * 2.0);
+    const look = position.clone().addScaledVector(radial, 1000);
+    NMS.setPosition(position.x, position.y, position.z, look.x, look.y, look.z);
+    nav.vel.set(0, 0, 0);
+  });
+  await page.waitForFunction(() => document.getElementById('pulse-fuel')?.textContent === '∞',
+    null, { timeout: 10000 });
+  const devInit = await page.evaluate(() => ({
+    alt: NMS.alt(),
+    fuel: NMS.pulseFuel(),
+    infinite: NMS.stats().pulseInfinite,
+    hudText: document.getElementById('pulse-fuel')?.textContent,
+  }));
+  check(devInit.infinite === true && devInit.fuel === 140 && devInit.hudText === '∞',
+    `startDevServer enables infinite pulse on localhost (fuel=${devInit.fuel}, hud=${devInit.hudText})`);
+  await page.keyboard.press('Space');
+  await page.waitForFunction('NMS.stats().pulseVisual > 0.25', null, { timeout: 15000 });
+  await page.waitForFunction(() => !window.NMS.stats().pulse, null, { timeout: 15000 });
+  await page.keyboard.down('Space');
+  await page.waitForFunction(() => window.NMS.stats().pulse, null, { timeout: 15000 });
+  await page.waitForTimeout(350);
+  await page.keyboard.up('Space');
+  await page.waitForFunction('NMS.stats().pulseVisual > 0.25', null, { timeout: 15000 });
+  await page.waitForFunction(() => !window.NMS.stats().pulse, null, { timeout: 15000 });
+  const devAfter = await page.evaluate(() => ({
+    alt: NMS.alt(),
+    fuel: NMS.pulseFuel(),
+    hudText: document.getElementById('pulse-fuel')?.textContent,
+  }));
+  check(devAfter.fuel === 140 && devAfter.hudText === '∞' && devAfter.alt > devInit.alt + 2000,
+    `infinite pulse taps and charged holds spend zero fuel (${Math.round(devAfter.alt - devInit.alt)} m, fuel=${devAfter.fuel})`);
+  await page.goto(`http://127.0.0.1:${devServer.port}/?renderer=webgl&nolock=1&nohero=1&post=0&farflora=0&buildms=25&infinitePulse=0`);
+  await page.waitForFunction('window.NMS?.booted', null, { timeout: 90000 });
+  await page.waitForFunction(() => document.getElementById('pulse-fuel')?.textContent === '140/140',
+    null, { timeout: 10000 });
+  check(await page.evaluate(() => NMS.stats().pulseInfinite === false && document.getElementById('pulse-fuel')?.textContent === '140/140'),
+    'infinitePulse=0 restores standard finite pulse fuel on dev server');
 } finally {
   await browser.close();
+  devServer?.server.close();
   server.close();
 }
 

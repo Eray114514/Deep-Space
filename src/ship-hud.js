@@ -73,6 +73,7 @@ export class ShipHUD {
     this.pulse = 0;
     this.pulseFuelValue = 140;
     this.pulseFuelMax = 140;
+    this.pulseInfinite = false;
     this.boost = 0;
     this.cockpitView = false;
     this.rmbHeld = false;
@@ -536,6 +537,7 @@ export class ShipHUD {
     pulse = 0,
     pulseFuel = 140,
     pulseFuelMax = 140,
+    pulseInfinite = false,
     shield = 100,
     hull = 100,
     gun = 100,
@@ -546,6 +548,7 @@ export class ShipHUD {
     this.pulse = clamp(Number(pulse) || 0);
     this.pulseFuelValue = Math.max(0, Number(pulseFuel) || 0);
     this.pulseFuelMax = Math.max(1, Number(pulseFuelMax) || 1);
+    this.pulseInfinite = !!pulseInfinite;
     this.shield = clamp(Number(shield) || 0, 0, 150);
     const nextHull = clamp(Number(hull) || 0, 0, 100);
     if (nextHull < this.hull - .5 && this.integrityPanel) {
@@ -559,7 +562,9 @@ export class ShipHUD {
       ? `${(this.speed / 1e6).toFixed(1)}M`
       : this.speed >= 1000 ? `${(this.speed / 1000).toFixed(1)}k` : this.speed.toFixed(0);
     if (this.speedValue.textContent !== speedText) this.speedValue.textContent = speedText;
-    const fuelText = `${Math.ceil(this.pulseFuelValue)}/${Math.ceil(this.pulseFuelMax)}`;
+    const fuelText = this.pulseInfinite
+      ? '∞'
+      : `${Math.ceil(this.pulseFuelValue)}/${Math.ceil(this.pulseFuelMax)}`;
     if (this.pulseFuel.textContent !== fuelText) this.pulseFuel.textContent = fuelText;
     this.gunValue.textContent = Math.round(this.gun);
     document.getElementById('ship-hud-key-rmb')?.classList.toggle('is-on',
@@ -756,7 +761,7 @@ export class ShipHUD {
       fill.setAttribute('opacity', .7 + .28 * speedRatio);
     }
 
-    const fuelLevel = clamp(this.pulseFuelValue / this.pulseFuelMax);
+    const fuelLevel = this.pulseInfinite ? 1 : clamp(this.pulseFuelValue / this.pulseFuelMax);
     const lowFuel = fuelLevel < .3;
     const fuelRatio = fuelLevel * boot;
     const filledRows = Math.round(fuelRatio * this.rows.length);

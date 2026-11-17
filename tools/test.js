@@ -352,12 +352,27 @@ if (!hoverShip.group.layers.isEnabled(0)
 // Opening another terminal while the dev server is still running must not
 // turn into an EADDRINUSE dead end. Occupy a real ephemeral port and prove the
 // CLI helper selects a neighbouring one without disturbing the first server.
+// Also verify the infinite-pulse playtest flag is injected only for
+// startDevServer (`npm run dev`), keeping test `startServer` runs on the
+// real fuel economy.
 const occupied = await startServer(0);
 let fallback;
 try {
   fallback = await startDevServer(occupied.port, 10);
   if (!fallback.usedFallback || fallback.port === occupied.port) {
     throw new Error('Development server did not avoid an occupied port');
+  }
+  const [testHtml, devHtml] = await Promise.all([
+    fetch(`http://127.0.0.1:${occupied.port}/`).then((res) => res.text()),
+    fetch(`http://127.0.0.1:${fallback.port}/`).then((res) => res.text()),
+  ]);
+  if (!testHtml.includes('window.__NMS_DEV_SERVER__=true;')
+      || testHtml.includes('__NMS_DEV_INFINITE_PULSE__')) {
+    throw new Error('startServer must inject DEV_SERVER without infinite pulse');
+  }
+  if (!devHtml.includes('window.__NMS_DEV_SERVER__=true;')
+      || !devHtml.includes('window.__NMS_DEV_INFINITE_PULSE__=true;')) {
+    throw new Error('startDevServer did not inject infinite pulse bootstrap');
   }
 } finally {
   fallback?.server.close();

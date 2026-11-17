@@ -186,7 +186,7 @@ export class UI {
   }
 
   setFlightTelemetry({ speed = 0, speedLimit = 1, boost = 0, atmosphere = 0,
-    pulse = 0, pulseFuel = 100, pulseFuelMax = 100, pulseRecharging = false, shield, hull, gun }) {
+    pulse = 0, pulseFuel = 100, pulseFuelMax = 100, pulseInfinite = false, pulseRecharging = false, shield, hull, gun }) {
     const speedK = Math.max(0, Math.min(1, speed / Math.max(1, speedLimit)));
     const boostK = Math.max(0, Math.min(1, boost));
     const atmoK = Math.max(0, Math.min(1, atmosphere));
@@ -201,7 +201,7 @@ export class UI {
     if (this.els.driveBoostFill) this.els.driveBoostFill.style.width = `${(Math.max(boostK, pulseK) * 100).toFixed(1)}%`;
     if (this.els.driveAtmoFill) this.els.driveAtmoFill.style.width = `${(atmoK * 100).toFixed(1)}%`;
     // ShipHUD is the single owner of the pulse / hull / shield readouts.
-    this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax, pulseRecharging, shield, hull, gun });
+    this.shipHud.setTelemetry({ speed, speedLimit, boost, pulse, pulseFuel, pulseFuelMax, pulseInfinite, pulseRecharging, shield, hull, gun });
     this.shipHud.tick(performance.now());
   }
 

@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DEV_BOOTSTRAP = '<script>window.__NMS_DEV_SERVER__=true;</script>';
+const DEV_PLAYTEST_BOOTSTRAP = '<script>window.__NMS_DEV_SERVER__=true;window.__NMS_DEV_INFINITE_PULSE__=true;</script>';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -19,7 +20,8 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-export function startServer(port = 0) {
+export function startServer(port = 0, { infinitePulse = false } = {}) {
+  const bootstrap = infinitePulse ? DEV_PLAYTEST_BOOTSTRAP : DEV_BOOTSTRAP;
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       try {
@@ -30,8 +32,11 @@ export function startServer(port = 0) {
         let data = await readFile(file);
         // The runtime uses this explicit marker instead of guessing from the
         // hostname, so a production build served on a LAN never grows dev UI.
+        // Interactive `npm run dev` sessions (`startDevServer`) also enable
+        // infinite pulse fuel for local playtesting while test callers of
+        // `startServer` keep the normal fuel economy unless opted in.
         if (extname(file).toLowerCase() === '.html') {
-          data = Buffer.from(data.toString('utf8').replace('</head>', `  ${DEV_BOOTSTRAP}\n</head>`));
+          data = Buffer.from(data.toString('utf8').replace('</head>', `  ${bootstrap}\n</head>`));
         }
         res.writeHead(200, {
           'content-type': MIME[extname(file).toLowerCase()] || 'application/octet-stream',
@@ -51,7 +56,7 @@ export function startServer(port = 0) {
 // session is opened. Keep that harmless: only the CLI/dev path walks upward
 // to a free port; tests that request port 0 and callers that need an exact
 // port can continue using startServer directly.
-export async function startDevServer(preferredPort = 8000, maxFallbacks = 10) {
+export async function startDevServer(preferredPort = 8000, maxFallbacks = 10, { infinitePulse = true } = {}) {
   const firstPort = Number.isInteger(preferredPort) && preferredPort > 0
     ? preferredPort
     : 8000;
@@ -60,7 +65,7 @@ export async function startDevServer(preferredPort = 8000, maxFallbacks = 10) {
     const candidate = firstPort + offset;
     if (candidate > 65535) break;
     try {
-      const result = await startServer(candidate);
+      const result = await startServer(candidate, { infinitePulse });
       return { ...result, preferredPort: firstPort, usedFallback: offset > 0 };
     } catch (error) {
       lastError = error;
@@ -77,6 +82,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.warn(`Port ${preferredPort} is already in use; using ${p} instead.`);
     }
     console.log(`深空 → http://127.0.0.1:${p}`);
+    console.log('本地试玩模式：脉冲能量无限（地址后加 ?infinitePulse=0 可恢复燃料消耗）');
   }).catch((error) => {
     console.error(error);
     process.exitCode = 1;
