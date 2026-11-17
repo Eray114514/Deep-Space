@@ -26,17 +26,20 @@ import path from 'node:path';
 import * as acorn from 'acorn';
 import { transformSync } from 'esbuild';
 
-const BUNDLE = process.env.SALTLINE_BUNDLE || 'D:/Eray0/下载/Saltline/public/engine/saltline.js';
+const DEFAULT_BUNDLE = process.env.SALTLINE_BUNDLE || 'D:/Eray0/下载/Saltline/public/engine/saltline.js';
+const GOLDEN_HOUR_BUNDLE = process.env.GOLDEN_HOUR_BUNDLE || 'D:/Eray0/下载/GOLDEN HOUR — Solstice Hotel/dist/game.js';
 
 // three.js addons that the bundle inlined after the core; they are not in the
-// `lt` namespace, so map them to our vendored addon modules by hand.
+// `lt` / `Ct` namespace, so map them to our vendored addon modules by hand.
 const ADDON_ALIASES = {};
 
 function parseArgs(argv) {
-  const out = { names: [], stop: new Set(), outFile: null, deps: false, modules: false, find: null, rename: new Map(), effects: new Set() };
+  const out = { bundle: DEFAULT_BUNDLE, names: [], stop: new Set(), outFile: null, deps: false, modules: false, find: null, rename: new Map(), effects: new Set() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--out') out.outFile = argv[++i];
+    if (a === '--bundle') out.bundle = argv[++i];
+    else if (a === '--gh') out.bundle = GOLDEN_HOUR_BUNDLE;
+    else if (a === '--out') out.outFile = argv[++i];
     else if (a === '--stop') argv[++i].split(',').filter(Boolean).forEach((n) => out.stop.add(n));
     else if (a === '--effects') argv[++i].split(',').filter(Boolean).forEach((n) => out.effects.add(n));
     else if (a === '--deps') out.deps = true;
@@ -234,8 +237,8 @@ class Analyzer {
 
 // ---------------------------------------------------------------- bundle model
 
-function loadBundle() {
-  const src = fs.readFileSync(BUNDLE, 'utf8');
+function loadBundle(bundlePath) {
+  const src = fs.readFileSync(bundlePath, 'utf8');
   const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script' });
   const call = ast.body.find((s) => s.type === 'ExpressionStatement')?.expression;
   const fnNode = call?.callee;
@@ -263,8 +266,14 @@ function loadBundle() {
     }
   }
 
-  const threeNs = namespaces.get('lt');
+  let threeNsKey = 'lt';
+  for (const [ns, list] of namespaces) {
+    if (list.some((e) => e.exportName === 'ACESFilmicToneMapping')) { threeNsKey = ns; break; }
+  }
+  const threeNs = namespaces.get(threeNsKey);
   const threeAlias = new Map((threeNs || []).map((e) => [e.alias, e.exportName]));
+  // Direct member access on the three namespace object (e.g. `Ct.MeshStandardMaterial`)
+  const threeNsIdent = threeNsKey;
 
   const declIndex = new Map(); // name -> stmt index
   stmts.forEach((s, i) => {
@@ -288,7 +297,7 @@ function loadBundle() {
     }
     return cache.get(i);
   };
-  return { src, stmts, namespaces, threeAlias, declIndex, threeEnd, freeOf };
+  return { src, stmts, namespaces, threeAlias, threeNsIdent, declIndex, threeEnd, freeOf };
 }
 
 function closure(b, roots, stop, effects = new Set()) {
@@ -307,6 +316,7 @@ function closure(b, roots, stop, effects = new Set()) {
     want.add(i);
     for (const name of b.freeOf(i).keys()) {
       if (stop.has(name)) continue;
+      if (name === b.threeNsIdent) { external.set(name, ''); continue; }
       if (b.threeAlias.has(name)) { external.set(name, b.threeAlias.get(name)); continue; }
       if (ADDON_ALIASES[name]) { external.set(name, ADDON_ALIASES[name]); continue; }
       const j = b.declIndex.get(name);
@@ -374,7 +384,7 @@ function emit(b, idxs, external, stop, rename = new Map()) {
 // ---------------------------------------------------------------- CLI
 
 const args = parseArgs(process.argv.slice(2));
-const b = loadBundle();
+const b = loadBundle(args.bundle);
 
 if (args.modules) {
   for (const [ns, list] of b.namespaces) {
