@@ -2330,7 +2330,13 @@ let _landingProbeLandable = true;
 const _landingProbePos = new THREE.Vector3(Infinity, Infinity, Infinity);
 
 function evaluateFlightLanding(planet, allowSubmerged = false) {
-  const shipLocal = planet.worldPositionToLocal(nav.pos, new THREE.Vector3());
+  const chaseLead = (1 - (shipView.viewBlend ?? 1)) * 30;
+  const refWorld = _v4.copy(nav.pos);
+  if (chaseLead > 0.1) {
+    _v3.set(0, 0, -1).applyQuaternion(nav.quat);
+    refWorld.addScaledVector(_v3, chaseLead);
+  }
+  const shipLocal = planet.worldPositionToLocal(refWorld, new THREE.Vector3());
   const shipLocalQuat = planet.frameOrientation.clone().invert()
     .multiply(nav.quat).normalize();
   return findLandingSite(planet, shipLocal, shipLocalQuat, {
@@ -2392,6 +2398,7 @@ function enterHighHover(planet, minClearance = 92) {
   }, () => {
     scriptedFlightSpd = 0;
     ship.finishLanding();
+    nodePipeline.cloudPass?.resetHistory();
     shipView.viewMode = 'cockpit';
     shipView.viewBlend = 1;
     shipView.parkedCamBlend = 1;
@@ -2454,6 +2461,7 @@ function tryLand() {
     nav,
     camera,
     landing,
+    allowSubmerged: overOpenWater,
     onTouchdown: () => audio.cue('touchdown'),
     onCockpitReached: () => {
       ui.setCockpitView(true);
@@ -2475,6 +2483,7 @@ function tryLand() {
   }, () => {
     scriptedFlightSpd = 0;
     ship.finishLanding();
+    nodePipeline.cloudPass?.resetHistory();
     shipView.viewMode = 'cockpit';
     shipView.viewBlend = 1;
     shipView.parkedCamBlend = 1;
@@ -2695,6 +2704,7 @@ function recallShip() {
     if (!recallInFlight) return;
     recallInFlight = false;
     ship.finishLanding();
+    nodePipeline.cloudPass?.resetHistory();
     shipView.openRamp();
     shipView.rampMax = shipView.groundClampedRampMax();
     shipView.rampT = shipView.rampMax;
@@ -5607,6 +5617,7 @@ function frame(rafTs) {
   }
 
 
+  const wasShipForeground = ship.foregroundOnly;
   // the ship flies just ahead of the camera whenever we're in flight
   ship.update(
     dt,
@@ -5629,6 +5640,38 @@ function frame(rafTs) {
   }
   // first-person modes re-place the hull around the camera
   shipView.applyShipPose(dt, nav, state);
+  if (wasShipForeground && !ship.foregroundOnly) {
+    nodePipeline.cloudPass?.resetHistory();
+  }
+  // Ground-effect hull clearance in 3rd-person low-altitude flight: nav.pos
+  // sits 6.5 m above and 30 m behind the formation hull, so pitching down near
+  // the ground would otherwise push the hull below terrain before pressing L.
+  if (state === 'space' && shipView.viewBlend < 0.99 && nearest && !nearest.isGasGiant
+      && !envUnderwater && nearestAlt < 85 && !(DEV_SERVER && devWaterWakeFixture)) {
+    _v.copy(nav.pos).add(ship.group.position);
+    nearest.worldPositionToLocal(_v, _v2);
+    const rawHullR = _v2.length();
+    _v3.copy(_v2).multiplyScalar(1 / Math.max(rawHullR, 1));
+    const minHullR = nearest.surfaceRadius(_v3) - GEAR_GROUND_Y + 0.75;
+    const skimT = 1 - smoothstep(minHullR, minHullR + 9.5, rawHullR);
+    if (skimT > 0.001) {
+      if (rawHullR < minHullR) {
+        _v2.copy(_v3).multiplyScalar(minHullR);
+        nearest.localPositionToWorld(_v2, _v);
+        ship.group.position.copy(_v).sub(nav.pos);
+      }
+      const localQ = _q.copy(nearest._invFrame).multiply(ship.group.quaternion).normalize();
+      const fwdLocal = _v4.set(0, 0, -1).applyQuaternion(localQ);
+      if (fwdLocal.dot(_v3) < 0.04) {
+        fwdLocal.addScaledVector(_v3, -fwdLocal.dot(_v3)).normalize();
+        if (fwdLocal.lengthSq() > 0.5) {
+          const levelLocalQ = horizonQuat(_v3, fwdLocal, _rampInvQuat);
+          localQ.slerp(levelLocalQ, skimT * 0.88);
+          ship.group.quaternion.copy(nearest.frameOrientation).multiply(localQ).normalize();
+        }
+      }
+    }
+  }
   // Transit kick: one low-frequency push back into the seat (cockpit) or away
   // from the hull (chase), applied after the hull is placed so it reads as
   // the ship surging, never as a shaking image.
@@ -5859,13 +5902,22 @@ function frame(rafTs) {
   // still owns this pass; tying it only to ship.foregroundOnly hid all four
   // weapon models after landing.
   foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible || skydiveCtl.rig.root.visible;
+  // During scripted surface manoeuvres (recall fly-in, landing, liftoff, hover
+  // departure) keep the ship on ForegroundPass AFTER LiteCloudPass so clouds
+  // never paste over the moving hull, while retaining the opaque scene depth
+  // buffer so mountains, ridges and trees still properly occlude the ship.
+  const keepSceneDepthForShip = Boolean(ship.landingPose)
+    && !nodePipeline.portalComposite.enabled
+    && !nodePipeline.warp.enabled
+    && (state === 'walk' || state === 'skydive' || !shipView.isCockpit());
+  foregroundPass.clearDepth = !keepSceneDepthForShip;
   if (RENDER_LOOK_NEXT) {
     // The cabin is fully occluded by the hull in a settled chase view. Keeping
     // its independent light layer alive there paid for every cabin material
     // and fixture without contributing a pixel. Retain it across cockpit,
-    // seat/walk and view-blend frames so camera transitions stay continuous.
+    // seat/walk, open-ramp fly-ins and view-blend frames so transitions stay continuous.
     const needsForegroundInterior = ship.foregroundOnly
-      && (shipView.isCockpit() || shipView.shipwalk || shipView.viewBlend < 1);
+      && (shipView.isCockpit() || shipView.shipwalk || shipView.viewBlend < 1 || shipView.rampT > 0.01);
     const foregroundLayers = needsForegroundInterior
       ? [SHIP_FOREGROUND_LAYER, SHIP_INTERIOR_LAYER]
       : [SHIP_FOREGROUND_LAYER];
@@ -6579,6 +6631,15 @@ window.NMS = {
     }
     focusPlanet = p; spaceCtl.focus = p;
     _landingProbeAt = -1;
+    recallInFlight = false;
+    ship.landingPose = null;
+    ship.hoverMode = null;
+    ship.orbitalStandby = false;
+    ship.parkedPlanet = null;
+    ship.parkedLocal = null;
+    ship.parkedLocalQuat = null;
+    ship.parkedPosUniv = null;
+    ship.parkAmt = 0;
     ship.shipQuat?.copy(nav.quat);
     return true;
   },
@@ -6629,6 +6690,15 @@ window.NMS = {
     nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), -0.32));
     focusPlanet = p; spaceCtl.focus = p;
     _landingProbeAt = -1;
+    recallInFlight = false;
+    ship.landingPose = null;
+    ship.hoverMode = null;
+    ship.orbitalStandby = false;
+    ship.parkedPlanet = null;
+    ship.parkedLocal = null;
+    ship.parkedLocalQuat = null;
+    ship.parkedPosUniv = null;
+    ship.parkAmt = 0;
     ship.shipQuat?.copy(nav.quat);
     return true;
   },
@@ -6859,8 +6929,8 @@ window.NMS = {
   },
   // aim the walker at the parked ship (testing the landing pad)
   faceShip() {
-    const targetUniv = (recallInFlight && ship.landingPose?.pos)
-      ? ship.landingPose.pos
+    const targetUniv = (recallInFlight && ship.landingPose?.posUniv)
+      ? ship.landingPose.posUniv
       : ship.parkedPosUniv;
     if (state !== 'walk' || !targetUniv) return false;
     const p = walkCtl.planet;

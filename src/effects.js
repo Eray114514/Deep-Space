@@ -620,7 +620,8 @@ export class Ship {
       this.emit(goingDown ? 'gear-down' : 'gear-up', [0, -0.8, -2.5]);
     }
     this.gearGoingDown = goingDown;
-    this.gearT = THREE.MathUtils.lerp(this.gearT ?? want, want, 1 - Math.exp(-Math.max(0, dt) * 3.2));
+    const gearRate = this.landingPose ? 5.2 : 3.2;
+    this.gearT = THREE.MathUtils.lerp(this.gearT ?? want, want, 1 - Math.exp(-Math.max(0, dt) * gearRate));
     /* bay doors swing first, then the leg drops and unfolds; retraction runs
        the same timeline backwards, so the doors shut behind the stowed leg */
     const doorT = THREE.MathUtils.smoothstep(this.gearT, 0.0, 0.35);
@@ -849,11 +850,22 @@ export class Ship {
     this.group.visible = true;
     const scriptedHull = !!this.landingPose;
     const wantsPark = (state === 'walk' || state === 'skydive' || state === 'landing' || state === 'landed' || state === 'boarding' || state === 'shipwalk') && !!this.parkedPosUniv;
+    if (!scriptedHull && !wantsPark && this.parkedPosUniv
+        && this.parkedPosUniv.distanceToSquared(nav.pos) > 400 * 400) {
+      this.parkedPosUniv = null;
+      this.parkAmt = 0;
+    }
     if (scriptedHull) this.parkAmt = this.landingPose.progress;
     else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
-    const foregroundOnly = !scriptedHull && (['space', 'flyto', 'warp', 'takeoff'].includes(state)
+    // Keep the hull on SHIP_FOREGROUND_LAYER throughout all active flight and
+    // scripted manoeuvres (landing, hover-entry, recall fly-in, liftoff and
+    // auto-depart) so half-res volumetric cloud history never composites over
+    // the moving ship; main.js preserves scene depth on ForegroundPass during
+    // scripted surface manoeuvres so terrain and trees still occlude the hull.
+    const foregroundOnly = ['space', 'flyto', 'warp', 'takeoff'].includes(state)
       || (state === 'shipwalk' && !this.parkedPosUniv)
-      || (state === 'landing' && this.parkAmt < 0.58 && !this.hoverMode));
+      || (scriptedHull && state !== 'landing')
+      || (state === 'landing' && this.parkAmt < 0.58);
     this.setForegroundOnly(foregroundOnly);
 
     // The hull's mass response is driven by raw pilot intent, never by speed

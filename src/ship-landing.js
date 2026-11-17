@@ -242,7 +242,7 @@ export function findLandingSite(planet, shipStartLocal, shipStartLocalQuat, {
   if (forwardH.lengthSq() < 1e-4) tangentBasis(startDir, forwardH, _v1);
   else forwardH.normalize();
 
-  const leadMeters = clamp(startAlt * 0.26, 0, 38);
+  const leadMeters = clamp(startAlt * 0.22, 4, 34);
   const aimDir = startDir.clone().addScaledVector(forwardH, leadMeters / planet.R).normalize();
   const e1 = new THREE.Vector3();
   const e2 = new THREE.Vector3();
@@ -366,6 +366,7 @@ export function createLandingSequence({
   nav,
   camera,
   landing,
+  allowSubmerged = false,
   onTouchdown = null,
   onCockpitReached = null,
 }) {
@@ -378,6 +379,20 @@ export function createLandingSequence({
   const shipStartLocalQuat = invFrame.clone().multiply(ship.group.quaternion).normalize();
   const invShipStart = shipStartLocalQuat.clone().invert();
 
+  // Never start a surface landing with the hull buried beneath the ground:
+  // in 3rd-person low flight the formation offset (-6.5 m Y, +30 m forward)
+  // could dip below terrain if ground-effect hadn't settled yet.
+  const rawStartR = shipStartLocal.length();
+  const startDir0 = shipStartLocal.clone().multiplyScalar(1 / Math.max(rawStartR, 1));
+  const startGroundR0 = planet.surfaceRadius(startDir0);
+  if (!allowSubmerged) {
+    const minSafeStartR = startGroundR0 - GEAR_GROUND_Y + 0.45;
+    if (rawStartR < minSafeStartR) {
+      shipStartLocal.copy(startDir0).multiplyScalar(minSafeStartR);
+    }
+  }
+  const startClearance = Math.max(0, shipStartLocal.length() - startGroundR0 + GEAR_GROUND_Y);
+
   const camStartWorld = nav.pos.clone().add(camera.position);
   const camStartLocal = planet.worldPositionToLocal(camStartWorld, new THREE.Vector3());
   const camStartLocalQuat = invFrame.clone()
@@ -389,11 +404,11 @@ export function createLandingSequence({
   const deltaStart = shipStartLocal.clone().sub(landing.padLocal);
   const startVert = deltaStart.dot(upLocal);
   const horizStart = deltaStart.clone().addScaledVector(upLocal, -startVert);
-  const travelDist = deltaStart.length();
+  const effectiveDist = Math.hypot(horizStart.length(), Math.max(0, startVert));
 
   const duration = wasCockpit
-    ? clamp(2.4 + Math.sqrt(travelDist) * 0.08, 2.6, 3.8)
-    : clamp(3.1 + Math.sqrt(travelDist) * 0.08, 3.3, 4.4);
+    ? clamp(1.95 + Math.sqrt(effectiveDist) * 0.11, 2.1, 3.8)
+    : clamp(2.55 + Math.sqrt(effectiveDist) * 0.11, 2.7, 4.4);
   const touchdownK = wasCockpit ? 0.90 : 0.72;
   const side = wasCockpit ? 1 : pickCinematicFlank(planet, landing.padLocal, landing.parkedLocalQuat);
 
@@ -420,30 +435,44 @@ export function createLandingSequence({
 
     let vert;
     if (startVert >= 0) {
-      const flareHover = clamp(startVert * 0.34, 6.5, 26);
-      vert = cubicBezier1D(
-        startVert,
-        Math.max(flareHover, startVert * 0.56),
-        flareHover * 0.38,
-        0,
-        us,
-      );
+      // Strictly monotonic descent (0 <= p2 <= p1 <= startVert) so a ship
+      // already hovering/skimming close to the ground never balloons upward!
+      const p1 = startVert * lerp(0.62, 0.42, smootherstep01((startVert - 8) / 82));
+      const p2 = p1 * 0.32;
+      vert = cubicBezier1D(startVert, p1, p2, 0, us);
     } else {
-      const crest = Math.max(9, -startVert * 0.25 + 9);
-      vert = cubicBezier1D(startVert, startVert * 0.3 + crest, crest * 0.45, 0, us);
-    }
-
-    if (k > touchdownK) {
-      const settle = (k - touchdownK) / Math.max(1e-4, 1 - touchdownK);
-      vert += -0.10 * Math.sin(Math.PI * Math.min(1, settle * 1.45)) * Math.exp(-2.5 * settle);
+      // Pad ahead sits upslope of shipStartLocal: glide smoothly up the slope
+      // contour without dipping underground or popping high into the air.
+      const gentleLift = Math.min(2.0, Math.abs(startVert) * 0.16 + 0.5);
+      vert = cubicBezier1D(startVert, startVert * 0.48 + gentleLift * 0.5, gentleLift * 0.42, 0, us);
     }
 
     shipLocal.copy(landing.padLocal)
       .addScaledVector(horizStart, 1 - uh)
       .addScaledVector(upLocal, vert);
 
+    // Continuous terrain-contour clearance guard across approach: prevent the
+    // belly or unfolding gear from clipping any intermediate hillock or slope.
+    if (!allowSubmerged && k <= touchdownK) {
+      const curR = shipLocal.length();
+      _v2.copy(shipLocal).multiplyScalar(1 / Math.max(curR, 1));
+      const localGroundR = planet.surfaceRadius(_v2);
+      const approachMargin = 0.45 * (1 - smootherstep01((u - 0.52) / 0.48));
+      const minClearR = localGroundR - GEAR_GROUND_Y + approachMargin;
+      if (curR < minClearR) {
+        shipLocal.copy(_v2).multiplyScalar(minClearR);
+      }
+    }
+
+    if (k > touchdownK) {
+      const settle = (k - touchdownK) / Math.max(1e-4, 1 - touchdownK);
+      const comp = -0.055 * Math.sin(Math.PI * Math.min(1, settle * 1.45)) * Math.exp(-2.6 * settle);
+      shipLocal.addScaledVector(upLocal, comp);
+    }
+
     const uRot = smootherstep01(Math.min(1, u * 1.06));
-    const flarePitch = 0.082 * Math.sin(Math.PI * Math.pow(u, 0.82)) * (1 - us);
+    const flareScale = clamp(startClearance / 18, 0.12, 1);
+    const flarePitch = 0.082 * flareScale * Math.sin(Math.PI * Math.pow(u, 0.82)) * (1 - us);
     shipLocalQuat.copy(shipStartLocalQuat).slerp(landing.parkedLocalQuat, uRot);
     if (Math.abs(flarePitch) > 1e-5) {
       shipLocalQuat.multiply(_q1.setFromAxisAngle(X_AXIS, flarePitch)).normalize();
@@ -451,7 +480,7 @@ export function createLandingSequence({
 
     planet.localPositionToWorld(shipLocal, shipWorld);
     shipWorldQuat.copy(planet.frameOrientation).multiply(shipLocalQuat).normalize();
-    const gearProgress = clamp(0.14 + u * 0.96, 0, 1);
+    const gearProgress = clamp(0.22 + u * 0.92, 0, 1);
     return { u, gearProgress };
   }
 

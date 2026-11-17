@@ -344,15 +344,17 @@ try {
   check(true, 'seated pilot launches cleanly from recalled ship back into space');
 
   // =========================================================================
-  // 4. Flat clearing recall (T): lands tripod-flush facing away with open ramp!
+  // 4. Flat clearing recall (T): verify cloud-layer ordering during fly-in
+  //    AND tripod-flush open-ramp landing!
   // =========================================================================
   await page.evaluate('NMS.land(0)');
   await page.waitForFunction('NMS.state === "walk"', null, { timeout: 30000 });
-  // Move 95 m away so we exercise long-range recall onto a flat clearing
+  // Force heavy cloud cover overhead and move 95 m away so recall flies right across the clouds!
   await page.evaluate(() => {
     const THREE = NMS._THREE;
     const { walkCtl, nav } = NMS._internals;
     const p = walkCtl.planet;
+    p.setWeatherFixture?.('cumulus');
     const up = walkCtl.posLocal.clone().normalize();
     const east = new THREE.Vector3(up.z, 0, -up.x).normalize();
     const farDir = up.clone().addScaledVector(east, 95 / p.R).normalize();
@@ -361,8 +363,29 @@ try {
     p.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(p.frameOrientation).multiply(walkCtl.quat);
   });
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(250);
   await page.keyboard.press('KeyT');
+  await page.waitForTimeout(1600);
+  await page.evaluate('NMS.faceShip()');
+  await page.waitForTimeout(150);
+  const recallCloudOrder = await page.evaluate(() => {
+    const { ship, nodePipeline } = NMS._internals;
+    return {
+      recallInFlight: NMS.shipLandingState().recallInFlight,
+      foregroundOnly: ship.foregroundOnly,
+      foregroundPassEnabled: nodePipeline.foregroundPass.enabled,
+      clearDepth: nodePipeline.foregroundPass.clearDepth,
+      liteCloudEnabled: Boolean(nodePipeline.cloudPass?.enabled),
+    };
+  });
+  console.log('recallCloudOrder:', JSON.stringify(recallCloudOrder));
+  check(recallCloudOrder.recallInFlight
+      && recallCloudOrder.foregroundOnly === true
+      && recallCloudOrder.foregroundPassEnabled === true
+      && recallCloudOrder.clearDepth === false,
+    `recalled ship renders after LiteCloudPass with scene-depth occlusion preserved ${JSON.stringify(recallCloudOrder)}`);
+  await shot('09-recall-flyin-in-front-of-clouds');
+
   await page.waitForFunction('!NMS.shipLandingState().recallInFlight', null, { timeout: 60000 });
   await page.evaluate('NMS.faceShip()');
   await page.waitForTimeout(350);
@@ -376,6 +399,93 @@ try {
       && flatRecall.landing.padGaps.every((g) => Math.abs(g) < 0.04),
     `flat clearing recall lands tripod-flush with open ramp facing player ${JSON.stringify(flatRecall)}`);
   await shot('08-recall-flat-open-ramp');
+  await page.evaluate(() => NMS._planet(0).setWeatherFixture?.(null));
+
+  // =========================================================================
+  // 5. Ultra-low-altitude 3rd-person landing (~5 m AGL, nose pitched -20°):
+  //    verify hull NEVER sinks underground and NEVER balloons upward!
+  // =========================================================================
+  await page.evaluate((dir) => {
+    const THREE = NMS._THREE;
+    const p = NMS._planet(0);
+    const groundR = p.surfaceRadius(new THREE.Vector3(...dir));
+    NMS.teleport(0, (groundR + 5.2 - p.R) / p.R, { dir, horizon: true, pitch: -0.35 });
+    NMS.shipViewDebug.setViewMode('chase');
+    NMS._internals.shipView.viewBlend = 0;
+  }, sites.moderate.dir);
+  await page.waitForTimeout(320);
+
+  const preLandClearance = await page.evaluate(() => {
+    const THREE = NMS._THREE;
+    const { ship, nav } = NMS._internals;
+    const p = NMS._planet(0);
+    const hullLocal = p.worldPositionToLocal(nav.pos.clone().add(ship.group.position), new THREE.Vector3());
+    const r = hullLocal.length();
+    const dir = hullLocal.clone().multiplyScalar(1 / r);
+    const bellyClearance = r - 1.05 - p.surfaceRadius(dir);
+    return +bellyClearance.toFixed(3);
+  });
+  console.log('preLandClearance:', preLandClearance);
+  check(preLandClearance >= 0.8,
+    `3rd-person ground-effect keeps low-flying hull belly above ground before L (${preLandClearance} m belly clearance)`);
+
+  // Sample hull belly clearance & 3 gear footpads on EVERY animation frame from KeyL to landed!
+  const lowTracePromise = page.evaluate(() => new Promise((resolve) => {
+    const THREE = NMS._THREE;
+    const { ship, nav } = NMS._internals;
+    const p = NMS._planet(0);
+    const invFrame = p.frameOrientation.clone().invert();
+    const pads = [[0, -1.60, -9.30], [2.45, -1.60, 3.60], [-2.45, -1.60, 3.60]];
+    const bellySamples = [];
+    const minPadSamples = [];
+    const tick = () => {
+      invFrame.copy(p.frameOrientation).invert();
+      const worldPos = ship.landingPose ? ship.landingPose.posUniv : nav.pos.clone().add(ship.group.position);
+      const worldQuat = ship.landingPose ? ship.landingPose.quat : ship.group.quaternion;
+      const hullLocal = p.worldPositionToLocal(worldPos, new THREE.Vector3());
+      const localQuat = invFrame.clone().multiply(worldQuat).normalize();
+      const r = hullLocal.length();
+      const dir = hullLocal.clone().multiplyScalar(1 / r);
+      bellySamples.push(+(r - 1.05 - p.surfaceRadius(dir)).toFixed(3));
+
+      let minPad = Infinity;
+      for (let i = 0; i < pads.length; i++) {
+        const [px, py, pz] = pads[i];
+        const pt = new THREE.Vector3(px, py + (ship.gearOffsets?.[i] || 0), pz)
+          .applyQuaternion(localQuat).add(hullLocal);
+        const pr = pt.length();
+        const pdir = pt.clone().multiplyScalar(1 / pr);
+        minPad = Math.min(minPad, pr - p.surfaceRadius(pdir));
+      }
+      minPadSamples.push(+minPad.toFixed(3));
+
+      if (NMS.state === 'landed' && bellySamples.length > 5) {
+        resolve({
+          count: bellySamples.length,
+          bellyFirst: bellySamples[0],
+          bellyMin: Math.min(...bellySamples),
+          bellyMax: Math.max(...bellySamples),
+          padFirst: minPadSamples[0],
+          padMin: Math.min(...minPadSamples),
+          padMax: Math.max(...minPadSamples),
+          padLast: minPadSamples[minPadSamples.length - 1],
+        });
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }));
+
+  await page.keyboard.press('KeyL');
+  await page.waitForTimeout(260);
+  await shot('10-ultra-low-landing-start');
+  const lowTrace = await lowTracePromise;
+  console.log('lowTrace:', JSON.stringify(lowTrace));
+  check(lowTrace.bellyMin >= 0.30
+      && lowTrace.padMin >= -0.08
+      && lowTrace.bellyMax <= lowTrace.bellyFirst + 1.2,
+    `ultra-low landing never sinks into terrain or balloons upward ${JSON.stringify(lowTrace)}`);
 
   check(errors.length === 0, `no page errors ${JSON.stringify(errors.slice(0, 3))}`);
   check(shaderErrors.length === 0, `no shader errors ${JSON.stringify(shaderErrors.slice(0, 3))}`);
