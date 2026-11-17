@@ -255,6 +255,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uT0 = { value: U.t0 };
     shader.uniforms.uTSpan = { value: U.tSpan };
     shader.uniforms.uTCurve = { value: U.tCurve };
+    // the meadow's base colour, matching the planted grass (scatter.js)
+    shader.uniforms.uMeadowC = { value: planet.floraPal
+      ? planet.floraPal.canopy.clone().offsetHSL(0, 0.12, 0.02) : new THREE.Color(0.1, 0.2, 0.05) };
     shader.uniforms.uSeaDepthSpan = { value: U.seaDepthSpan };
     shader.uniforms.uRockC = { value: U.rock };
     shader.uniforms.uSlopeLo = { value: U.slopeLo };
@@ -343,6 +346,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform float uT0;
         uniform float uTSpan;
         uniform float uTCurve;
+        uniform vec3 uMeadowC;
         uniform float uSeaDepthSpan;
         uniform vec3 uRockC;
         uniform float uSlopeLo;
@@ -364,6 +368,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         varying vec3 vMat;
         varying vec4 vExtra;
         float gSnowW = 0.0;
+        float gMeadow = 0.0;
         float gPatch = 0.0;
         float gShoreWet = 0.0;
         float gSurfaceRoughness = 0.82;
@@ -507,6 +512,9 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               // the driest country is bare: pale sand and ochre rock
               float aridW = (1.0 - smoothstep(0.14, 0.27, moisture)) * (1.0 - wooded);
               base = mix(base, uLandC[0] * vec3(1.02, 0.93, 0.78), aridW * 0.8);
+              // where grass grows near the player, the ground is grass
+              gMeadow = (1.0 - aridW) * (1.0 - dryW * 0.6) * (1.0 - chill)
+                * (1.0 - smoothstep(uSlopeLo, uSlopeHi, slope)) * smoothstep(0.02, 0.06, t);
               vec3 tundra = mix(uRockC, base, 0.35) * vec3(0.96, 0.94, 0.9);
               base = mix(base, tundra, chill * 0.7);
               forestW = max(smoothstep(0.3, 0.62, forestW * 0.75 + (moisture - 0.5) * 0.9
@@ -603,7 +611,13 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             // keep the planet's hue on alien worlds, the scan's on earth-like ones
             vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, 0.25 + uEarthLike * 0.45);
             pbrStructure = clamp(pbrStructure, vec3(0.25), vec3(2.2));
-            diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.85);
+            // Inside the grass ring the ground is the base of the sward:
+            // its colour, deep in shade, with only a hint of the scan.
+            float meadowNear = gMeadow * (1.0 - smoothstep(40.0, 130.0, viewDist));
+            vec3 swardBase = mix(diffuseColor.rgb, uMeadowC, 0.75) * 0.7
+              * mix(vec3(1.0), pbrStructure, 0.35);
+            diffuseColor.rgb *= mix(vec3(1.0), pbrStructure, pbrNear * 0.85 * (1.0 - meadowNear));
+            diffuseColor.rgb = mix(diffuseColor.rgb, swardBase, meadowNear);
             gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
               texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
           }
@@ -694,7 +708,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => 'terrain-layered-pbr-v25-scan-mean-'+hasSurfaceCloudMedium(planet);
+  material.customProgramCacheKey = () => 'terrain-layered-pbr-v26-meadow-'+hasSurfaceCloudMedium(planet);
   return prepareSurfaceAtmosphere(material, planet);
 }
 

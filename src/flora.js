@@ -263,6 +263,54 @@ function buildPodPlant(rng, pal) {
   return { geo: shadeVertical(mergeGeos(parts), 0.78, 1.1), glow: pal.accent.clone() };
 }
 
+// A meadow patch: many fine blades of nearly even height spread over a
+// ~0.75 m disc, so neighbouring patches knit into continuous sward. (A tight
+// clump of mixed-height blades, the previous design, reads as weeds however
+// densely it is planted.) Coarser levels carry fewer, wider blades.
+function buildMeadowPatch(rng, blades, rows, widthScale, spread = 0.38) {
+  const white = new THREE.Color(1, 1, 1);
+  const parts = [];
+  for (let i = 0; i < blades; i++) {
+    const r = Math.sqrt(rng()) * spread, a = rng() * Math.PI * 2;
+    // even sward with the odd seed stem standing above it
+    const len = rng() < 0.04 ? 0.58 + rng() * 0.2 : 0.26 + rng() * 0.2;
+    const f = new THREE.PlaneGeometry(0.02 * widthScale * (0.8 + rng() * 0.4), len, 1, rows);
+    f.translate(0, len / 2, 0);
+    const fp = f.attributes.position;
+    const curl = 0.6 + rng() * 0.6;
+    for (let v = 0; v < fp.count; v++) {
+      const t = Math.max(0, Math.min(1, fp.getY(v) / len));
+      fp.setX(v, fp.getX(v) * (1 - t * 0.85));
+      fp.setZ(v, Math.sin(t * curl) * len * 0.3);
+    }
+    paint(f, white, rng, 0.06);
+    const pos = f.attributes.position, col = f.attributes.color;
+    // live green with gentle variation; an occasional sun-bleached blade
+    const dry = rng() < 0.05;
+    const shade = 0.88 + rng() * 0.24;
+    const tint = dry ? [1.3, 1.18, 0.72] : [shade * 0.95, shade, shade * 0.88];
+    for (let v = 0; v < pos.count; v++) {
+      const t = Math.max(0, Math.min(1, pos.getY(v) / len));
+      // deep shade inside the sward, light at the tips
+      const k = (0.32 + 0.78 * Math.pow(t, 0.7));
+      col.setXYZ(v, col.getX(v) * tint[0] * k, col.getY(v) * tint[1] * k, col.getZ(v) * tint[2] * k);
+    }
+    _q.setFromAxisAngle(Y, rng() * Math.PI * 2).multiply(
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.1 + rng() * 0.28));
+    parts.push(place(f, Math.cos(a) * r, 0, Math.sin(a) * r, _q.clone()));
+  }
+  const g = mergeGeos(parts);
+  // normals mostly up so the sward shades with the field, with a little of
+  // each blade's own facing for depth
+  const nrm = g.attributes.normal;
+  for (let i = 0; i < nrm.count; i++) {
+    const x = nrm.getX(i) * 0.3, z = nrm.getZ(i) * 0.3;
+    const l = Math.hypot(x, 1, z);
+    nrm.setXYZ(i, x / l, 1 / l, z / l);
+  }
+  return g;
+}
+
 function buildGrassTuft(rng, bladeRange = [12, 18], rows = 4, widthScale = 1) {
   // real blades (white — each instance is tinted per-planet at placement).
   // The baked root→tip brightness gradient is what makes grass read as
@@ -374,7 +422,9 @@ export function buildFlora(planet) {
   // keep the shapes they had; their geometry is no longer shown.
   const t0 = buildTree(rng, pal, pal.canopy);
   const t1 = buildTree(rng, pal, pal.canopy2);
-  const grass = buildGrassTuft(rng);
+  // retired weedy tuft: built only to keep the RNG stream (and so every
+  // later geometry) unchanged
+  buildGrassTuft(rng).dispose();
   const legacyShrub = buildShrub(rng, pal);
   t0.geo.dispose(); t1.geo.dispose(); legacyShrub.dispose();
   // Trees and shrubs: grown by src/vegetation/tree-species.js, drawn at every
@@ -390,9 +440,9 @@ export function buildFlora(planet) {
     // The three meshes share the same deterministic placement field. Only
     // their blade complexity changes with distance: a dense meadow therefore
     // keeps its silhouette without paying near-blade cost at the far rim.
-    grass,
-    grassMid: buildGrassTuft(rng, [6, 9], 2, 1.6),
-    grassFar: buildGrassTuft(rng, [3, 4], 1, 2.6),
+    grass: buildMeadowPatch(makeRng(planet.seed + ':meadow-near'), 44, 3, 1),
+    grassMid: buildMeadowPatch(makeRng(planet.seed + ':meadow-mid'), 16, 2, 1.7),
+    grassFar: buildMeadowPatch(makeRng(planet.seed + ':meadow-far'), 7, 1, 2.8),
     // meadows lean toward the planet's canopy colour instead of bare dirt —
     // the ground tint alone made grass vanish on dark soils
     grassTint: pal.canopy.clone().offsetHSL(0, 0.08, 0.025),

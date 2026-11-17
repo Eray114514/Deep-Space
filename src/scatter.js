@@ -72,11 +72,13 @@ const SHOW_BELOW_ALT = 600;  // metres
 // at every 9 m step: while the player kept moving no ring ever finished and
 // the grass stayed where it was first planted.
 const CELL_CACHE_LIMIT = 700;
-// Grass tufts per cell shrink with camera height: from 40 m up a meadow
-// reads at a third of the density, and that is what keeps the ring up with a
+// Grass patches per cell shrink with camera height: from 40 m up a meadow
+// reads at a quarter of the density, and that is what keeps the ring up with a
 // low-flying ship. Quantised so the ring is only rebuilt at a few heights.
 function grassShareForAltitude(alt) {
-  return alt < 12 ? 1 : alt < 40 ? 0.6 : 0.3;
+  // meadow patches are ~0.75 m across, so even 45% of them still close
+  // the sward when seen from above head height
+  return alt < 12 ? 1 : alt < 40 ? 0.45 : 0.25;
 }
 const PREWARM_BELOW_ALT = 8000;
 const STREAM_BUDGET_MS = 1.8;
@@ -535,7 +537,7 @@ export class Scatter {
   // One plant: jitter inside the cell, ground it at full terrain detail.
   // Leaves its rotation-scale in _plantRot and its offset from the cell
   // origin in _plantPos. Returns false when the spot is under water.
-  plant(job, cell, hc, s0, s1) {
+  plant(job, cell, hc, s0, s1, heightVariance = 0.5) {
     const p = job.p;
     _jd.copy(cell.up)
       .addScaledVector(cell.e1, (hashFloat(hc, 1) - 0.5) * job.cellAng)
@@ -549,7 +551,7 @@ export class Scatter {
     _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
     _q.multiply(_q2);
     const sc = s0 + (s1 - s0) * hashFloat(hc, 2);
-    _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
+    _s.set(sc, sc * (1.05 - heightVariance * 0.5 + hashFloat(hc, 0) * heightVariance), sc);
     _m.compose(_v.set(0, 0, 0), _q, _s);
     const e = _m.elements;
     _plantRot[0] = e[0]; _plantRot[1] = e[1]; _plantRot[2] = e[2];
@@ -571,7 +573,7 @@ export class Scatter {
       yield;
       const c = grass.cursor++;
       const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, job.seedI);
-      if (!this.plant(job, cell, hc, 0.52, 0.96)) continue;
+      if (!this.plant(job, cell, hc, 0.78, 0.92, 0.16)) continue;
       const i = grass.count++;
       grass.attempt[i] = c;
       grass.rot.set(_plantRot, i * 9);
@@ -588,9 +590,11 @@ export class Scatter {
       const wx = _jd.x * job.p.R, wy = _jd.y * job.p.R, wz = _jd.z * job.p.R;
       const patch = meadowNoise(wx / 7.5, wy / 7.5, wz / 7.5) * 0.65
         + meadowNoise(wx / 2.2 + 17, wy / 2.2, wz / 2.2) * 0.35;
-      const dryness = Math.min(1, Math.max(0, (patch - 0.52) * 3.2));
-      _ic.lerp(_straw, dryness * 0.55).multiplyScalar(0.58 + (1 - patch) * 0.22).offsetHSL(
-        (hashFloat(hc, 0) - 0.5) * 0.05, 0.12, (hashFloat(hc, 1) - 0.5) * 0.08);
+      // a healthy sward is one green with soft lighter and darker drifts;
+      // only the driest patches start to yellow
+      const dryness = Math.min(1, Math.max(0, (patch - 0.62) * 3));
+      _ic.lerp(_straw, dryness * 0.22).multiplyScalar(0.6 + (1 - patch) * 0.12).offsetHSL(
+        (hashFloat(hc, 0) - 0.5) * 0.02, 0.14, (hashFloat(hc, 1) - 0.5) * 0.035);
       grass.color[i * 3] = _ic.r; grass.color[i * 3 + 1] = _ic.g; grass.color[i * 3 + 2] = _ic.b;
     }
   }

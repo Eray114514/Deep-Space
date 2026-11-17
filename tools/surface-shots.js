@@ -42,6 +42,7 @@ const SCENES = [
   { name: '05-flight-8km', js: flight(8000, -0.32) },
   { name: '06-flight-2km', js: flight(2000, -0.22) },
   { name: '07-flight-400m', js: flight(400, -0.14) },
+  { name: '07b-flight-15m', js: flight(15, -0.18) },
   { name: '08-walk', js: (i) => `NMS.land(${i}, 0, 'meadow')` },
   { name: '09-walk-turn', js: (i) => `NMS.land(${i}, 140, 'meadow')` },
   { name: '10-walk-ground', js: (i) => `NMS.land(${i}, 60, 'meadow'); NMS.lookPitch(-55)` },
