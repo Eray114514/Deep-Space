@@ -25,6 +25,12 @@ try {
   });
   await page.goto(`http://127.0.0.1:${port}/?nohero=1&nolock=1&quality=balanced&vclouds=0&farflora=0&post=1&freeze=1&buildms=25`);
   await page.waitForFunction(() => window.NMS?.booted, null, { timeout: 120000 });
+  // Drain idle SurveyUnits prewarm (scheduled at +6s outside GpuPreparationQueue in main.js)
+  // before installing submission-ownership observers and frame pacing.
+  await page.evaluate(async () => {
+    const { surveyUnits, camera, scene } = NMS._internals;
+    await surveyUnits?.prewarm?.({ renderer: NMS._renderer, camera, scene });
+  });
   await page.evaluate(async () => {
     const T = await import('three');
     const pipeline = NMS._pipeline, renderer = NMS._renderer, queue = pipeline.preparations;
@@ -34,18 +40,24 @@ try {
       restores.push(() => { if (object[name] !== wrapper) throw Error(`Observer changed: ${name}`);object[name] = original; });
     };
     const { WorldPublication } = await import('/src/world-publication.js');
-    const { SpatialRift } = await import('/src/spatial-rift-webgl.js');
-    wrap(SpatialRift.prototype, 'renderPortal', original => function(options) {
-      if (!options?.force) return original.call(this, options);
-      const before = { open: this.open, traversed: this.traversed, visible: this.group.visible,
+    const { PortalView } = await import('/src/portal/portal-view.js');
+    wrap(PortalView.prototype, 'render', original => function(options) {
+      const label = queue.active?.label;
+      if (!label) return original.call(this, options);
+      const { scene, universe, ship } = NMS._internals;
+      const before = { open: NMS.riftState().open, visible: NMS.riftState().visible, composite: pipeline.portalComposite.enabled,
         target: renderer.getRenderTarget(), face: renderer.getActiveCubeFace(), mip: renderer.getActiveMipmapLevel(),
-        calls: renderer.info.render.calls, layer: this.portalCamera.layers.mask };
-      const label = queue.active?.label, result = original.call(this, options);
-      data.privatePortals.push({ label, result, open: before.open, traversed: before.traversed, visible: before.visible,
+        calls: renderer.info.render.calls, fog: scene.fog, shipVisible: ship.group.visible,
+        starsPos: universe.nearStarsMesh?.position.toArray() };
+      const result = original.call(this, options);
+      data.privatePortals.push({ label, result, open: before.open, visible: before.visible, composite: before.composite,
         nativeDraws: renderer.info.render.calls - before.calls,
+        portalViewFlag: Boolean(this.pipeline?.portalView),
+        renderToScreen: Boolean(this.pipeline?.composer.renderToScreen),
         restored: renderer.getRenderTarget() === before.target && renderer.getActiveCubeFace() === before.face
-          && renderer.getActiveMipmapLevel() === before.mip && this.group.visible === before.visible
-          && this.portalCamera.layers.mask === before.layer && this.open === before.open && this.traversed === before.traversed });
+          && renderer.getActiveMipmapLevel() === before.mip && scene.fog === before.fog
+          && ship.group.visible === before.shipVisible && pipeline.portalComposite.enabled === before.composite
+          && JSON.stringify(universe.nearStarsMesh?.position.toArray()) === JSON.stringify(before.starsPos) });
       return result;
     });
     const identifiers = new WeakMap();let nextPublication = 0, injectedPublicationFailure = false;
@@ -171,7 +183,7 @@ try {
   await page.evaluate(() => { __preparationPlayer.phase = 'rift'; });
   report.riftTarget = await choose();await page.locator('#route-rift-btn').click();report.step = 'rift-ready';
   await page.waitForFunction(() => NMS.riftState().open > .985 && NMS.riftState().anchorLocked
-    && NMS.riftState().previewVolume?.portalReadiness > .96, null, { timeout: 120000 });
+    && NMS.riftState().previewVolume?.ready, null, { timeout: 120000 });
   report.rift = await page.evaluate(() => ({ state: NMS.riftState(), warm: NMS.warpPreparationState() }));
   await page.screenshot({ path: `${out}/rift-open.png`, timeout: 90000 });
   assert.equal(await page.evaluate(() => NMS.approachRift(-10)), true);
@@ -196,9 +208,9 @@ try {
   assert.ok(report.result.observer.compiles > 0 && report.result.observer.uploads > 0);
   assert.ok(report.result.observer.labels['destination-private-frame'] > 0);
   assert.ok(report.result.observer.labels['destination-portal'] > 0);
-  assert.ok(report.result.observer.privatePortals.some(row => row.open < .025), 'Actual hidden portal was warmed');
+  assert.ok(report.result.observer.privatePortals.some(row => row.open < .025 && !row.visible && !row.composite), 'Actual hidden portal far-view was warmed');
   assert.ok(report.result.observer.privatePortals.every(row => row.label === 'destination-portal' && row.result === true
-    && row.nativeDraws > 0 && row.restored), 'Private portal success requires native draws and restored state');
+    && row.nativeDraws > 0 && row.portalViewFlag && !row.renderToScreen && row.restored), 'Private portal success requires native draws, isolated PortalView pipeline, and restored state');
   assert.deepEqual(report.result.observer.outside, []);assert.equal(report.result.observer.restored, true);
   assert.equal(report.expectedErrors.length, 1);assert.equal(report.result.observer.controlledPublicationFailure, true);
   const failedPublication = report.result.observer.publications.find(row => row.failed);

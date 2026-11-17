@@ -147,7 +147,7 @@ for (const failSetup of [false, true]) test(() => {
   const fog = {}, stars = group(), error = new Error('far medium bind');stars.position.set(1, 2, 3);
   const context = { THREE, scene: { fog }, universe: { nearStarsMesh: stars, backdropMesh: null,
     system: { starViews: [], planets: [{ group: source }], compactObjects: [], artificialSites: [{ parentBody: null, group: sourceOrphan }] }, fadingSystem: null },
-    ship: { group: group() }, weapons: {}, sunShadow: group(), headlamp: group(), skyDome: { mesh: group() }, hemi: group(), ambient: group(),
+    ship: { group: group() }, weapons: {}, sunShadow: group(), headlamp: group(), skyDome: { mesh: group() }, hemi: group(), ambient: group(), scatter: { meshes: {} },
     riftPortalAmbient: group(), riftRoute: { arrived: false }, riftFarBodyId: 'far-body', atmospherePass: { activePlanet: null } };
   context.riftPortalAmbient.visible = false;
   context.standaloneSiteGroups = load('standaloneSiteGroups', context);

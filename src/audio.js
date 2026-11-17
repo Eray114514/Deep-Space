@@ -316,6 +316,12 @@ export class FlightAudio {
       this.tone({ from: 390, to: 980, duration: 1.52, gain: 0.032, type: 'sine', lowpass: 2400, delay: 0.38 });
       this.noiseBurst({ duration: 0.46, gain: 0.17, from: 4800, to: 820, q: 1.15, delay: 1.88 });
       this.tone({ from: 82, to: 39, duration: 0.52, gain: 0.18, type: 'triangle', lowpass: 260, delay: 1.91 });
+    } else if (kind === 'rift-enter') {
+      // swallowed by the mouth: a deep suck, the punch, the throat's rush
+      this.noiseBurst({ duration: 0.35, gain: 0.12, from: 2400, to: 300, q: 0.7 });
+      this.tone({ from: 70, to: 26, duration: 1.1, gain: 0.34, type: 'sine', lowpass: 150, delay: 0.1 });
+      this.noiseBurst({ duration: 1.4, gain: 0.15, from: 600, to: 5400, q: 0.45, delay: 0.12 });
+      this.tone({ from: 180, to: 90, duration: 0.9, gain: 0.05, type: 'triangle', lowpass: 900, delay: 0.15 });
     } else if (kind === 'rift-close') {
       this.noiseBurst({ duration: 0.72, gain: 0.15, from: 3100, to: 145, q: 0.62 });
       this.tone({ from: 176, to: 43, duration: 0.74, gain: 0.14, type: 'triangle', lowpass: 820 });

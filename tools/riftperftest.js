@@ -153,7 +153,7 @@ try {
         gap: now - previous,
         phase,
         open: rift.open,
-        ready: rift.previewVolume?.portalReadiness || 0,
+        ready: rift.previewVolume?.ready ? 1 : 0,
         pending: stats.pending,
         volumeBodyId: NMS.volumeState().activeBodyId,
       });
@@ -165,7 +165,7 @@ try {
 
   await page.locator('#route-rift-btn').click();
   await page.waitForFunction(() => NMS.riftState().open > 0.985
-    && (NMS.riftState().previewVolume?.portalReadiness || 0) > 0.96, null,
+    && NMS.riftState().previewVolume?.ready, null,
   { timeout: 60000 });
   const preparationAtOpen = await page.evaluate('NMS.warpPreparationState()');
   const preparedMaterials = await page.evaluate((bodyId) => {

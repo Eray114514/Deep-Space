@@ -22,7 +22,7 @@ await mkdir(`${directory}/inputs`, { recursive: true });
 const verifierBytes = await readFile(new URL(import.meta.url));
 await writeFile(`${directory}/verifier.js`, verifierBytes);
 const report = {
-  scope: 'Actual GameLegacyPipeline, synthetic signed cloud pixels and real constant opaque depth; production resolve/composite, native RGBA16F plain off/on then weapon/portal-auxiliary scope off/on, real WeaponLighting/WeaponSkyProbe PMREM, SurfaceWeapons.renderScopeView with a minimal optical rig and SpatialRift.renderPortal with real matrices/cameras plus one synthetic HDR destination plane, native fence admission and retirement. Queued real compilePrograms, private preparation draw and player-history recovery share that same owner. No weapon GLB or rift structure is constructed. Not authored physical clouds, column throughput, default-player, latency or frame-rate acceptance.',
+  scope: 'Actual GameLegacyPipeline, synthetic signed cloud pixels and real constant opaque depth; production resolve/composite, native RGBA16F plain off/on then weapon/portal-auxiliary scope off/on, real WeaponLighting/WeaponSkyProbe PMREM, SurfaceWeapons.renderScopeView with a minimal optical rig and PortalView.render (second production GameLegacyPipeline) with real camera sync plus one synthetic HDR destination plane, native fence admission and retirement. Queued real compilePrograms, private preparation draw and player-history recovery share that same owner. No weapon GLB or full planet system is constructed. Not authored physical clouds, column throughput, default-player, latency or frame-rate acceptance.',
   busyEvidence: 'Only unmodified native clientWaitSync TIMEOUT_EXPIRED followed by render(false) counts. No fake wait status, forced GPU workload or CPU mock is accepted as hardware busy coverage; missing natural coverage fails explicitly.',
   cpuMock: { executed: false, reason: 'This tool accepts native WebGL evidence only. CPU fault/reentry contracts live separately in tools/gpuframepacertest.js.' },
   verifier: { path: `${directory}/verifier.js`, bytes: verifierBytes.length, sha256: sha256(verifierBytes) },
@@ -66,14 +66,14 @@ try {
     const { VOLUME_LAYER } = await import('/src/volumetric-pass-webgl.js');
     const { WeaponLighting } = await import('/src/weapon-lighting.js');
     const { SurfaceWeapons, SURFACE_WEAPONS } = await import('/src/surface-weapons.js');
-    const { SpatialRift } = await import('/src/spatial-rift.js');
+    const { PortalView } = await import('/src/portal/portal-view.js');
     const { compilePrograms } = await import('/src/program-preparation.js');
     const result = { checks: [], cases: [], comparisons: [], busy: [], transitions: [], scopes: [], scopeBusy: [], auxiliary: [], gl: [],
       shaderErrors: [], contextLosses: [], native: { fences: [], waits: [], deletes: [], draws: [], clears: [], forbidden: [] },
       input: { width: 32, height: 32, volumeScale: 1, successfulFramesPerCase: 3,
         maxNaturalBusyTrialsPerTransition: 24, deadlineMs: 10000,
           depth: .5, source: 'Signed deterministic cloud pixels; fixed HDR opaque source and real depth. No production weather/column workload.',
-          auxiliaries: 'Real WeaponLighting.update(deferEnvironment)/prepareEnvironment and WeaponSkyProbe.fromEquirectangular; actual SurfaceWeapons.prototype.renderScopeView with the authored hasScope definition and a primitive optical rig; actual SpatialRift.prototype.renderPortal with real source/target transforms and a projection-dependent HDR destination. No weapon/rift constructor or GLB.',
+          auxiliaries: 'Real WeaponLighting.update(deferEnvironment)/prepareEnvironment and WeaponSkyProbe.fromEquirectangular; actual SurfaceWeapons.prototype.renderScopeView with the authored hasScope definition and a primitive optical rig; actual PortalView.prototype.render with a real second GameLegacyPipeline, synced camera projection and a synthetic HDR destination. No weapon GLB or full planet system.',
           weaponEnvironment: { atmosphere: 1, skyIrradiance: 1.8, sunset: .15, up: [0, 1, 0], parityDaySequence: [.75, 1, .875] },
           portal: { destinationTranslation: [0, 0, 8], sourceRotationY: .2, depth: 2, destinationLayer: 2,
             callerCameraLayer: 5, borrowedXr: true, borrowedAutoClear: false, positiveControlFov: 42 } } };
@@ -90,7 +90,7 @@ try {
       if (!ids.has(value)) ids.set(value, ++nextId);return ids.get(value);
     };
     let renderer, gl, pipeline, cube, geometry, source, base, lighting, scopeRig, scopeTarget, scopeMaterial, equipmentMaterial,
-      portalTarget, portalMaterial, portalGroup, preparationTarget, preparationMaterial,
+      portalView, portalTarget, portalMaterial, portalDestination, portalGroup, preparationTarget, preparationMaterial,
       label = 'setup', nativeMethods, nativeOrder = 0;
     const pipelines = [], pacers = [], captures = [], resolveObservations = [], disposedPipelines = new Set();
     const counts = { draws: 0, queryBegins: 0, queryEnds: 0, fences: 0, auxiliaryCallbacks: 0 };
@@ -259,43 +259,37 @@ try {
       check('Actual authored scope input selected without weapon constructor or GLB', scopeIndex >= 0
         && models[scopeIndex].hasScope && lens.material.map === scopeTarget.texture && scopeRig.visible);
       // A separate tiny destination keeps the main native pixel controls
-      // unchanged. The actual portal method owns all camera/texture matrices;
-      // its real ShaderMaterial consumes both projectionMatrix and the
-      // uTextureMatrix it publishes, without constructing the rift geometry.
-      const portalScene = new T.Scene(), portalCamera = new T.PerspectiveCamera();portalCamera.layers.set(5);
-      portalGroup = new T.Group();portalGroup.position.set(3, 2, -5);
-      portalGroup.quaternion.setFromAxisAngle(new T.Vector3(0, 1, 0), result.input.portal.sourceRotationY);
-      const portalVisual = new T.Group();portalVisual.position.set(1, 4, -2);portalGroup.add(portalVisual);portalScene.add(portalGroup);
-      const hiddenSentinel = new T.Mesh(geometry, base);hiddenSentinel.layers.set(2);hiddenSentinel.frustumCulled = false;portalVisual.add(hiddenSentinel);
-      portalGroup.updateMatrixWorld(true);
-      const portalAnchor = portalVisual.localToWorld(new T.Vector3(0, 0, -result.input.portal.depth))
-        .add(new T.Vector3(...result.input.portal.destinationTranslation));
-      const portalOffset = new T.Matrix4().makeTranslation(...result.input.portal.destinationTranslation);
-      portalTarget = new T.WebGLRenderTarget(32, 32, { type: T.HalfFloatType, depthBuffer: true, stencilBuffer: false });
-      portalTarget.texture.colorSpace = T.NoColorSpace;portalTarget.texture.name = 'fixture-actual-portal';
-      portalMaterial = new T.ShaderMaterial({ uniforms: { uTextureMatrix: { value: new T.Matrix4() },
-        uDestinationToSource: { value: portalOffset.clone().invert() } },
-      vertexShader: 'varying vec2 vUv;varying vec4 vProjected;uniform mat4 uTextureMatrix;uniform mat4 uDestinationToSource;'
-        + 'void main(){vUv=uv;vec4 world=modelMatrix*vec4(position,1.0);vProjected=uTextureMatrix*uDestinationToSource*world;'
-        + 'gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
-      fragmentShader: 'varying vec2 vUv;varying vec4 vProjected;void main(){vec2 projected=vProjected.xy/vProjected.w;'
-        + 'gl_FragColor=vec4(2.5+vUv.x*2.0+.125*projected.x,1.25+vUv.y*1.75+.125*projected.y,.5+vUv.x*.5,1.0);}',
-      depthTest: true, depthWrite: true, blending: T.NoBlending, toneMapped: false });
-      const portalDestination = new T.Mesh(geometry, portalMaterial);portalDestination.scale.set(5, 5, 1);
-      portalDestination.layers.set(2);portalScene.add(portalDestination);
-      const portalObject = { renderer, scene: portalScene, mainCamera: camera, group: portalGroup, visual: portalVisual,
-        portalCamera, portalRT: portalTarget, portalMat: portalMaterial, open: 1, traversed: false, depth: result.input.portal.depth,
-        sourceQuaternion: new T.Quaternion(), targetQuaternion: portalGroup.quaternion.clone(), unitScale: new T.Vector3(1, 1, 1),
-        targetAnchor: portalAnchor, sourceFrameMatrix: new T.Matrix4(), targetFrameMatrix: new T.Matrix4(),
-        inverseSourceMatrix: new T.Matrix4(), offsetMatrix: new T.Matrix4(), frameRotation: new T.Quaternion(), textureMatrix: new T.Matrix4(),
-        biasMatrix: new T.Matrix4().set(.5, 0, 0, .5, 0, .5, 0, .5, 0, 0, .5, .5, 0, 0, 0, 1), portalVolumeLayerRendered: false };
+      // unchanged. PortalView owns a second GameLegacyPipeline (opaque +
+      // atmosphere, display transforms disabled) and syncs projection from the
+      // main camera into its own offscreen HDR buffer.
+      const portalScene = new T.Scene();
+      portalGroup = new T.Group();portalGroup.position.set(0, 0, -4);
+      portalScene.add(portalGroup);
+      const hiddenSentinel = new T.Mesh(geometry, base);hiddenSentinel.frustumCulled = false;portalGroup.add(hiddenSentinel);
+      const portalOrigin = new T.Vector3(...result.input.portal.destinationTranslation);
+      const portalContext = { name: 'synthetic-far-system' };
+      const portalQuat = new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 1, 0), 0);
+      portalMaterial = new T.ShaderMaterial({
+        vertexShader: 'varying vec2 vUv;varying vec2 vProj;void main(){vUv=uv;vProj=vec2(projectionMatrix[0][0],projectionMatrix[1][1]);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+        fragmentShader: 'varying vec2 vUv;varying vec2 vProj;void main(){gl_FragColor=vec4(2.5+vUv.x*2.0+.25*vProj.x,1.25+vUv.y*1.75+.25*vProj.y,.5+vUv.x*.5,1.0);}',
+        depthTest: true, depthWrite: true, blending: T.NoBlending, toneMapped: false });
+      portalDestination = new T.Mesh(new T.PlaneGeometry(20, 20), portalMaterial);
+      portalDestination.position.set(0, 0, -5);
+      portalScene.add(portalDestination);
+      portalView = new PortalView({
+        mainCamera: camera,
+        createPipeline: viewCamera => new GameLegacyPipeline(renderer, portalScene, viewCamera,
+          { volume: false, liteClouds: false, bloomEnabled: false, temporalAA: false }),
+      });
+      portalView.setSize(32, 32, 1);
       const portalObservations = [];
       portalDestination.onBeforeRender = (actualRenderer, actualScene, actualCamera) => portalObservations.push({
-        order: nativeOrder, label, renderer: actualRenderer === renderer, scene: actualScene === portalScene, camera: actualCamera === portalCamera,
-        target: actualRenderer.getRenderTarget() === portalTarget, xr: actualRenderer.xr.enabled, autoClear: actualRenderer.autoClear,
-        layers: actualCamera.layers.mask, groupVisible: portalGroup.visible, projection: actualCamera.projectionMatrix.toArray(),
+        order: nativeOrder, label, renderer: actualRenderer === renderer, scene: actualScene === portalScene, camera: actualCamera === portalView.camera,
+        target: actualRenderer.getRenderTarget() === portalView.pipeline?.composer.writeBuffer
+          || actualRenderer.getRenderTarget() === portalView.pipeline?.composer.readBuffer,
+        groupVisible: portalGroup.visible, projection: actualCamera.projectionMatrix.toArray(),
         modelView: new T.Matrix4().multiplyMatrices(actualCamera.matrixWorldInverse, portalDestination.matrixWorld).toArray(),
-        texture: portalMaterial.uniforms.uTextureMatrix.value.toArray(), position: actualCamera.position.toArray() });
+        position: actualCamera.position.toArray() });
       const matrixClose = (actual, expected, tolerance = 1e-5) => actual?.length === 16 && expected.length === 16
         && actual.every((value, index) => Number.isFinite(value) && Math.abs(value - expected[index]) <= tolerance * Math.max(1, Math.abs(expected[index])));
       const updateWeaponEnvironment = day => {
@@ -337,64 +331,60 @@ try {
       };
       const renderActualPortal = name => {
         const before = graphSnapshot(), caller = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel(),
-          oldXr = renderer.xr.enabled, oldAutoClear = renderer.autoClear, oldLayers = portalCamera.layers.mask, oldVisible = portalGroup.visible,
-          start = result.native.draws.length, clearStart = result.native.clears.length, observationStart = portalObservations.length;
-        let beforeHooks = 0, afterHooks = 0, beforeHookState, afterHookState;
-        const borrowedState = () => ({ target: renderer.getRenderTarget() === caller, face: renderer.getActiveCubeFace(),
-          mip: renderer.getActiveMipmapLevel(), xr: renderer.xr.enabled, autoClear: renderer.autoClear,
-          layers: portalCamera.layers.mask, groupVisible: portalGroup.visible });
-        // Exercise real XR=true/autoClear=false borrowed state. No XR session is
-        // presented. Check the method's restoration before restoring the test's
-        // preparation, so these assignments cannot conceal a portal leak.
-        renderer.xr.enabled = result.input.portal.borrowedXr;renderer.autoClear = result.input.portal.borrowedAutoClear;
+          oldVisible = portalGroup.visible, start = result.native.draws.length, clearStart = result.native.clears.length,
+          observationStart = portalObservations.length;
+        let setupCalls = 0, restoreCalls = 0, setupVisible, restoreVisible;
         label = `aux-portal:${name}`;
-        try {
-          SpatialRift.prototype.renderPortal.call(portalObject, {
-            beforeRender: actualCamera => {
-              beforeHooks++;beforeHookState = { ...borrowedState(), camera: actualCamera === portalCamera };
-            },
-            afterRender: () => { afterHooks++;afterHookState = borrowedState(); },
-          });
-          const draws = result.native.draws.slice(start), clears = result.native.clears.slice(clearStart), observations = portalObservations.slice(observationStart),
-            expectedWorld = new T.Matrix4().multiplyMatrices(portalOffset, camera.matrixWorld),
-            expectedProjection = new T.PerspectiveCamera(camera.fov, camera.aspect, camera.near, camera.far).projectionMatrix,
-            expectedTexture = portalObject.biasMatrix.clone().multiply(expectedProjection).multiply(expectedWorld.clone().invert()).multiply(portalOffset),
-            program = renderer.properties.get(portalMaterial).currentProgram?.program;
-          const uploaded = uniform => {
-            const location = program && gl.getUniformLocation(program, uniform), value = location ? gl.getUniform(program, location) : null;
-            return value ? Array.from(value) : null;
-          };
-          const record = { name, kind: 'SpatialRift.prototype.renderPortal', target: id(portalTarget), draws, clears, beforeHooks, afterHooks,
-            beforeHookState, afterHookState, observations, projectionFov: camera.fov, portalVolumeLayerRendered: portalObject.portalVolumeLayerRendered,
-            actualOffset: portalObject.offsetMatrix.toArray(), expectedOffset: portalOffset.toArray(), actualWorld: portalCamera.matrixWorld.toArray(),
-            expectedWorld: expectedWorld.toArray(), expectedProjection: expectedProjection.toArray(), expectedTexture: expectedTexture.toArray(),
-            nativeUniforms: { projection: uploaded('projectionMatrix'), modelView: uploaded('modelViewMatrix'), texture: uploaded('uTextureMatrix'),
-              destinationToSource: uploaded('uDestinationToSource') },
-            targetRestored: renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip,
-            xrRestored: renderer.xr.enabled === result.input.portal.borrowedXr, autoClearRestored: renderer.autoClear === result.input.portal.borrowedAutoClear,
-            layersRestored: portalCamera.layers.mask === oldLayers, groupRestored: portalGroup.visible === oldVisible,
-            graphUnchanged: equal(before, graphSnapshot()) };result.auxiliary.push(record);
-          check(`${name}: actual portal clears then draws exactly its visible destination`, clears.length > 0 && draws.length === 1
-            && clears[0].order < draws[0].order && observations.length === 1 && observations[0].order < draws[0].order);
-          check(`${name}: real portal draw disables XR, enables volume layer and hides its group`, observations.every(row => row.renderer && row.scene
-            && row.camera && row.target && !row.xr && !row.autoClear && row.layers === (oldLayers | (1 << 2)) && !row.groupVisible)
-            && record.portalVolumeLayerRendered);
-          check(`${name}: actual portal hooks observe the production borrow/restore order`, beforeHooks === 1 && afterHooks === 1
-            && beforeHookState.camera && beforeHookState.target && beforeHookState.face === face && beforeHookState.mip === mip
-            && beforeHookState.xr && !beforeHookState.autoClear && beforeHookState.layers === (oldLayers | (1 << 2)) && !beforeHookState.groupVisible
-            && afterHookState.target && afterHookState.face === face && afterHookState.mip === mip && afterHookState.xr
-            && !afterHookState.autoClear && afterHookState.layers === oldLayers && !afterHookState.groupVisible);
-          check(`${name}: actual portal restores complete target, XR, autoClear, layers and group`, record.targetRestored && record.xrRestored
-            && record.autoClearRestored && record.layersRestored && record.groupRestored);
-          check(`${name}: actual portal transports source/target frames and projection`, matrixClose(record.actualOffset, record.expectedOffset, 1e-10)
-            && matrixClose(record.actualWorld, record.expectedWorld, 1e-10) && matrixClose(observations[0].projection, record.expectedProjection, 1e-10)
-            && matrixClose(observations[0].texture, record.expectedTexture, 1e-10));
-          check(`${name}: native destination shader consumes the actual portal camera and texture projections`, matrixClose(record.nativeUniforms.projection,
-            record.expectedProjection) && matrixClose(record.nativeUniforms.modelView, observations[0].modelView)
-            && matrixClose(record.nativeUniforms.texture, record.expectedTexture)
-            && matrixClose(record.nativeUniforms.destinationToSource, portalMaterial.uniforms.uDestinationToSource.value.toArray()));
-          check(`${name}: actual portal does not publish world history`, record.graphUnchanged);
-        } finally { renderer.xr.enabled = oldXr;renderer.autoClear = oldAutoClear; }
+        portalView.syncCamera(portalQuat);
+        const rendered = portalView.render({
+          origin: portalOrigin,
+          context: portalContext,
+          timeEpoch: 0,
+          setup: () => {
+            setupCalls++;
+            const prev = portalGroup.visible;
+            portalGroup.visible = false;
+            setupVisible = portalGroup.visible;
+            return () => {
+              restoreCalls++;
+              portalGroup.visible = prev;
+              restoreVisible = portalGroup.visible;
+            };
+          },
+        });
+        portalTarget = portalView.pipeline?.composer.readBuffer || null;
+        const draws = result.native.draws.slice(start), clears = result.native.clears.slice(clearStart),
+          observations = portalObservations.slice(observationStart),
+          expectedProjection = new T.PerspectiveCamera(camera.fov, camera.aspect, camera.near, camera.far).projectionMatrix,
+          program = renderer.properties.get(portalMaterial).currentProgram?.program;
+        const uploaded = uniform => {
+          const location = program && gl.getUniformLocation(program, uniform), value = location ? gl.getUniform(program, location) : null;
+          return value ? Array.from(value) : null;
+        };
+        const record = { name, kind: 'PortalView.prototype.render', rendered, target: id(portalTarget), draws, clears,
+          setupCalls, restoreCalls, setupVisible, restoreVisible, observations, projectionFov: camera.fov,
+          portalViewFlag: Boolean(portalView.pipeline?.portalView),
+          renderToScreen: Boolean(portalView.pipeline?.composer.renderToScreen),
+          disabledDisplayPasses: ['warp', 'foregroundPass', 'temporalAA', 'bloom', 'outputPass', 'grade', 'smaa', 'portalComposite']
+            .every(key => !portalView.pipeline?.[key]?.enabled),
+          expectedProjection: expectedProjection.toArray(),
+          nativeUniforms: { projection: uploaded('projectionMatrix'), modelView: uploaded('modelViewMatrix') },
+          targetRestored: renderer.getRenderTarget() === caller && renderer.getActiveCubeFace() === face && renderer.getActiveMipmapLevel() === mip,
+          groupRestored: portalGroup.visible === oldVisible,
+          graphUnchanged: equal(before, graphSnapshot()) };result.auxiliary.push(record);
+        check(`${name}: actual portal clears then draws its far destination`, rendered === true && clears.length > 0 && draws.length >= 1
+          && clears[0].order < draws[0].order && observations.length === 1 && observations[0].order < draws[0].order);
+        check(`${name}: portal far view runs without display transforms and hides leased group`, record.portalViewFlag
+          && !record.renderToScreen && record.disabledDisplayPasses
+          && observations.every(row => row.renderer && row.scene && row.camera && row.target && !row.groupVisible));
+        check(`${name}: actual portal setup/restore lease order holds`, setupCalls === 1 && restoreCalls === 1
+          && !setupVisible && restoreVisible === oldVisible);
+        check(`${name}: actual portal restores complete target and group visibility`, record.targetRestored && record.groupRestored);
+        check(`${name}: actual portal syncs camera projection and consumes it in native shader`,
+          matrixClose(observations[0].projection, record.expectedProjection, 1e-10)
+          && matrixClose(record.nativeUniforms.projection, record.expectedProjection)
+          && matrixClose(record.nativeUniforms.modelView, observations[0].modelView));
+        check(`${name}: actual portal does not publish main world history`, record.graphUnchanged);
       };
       const makePipeline = () => {
         const value = new GameLegacyPipeline(renderer, scene, camera, { volume: true, volumeScale: 1, bloomEnabled: false });
@@ -444,7 +434,7 @@ try {
           scopeDraws = draws.filter(row => row.label === `aux-scope:${name}`),
           portalDraws = draws.filter(row => row.label === `aux-portal:${name}`),
           graphDraws = draws.filter(row => row.label === `scope-graph:${name}`);
-        check(`${name}: native PMREM, actual scope, portal and graph preserve production submission order`, scopeDraws.length > 0 && portalDraws.length === 1
+        check(`${name}: native PMREM, actual scope, portal and graph preserve production submission order`, scopeDraws.length > 0 && portalDraws.length >= 1
           && pmremDraws.every(row => row.order < scopeDraws[0].order)
           && scopeDraws.every(row => row.order < portalDraws[0].order)
           && (drawGraph ? graphDraws.length > 0 && portalDraws.every(row => row.order < graphDraws[0].order) : graphDraws.length === 0));
@@ -489,7 +479,7 @@ try {
       check('A paced scope includes real weapon PMREM native draws', result.auxiliary.some(row => row.kind.startsWith('WeaponLighting')
         && row.name.startsWith('case-3-') && row.rebuilt && row.nativeDraws.length > 0));
       check('Both repeated native cases include three actual portal renders', [2, 3].every(index => result.auxiliary.filter(row =>
-        row.kind === 'SpatialRift.prototype.renderPortal' && row.name.startsWith(`case-${index}-`) && row.draws.length === 1).length === 3));
+        row.kind === 'PortalView.prototype.render' && row.name.startsWith(`case-${index}-`) && row.draws.length >= 1).length === 3));
       for (const [a, b, name] of [[0, 1, 'off/on'], [0, 2, 'off native repeat'], [1, 3, 'on native repeat'], [2, 3, 'repeat off/on']]) {
         const stages = Object.fromEntries(['current', 'resolved', 'final'].map(stage => [stage, compare(captures[a][stage].bits, captures[b][stage].bits)]));
         result.comparisons.push({ name, stages });check(`${name}: all RGBA16F native bits equal`, Object.values(stages).every(delta => delta.changed === 0));
@@ -844,7 +834,8 @@ try {
         }
         for (const owner of pacers) if (!owner.snapshot().released) { owner.dispose();await awaitReleased(owner, 'cleanup-captured'); }
         renderer?.setRenderTarget(null);lighting?.dispose();scopeRig?.removeFromParent();scopeTarget?.dispose();
-        portalGroup?.removeFromParent();portalTarget?.dispose();portalMaterial?.dispose();
+        portalGroup?.removeFromParent();portalDestination?.removeFromParent();portalView?.dispose();
+        portalDestination?.geometry?.dispose();portalMaterial?.dispose();
         preparationTarget?.dispose();preparationMaterial?.dispose();
         scopeMaterial?.dispose();equipmentMaterial?.dispose();cube?.dispose();source?.dispose();base?.dispose();geometry?.dispose();
         if (renderer) {

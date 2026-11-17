@@ -39,7 +39,7 @@ const { startDevServer, startServer } = await import('./server.js');
 const { applyFlightThrusters, guidePlanetApproach, stabilizeHorizon,
   applyFlightSteering, flightBoostSpeedLimit, pulseBurstDistance } = await import('../src/controls.js');
 const { Ship, landingDescentProgress, SHIP_LANDING_PROFILE } = await import('../src/effects.js');
-const { PULSE_TIMING, pulseChannels, pulseChargeFromHold, pulseChargeScaling, pulseDisplacement, warpApproachRemaining, warpChannels,
+const { PULSE_TIMING, pulseChannels, pulseChargeFromHold, pulseChargeScaling, pulseDisplacement, throatChannels, throatPlan, warpApproachRemaining, warpChannels,
   warpDepartureTravel, warpPlan } = await import('../src/transit.js');
 const { cockpitShakeAmplitude, solveHullQuaternion } = await import('../src/ship-view.js');
 const { DEFAULT_POWER, powerEffectsFor } = await import('../src/ship-hud.js');
@@ -126,7 +126,9 @@ for (const distance of [2e11, 5e12, 8e13]) {
     previous = current;
   }
   const atSwap = warpChannels(plan.swapAt, plan);
-  if (atSwap.tunnel < 0.999 || atSwap.mouth > 0) throw new Error('Warp swaps the destination while the tunnel is not opaque');
+  if (atSwap.tunnel < 0.999 || atSwap.conduitEnter < 0.999 || atSwap.conduitExit > 0.001) {
+    throw new Error('Warp swaps the destination while the conduit does not fully cover the view');
+  }
   let lastRemaining = 1;
   for (let t = 0; t <= plan.total; t += dt) {
     const remaining = warpApproachRemaining(t, plan);
@@ -142,6 +144,22 @@ for (const distance of [2e11, 5e12, 8e13]) {
   if (settled.streak > 1e-6 || settled.tunnel > 1e-6 || Math.abs(settled.fov) > 1e-6) {
     throw new Error('Warp visuals do not settle at arrival');
   }
+}
+
+// The wormhole throat is the same conduit language, compressed: continuous,
+// fully covered at the swap, and settled when it ends.
+{
+  const plan = throatPlan();
+  let prev = throatChannels(0, plan);
+  for (let t = 1 / 120; t <= plan.duration; t += 1 / 120) {
+    const c = throatChannels(t, plan);
+    for (const [key, limit] of Object.entries({ warp: 0.05, tunnel: 0.05, fov: 0.6, kick: 0.12 })) {
+      if (Math.abs(c[key] - prev[key]) > limit) throw new Error(`Throat channel ${key} jumps at ${t.toFixed(3)} s`);
+    }
+    prev = c;
+  }
+  if (throatChannels(plan.swapAt, plan).tunnel < 0.999) throw new Error('Throat swaps worlds while the conduit is not covering the view');
+  if (throatChannels(plan.duration, plan).tunnel > 1e-6) throw new Error('Throat does not open fully');
 }
 
 // Landing is a world-space third-person shot, with enough authored clearance

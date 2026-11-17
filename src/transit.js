@@ -1,7 +1,7 @@
 // Transit choreography shared by the local pulse and the interstellar warp.
 //
 // Every visible and audible part of a transit (starflow streak length,
-// relativistic aberration, the post-pass tunnel, FOV, camera kick, hull light)
+// relativistic aberration, the 3D conduit, FOV, camera kick, hull light)
 // reads one continuous timeline. Phases therefore hand over by changing the
 // same parameters, never by fading one effect out while another one appears.
 // Everything here is pure so the choreography is testable in Node.
@@ -45,6 +45,13 @@ export function emptyTransitChannels() {
     fov: 0, // degrees added to the base field of view
     kick: 0, // camera push along its local +Z, in units of the shot's kick scale
     hull: 0, // transit light on the hull
+    warp: 0, // conduit flow 0..1 (warp and throat)
+    conduitEnter: 0, // conduit formation front 0..1
+    conduitExit: 0, // conduit opening front 0..1
+    speed: 0, // conduit visual speed, fraction of peak
+    accel: 0, // normalised acceleration of the flow
+    charge: 0, // warp spool charge
+    sky: 1, // visibility of the real sky starfield
   };
 }
 
@@ -123,116 +130,161 @@ export function pulseChannels(t, out = emptyTransitChannels(), { power = 1, char
 }
 
 // ---------------------------------------------------------------------------
-// Warp: five phases whose exit state is the next phase's entry state.
-//   A  spool    stars streak and gather forward, FOV opens
-//   B  entry    streak field thickens into the tunnel wall; mouth sweeps out
-//   C  tunnel   long curving passage; the universe is swapped out of sight
-//   D  exit     the end light opens from the centre; wall breaks back to streaks
-//   E  arrival  streaks retract while the camera brakes onto the destination
+// Warp: one shot driven by a single flow scalar w(u) over normalised time u.
+//   spool     0    – .085  charge: space pinches, the lens tightens
+//   accelerate .085 – .16   near-field stars start to streak past
+//   enter     .16  – .34   a formation front sweeps from the far end back over
+//                           the ship; streaks are bent onto the conduit and
+//                           become its filaments (see warp-conduit.js)
+//   covered   .34  – .62   inside the conduit; the universe is swapped here
+//   exit      .62  – .80   an opening front sweeps the same way; the
+//                           destination appears through the dissolving mouth
+//   arrive    .80  – 1     streaks shorten back to points while braking
+// Visual travel is the integral of the speed curve, pre-computed into a
+// table, so streak flow, the departure drift and the arrival approach all
+// follow the same speed.
+export const WARP_MARKS = Object.freeze({
+  spoolEnd: 0.085, enterStart: 0.16, enterEnd: 0.34, decelStart: 0.58,
+  exitStart: 0.62, exitEnd: 0.80, decelEnd: 0.93,
+});
+const WARP_SAMPLES = 1024;
+const WARP_SPEED_K = 4.2;
+
+export function warpFlow(u) {
+  if (u <= 0 || u >= 1) return 0;
+  const rise = Math.pow(smoothstep(0.02, 0.31, u), 1.7);
+  const fall = 1 - smoothstep(WARP_MARKS.decelStart, WARP_MARKS.decelEnd, u);
+  return Math.min(rise, fall);
+}
+
+// Visual speed as a fraction of peak: exponential in w, so the last stretch
+// of acceleration is violent and the first stretch of braking is decisive.
+export function warpSpeedFraction(w, cruise = 0.0015) {
+  return cruise + (1 - cruise) * (Math.exp(WARP_SPEED_K * w) - 1) / (Math.exp(WARP_SPEED_K) - 1);
+}
+
 export function warpPlan(distance = 0) {
-  // Interstellar distances are 1e11..1e14 m; give long hauls a longer tunnel.
-  const tunnel = Math.max(4, Math.min(8, 3.4 + Math.log10(Math.max(distance, 1e10) / 1e10) * 1.4));
-  const plan = { spool: 3.0, entry: 1.25, tunnel, exit: 1.2, arrival: 3.2 };
-  plan.entryStart = plan.spool;
-  plan.tunnelStart = plan.entryStart + plan.entry;
-  plan.exitStart = plan.tunnelStart + plan.tunnel;
-  plan.arrivalStart = plan.exitStart + plan.exit;
-  plan.total = plan.arrivalStart + plan.arrival;
-  // The destination is adopted half a second into the opaque tunnel.
-  plan.swapAt = plan.tunnelStart + 0.5;
-  return plan;
+  // 14 s for a neighbour, up to 18 s for the far side of the galaxy.
+  const duration = Math.max(14, Math.min(18, 14 + Math.log10(Math.max(distance, 1e10) / 1e10) * 1.3));
+  const travel = new Float64Array(WARP_SAMPLES + 1);
+  const accel = new Float32Array(WARP_SAMPLES + 1);
+  // travel speed: the flow curve, settling to exactly zero at the end so
+  // the arrival approach comes to rest on the framing
+  const travelSpeed = (u) => warpSpeedFraction(warpFlow(u)) * (1 - smoothstep(WARP_MARKS.decelEnd, 1, u));
+  let acc = 0, prev = travelSpeed(0), maxA = 1e-9;
+  for (let i = 1; i <= WARP_SAMPLES; i++) {
+    const v = travelSpeed(i / WARP_SAMPLES);
+    acc += 0.5 * (v + prev) * duration / WARP_SAMPLES;
+    travel[i] = acc;
+    accel[i] = (v - prev) * WARP_SAMPLES / duration;
+    maxA = Math.max(maxA, Math.abs(accel[i]));
+    prev = v;
+  }
+  accel[0] = accel[1];
+  for (let i = 0; i <= WARP_SAMPLES; i++) accel[i] /= maxA;
+  const m = WARP_MARKS;
+  return {
+    duration, total: duration, travel, accel,
+    spool: duration * m.enterStart,
+    entryStart: duration * m.enterStart,
+    tunnelStart: duration * m.enterEnd,
+    exitStart: duration * m.exitStart,
+    arrivalStart: duration * m.exitEnd,
+    // the universe is swapped in the middle of the fully covered window
+    swapAt: duration * (m.enterEnd + 0.4 * (m.exitStart - m.enterEnd)),
+  };
 }
 
-// Remaining fraction of the final approach distance, over exit + arrival.
-// Velocity is continuous and reaches exactly zero at the authored framing.
+function sampleTable(table, u) {
+  const x = clamp01(u) * WARP_SAMPLES;
+  const i = Math.min(WARP_SAMPLES - 1, Math.floor(x));
+  const f = x - i;
+  return table[i] * (1 - f) + table[i + 1] * f;
+}
+
+// Fraction of the final approach distance still ahead (1 at the opening,
+// exactly 0 at the end), following the same speed curve as the streaks.
 export function warpApproachRemaining(t, plan) {
-  const span = plan.exit + plan.arrival;
-  const u = clamp01((t - plan.exitStart) / span);
-  return Math.pow(1 - u, 3.2);
+  const u = clamp01(t / plan.duration);
+  const start = sampleTable(plan.travel, WARP_MARKS.exitStart);
+  const end = plan.travel[WARP_SAMPLES];
+  if (u <= WARP_MARKS.exitStart) return 1;
+  return Math.max(0, (end - sampleTable(plan.travel, u)) / Math.max(end - start, 1e-9));
 }
 
-// Pre-tunnel travel, as a fraction of the spool distance (cubic, continues
-// smoothly through the entry until the swap).
+// Departure drift before the ship is enclosed, as a fraction of the spool
+// distance at full enclosure (continues smoothly to the swap).
 export function warpDepartureTravel(t, plan) {
-  const u = Math.max(0, t) / plan.spool;
-  return u * u * u;
+  const u = clamp01(t / plan.duration);
+  return sampleTable(plan.travel, u) / Math.max(sampleTable(plan.travel, WARP_MARKS.enterEnd), 1e-9);
 }
 
 export function warpChannels(t, plan, out = emptyTransitChannels()) {
-  if (t < 0 || t > plan.total) return out;
-  const { entryStart: B, tunnelStart: C, exitStart: D, arrivalStart: E } = plan;
-  if (t < B) {
-    const u = t / plan.spool;
-    out.streak = 0.82 * Math.pow(u, 1.7);
-    out.aberr = 0.30 * u * u;
-    out.doppler = 0.6 * u * u;
-    out.blur = 0.55 * u * u;
-    out.fov = -3 * envelope(t, 0.15, 0.7, 0.9, 1.6) + 16 * Math.pow(smoothstep(0.6, B, t), 1.35);
-    out.flowSpeed = 6;
-    out.hull = 0.25 * u * u;
-  } else if (t < C) {
-    const u = (t - B) / plan.entry;
-    const s = smoothstep(0, 1, u);
-    out.streak = 0.82 + 0.18 * s;
-    out.aberr = 0.30 + 0.58 * s;
-    out.doppler = 0.6 + 0.4 * s;
-    out.blur = 0.55 + 0.3 * s;
-    out.tunnel = smoothstep(0.0, 0.5, u);
-    out.mouth = 70 * Math.pow(1 - u, 2.3);
-    out.endGlow = 0.6 * s;
-    out.flowSpeed = 6 + 34 * s;
-    out.fov = 16 + 6 * s;
-    out.flash = 0.22 * envelope(t, C - 0.24, C - 0.1, C - 0.06, C + 0.25);
-    out.hull = 0.25 + 0.75 * s;
-  } else if (t < D) {
-    const u = (t - C) / plan.tunnel;
-    out.streak = 1;
-    out.aberr = 0.88;
-    out.doppler = 1;
-    out.blur = 0.85;
-    out.tunnel = 1;
-    out.mouth = 0;
-    out.endGlow = 0.6 + 0.4 * smoothstep(0, 1, u);
-    out.flowSpeed = 40;
-    out.colorMix = smoothstep(0.15, 0.85, u);
-    out.fov = 22 - 2 * smoothstep(0, 0.3, u) + Math.sin(u * Math.PI * 2) * 0.8;
-    out.flash = 0.22 * envelope(t, C - 0.24, C - 0.1, C - 0.06, C + 0.25);
-    out.hull = 1;
-  } else if (t < E) {
-    const u = (t - D) / plan.exit;
-    const s = smoothstep(0, 1, u);
-    out.streak = 1 - 0.2 * s;
-    out.aberr = 0.88 - 0.43 * s;
-    out.doppler = 1 - 0.4 * s;
-    out.blur = 0.85 - 0.25 * s;
-    // The exit opens through the hole, never by thinning the wall.
-    out.tunnel = 1 - smoothstep(0.78, 1, u);
-    out.mouth = 0;
-    out.exit = 90 * Math.pow(1 - u, 2.2);
-    // Flares as the opening sweeps past, then hands the frame to the real sky.
-    out.endGlow = (1 + 1.1 * envelope(u, 0, 0.35, 0.55, 1)) * (1 - smoothstep(0.5, 1, u));
-    out.flowSpeed = 40 - 20 * s;
-    // the eye adapting as daylight-bright real space floods in through the exit
-    out.flash = 0.45 * envelope(u, 0.25, 0.5, 0.6, 0.98);
-    out.colorMix = 1;
-    out.fov = 20 - 8 * s;
-    out.hull = 1 - 0.6 * s;
-  } else {
-    const u = (t - E) / plan.arrival;
-    const fall = (1 - u) * (1 - u);
-    out.streak = 0.8 * fall;
-    out.aberr = 0.45 * fall;
-    out.doppler = 0.6 * fall;
-    out.blur = 0.6 * fall;
-    out.colorMix = 1;
-    out.fov = 12 * (1 - smoothstep(0, 0.55, u)) - 3 * envelope(u, 0.35, 0.6, 0.7, 1);
-    out.hull = 0.4 * fall;
-  }
-  out.kick += transitKick(t, C - 0.12, { decay: 3.6, frequency: 1.1 }) * 1.2
-    + transitKick(t, D + 0.25, { decay: 4.5, frequency: 1.3 }) * 0.45;
+  if (t < 0 || t > plan.duration) return out;
+  const m = WARP_MARKS;
+  const u = clamp01(t / plan.duration);
+  const w = warpFlow(u);
+  const enter = smoothstep(m.enterStart, m.enterEnd, u);
+  const exit = smoothstep(m.exitStart, m.exitEnd, u);
+  const charge = u <= 0 || u >= 1 ? 0 : smoothstep(0, 0.075, u) * (1 - smoothstep(0.11, 0.26, u));
+  const accel = u < 1 ? sampleTable(plan.accel, u) : 0;
+  const coverage = Math.min(enter, 1 - exit);
+  out.warp = w;
+  out.conduitEnter = enter;
+  out.conduitExit = exit;
+  out.speed = warpSpeedFraction(w);
+  out.accel = accel;
+  out.charge = charge;
+  out.tunnel = coverage;
+  out.sky = 1 - smoothstep(0.06, 0.5, w);
+  // the real sky only hints at the motion; the near-field streaks carry it
+  out.streak = 0.35 * w * out.sky;
+  out.aberr = 0.22 * w * out.sky + 0.08 * charge;
+  out.doppler = 0.5 * w * out.sky;
+  out.blur = Math.min(1, w * (0.25 + 0.45 * Math.max(accel, 0)));
+  out.fold = 3 * (0.035 * charge + 0.02 * Math.max(accel, 0)) * (1 - enter);
+  out.colorMix = smoothstep(m.enterEnd, m.exitStart, u);
+  // lens: tightens while charging, opens with the flow, punches with accel
+  out.fov = 62 * (-0.045 * charge * (1 - w) + 0.19 * w + 0.07 * accel);
+  out.kick += 0.85 * accel - 0.25 * charge * (1 - w);
+  out.flash = Math.max(out.flash, 0.18 * envelope(u, m.exitStart + 0.04, m.exitStart + 0.09, m.exitStart + 0.11, m.exitEnd));
+  out.hull = Math.max(out.hull, 0.25 * charge + 0.75 * smoothstep(0.15, 1, w));
   return out;
 }
 
 export function transitIntensity(channels) {
   return clamp01(Math.max(channels.streak, channels.tunnel, channels.fold));
+}
+
+// ---------------------------------------------------------------------------
+// Throat: the short ride through a wormhole mouth (弦界航道). Same conduit
+// language as the warp, compressed to ~2.6 s, with a decisive push on entry:
+// the mouth's interior swallows the view, the conduit forms around the ship,
+// the worlds are swapped while it is opaque, and it opens onto the far side.
+export const THROAT_MARKS = Object.freeze({ enterEnd: 0.3, swap: 0.4, exitStart: 0.48, exitEnd: 0.88 });
+
+export function throatPlan() {
+  return { duration: 2.6, swapAt: 2.6 * THROAT_MARKS.swap };
+}
+
+export function throatChannels(t, plan, out = emptyTransitChannels()) {
+  if (t < 0 || t > plan.duration) return out;
+  const m = THROAT_MARKS;
+  const u = clamp01(t / plan.duration);
+  const w = smoothstep(0, 0.2, u) * (1 - smoothstep(0.56, 0.96, u));
+  const enter = smoothstep(0, m.enterEnd, u);
+  const exit = smoothstep(m.exitStart, m.exitEnd, u);
+  out.warp = Math.max(out.warp || 0, w);
+  out.conduitEnter = enter;
+  out.conduitExit = exit;
+  out.speed = warpSpeedFraction(w) * 0.55;
+  out.tunnel = Math.min(enter, 1 - exit);
+  out.blur = Math.max(out.blur, 0.75 * w);
+  out.fold = Math.max(out.fold, 0.5 * envelope(u, 0, 0.05, 0.08, 0.2));
+  out.flash = Math.max(out.flash, 0.4 * envelope(u, 0.02, 0.06, 0.08, 0.2));
+  out.fov += 62 * (0.16 * w - 0.05 * envelope(u, 0.85, 0.92, 0.94, 1));
+  out.kick += transitKick(t, 0.12, { decay: 3.8, frequency: 1.15 }) * 1.3
+    + transitKick(t, plan.duration * m.exitStart + 0.2, { decay: 4.5, frequency: 1.3 }) * 0.4;
+  out.hull = Math.max(out.hull, 0.9 * w);
+  return out;
 }

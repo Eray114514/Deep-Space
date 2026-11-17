@@ -18,7 +18,11 @@ const smoothstep = (a, b, x) => {
 
 // Shape and character of an opening. Every field can be overridden per portal.
 export const DEFAULT_PORTAL_PROFILE = Object.freeze({
-  halfWidth: 380, // metres
+  // 'sphere': a wormhole mouth (lensing ball, crossed through a short throat);
+  // 'plane': a fold seam with a shaped opening (doors, gates).
+  shape: 'plane',
+  radius: 400, // metres, sphere mouths
+  halfWidth: 380, // metres, plane seams
   halfHeight: 300,
   // contour = 1 + Σ amp·sin(k·θ + phase + speed·t); four harmonics
   harmonics: Object.freeze([
@@ -45,6 +49,14 @@ export function createPortalProfile(options = {}) {
   profile.harmonics = (options.harmonics || DEFAULT_PORTAL_PROFILE.harmonics).map((h) => ({ ...h }));
   profile.rimColor = [...(options.rimColor || DEFAULT_PORTAL_PROFILE.rimColor)];
   return profile;
+}
+
+// The 弦界 lane: a wormhole mouth that forms ahead of the ship.
+export function wormholePortalProfile(options = {}) {
+  return createPortalProfile({
+    shape: 'sphere', radius: 420, rimIntensity: 2.2, lensing: 1.0, openSeconds: 1.5,
+    closeSeconds: 1.4, seamFraction: 0.18, ...options,
+  });
 }
 
 // A person-sized door: tighter, calmer contour, brighter relative seam.
@@ -101,6 +113,8 @@ export class SpacePortal {
     this.time = 0;
   }
 
+  get shape() { return this.profile.shape; }
+  get radius() { return this.profile.radius; }
   get halfWidth() { return this.profile.halfWidth; }
   get halfHeight() { return this.profile.halfHeight; }
   get isVisible() { return this.phase !== 'closed'; }
@@ -173,6 +187,9 @@ export class SpacePortal {
   // Map a universe-space pose through the opening to the far side.
   mapPosition(point, out = new THREE.Vector3()) {
     this.toSourceLocal(point, out);
+    // Through a mouth you leave by the far surface of the other mouth, so the
+    // throat is traversed front to back instead of landing inside the ball.
+    if (this.profile.shape === 'sphere') out.z = -out.z;
     return out.applyQuaternion(this.target.quaternion).add(this.target.position);
   }
 
@@ -190,6 +207,19 @@ export class SpacePortal {
   // Returns the crossing fraction along the segment, or -1.
   crossing(prev, curr) {
     if (this.open.y < 0.9) return -1;
+    if (this.profile.shape === 'sphere') {
+      // first entry of the segment into the mouth
+      const R = this.radius * this.open.y;
+      const a = this.toSourceLocal(prev, new THREE.Vector3());
+      const b = this.toSourceLocal(curr, new THREE.Vector3());
+      if (a.length() <= R) return -1;
+      const d = b.clone().sub(a);
+      const A = d.dot(d), B = 2 * a.dot(d), C = a.dot(a) - R * R;
+      const disc = B * B - 4 * A * C;
+      if (A < 1e-12 || disc < 0) return -1;
+      const t = (-B - Math.sqrt(disc)) / (2 * A);
+      return t >= 0 && t <= 1 ? t : -1;
+    }
     const a = this.toSourceLocal(prev, new THREE.Vector3());
     const b = this.toSourceLocal(curr, new THREE.Vector3());
     if (Math.sign(a.z) === Math.sign(b.z) || a.z === b.z) return -1;
@@ -204,6 +234,9 @@ export class SpacePortal {
   // radial position of a universe point relative to the opening.
   locate(point) {
     const local = this.toSourceLocal(point, _v);
+    if (this.profile.shape === 'sphere') {
+      return { z: local.length() - this.radius, radial: Math.hypot(local.x, local.y) / this.radius, local: local.clone() };
+    }
     const x = local.x / this.halfWidth, y = local.y / this.halfHeight;
     return { z: local.z, radial: Math.hypot(x, y) / this.contour(Math.atan2(y, x)), local: local.clone() };
   }
@@ -217,6 +250,8 @@ export class SpacePortal {
     u.uUp.value.setFromMatrixColumn(_m, 1);
     u.uNormal.value.setFromMatrixColumn(_m, 2);
     u.uHalf.value.set(this.halfWidth, this.halfHeight);
+    u.uShape.value = this.profile.shape === 'sphere' ? 1 : 0;
+    u.uRadius.value = this.radius;
     u.uOpen.value.set(this.open.x, this.open.y);
     u.uTension.value = this.open.tension;
     u.uFlash.value = this.open.flash;

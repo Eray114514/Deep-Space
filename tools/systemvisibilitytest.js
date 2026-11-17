@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as THREE from 'three';
 import * as transit from '../src/transit.js';
-import { SpacePortal } from '../src/portal/space-portal.js';
+import { SpacePortal, wormholePortalProfile } from '../src/portal/space-portal.js';
 
 const mainPath = process.argv.find(value => value.startsWith('--main-source='))?.slice('--main-source='.length) || 'src/main.js';
 const bytes = await readFile(mainPath), main = bytes.toString(), verifier = await readFile(new URL(import.meta.url));
@@ -31,7 +31,7 @@ async function test(name, work) {
 const group = visible => Object.assign(new THREE.Group(), { visible });
 function system(id, visible = true) {
   const body = { bodyId: `${id}-body`, group: group(visible), posUniv: new THREE.Vector3(0, 0, 100), name: id, appear: 1 };
-  const other = { bodyId: `${id}-other`, group: group(visible) };
+  const other = { bodyId: `${id}-other`, group: group(visible), posUniv: new THREE.Vector3(0, 0, 9e6) };
   const orphan = group(visible), child = new THREE.PointLight(0xffffff, 1);orphan.add(child);
   const attached = group(true);body.group.add(attached);
   const spec = { bodyId: body.bodyId, name: id, radius: 10, isMoon: false };
@@ -85,7 +85,8 @@ function farViewFixture() {
   const context = helpers({ THREE, scene, universe: { system: source, fadingSystem: fading, nearStarsMesh: stars, backdropMesh: backdrop, nebulas: new THREE.Group() },
     riftRoute: { arrived: false }, riftFarBodyId: destination.body.bodyId, atmospherePass: { activePlanet: live },
     ship: { group: group(true) }, weapons: { glowMesh: group(true), coreMesh: group(false) }, sunShadow: group(true), headlamp: group(false),
-    skyDome: { mesh: group(true) }, hemi: group(true), ambient: group(false), riftPortalAmbient: group(false) });
+    skyDome: { mesh: group(true) }, hemi: group(true), ambient: group(false), riftPortalAmbient: group(false),
+    scatter: { meshes: { grass: group(true) } } });
   return { context, source, fading, destination, scene, stars, backdrop, live };
 }
 await test('far view lease hides the near worlds, shows only the far target, moves the sky and restores everything', () => {
@@ -150,8 +151,8 @@ await test('an early stellar warp hides sites produced while finishing the prepa
   assert.equal(f.destination.orphan.visible, false);assert.equal(f.destination.body.group.visible, false);assert.equal(f.context.universe.system, f.source);
   step(.6);f.verify();
 });
-await test('rift crossing maps the pose through the fold and keeps the departure world as the closing far side', () => {
-  const f = adoptionFixture(), portal = new SpacePortal({ halfWidth: 500, halfHeight: 400 });
+await test('wormhole entry rides the throat, swaps under cover and leaves through the far mouth with the pose carried', () => {
+  const f = adoptionFixture(), portal = new SpacePortal(wormholePortalProfile({ radius: 400 }));
   const source = new THREE.Vector3(0, 0, -1000), target = new THREE.Vector3(5e9, 0, 0);
   const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.4);
   portal.setFrames(source, new THREE.Quaternion(), target, targetQuat);
@@ -159,24 +160,36 @@ await test('rift crossing maps the pose through the fold and keeps the departure
   let exchanged = 0;
   Object.assign(f.context, { riftPortal: portal, riftPreviewSystem: f.destination, riftPreviewReady: true, riftBackSystem: null,
     riftEntranceUniv: source.clone(), riftOrientation: new THREE.Quaternion(), riftInverse: new THREE.Quaternion(), riftLocalVel: new THREE.Vector3(),
-    RIFT_CAPTURE_DISTANCE: 1900, lerp: (a, b, t) => a + (b - a) * t, riftSpill: new THREE.Color(), clock: { elapsedTime: 10 },
-    nodePipeline: { setActiveAtmosphere() {}, cloudPass: { exchangeTemporalState() { exchanged++; } }, portalComposite: { enabled: true } },
-    portalView: { pipeline: { cloudPass: {} } }, systemBuildResumeAt: 0, focusPlanet: null, _v: new THREE.Vector3() });
-  f.context.riftRoute = { arrived: false, anchorLocked: true, openStarted: true, lastHintBand: 0, label: 'route',
+    lerp: (a, b, t) => a + (b - a) * t, riftSpill: new THREE.Color(), clock: { elapsedTime: 10 }, riftThroat: null, nearest: null, riftTargetUniv: target.clone(),
+    nodePipeline: { setActiveAtmosphere() {}, invalidateTemporalHistory() {}, cloudPass: { exchangeTemporalState() { exchanged++; } }, portalComposite: { enabled: true } },
+    portalView: { pipeline: { setActiveAtmosphere() {}, cloudPass: {} } }, systemBuildResumeAt: 0, focusPlanet: null, _v: new THREE.Vector3() });
+  f.context.riftRoute = { arrived: false, anchorLocked: true, openStarted: true, lastHintBand: 0, label: 'route', reach: 4000,
     arrival: { bodyId: f.destination.body.bodyId, entry: target.clone(), quat: targetQuat.clone() } };
-  f.context.prevNavPos.set(0, 0, -995);f.context.nav.pos.set(0, 0, -1004);f.context.nav.vel.set(0, 0, -76);
+  // front surface of the near mouth is at z = -600; the ship crosses it this frame
+  f.context.prevNavPos.set(0, 0, -595);f.context.nav.pos.set(0, 0, -604);f.context.nav.vel.set(0, 0, -76);
+  const entry = new THREE.Vector3(0, 0, -600);
+  const expected = portal.mapPosition(entry, new THREE.Vector3()).add(portal.mapDirection(new THREE.Vector3(0, 0, -4), new THREE.Vector3()));
+  const expectedVel = portal.mapDirection(new THREE.Vector3(0, 0, -1), new THREE.Vector3());
+  f.context.nearestBodyOf = load('nearestBodyOf', f.context);
+  f.context.beginRiftThroat = load('beginRiftThroat', f.context);
   f.context.finishRiftCrossing = load('finishRiftCrossing', f.context);
-  load('updateRiftRoute', f.context)(.016);
+  const update = load('updateRiftRoute', f.context);
+  update(.016);
+  assert.ok(f.context.riftThroat, 'entering the mouth starts the throat ride');
+  assert.equal(f.context.riftRoute.arrived, false, 'no world swap at the surface');
+  const swapAt = f.context.riftThroat.plan.swapAt;
+  // the conduit covers the view completely at the swap
+  const ch = transit.emptyTransitChannels();transit.throatChannels(swapAt, f.context.riftThroat.plan, ch);
+  assert.ok(ch.tunnel > 0.999, 'the swap happens under full cover');
+  for (let i = 0; i < 400 && !f.context.riftRoute.arrived; i++) update(.016);
   assert.equal(f.context.riftRoute.arrived, true);assert.equal(f.context.universe.system, f.destination);
   assert.equal(f.context.riftBackSystem, f.source, 'the departure world stays drawable behind the fold');
   assert.equal(f.context.universe.fadingSystem, null);assert.equal(f.source.orphan.visible, false);assert.equal(f.source.body.group.visible, false);
   assert.equal(f.destination.orphan.visible, true);assert.equal(f.destination.body.group.visible, true);assert.equal(f.destination.other.group.visible, false);
   assert.equal(f.context.deferredSystemWarmQueue.length, 1);assert.equal(exchanged, 1);
-  // 4 m past the opening along the source normal == 4 m past the target frame
-  const expected = new THREE.Vector3(0, 0, -4).applyQuaternion(targetQuat).add(target);
-  assert.ok(f.context.nav.pos.distanceTo(expected) < 1e-6, 'position continues through the fold');
-  assert.ok(f.context.nav.vel.clone().normalize().distanceTo(new THREE.Vector3(0, 0, -1).applyQuaternion(targetQuat)) < 1e-9, 'velocity is carried, not re-aimed');
-  assert.ok(f.context.prevNavPos.distanceTo(new THREE.Vector3(0, 0, 5).applyQuaternion(targetQuat).add(target)) < 1e-6, 'frame history follows the fold');
+  assert.ok(f.context.nav.pos.distanceTo(expected) < 1e-6, 'position continues through the throat');
+  assert.ok(Math.abs(f.context.nav.pos.distanceTo(target) - 404) < 1e-6, 'the ship leaves 4 m outside the far mouth');
+  assert.ok(f.context.nav.vel.clone().normalize().distanceTo(expectedVel) < 1e-9, 'velocity is carried, not re-aimed');
 });
 
 const failures = cases.filter(row => !row.passed), sourceStable = (await readFile(mainPath)).equals(bytes)

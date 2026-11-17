@@ -15,6 +15,7 @@ export const starflowUniforms = {
   uStreak: { value: 0 },
   uAberr: { value: 0 },
   uDoppler: { value: 0 },
+  uSky: { value: 1 }, // fades the real sky while the warp conduit carries the motion
   uViewport: { value: new THREE.Vector2(1920, 1080) }, // drawing-buffer pixels
 };
 
@@ -111,6 +112,7 @@ const STARFLOW_VERTEX_CORE = /* glsl */`
 `;
 
 const STARFLOW_FRAGMENT_CORE = /* glsl */`
+  uniform float uSky;
   varying vec2 vSeg;
   varying float vLen;
   varying float vHalf;
@@ -185,7 +187,7 @@ export function makeStarflowStarMaterial() {
         if (r >= 1.0) discard;
         float a = smoothstep(1.0, 0.15, r);
         vec3 c = starflowShift(vColor) * (1.0 + 0.5 * (1.0 - r));
-        gl_FragColor = vec4(c, 1.0) * a * starflowTrail() * vBright * vEnergy * (1.0 - uDim * 0.97);
+        gl_FragColor = vec4(c, 1.0) * a * starflowTrail() * vBright * vEnergy * (1.0 - uDim * 0.97) * uSky;
       }`,
     transparent: true,
     depthWrite: false,
@@ -224,7 +226,7 @@ export function makeStarflowBackdropMaterial() {
         if (r >= 1.0) discard;
         float a = smoothstep(1.0, 0.1, r);
         gl_FragColor = vec4(starflowShift(vColor) * 0.78,
-          a * starflowTrail() * vAlpha * pow(vEnergy, 1.8) * (1.0 - uDim * 0.985));
+          a * starflowTrail() * vAlpha * pow(vEnergy, 1.8) * (1.0 - uDim * 0.985) * uSky);
       }`,
     transparent: true,
     depthWrite: false,

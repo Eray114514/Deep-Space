@@ -133,167 +133,180 @@ try {
     'rift passage hides the complete cockpit HUD and route selector');
   await page.waitForFunction(() => {
     const rift = NMS.riftState();
-    return rift.tension > 0.45 && rift.open > 0.10 && rift.open < 0.82;
+    return rift.phase === 'opening' && rift.seam > 0.9 && rift.open > 0.10 && rift.open < 0.85;
   }, null, { timeout: 20000 });
   const openingState = await page.evaluate('NMS.riftState()');
   await page.screenshot({ path: openingFrame });
-  check(openingState.burst < 0.30,
-    `rift opening keeps its release pulse local (open ${openingState.open.toFixed(2)}, burst ${openingState.burst.toFixed(2)})`);
-  await page.waitForFunction(() => NMS.riftState().open > 0.985 && NMS.riftState().burst < 0.001,
-    null, { timeout: 20000 });
-  await page.waitForFunction(() => (NMS.riftState().previewVolume?.portalReadiness || 0) > 0.96,
+  check(openingState.composite && openingState.farRendered && openingState.seam > 0.9 && openingState.burst <= 1.0,
+    `rift opening tears from seam with live far composite (seam ${openingState.seam.toFixed(2)}, open ${openingState.open.toFixed(2)}, burst ${openingState.burst.toFixed(2)})`);
+  await page.waitForFunction(() => {
+    const rift = NMS.riftState();
+    return rift.phase === 'open' && rift.open > 0.985 && rift.burst < 0.001 && rift.anchorLocked;
+  }, null, { timeout: 20000 });
+  await page.waitForFunction(() => NMS.riftState().previewVolume?.ready,
     null, { timeout: 20000 });
 
   check(await page.evaluate('NMS.stats().audio'), 'route gesture unlocks procedural audio');
   const stable = await page.evaluate('NMS.riftState()');
-  check(stable.visible && stable.destinationLight.length > 0,
-    'stable passage renders a live destination system');
+  check(stable.visible && stable.composite && stable.farRendered && stable.phase === 'open' && stable.destinationLight.length > 0,
+    'stable passage renders a live destination system through the far-view composite');
   const portalContract = await page.evaluate(() => {
-    const { scene, riftPreviewSystem } = NMS._internals;
+    const { scene, ship, universe, riftPreviewSystem } = NMS._internals;
+    const pipeline = NMS._pipeline;
+    const composite = pipeline.portalComposite;
     const targetBodyId = NMS.riftState().previewVolume?.bodyId;
     const targetBody = riftPreviewSystem?.bodyById.get(targetBodyId);
-    const wall = scene.getObjectByName('spatial-rift-inner-wall');
-    const wallDepth = wall?.geometry.getAttribute('aDepth');
-    const portal = scene.getObjectByName('spatial-rift-portal-cutout');
     const previewBodies = [
       ...(riftPreviewSystem?.planets || []),
       ...(riftPreviewSystem?.compactObjects || []),
     ];
     return {
-      wallOpaque: !!wall && !wall.material.transparent && wall.material.depthWrite,
-      wallSpansPassage: !!wallDepth && wallDepth.getX(0) === 0
-        && wallDepth.getX(wallDepth.count - 1) === 1,
-      portalOpaqueCutout: !!portal
-        && !portal.material.transparent
-        && portal.material.depthWrite
-        && portal.material.alphaTest >= 0.5
-        && portal.material.alphaToCoverage
-        && portal.renderOrder < wall.renderOrder,
+      compositeActive: !!composite?.enabled && !!composite.uniforms.tPortal.value && composite.uniforms.uPortalReady.value === 1,
       previewSceneHidden: previewBodies.every((body) => !body.group.visible)
         && (riftPreviewSystem?.starViews || []).every((view) =>
           !view.group.visible && !view.light.visible),
+      mainSceneIntact: !!ship.group.visible && !!scene.fog
+        && (universe.system?.starViews || []).every((view) => view.group.visible && view.light.visible),
       radius: targetBody?.R || 0,
       atmosphereRadius: targetBody?.atmoMesh?.geometry?.parameters?.radius || 0,
       cloudRadius: targetBody?.cloudMesh?.geometry?.parameters?.radius || 0,
       volumeCloudRadius: targetBody?.volCloudMesh?.geometry?.parameters?.radius || 0,
+      cloudPassEnabled: !!pipeline.cloudPass,
     };
   });
-  check(portalContract.wallOpaque,
-    'rift thickness is an opaque depth-writing inner wall');
-  check(portalContract.wallSpansPassage,
-    'inner-wall checks target the full tunnel geometry, not the entrance rim');
-  check(portalContract.portalOpaqueCutout,
-    'destination portal is an opaque cutout rendered before the inner wall');
+  check(portalContract.compositeActive,
+    'per-pixel portal composite is active with a rendered far-view texture');
   check(portalContract.previewSceneHidden,
     'destination scene remains isolated from the source-world main pass');
+  check(portalContract.mainSceneIntact,
+    'far-view lease restores source-world stars, ship and fog after drawing');
   const targetShellsBounded = portalContract.radius > 0
     && portalContract.atmosphereRadius / portalContract.radius < 1.2
     && portalContract.cloudRadius / portalContract.radius < 1.08
-    && portalContract.volumeCloudRadius / portalContract.radius < 1.08;
+    && (!portalContract.volumeCloudRadius || portalContract.volumeCloudRadius / portalContract.radius < 1.08);
   check(targetShellsBounded,
     'destination atmosphere and cloud shells stay bounded to the selected planet');
   check(stable.previewVolume?.preloaded && stable.previewVolume?.ready,
     'rift reuses the destination prepared when the route selector opened');
   check(stable.previewVolume?.cloudCoverage > 0.12
-      && stable.previewVolume?.atmosphereVisible
-      && stable.previewVolume?.volumeCloudVisible
-      && stable.previewVolume?.portalVolumeLayerRendered,
-  `portal renders the selected planet's atmosphere and volume clouds (${stable.previewVolume?.cloudCoverage?.toFixed(2) || 'missing'} coverage)`);
+      && stable.previewVolume?.farAtmosphereBody === stable.previewVolume?.bodyId
+      && (!portalContract.cloudPassEnabled || stable.previewVolume?.farCloudBody === stable.previewVolume?.bodyId),
+  `far view binds the selected planet's atmosphere and clouds (${stable.previewVolume?.cloudCoverage?.toFixed(2) || 'missing'} coverage, atmo=${stable.previewVolume?.farAtmosphereBody}, cloud=${stable.previewVolume?.farCloudBody})`);
 
-  const wallOcclusion = await page.evaluate(() => {
+  const portalOcclusion = await page.evaluate(async () => {
     const THREE = NMS._THREE;
     const renderer = NMS._renderer;
-    const source = NMS._internals.scene.getObjectByName('spatial-rift-inner-wall');
-    const material = source.material.clone();
-    const wall = new THREE.Mesh(source.geometry, material);
-    wall.renderOrder = 2;
+    const { PortalCompositePass } = await import('/src/portal/portal-composite-pass.js');
+    const width = 128, height = 128;
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.5, 10000);
+    cam.position.set(0, 0, 0);
+    cam.lookAt(0, 0, -1);
+    cam.updateMatrixWorld(true);
+    cam.updateProjectionMatrix();
+
+    const baseTarget = new THREE.WebGLRenderTarget(width, height, {
+      depthBuffer: true,
+      depthTexture: new THREE.DepthTexture(width, height, THREE.UnsignedIntType),
+    });
+    baseTarget.depthTexture.format = THREE.DepthFormat;
+    const farTarget = new THREE.WebGLRenderTarget(width, height);
+    const outTarget = new THREE.WebGLRenderTarget(width, height);
+    const pass = new PortalCompositePass(cam);
+    pass.enabled = true;
+    pass.renderToScreen = false;
+    const u = pass.uniforms;
+    u.uCenter.value.set(0, 0, -100);
+    u.uRight.value.set(1, 0, 0);
+    u.uUp.value.set(0, 1, 0);
+    u.uNormal.value.set(0, 0, 1);
+    u.uHalf.value.set(28, 28);
+    u.uOpen.value.set(1, 1);
+    u.uPortalReady.value = 1;
+    u.uRimIntensity.value = 0;
+    u.uLensing.value = 0;
+
     const scene = new THREE.Scene();
-    scene.add(wall);
-    // Draw a bright source-world surface AFTER the wall. This catches both
-    // alpha blending and missing depth writes using actual GPU output.
-    const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(10000, 10000),
-      new THREE.MeshBasicMaterial());
-    backdrop.position.z = -500;
-    backdrop.renderOrder = 3;
-    scene.add(backdrop);
-    const camera = new THREE.PerspectiveCamera(60, 512 / 288, 1, 10000);
-    const target = new THREE.WebGLRenderTarget(512, 288);
-    const maskMaterial = material.clone();
-    maskMaterial.transparent = false;
-    maskMaterial.depthWrite = true;
-    maskMaterial.blending = THREE.NoBlending;
-    maskMaterial.fragmentShader = `
-      #include <common>
-      #include <logdepthbuf_pars_fragment>
-      void main() {
-        #include <logdepthbuf_fragment>
-        gl_FragColor = vec4(1.0);
-      }
-    `;
-    const previous = {
-      target: renderer.getRenderTarget(),
-      autoClear: renderer.autoClear,
-      toneMapping: renderer.toneMapping,
+    const occluderMat = new THREE.ShaderMaterial({
+      vertexShader: 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: `
+        uniform float uLogDepth;
+        void main() {
+          gl_FragDepth = uLogDepth;
+          gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+        }
+      `,
+      uniforms: { uLogDepth: { value: 0 } },
+      depthTest: true,
+      depthWrite: true,
+    });
+    const occluder = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), occluderMat);
+    occluder.position.set(0, 0, -30);
+    scene.add(occluder);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
+    const prevTone = renderer.toneMapping;
+
+    const readCenterAndCorner = (target) => {
+      const px = new Uint8Array(width * height * 4);
+      renderer.readRenderTargetPixels(target, 0, 0, width, height, px);
+      const sample = (x, y) => {
+        const i = (y * width + x) * 4;
+        return [px[i], px[i + 1], px[i + 2]];
+      };
+      return {
+        center: sample(width >> 1, height >> 1),
+        corner: sample(4, 4),
+      };
     };
-    const draw = (color) => {
-      scene.background = new THREE.Color(color);
-      backdrop.material.color.set(color);
-      renderer.setRenderTarget(target);
-      renderer.render(scene, camera);
-      const pixels = new Uint8Array(512 * 288 * 4);
-      renderer.readRenderTargetPixels(target, 0, 0, 512, 288, pixels);
-      return pixels;
-    };
-    const samples = [];
+
     try {
       renderer.autoClear = true;
       renderer.toneMapping = THREE.NoToneMapping;
-      for (const position of [[0, 0, 800], [110, 65, 260], [0, 0, -48]]) {
-        camera.position.set(...position);
-        if (position[2] < 0) camera.lookAt(410, 0, -48);
-        else camera.lookAt(0, 0, -96);
-        for (const time of [0, 0.7, 2.3]) {
-          material.uniforms.uTime.value = maskMaterial.uniforms.uTime.value = time;
-          wall.material = maskMaterial;
-          backdrop.visible = false;
-          const mask = draw(0x000000);
-          wall.material = material;
-          backdrop.visible = true;
-          const a = draw(0xff00ff);
-          const b = draw(0x00ff00);
-          let covered = 0;
-          let leaked = 0;
-          let backgroundChanged = 0;
-          for (let y = 1; y < 287; y++) {
-            for (let x = 1; x < 511; x++) {
-              const i = (y * 512 + x) * 4;
-              const inside = [-513, -512, -511, -1, 0, 1, 511, 512, 513]
-                .every((offset) => mask[i + offset * 4] > 250);
-              const delta = Math.max(...[0, 1, 2].map((c) => Math.abs(a[i + c] - b[i + c])));
-              if (inside) { covered++; if (delta > 1) leaked++; }
-              else if (mask[i] === 0 && delta > 100) backgroundChanged++;
-            }
-          }
-          samples.push({ position, time, covered, leaked, backgroundChanged });
-        }
-      }
+      renderer.setRenderTarget(farTarget);
+      renderer.setClearColor(0x00ffff, 1);
+      renderer.clear(true, true, false);
+      u.tPortal.value = farTarget.texture;
+
+      // Case 1: unoccluded (depth = 1.0 clear, magenta base) -> center shows cyan portal, corner shows magenta base
+      renderer.setRenderTarget(baseTarget);
+      renderer.setClearColor(0xff00ff, 1);
+      occluder.visible = false;
+      renderer.render(scene, cam);
+      pass.render(renderer, outTarget, baseTarget);
+      const unoccluded = readCenterAndCorner(outTarget);
+
+      // Case 2: near source occluder at z = -30 in front of portal at z = -100 -> center shows magenta source
+      occluder.visible = true;
+      occluderMat.uniforms.uLogDepth.value = Math.log2(30 + 1) / Math.log2(cam.far + 1);
+      renderer.setRenderTarget(baseTarget);
+      renderer.setClearColor(0xff00ff, 1);
+      renderer.render(scene, cam);
+      pass.render(renderer, outTarget, baseTarget);
+      const occluded = readCenterAndCorner(outTarget);
+
+      return { unoccluded, occluded };
     } finally {
-      renderer.setRenderTarget(previous.target);
-      renderer.autoClear = previous.autoClear;
-      renderer.toneMapping = previous.toneMapping;
-      target.dispose();
-      backdrop.geometry.dispose();
-      backdrop.material.dispose();
-      material.dispose();
-      maskMaterial.dispose();
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAutoClear;
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+      renderer.toneMapping = prevTone;
+      occluder.geometry.dispose();
+      occluderMat.dispose();
+      baseTarget.dispose();
+      farTarget.dispose();
+      outTarget.dispose();
+      pass.dispose();
     }
-    return samples;
   });
-  const wallOccludes = wallOcclusion.every((sample) => sample.covered > 1000
-    && sample.leaked === 0 && sample.backgroundChanged > 1000);
-  check(wallOccludes,
-    `rift wall blocks source-world pixels in ${wallOcclusion.length} viewpoints/animation phases`);
-  if (!wallOccludes) console.error(JSON.stringify({ wallOcclusion }, null, 2));
+  const isCyan = (rgb) => rgb[0] < 30 && rgb[1] > 210 && rgb[2] > 210;
+  const isMagenta = (rgb) => rgb[0] > 210 && rgb[1] < 30 && rgb[2] > 210;
+  check(isCyan(portalOcclusion.unoccluded.center) && isMagenta(portalOcclusion.unoccluded.corner)
+      && isMagenta(portalOcclusion.occluded.center),
+  `portal composite occludes behind near source geometry and reveals far pixels through the opening (${JSON.stringify(portalOcclusion)})`);
 
   await page.screenshot({ path: frameA });
   await page.waitForTimeout(420);
@@ -320,43 +333,72 @@ try {
   check(maxLightDelta < 0.002,
     `destination stellar light is continuous across the threshold (max Δ ${maxLightDelta.toFixed(5)})`);
   check(arrived.audioCue === 'rift-close', 'threshold crossing triggers the dedicated closing cue');
-  const exitDepths = await page.evaluate(() => new Promise((resolve) => {
+  const closingPoseChecks = await page.evaluate(() => new Promise((resolve) => {
     const samples = [];
+    const THREE = NMS._THREE;
+    const fwd = new THREE.Vector3();
     const sample = () => requestAnimationFrame(() => {
       const rift = NMS.riftState();
-      if (rift.exitDepth) samples.push(rift.exitDepth);
+      const u = NMS._pipeline.portalComposite.uniforms;
+      const denom = fwd.set(0, 0, -1).applyQuaternion(NMS._internals.camera.quaternion).dot(u.uNormal.value);
+      const tPlane = Math.abs(denom) > 1e-6 ? u.uCenter.value.dot(u.uNormal.value) / denom : -1;
+      if (rift.visible) samples.push({ phase: rift.phase, open: rift.open, distanceToThreshold: rift.distanceToThreshold, tPlane });
       if (!rift.visible || samples.length >= 8) resolve(samples);
       else sample();
     });
     sample();
   }));
-  check(exitDepths.length > 0 && exitDepths.every((range) => range.min > 0),
-    `collapsing exit stays fully behind the camera (${exitDepths.length} sampled frames)`);
+  check(closingPoseChecks.length > 0 && closingPoseChecks.every((s) => s.distanceToThreshold === null && s.tPlane < 0),
+    `closing fold stays behind the forward view after crossing (${closingPoseChecks.length} sampled frames)`);
   await page.evaluate(() => NMS._internals.nav.vel.set(0, 0, 0));
   await page.waitForTimeout(80);
   await page.screenshot({ path: arrivalFrame });
   const [thresholdPng, arrivalPng] = await Promise.all([readFile(thresholdFrame), readFile(arrivalFrame)])
     .then((buffers) => buffers.map((buffer) => PNG.sync.read(buffer)));
-  const mean = (png) => {
-    const sum = [0, 0, 0];
-    let count = 0;
+  const continuity = (aPng, bPng) => {
+    const sumA = [0, 0, 0], sumB = [0, 0, 0];
+    let pixelDiffSum = 0, changedPixels = 0, count = 0;
+    // Sample central sky/planet area above the foreground ship hull (y: 120..380, x: 280..1000)
+    // and full inner portal box (y: 190..650, x: 300..980) for exposure.
     for (let y = 190; y < 650; y++) {
       for (let x = 300; x < 980; x++) {
-        const i = (y * png.width + x) * 4;
-        for (let channel = 0; channel < 3; channel++) sum[channel] += png.data[i + channel];
+        const i = (y * aPng.width + x) * 4;
+        for (let channel = 0; channel < 3; channel++) {
+          sumA[channel] += aPng.data[i + channel];
+          sumB[channel] += bPng.data[i + channel];
+        }
         count++;
       }
     }
-    return sum.map((value) => value / count);
+    let farCount = 0;
+    for (let y = 120; y < 380; y++) {
+      for (let x = 280; x < 1000; x++) {
+        const i = (y * aPng.width + x) * 4;
+        const d = (Math.abs(aPng.data[i] - bPng.data[i])
+          + Math.abs(aPng.data[i + 1] - bPng.data[i + 1])
+          + Math.abs(aPng.data[i + 2] - bPng.data[i + 2])) / 3;
+        pixelDiffSum += d;
+        if (d > 12) changedPixels++;
+        farCount++;
+      }
+    }
+    const meanA = sumA.map((v) => v / count);
+    const meanB = sumB.map((v) => v / count);
+    return {
+      exposureDelta: Math.max(...meanA.map((v, idx) => Math.abs(v - meanB[idx]))),
+      meanPixelDelta: pixelDiffSum / farCount,
+      changedPct: (changedPixels / farCount) * 100,
+    };
   };
-  const beforeMean = mean(thresholdPng);
-  const afterMean = mean(arrivalPng);
-  const exposureDelta = Math.max(...beforeMean.map((value, index) => Math.abs(value - afterMean[index])));
-  check(exposureDelta < 8,
-    `destination final-image exposure stays continuous (max RGB mean Δ ${exposureDelta.toFixed(2)})`);
+  const cont = continuity(thresholdPng, arrivalPng);
+  check(cont.exposureDelta < 8,
+    `destination final-image exposure stays continuous across threshold (max RGB mean Δ ${cont.exposureDelta.toFixed(2)})`);
+  check(cont.meanPixelDelta < 8 && cont.changedPct < 15,
+    `destination pixels stay continuous across threshold (mean Δ ${cont.meanPixelDelta.toFixed(2)}, >12/255: ${cont.changedPct.toFixed(2)}%)`);
   await page.waitForFunction(() => !NMS.riftState().active, null, { timeout: 5000 });
   const closed = await page.evaluate('NMS.riftState()');
-  check(!closed.visible && closed.open === 0, 'exit collapses fully after traversal');
+  check(!closed.visible && !closed.composite && closed.phase === 'closed' && closed.open === 0 && closed.seam === 0,
+    'fold closes and composites off cleanly after traversal');
 
   // Giants have a countChunks-only LOD facade. Exercise both types through the
   // real buttons; the terrain-only route above cannot catch this deadlock.
@@ -375,18 +417,26 @@ try {
     await page.evaluate((id) => {
       NMS.openStarMap();
       NMS.selectStarMapTarget(id);
-      // Hold the first (structure) compilation to verify the waiting UI
+      // Hold the queued destination portal preparation to verify the waiting UI
       // deterministically, even on a driver with a warm shader cache.
-      const renderer = NMS._renderer;
-      const compile = renderer.compileAsync;
+      const pipeline = NMS._pipeline;
+      const prepare = pipeline.prepare.bind(pipeline);
       const gate = new Promise((resolve) => { window.__releaseRiftWarmup = resolve; });
-      renderer.compileAsync = function (...args) {
-        renderer.compileAsync = compile;
-        return Promise.all([compile.apply(this, args), gate]);
+      pipeline.prepare = function (work, options) {
+        if (options?.label === 'destination-lod' || options?.label === 'destination-portal') {
+          pipeline.prepare = prepare;
+          return Promise.all([prepare(work, options), gate]).then(([value]) => value);
+        }
+        return prepare(work, options);
       };
     }, giantTarget.starId);
     await page.locator(`#sm-systemGlyph [data-glyph-index="${giantTarget.bodyIndex}"]`).click({ force: true });
+    await page.waitForFunction((bodyId) => NMS._internals.starMap.mode === 'system'
+      && NMS._internals.starMap.selectedPlanet?.bodyId === bodyId
+      && document.querySelector('#sm-planetLeft')?.classList.contains('active')
+      && !document.getElementById('sm-routeAction')?.disabled, giantTarget.bodyId);
     await page.locator('#sm-routeAction').click({ force: true });
+    await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
     await page.locator('#route-rift-btn').click();
     await page.waitForTimeout(240);
     const waiting = await page.evaluate(() => ({
@@ -407,11 +457,11 @@ try {
     check(preparation.lodWarmState === 'complete' && preparation.riftWarmState === 'complete'
         && !preparation.lodWarmError && !preparation.riftWarmError,
     `${type} completes portal preparation without terrain-quadtree calls`);
-    check(await page.evaluate(() => NMS.riftState().visible && NMS.riftState().open > 0.985),
+    check(await page.evaluate(() => NMS.riftState().visible && NMS.riftState().composite && NMS.riftState().open > 0.985),
       `${type} passage opens and renders`);
     check(await page.evaluate((bodyId) => {
       const body = NMS._internals.riftPreviewSystem.bodyById.get(bodyId);
-      return body.appear === 1 && body.terrainMaterial.opacity === 1;
+      return body.appear === 1 && (!body.terrainMaterial || body.terrainMaterial.opacity === 1);
     }, giantTarget.bodyId), `${type} destination surface is opaque inside the portal`);
     await page.screenshot({ path: path.join(os.tmpdir(), `deep-space-rift-${type}.png`) });
     await page.evaluate(() => NMS.approachRift(-10));
@@ -524,7 +574,9 @@ try {
   });
   await page.waitForFunction((target) => NMS.state === 'space'
     && NMS.system().id === target.starId
-    && NMS.volumeState().activeBodyId === target.bodyId,
+    && (NMS.volumeState().activeBodyId
+      || NMS._pipeline?.cloudPass?.activePlanet?.bodyId
+      || NMS._pipeline?.atmospherePass?.activePlanet?.bodyId) === target.bodyId,
   warpTarget, { timeout: 90000 });
   const arrival = await page.evaluate((target) => {
     const { universe, nav, camera } = NMS._internals;
@@ -535,6 +587,10 @@ try {
       radius: planet.R,
       ring: !!planet.ringMesh,
     })) || [];
+    const activeMediumBodyId = NMS.volumeState().activeBodyId
+      || NMS._pipeline?.cloudPass?.activePlanet?.bodyId
+      || NMS._pipeline?.atmospherePass?.activePlanet?.bodyId
+      || null;
     return {
       state: NMS.state,
       systemId: NMS.system().id,
@@ -545,6 +601,7 @@ try {
       fov: camera.fov,
       warp: NMS.warp(),
       volume: NMS.volumeState(),
+      activeMediumBodyId,
       stalePlanets,
       gpuErrors: window.__riftGpuErrors || [],
       frameGaps: window.__warpFrameGaps || [],
@@ -556,8 +613,8 @@ try {
     'stellar warp completes in the selected destination system');
   check(arrival.position.every(Number.isFinite) && arrival.warp === 0 && Math.abs(arrival.fov - 62) < 0.1,
     'stellar warp restores finite navigation state and the base camera');
-  check(arrival.bodyId === warpTarget.bodyId && arrival.volume.activeBodyId === warpTarget.bodyId,
-    `arrival volume belongs to the selected body (${arrival.bodyName || arrival.bodyId})`);
+  check(arrival.bodyId === warpTarget.bodyId && arrival.activeMediumBodyId === warpTarget.bodyId,
+    `arrival medium belongs to the selected body (${arrival.bodyName || arrival.bodyId})`);
   check(arrival.gpuErrors.length === 0,
     `stellar warp arrival produces no uncaptured WebGPU errors (${arrival.gpuErrors.length})`);
   const sortedWarpGaps = arrival.frameGaps.filter((gap) => gap >= 0)

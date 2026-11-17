@@ -114,6 +114,8 @@ function lodContinuationFixture() {
     warpPreparedRiftWarmState: 'compiling', warpPreparedRiftWarmError: null, warpPreparedRiftStructureState: 'complete', warpPreparedRiftStructurePromise: Promise.resolve(),
     setTimeout(work) { timers.push(work); }, flushChunkQueue() {} });
   f.context.uploadPreparedLodMeshes = load('uploadPreparedLodMeshes', f.context);
+  f.context.preparedLodUploads = new WeakMap();
+  f.context.uploadPreparedLodMeshesOnce = load('uploadPreparedLodMeshesOnce', f.context);
   f.context.prewarmPreparedRiftPortal = load('prewarmPreparedRiftPortal', f.context);
   return { ...f, timers, start() {
     load('prewarmPreparedLod', f.context)(f.targetBody, 1, f.route, f.prepared);assert.equal(timers.length, 1);timers.shift()();

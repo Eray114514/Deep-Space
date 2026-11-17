@@ -76,7 +76,7 @@ function fixture(options = {}) {
     lookQuatAt(_from, _to, out) { return out.setFromAxisAngle(new THREE.Vector3(1, 0, 0), .6); },
     preparedDestinationIsActive(token, receivedRoute, receivedPrepared) { assert.equal(token, 4);assert.equal(receivedRoute, route);assert.equal(receivedPrepared, prepared);return active; },
     warpPreparedRiftWarmState: 'idle', warpPreparedRiftWarmError: null, warpPreparedRiftStructurePromise: Promise.resolve(),
-    uploadPreparedLodMeshes: async () => {}, celestialClock: { hours: 1 }, RIFT_SPAWN_DISTANCE: 25,
+    uploadPreparedLodMeshes: async () => {}, uploadPreparedLodMeshesOnce: async () => {}, celestialClock: { hours: 1 }, RIFT_SPAWN_DISTANCE: 25,
     riftFarBodyId: null, renderRiftFarView() { assert.equal(executing, true);events.push('portal');fail('portal');return portalResult; }, console: { error(...args) { errors.push(args); } } };
   context.standaloneSiteGroups = load('standaloneSiteGroups', context);
   const warm = load('renderPreparedDestinationWarmFrame', context);context.renderPreparedDestinationWarmFrame = warm;
@@ -123,11 +123,14 @@ await test('queued private draw waits without borrowing visibility/camera/shadow
 await test('private restoration captures the live state at execution, including cube face and mip', async () => {
   const f = fixture(), pending = f.run();f.setLiveState();const later = f.capture();f.admit();assert.equal(await pending, true);f.restored(later);
 });
-for (const cancel of ['token', 'warp-request']) await test(`${cancel} while queued returns false with zero borrowed state`, async () => {
+for (const cancel of ['token']) await test(`${cancel} while queued returns false with zero borrowed state`, async () => {
   const f = fixture(), before = f.capture(), pending = f.run();if (cancel === 'token') f.cancel();else f.route.warpRequested = true;
   f.admit();assert.equal(await pending, false);assert.equal(f.touches.length, 0);assert.equal(f.pipeline.renderCalls, 0);f.restored(before);
 });
-for (const cancel of ['token', 'warp-request']) await test(`already cancelled ${cancel} never enqueues private work`, async () => {
+await test('a warp request keeps warming the transferred destination (it stays owned until the swap)', async () => {
+  const f = fixture(), pending = f.run();f.route.warpRequested = true;f.admit();assert.equal(await pending, true);assert.equal(f.pipeline.renderCalls, 1);
+});
+for (const cancel of ['token']) await test(`already cancelled ${cancel} never enqueues private work`, async () => {
   const f = fixture();if (cancel === 'token') f.cancel();else f.route.warpRequested = true;
   assert.equal(await f.run(), false);assert.equal(f.jobs.length, 0);assert.equal(f.touches.length, 0);
 });
@@ -156,32 +159,25 @@ await test('false private production result rejects and cannot count as a comple
 await test('optional MRT and absent volume retain complete restoration', async () => {
   const f = fixture({ mrt: false, volume: false }), before = f.capture(), pending = f.run();f.admit();assert.equal(await pending, true);f.restored(before);
 });
-await test('actual portal cannot complete before both queued portal view and private world draw', async () => {
+// Route preparation no longer draws the portal far view: that program set is
+// linked only once a 弦界 route is actually chosen (prewarmRiftFarView).
+await test('route preparation completes on the private world draw alone and never draws the far view', async () => {
   const f = fixture(), before = f.capture(), pending = f.portal();await microtasks();assert.equal(f.touches.length, 0);assert.equal(f.context.warpPreparedRiftWarmState, 'compiling');
-  f.admit();await microtasks();assert.equal(f.pipeline.renderCalls, 0);assert.equal(f.context.warpPreparedRiftWarmState, 'compiling');assert.equal(f.touches.length, 0);
-  f.admit();await pending;assert.equal(f.context.warpPreparedRiftWarmState, 'complete');assert.equal(f.context.warpPreparedRiftWarmError, null);assert.equal(f.pipeline.renderCalls, 1);f.restored(before);
+  assert.equal(f.jobs.length, 1);assert.equal(f.jobs[0].options.label, 'destination-private-frame');
+  f.admit();await pending;assert.equal(f.context.warpPreparedRiftWarmState, 'complete');assert.equal(f.context.warpPreparedRiftWarmError, null);
+  assert.equal(f.pipeline.renderCalls, 1);assert.equal(f.events.includes('portal'), false);f.restored(before);
 });
-await test('actual portal reports false private draw as failure after full restoration', async () => {
-  const f = fixture({ renderResult: false }), before = f.capture(), pending = f.portal();await f.reachPrivateFromPortal();f.admit();await pending;
+await test('route preparation reports a false private draw as failure after full restoration', async () => {
+  const f = fixture({ renderResult: false }), before = f.capture(), pending = f.portal();await microtasks();f.admit();await pending;
   assert.equal(f.context.warpPreparedRiftWarmState, 'failed');assert.match(f.context.warpPreparedRiftWarmError, /was not submitted/);assert.equal(f.errors.length, 1);f.restored(before);
 });
-await test('a portal no-draw result cannot become complete or enqueue the private world warm frame', async () => {
-  const f = fixture({ portalResult: false }), pending = f.portal();await microtasks();f.admit();await microtasks();
-  // Drain the old path as a negative control too: it incorrectly queues the
-  // private draw despite the portal result, rather than leaving this test hung.
-  if (f.jobs.length) f.admit();await pending;
-  assert.equal(f.context.warpPreparedRiftWarmState, 'failed');assert.match(f.context.warpPreparedRiftWarmError, /portal warm frame was not submitted/);
-  assert.equal(f.jobs.length, 0);assert.equal(f.pipeline.renderCalls, 0);assert.equal(f.errors.length, 1);
-});
-
-for (const cancel of ['token', 'warp-request']) await test(`portal ${cancel} while private work waits never publishes completion`, async () => {
-  const f = fixture(), before = f.capture(), pending = f.portal();await f.reachPrivateFromPortal();assert.equal(f.touches.length, 0);
-  if (cancel === 'token') f.cancel();else f.route.warpRequested = true;f.admit();await pending;
+await test('a cancelled route never publishes preparation completion', async () => {
+  const f = fixture(), before = f.capture(), pending = f.portal();await microtasks();f.cancel();f.admit();await pending;
   assert.notEqual(f.context.warpPreparedRiftWarmState, 'complete');assert.equal(f.pipeline.renderCalls, 0);assert.equal(f.errors.length, 0);f.restored(before);
 });
-for (const cancel of ['token', 'warp-request']) await test(`portal ${cancel} before queued view executes never borrows its destination`, async () => {
-  const f = fixture(), pending = f.portal();await microtasks();if (cancel === 'token') f.cancel();else f.route.warpRequested = true;f.admit();await pending;
-  assert.equal(f.events.includes('portal'), false);assert.equal(f.events.includes('celestial'), false);assert.equal(f.touches.length, 0);assert.notEqual(f.context.warpPreparedRiftWarmState, 'complete');
+await test('a warp request keeps route preparation running to completion', async () => {
+  const f = fixture(), pending = f.portal();await microtasks();f.route.warpRequested = true;f.admit();await pending;
+  assert.equal(f.context.warpPreparedRiftWarmState, 'complete');assert.equal(f.pipeline.renderCalls, 1);
 });
 const sourceStable = (await readFile('src/main.js')).equals(mainBytes) && (await readFile(new URL(import.meta.url))).equals(verifierBytes), failed = results.filter(row => !row.passed);
 const report = { passed: !failed.length && sourceStable, scope: 'Pure CPU actual-main queue/capability/lease contracts. No GL, native pacing, visual or performance acceptance.', sourceStable,

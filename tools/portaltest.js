@@ -2,7 +2,7 @@
 // choreography, far-view pass ownership and the cloud history exchange.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { SpacePortal, createPortalProfile, doorPortalProfile, portalClosing, portalOpening }
+import { SpacePortal, createPortalProfile, doorPortalProfile, portalClosing, portalOpening, wormholePortalProfile }
   from '../src/portal/space-portal.js';
 import { PortalView } from '../src/portal/portal-view.js';
 import { LiteCloudPass } from '../src/cloud/lite-cloud-pass.js';
@@ -102,6 +102,23 @@ test('crossing exchanges cloud reconstruction state between the two views', () =
   a.exchangeTemporalState(b);
   assert.equal(a.history[0], 'b0');assert.equal(a.frame, 9);assert.equal(a.activePlanet, planetB);
   assert.equal(b.history[0], 'a0');assert.equal(b.frame, 3);assert.equal(b.activePlanet, planetA);
+});
+
+test('a wormhole mouth is entered at its near surface and left through the far one', () => {
+  const p = new SpacePortal(wormholePortalProfile({ radius: 400 }));
+  p.setFrames(new THREE.Vector3(0, 0, -2000), new THREE.Quaternion(), new THREE.Vector3(9e9, 0, 0),
+    new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 1.1));
+  p.phase = 'open';
+  p.open = { x: 1, y: 1, tension: 0, flash: 0 };
+  assert.ok(p.crossing(new THREE.Vector3(0, 0, -1500), new THREE.Vector3(0, 0, -1700)) >= 0, 'entering the ball');
+  assert.equal(p.crossing(new THREE.Vector3(0, 0, -1500), new THREE.Vector3(0, 0, -1550)), -1, 'still outside');
+  assert.equal(p.crossing(new THREE.Vector3(900, 0, -1500), new THREE.Vector3(900, 0, -2500)), -1, 'passing beside it');
+  const entry = new THREE.Vector3(0, 0, -1600); // near surface (local z = +400)
+  const exit = p.mapPosition(entry);
+  const local = exit.clone().sub(p.target.position).applyQuaternion(p.target.quaternion.clone().invert());
+  assert.ok(Math.abs(local.z + 400) < 1e-6, 'leaves through the far surface, already past the mouth');
+  const located = p.locate(new THREE.Vector3(0, 0, -1000));
+  assert.ok(Math.abs(located.z - 600) < 1e-6, 'sphere distance is to the surface');
 });
 
 if (failures) {

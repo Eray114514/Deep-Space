@@ -10,8 +10,9 @@
 export class PortalView {
   // createPipeline(camera) must return a GameLegacyPipeline configured like
   // the main one; it is invoked lazily on first use.
-  constructor({ createPipeline, mainCamera }) {
+  constructor({ createPipeline, mainCamera, resolutionScale = 1 }) {
     this.createPipeline = createPipeline;
+    this.resolutionScale = resolutionScale;
     this.mainCamera = mainCamera;
     this.camera = mainCamera.clone();
     this.camera.name = 'portal-view-camera';
@@ -21,7 +22,13 @@ export class PortalView {
   }
 
   ensure() {
-    if (this.pipeline) return this.pipeline;
+    if (this.pipeline) {
+      if (this.released && this.size) {
+        this.pipeline.setSize(this.size[0], this.size[1], this.size[2] * this.resolutionScale);
+      }
+      this.released = false;
+      return this.pipeline;
+    }
     const pipeline = this.createPipeline(this.camera);
     // Everything after the participating media is a display transform owned
     // by the main view, plus the ship, which only exists on the viewer's side.
@@ -34,13 +41,23 @@ export class PortalView {
     pipeline.portalView = true;
     pipeline.composer.renderToScreen = false;
     this.pipeline = pipeline;
-    if (this.size) pipeline.setSize(...this.size);
+    if (this.size) pipeline.setSize(this.size[0], this.size[1], this.size[2] * this.resolutionScale);
     return pipeline;
   }
 
   setSize(width, height, dpr) {
     this.size = [width, height, dpr];
-    this.pipeline?.setSize(width, height, dpr);
+    if (!this.released) this.pipeline?.setSize(width, height, dpr * this.resolutionScale);
+  }
+
+  // Between uses: shrink the far view's targets to almost nothing but keep
+  // the pipeline (its programs are shared with the main view's renderer, so
+  // tearing it down would retire programs the main view still draws with).
+  release() {
+    if (!this.pipeline || this.released) return;
+    this.pipeline.setSize(8, 8, 1);
+    this.released = true;
+    this.rendered = false;
   }
 
   // The view's linear HDR output after the last render.
