@@ -7,6 +7,18 @@ import { createSaltlineMaterials } from './saltline/materials.js';
 // Triplanar scale per library material, as Saltline dressed the PAC-9.
 const VIEWMODEL_MATERIAL_SCALE = { anodized_black: 2, gunmetal: 2, brass: 4, glove_fabric: 3, rubber: 4 };
 
+export function isSoftwareWebGL(renderer) {
+  try {
+    const gl = renderer?.getContext?.();
+    if (!gl) return false;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = `${ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : ''} ${gl.getParameter(gl.RENDERER) || ''}`;
+    return /swiftshader|llvmpipe|software|basic render/i.test(name);
+  } catch {
+    return false;
+  }
+}
+
 // First-person surface weapons. Every entry is a full viewmodel (geometry,
 // gloved hands, keyframed reload, spring recoil) driven by its own controller;
 // the PAC-9 Longshore is ported from Saltline (src/saltline/). The old
@@ -86,7 +98,8 @@ export class SurfaceWeapons {
     // renderer (Node tests) the viewmodel falls back to plain base colours.
     this.materials = null;
     if (renderer) {
-      try { this.materials = createSaltlineMaterials({ renderer, params: { tex: 1024, wet: 0 } }); }
+      const texSize = isSoftwareWebGL(renderer) ? 256 : 1024;
+      try { this.materials = createSaltlineMaterials({ renderer, params: { tex: texSize, wet: 0 } }); }
       catch (error) { console.warn('[weapons] material library unavailable', error); }
     }
     this.models = SURFACE_WEAPONS.map((def) => this.createViewmodel(def));

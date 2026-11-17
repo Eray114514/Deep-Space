@@ -310,23 +310,17 @@ export class FlightAudio {
       this.noiseBurst({ duration: 2.2, gain: 0.1, from: 4200, to: 260, q: 0.55, delay: 0.9 });
       this.tone({ from: 46, to: 33, duration: 2.6, gain: 0.16, type: 'sine', lowpass: 150, delay: 0.85 });
     } else if (kind === 'rift-open') {
-      this.noiseBurst({ duration: 2.45, gain: 0.13, from: 150, to: 3600, q: 0.34 });
-      this.tone({ from: 29, to: 47, duration: 2.35, gain: 0.20, type: 'sine', lowpass: 170 });
-      this.tone({ from: 71, to: 178, duration: 2.15, gain: 0.075, type: 'triangle', lowpass: 760, delay: 0.08 });
-      this.tone({ from: 390, to: 980, duration: 1.52, gain: 0.032, type: 'sine', lowpass: 2400, delay: 0.38 });
-      this.noiseBurst({ duration: 0.46, gain: 0.17, from: 4800, to: 820, q: 1.15, delay: 1.88 });
-      this.tone({ from: 82, to: 39, duration: 0.52, gain: 0.18, type: 'triangle', lowpass: 260, delay: 1.91 });
-    } else if (kind === 'rift-enter') {
-      // swallowed by the mouth: a deep suck, the punch, the throat's rush
-      this.noiseBurst({ duration: 0.35, gain: 0.12, from: 2400, to: 300, q: 0.7 });
-      this.tone({ from: 70, to: 26, duration: 1.1, gain: 0.34, type: 'sine', lowpass: 150, delay: 0.1 });
-      this.noiseBurst({ duration: 1.4, gain: 0.15, from: 600, to: 5400, q: 0.45, delay: 0.12 });
-      this.tone({ from: 180, to: 90, duration: 0.9, gain: 0.05, type: 'triangle', lowpass: 900, delay: 0.15 });
+      this.noiseBurst({ duration: 0.085, gain: 0.13, from: 6200, to: 1800, q: 1.2 });
+      this.tone({ from: 39, to: 73, duration: 0.64, gain: 0.16, type: 'sine', lowpass: 190 });
+      this.tone({ from: 260, to: 620, duration: 0.38, gain: 0.035, type: 'triangle', lowpass: 1800 });
+    } else if (kind === 'rift-tear') {
+      this.noiseBurst({ duration: 0.16, gain: 0.15, from: 5700, to: 780, q: 1.15 });
+      this.noiseBurst({ duration: 0.065, gain: 0.10, from: 7600, to: 2100, q: 0.9, delay: 0.065 });
+      this.tone({ from: 84, to: 40, duration: 0.42, gain: 0.15, type: 'sine', lowpass: 220 });
     } else if (kind === 'rift-close') {
-      this.noiseBurst({ duration: 0.72, gain: 0.15, from: 3100, to: 145, q: 0.62 });
-      this.tone({ from: 176, to: 43, duration: 0.74, gain: 0.14, type: 'triangle', lowpass: 820 });
-      this.tone({ from: 55, to: 27, duration: 0.36, gain: 0.23, type: 'sine', lowpass: 150, delay: 0.40 });
-      this.noiseBurst({ duration: 0.13, gain: 0.19, from: 920, to: 105, q: 1.7, delay: 0.54 });
+      this.noiseBurst({ duration: 0.12, gain: 0.15, from: 3700, to: 190, q: 0.70 });
+      this.tone({ from: 88, to: 34, duration: 0.27, gain: 0.22, type: 'sine', lowpass: 180 });
+      this.noiseBurst({ duration: 0.19, gain: 0.06, from: 1600, to: 320, q: 0.6, delay: 0.09 });
     } else if (kind === 'atmosphere') {
       this.noiseBurst({ duration: 1.25, gain: 0.17, from: 3600, to: 720, q: 0.58 });
       this.tone({ from: 118, to: 64, duration: 0.9, gain: 0.08, lowpass: 900 });

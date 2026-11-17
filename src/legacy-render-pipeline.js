@@ -357,8 +357,12 @@ export class GameLegacyPipeline {
       jitterHeight: !privateFrame && this.temporalAA?.enabled ? bufH : 0,
     });
     let jitterApplied = false;
+    const present = this.composer.renderToScreen;
     try {
       try {
+        // EffectComposer selects its own target for the last pass. Binding
+        // a private target alone still presents the destination warm-up.
+        if (privateFrame) this.composer.renderToScreen = false;
         if (!privateFrame && rigidObjects) this.frameState.captureRigidObjects(rigidObjects, this.scene);
         if (!privateFrame && this.temporalAA?.enabled) {
           jitterApplied = this.frameState.applyCameraJitter(this.camera);
@@ -388,6 +392,7 @@ export class GameLegacyPipeline {
       } catch(error) {
         failed=true;throw error;
       } finally {
+        this.composer.renderToScreen = present;
         if (jitterApplied) this.frameState.restoreCameraProjection(this.camera);
         if(batchOnly)this.volumePass.requirePreparedLightBatch=false;
         if (this.volumePass?.farSplit) this.volumePass.farSplit.plan = null;

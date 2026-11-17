@@ -13,7 +13,7 @@ import { flushChunkQueue, pendingChunks, setGridCells, lodStats, lodStatsReset, 
 import { SpaceControls, WalkControls, guidePlanetApproach, keys,
   flightBoostSpeedLimit, pulseBurstDistance } from './controls.js';
 import { PULSE_TIMING, emptyTransitChannels, pulseChannels, pulseChargeFromHold, pulseChargeScaling,
-  pulseDisplacement, throatChannels, throatPlan, transitIntensity, warpSpeedFraction,
+  pulseDisplacement, transitIntensity, warpSpeedFraction,
   warpApproachRemaining, warpChannels, warpDepartureTravel, warpPlan } from './transit.js';
 import { setStarflowViewport, starflowUniforms } from './starflow.js';
 import { Scatter } from './scatter.js';
@@ -56,10 +56,10 @@ import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
-import { SpacePortal, wormholePortalProfile } from './portal/space-portal.js';
+import { SpacePortal, createPortalProfile } from './portal/space-portal.js';
 import { WarpConduit } from './warp-conduit.js';
 import { PortalView } from './portal/portal-view.js';
-import { SurfaceWeapons, SURFACE_WEAPONS } from './surface-weapons.js';
+import { SurfaceWeapons, SURFACE_WEAPONS, isSoftwareWebGL } from './surface-weapons.js';
 import { SurveyUnits } from './saltline/robots.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
@@ -556,8 +556,8 @@ function prewarmWeaponAndPostPipelines() {
   }).finally(() => {
     postPipelinesWarmPending = false;
   });
-  // The conduit's four programs are linked during loading, never on the
-  // first frame of a warp, a pulse or a wormhole throat.
+  // The conduit programs are linked during loading, never on the
+  // first frame of a warp or a pulse.
   void nodePipeline.prepare(() => {
     const group = warpConduit.group;
     const visible = [group.visible, ...group.children.map((child) => child.visible)];
@@ -566,7 +566,16 @@ function prewarmWeaponAndPostPipelines() {
     group.visible = true;
     for (const child of group.children) child.visible = true;
     try {
-      return compilePrograms(renderer, group, conduitCamera, null, { signal });
+      const foreground = compilePrograms(renderer, group, conduitCamera, null, { signal });
+      if (!warpConduit.lowVolume) return foreground;
+      const target = renderer.getRenderTarget();
+      const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
+      try {
+        renderer.setRenderTarget(warpConduit.fogTarget);
+        return Promise.all([foreground, compilePrograms(renderer, warpConduit.lowVolume, conduitCamera, null, { signal })]);
+      } finally {
+        renderer.setRenderTarget(target, face, mip);
+      }
     } finally {
       group.visible = visible[0];
       group.children.forEach((child, i) => { child.visible = visible[i + 1]; });
@@ -744,7 +753,6 @@ let usePost = !QUALITY_LOW && (bloomPass.enabled || VOLUME_ENABLED);
 let riftPortal = null;
 let portalView = null;
 let warpConduit = null;
-let riftThroat = null;
 let pipelineResizePending = false;
 function pipelineResourcesBusy() {
   return shipPipelineWarmPending || postPipelinesWarmPending || weaponPipelinesWarmPending
@@ -892,8 +900,6 @@ let riftRoute = null;
 let riftPreviewSystem = null;
 let retiredRiftSystem = null;
 let riftPreviewReady = false;
-const RIFT_SPAWN_DISTANCE = 780;
-const RIFT_CAPTURE_DISTANCE = 1900;
 const PLANET_ARRIVAL_FACTOR = 1.68;
 const INITIAL_ORBIT_FACTOR = 1.72;
 // Full-page hero framing. The old 1.3R/0.72rad limb close-up yaws the planet
@@ -910,8 +916,6 @@ const riftEntranceUniv = new THREE.Vector3();
 const riftTargetUniv = new THREE.Vector3();
 const riftPreviewOriginUniv = new THREE.Vector3();
 const riftOrientation = new THREE.Quaternion();
-const riftLocalVel = new THREE.Vector3();
-const riftInverse = new THREE.Quaternion();
 const riftAssistQuat = new THREE.Quaternion();
 let dialAcc = 0;
 // Snow coverage at the player's current foot position, refreshed by the walk
@@ -1051,7 +1055,20 @@ const skydiveCtl = new SkydiveController(renderer.domElement, scene, {
     setState('walk');
   },
 });
-riftPortal = new SpacePortal(wormholePortalProfile());
+riftPortal = new SpacePortal(createPortalProfile({
+  shape: 'plane',
+  harmonics: [
+    { k: 2, amp: .095, phase: 1.49, speed: .018 },
+    { k: 3, amp: .042, phase: .63, speed: -.085 },
+    { k: 5, amp: .032, phase: 2.30, speed: .12 },
+    { k: 9, amp: .024, phase: 4.10, speed: -.30 },
+  ],
+  halfWidth: 506,
+  halfHeight: 308,
+  openSeconds: 1.15,
+  closeSeconds: 1.1,
+  seamFraction: 0.26,
+}));
 // The warp conduit is real geometry on the ship's foreground layer: drawn
 // after the world and its post effects, depth-tested against the hull.
 warpConduit = new WarpConduit({ radius: 220, layer: SHIP_FOREGROUND_LAYER, quality: QUALITY_LOW ? 'low' : 'medium' });
@@ -1067,6 +1084,7 @@ portalView = new PortalView({
     // stack is never the far side's owner.
     const pipeline = new GameLegacyPipeline(renderer, scene, viewCamera,
       { ...MAIN_PIPELINE_OPTIONS, volume: false, temporalAA: false });
+    if (pipeline.cloudPass && nodePipeline.cloudPass) pipeline.cloudPass.setQuality({ scale: nodePipeline.cloudPass.scale });
     return pipeline;
   },
 });
@@ -1111,12 +1129,15 @@ const surveyUnits = new SurveyUnits({
     intensity: surfaceWeapons.lighting.reflectionScale ?? 1,
   }),
 });
-// Build the robots in idle time after startup so the first landing does not
-// stall on their texture bakes and shader compiles.
-setTimeout(() => {
-  const run = () => surveyUnits.prewarm({ renderer, camera, scene });
-  if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else run();
-}, 6000);
+// Build the robots in idle time after startup on hardware GPUs so the first
+// landing does not stall; software rasterizers (SwiftShader CI) skip eager
+// background bakes and build lazily on deploy().
+if (!isSoftwareWebGL(renderer)) {
+  setTimeout(() => {
+    const run = () => surveyUnits.prewarm({ renderer, camera, scene });
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else run();
+  }, 6000);
+}
 // Hands and optics sit closer than the world camera's 0.12 m near plane, so
 // the weapon layer renders through the rig's own view camera.
 foregroundPass.setLayerCamera(WEAPON_FOREGROUND_LAYER, surfaceWeapons.viewCamera);
@@ -1366,12 +1387,10 @@ function updateTransitChannels(dt) {
   if (pulseBurst) pulseChannels(pulseBurst.elapsed, transitChannels, pulseBurst);
   pulseVisual = transitIntensity(transitChannels);
   if (warpTransit) warpChannels(warpTransit.t, warpTransit.plan, transitChannels);
-  if (riftThroat) throatChannels(riftThroat.t, riftThroat.plan, transitChannels);
-  warpIntensity = warpTransit || riftThroat
+  warpIntensity = warpTransit
     ? clamp(Math.max(transitChannels.warp, transitChannels.tunnel), 0, 1) : 0;
   transitFlow += transitChannels.flowSpeed * dt;
   if (warpTransit) transitAxisTarget.copy(warpTransit.dir);
-  else if (riftThroat) transitAxisTarget.set(0, 0, -1).applyQuaternion(nav.quat);
   else if (pulseBurst) transitAxisTarget.copy(pulseBurst.direction);
   else if (pulseEchoes.length) transitAxisTarget.copy(pulseEchoes.at(-1).direction);
   else transitAxisTarget.set(0, 0, -1).applyQuaternion(nav.quat);
@@ -1394,7 +1413,7 @@ function applyTransitVisuals(dt = 1 / 60) {
   const peak = 4000 * k;
   let flow = ch.warp || 0;
   let speed = (ch.speed || 0) * peak;
-  if (!warpTransit && !riftThroat && !transitHold?.plan?.duration) {
+  if (!warpTransit && !transitHold?.plan?.duration) {
     flow = Math.min(1, ch.streak * 0.85);
     speed = warpSpeedFraction(flow) * peak * 0.5;
   } else if (transitHold?.kind === 'pulse') {
@@ -1448,8 +1467,9 @@ function applyTransitVisuals(dt = 1 / 60) {
     const near = Math.max(0, 1 - Math.abs(where.z) / reach) * Math.max(0, 1 - Math.max(0, where.radial - 1) * 2);
     const spill = riftPortal.openness * (0.25 + 0.75 * near * near);
     transitHullLight.position.copy(riftPortal.source.position).sub(nav.pos);
-    transitHullLight.color.copy(riftSpill).lerp(TRANSIT_COOL, 0.2);
-    transitHullLight.intensity = spill * 2.2;
+    const discharge = riftPortal.open.flash + .32 * riftPortal.open.tension;
+    transitHullLight.color.copy(riftSpill).lerp(TRANSIT_COOL, Math.min(1, .2 + discharge));
+    transitHullLight.intensity = spill * 2.2 + discharge * 2.8;
     transitHullAmbient.color.copy(riftSpill);
     transitHullAmbient.intensity = spill * near * 0.35;
   }
@@ -1560,7 +1580,10 @@ window.addEventListener('keydown', (e) => {
       shipView.toggleRamp();
     }
   }
-  if (!e.repeat && e.code === 'KeyX' && state === 'space') nav.vel.set(0, 0, 0);
+  if (!e.repeat && e.code === 'KeyX' && state === 'space' && !paused) {
+    if (riftRoute && !riftRoute.arrived) cancelRiftRoute();
+    else nav.vel.set(0, 0, 0);
+  }
   if (!e.repeat && e.code === 'KeyE' && !paused) {
     if (state === 'walk' && isNearExteriorRamp()) shipView.toggleRamp();
     else if (state === 'shipwalk' && shipView.walkPos.z > 3.2) shipView.toggleRamp();
@@ -1583,6 +1606,11 @@ window.addEventListener('keydown', (e) => {
       pauseGame();
     }
   }
+});
+
+window.addEventListener('cancel-fold-route', () => {
+  if (riftRoute && !riftRoute.arrived) cancelRiftRoute();
+  else if (pendingRoute) clearPendingRoute();
 });
 
 // ---- UI ---------------------------------------------------------------------
@@ -1821,7 +1849,8 @@ function clearFlightInput() {
 }
 
 function openStarMap() {
-  if (!starMap || starMap.isOpen || paused || riftRoute || ['warp', 'landing', 'takeoff', 'flyto', 'skydive'].includes(state)) return;
+  if (!starMap || starMap.isOpen || paused || riftRoute?.arrived || ['warp', 'landing', 'takeoff', 'flyto', 'skydive'].includes(state)) return;
+  if (riftRoute) cancelRiftRoute();
   cancelTimeWarp();
   clearFlightInput();
   spaceCtl.enabled = false;
@@ -2033,6 +2062,7 @@ let recallInFlight = false;
 
 function setState(s) {
   state = s;
+  if (s !== 'space' && riftRoute && !riftRoute.arrived) cancelRiftRoute();
   document.body.classList.toggle('walking', s === 'walk');
   if (s !== 'space') {
     cancelPulseBurst();
@@ -3681,7 +3711,7 @@ function setupRiftFarScene(pipeline, far, farCamera, focusBody) {
     }
     for (const view of far.starViews) { hide(view.group, true); hide(view.light, true); }
     for (const body of [...far.planets, ...far.compactObjects]) {
-      hide(body.group, riftRoute?.arrived ? true : body.bodyId === riftFarBodyId);
+      hide(body.group, riftRoute?.arrived || body === focusBody);
     }
     for (const group of standaloneSiteGroups(far)) hide(group, true);
     for (const object of [ship.group, weapons.glowMesh, weapons.coreMesh, sunShadow, headlamp,
@@ -3730,6 +3760,10 @@ function renderRiftFarView(far, farCamera, farQuat, dt = 1 / 60) {
 
 function renderRiftPortal() {
   const composite = nodePipeline.portalComposite;
+  if (!riftRoute && pendingRoute?.target && warpPreparedSystem && !pendingRoute.warpRequested
+      && !pendingRoute.farPrograms && warpPreparedRiftWarmState === 'complete') {
+    void prewarmRiftFarView(pendingRoute, warpPreparedSystem);
+  }
   if (!riftRoute || !riftPortal.isVisible) {
     composite.enabled = false;
     return;
@@ -3738,34 +3772,43 @@ function renderRiftPortal() {
   if (!far) { composite.enabled = false; return; }
   if (!riftRoute.arrived) syncRiftDestination();
   riftCameraUniv.copy(nav.pos).add(camera.position);
+  const eyeAcross = riftPortal.shape === 'plane' && riftPortal.crossing(nav.pos, riftCameraUniv) >= 0;
+  if (riftRoute.arrived && !riftPortal.needsBackView(riftCameraUniv, camera, eyeAcross)) {
+    composite.enabled = false;
+    return;
+  }
   riftPortal.mapPosition(riftCameraUniv, riftFarCameraUniv);
   riftPortal.mapQuaternion(camera.quaternion, riftFarQuat);
   let rendered = false;
   // Once the destination itself is warm, link the far view's programs off
   // the frame; the far image fades in when they are ready.
   if (!riftRoute.arrived && riftFarWarmState === 'idle' && riftDestinationPreparationReady()
-    && far.bodyById.has(riftFarBodyId)) {
+    && (!riftFarBodyId || far.bodyById.has(riftFarBodyId))) {
     void prewarmRiftFarView(riftRoute, far);
   }
   const farWarm = riftFarWarmState === 'complete' || riftFarWarmState === 'failed';
-  if (riftPortal.open.y > 0.004 && (riftRoute.arrived || (farWarm && riftDestinationPreparationReady()))) {
+  if ((riftPortal.open.y > 0.004 || riftPortal.open.x > 0.02)
+      && (riftRoute.arrived || (farWarm && riftDestinationPreparationReady()))) {
     try {
       rendered = renderRiftFarView(far, riftFarCameraUniv, riftFarQuat);
+      if (rendered) riftRoute.farDrawFailures = 0;
     } catch (error) {
       // A failed far draw must not take the flight loop with it: the lease has
       // already restored the near world, and the opening shows only its light.
-      if (!riftRoute.farViewError) console.error('Portal far view failed:', error);
-      riftRoute.farViewError = String(error?.message || error);
+      if (!riftRoute.farDrawFailures) console.error('Portal far view failed:', error);
+      riftRoute.farDrawFailures = (riftRoute.farDrawFailures || 0) + 1;
     }
   }
   if (!riftRoute.arrived) {
-    const target = far.bodyById.get(riftFarBodyId);
+    const target = riftFarBodyId ? far.bodyById.get(riftFarBodyId) : null;
+    const targetPresent = !riftFarBodyId || Boolean(target) || Boolean(far.built);
     const rootsReady = !target?.lod?.roots?.length || target.lod.roots.every((root) => !!root.mesh);
-    riftPreviewReady = rendered && rootsReady && riftDestinationPreparationReady();
+    riftPreviewReady = rendered && targetPresent && rootsReady && riftDestinationPreparationReady();
   }
   riftPortal.writeComposite(composite.uniforms, nav.pos);
   composite.uniforms.tPortal.value = portalView.texture;
   composite.uniforms.uPortalReady.value = rendered ? 1 : 0;
+  composite.uniforms.uEyeAcross.value = rendered && eyeAcross ? 1 : 0;
   composite.uniforms.uFarLight.value.copy(riftSpill);
   composite.enabled = true;
 }
@@ -3794,16 +3837,55 @@ function beginSelectedWarp() {
   }
   const prepared = takePreparedDestination(route, 'warp');
   requestGameplayPointerLock();
+  emitFoldNav('clear', '');
   ui.beginTravel();
   clearPendingRoute(false, true);
   warpTo(route.star, route.bodyId, prepared, route.target);
+}
+
+let foldNavPhase = 'clear';
+let foldNavLabel = '';
+function emitFoldNav(phase, label = '') {
+  const nextLabel = String(label || '');
+  if (phase === foldNavPhase && nextLabel === foldNavLabel) return;
+  foldNavPhase = phase;
+  foldNavLabel = nextLabel;
+  if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('fold-nav', {
+      detail: { phase, label: nextLabel },
+    }));
+  }
+}
+
+function cancelRiftRoute(message = '弦界航道已取消') {
+  if (!riftRoute || riftRoute.arrived) return false;
+  disposeRiftPreview();
+  if (riftBackSystem) { riftBackSystem.dispose(); riftBackSystem = null; }
+  riftRoute = null;
+  riftFarBodyId = null;
+  riftPortal.phase = 'closed';
+  riftPortal.open = { x: 0, y: 0, tension: 0, flash: 0 };
+  nodePipeline.portalComposite.enabled = false;
+  nodePipeline.portalComposite.uniforms.tPortal.value = null;
+  portalView?.pipeline?.setActiveAtmosphere?.(null, nav.pos);
+  portalView?.release?.();
+  riftFarWarmToken++;
+  riftFarWarmState = 'idle';
+  ui.endTravel();
+  if (state === 'space' && !paused) {
+    spaceCtl.enabled = true;
+    ui.setCrosshair(true);
+  }
+  emitFoldNav('clear', '');
+  ui.setHint(message);
+  return true;
 }
 
 function beginSelectedRift() {
   if (!pendingRoute || state !== 'space' || riftRoute) return;
   // The route can be chosen entirely through DOM buttons, without ever
   // touching the flight canvas or keyboard. Unlock inside this trusted click
-  // path so both the opening and the crossing are always audible.
+  // path so both the opening tear and post-crossing seal are always audible.
   unlockAudio();
   const route = pendingRoute;
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(nav.quat).normalize();
@@ -3813,31 +3895,40 @@ function beginSelectedRift() {
   const prepared = takePreparedDestination(route, 'rift');
   requestGameplayPointerLock();
   clearPendingRoute(false, true);
+  ui.endTravel();
   spaceCtl.enabled = true;
   ui.setCrosshair(true);
-  // The mouth forms a few seconds of flight ahead and its size follows the
-  // flight scale, so it neither rushes past nor fills the screen at once.
+  // The lane forms ahead of the ship and scales with the active flight speed
+  // scale so its angular size stays balanced from low orbit to deep space.
   const reach = clamp(spaceCtl.speedScale * 1.6, 2200, 80000);
-  riftPortal.profile.radius = clamp(reach * 0.16, 300, 12000);
+  if (riftPortal.shape === 'sphere') {
+    riftPortal.profile.radius = clamp(reach * 0.16, 300, 12000);
+  } else {
+    riftPortal.profile.halfWidth = reach * 0.23;
+    riftPortal.profile.halfHeight = reach * 0.14;
+  }
   riftRoute = {
     ...route,
     arrival,
     arrived: false,
-    anchorLocked: true,
-    lastHintBand: -1,
+    anchorLocked: false,
     previewPreloaded: !!prepared,
     previewBuildFrame: -1,
     openStarted: false,
+    pendingCrossing: false,
+    heldVelocity: null,
     closeAt: 0,
     reach,
   };
   riftFarBodyId = arrival.bodyId;
   riftOrientation.copy(nav.quat);
   riftEntranceUniv.copy(nav.pos).addScaledVector(forward, reach);
-  // The far mouth sits just behind the arrival point: the throat lets the
-  // ship out of its back surface, already facing the destination.
-  const arrivalForward = new THREE.Vector3(0, 0, -1).applyQuaternion(arrival.quat);
-  riftTargetUniv.copy(arrival.entry).addScaledVector(arrivalForward, -riftPortal.radius);
+  if (riftPortal.shape === 'sphere') {
+    const arrivalForward = new THREE.Vector3(0, 0, -1).applyQuaternion(arrival.quat);
+    riftTargetUniv.copy(arrival.entry).addScaledVector(arrivalForward, -riftPortal.radius);
+  } else {
+    riftTargetUniv.copy(arrival.entry);
+  }
   riftPreviewOriginUniv.copy(arrival.entry);
   riftPortal.setFrames(riftEntranceUniv, riftOrientation, riftTargetUniv, arrival.quat);
   cancelPulseBurst();
@@ -3857,44 +3948,86 @@ function beginSelectedRift() {
   setRiftPreviewVisible(false);
   const farStar = riftPreviewSystem.starViews?.[0]?.light?.color;
   riftSpill.copy(farStar || route.star.color || new THREE.Color(1, 1, 1));
-  // Respond on the click itself: the mouth starts to form at once; its far
-  // image fades in as soon as the destination and the far view are warm.
-  riftFarWarmState = 'idle';
+  const programsValid = route.farPrograms
+    && route.farPrograms.system === riftPreviewSystem
+    && (route.farPrograms.state === 'complete'
+      || (route.farPrograms.state === 'compiling' && route.farPrograms.token === riftFarWarmToken));
+  if (programsValid) {
+    riftFarWarmState = route.farPrograms.state;
+  } else {
+    riftRoute.farPrograms = null;
+    riftFarWarmState = 'idle';
+  }
+  emitFoldNav('sync', route.label || '');
   startRiftOpening();
+  if (riftFarWarmState === 'idle' && riftDestinationPreparationReady()
+      && (!riftFarBodyId || riftPreviewSystem.bodyById.has(riftFarBodyId))) {
+    void prewarmRiftFarView(riftRoute, riftPreviewSystem);
+  }
 }
 
 let riftFarWarmState = 'idle';
 let riftFarWarmToken = 0;
 
-// Link the far view's programs for the exact far scene while the mouth forms:
+// Link the far view's programs for the exact far scene while waiting to open:
 // lease the destination exactly as the far draw will, collect its materials
 // synchronously and let the driver compile them in parallel.
 async function prewarmRiftFarView(route, prepared) {
   const token = ++riftFarWarmToken;
-  riftFarWarmState = 'compiling';
+  const record = { state: 'compiling', token, system: prepared };
+  route.farPrograms = record;
+  if (riftRoute === route) riftFarWarmState = record.state;
   const signal = warpCompile.signal;
-  const current = () => token === riftFarWarmToken && riftRoute === route && !route.arrived;
+  const arrival = route.arrival || route.target;
+  const current = () => token === riftFarWarmToken
+    && ((pendingRoute === route && !route.warpRequested) || (riftRoute?.farPrograms === record && !riftRoute.arrived));
   try {
     const pipeline = portalView.ensure();
     await nodePipeline.prepare(() => {
-      const quat = lookQuatAt(route.arrival.entry, route.arrival.center, new THREE.Quaternion());
+      const quat = lookQuatAt(arrival.entry, arrival.center, new THREE.Quaternion());
       portalView.syncCamera(quat);
       prepared.updateCelestial(celestialClock.hours);
-      universe.relativizeSystem(prepared, route.arrival.entry);
-      const focusBody = prepared.bodyById.get(riftFarBodyId) || null;
-      const restore = setupRiftFarScene(pipeline, prepared, route.arrival.entry, focusBody);
+      universe.relativizeSystem(prepared, arrival.entry);
+      const focusBody = prepared.bodyById.get(route.bodyId || arrival.bodyId) || null;
+      const previousTarget = renderer.getRenderTarget();
+      const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
+      const restore = setupRiftFarScene(pipeline, prepared, arrival.entry, focusBody);
       try {
-        const compileCamera = portalView.camera.clone();
-        compileCamera.layers.enableAll();
-        return compilePrograms(renderer, scene, compileCamera, null, { signal });
+        // Three's compile() visits materials in hidden subtrees as well.
+        // Enumerate only the live far-side drawables, retaining their mesh
+        // types and the exact lighting/environment of the leased scene.
+        const meshes = [];
+        scene.traverseVisible(object => {
+          if (object.material && object.layers.test(portalView.camera.layers)) meshes.push(object);
+        });
+        const drawables = {
+          traverse: visit => meshes.forEach(visit),
+          traverseVisible() {}, // lights are gathered from the target scene
+        };
+        renderer.setRenderTarget(pipeline.composer.readBuffer);
+        return compilePrograms(renderer, drawables, portalView.camera, scene, { signal });
       } finally {
+        renderer.setRenderTarget(previousTarget, face, mip);
         restore();
       }
     }, { signal, label: 'portal-programs', isCurrent: current });
-    if (current()) riftFarWarmState = 'complete';
+    if (current()) {
+      record.state = 'complete';
+      if (riftRoute?.farPrograms === record) riftFarWarmState = record.state;
+    } else if (route.farPrograms === record && record.state === 'compiling') {
+      record.state = 'idle';
+      if (riftRoute?.farPrograms === record) riftFarWarmState = 'idle';
+    }
   } catch (error) {
-    if (!current()) return;
-    riftFarWarmState = 'failed';
+    if (!current()) {
+      if (route.farPrograms === record && record.state === 'compiling') {
+        record.state = 'idle';
+        if (riftRoute?.farPrograms === record) riftFarWarmState = 'idle';
+      }
+      return;
+    }
+    record.state = 'failed';
+    if (riftRoute?.farPrograms === record) riftFarWarmState = record.state;
     console.warn('Portal far-view preparation failed:', error);
   }
 }
@@ -3902,15 +4035,16 @@ async function prewarmRiftFarView(route, prepared) {
 function startRiftOpening() {
   if (!riftRoute || riftRoute.arrived || riftRoute.openStarted) return;
   riftRoute.openStarted = true;
-  ui.beginTravel();
   riftPortal.beginOpening();
   audio.cue('rift-open');
-  ui.setHint(riftDestinationPreparationReady()
-    ? '弦界坐标钉定 · 虫洞口正在船头成形'
-    : '弦界坐标钉定 · 虫洞口成形中 · 目标世界预载中', true);
+  ui.setHint('');
 }
 
 function riftDestinationPreparationReady() {
+  if (riftRoute && !riftRoute.previewPreloaded) {
+    const target = riftFarBodyId ? riftPreviewSystem?.bodyById.get(riftFarBodyId) : null;
+    return Boolean(!riftFarBodyId || target || riftPreviewSystem?.built);
+  }
   const settled = (value) => value === 'complete' || value === 'failed';
   return settled(warpPreparedWaterWarmState)
     && settled(warpPreparedRiftWarmState);
@@ -3939,9 +4073,31 @@ function syncRiftDestination() {
     body = riftPreviewSystem.bodyById.get(riftRoute.arrival.bodyId);
   }
   if (!body) return;
+  if (typeof riftPreviewReady !== 'undefined' && !riftPreviewReady && !riftRoute.previewPreloaded && typeof flushChunkQueue === 'function') {
+    const terrainRootsMissing = body.lod?.roots?.some((root) => !root.mesh);
+    const waterRootsMissing = body.waterLod?.roots?.some((root) => !root.mesh);
+    if (terrainRootsMissing || waterRootsMissing) {
+      const worldOffset = _v.copy(riftRoute.arrival.entry).sub(body.posUniv);
+      const camLocal = body.worldOffsetToLocal?.(worldOffset, _v2) || worldOffset;
+      if (terrainRootsMissing) {
+        body.lod.focused = true;
+        body.lod.update(camLocal, 1);
+      }
+      if (waterRootsMissing) {
+        body.waterLod.focused = true;
+        body.waterLod.update(camLocal, 1);
+      }
+      flushChunkQueue(12);
+    }
+  }
   riftRoute.arrival.center.copy(body.posUniv);
   riftRoute.arrival.entry.copy(body.posUniv).add(riftRoute.arrival.offset);
-  riftTargetUniv.copy(riftRoute.arrival.entry);
+  if (typeof riftPortal !== 'undefined' && riftPortal?.shape === 'sphere') {
+    const arrivalForward = _v2.set(0, 0, -1).applyQuaternion(riftRoute.arrival.quat);
+    riftTargetUniv.copy(riftRoute.arrival.entry).addScaledVector(arrivalForward, -riftPortal.radius);
+  } else {
+    riftTargetUniv.copy(riftRoute.arrival.entry);
+  }
   riftPreviewOriginUniv.copy(riftRoute.arrival.entry);
 }
 
@@ -3974,36 +4130,59 @@ function updateDestinationMarker() {
   });
 }
 
-function beginRiftThroat() {
-  const route = riftRoute;
-  const entry = new THREE.Vector3().lerpVectors(prevNavPos, nav.pos,
-    Math.max(0, riftPortal.crossing(prevNavPos, nav.pos)));
-  riftThroat = { t: 0, plan: throatPlan(), entry, swapped: false };
-  route.inThroat = true;
-  audio.cue('rift-enter');
-  ui.setHint(`${route.label} · 穿越喉道`, true);
-}
 function finishRiftCrossing() {
   const route = riftRoute;
-  // Carry the pose through the throat: the entry point on the near mouth
-  // maps to the exit point on the far mouth's back surface, and everything
-  // flown since entry continues from there. Heading and velocity are mapped,
-  // nothing is re-aimed.
-  const entry = riftThroat?.entry || nav.pos.clone();
-  const delta = _v2.copy(nav.pos).sub(entry);
-  const prevDelta = _v3.copy(prevNavPos).sub(entry);
-  riftPortal.mapPosition(entry, _v);
-  nav.pos.copy(_v).add(riftPortal.mapDirection(delta, delta));
-  prevNavPos.copy(_v).add(riftPortal.mapDirection(prevDelta, prevDelta));
+  // Carry the exact camera pose through the opening: position, heading and
+  // velocity are mapped, nothing is re-aimed or pulled onto the axis.
+  const crossedFromPending = !!route.pendingCrossing;
+  route.pendingCrossing = false;
+  if (route.heldVelocity) {
+    if (nav.vel.lengthSq() < route.heldVelocity.lengthSq()) nav.vel.copy(route.heldVelocity);
+    route.heldVelocity = null;
+  }
+  if (crossedFromPending && riftPortal.profile.shape !== 'sphere') {
+    const localBefore = riftPortal.toSourceLocal(nav.pos, _v);
+    if (localBefore.z >= 0) {
+      _v2.set(0, 0, -1).applyQuaternion(riftOrientation);
+      nav.pos.addScaledVector(_v2, localBefore.z + 1);
+    }
+  }
+  riftPortal.mapPosition(nav.pos, _v);
+  nav.pos.copy(_v);
+  riftPortal.mapPosition(prevNavPos, prevNavPos);
   riftPortal.mapQuaternion(nav.quat, riftAssistQuat);
   nav.quat.copy(riftAssistQuat);
   riftPortal.mapDirection(nav.vel, _v);
   nav.vel.copy(_v);
+  if (typeof shipView !== 'undefined' && shipView) {
+    if (shipView.prevQuat) {
+      riftPortal.mapQuaternion(shipView.prevQuat, riftAssistQuat);
+      shipView.prevQuat.copy(riftAssistQuat);
+    }
+    if (shipView.viewBlend < 1 && shipView.viewBlendFrom) {
+      riftPortal.mapDirection(shipView.viewBlendFrom.p, shipView.viewBlendFrom.p);
+      riftPortal.mapQuaternion(shipView.viewBlendFrom.q, riftAssistQuat);
+      shipView.viewBlendFrom.q.copy(riftAssistQuat);
+    }
+    if (shipView.shipwalk && !(typeof ship !== 'undefined' && ship?.parkedPosUniv)) {
+      riftPortal.mapPosition(shipView.anchorPos, shipView.anchorPos);
+      riftPortal.mapQuaternion(shipView.anchorQuat, riftAssistQuat);
+      shipView.anchorQuat.copy(riftAssistQuat);
+    }
+  }
+  if (typeof transitAxisWorld !== 'undefined') {
+    riftPortal.mapDirection(transitAxisWorld, transitAxisWorld);
+  }
+  if (typeof pulseEchoes !== 'undefined') {
+    for (const echo of pulseEchoes) {
+      if (echo?.direction) riftPortal.mapDirection(echo.direction, echo.direction);
+    }
+  }
   const destination = universe.adoptSystem(riftPreviewSystem);
   riftPreviewSystem = null;
   transferredPreparedDestination = null;
   // The departure system leaves the live universe but stays drawable: it is
-  // what the far mouth now shows behind the ship until it closes.
+  // what the closing fold now shows behind the ship.
   riftBackSystem = universe.fadingSystem;
   universe.fadingSystem = null;
   for (const view of riftBackSystem?.starViews || []) {
@@ -4037,81 +4216,176 @@ function finishRiftCrossing() {
   // frame to the arrival body now so the medium is not rebound to the
   // departure planet and the swapped cloud history survives.
   nearest = typeof arrivalBody?.altitudeAt === 'function' ? arrivalBody : null;
+  const mainAtmoBody = arrivalBody?.isGasGiant || arrivalBody?.type === 'artificialHabitat'
+    ? null : arrivalBody;
+  riftPortal.swapSides();
   // The two views trade worlds; the cloud reconstruction goes with them.
-  const farPipeline = portalView.pipeline;
+  const farPipeline = portalView?.pipeline;
   if (farPipeline) {
     // Trade first: the main view takes the far view's reconstruction of the
     // arrival planet, the far view takes the departure planet's. Binding the
     // media afterwards then finds each cloud pass already on its own planet.
     const backBody = nearestBodyOf(riftBackSystem, riftEntranceUniv, true);
+    const farAtmoBody = backBody?.isGasGiant || backBody?.type === 'artificialHabitat'
+      ? null : backBody;
+    const backCamPos = riftPortal.mapPosition(nav.pos, _v3);
     nodePipeline.cloudPass?.exchangeTemporalState(farPipeline.cloudPass);
-    nodePipeline.setActiveAtmosphere(arrivalBody, nav.pos);
-    farPipeline.setActiveAtmosphere(backBody, nav.pos);
+    for (const cp of [nodePipeline.cloudPass, farPipeline.cloudPass]) {
+      if (!cp?.target?.textures) continue;
+      const ru = cp.resolveMaterial?.uniforms;
+      if (ru) {
+        if (ru.tCurrent) ru.tCurrent.value = cp.target.textures[0];
+        if (ru.tCurrentAux) ru.tCurrentAux.value = cp.target.textures[1];
+      }
+      const cu = cp.compositeMaterial?.uniforms;
+      if (cu) {
+        if (cu.tCloudAux) cu.tCloudAux.value = cp.target.textures[1];
+        if (cu.tShaft) cu.tShaft.value = cp.target.textures[2];
+      }
+    }
+    nodePipeline.setActiveAtmosphere(mainAtmoBody, nav.pos);
+    farPipeline.setActiveAtmosphere(farAtmoBody, backCamPos);
+  } else {
+    nodePipeline.setActiveAtmosphere?.(mainAtmoBody, nav.pos);
   }
-  nodePipeline.invalidateTemporalHistory?.('rift-handoff');
-  riftPortal.swapSides();
+  // Reset frame correspondence / TAA / legacy volume across the fold jump
+  // without calling invalidateTemporalHistory(), which would wipe the
+  // swapped LiteCloudPass temporal history.
+  nodePipeline.frameState?.invalidate?.('rift-handoff');
+  nodePipeline.temporalAA?.resetHistory?.();
+  nodePipeline.volumePass?.resetHistory?.();
+  if (!farPipeline?.cloudPass) nodePipeline.cloudPass?.resetHistory?.();
   riftSpill.copy(riftBackSystem?.starViews?.[0]?.light?.color || new THREE.Color(1, 1, 1));
   route.arrived = true;
-  route.closeAt = clock.elapsedTime + (riftPortal.profile.persistent ? Infinity : 1.4);
-  if (riftThroat) riftThroat.swapped = true;
+  route.closeAt = clock.elapsedTime + (riftPortal.profile.persistent ? Infinity : 0.65);
+  if (typeof emitFoldNav === 'function') emitFoldNav('clear', '');
   audio.cue('rift-close');
   setState('space');
   ui.showArrival(arrivalBody?.name || destination.name, destination.name, '弦界抵达');
 }
 
+function riftThresholdCrossing(portal, prev, curr) {
+  if (portal.isOpen) return portal.crossing(prev, curr);
+  if (portal.profile.shape !== 'plane') return -1;
+  const a = portal.toSourceLocal(prev, _v2);
+  const b = portal.toSourceLocal(curr, _v3);
+  if (a.z <= 0 || Math.sign(a.z) === Math.sign(b.z) || a.z === b.z) return -1;
+  const t = a.z / (a.z - b.z);
+  const x = (a.x + (b.x - a.x) * t) / Math.max(portal.halfWidth, 1e-3);
+  const y = (a.y + (b.y - a.y) * t) / Math.max(portal.halfHeight, 1e-3);
+  const inside = Math.hypot(x, y) <= portal.contour(Math.atan2(y, x)) * 0.985;
+  return inside ? t : -1;
+}
+
 function updateRiftRoute(dt) {
   if (!riftRoute) return;
-  if (!riftRoute.arrived) syncRiftDestination();
-  riftPortal.update(dt, clock.elapsedTime);
-  if (riftThroat) {
-    // The throat holds its covered moment until the destination is ready,
-    // so a late preparation lengthens the ride instead of breaking it.
-    const holdAt = riftThroat.plan.swapAt;
-    const ready = riftPreviewReady || riftRoute.arrived;
-    riftThroat.t = ready || riftThroat.t < holdAt ? riftThroat.t + dt : holdAt;
-    if (!riftThroat.swapped && riftThroat.t >= holdAt && ready) finishRiftCrossing();
-    if (riftThroat.t >= riftThroat.plan.duration) {
-      riftThroat = null;
-      riftRoute.inThroat = false;
+  if (!riftRoute.arrived) {
+    if (riftRoute.farDrawFailures >= 3) {
+      cancelRiftRoute('目的地视野未能建立 · 航道已关闭');
+      return;
+    }
+    if (!riftRoute.openStarted && typeof startRiftOpening === 'function') {
+      if (typeof emitFoldNav === 'function') emitFoldNav('sync', riftRoute.label || '');
+      startRiftOpening();
+    }
+    syncRiftDestination();
+    if (riftFarBodyId && riftPreviewSystem?.built && !riftPreviewSystem.bodyById.has(riftFarBodyId)) {
+      cancelRiftRoute('未找到目的地坐标 · 航道已关闭');
+      return;
+    }
+    if (riftFarWarmState === 'compiling'
+        && (riftRoute.farPrograms?.token !== riftFarWarmToken || riftRoute.farPrograms?.state !== 'compiling')) {
+      riftFarWarmState = riftRoute.farPrograms?.state || 'idle';
+    }
+    if (riftFarWarmState === 'idle' && riftDestinationPreparationReady()
+        && (!riftFarBodyId || riftPreviewSystem?.bodyById.has(riftFarBodyId))
+        && typeof prewarmRiftFarView === 'function') {
+      void prewarmRiftFarView(riftRoute, riftPreviewSystem);
     }
   }
+  // Hold at the drawn glowing seam if the first far-view frame has not rendered
+  // yet, so the opening never tears into a black aperture.
+  let portalDt = dt;
+  if (riftPortal.phase === 'opening' && !riftPreviewReady) {
+    const seamCap = riftPortal.profile.openSeconds * (riftPortal.profile.seamFraction * 0.95);
+    if (riftPortal.clock >= seamCap) portalDt = 0;
+    else portalDt = Math.min(dt, Math.max(0, seamCap - riftPortal.clock));
+  }
+  const wasSlit = riftPortal.phase === 'opening' && riftPortal.openness < .04;
+  riftPortal.update(portalDt, clock.elapsedTime);
+  if (wasSlit && riftPortal.openness >= .04) audio.cue('rift-tear');
   if (!riftRoute.arrived) {
+    // Keep the lane anchored in world/reference space from click onwards.
     riftPortal.setFrames(riftEntranceUniv, riftOrientation, riftTargetUniv, riftRoute.arrival.quat);
-    if (!riftThroat) {
-      const where = riftPortal.locate(nav.pos);
-      // While the mouth forms the ship cannot outrun it; afterwards the
-      // pilot flies freely, with a light pull toward the axis close in.
-      if (!riftPortal.isOpen) {
-        const cap = riftRoute.reach / Math.max(riftPortal.profile.openSeconds * 1.8, 0.5);
-        if (nav.vel.length() > cap) nav.vel.setLength(cap);
+    const readyToCross = riftPortal.isOpen && riftPreviewReady;
+    if (!riftRoute.anchorLocked) {
+      if (!readyToCross) {
+        const activity = riftPreviewReady ? '坐标锁定 · 展开裂口'
+          : riftFarWarmState === 'compiling' ? '链接目的地视野' : '同步弦界坐标';
+        ui.setFoldActivity?.(activity);
       }
-      const near = where.z > 0 && where.z < riftPortal.radius * 5 && where.radial < 1.6;
-      if (near && riftPortal.isOpen) {
-        riftInverse.copy(riftOrientation).invert();
-        riftLocalVel.copy(nav.vel).applyQuaternion(riftInverse);
-        const pull = (1 - Math.exp(-dt * 0.8)) * (1 - where.z / (riftPortal.radius * 5));
-        riftLocalVel.x = lerp(riftLocalVel.x, clamp(-where.local.x * 0.15, -80, 80), pull);
-        riftLocalVel.y = lerp(riftLocalVel.y, clamp(-where.local.y * 0.15, -80, 80), pull);
-        nav.vel.copy(riftLocalVel.applyQuaternion(riftOrientation));
+      if (readyToCross) {
+        riftRoute.anchorLocked = true;
+        if (typeof emitFoldNav === 'function') emitFoldNav('open', riftRoute.label || '');
+        ui.endTravel?.();
+        if (state === 'space' && !paused) {
+          spaceCtl.enabled = true;
+          ui.setCrosshair?.(true);
+        }
       }
-      const band = riftPortal.isOpen ? 10 : 9;
-      if (band !== riftRoute.lastHintBand) {
-        riftRoute.lastHintBand = band;
-        if (riftPortal.isOpen) ui.setHint(`${riftRoute.label} · 虫洞口已稳定 · 飞入即可穿越`, true);
+    }
+    const crossingT = typeof riftThresholdCrossing === 'function'
+      ? riftThresholdCrossing(riftPortal, prevNavPos, nav.pos)
+      : riftPortal.crossing(prevNavPos, nav.pos);
+    if (crossingT >= 0) {
+      if (readyToCross) {
+        finishRiftCrossing();
+        return;
       }
-      if (riftPortal.crossing(prevNavPos, nav.pos) >= 0) beginRiftThroat();
+      // Support immediate forward input during load: save momentum and hold
+      // just on the near side of the anchored portal so crossing cannot miss.
+      if (!riftRoute.heldVelocity) riftRoute.heldVelocity = nav.vel.clone();
+      else if (nav.vel.lengthSq() > riftRoute.heldVelocity.lengthSq()) riftRoute.heldVelocity.copy(nav.vel);
+      riftRoute.pendingCrossing = true;
+      _v.lerpVectors(prevNavPos, nav.pos, Math.max(0, crossingT * 0.98));
+      nav.pos.copy(_v);
+      const holdLocal = riftPortal.toSourceLocal(nav.pos, _v2);
+      if (holdLocal.z < 1) {
+        _v3.set(0, 0, 1).applyQuaternion(riftOrientation);
+        nav.pos.addScaledVector(_v3, 1 - holdLocal.z);
+      }
+      nav.vel.set(0, 0, 0);
+      ui.setHint(`${riftRoute.label} · 正在同步目的地 · 即将穿越`, true);
+    } else if (riftRoute.pendingCrossing) {
+      const loc = riftPortal.locate(nav.pos);
+      if (loc.z > Math.max(50, riftRoute.reach * 0.05)) {
+        riftRoute.pendingCrossing = false;
+        riftRoute.heldVelocity = null;
+      } else if (readyToCross) {
+        finishRiftCrossing();
+        return;
+      } else if (loc.z < 1) {
+        _v3.set(0, 0, 1).applyQuaternion(riftOrientation);
+        nav.pos.addScaledVector(_v3, 1 - loc.z);
+        nav.vel.set(0, 0, 0);
+      }
+    } else if (riftPortal.shape === 'plane' && riftPortal.locate(nav.pos).z < -.75 * riftRoute.reach) {
+      // A pilot who went around the opening and kept flying has left it behind.
+      cancelRiftRoute('已飞离弦界入口 · 航道已关闭');
     }
   } else if (clock.elapsedTime >= riftRoute.closeAt && riftPortal.isOpen) {
     riftPortal.beginClosing();
-  } else if (!riftPortal.isVisible && !riftThroat) {
-    // The mouth has closed: the departure world is no longer visible anywhere.
+  } else if (!riftPortal.isVisible) {
+    // The fold has healed: the departure world is no longer visible anywhere.
     retiredRiftSystem = riftBackSystem;
     riftBackSystem = null;
     nodePipeline.portalComposite.enabled = false;
     nodePipeline.portalComposite.uniforms.tPortal.value = null;
-    portalView.release();
+    portalView?.pipeline?.setActiveAtmosphere?.(null, nav.pos);
+    portalView?.release?.();
     riftFarWarmState = 'idle';
     riftRoute = null;
+    if (typeof emitFoldNav === 'function') emitFoldNav('clear', '');
   }
 }
 
@@ -4240,9 +4514,9 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
       arrivalSpec = hero;
       const arrivalDistance = blackHoleArrivalDistance(hero);
       warpRevealCameraOffset = approachDir.clone().multiplyScalar(arrivalDistance);
-      // From ~38x the framing distance the planet is a lit point at the end
-      // of the tunnel; it grows continuously until the authored framing.
-      approachDistance = arrivalDistance * (hero.type === 'blackHole' ? 24 : 38);
+      // The silhouette should already be legible through the first opening.
+      // A shorter run-in also spreads its apparent growth across the exit.
+      approachDistance = arrivalDistance * (hero.type === 'blackHole' ? 7 : 9);
       arrivalPlanetName = hero.name;
     }
     // The camera pose jumps across the galaxy while the tunnel is opaque;
@@ -4345,18 +4619,22 @@ function abortTransits() {
     riftPortal.phase = 'closed';
     riftPortal.open = { x: 0, y: 0, tension: 0, flash: 0 };
     nodePipeline.portalComposite.enabled = false;
+    nodePipeline.portalComposite.uniforms.tPortal.value = null;
+    portalView?.pipeline?.setActiveAtmosphere?.(null, nav.pos);
+    portalView?.release?.();
+    riftFarWarmToken++;
     riftFarWarmState = 'idle';
   }
+  emitFoldNav('clear', '');
   if (state === 'warp') setState('space');
 }
 
 function transitHoldsQuality() {
-  return !!(warpTransit || riftThroat || pulseBurst || pulseEchoes.length || riftRoute || transitHold || state === 'warp');
+  return !!(warpTransit || pulseBurst || pulseEchoes.length || riftRoute || transitHold || state === 'warp');
 }
 
 function resetTransitState() {
   if (pulseBurst?.charging) audio.pulseCharge?.(-1);
-  riftThroat = null;
   pulseBurst = null;
   pulseEchoes.length = 0;
   pulseActive = false;
@@ -4388,6 +4666,12 @@ function newUniverse(seed) {
   riftPortal.phase = 'closed';
   riftPortal.open = { x: 0, y: 0, tension: 0, flash: 0 };
   nodePipeline.portalComposite.enabled = false;
+  nodePipeline.portalComposite.uniforms.tPortal.value = null;
+  portalView?.pipeline?.setActiveAtmosphere?.(null, nav.pos);
+  portalView?.release?.();
+  riftFarWarmToken++;
+  riftFarWarmState = 'idle';
+  emitFoldNav('clear', '');
   if (riftBackSystem) { riftBackSystem.dispose(); riftBackSystem = null; }
   scatter.clear();
   universe.dispose();
@@ -4968,7 +5252,9 @@ function applyAdaptiveStage(stage) {
   // (avoids any mid-flight shader recompilation).
   if (nodePipeline.cloudPass && QUALITY_PROFILE.liteClouds) {
     const cloudScaleFactor = adaptiveStage >= 3 ? 0.76 : adaptiveStage >= 1 ? 0.88 : 1.0;
-    nodePipeline.cloudPass.setQuality({ scale: QUALITY_PROFILE.liteClouds.scale * cloudScaleFactor });
+    const scale = QUALITY_PROFILE.liteClouds.scale * cloudScaleFactor;
+    nodePipeline.cloudPass.setQuality({ scale });
+    portalView?.pipeline?.cloudPass?.setQuality({ scale });
   }
   const adaptiveGrassScale = adaptiveStage >= 5 ? 0.52 : adaptiveStage >= 2 ? 0.76 : 1;
   scatter.setGrassDensity(QUALITY_PROFILE.grassDensity * adaptiveGrassScale);
@@ -5007,6 +5293,7 @@ function renderWorldFrame() {
       gradePass_.uniforms.uTime.value = DEV_SERVER && devWaterWakeFixture?.held
         ? devWaterWakeFixture.heldGradeTime : clock.elapsedTime;
     }
+    warpConduit.renderLowFog(renderer, camera);
     rigidWorldObjects.set(ship.group, ship.foregroundOnly ? foregroundPass : nodePipeline.renderPass);
     rendered = draw({ origin: nav.pos, context: universe.system, timeEpoch: celestialClock.epoch,
       rigidObjects: rigidWorldObjects });
@@ -5056,7 +5343,10 @@ function frame(rafTs) {
   if (followFrame && universe.planets().includes(referenceBody)) {
     _v.copy(referenceBody.posUniv).sub(referenceBodyPos);
     nav.pos.add(_v);
-    if (riftRoute && !riftRoute.arrived && riftRoute.anchorLocked) riftEntranceUniv.add(_v);
+    if (riftRoute && !riftRoute.arrived) {
+      riftEntranceUniv.add(_v);
+      prevNavPos.add(_v);
+    }
     // 低空范围内让飞船挂靠行星自转：每帧把 nav.pos / nav.quat 同步应用
     // frameOrientation 的本帧增量，否则悬停找落点时地面疯狂转动、落点
     // 追不上。仅当连续跟踪同一颗 referenceBody 时启用，避免切换目标时
@@ -5072,9 +5362,10 @@ function frame(rafTs) {
         // the local frame so a held strafe/approach direction does not drift as
         // the ground turns underneath the ship.
         nav.vel.applyQuaternion(dq);
-        if (riftRoute && !riftRoute.arrived && riftRoute.anchorLocked) {
+        if (riftRoute && !riftRoute.arrived) {
           riftEntranceUniv.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
           riftOrientation.premultiply(dq);
+          prevNavPos.sub(referenceBody.posUniv).applyQuaternion(dq).add(referenceBody.posUniv);
         }
       }
     }
@@ -5193,6 +5484,23 @@ function frame(rafTs) {
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), approachLimit, dt);
+    }
+    if (riftRoute && !riftRoute.anchorLocked && !riftRoute.arrived && riftPortal.shape === 'plane') {
+      // Keep the opening in view on an early approach. Brake only the incoming
+      // component, allowing the pilot to steer away or reverse at any time.
+      const normal = _v2.set(0, 0, 1).applyQuaternion(riftOrientation);
+      const startZ = _v.copy(flightStepStart).sub(riftEntranceUniv).dot(normal);
+      const endZ = _v.copy(nav.pos).sub(riftEntranceUniv).dot(normal);
+      const standOff = .48 * riftRoute.reach;
+      if (endZ < startZ && startZ > 0 && endZ < standOff * 1.6) {
+        const local = _v.subVectors(nav.pos, riftEntranceUniv).applyQuaternion(_q.copy(riftOrientation).invert());
+        if (Math.hypot(local.x / riftPortal.halfWidth, local.y / riftPortal.halfHeight) < 1.2) {
+          const allowed = Math.max(0, startZ - standOff) * (1 - Math.exp(-3*dt));
+          const excess = Math.max(0, startZ - endZ - allowed);
+          nav.pos.addScaledVector(normal, excess);
+          nav.vel.addScaledVector(normal, Math.min(excess / Math.max(dt, .001), Math.max(0, -nav.vel.dot(normal))));
+        }
+      }
     }
     // Sweep the camera's whole frame step against procedural terrain. Checking
     // only last frame's altitude allowed a low-FPS step to enter or cross a
@@ -7864,10 +8172,14 @@ window.NMS = {
     active: !!riftRoute,
     arrived: !!riftRoute?.arrived,
     anchorLocked: !!riftRoute?.anchorLocked,
+    openStarted: !!riftRoute?.openStarted,
+    pendingCrossing: !!riftRoute?.pendingCrossing,
     phase: riftPortal.phase,
-    throat: riftThroat ? { t: riftThroat.t, swapped: riftThroat.swapped } : null,
     shape: riftPortal.shape,
+    halfWidth: riftPortal.halfWidth,
+    halfHeight: riftPortal.halfHeight,
     radius: riftPortal.radius,
+    reach: riftRoute?.reach ?? null,
     open: riftPortal.openness,
     seam: riftPortal.open.x,
     tension: riftPortal.open.tension,
@@ -7875,6 +8187,8 @@ window.NMS = {
     visible: riftPortal.isVisible,
     composite: nodePipeline.portalComposite.enabled,
     farRendered: !!portalView.rendered,
+    farWarmState: riftFarWarmState,
+    foldNavPhase,
     audioCue: audio.lastCue,
     // metres in front of the opening (+) along its normal; null after crossing
     distanceToThreshold: riftRoute && !riftRoute.arrived ? riftPortal.locate(nav.pos).z : null,
@@ -7895,13 +8209,24 @@ window.NMS = {
       };
     })(),
   }),
-  approachRift(distance = 38) {
+  approachRift(distance = 38, offsetOrX = 0, offsetY = 0) {
     if (!riftRoute || riftRoute.arrived || !riftRoute.anchorLocked) return false;
-    // distance is measured from the mouth's surface (a sphere's front face)
+    const opts = typeof offsetOrX === 'object' && offsetOrX !== null
+      ? offsetOrX : { x: Number(offsetOrX) || 0, y: Number(offsetY) || 0 };
+    // distance is measured from the mouth's surface (0 for plane, radius for sphere)
     const surface = riftPortal.shape === 'sphere' ? riftPortal.radius : 0;
-    nav.pos.set(0, 0, surface + Number(distance)).applyQuaternion(riftOrientation).add(riftEntranceUniv);
+    nav.pos.set(Number(opts.x) || 0, Number(opts.y) || 0, surface + Number(distance))
+      .applyQuaternion(riftOrientation).add(riftEntranceUniv);
+    if (opts.yaw || opts.pitch || opts.roll) {
+      nav.quat.copy(riftOrientation).multiply(_q.setFromEuler(
+        new THREE.Euler(Number(opts.pitch) || 0, Number(opts.yaw) || 0, Number(opts.roll) || 0, 'YXZ'),
+      ));
+    }
     nav.vel.set(0, 0, 0);
     return true;
+  },
+  cancelRift() {
+    return cancelRiftRoute();
   },
   setPulse(active) {
     return !!active && triggerPulse();
@@ -7978,6 +8303,7 @@ window.NMS = {
       warpConduit,
       nodePipeline,
       portalView,
+      riftPortal,
       scene,
       renderer,
       nav,

@@ -104,6 +104,65 @@ test('crossing exchanges cloud reconstruction state between the two views', () =
   assert.equal(b.history[0], 'a0');assert.equal(b.frame, 3);assert.equal(b.activePlanet, planetA);
 });
 
+test('planar lane profile opens from a 0.26 seam in 1.15 s and crosses off-axis cleanly', () => {
+  const reach = 2200;
+  const p = new SpacePortal(createPortalProfile({
+    shape: 'plane',
+    openSeconds: 1.15,
+    seamFraction: 0.26,
+    halfWidth: 0.23 * reach,
+    halfHeight: 0.14 * reach,
+  }));
+  const srcQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.18, -0.52, 0.09, 'YXZ'));
+  const dstQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.27, 1.35, -0.14, 'YXZ'));
+  p.setFrames(new THREE.Vector3(120, -40, -2200), srcQ, new THREE.Vector3(8e10, -2e9, 4e10), dstQ);
+  p.beginOpening();
+  // During the seam fraction (u <= 0.26), width draws while height remains a thin seam.
+  p.update(0.28, 0.28);
+  assert.equal(p.phase, 'opening');
+  assert.ok(p.open.x > 0.99 && p.open.y < 0.02, `expected seam at 0.28s, got x=${p.open.x}, y=${p.open.y}`);
+  // Finish opening at 1.15s total.
+  p.update(0.90, 1.18);
+  assert.equal(p.phase, 'open');
+  assert.equal(p.open.y, 1);
+
+  const at = (x, y, z) => new THREE.Vector3(x, y, z).applyQuaternion(srcQ).add(p.source.position);
+  // Off-axis lateral + oblique trajectory crossing inside the dynamic ellipse.
+  const prev = at(180, -85, 24);
+  const curr = at(220, -105, -16);
+  const t = p.crossing(prev, curr);
+  assert.ok(Math.abs(t - 0.6) < 1e-6, `expected exact plane crossing fraction 0.6, got ${t}`);
+  // Outside the scaled contour at the same Z span still misses.
+  assert.equal(p.crossing(at(700, 0, 24), at(700, 0, -16)), -1, 'off-axis miss outside halfWidth');
+  assert.equal(p.crossing(at(0, 450, 24), at(0, 450, -16)), -1, 'off-axis miss outside halfHeight');
+
+  // Off-axis position, heading and velocity map rigidly to target space.
+  const mappedCurr = p.mapPosition(curr);
+  const localTarget = mappedCurr.clone().sub(p.target.position).applyQuaternion(dstQ.clone().invert());
+  assert.ok(localTarget.distanceTo(new THREE.Vector3(220, -105, -16)) < 1e-4);
+  const shipQ = srcQ.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.12, 0.34, 0.08, 'YXZ')));
+  const mappedQ = p.mapQuaternion(shipQ);
+  const relLocal = dstQ.clone().invert().multiply(mappedQ);
+  const expectedRel = srcQ.clone().invert().multiply(shipQ);
+  assert.ok(relLocal.angleTo(expectedRel) < 1e-9);
+});
+
+test('the closing portal renders its back world only when the eye can see it', () => {
+  const portal = new SpacePortal();
+  portal.beginOpening();
+  portal.update(3, 3);
+  const camera = new THREE.PerspectiveCamera(60, 16 / 9, .1, 10000);
+  const eye = new THREE.Vector3(0, 0, -5);
+  assert.equal(portal.needsBackView(eye, camera, false), false);
+  camera.rotateY(Math.PI);
+  assert.equal(portal.needsBackView(eye, camera, false), true);
+  camera.rotateY(-Math.PI);
+  eye.z = 5;
+  assert.equal(portal.needsBackView(eye, camera, true), false);
+  eye.x = portal.halfWidth;
+  assert.equal(portal.needsBackView(eye, camera, true), true);
+});
+
 test('a wormhole mouth is entered at its near surface and left through the far one', () => {
   const p = new SpacePortal(wormholePortalProfile({ radius: 400 }));
   p.setFrames(new THREE.Vector3(0, 0, -2000), new THREE.Quaternion(), new THREE.Vector3(9e9, 0, 0),

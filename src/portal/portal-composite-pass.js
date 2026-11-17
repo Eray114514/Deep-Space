@@ -29,6 +29,7 @@ export const PortalCompositeShader = {
     tSceneDepth: { value: null },
     tPortal: { value: null },
     uPortalReady: { value: 0 },
+    uEyeAcross: { value: 0 },
     uInvProjection: { value: new THREE.Matrix4() },
     uCameraWorld: { value: new THREE.Matrix4() },
     uCameraFar: { value: 1 },
@@ -64,7 +65,7 @@ export const PortalCompositeShader = {
   `,
   fragmentShader: /* glsl */`
     uniform sampler2D tBase, tSceneDepth, tPortal;
-    uniform float uPortalReady, uCameraFar, uAspect, uTime, uLiving, uShape, uRadius, uScreenRadius;
+    uniform float uPortalReady, uEyeAcross, uCameraFar, uAspect, uTime, uLiving, uShape, uRadius, uScreenRadius;
     uniform mat4 uInvProjection, uCameraWorld;
     uniform vec3 uCenter, uRight, uUp, uNormal;
     uniform vec2 uHalf, uOpen, uCenterUv;
@@ -73,10 +74,9 @@ export const PortalCompositeShader = {
     uniform vec3 uRimColor, uFarLight;
     varying vec2 vUv;
 
-    float hash11(float p) { p = fract(p * .1031); p *= p + 33.33; p *= p + p; return fract(p); }
     float contour(float a) {
       vec4 phase = uHarmK * a + uHarmP + uHarmS * uTime * uLiving;
-      return 1.0 + dot(uHarmA, sin(phase));
+      return 1.0 + dot(uHarmA, sin(phase)) - uTension * .20 * abs(sin(2.0*a));
     }
     vec3 sampleBase(vec2 uv) { return texture2D(tBase, clamp(uv, vec2(.001), vec2(.999))).rgb; }
     vec3 sampleFar(vec2 uv) { return texture2D(tPortal, clamp(uv, vec2(.001), vec2(.999))).rgb; }
@@ -157,29 +157,57 @@ export const PortalCompositeShader = {
       vec2 q = vec2(dot(p - uCenter, uRight), dot(p - uCenter, uUp)) / halfOpen;
       float rho = length(q);
       float a = atan(q.y, q.x);
-      float edge = (rho - contour(a)) * min(halfOpen.x, halfOpen.y) / max(min(uHalf.x, uHalf.y), 1e-3);
-      float aa = max(fwidth(edge) * 1.25, 1e-5);
-      float inside = hit ? 1.0 - smoothstep(-aa, aa, edge) : 0.0;
+      float unit = max(min(uHalf.x, uHalf.y), 1e-3);
+      float edge = (rho - contour(a)) * min(halfOpen.x, halfOpen.y) / unit;
+      // Keep the drawn seam finite when its minor axis is almost zero.
+      edge = max(edge, (abs(q.x) - (1.04 + dot(abs(uHarmA), vec4(1.0)))) * halfOpen.x / unit);
+      float aa = clamp(fwidth(edge), .0003, .04);
+      // Bound the entire discharge in metres, including its halo. Near a
+      // grazing plane a single screen pixel can span the whole aperture.
+      vec2 margin = abs(q * halfOpen) - 1.4 * halfOpen;
+      if (!hit || max(margin.x, margin.y) > unit*.30 || edge > .32) {
+        return vec4(uEyeAcross > .5 ? sampleFar(vUv) : base.rgb, depth);
+      }
+      float inside = 1.0 - smoothstep(-aa, aa, edge);
       vec2 away = (vUv - uCenterUv) * vec2(uAspect, 1.0);
       float awayLen = length(away);
       vec2 awayUv = (awayLen > 1e-5 ? away / awayLen : vec2(0.0)) / vec2(uAspect, 1.0);
-      float lens = uLensing * uOpen.y * exp(-max(edge, 0.0) / max(uLensWidth, 1e-3)) * step(0.0, edge) * (t > 0.0 ? 1.0 : 0.0);
-      vec3 source = lens > 1e-5 ? sampleBase(vUv - awayUv * lens * .08) : base.rgb;
+      float lens = uLensing * exp(-abs(edge) / max(uLensWidth, 1e-3)) * (hit ? 1.0 : 0.0);
+      vec3 source = lens > 1e-5 ? sampleBase(vUv - awayUv * lens * (.012 + .025 * uTension)) : base.rgb;
       float innerFall = exp(min(edge, 0.0) / max(uLensWidth * .6, 1e-3));
       vec2 farUv = vUv + awayUv * uLensing * innerFall * .05;
       float disp = innerFall * uLensing * .006;
-      vec3 far = vec3(sampleFar(farUv + awayUv * disp).r, sampleFar(farUv).g, sampleFar(farUv - awayUv * disp).b) * uPortalReady;
-      far = mix(uFarLight * .25 * (.6 + .4 * hash11(floor(a * 40.0) + floor(uTime * 24.0))), far, smoothstep(.15, .75, uOpen.y));
+      vec3 far = vec3(sampleFar(farUv + awayUv * disp).r, sampleFar(farUv).g, sampleFar(farUv - awayUv * disp).b);
+      far = mix(source, far, uPortalReady * smoothstep(.015, .44, uOpen.y));
       vec3 col = mix(source, far, inside);
-      float w = uRimWidth * (1.0 + 1.5 * uTension);
-      float filament = exp(-pow(edge / max(w, 1e-5), 2.0));
-      float sheath = exp(-abs(edge) / max(w * 7.0, 1e-5));
-      float travel = sin(a * 5.0 - uTime * 1.7) * .5 + sin(a * 11.0 + uTime * 2.6) * .3 + sin(a * 23.0 - uTime * 4.1) * .2;
-      float pulses = smoothstep(.42, .92, travel * .5 + .5);
-      float flicker = .06 + .94 * pulses + hash11(floor(a * 90.0) + floor(uTime * 18.0)) * .35 * pulses;
-      vec3 fringe = mix(vec3(1.0, .72, .5), vec3(.55, .78, 1.0), smoothstep(-w * 2.0, w * 2.0, edge));
-      vec3 rim = (uRimColor * 1.4 + vec3(.5)) * filament * flicker + fringe * sheath * .06 * (.4 + .6 * pulses);
-      col += rim * uRimIntensity * (1.0 + 2.0 * uTension + 4.0 * uFlash) * (t > 0.0 ? 1.0 : 0.0) * smoothstep(0.0, 0.05, uOpen.x);
+      // The chase camera can still be in the previous world after the hull
+      // has crossed. Keep both images registered as the eye passes the seam.
+      if (uEyeAcross > .5) col = mix(sampleFar(vUv), base.rgb, inside);
+      float w = max(.0025, uRimWidth);
+      float hotWidth = max(w, aa*.85);
+      float arcCoord = q.x + .038*sin(11.0*q.x + uTime*1.2);
+      float side = q.y >= 0.0 ? 1.0 : -1.0;
+      float pulse = .5+.5*cos(5.0*arcCoord - uTime*2.7 + side);
+      float splitting = smoothstep(.013,.17,uOpen.y)*(1.0-smoothstep(.56,1.,uOpen.y));
+      float bank = smoothstep(.06,.65,abs(sin(a)));
+      float strength = bank*(.26+.74*splitting);
+      // Dispersion follows both lips, locally measured across the seam.
+      // The outer colour separates from the white arc as the two banks lift.
+      float bandWidth = .016 + .047*strength + .012*pulse;
+      float phase = edge / bandWidth + .25*arcCoord + .09*sin(9.0*arcCoord-uTime) + side*.12;
+      vec3 prism = .53+.47*cos(6.28318*(phase*.65+vec3(.05,.38,.67)));
+      prism *= prism;
+      float curtain = exp(-abs(edge-.018*strength)/bandWidth*1.1);
+      float white = exp(-pow(edge/hotWidth,2.0))*min(1.0,w/hotWidth);
+      // Broken companion strands rejoin the parent on the same bank.
+      float run = pow(pulse,3.0);
+      float jag = abs(fract(arcCoord*10.0-side*uTime*.62)*2.0-1.0);
+      float fork = (.014+.037*jag+.011*sin(46.0*arcCoord+side*uTime*3.0))*run;
+      float thread = run*exp(-pow((edge-fork)/hotWidth,2.0))*min(1.0,w/hotWidth);
+      col *= 1.0 - .54*curtain*bank*(.6+.4*splitting);
+      vec3 rim = prism*curtain*(.10+strength*.90)*(.66+.34*pulse)
+        + uRimColor*(white*(.22+.44*pulse) + .50*thread);
+      col += rim*uRimIntensity*(1.0+.48*uTension+.60*uFlash)*smoothstep(.0,.08,uOpen.x);
       float outDepth = depth;
       if (inside > .5) outDepth = log2(t * max(-dirView.z, 5e-4) + 1.0) / log2(uCameraFar + 1.0);
       return vec4(col, outDepth);

@@ -85,31 +85,30 @@ try {
         const state = await page.evaluate(() => NMS.riftState());
         const name = `${out}/rift-${label}-open${state.open.toFixed(2)}.png`;
         await page.screenshot({ path: name });
-        console.log('✓', name, JSON.stringify({ phase: state.phase, seam: state.seam, far: state.farRendered,
-          d: state.distanceToThreshold, throat: state.throat, arrived: state.arrived }));
+        console.log('✓', name, JSON.stringify({ shape: state.shape, phase: state.phase, seam: state.seam,
+          far: state.farRendered, halfWidth: Math.round(state.halfWidth), halfHeight: Math.round(state.halfHeight),
+          d: state.distanceToThreshold, arrived: state.arrived }));
       };
       const clickedAt = Date.now();
-      for (let i = 0; i < 7; i++) { await shot(`a${i}`); await page.waitForTimeout(250); }
+      for (let i = 0; i < 6; i++) { await shot(`a${i}`); await page.waitForTimeout(220); }
       await page.waitForFunction(() => NMS.riftState().previewVolume?.ready && NMS.riftState().open > 0.98, null, { timeout: 60000 })
         .catch(() => console.log('far view not ready in time'));
       console.log('far view ready after', Date.now() - clickedAt, 'ms');
-      const radius = await page.evaluate(() => NMS.riftState().radius);
-      for (const k of [6, 3, 1.5, 0.6, 0.15, 0.03]) {
-        await page.evaluate((dist) => NMS.approachRift(dist), radius * k);
+      const scale = await page.evaluate(() => {
+        const s = NMS.riftState();
+        return Math.max(s.halfWidth || 0, s.halfHeight || 0, s.radius || 400);
+      });
+      for (const k of [4, 2, 1, 0.4, 0.1, 0.02]) {
+        await page.evaluate((dist) => NMS.approachRift(dist), scale * k);
         await frames(20);
-        await shot(`b${k.toFixed(2)}R`);
+        await shot(`b${k.toFixed(2)}W`);
       }
       await page.evaluate(() => NMS.approachRift(-6));
       await frames(2);
-      // sample the throat ride by its own clock: screenshots are slow here
-      for (const t of [0.1, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.8, 2.1, 2.4, 2.8]) {
-        await page.waitForFunction((at) => {
-          const s = NMS.riftState();
-          return !s.throat || s.throat.t >= at;
-        }, t, { timeout: 20000 }).catch(() => {});
-        await shot(`c${t.toFixed(1)}`);
-      }
-      await page.waitForTimeout(1200);
+      await shot('c-crossed');
+      await page.waitForTimeout(400);
+      await shot('c-after400');
+      await page.waitForTimeout(1600);
       await shot('d-after');
       console.log('after', JSON.stringify(await page.evaluate(() => {
         const s = NMS.stats();

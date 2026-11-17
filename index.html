@@ -82,23 +82,76 @@
     <i></i><span id="destination-marker-name">目的地</span><small id="destination-marker-distance">—</small>
   </div>
 
-  <section id="route-choice" class="hidden" aria-label="选择星际移动方式">
-    <header>
-      <div><span>航线协议 · ROUTE PROTOCOL</span><strong id="route-choice-name">—</strong></div>
+  <section id="fold-nav" hidden aria-label="弦界导航">
+    <div class="fold-instrument">
+      <svg class="fold-traces" viewBox="0 0 420 62" fill="none" aria-hidden="true">
+        <g class="fold-datum" stroke="currentColor">
+          <path d="M2 6v40h67l11 10h58m144 0h58l11-10h67V6M2 33h72m272 0h72"/>
+          <path d="M12 42v-4m12 4v-4m12 4v-4m12 4v-4m12 4v-4m300 4v-4m12 4v-4m12 4v-4m12 4v-4m12 4v-4"/>
+        </g>
+        <g class="fold-wave" stroke="currentColor">
+          <path d="M3 27h9l5-2 4 3 4-8 4 14 5-24 5 22 5-12 5 8 5-3 5 2h11"/>
+          <path d="M350 26h8l5-3 5 6 5-12 5 15 6-21 5 18 6-9 5 7h17"/>
+        </g>
+      </svg>
+      <div class="fold-readout" role="status">
+        <span id="fold-state"></span><strong id="fold-target"></strong><small id="fold-system"></small>
+      </div>
+    </div>
+    <button id="fold-abort" type="button"><kbd>X</kbd> 中止航道</button>
+  </section>
+
+  <section id="route-choice" class="hidden" role="dialog" aria-modal="true" aria-label="选择星际移动方式">
+    <header class="route-choice-header">
+      <div class="route-choice-titleblock">
+        <span class="route-choice-eyebrow"><i class="brand-stripe" aria-hidden="true"></i>HALCYON VII · 航线协议</span>
+        <strong id="route-choice-name">—</strong>
+      </div>
       <button id="route-cancel-btn" type="button" aria-label="取消当前航线">×</button>
     </header>
     <div class="route-choice-actions">
-      <button id="route-warp-btn" type="button">
-        <i class="route-method-glyph warp-glyph" aria-hidden="true"></i>
-        <span><small>01 · 自动航行</small><b>恒星跃迁</b><em>折叠航程，直接抵达星系安全入口</em></span>
-        <kbd>1</kbd>
+      <button id="route-warp-btn" class="route-card is-selected" type="button">
+        <div class="route-card-top">
+          <span class="route-card-index">01 // AUTO TRANSIT</span>
+          <kbd>1</kbd>
+        </div>
+        <svg class="route-card-schematic" viewBox="0 0 180 54" fill="none" aria-hidden="true">
+          <line x1="16" y1="27" x2="164" y2="27" stroke="currentColor" stroke-opacity=".22" stroke-dasharray="3 4"/>
+          <circle cx="22" cy="27" r="4" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M28 27 C 62 27, 72 10, 108 10 C 132 10, 140 27, 151 27" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M144 22 L152 27 L144 32" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          <circle cx="158" cy="27" r="8.5" stroke="currentColor" stroke-opacity=".45" stroke-width="1.2"/>
+          <circle cx="158" cy="27" r="2.5" fill="currentColor"/>
+          <path d="M68 23v8 M90 11v6 M114 11v6" stroke="currentColor" stroke-opacity=".45" stroke-width="1.1"/>
+        </svg>
+        <div class="route-card-body">
+          <div class="route-card-heading"><b>恒星跃迁</b><small>自动航行</small></div>
+          <em>折叠星际航程，自动驾驶直达星系安全入口</em>
+        </div>
       </button>
-      <button id="route-rift-btn" type="button">
-        <i class="route-method-glyph rift-glyph" aria-hidden="true"></i>
-        <span><small>02 · 手动穿越</small><b>弦界航道</b><em>展开弦界入口，由你亲自驶过边界</em></span>
-        <kbd>2</kbd>
+      <button id="route-rift-btn" class="route-card" type="button">
+        <div class="route-card-top">
+          <span class="route-card-index">02 // MANUAL FOLD</span>
+          <kbd>2</kbd>
+        </div>
+        <svg class="route-card-schematic" viewBox="0 0 180 54" fill="none" aria-hidden="true">
+          <line x1="14" y1="27" x2="72" y2="27" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M66 22 L74 27 L66 32" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <ellipse cx="96" cy="27" rx="12.5" ry="21" stroke="currentColor" stroke-width="1.6"/>
+          <ellipse cx="96" cy="27" rx="6.5" ry="13.5" stroke="currentColor" stroke-opacity=".55" stroke-width="1.2"/>
+          <ellipse cx="96" cy="27" rx="25" ry="8.5" stroke="currentColor" stroke-opacity=".3" stroke-width="1.1" transform="rotate(-12 96 27)"/>
+          <line x1="112" y1="27" x2="166" y2="27" stroke="currentColor" stroke-opacity=".45" stroke-width="1.4" stroke-dasharray="4 3"/>
+        </svg>
+        <div class="route-card-body">
+          <div class="route-card-heading"><b>弦界航道</b><small>手动穿越</small></div>
+          <em>展开前方空间裂口，由你亲自驾船驶过边界</em>
+        </div>
       </button>
     </div>
+    <footer class="route-choice-footer">
+      <span>航线坐标已锁定 · 选择跃迁方式</span>
+      <span><kbd>1</kbd><kbd>2</kbd> / <kbd>←</kbd><kbd>→</kbd> 选择 <kbd>ENTER</kbd> 确认 <kbd>ESC</kbd> 取消</span>
+    </footer>
   </section>
 
   <section id="walk-hud" aria-label="地表探索状态">
@@ -206,32 +259,33 @@
         <div><dt>卫星</dt><dd id="hero-dossier-moons">—</dd></div>
       </dl>
     </aside>
-    <section id="graphics-settings-panel" class="graphics-settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="graphics-settings-title">
-      <header>
-        <div><span>AF/S9 · RENDER CONTROL</span><h2 id="graphics-settings-title">图形设置</h2></div>
-        <button id="graphics-settings-close" type="button" aria-label="关闭图形设置">×</button>
-      </header>
-      <div class="graphics-device">
-        <span>当前图形设备</span><strong id="graphics-gpu">检测中</strong>
-        <small id="graphics-backend">请求 AUTO · 实际检测中</small>
-      </div>
-      <fieldset>
-        <legend>画质档位</legend>
-        <div class="graphics-choice-grid graphics-quality-grid">
-          <label><input type="radio" name="graphics-quality" value="auto"><span><b>自动</b><small>依据设备选择，推荐</small></span></label>
-          <label><input type="radio" name="graphics-quality" value="performance"><span><b>性能</b><small>清晰近景，缩短效果范围</small></span></label>
-          <label><input type="radio" name="graphics-quality" value="balanced"><span><b>均衡</b><small>完整材质与中等采样</small></span></label>
-          <label><input type="radio" name="graphics-quality" value="ultra"><span><b>极致</b><small>高密度体积与远景</small></span></label>
-        </div>
-      </fieldset>
-      <p id="graphics-settings-note" class="graphics-settings-note">画质档位决定体积云、远景植被与采样密度。重型图形资源将在重新启动后生效。</p>
-      <footer><button id="graphics-settings-cancel" type="button">取消</button><button id="graphics-settings-apply" type="button">应用并重新启动</button></footer>
-    </section>
     <div class="hero-bottomline" aria-hidden="true">
       <span>宇宙 <b id="hero-seed">DEEP SPACE</b></span>
       <span>版本 <b id="hero-build">—</b></span>
       <span>音频将在开始后启动 · 建议佩戴耳机</span>
     </div>
+  </section>
+
+  <section id="graphics-settings-panel" class="graphics-settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="graphics-settings-title">
+    <header>
+      <div><span>AF/S9 · RENDER CONTROL</span><h2 id="graphics-settings-title">图形设置</h2></div>
+      <button id="graphics-settings-close" type="button" aria-label="关闭图形设置">×</button>
+    </header>
+    <div class="graphics-device">
+      <span>当前图形设备</span><strong id="graphics-gpu">检测中</strong>
+      <small id="graphics-backend">请求 AUTO · 实际检测中</small>
+    </div>
+    <fieldset>
+      <legend>画质档位</legend>
+      <div class="graphics-choice-grid graphics-quality-grid">
+        <label><input type="radio" name="graphics-quality" value="auto"><span><b>自动</b><small>依据设备选择，推荐</small></span></label>
+        <label><input type="radio" name="graphics-quality" value="performance"><span><b>性能</b><small>清晰近景，缩短效果范围</small></span></label>
+        <label><input type="radio" name="graphics-quality" value="balanced"><span><b>均衡</b><small>完整材质与中等采样</small></span></label>
+        <label><input type="radio" name="graphics-quality" value="ultra"><span><b>极致</b><small>高密度体积与远景</small></span></label>
+      </div>
+    </fieldset>
+    <p id="graphics-settings-note" class="graphics-settings-note">画质档位决定体积云、远景植被与采样密度。重型图形资源将在重新启动后生效。</p>
+    <footer><button id="graphics-settings-cancel" type="button">取消</button><button id="graphics-settings-apply" type="button">应用并重新启动</button></footer>
   </section>
 
   <div id="graphics-restart-mask" class="graphics-restart-mask hidden" role="status" aria-live="assertive">
@@ -253,6 +307,7 @@
         <section class="pause-primary" aria-label="继续航行">
           <button id="resume-btn" class="pause-resume menu-item"><span class="menu-item-label">继续航行</span><kbd>ESC</kbd></button>
           <button id="pause-map-btn" class="menu-item"><span class="menu-item-label">银河星图</span><kbd>M</kbd></button>
+          <button id="pause-settings-btn" class="menu-item" type="button" aria-controls="graphics-settings-panel" aria-expanded="false"><span class="menu-item-label">图形设置</span></button>
         </section>
         <section class="pause-time" aria-label="星历快进">
           <header><span>星历快进</span><small>恢复控制后实时推进</small></header>

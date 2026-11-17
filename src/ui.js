@@ -28,7 +28,8 @@ export class UI {
       touchUI: $('touch-ui'), joystick: $('joystick'), knob: $('joystick-knob'),
       btnJump: $('btn-jump'), btnTakeoff: $('btn-takeoff'),
       performanceNotice: $('performance-notice'), hero: $('hero-overlay'), heroStart: $('hero-start-btn'),
-      heroSettings: $('hero-settings-btn'), graphicsPanel: $('graphics-settings-panel'),
+      heroSettings: $('hero-settings-btn'), pauseSettings: $('pause-settings-btn'),
+      graphicsPanel: $('graphics-settings-panel'),
       graphicsClose: $('graphics-settings-close'), graphicsCancel: $('graphics-settings-cancel'),
       graphicsApply: $('graphics-settings-apply'), graphicsGpu: $('graphics-gpu'),
       graphicsBackend: $('graphics-backend'), graphicsNote: $('graphics-settings-note'),
@@ -44,11 +45,45 @@ export class UI {
       timeWarp: $('time-warp-indicator'), timeWarpLabel: $('time-warp-label'),
       timeWarpProgress: $('time-warp-progress'), timeWarpRate: $('time-warp-rate'),
     };
-    this.els.land.addEventListener('click', () => this.cb.onLand && this.cb.onLand());
-    this.els.starMapBtn.addEventListener('click', () => this.cb.onStarMap && this.cb.onStarMap());
-    this.els.routeWarp.addEventListener('click', () => this.cb.onRouteWarp?.());
-    this.els.routeRift.addEventListener('click', () => this.cb.onRouteRift?.());
-    this.els.routeCancel.addEventListener('click', () => this.cb.onRouteCancel?.());
+    const playUiSound = (name) => window.dispatchEvent(new CustomEvent('ui-sound', { detail: name }));
+    this._playUiSound = playUiSound;
+    this.els.land.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+    this.els.land.addEventListener('click', () => { playUiSound('ui_click'); this.cb.onLand && this.cb.onLand(); });
+    this.els.starMapBtn.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+    this.els.starMapBtn.addEventListener('click', () => { playUiSound('ui_click'); this.cb.onStarMap && this.cb.onStarMap(); });
+    this._routeSelectedIndex = 0;
+    this._routeCards = [this.els.routeWarp, this.els.routeRift].filter(Boolean);
+    this._selectRouteCard = (index, { sound = true, focus = false } = {}) => {
+      if (!this._routeCards.length) return;
+      const next = (index + this._routeCards.length) % this._routeCards.length;
+      const changed = next !== this._routeSelectedIndex;
+      this._routeSelectedIndex = next;
+      this._routeCards.forEach((btn, i) => btn.classList.toggle('is-selected', i === next));
+      if (changed && sound) playUiSound('ui_hover');
+      if (focus) this._routeCards[next]?.focus({ preventScroll: true });
+    };
+    this._routeCards.forEach((btn, index) => {
+      btn.addEventListener('pointerenter', () => this._selectRouteCard(index));
+      btn.addEventListener('focus', () => this._selectRouteCard(index, { sound: false }));
+    });
+    this.els.routeWarp.addEventListener('click', () => { playUiSound('ui_click'); this.cb.onRouteWarp?.(); });
+    this.els.routeRift.addEventListener('click', () => { playUiSound('ui_click'); this.cb.onRouteRift?.(); });
+    this.els.routeCancel.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+    this.els.routeCancel.addEventListener('click', () => { playUiSound('ui_click'); this.cb.onRouteCancel?.(); });
+    const foldNav = $('fold-nav');
+    this._foldNav = ({ detail }) => {
+      const open = detail.phase === 'open';
+      foldNav.hidden = detail.phase === 'clear';
+      foldNav.dataset.phase = detail.phase;
+      if (foldNav.hidden) return;
+      $('fold-state').textContent = open ? '航道开放 · 驶入裂口' : '定位目的地';
+      const [target, ...system] = (detail.label || '').split(' · ');
+      $('fold-target').textContent = target;
+      $('fold-system').textContent = system.join(' · ');
+    };
+    this._abortFold = () => window.dispatchEvent(new Event('cancel-fold-route'));
+    window.addEventListener('fold-nav', this._foldNav);
+    $('fold-abort').addEventListener('click', this._abortFold);
     this.els.heroStart.addEventListener('click', () => {
       // The overlay fades while main.js runs the pull-back camera cinematic.
       this.hideHero();
@@ -56,21 +91,31 @@ export class UI {
       window.dispatchEvent(new CustomEvent('game-user-start'));
     });
     this.els.heroSettings?.addEventListener('click', () => this.showGraphicsSettings(true));
-    this.els.graphicsClose?.addEventListener('click', () => this.showGraphicsSettings(false));
-    this.els.graphicsCancel?.addEventListener('click', () => this.showGraphicsSettings(false));
+    this.els.pauseSettings?.addEventListener('click', () => this.showGraphicsSettings(true));
+    this.els.graphicsClose?.addEventListener('click', () => { playUiSound('ui_click'); this.showGraphicsSettings(false); });
+    this.els.graphicsCancel?.addEventListener('click', () => { playUiSound('ui_click'); this.showGraphicsSettings(false); });
+    this.els.graphicsPanel?.querySelectorAll('.graphics-choice-grid label, footer button, header button').forEach((el) => {
+      el.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+    });
+    this.els.graphicsPanel?.querySelectorAll('input[name="graphics-quality"]').forEach((input) => {
+      input.addEventListener('change', () => playUiSound('ui_click'));
+    });
     this.els.graphicsPanel?.addEventListener('click', (event) => {
       if (event.target === this.els.graphicsPanel) this.showGraphicsSettings(false);
     });
     this.els.graphicsApply?.addEventListener('click', () => {
+      playUiSound('ui_click');
       const quality = this.els.graphicsPanel.querySelector('input[name="graphics-quality"]:checked')?.value || 'auto';
       this.els.graphicsRestartMask?.classList.remove('hidden');
       this.cb.onApplyGraphics?.({ quality });
     });
     if (this.els.heroPerfHint) {
-      this.els.heroPerfHint.addEventListener('click', () => this.showPerfTutorial(true));
+      this.els.heroPerfHint.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+      this.els.heroPerfHint.addEventListener('click', () => { playUiSound('ui_click'); this.showPerfTutorial(true); });
     }
     if (this.els.perfTutorialClose) {
-      this.els.perfTutorialClose.addEventListener('click', () => this.showPerfTutorial(false));
+      this.els.perfTutorialClose.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+      this.els.perfTutorialClose.addEventListener('click', () => { playUiSound('ui_click'); this.showPerfTutorial(false); });
     }
     if (this.els.perfTutorial) {
       // Click on the backdrop (not the panel) closes the dialog.
@@ -78,17 +123,38 @@ export class UI {
         if (e.target === this.els.perfTutorial) this.showPerfTutorial(false);
       });
     }
-    this._perfTutorialKey = (e) => {
+    this._modalKey = (e) => {
       if (e.key === 'Escape' && this.els.graphicsPanel && !this.els.graphicsPanel.classList.contains('hidden')) {
+        e.preventDefault();
         e.stopImmediatePropagation();
+        playUiSound('ui_click');
         this.showGraphicsSettings(false);
         return;
       }
       if (e.key === 'Escape' && this.els.perfTutorial && !this.els.perfTutorial.classList.contains('hidden')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        playUiSound('ui_click');
         this.showPerfTutorial(false);
+        return;
+      }
+      if (this.els.routeChoice && !this.els.routeChoice.classList.contains('hidden')) {
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this._selectRouteCard(0, { focus: true });
+        } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this._selectRouteCard(1, { focus: true });
+        } else if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this._routeCards[this._routeSelectedIndex]?.click();
+        }
       }
     };
-    document.addEventListener('keydown', this._perfTutorialKey);
+    window.addEventListener('keydown', this._modalKey, true);
     // Pre-hero title card: click / Enter / Space dissolves into the hero. The
     // loading veil draws the same card above it until bootstrap finishes.
     if (this.els.heroSplash) {
@@ -457,16 +523,28 @@ export class UI {
     if (!panel) return;
     panel.classList.toggle('hidden', !show);
     this.els.heroSettings?.setAttribute('aria-expanded', String(show));
-    if (show) queueMicrotask(() => panel.querySelector('input:checked')?.focus());
-    else this.els.heroSettings?.focus();
+    this.els.pauseSettings?.setAttribute('aria-expanded', String(show));
+    if (show) {
+      queueMicrotask(() => panel.querySelector('input:checked')?.focus());
+    } else {
+      const pauseOpen = document.getElementById('pause-overlay')?.classList.contains('hidden') === false;
+      (pauseOpen ? this.els.pauseSettings : this.els.heroSettings)?.focus();
+    }
   }
 
   showRouteChoice(show, name = '') {
     this.els.routeChoice.classList.toggle('hidden', !show);
     document.body.classList.toggle('route-choice-active', show);
-    if (show) this._setText(this.els.routeChoiceName, name || '未命名星系');
+    if (show) {
+      this._setText(this.els.routeChoiceName, name || '未命名星系');
+      this._selectRouteCard(0, { sound: false });
+    }
   }
 
+
+  setFoldActivity(text) {
+    this._setText(document.getElementById('fold-state'), text);
+  }
 
   beginTravel() {
     clearTimeout(this._arrivalTimer);
@@ -558,6 +636,9 @@ export class UI {
   // persistent nodes and intentionally left intact — a future UI instance
   // would rebind to the same elements.
   dispose() {
+    window.removeEventListener('keydown', this._modalKey, true);
+    window.removeEventListener('fold-nav', this._foldNav);
+    document.getElementById('fold-abort').removeEventListener('click', this._abortFold);
     clearTimeout(this._hintTimer);
     clearTimeout(this._performanceNoticeTimer);
     clearTimeout(this._performanceNoticeFadeTimer);

@@ -101,6 +101,8 @@ export function portalClosing(u) {
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _v = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const _ray = new THREE.Vector3();
 
 export class SpacePortal {
   constructor(profile = {}) {
@@ -175,7 +177,9 @@ export class SpacePortal {
     for (const h of this.profile.harmonics) {
       r += h.amp * Math.sin(h.k * angle + h.phase + h.speed * time * this.profile.living);
     }
-    return r;
+    // The banks separate first at the middle. The tips remain pinned
+    // during the snap, then relax to the authored contour.
+    return r - this.open.tension * .20 * Math.abs(Math.sin(2 * angle));
   }
 
   // Universe-space point -> source-frame local coordinates.
@@ -195,7 +199,8 @@ export class SpacePortal {
 
   mapQuaternion(quaternion, out = new THREE.Quaternion()) {
     _q.copy(this.source.quaternion).invert();
-    return out.copy(this.target.quaternion).multiply(_q).multiply(quaternion);
+    _q.premultiply(this.target.quaternion);
+    return out.copy(quaternion).premultiply(_q);
   }
 
   mapDirection(direction, out = new THREE.Vector3()) {
@@ -228,6 +233,27 @@ export class SpacePortal {
     const y = (a.y + (b.y - a.y) * t) / (this.halfHeight * this.open.y);
     const inside = Math.hypot(x, y) <= this.contour(Math.atan2(y, x)) * 0.985;
     return inside ? t : -1;
+  }
+
+  // After handoff only draw the previous system if the camera can see it.
+  // Four forward corner rays bound the whole screen on the portal plane.
+  needsBackView(eye, camera, eyeAcross) {
+    if (this.shape !== 'plane') return true;
+    this.toSourceLocal(eye, _eye);
+    const inner = 1 - this.profile.harmonics.reduce((sum, h) => sum + Math.abs(h.amp), 0)
+      - .2 * this.open.tension;
+    const rx = this.halfWidth * this.open.x, ry = this.halfHeight * this.open.y;
+    for (const x of [-1, 1]) for (const y of [-1, 1]) {
+      _ray.set(x, y, .5).applyMatrix4(camera.projectionMatrixInverse)
+        .applyQuaternion(camera.quaternion).applyQuaternion(_q);
+      const t = -_eye.z / _ray.z;
+      if (!eyeAcross) {
+        if (t > 0) return true;
+      } else if (!(t > 0) || Math.hypot((_eye.x + t*_ray.x) / rx, (_eye.y + t*_ray.y) / ry) >= inner) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Signed distance (metres, + in front of the source face) and normalised

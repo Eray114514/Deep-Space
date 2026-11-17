@@ -1085,10 +1085,16 @@ export class LiteCloudPass extends Pass {
     if (!other || other === this) return;
     for (const key of ['history', 'historyIndex', 'historyValid', 'frame', 'previousCamera',
       'previousPlanet', 'previousSun', 'previousLocalToView', 'previousDeck', 'settleFrames',
-      'subpixelIndex', 'historyRatio']) {
+      'subpixelIndex', 'historyRatio', 'target', 'targetTypeChosen']) {
       const value = this[key];
       this[key] = other[key];
       other[key] = value;
+    }
+    // the resolve pass reprojects with the previous frame's camera
+    const mineU = this.resolveMaterial?.uniforms, theirsU = other.resolveMaterial?.uniforms;
+    for (const name of ['uPrevLocalToView', 'uPrevProjection']) {
+      const a = mineU?.[name]?.value, b = theirsU?.[name]?.value;
+      if (a?.clone && b?.copy) { const t = a.clone(); a.copy(b); b.copy(t); }
     }
     const mine = this.activePlanet, theirs = other.activePlanet;
     this.activePlanet = null;

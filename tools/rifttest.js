@@ -120,36 +120,52 @@ try {
   'route choice remains fully inside a 640 px viewport');
   await page.screenshot({ path: routeMobileFrame });
   await page.setViewportSize({ width: 1280, height: 720 });
+  await page.evaluate(() => {
+    window.__foldNavEvents = [];
+    window.addEventListener('fold-nav', (event) => {
+      window.__foldNavEvents.push({ ...(event.detail || {}), at: performance.now() });
+    });
+  });
   await page.locator('#route-rift-btn').click();
-  await page.waitForFunction(() => document.body.classList.contains('travel-cinematic'));
-  await page.waitForFunction(() => getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden',
-    null, { timeout: 3000 }).catch(() => {});
-  const riftHudHidden = await page.evaluate(() => ({
-    // The HUD collapses via visibility (it stays in layout so the exit can animate).
-    display: getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden' ? 'none' : 'shown',
+  await page.waitForFunction(() => window.__foldNavEvents.some((e) => e.phase === 'sync'), null, { timeout: 5000 });
+  const syncNav = await page.evaluate(() => ({
+    events: window.__foldNavEvents.slice(),
     routeHidden: getComputedStyle(document.getElementById('route-choice')).display,
+    rift: NMS.riftState(),
   }));
-  check(riftHudHidden.display === 'none' && riftHudHidden.routeHidden === 'none',
-    'rift passage hides the complete cockpit HUD and route selector');
+  check(syncNav.events[0]?.phase === 'sync' && typeof syncNav.events[0]?.label === 'string'
+      && syncNav.routeHidden === 'none' && syncNav.rift.active,
+    'rift click immediately dispatches fold-nav sync and dismisses route selector');
   await page.waitForFunction(() => {
     const rift = NMS.riftState();
     return rift.phase === 'opening' && rift.seam > 0.9 && rift.open > 0.10 && rift.open < 0.85;
-  }, null, { timeout: 20000 });
+  }, null, { timeout: 90000 });
   const openingState = await page.evaluate('NMS.riftState()');
   await page.screenshot({ path: openingFrame });
-  check(openingState.composite && openingState.farRendered && openingState.seam > 0.9 && openingState.burst <= 1.0,
-    `rift opening tears from seam with live far composite (seam ${openingState.seam.toFixed(2)}, open ${openingState.open.toFixed(2)}, burst ${openingState.burst.toFixed(2)})`);
+  check(openingState.composite && openingState.farRendered && openingState.seam > 0.9 && openingState.burst <= 1.0
+      && openingState.shape === 'plane' && openingState.throat === undefined
+      && openingState.halfWidth > 0 && openingState.halfHeight > 0,
+    `rift opening tears from planar seam with live far composite (seam ${openingState.seam.toFixed(2)}, open ${openingState.open.toFixed(2)}, burst ${openingState.burst.toFixed(2)})`);
   await page.waitForFunction(() => {
     const rift = NMS.riftState();
     return rift.phase === 'open' && rift.open > 0.985 && rift.burst < 0.001 && rift.anchorLocked;
-  }, null, { timeout: 20000 });
+  }, null, { timeout: 90000 });
   await page.waitForFunction(() => NMS.riftState().previewVolume?.ready,
-    null, { timeout: 20000 });
+    null, { timeout: 90000 });
 
   check(await page.evaluate('NMS.stats().audio'), 'route gesture unlocks procedural audio');
-  const stable = await page.evaluate('NMS.riftState()');
-  check(stable.visible && stable.composite && stable.farRendered && stable.phase === 'open' && stable.destinationLight.length > 0,
-    'stable passage renders a live destination system through the far-view composite');
+  const stable = await page.evaluate(() => ({
+    rift: NMS.riftState(),
+    events: window.__foldNavEvents.slice(),
+    cinematic: document.body.classList.contains('travel-cinematic'),
+    hudVisibility: getComputedStyle(document.getElementById('ship-hud-stage')).visibility,
+  }));
+  check(stable.rift.visible && stable.rift.composite && stable.rift.farRendered && stable.rift.phase === 'open'
+      && stable.rift.shape === 'plane' && Math.abs(stable.rift.halfWidth / stable.rift.halfHeight - 0.23 / 0.14) < 1e-4
+      && stable.rift.destinationLight.length > 0,
+    'stable planar lane renders a live destination system with dynamic 0.23/0.14 reach sizing');
+  check(stable.events.some((e) => e.phase === 'open') && !stable.cinematic && stable.hudVisibility !== 'hidden',
+    'stable opening dispatches fold-nav open and keeps the real flight HUD available');
   const portalContract = await page.evaluate(() => {
     const { scene, ship, universe, riftPreviewSystem } = NMS._internals;
     const pipeline = NMS._pipeline;
@@ -172,6 +188,12 @@ try {
       cloudRadius: targetBody?.cloudMesh?.geometry?.parameters?.radius || 0,
       volumeCloudRadius: targetBody?.volCloudMesh?.geometry?.parameters?.radius || 0,
       cloudPassEnabled: !!pipeline.cloudPass,
+      previewPreloaded: NMS.riftState().previewVolume?.preloaded,
+      previewReady: NMS.riftState().previewVolume?.ready,
+      cloudCoverage: NMS.riftState().previewVolume?.cloudCoverage,
+      farAtmosphereBody: NMS.riftState().previewVolume?.farAtmosphereBody,
+      farCloudBody: NMS.riftState().previewVolume?.farCloudBody,
+      bodyId: targetBodyId,
     };
   });
   check(portalContract.compositeActive,
@@ -186,12 +208,12 @@ try {
     && (!portalContract.volumeCloudRadius || portalContract.volumeCloudRadius / portalContract.radius < 1.08);
   check(targetShellsBounded,
     'destination atmosphere and cloud shells stay bounded to the selected planet');
-  check(stable.previewVolume?.preloaded && stable.previewVolume?.ready,
+  check(portalContract.previewPreloaded && portalContract.previewReady,
     'rift reuses the destination prepared when the route selector opened');
-  check(stable.previewVolume?.cloudCoverage > 0.12
-      && stable.previewVolume?.farAtmosphereBody === stable.previewVolume?.bodyId
-      && (!portalContract.cloudPassEnabled || stable.previewVolume?.farCloudBody === stable.previewVolume?.bodyId),
-  `far view binds the selected planet's atmosphere and clouds (${stable.previewVolume?.cloudCoverage?.toFixed(2) || 'missing'} coverage, atmo=${stable.previewVolume?.farAtmosphereBody}, cloud=${stable.previewVolume?.farCloudBody})`);
+  check(portalContract.cloudCoverage > 0.12
+      && portalContract.farAtmosphereBody === portalContract.bodyId
+      && (!portalContract.cloudPassEnabled || portalContract.farCloudBody === portalContract.bodyId),
+  `far view binds the selected planet's atmosphere and clouds (${portalContract.cloudCoverage?.toFixed(2) || 'missing'} coverage, atmo=${portalContract.farAtmosphereBody}, cloud=${portalContract.farCloudBody})`);
 
   const portalOcclusion = await page.evaluate(async () => {
     const THREE = NMS._THREE;
@@ -328,28 +350,37 @@ try {
   await page.evaluate('NMS.approachRift(-10)');
   await page.waitForFunction(() => NMS.riftState().arrived, null, { timeout: 10000 });
   const arrived = await page.evaluate('NMS.riftState()');
-  const maxLightDelta = Math.max(0, ...stable.destinationLight.map((value, index) =>
+  const maxLightDelta = Math.max(0, ...stable.rift.destinationLight.map((value, index) =>
     Math.abs(value - (arrived.destinationLight[index] ?? value))));
   check(maxLightDelta < 0.002,
     `destination stellar light is continuous across the threshold (max Δ ${maxLightDelta.toFixed(5)})`);
   check(arrived.audioCue === 'rift-close', 'threshold crossing triggers the dedicated closing cue');
+  check(await page.evaluate(() => window.__foldNavEvents.at(-1)?.phase === 'clear'),
+    'threshold handoff dispatches fold-nav clear');
   const closingPoseChecks = await page.evaluate(() => new Promise((resolve) => {
     const samples = [];
     const THREE = NMS._THREE;
     const fwd = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    const normal = new THREE.Vector3();
     const sample = () => requestAnimationFrame(() => {
       const rift = NMS.riftState();
-      const u = NMS._pipeline.portalComposite.uniforms;
-      const denom = fwd.set(0, 0, -1).applyQuaternion(NMS._internals.camera.quaternion).dot(u.uNormal.value);
-      const tPlane = Math.abs(denom) > 1e-6 ? u.uCenter.value.dot(u.uNormal.value) / denom : -1;
-      if (rift.visible) samples.push({ phase: rift.phase, open: rift.open, distanceToThreshold: rift.distanceToThreshold, tPlane });
+      const { camera, nav, riftPortal } = NMS._internals;
+      center.copy(riftPortal.source.position).sub(nav.pos).sub(camera.position);
+      normal.set(0, 0, 1).applyQuaternion(riftPortal.source.quaternion);
+      const denom = fwd.set(0, 0, -1).applyQuaternion(camera.quaternion).dot(normal);
+      const tPlane = Math.abs(denom) > 1e-6 ? center.dot(normal) / denom : -1;
+      if (rift.visible) {
+        samples.push({ phase: rift.phase, open: rift.open, distanceToThreshold: rift.distanceToThreshold,
+          tPlane, composite: rift.composite });
+      }
       if (!rift.visible || samples.length >= 8) resolve(samples);
       else sample();
     });
     sample();
   }));
-  check(closingPoseChecks.length > 0 && closingPoseChecks.every((s) => s.distanceToThreshold === null && s.tPlane < 0),
-    `closing fold stays behind the forward view after crossing (${closingPoseChecks.length} sampled frames)`);
+  check(closingPoseChecks.length > 0 && closingPoseChecks.every((s) => s.distanceToThreshold === null && s.tPlane < 0 && !s.composite),
+    `closing fold stays behind the forward view and skips rear composite (${closingPoseChecks.length} sampled frames)`);
   await page.evaluate(() => NMS._internals.nav.vel.set(0, 0, 0));
   await page.waitForTimeout(80);
   await page.screenshot({ path: arrivalFrame });
@@ -423,7 +454,7 @@ try {
       const prepare = pipeline.prepare.bind(pipeline);
       const gate = new Promise((resolve) => { window.__releaseRiftWarmup = resolve; });
       pipeline.prepare = function (work, options) {
-        if (options?.label === 'destination-lod' || options?.label === 'destination-portal') {
+        if (options?.label === 'destination-lod' || options?.label === 'portal-programs') {
           pipeline.prepare = prepare;
           return Promise.all([prepare(work, options), gate]).then(([value]) => value);
         }
@@ -438,21 +469,30 @@ try {
     await page.locator('#sm-routeAction').click({ force: true });
     await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
     await page.locator('#route-rift-btn').click();
-    await page.waitForTimeout(240);
-    const waiting = await page.evaluate(() => ({
-      rift: NMS.riftState(),
-      cinematic: document.body.classList.contains('travel-cinematic'),
-      hud: getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden' ? 'none' : 'shown',
-      hint: document.getElementById('hint').textContent,
-    }));
-    check(waiting.rift.active && !waiting.rift.visible && !waiting.cinematic
-        && waiting.hud !== 'none' && waiting.hint.includes('正在预载'),
-    `${type} keeps the HUD and loading hint visible during preparation`);
+    const portalStartAnchor = await page.evaluate(() => NMS._internals.riftPortal.source.position.toArray());
+    if (type === 'gasGiant') await page.keyboard.down('KeyW');
+    await page.waitForTimeout(420);
+    if (type === 'gasGiant') await page.keyboard.up('KeyW');
+    const waiting = await page.evaluate((startAnchor) => {
+      const anchorNow = NMS._internals.riftPortal.source.position;
+      const drift = Math.hypot(anchorNow.x - startAnchor[0], anchorNow.y - startAnchor[1], anchorNow.z - startAnchor[2]);
+      return {
+        rift: NMS.riftState(),
+        cinematic: document.body.classList.contains('travel-cinematic'),
+        hud: getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden' ? 'none' : 'shown',
+        hint: document.getElementById('hint').textContent,
+        anchorDrift: drift,
+      };
+    }, portalStartAnchor);
+    check(waiting.rift.active && waiting.rift.visible && !waiting.cinematic && waiting.hud !== 'none'
+        && waiting.rift.open < 0.1 && !waiting.rift.anchorLocked && !waiting.rift.arrived
+        && waiting.rift.distanceToThreshold > 0 && waiting.anchorDrift < 1e-3,
+      `${type} holds at the world-anchored glowing seam while preparing without hiding HUD or black aperture (drift=${waiting.anchorDrift.toFixed(4)})`);
     if (type === 'gasGiant') {
       await page.screenshot({ path: path.join(os.tmpdir(), 'deep-space-rift-loading.png') });
     }
     await page.evaluate(() => window.__releaseRiftWarmup());
-    await page.waitForFunction(() => NMS.riftState().anchorLocked, null, { timeout: 30000 });
+    await page.waitForFunction(() => NMS.riftState().anchorLocked, null, { timeout: 90000 });
     const preparation = await page.evaluate(() => NMS.warpPreparationState());
     check(preparation.lodWarmState === 'complete' && preparation.riftWarmState === 'complete'
         && !preparation.lodWarmError && !preparation.riftWarmError,
@@ -473,6 +513,194 @@ try {
       && !document.body.classList.contains('travel-cinematic'), null, { timeout: 10000 });
     check(await page.locator('#ship-hud-stage').isVisible(), `${type} arrival restores the flight HUD`);
   }
+
+  // Off-axis free lateral approach + crossing in cockpit view with cloud handoff.
+  await page.waitForFunction(() => !document.body.classList.contains('travel-cinematic'));
+  const cockpitTarget = await page.evaluate(() => {
+    NMS.shipViewDebug.setViewMode('cockpit');
+    const { universe, starMap } = NMS._internals;
+    for (const star of universe.nearStarsList) {
+      if (star.id === universe.system.star.id) continue;
+      const body = starMap.systemPreview(star).bodies.find((candidate) => !candidate.isMoon
+        && !['gasGiant', 'iceGiant', 'blackHole'].includes(candidate.type)
+        && (candidate.clouds?.coverage || 0) > 0.12);
+      if (body) return { starId: star.id, bodyIndex: body.index, bodyId: body.bodyId };
+    }
+    return null;
+  });
+  check(!!cockpitTarget, 'a cloudy destination is available for cockpit off-axis crossing');
+  await page.evaluate((id) => {
+    NMS.openStarMap();
+    NMS.selectStarMapTarget(id);
+  }, cockpitTarget.starId);
+  await page.locator(`#sm-systemGlyph [data-glyph-index="${cockpitTarget.bodyIndex}"]`).click({ force: true });
+  await page.waitForFunction((bodyId) => NMS._internals.starMap.mode === 'system'
+    && NMS._internals.starMap.selectedPlanet?.bodyId === bodyId
+    && document.querySelector('#sm-planetLeft')?.classList.contains('active')
+    && !document.getElementById('sm-routeAction')?.disabled, cockpitTarget.bodyId);
+  await page.locator('#sm-routeAction').click({ force: true });
+  await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
+  await page.locator('#route-rift-btn').click();
+  await page.waitForFunction(() => {
+    const rift = NMS.riftState();
+    return rift.phase === 'open' && rift.open > 0.985 && rift.anchorLocked && rift.previewVolume?.ready;
+  }, null, { timeout: 30000 });
+  const offAxis = await page.evaluate(async () => {
+    const T = NMS._THREE;
+    const { nav, riftPortal, shipView, nodePipeline } = NMS._internals;
+    const hw = riftPortal.halfWidth, hh = riftPortal.halfHeight;
+    const latX = hw * 0.24, latY = -hh * 0.18;
+    NMS.approachRift(95, { x: latX, y: latY, yaw: 0.14, pitch: -0.06 });
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    // Give oblique forward + lateral velocity and verify free lateral approach (no axis pull).
+    const srcQ = riftPortal.source.quaternion.clone();
+    const tgtQ = riftPortal.target.quaternion.clone();
+    const localVel = new T.Vector3(48, -22, -460);
+    nav.vel.copy(localVel).applyQuaternion(srcQ);
+    const velBeforeDir = localVel.clone().normalize();
+    let lastPreCrossQuat = nav.quat.clone();
+    await new Promise((r) => setTimeout(r, 90));
+    // Measure velocity direction right before crossing (must keep lateral ratio).
+    const preCrossLocalVel = nav.vel.clone().applyQuaternion(srcQ.clone().invert()).normalize();
+    const lateralPullError = preCrossLocalVel.distanceTo(velBeforeDir);
+    const crossed = await new Promise((resolve) => {
+      const deadline = performance.now() + 5000;
+      const poll = () => {
+        const rift = NMS.riftState();
+        if (rift.arrived) {
+          const expectedQuat = tgtQ.clone().multiply(srcQ.clone().invert()).multiply(lastPreCrossQuat);
+          const postLocal = nav.pos.clone().sub(riftPortal.source.position)
+            .applyQuaternion(riftPortal.source.quaternion.clone().invert());
+          const postLocalVel = nav.vel.clone().applyQuaternion(tgtQ.clone().invert()).normalize();
+          resolve({
+            arrived: true,
+            cockpit: shipView.isCockpit(),
+            angVel: shipView.angVel.length(),
+            lateralX: postLocal.x,
+            lateralY: postLocal.y,
+            expectedX: latX,
+            expectedY: latY,
+            velDirError: postLocalVel.distanceTo(velBeforeDir),
+            quatError: nav.quat.angleTo(expectedQuat),
+            hasCloudPass: !!nodePipeline.cloudPass,
+            cloudValid: !!nodePipeline.cloudPass?.historyValid,
+            cloudBody: nodePipeline.cloudPass?.activePlanet?.bodyId || null,
+          });
+          return;
+        }
+        lastPreCrossQuat.copy(nav.quat);
+        if (performance.now() > deadline) { resolve({ arrived: false }); return; }
+        requestAnimationFrame(poll);
+      };
+      requestAnimationFrame(poll);
+    });
+    return { lateralPullError, ...crossed };
+  });
+  check(offAxis.arrived && offAxis.cockpit,
+    'cockpit off-axis free flight crosses the planar lane directly');
+  check(offAxis.lateralPullError < 1e-4,
+    `free lateral approach preserves oblique velocity without axis pull (Δ ${offAxis.lateralPullError.toExponential(2)})`);
+  check(offAxis.lateralX > offAxis.expectedX * 0.95 && offAxis.lateralY < offAxis.expectedY * 0.95
+      && offAxis.velDirError < 1e-3 && offAxis.quatError < 0.02,
+    `off-axis lateral position, velocity and orientation carry through cleanly (x=${offAxis.lateralX?.toFixed(1)}, y=${offAxis.lateralY?.toFixed(1)}, velΔ=${offAxis.velDirError?.toExponential(2)}, qΔ=${offAxis.quatError?.toFixed(4)})`);
+  check(offAxis.angVel < 0.5,
+    `cockpit angular smoothing does not spike across crossing (angVel=${offAxis.angVel?.toFixed(3)})`);
+  check(!offAxis.hasCloudPass || (offAxis.cloudValid && offAxis.cloudBody === cockpitTarget.bodyId),
+    `cloud temporal history stays valid across cockpit off-axis handoff (valid=${offAxis.cloudValid}, body=${offAxis.cloudBody})`);
+  await page.waitForFunction(() => !NMS.riftState().active, null, { timeout: 5000 });
+
+  // Cancel in flight (KeyX and cancel-fold-route event) plus non-debug normal flight approach.
+  await page.waitForFunction(() => !document.body.classList.contains('travel-cinematic'));
+  const flightTarget = await page.evaluate(() => {
+    const { universe, starMap } = NMS._internals;
+    for (const star of universe.nearStarsList) {
+      if (star.id === universe.system.star.id) continue;
+      const body = starMap.systemPreview(star).bodies.find((candidate) => !candidate.isMoon
+        && !['gasGiant', 'iceGiant', 'blackHole'].includes(candidate.type));
+      if (body) return { starId: star.id, bodyIndex: body.index, bodyId: body.bodyId };
+    }
+    return null;
+  });
+  check(!!flightTarget, 'a destination is available for cancel and normal flight approach checks');
+  const openRouteChoice = async (targetInfo) => {
+    await page.evaluate((id) => {
+      NMS.openStarMap();
+      NMS.selectStarMapTarget(id);
+    }, targetInfo.starId);
+    await page.locator(`#sm-systemGlyph [data-glyph-index="${targetInfo.bodyIndex}"]`).click({ force: true });
+    await page.waitForFunction((bodyId) => NMS._internals.starMap.mode === 'system'
+      && NMS._internals.starMap.selectedPlanet?.bodyId === bodyId
+      && document.querySelector('#sm-planetLeft')?.classList.contains('active')
+      && !document.getElementById('sm-routeAction')?.disabled, targetInfo.bodyId);
+    await page.locator('#sm-routeAction').click({ force: true });
+    await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
+  };
+
+  // 1) KeyX cancels an active rift in flight and emits fold-nav clear.
+  await openRouteChoice(flightTarget);
+  await page.evaluate(() => { window.__foldNavEvents.length = 0; });
+  await page.locator('#route-rift-btn').click();
+  await page.waitForFunction(() => NMS.riftState().active && NMS.riftState().visible);
+  await page.keyboard.press('KeyX');
+  await page.waitForFunction(() => !NMS.riftState().active, null, { timeout: 5000 });
+  const keyXCancel = await page.evaluate(() => ({
+    rift: NMS.riftState(),
+    events: window.__foldNavEvents.slice(),
+    cinematic: document.body.classList.contains('travel-cinematic'),
+    hudVis: getComputedStyle(document.getElementById('ship-hud-stage')).visibility,
+  }));
+  check(!keyXCancel.rift.active && !keyXCancel.rift.visible && !keyXCancel.rift.composite
+      && keyXCancel.events.at(-1)?.phase === 'clear' && !keyXCancel.cinematic && keyXCancel.hudVis !== 'hidden',
+    'KeyX cancels an in-flight fold route and restores flight HUD state');
+
+  // 2) Custom window event 'cancel-fold-route' cancels an active rift cleanly.
+  await openRouteChoice(flightTarget);
+  await page.evaluate(() => { window.__foldNavEvents.length = 0; });
+  await page.locator('#route-rift-btn').click();
+  await page.waitForFunction(() => NMS.riftState().active && NMS.riftState().visible);
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('cancel-fold-route')));
+  await page.waitForFunction(() => !NMS.riftState().active, null, { timeout: 5000 });
+  const eventCancel = await page.evaluate(() => ({
+    rift: NMS.riftState(),
+    events: window.__foldNavEvents.slice(),
+    hudVis: getComputedStyle(document.getElementById('ship-hud-stage')).visibility,
+  }));
+  check(!eventCancel.rift.active && !eventCancel.rift.composite
+      && eventCancel.events.at(-1)?.phase === 'clear' && eventCancel.hudVis !== 'hidden',
+    'cancel-fold-route custom event cancels the route and dispatches fold-nav clear');
+
+  // 3) Normal non-debug forward flight input during load crosses the anchored portal without approachRift().
+  await openRouteChoice(flightTarget);
+  await page.evaluate(() => { window.__foldNavEvents.length = 0; });
+  await page.locator('#route-rift-btn').click();
+  await page.keyboard.down('KeyW');
+  await page.keyboard.down('ShiftLeft');
+  await page.waitForFunction((starId) => NMS._internals.universe.system.star.id === starId,
+    flightTarget.starId, { timeout: 90000 }).catch(async (err) => {
+    console.error('NORMAL_FLIGHT_FAIL_DIAG:', JSON.stringify(await page.evaluate(() => ({
+      star: NMS._internals.universe.system.star.id,
+      rift: NMS.riftState(),
+      warm: NMS.warpPreparationState(),
+      speed: NMS._internals.nav.vel.length(),
+      scale: NMS._internals.spaceCtl.speedScale,
+      enabled: NMS._internals.spaceCtl.enabled,
+    })), null, 2));
+    throw err;
+  });
+  await page.keyboard.up('ShiftLeft');
+  await page.keyboard.up('KeyW');
+  const normalFlight = await page.evaluate((starId) => ({
+    starId: NMS._internals.universe.system.star.id,
+    expectedStarId: starId,
+    events: window.__foldNavEvents.slice(),
+    speed: NMS._internals.nav.vel.length(),
+  }), flightTarget.starId);
+  check(normalFlight.starId === normalFlight.expectedStarId
+      && normalFlight.events[0]?.phase === 'sync'
+      && normalFlight.events.some((e) => e.phase === 'clear')
+      && normalFlight.speed > 0,
+    `normal flight input during load crosses world-anchored portal without debug staging (speed=${normalFlight.speed.toFixed(1)})`);
+  await page.waitForFunction(() => !NMS.riftState().active, null, { timeout: 5000 });
 
   // Reload and exercise the sibling route through the real star-map choice.
   // Both travel methods share the cinematic state, but this guards against a

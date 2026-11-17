@@ -42,8 +42,8 @@ try {
     const { WorldPublication } = await import('/src/world-publication.js');
     const { PortalView } = await import('/src/portal/portal-view.js');
     wrap(PortalView.prototype, 'render', original => function(options) {
-      const label = queue.active?.label;
-      if (!label) return original.call(this, options);
+      const label = queue.active?.label || 'live-portal';
+      if (data.phase !== 'rift' && !queue.active?.label) return original.call(this, options);
       const { scene, universe, ship } = NMS._internals;
       const before = { open: NMS.riftState().open, visible: NMS.riftState().visible, composite: pipeline.portalComposite.enabled,
         target: renderer.getRenderTarget(), face: renderer.getActiveCubeFace(), mip: renderer.getActiveMipmapLevel(),
@@ -207,10 +207,10 @@ try {
   assert.equal(report.result.star, report.riftTarget.starId);assert.equal(report.result.stats.state, 'space');
   assert.ok(report.result.observer.compiles > 0 && report.result.observer.uploads > 0);
   assert.ok(report.result.observer.labels['destination-private-frame'] > 0);
-  assert.ok(report.result.observer.labels['destination-portal'] > 0);
-  assert.ok(report.result.observer.privatePortals.some(row => row.open < .025 && !row.visible && !row.composite), 'Actual hidden portal far-view was warmed');
-  assert.ok(report.result.observer.privatePortals.every(row => row.label === 'destination-portal' && row.result === true
-    && row.nativeDraws > 0 && row.portalViewFlag && !row.renderToScreen && row.restored), 'Private portal success requires native draws, isolated PortalView pipeline, and restored state');
+  assert.ok(report.result.observer.labels['portal-programs'] > 0);
+  assert.ok(report.result.observer.privatePortals.length > 0, 'PortalView rendered the live destination view');
+  assert.ok(report.result.observer.privatePortals.every(row => row.result === true
+    && row.nativeDraws > 0 && row.portalViewFlag && !row.renderToScreen && row.restored), 'Portal far-view requires native draws, isolated PortalView pipeline, and restored state');
   assert.deepEqual(report.result.observer.outside, []);assert.equal(report.result.observer.restored, true);
   assert.equal(report.expectedErrors.length, 1);assert.equal(report.result.observer.controlledPublicationFailure, true);
   const failedPublication = report.result.observer.publications.find(row => row.failed);

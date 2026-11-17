@@ -236,55 +236,25 @@ export function warpChannels(t, plan, out = emptyTransitChannels()) {
   out.accel = accel;
   out.charge = charge;
   out.tunnel = coverage;
-  out.sky = 1 - smoothstep(0.06, 0.5, w);
-  // the real sky only hints at the motion; the near-field streaks carry it
-  out.streak = 0.35 * w * out.sky;
+  // Keep the same stars in view until the wall overtakes them. On exit
+  // the central opening reveals the sky before the near banks fall away.
+  out.sky = Math.max(1 - smoothstep(0.14, 0.92, enter), smoothstep(0, .30, exit));
+  const entrySurge = envelope(u, .09, .18, .21, .29);
+  const exitSurge = envelope(u, .64, .72, .75, .84);
+  out.streak = Math.min(1, (.82 * Math.sqrt(w) + .12 * charge) * out.sky + .42 * Math.max(entrySurge, exitSurge) * out.sky);
   out.aberr = 0.22 * w * out.sky + 0.08 * charge;
-  out.doppler = 0.5 * w * out.sky;
+  out.doppler = (.5 * w + .28 * Math.max(entrySurge, exitSurge)) * out.sky;
   out.blur = Math.min(1, w * (0.25 + 0.45 * Math.max(accel, 0)));
   out.fold = 3 * (0.035 * charge + 0.02 * Math.max(accel, 0)) * (1 - enter);
   out.colorMix = smoothstep(m.enterEnd, m.exitStart, u);
   // lens: tightens while charging, opens with the flow, punches with accel
   out.fov = 62 * (-0.045 * charge * (1 - w) + 0.19 * w + 0.07 * accel);
   out.kick += 0.85 * accel - 0.25 * charge * (1 - w);
-  out.flash = Math.max(out.flash, 0.18 * envelope(u, m.exitStart + 0.04, m.exitStart + 0.09, m.exitStart + 0.11, m.exitEnd));
+  out.flash = Math.max(out.flash, .30 * envelope(u, .21, .255, .26, .315), .36 * envelope(u, .67, .72, .73, .79));
   out.hull = Math.max(out.hull, 0.25 * charge + 0.75 * smoothstep(0.15, 1, w));
   return out;
 }
 
 export function transitIntensity(channels) {
   return clamp01(Math.max(channels.streak, channels.tunnel, channels.fold));
-}
-
-// ---------------------------------------------------------------------------
-// Throat: the short ride through a wormhole mouth (弦界航道). Same conduit
-// language as the warp, compressed to ~2.6 s, with a decisive push on entry:
-// the mouth's interior swallows the view, the conduit forms around the ship,
-// the worlds are swapped while it is opaque, and it opens onto the far side.
-export const THROAT_MARKS = Object.freeze({ enterEnd: 0.3, swap: 0.4, exitStart: 0.48, exitEnd: 0.88 });
-
-export function throatPlan() {
-  return { duration: 2.6, swapAt: 2.6 * THROAT_MARKS.swap };
-}
-
-export function throatChannels(t, plan, out = emptyTransitChannels()) {
-  if (t < 0 || t > plan.duration) return out;
-  const m = THROAT_MARKS;
-  const u = clamp01(t / plan.duration);
-  const w = smoothstep(0, 0.2, u) * (1 - smoothstep(0.56, 0.96, u));
-  const enter = smoothstep(0, m.enterEnd, u);
-  const exit = smoothstep(m.exitStart, m.exitEnd, u);
-  out.warp = Math.max(out.warp || 0, w);
-  out.conduitEnter = enter;
-  out.conduitExit = exit;
-  out.speed = warpSpeedFraction(w) * 0.55;
-  out.tunnel = Math.min(enter, 1 - exit);
-  out.blur = Math.max(out.blur, 0.75 * w);
-  out.fold = Math.max(out.fold, 0.5 * envelope(u, 0, 0.05, 0.08, 0.2));
-  out.flash = Math.max(out.flash, 0.4 * envelope(u, 0.02, 0.06, 0.08, 0.2));
-  out.fov += 62 * (0.16 * w - 0.05 * envelope(u, 0.85, 0.92, 0.94, 1));
-  out.kick += transitKick(t, 0.12, { decay: 3.8, frequency: 1.15 }) * 1.3
-    + transitKick(t, plan.duration * m.exitStart + 0.2, { decay: 4.5, frequency: 1.3 }) * 0.4;
-  out.hull = Math.max(out.hull, 0.9 * w);
-  return out;
 }
