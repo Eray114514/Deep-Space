@@ -21,6 +21,14 @@ export const CELL_BUSH = 2;
 export const CELL_FROND = 3;
 export const CELL_IMPOSTOR_0 = 4;     // + species index (0..3)
 
+// The last cell holds a quarter-cell overhead projection per species.
+export function crownTopRect(slot) {
+  const u0 = 0.75 + (slot % 2) * 0.125;
+  const v0 = 0.75 + Math.floor(slot / 2) * 0.125;
+  const inset = 2 / ATLAS_SIZE;
+  return { u0: u0 + inset, u1: u0 + 0.125 - inset, v0: v0 + inset, v1: v0 + 0.125 - inset };
+}
+
 // uv rectangle of a cell, inset so mip levels do not bleed across cells
 export function cellRect(cell) {
   const col = cell % 2, row = Math.floor(cell / 2);
@@ -216,8 +224,17 @@ export function buildTreeAtlas(seedInt, rng, species) {
   paintNeedleCard(cellPainter(data, CELL_NEEDLE), rng);
   paintBroadleafCard(cellPainter(data, CELL_BUSH), rng, true);
   paintFrondCard(cellPainter(data, CELL_FROND), rng);
+  const overhead = cellPainter(data, 7);
+  overhead.fill(120, 140, 105);
   species.forEach((entry, index) => {
-    if (entry.impostor && index < 4) {
+    if (entry.impostor && index < 3) {
+      for (const clump of [...entry.impostor.clumps].sort((a, b) => a.y - b.y)) {
+        const x = (index % 2 + clump.x) * 0.5;
+        const z = (Math.floor(index / 2) + 0.5 + clump.z / entry.width) * 0.5;
+        const edge = Math.min(clump.x, 1 - clump.x, 0.5 - Math.abs(clump.z / entry.width));
+        if (edge > 0.02) overhead.blob(x, z, Math.min(edge - 0.01, clump.r) * 0.5,
+          0.52 + clump.y * 0.47, seedInt + index);
+      }
       paintImpostor(cellPainter(data, CELL_IMPOSTOR_0 + index), entry.impostor.clumps, entry.impostor.trunk, seedInt + index);
     }
   });

@@ -6,7 +6,7 @@
 //   near      full branch and leaf detail
 //   mid       thinned rings and leaves (larger leaf cards keep the coverage)
 //   far       trunk and main limbs, a few dozen big foliage cards
-//   horizon   two crossed quads carrying a silhouette painted from the crown
+//   horizon   crossed silhouettes and an overhead projection of the crown
 //
 // Every level is one indexed geometry (bark and foliage merged, atlas uvs,
 // vertex colours for the species tint) so the tree field can instance it with
@@ -17,7 +17,7 @@ import { Tree } from '../../vendor/ez-tree/tree.js';
 import { makeRng } from '../rng.js';
 import {
   BARK_RECT, CELL_BROADLEAF, CELL_BUSH, CELL_FROND, CELL_IMPOSTOR_0, CELL_NEEDLE,
-  buildTreeAtlas, cellRect,
+  buildTreeAtlas, cellRect, crownTopRect,
 } from './tree-atlas.js';
 
 // archetypes: an ez-tree preset, the foliage card it wears and a target height
@@ -124,7 +124,7 @@ function mergeTree({ branches, leaves }, { scale, barkColor, leafColor, cell, cr
   return geometry;
 }
 
-function horizonCard(width, height, cell, leafColor) {
+function horizonCard(width, height, cell, leafColor, crownHeight) {
   const rect = cellRect(cell);
   const position = [], normal = [], uv = [], color = [], index = [];
   for (let k = 0; k < 2; k++) {
@@ -139,6 +139,15 @@ function horizonCard(width, height, cell, leafColor) {
     }
     index.push(base, base + 1, base + 2, base, base + 2, base + 3);
   }
+  const top = crownTopRect(cell - CELL_IMPOSTOR_0);
+  const base = position.length / 3;
+  for (const [x, z] of [[-0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]]) {
+    position.push(x * width, crownHeight, z * width);
+    normal.push(x, 0.85, z);
+    uv.push(top.u0 + (x + 0.5) * (top.u1 - top.u0), top.v0 + (z + 0.5) * (top.v1 - top.v0));
+    color.push(leafColor.r, leafColor.g, leafColor.b);
+  }
+  index.push(base, base + 1, base + 2, base, base + 2, base + 3);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normal, 3));
@@ -216,7 +225,7 @@ function growSpecies(archetypeName, rng, colors, slot) {
     trunk: { top: Math.min(0.9, (leafBox.min.y * scale) / height + 0.25), halfWidth: Math.max(0.006, (trunkRadius * scale) / width * 0.6) },
   };
   // an up-lit flat card reads brighter than the self-shadowing crown it replaces
-  geometries.horizon = horizonCard(width, height, CELL_IMPOSTOR_0 + slot, colors.leaf.clone().multiplyScalar(0.66));
+  geometries.horizon = horizonCard(width, height, CELL_IMPOSTOR_0 + slot, colors.leaf.clone().multiplyScalar(0.66), crownCenter.y);
   full.branches.dispose(); full.leaves.dispose();
   mid.branches.dispose(); mid.leaves.dispose();
   far.branches.dispose(); far.leaves.dispose();

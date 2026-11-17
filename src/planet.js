@@ -522,8 +522,8 @@ export class Planet extends TerrainHeightField {
   }
 
   // Low-frequency tint masks baked per-vertex (they're smooth, so vertex
-  // resolution is fine): x=forest, y=blotch, z=stripe phase, w=ember/
-  // crevasse/strata. The fragment shader applies the actual colors.
+  // resolution is fine): x=forest tint, y=blotch, z=stripe phase, w=woodland
+  // occupancy on living worlds or ember/crevasse/strata on other worlds.
   extrasAt(dir, h, maxFreq, out) {
     out.set(0, 0, 0, 0);
     const p = this.pal;
@@ -536,6 +536,11 @@ export class Planet extends TerrainHeightField {
       out.x = smoothstep(0.05, 0.3, moist) * smoothstep(0.04, 0.1, tl)
         * (1 - smoothstep(0.4, 0.55, tl)) * 0.85;
       if (this.snowWeightAt(dir, h) > 0.28) out.x = 0;
+      else if (!this.hasLiquid || h >= this.seaLevel + 1.5) {
+        // Interpolate the signed distance to the planting thresholds. A
+        // binary flag at coarse vertices draws straight triangular borders.
+        out.w = clamp(0.5 + 0.5 * this.woodlandMargin(tl, moist), 0, 1);
+      }
     }
     if (p.blotch) {
       const b = this.nD.billow(x - 17, y + 5, z, 5.5, 3, 0.5, 2.1, maxFreq);
@@ -710,6 +715,10 @@ export class Planet extends TerrainHeightField {
     const sl = this.pal.snowLine * (1 - 0.65 * smoothstep(0.45, 0.95, lat));
     return Math.max(smoothstep(sl, sl + Math.max(18, this.hAmp * 0.2), h),
       smoothstep(this.pal.capLat, this.pal.capLat + 0.085, lat));
+  }
+
+  woodlandMargin(landT, moisture) {
+    return Math.min((landT - 0.05) / 0.03, (0.45 - landT) / 0.045, (moisture - 0.14) / 0.075);
   }
 
   biomeAt(dir, h) {

@@ -7,7 +7,7 @@
 //   near     < ~45 m     full branches and leaves
 //   mid      < ~140 m    thinned mesh
 //   far      < ~800 m    trunk, limbs and a few dozen foliage cards
-//   horizon  to 4.4 km   two crossed quads with the species' silhouette
+//   horizon  to 4.4 km   crossed silhouettes and an overhead crown projection
 //
 // Nothing pops. Neighbouring levels hand over across a band of distance with
 // complementary screen-door dither, each tree at its own slightly different
@@ -225,6 +225,7 @@ export class FarFlora {
     this.origin = new THREE.Vector3();
     this.cameraLocal = new THREE.Vector3();
     this.classifiedAt = new THREE.Vector3(Infinity, 0, 0);
+    this.horizonClassifiedAt = new THREE.Vector3(Infinity, 0, 0);
   }
 
   setPlanet(planet) {
@@ -441,7 +442,7 @@ export class FarFlora {
     }
     // the camera moved: re-sort the trees in reach into levels
     if (!repacked && visible && this.cameraLocal.distanceTo(this.classifiedAt) > RECLASSIFY_M) {
-      this.repack(true);
+      this.repack(this.cameraLocal.distanceTo(this.horizonClassifiedAt) < 120);
     }
 
     // Copy disturbance records after repack() so uDistPos always uses the
@@ -540,7 +541,8 @@ export class FarFlora {
       // most rolls fail in every biome; skip the terrain queries for them
       if (sel >= MAX_DENSITY * this.density) continue;
       const hgt = p.height(_up, 96);
-      const dens = FAR_DENSITY[p.biomeAt(_up, hgt)];
+      const biome = p.biomeAt(_up, hgt);
+      const dens = FAR_DENSITY[biome];
       if (!dens || sel >= dens[0] * this.density) continue;
       // jitter inside the cell, ground the tree at full terrain detail
       frame(_up, _ce1, _ce2);
@@ -557,10 +559,17 @@ export class FarFlora {
       _q2.setFromAxisAngle(Y, hashFloat(h0, 1) * Math.PI * 2);
       _q.multiply(_q2);
       const sc = 0.7 + hashFloat(h0, 2) * 0.6;
-      _s.set(sc, sc * (0.9 + hashFloat(h0, 0) * 0.25), sc);
+      // A woodland stand closes overhead; open-country trees keep their
+      // isolated silhouettes. One transform serves every distance tier.
+      const spread = biome === 'forest' ? sc * 1.55 : sc;
+      _s.set(spread, sc * (0.9 + hashFloat(h0, 0) * 0.25), spread);
       _m.compose(_p, _q, _s);
-      appendMatrix(job, hashFloat(h0, 3) < dens[1] ? 0 : 1, _m.elements,
-        hashFloat(hash3i(ux, uy, uz, job.seedI ^ 0x3d1f), 0));
+      const variant = hash3i(ux, uy, uz, job.seedI ^ 0x3d1f);
+      // Choose the species at the jittered planting site, independently of
+      // the roll that admits the lattice cell or sizes its tree.
+      const speciesHash = hash3i(Math.round(_jd.x * job.Q3), Math.round(_jd.y * job.Q3),
+        Math.round(_jd.z * job.Q3), job.seedI ^ 0xc31b);
+      appendMatrix(job, hashFloat(speciesHash) < dens[1] ? 0 : 1, _m.elements, hashFloat(variant));
     }
   }
 
@@ -592,6 +601,7 @@ export class FarFlora {
       .sort((a, b) => (tileDistanceSq(a, ax, ay, az) - tileDistanceSq(b, ax, ay, az))
         || compareTileKeys(a, b));
     if (!nearOnly) {
+      this.horizonClassifiedAt.copy(this.cameraLocal);
       if (keys.length) this.origin.copy(this.tiles.get(keys[0]).origin);
       // These translations combine with the camera-relative planet transform
       // on the CPU. The GPU only adds nearby tile offsets and tree geometry.
@@ -614,25 +624,18 @@ export class FarFlora {
         const from = tier.lo * (1 - BAND_JITTER) * 0.9 - TIER_MARGIN_M;
         for (let species = 0; species < 2; species++) {
           const source = t.m[species], rand = t.r[species];
-          // Tiles are generated in stable hash order; retaining a prefix is a
-          // deterministic density reduction and does not make trees shuffle.
-          const available = Math.floor(t.n[species] * this.displayDensity);
+          // The source is in lattice scan order. Use a stable dispersed
+          // subset at reduced density so partial tiles never become strips.
+          const available = t.n[species];
           const mesh = meshes[species];
           const target = mesh.instanceMatrix.array;
           const targetRand = mesh.geometry.getAttribute('aRand').array;
           let n = counts[level][species];
           if (level === 0) {
             const nearest = Math.max(0, _offset.distanceTo(_cam) - TILE_M);
-            if (nearest + TILE_M * 2 < HORIZON_THIN_FROM * (1 - BAND_JITTER)) {
-              // the whole tile is inside the unthinned disc
-              const take = Math.min(available, tier.cap - n);
-              if (take > 0) {
-                copyTileMatrices(target, source, n, take, _offset);
-                targetRand.set(rand.subarray(0, take), n);
-                n += take;
-              }
-            } else if (nearest < RIM_M) {
+            if (nearest < RIM_M) {
               for (let i = 0; i < available && n < tier.cap; i++) {
+                if ((rand[i] * 53.13) % 1 >= this.displayDensity) continue;
                 const x = source[i * 16 + 12] + _offset.x - _cam.x;
                 const y = source[i * 16 + 13] + _offset.y - _cam.y;
                 const z = source[i * 16 + 14] + _offset.z - _cam.z;
@@ -652,6 +655,7 @@ export class FarFlora {
             }
           } else {
             for (let i = 0; i < available && n < tier.cap; i++) {
+              if ((rand[i] * 53.13) % 1 >= this.displayDensity) continue;
               const x = source[i * 16 + 12] + _offset.x - _cam.x;
               const y = source[i * 16 + 13] + _offset.y - _cam.y;
               const z = source[i * 16 + 14] + _offset.z - _cam.z;
@@ -703,15 +707,6 @@ function tileDistanceSq(key, ax, ay, az) {
   return (qx - ax) * (qx - ax) + (qy - ay) * (qy - ay) + (qz - az) * (qz - az);
 }
 
-function copyTileMatrices(target, source, start, count, offset) {
-  target.set(source.subarray(0, count * 16), start * 16);
-  for (let i = 0; i < count; i++) {
-    const at = (start + i) * 16 + 12;
-    target[at] = source[i * 16 + 12] + offset.x;
-    target[at + 1] = source[i * 16 + 13] + offset.y;
-    target[at + 2] = source[i * 16 + 14] + offset.z;
-  }
-}
 
 function tileCoordinates(key) {
   return key.split(':').map(Number);

@@ -53,6 +53,7 @@ try {
       const job = flora.createTileJob(planet, key);
       const tile = flora.buildTile(planet, key);
       assert.ok(treeCount(tile) > 20, 'Controlled forest must populate the nearest tile.');
+      assert.ok(tile.n[1] > 0 && tile.n[0] > 0, 'Mixed woodland must plant both authored species.');
       const center = job.anchor.clone().multiplyScalar(radius + planet.height() - 0.25);
       for (const species of [0, 1]) {
         const matrices = usedMatrices(tile, species);
@@ -91,6 +92,20 @@ try {
   assert.equal(flora.pending(), 0);
   assert.ok(flora.debugStats().instances > 1000, 'A complete real forest ring must be visible.');
   const counts = flora.meshes.map(mesh => mesh.count);
+  const overhead = home.clone().normalize().multiplyScalar(planet.R + 8000);
+  flora.update(planet, overhead, 8000);
+  assert.equal(flora.debugStats().levels.horizon, 0);
+  flora.update(planet, home, 800);
+  assert.equal(flora.debugStats().levels.horizon, counts[0] + counts[1],
+    'Vertical descent must refill the horizon tier even when the tile ring stays fixed.');
+  flora.setDisplayDensity(0.48);
+  const nearest = [...flora.tiles.values()].sort((a, b) =>
+    a.origin.distanceToSquared(home) - b.origin.distanceToSquared(home))[0];
+  const uploaded = new Set(flora.meshes[0].geometry.getAttribute('aRand').array.subarray(0, flora.meshes[0].count));
+  const tail = nearest.r[0].subarray(Math.floor(nearest.n[0] * 0.75), nearest.n[0]);
+  assert.ok(tail.filter(r => uploaded.has(r)).length > tail.length * 0.2,
+    'Reduced density must still draw trees from the last quarter of a tile scan.');
+  flora.setDisplayDensity(1);
   const initialKeys = [...flora.targetKeys];
   for (const distance of [1200, 7200, 14400, 21600]) {
     const camera = home.clone().addScaledVector(tangent, distance).normalize().multiplyScalar(planet.R + 800);

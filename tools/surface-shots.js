@@ -6,10 +6,11 @@
 //   node tools/surface-shots.js [--out test-results/surface-shots/<name>]
 //     [--planet 0] [--only orbit,walk] [--hud] [--clouds] [--query "a=1&b=2"]
 //
+// Reuse a captured forest location with --site forest --site-report path/to/report.json.
 // The clear-sky weather fixture is the default: this tool judges the ground.
 // (vclouds=0 is not a substitute, it brings back the opaque legacy cloud shell.)
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { startServer } from './server.js';
 import { resolveSystemChromePath } from './browser.js';
@@ -86,7 +87,8 @@ const site = await page.evaluate(`(() => {
 // --site forest: move every shot to closed woodland near the meadow, in the
 // same daylight, and add shots from inside the trees with the ship hidden
 if (option('site', 'meadow') === 'forest') {
-  const forest = await page.evaluate(`(() => {
+  const prior = option('site-report', '');
+  const forest = prior ? JSON.parse(await readFile(prior, 'utf8')).site : await page.evaluate(`(() => {
     const p = NMS._ff.planet;
     if (!p) return null;
     const base = ${JSON.stringify(site.dir)};
@@ -108,6 +110,9 @@ if (option('site', 'meadow') === 'forest') {
   })()`);
   if (!forest) throw new Error('no sunlit woodland found near the landing site');
   Object.assign(site, forest);
+  SCENES.push({ name: '11-forest-down-8km', js: flight(8000, -1.44) },
+    { name: '12-forest-down-2km', js: flight(2000, -1.44) },
+    { name: '13-forest-down-400m', js: flight(400, -1.44) });
   SCENES.splice(SCENES.findIndex((scene) => scene.name === '08-walk'), 2,
     { name: '08-canopy-60m', js: flight(60, -0.3) },
     { name: '09-eye-level', js: (i, s) => 'NMS.shipVisible(false); ' + flight(2.2, 0)(i, s) },

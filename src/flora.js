@@ -406,7 +406,9 @@ export function floraPalette(planet, rng) {
   }
   const alien = planet.type === 'exotic' || planet.type === 'toxic';
   const canopy = base.clone().offsetHSL(shift, alien ? 0.18 : 0.08, alien ? 0.06 : 0.025);
-  const canopy2 = canopy.clone().offsetHSL(0.3 + rng() * 0.35, 0.05, (rng() - 0.5) * 0.1);
+  const secondHue = rng();
+  const canopy2 = canopy.clone().offsetHSL(alien ? 0.3 + secondHue * 0.35 : (secondHue - 0.5) * 0.055,
+    alien ? 0.05 : -0.025, (rng() - 0.5) * (alien ? 0.1 : 0.025));
   const trunk = (planet.pal.rock || base).clone()
     .lerp(new THREE.Color(0.24, 0.15, 0.1), 0.45 + rng() * 0.3);
   const accent = new THREE.Color().setHSL(rng(), 0.85, 0.58);

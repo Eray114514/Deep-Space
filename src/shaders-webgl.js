@@ -262,6 +262,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.uniforms.uRockC = { value: U.rock };
     shader.uniforms.uSlopeLo = { value: U.slopeLo };
     shader.uniforms.uSlopeHi = { value: U.slopeHi };
+    shader.uniforms.uCanopySun = { value: planet.sunDirLocal };
+    shader.uniforms.uCanopyC = { value: planet.floraPal?.canopy || U.forest };
     shader.uniforms.uForestC = { value: U.forest };
     shader.uniforms.uBlotchC = { value: U.blotch };
     shader.uniforms.uStripeA = { value: U.stripeA };
@@ -351,6 +353,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         uniform vec3 uRockC;
         uniform float uSlopeLo;
         uniform float uSlopeHi;
+        uniform vec3 uCanopySun, uCanopyC;
         uniform vec3 uForestC;
         uniform vec3 uBlotchC;
         uniform vec3 uStripeA;
@@ -452,6 +455,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             float band = 1.0 - smoothstep(0.0, uTSpan * 0.03, abs(hgt - uT0));
             hgt += cn * uTSpan * 0.011 * coastFar * band;
           }
+          float pixelMetres = max(length(dFdx(vLocalPos)), length(dFdy(vLocalPos)));
           vec3 base;
           if (uHasSea > 0.5 && hgt < uT0) {
             float t = clamp(1.0 - (uT0 - hgt) / uSeaDepthSpan, 0.0, 1.0);
@@ -530,6 +534,25 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               forestW *= 0.85;
             }
             base = mix(base, uForestC, forestW * 0.85 * vertexFieldFade);
+            // As trees thin with range, resolve crown groups and their sun-facing
+            // shoulders on the terrain itself. Filter each scale by pixel footprint.
+            float canopyCover = uEarthLike * smoothstep(0.08, 0.88, vExtra.w + (standField - 0.5) * 0.42)
+              * smoothstep(180.0, 1300.0, viewDist);
+            if (canopyCover > 0.001) {
+              vec3 sunTangent = uCanopySun - nd * dot(nd, uCanopySun);
+              float grove = terrainField(vLocalPos * 0.012 + standField * 2.3);
+              float coarse = 1.0 - smoothstep(12.0, 68.0, pixelMetres);
+              vec3 q = vLocalPos * 0.065 + grove * 1.6;
+              float crown = terrainField(q);
+              float lit = crown - terrainField(q + sunTangent * 0.58);
+              float fine = 1.0 - smoothstep(2.5, 14.0, pixelMetres);
+              float gaps = mix(0.84, smoothstep(0.18, 0.49, grove), coarse);
+              float shoulders = grove - terrainField((vLocalPos + sunTangent * 22.0) * 0.012 + standField * 2.3);
+              vec3 leaves = uCanopyC * max(0.22, 0.88 + (standField - 0.5) * 0.85
+                + coarse * ((grove - 0.5) * 1.1 + shoulders * 1.2)
+                + fine * ((crown - 0.5) * 0.86 + lit * 1.6));
+              base = mix(base, leaves, canopyCover * gaps);
+            }
             base = mix(base, uBlotchC, vExtra.y * vertexFieldFade);
             if (uStripeK > 0.001) base = mix(base,
               mix(uStripeA, uStripeB, vExtra.z), uStripeK * vertexFieldFade);
