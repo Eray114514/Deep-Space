@@ -14,6 +14,27 @@ let treeCount = 0;
 let tileError = 0;
 let ringError = 0;
 const position = new THREE.Vector3();
+// one-metre bins for nearest-planted-point lookups
+const binKey = (v) => `${Math.floor(v.x)}:${Math.floor(v.y)}:${Math.floor(v.z)}`;
+function binPoints(points) {
+  const bins = new Map();
+  for (const point of points) {
+    const key = binKey(point);
+    if (!bins.has(key)) bins.set(key, []);
+    bins.get(key).push(point);
+  }
+  return bins;
+}
+function nearestBinned(bins, point) {
+  let best = Infinity;
+  const base = point.clone().floor();
+  for (let z = -1; z <= 1; z++) for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
+    for (const candidate of bins.get(`${base.x + x}:${base.y + y}:${base.z + z}`) || []) {
+      best = Math.min(best, point.distanceTo(candidate));
+    }
+  }
+  return best;
+}
 const scenarios = ['flat', 'relief'].flatMap(terrainProfile => [286000, 6000000, 20000000]
   .map(radius => ({ terrainProfile, radius })));
 
@@ -45,10 +66,14 @@ for (const { radius, terrainProfile } of scenarios) {
       flora.repack();
       for (const species of [0, 1]) {
         const mesh = flora.meshes[species];
-        assert.equal(mesh.count, expected[species].length);
+        // The horizon level uploads a distance-thinned subset; every drawn
+        // tree must still be one of the planted ones, at sub-mm precision.
+        assert.ok(mesh.count <= expected[species].length);
+        assert.ok(expected[species].length === 0 || mesh.count > 0, 'The nearest tile must be drawn.');
+        const bins = binPoints(expected[species]);
         for (let i = 0; i < mesh.count; i++) {
           position.fromArray(mesh.instanceMatrix.array, i * 16 + 12).add(mesh.position);
-          const error = position.distanceTo(expected[species][i]);
+          const error = nearestBinned(bins, position);
           ringError = Math.max(ringError, error);
           assert.ok(error < 0.001, `Drawn tree must retain sub-mm placement, got ${error} m.`);
         }
@@ -86,7 +111,7 @@ for (const { radius, terrainProfile } of scenarios) {
         flora.repack();
         for (const species of [0, 1]) {
           const mesh = flora.meshes[species];
-          assert.equal(mesh.count, [...reference[species].values()].reduce((count, points) => count + points.length, 0));
+          assert.ok(mesh.count <= [...reference[species].values()].reduce((count, points) => count + points.length, 0));
           const unmatched = new Map([...reference[species]].map(([identity, points]) => [identity, [...points]]));
           for (let i = 0; i < mesh.count; i++) {
             const identity = mesh.instanceMatrix.array.subarray(i * 16, i * 16 + 12).join(':');

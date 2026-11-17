@@ -895,6 +895,7 @@ const sceneRadiance = new SceneRadianceState(renderer, scene, universe, {
   probeResolution: QUALITY_PROFILE.reflectionProbeResolution,
 });
 const sceneBuildBudget=new FrameWorkBudget();
+const PLANT_STREAM_FLOOR_MS = 0.6;
 const scatter = new Scatter({
   grassRadius: QUALITY_PROFILE.grassRadius,
   grassDensity: QUALITY_PROFILE.grassDensity,
@@ -4627,7 +4628,9 @@ function frame(rafTs) {
     : heavySurfaceBacklog ? 4.2 : state === 'walk' ? 2.6 : nearTerrain ? 3.4 : 1.6);
   const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
   sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),
-    {terrain:terrainBuildMs,near:scatter.streamBudgetMs});
+    // plants are reserved like terrain: unreserved, a busy terrain frame left
+    // them a zero grant and the forest stopped streaming in flight
+    {terrain:terrainBuildMs,near:scatter.streamBudgetMs,far:FARFLORA?farFlora.streamBudgetMs:0});
   // Render adapters consume the already-updated simulation frames.
   for (const p of universe.planets()) {
     // While the tunnel owns the frame, only the selected reveal body may
@@ -4666,8 +4669,12 @@ function frame(rafTs) {
   if (nearest && !nearest.isGasGiant) {
     _v.copy(nav.pos).sub(nearest.posUniv);
     nearest.worldOffsetToLocal(_v, _v);
+    // Plant streams always get a small floor. A water-patch overrun on a
+    // coastal frame used to leave them a zero grant frame after frame, so the
+    // grass ring or the forest stopped filling in until the player stopped.
     sceneBuildBudget.run('near',scatter.streamBudgetMs,
-      budget=>scatter.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt,budget));
+      budget=>scatter.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt,
+        Math.max(budget, PLANT_STREAM_FLOOR_MS)));
     if (scatter.planet) {
       prewarmSurfacePipelines(scatter.planet);
       if (!surfacePipelinesReady) {
@@ -4675,7 +4682,8 @@ function frame(rafTs) {
       }
     }
     if (FARFLORA)sceneBuildBudget.run('far',farFlora.streamBudgetMs,
-      budget=>farFlora.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt,budget));
+      budget=>farFlora.update(nearest?.type === 'artificialHabitat' ? null : nearest, _v, nearestAlt,
+        Math.max(budget, PLANT_STREAM_FLOOR_MS)));
   } else {
     if (scatter.planet) scatter.clear();
     if (farFlora.planet) farFlora.clear();

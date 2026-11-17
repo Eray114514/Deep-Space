@@ -50,6 +50,18 @@ const CAPS = {
 };
 export function capFor(kind) { return CAPS[kind] ?? CAPS.default; }
 const SHOW_BELOW_ALT = 600;  // metres
+// Planted cells are cached (placement is a pure function of the cell), so a
+// ring that moves by one cell only computes its new leading edge. The old
+// stream recomputed ~100k tufts per ring and threw the unfinished ring away
+// at every 9 m step: while the player kept moving no ring ever finished and
+// the grass stayed where it was first planted.
+const CELL_CACHE_LIMIT = 700;
+// Grass tufts per cell shrink with camera height: from 40 m up a meadow
+// reads at a third of the density, and that is what keeps the ring up with a
+// low-flying ship. Quantised so the ring is only rebuilt at a few heights.
+function grassShareForAltitude(alt) {
+  return alt < 12 ? 1 : alt < 40 ? 0.6 : 0.3;
+}
 const PREWARM_BELOW_ALT = 8000;
 const STREAM_BUDGET_MS = 1.8;
 
@@ -69,6 +81,10 @@ const _ic = new THREE.Color();
 const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
+const _offset = new THREE.Vector3();
+const _plantRot = new Float32Array(9);
+const _plantPos = new Float64Array(3);
+let _plantHeight = 0;
 
 // shared mineral geometries (unit-ish size, origin at base) — vegetation is
 // per-planet (seeded species built by flora.js in setPlanet)
@@ -151,6 +167,9 @@ export class Scatter {
     this.lastKey = '';
     this.seen = new Set();
     this.frame = new VegetationFrame();
+    this.cellCache = new Map();
+    this.wantJob = null;
+    this.grassShare = 1;
   }
 
   setPlanet(planet) {
@@ -260,6 +279,8 @@ export class Scatter {
     this.meshes = {};
     this.staging = {};
     this.job = null;
+    this.wantJob = null;
+    this.cellCache.clear();
     this.planet = null;
     this.lastKey = '';
     this.frame.setOrigin(_v.set(0, 0, 0));
@@ -286,18 +307,38 @@ export class Scatter {
     const Q = p.R / CELL_M;                 // cell-id lattice radius
     const cellAng = CELL_M / p.R;
 
-    // rebuild only when the camera crosses into a new planet-fixed cell
+    // rebuild only when the camera crosses into a new planet-fixed cell (or
+    // changes height band)
     const kx = Math.round(_dir.x * Q), ky = Math.round(_dir.y * Q), kz = Math.round(_dir.z * Q);
-    const key = p.seed + ':' + kx + ':' + ky + ':' + kz;
+    const share = grassShareForAltitude(alt);
+    const key = p.seed + ':' + kx + ':' + ky + ':' + kz + ':' + share;
     if (key !== this.lastKey) {
       this.lastKey = key;
-      this.beginJob(p, kx, ky, kz, Q, cellAng);
+      this.wantJob = [kx, ky, kz, share];
+    }
+    // An unfinished ring is never thrown away: it finishes (cheaply, from the
+    // cache) and the newest target starts right after it.
+    if (!this.job && this.wantJob) {
+      const [wx, wy, wz, wantShare] = this.wantJob;
+      this.wantJob = null;
+      this.grassShare = wantShare;
+      this.beginJob(p, wx, wy, wz, Q, cellAng);
     }
     if (!this.job) return;
     if (budgetMs<=0)return;
     if (this.stepJob(performance.now() + budgetMs)) {
       this.commitJob(this.job);
+      this.pruneCellCache(this.job);
       this.job = null;
+    }
+  }
+
+  pruneCellCache(job) {
+    if (this.cellCache.size <= CELL_CACHE_LIMIT) return;
+    const keep = new Set(job.needed);
+    for (const key of this.cellCache.keys()) {
+      if (this.cellCache.size <= CELL_CACHE_LIMIT * 0.8) break;
+      if (!keep.has(key)) this.cellCache.delete(key);
     }
   }
 
@@ -305,6 +346,8 @@ export class Scatter {
     const next = Math.max(0.35, Math.min(1, density));
     if (Math.abs(next - this.grassDensity) < 0.025) return;
     this.grassDensity = next;
+    // cached cells size their tuft lists for the old density
+    this.cellCache.clear();
     this.lastKey = '';
   }
 
@@ -323,7 +366,8 @@ export class Scatter {
       }
     }
     return { counts, total: Object.values(counts).reduce((sum, value) => sum + value, 0), signature,
-      origin: this.frame.origin.toArray(), pending: Boolean(this.job) };
+      origin: this.frame.origin.toArray(), pending: Boolean(this.job || this.wantJob),
+      cachedCells: this.cellCache.size };
   }
 
   beginJob(p, kx, ky, kz, Q, cellAng) {
@@ -342,7 +386,8 @@ export class Scatter {
       anchor: _anchor.clone(), e1: _e1.clone(), e2: _e2.clone(),
       origin: _anchor.clone().multiplyScalar(p.R + p.height(_anchor, p.fullMaxFreq)),
       counts, range: this.range,
-      cells: [], cellIndex: 0,
+      cells: [], cellIndex: 0, needed: [],
+      grassShare: this.grassShare,
       initial: Object.values(this.meshes).every((mesh) => mesh.count === 0),
       lastPreviewAt: performance.now(),
     };
@@ -395,12 +440,167 @@ export class Scatter {
         if (this.seen.has(ck)) continue;
         this.seen.add(ck);
         if (Math.abs(Math.hypot(qx, qy, qz) - job.Q) <= 0.7) {
-          yield* this.placeCell(job, qx, qy, qz);
+          yield* this.placeCell(job, ck, qx, qy, qz);
         }
         yield;
       }
       yield;
     }
+  }
+
+  // Ensure the cell is planted (cached), then copy it into this ring.
+  *placeCell(job, ck, qx, qy, qz) {
+    // props near the range edge grow in instead of popping in
+    _up.set(qx, qy, qz).normalize();
+    const dot = Math.min(1, Math.max(-1, _up.dot(job.anchor)));
+    const cells = Math.acos(dot) / job.cellAng;
+    let edge = Math.min(1, Math.max(0, ((this.range - 1) - cells) / Math.max(2, this.range * 0.3)));
+    if (edge < 0.03) return;
+    edge = edge * edge * (3 - 2 * edge);
+
+    let cell = this.cellCache.get(ck);
+    if (!cell) {
+      cell = this.createCell(job, qx, qy, qz);
+      this.cellCache.set(ck, cell);
+    }
+    if (!cell.recipe) return;
+    job.needed.push(ck);
+    const wantGrass = Math.round((MEADOW_DENSITY[cell.biome] || 0) * this.grassDensity * job.grassShare);
+    yield* this.fillGrass(job, cell, qx, qy, qz, wantGrass);
+    this.assembleCell(job, cell, edge, wantGrass);
+  }
+
+  createCell(job, qx, qy, qz) {
+    const p = job.p;
+    const up = new THREE.Vector3(qx, qy, qz).normalize();   // canonical cell direction
+    const hgt = p.height(up, p.fullMaxFreq);
+    const biome = p.biomeAt(up, hgt);
+    const recipe = RECIPES[biome] || null;
+    const cell = { up, biome, recipe, origin: up.clone().multiplyScalar(p.R + hgt), grass: null, props: [] };
+    if (!recipe) return cell;
+    // cell-local tangent frame, derived from the canonical direction
+    cell.e1 = new THREE.Vector3();
+    if (Math.abs(up.y) < 0.93) cell.e1.set(-up.z, 0, up.x).normalize();
+    else cell.e1.set(1, 0, 0).projectOnPlane(up).normalize();
+    cell.e2 = new THREE.Vector3().crossVectors(up, cell.e1);
+    const meadowMax = Math.round((MEADOW_DENSITY[biome] || 0) * this.grassDensity);
+    if (meadowMax > 0) {
+      cell.grass = {
+        cursor: 0, count: 0,
+        attempt: new Uint16Array(meadowMax), rot: new Float32Array(meadowMax * 9),
+        pos: new Float32Array(meadowMax * 3), color: new Float32Array(meadowMax * 3),
+        noise: new Float32Array(meadowMax),
+      };
+    }
+    // Trees and rocks may stand in a meadow without deleting a nine-metre
+    // square of grass around themselves: one structural roll per cell.
+    const seedI = job.seedI;
+    const h0 = hash3i(qx, qy, qz, seedI);
+    const structural = recipe.filter(([kind]) => kind !== 'grass');
+    const structuralWeight = structural.reduce((sum, item) => sum + item[1], 0);
+    const sel = hashFloat(h0, 5);
+    if (sel < structuralWeight) {
+      let acc = 0, chosen = null;
+      for (const r of structural) { acc += r[1]; if (sel < acc) { chosen = r; break; } }
+      if (chosen && this.meshes[chosen[0]]) {
+        const [kind, , s0, s1] = chosen;
+        const hc = hash3i(qx, qy, qz, seedI ^ 0x71a3);
+        if (this.plant(job, cell, hc, s0, s1)) {
+          // no two plants quite the same colour
+          _ic.setRGB(1, 1, 1).offsetHSL(
+            (hashFloat(hc, 0) - 0.5) * 0.05, 0, (hashFloat(hc, 1) - 0.5) * 0.16);
+          cell.props.push({ kind, rot: _plantRot.slice(), pos: _plantPos.slice(), color: [_ic.r, _ic.g, _ic.b] });
+        }
+      }
+    }
+    return cell;
+  }
+
+  // One plant: jitter inside the cell, ground it at full terrain detail.
+  // Leaves its rotation-scale in _plantRot and its offset from the cell
+  // origin in _plantPos. Returns false when the spot is under water.
+  plant(job, cell, hc, s0, s1) {
+    const p = job.p;
+    _jd.copy(cell.up)
+      .addScaledVector(cell.e1, (hashFloat(hc, 1) - 0.5) * job.cellAng)
+      .addScaledVector(cell.e2, (hashFloat(hc, 2) - 0.5) * job.cellAng)
+      .normalize();
+    const hh = p.height(_jd, p.fullMaxFreq);
+    if (p.hasLiquid && hh < p.seaLevel + 0.4) return false;   // not in the sea
+    _plantHeight = hh;
+    _v2.copy(_jd).multiplyScalar(p.R + hh).sub(cell.origin);
+    _q.setFromUnitVectors(Y, _jd);
+    _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
+    _q.multiply(_q2);
+    const sc = s0 + (s1 - s0) * hashFloat(hc, 2);
+    _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
+    _m.compose(_v.set(0, 0, 0), _q, _s);
+    const e = _m.elements;
+    _plantRot[0] = e[0]; _plantRot[1] = e[1]; _plantRot[2] = e[2];
+    _plantRot[3] = e[4]; _plantRot[4] = e[5]; _plantRot[5] = e[6];
+    _plantRot[6] = e[8]; _plantRot[7] = e[9]; _plantRot[8] = e[10];
+    _plantPos[0] = _v2.x; _plantPos[1] = _v2.y; _plantPos[2] = _v2.z;
+    return true;
+  }
+
+  // Grass is planted as a prefix: tuft c is a pure function of (cell, c), so
+  // a sparser ring is the first tufts of a denser one.
+  *fillGrass(job, cell, qx, qy, qz, want) {
+    const grass = cell.grass;
+    if (!grass) return;
+    const target = Math.min(want, grass.attempt.length);
+    const h0 = hash3i(qx, qy, qz, job.seedI);
+    while (grass.cursor < target) {
+      // Yield before the next candidate; the previous one is fully cached.
+      yield;
+      const c = grass.cursor++;
+      const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, job.seedI);
+      if (!this.plant(job, cell, hc, 0.52, 0.96)) continue;
+      const i = grass.count++;
+      grass.attempt[i] = c;
+      grass.rot.set(_plantRot, i * 9);
+      grass.pos.set(_plantPos, i * 3);
+      // A small hash offset dissolves the circular LOD boundary into the
+      // meadow. The same blade always chooses the same side of the blend.
+      grass.noise[i] = (hashFloat(hc, 3) - 0.5) * 3.2;
+      // tufts blend the ground colour with the planet's canopy tint: they
+      // still belong to the terrain, but read as living growth on any soil
+      job.p.colorAt(_jd, _plantHeight, 0.08, 64, _ic);
+      _ic.lerp(this.flora.grassTint, 0.72).multiplyScalar(0.92).offsetHSL(
+        (hashFloat(hc, 0) - 0.5) * 0.045, 0.035, (hashFloat(hc, 1) - 0.5) * 0.065);
+      grass.color[i * 3] = _ic.r; grass.color[i * 3 + 1] = _ic.g; grass.color[i * 3 + 2] = _ic.b;
+    }
+  }
+
+  assembleCell(job, cell, edge, wantGrass) {
+    _offset.copy(cell.origin).sub(job.origin);
+    for (const prop of cell.props) {
+      this.stage(job, prop.kind, prop.rot, 0, prop.pos, 0, prop.color, 0, edge);
+    }
+    const grass = cell.grass;
+    if (!grass) return;
+    for (let i = 0; i < grass.count; i++) {
+      if (grass.attempt[i] >= wantGrass) break;
+      const px = grass.pos[i * 3] + _offset.x, py = grass.pos[i * 3 + 1] + _offset.y, pz = grass.pos[i * 3 + 2] + _offset.z;
+      const noisyDistance = Math.sqrt(px * px + py * py + pz * pz) + grass.noise[i];
+      const drawKind = noisyDistance < 8 ? 'grassNear' : noisyDistance < 24 ? 'grassMid' : 'grassFar';
+      this.stage(job, drawKind, grass.rot, i * 9, grass.pos, i * 3, grass.color, i * 3, edge);
+    }
+  }
+
+  stage(job, kind, rot, ro, pos, po, color, co, edge) {
+    if (!this.meshes[kind] || job.counts[kind] >= capFor(kind)) return;
+    const index = job.counts[kind]++;
+    const stage = this.staging[kind];
+    const m = stage.matrix, at = index * 16;
+    m[at] = rot[ro] * edge; m[at + 1] = rot[ro + 1] * edge; m[at + 2] = rot[ro + 2] * edge; m[at + 3] = 0;
+    m[at + 4] = rot[ro + 3] * edge; m[at + 5] = rot[ro + 4] * edge; m[at + 6] = rot[ro + 5] * edge; m[at + 7] = 0;
+    m[at + 8] = rot[ro + 6] * edge; m[at + 9] = rot[ro + 7] * edge; m[at + 10] = rot[ro + 8] * edge; m[at + 11] = 0;
+    m[at + 12] = pos[po] + _offset.x; m[at + 13] = pos[po + 1] + _offset.y; m[at + 14] = pos[po + 2] + _offset.z;
+    m[at + 15] = 1;
+    stage.color[index * 3] = color[co];
+    stage.color[index * 3 + 1] = color[co + 1];
+    stage.color[index * 3 + 2] = color[co + 2];
   }
 
   commitJob(job) {
@@ -416,112 +616,6 @@ export class Scatter {
       mesh.count = count;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.instanceColor.needsUpdate = true;
-    }
-  }
-
-  // everything here depends ONLY on (planet seed, qx, qy, qz):
-  // the same rock stands in the same spot forever
-  *placeCell(job, qx, qy, qz) {
-    const {p, cellAng, seedI, counts} = job;
-    _up.set(qx, qy, qz).normalize();          // canonical cell direction
-    const h0 = hash3i(qx, qy, qz, seedI);
-
-    // props near the range edge grow in instead of popping in
-    const dot = Math.min(1, Math.max(-1, _up.dot(job.anchor)));
-    const cells = Math.acos(dot) / cellAng;
-    let edge = Math.min(1, Math.max(0, ((this.range - 1) - cells) / Math.max(2, this.range * 0.3)));
-    if (edge < 0.03) return;
-    edge = edge * edge * (3 - 2 * edge);
-
-    const hgt = p.height(_up, p.fullMaxFreq);
-    const biome = p.biomeAt(_up, hgt);
-    const recipe = RECIPES[biome];
-    if (!recipe) return;
-
-    // cell-local tangent frame, derived from the canonical direction
-    if (Math.abs(_up.y) < 0.93) _ce1.set(-_up.z, 0, _up.x).normalize();
-    else _ce1.set(1, 0, 0).projectOnPlane(_up).normalize();
-    _ce2.crossVectors(_up, _ce1);
-    // Module scratch vectors may be reused by another field between yields.
-    // Only three double-precision vectors are retained for the current cell.
-    const basis = {up: _up.clone(), e1: _ce1.clone(), e2: _ce2.clone()};
-
-    // Grass is a continuous biome layer, not a mutually-exclusive prop roll.
-    // Trees and rocks may stand in a meadow without deleting a nine-metre
-    // square of grass around themselves.
-    const meadowCopies = Math.round((MEADOW_DENSITY[biome] || 0) * this.grassDensity);
-    if (meadowCopies > 0) {
-      yield* this.placeKind(job, basis, qx, qy, qz,
-        'grass', 0.52, 0.96, meadowCopies, h0, edge);
-    }
-
-    const structural = recipe.filter(([kind]) => kind !== 'grass');
-    const structuralWeight = structural.reduce((sum, item) => sum + item[1], 0);
-    const sel = hashFloat(h0, 5);
-    if (sel >= structuralWeight) return;
-    let acc = 0, chosen = null;
-    for (const r of structural) { acc += r[1]; if (sel < acc) { chosen = r; break; } }
-    if (!chosen) return;
-    const [kind, , s0, s1] = chosen;
-    yield* this.placeKind(job, basis, qx, qy, qz,
-      kind, s0, s1, 1, hash3i(qx, qy, qz, seedI ^ 0x71a3), edge);
-  }
-
-  *placeKind(job, basis, qx, qy, qz, kind, s0, s1, copies, h0, edge) {
-    const {p, cellAng, seedI, counts} = job;
-    if (kind !== 'grass' && (!this.meshes[kind] || counts[kind] >= capFor(kind))) return;
-
-    // grass grows in little clumps; everything else stands alone
-    // One stable cell yields a clustered tuft field, not a single isolated
-    // prop. Candidate positions remain PCG-derived from the canonical cell,
-    // so changing camera direction never regenerates or slides the meadow.
-    for (let c = 0; c < copies; c++) {
-      // Yield before the next candidate; the previous one is fully staged.
-      // Cancellation discards this iterator without mutating the visible ring.
-      yield;
-      const hc = c === 0 ? h0 : hash3i(qx + c * 131, qy - c * 57, qz + c * 263, seedI);
-      // jitter inside the cell, then re-sample ground height there
-      _jd.copy(basis.up)
-        .addScaledVector(basis.e1, (hashFloat(hc, 1) - 0.5) * cellAng)
-        .addScaledVector(basis.e2, (hashFloat(hc, 2) - 0.5) * cellAng)
-        .normalize();
-      const hh = p.height(_jd, p.fullMaxFreq);
-      if (p.hasLiquid && hh < p.seaLevel + 0.4) continue;   // not in the sea
-
-      let drawKind = kind;
-      if (kind === 'grass') {
-        const distance = Math.acos(Math.min(1, Math.max(-1, _jd.dot(job.anchor)))) * p.R;
-        // A small hash offset dissolves the circular LOD boundary into the
-        // meadow. The same blade always chooses the same side of the blend.
-        const noisyDistance = distance + (hashFloat(hc, 3) - 0.5) * 3.2;
-        drawKind = noisyDistance < 8 ? 'grassNear' : noisyDistance < 24 ? 'grassMid' : 'grassFar';
-      }
-      if (!this.meshes[drawKind] || counts[drawKind] >= capFor(drawKind)) continue;
-
-      _v2.copy(_jd).multiplyScalar(p.R + hh).sub(job.origin);
-      _q.setFromUnitVectors(Y, _jd);
-      _q2.setFromAxisAngle(Y, hashFloat(hc, 1) * Math.PI * 2);
-      _q.multiply(_q2);
-      const sc = (s0 + (s1 - s0) * hashFloat(hc, 2)) * edge;
-      _s.set(sc, sc * (0.8 + hashFloat(hc, 0) * 0.5), sc);
-      _m.compose(_v2, _q, _s);
-      if (kind === 'grass') {
-        // tufts blend the ground colour with the planet's canopy tint: they
-        // still belong to the terrain, but read as living growth on any soil
-        p.colorAt(_jd, hh, 0.08, 64, _ic);
-        _ic.lerp(this.flora.grassTint, 0.72).multiplyScalar(0.92).offsetHSL(
-          (hashFloat(hc, 0) - 0.5) * 0.045, 0.035, (hashFloat(hc, 1) - 0.5) * 0.065);
-      } else {
-        // no two plants quite the same colour
-        _ic.setRGB(1, 1, 1).offsetHSL(
-          (hashFloat(hc, 0) - 0.5) * 0.05, 0, (hashFloat(hc, 1) - 0.5) * 0.16);
-      }
-      const index = counts[drawKind]++;
-      const stage = this.staging[drawKind];
-      stage.matrix.set(_m.elements, index * 16);
-      stage.color[index * 3] = _ic.r;
-      stage.color[index * 3 + 1] = _ic.g;
-      stage.color[index * 3 + 2] = _ic.b;
     }
   }
 }

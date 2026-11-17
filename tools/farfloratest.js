@@ -58,7 +58,9 @@ try {
         const matrices = usedMatrices(tile, species);
         for (let i = 0; i < matrices.length; i += 16) {
           const position = new THREE.Vector3(matrices[i + 12], matrices[i + 13], matrices[i + 14]).add(tile.origin);
-          assert.ok(position.distanceTo(center) < 800,
+          // repack() bounds a tile by TILE_M around its origin; the lattice scan
+          // reaches every cell the tile owns, up to ~870 m from its centre
+          assert.ok(position.distanceTo(center) < 960,
             'Generated trees must belong to this tile, including jitter near its edge.');
           assert.ok(Math.abs(position.length() - (radius + planet.height() - 0.25)) < 0.001,
             'Trees must stay on the terrain shell within a millimetre.');

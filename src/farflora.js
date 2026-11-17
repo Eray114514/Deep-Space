@@ -34,8 +34,14 @@ const RADIUS = 4.4;          // tiles of reach around the camera (~4.5 km)
 const RIM_M = 4400;
 const PREWARM_BELOW = 26000; // build while invisible, well before the tree line appears
 const SHOW_BELOW = 16000;    // retained cache band; visual fade starts at 13 km
-const STREAM_BUDGET_MS = 1.25;
-const REPACK_INTERVAL_MS = 160;
+const STREAM_BUDGET_MS = 2.0;
+// While tiles are still streaming in, finished ones are published at most
+// this often. Waiting for the whole ring (the old rule) froze every level
+// for as long as the player kept moving: trees in front vanished when the
+// horizon level handed them to a near level that had never been refilled.
+const REPACK_INTERVAL_MS = 300;
+// the densest biome; cells whose roll is above it cannot hold a tree
+const MAX_DENSITY = 0.62;
 const CACHE_LIMIT = 384;
 
 // level bands in metres; each tree jitters them by ±15% (see the shader)
@@ -46,6 +52,16 @@ const TIERS = [
   { name: 'near', geometry: 'near', lo: 0, hi: 45, cap: 160, shadow: true },
 ];
 const BAND_JITTER = 0.15;
+// The horizon level thins out tree by tree from 1.1 km to the rim, where the
+// terrain's canopy colour carries the forest. The CPU uploads only trees the
+// shader would keep, so a dense ring stays under the instance cap (a full
+// cap drops the farthest trees, which then pop back as the ring moves).
+const HORIZON_THIN_FROM = 1100;
+const HORIZON_KEEP_RIM = 0.12;
+function horizonKeep(d) {
+  const t = Math.min(1, Math.max(0, (d - HORIZON_THIN_FROM) / (RIM_M - HORIZON_THIN_FROM)));
+  return 1 + (HORIZON_KEEP_RIM - 1) * t * t * (3 - 2 * t);
+}
 const TIER_MARGIN_M = 48;     // slack so a level is resident before its band begins
 const RECLASSIFY_M = 24;      // camera travel that re-sorts trees into levels
 
@@ -88,6 +104,10 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
           uniform vec4 uTreeWind;
           attribute float aRand;
           varying vec2 vTreeFade;
+          // share of horizon trees kept at distance d; mirrored on the CPU
+          float horizonKeep(float d) {
+            return mix(1.0, ${HORIZON_KEEP_RIM.toFixed(2)}, smoothstep(${HORIZON_THIN_FROM.toFixed(1)}, ${RIM_M.toFixed(1)}, d));
+          }
           ${DISTURBANCE_GLSL}
           // a blown-over tree pivots about its base, away from the downwash
           mat3 treeBend() {
@@ -118,7 +138,7 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             float rim = ${RIM_M.toFixed(1)} * (0.72 + 0.28 * r2);
             g *= 1.0 - smoothstep(rim * 0.82, rim, d);
             // thin the horizon out with distance, one tree at a time
-            float keep = mix(1.0, 0.34, smoothstep(1100.0, ${RIM_M.toFixed(1)}, d));
+            float keep = horizonKeep(d);
             g *= 1.0 - smoothstep(keep - 0.07, keep, r2);` : ''}
             vec4 treeView = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
             if (!isOrthographic && treeView.z > 40.0) g = 0.0;
@@ -291,6 +311,8 @@ export class FarFlora {
       levels: this.tiers ? Object.fromEntries(this.tiers.map((entry) => [entry.tier.name,
         entry.meshes.reduce((sum, mesh) => sum + mesh.count, 0)])) : {},
       origin: this.origin.toArray(),
+      // how far the camera has moved since trees were last sorted into levels
+      sortLag: this.classifiedAt.x === Infinity ? null : this.cameraLocal.distanceTo(this.classifiedAt),
     };
   }
 
@@ -399,20 +421,27 @@ export class FarFlora {
     vegetationDisturbance.copyRelative(this.uniforms.uDistPos.value, this.uniforms.uDistData.value,
       this.origin, p.bodyId || p.seed);
 
-    if (!this.dirty && visible && this.cameraLocal.distanceTo(this.classifiedAt) > RECLASSIFY_M) {
-      this.repack(true);
-    }
-
+    this.completedSinceRepack = (this.completedSinceRepack || 0) + completed;
+    let repacked = false;
     if (this.dirty) {
+      const now = performance.now();
       const firstVisibleBatch = visible
         && this.meshes[0].count + this.meshes[1].count === 0 && completed > 0;
-      // Keep the previous complete ring resident while the next one streams.
-      // Repacking every 160 ms uploaded all 24k matrices repeatedly and was
-      // the source of the old <16 km periodic hitch.
-      if (firstVisibleBatch || this.pending() === 0) {
+      // Publish newly finished tiles while the rest of the ring streams. The
+      // previous complete ring stays in `activeKeys` meanwhile, so nothing
+      // already visible drops out.
+      const streamedTiles = this.completedSinceRepack > 0
+        && now - this.lastRepackAt >= this.repackIntervalMs;
+      if (firstVisibleBatch || this.pending() === 0 || streamedTiles) {
         this.repack();
-        this.lastRepackAt = performance.now();
+        this.lastRepackAt = now;
+        this.completedSinceRepack = 0;
+        repacked = true;
       }
+    }
+    // the camera moved: re-sort the trees in reach into levels
+    if (!repacked && visible && this.cameraLocal.distanceTo(this.classifiedAt) > RECLASSIFY_M) {
+      this.repack(true);
     }
   }
 
@@ -443,81 +472,91 @@ export class FarFlora {
     // Subtract while coordinates are still doubles; Float32 planet-scale
     // matrices lose centimetres/metres before camera-relative rendering.
     const origin = _anchor.clone().multiplyScalar(p.R + p.height(_anchor, p.fullMaxFreq));
-    const SUB = Math.round(TILE_M / CELL_M) + 1;
+    const Q3 = p.R / CELL_M;
+    // Planting cells are the integer lattice points on the shell |u| = Q3.
+    // Walk the two minor axes of the tile's direction and solve the major one,
+    // so each candidate is visited exactly once. (The old scan reached every
+    // cell from up to eight neighbouring samples and de-duplicated through a
+    // Set: roughly ten times the work for the same trees.)
+    const ax = Math.abs(qx), ay = Math.abs(qy), az = Math.abs(qz);
+    const major = ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
+    const minorA = major === 0 ? 1 : 0, minorB = major === 2 ? 1 : 2;
+    const centre = [qx, qy, qz].map((value) => value / Q * Q3);
+    const reach = Math.ceil(TILE_M / CELL_M) + 2;
     return {
-      key, qx, qy, qz, Q, origin,
-      Q3: p.R / CELL_M,
+      key, qx, qy, qz, Q, origin, Q3,
       cellAng: CELL_M / p.R,
       seedI: p.intSeed ^ 0xfa12,
       anchor: _anchor.clone(),
-      e1: _e1.clone(),
-      e2: _e2.clone(),
-      SUB, gx: -SUB, gy: -SUB,
+      major, minorA, minorB,
+      majorSign: [qx, qy, qz][major] >= 0 ? 1 : -1,
+      a0: Math.round(centre[minorA]) - reach, a1: Math.round(centre[minorA]) + reach,
+      b0: Math.round(centre[minorB]) - reach, b1: Math.round(centre[minorB]) + reach,
+      ia: Math.round(centre[minorA]) - reach, ib: Math.round(centre[minorB]) - reach,
+      cell: [0, 0, 0], step: 3, ca: 0, cb: 0, cm: -1,
       // Write matrices straight into their long-lived typed storage. The old
       // JS arrays created 16 boxed-number entries per tree and then copied the
       // whole tile again on completion, producing severe GC pauses in flight.
       m0: new Float32Array(128 * 16), n0: 0, r0: new Float32Array(128),
       m1: new Float32Array(128 * 16), n1: 0, r1: new Float32Array(128),
-      seen: new Set(),
     };
   }
 
   stepTileJob(p, job, deadline) {
-    while (job.gy <= job.SUB) {
-      const gx = job.gx, gy = job.gy;
-      job.gx++;
-      if (job.gx > job.SUB) { job.gx = -job.SUB; job.gy++; }
-      _v.copy(job.anchor)
-        .addScaledVector(job.e1, gx * 0.5 * job.cellAng)
-        .addScaledVector(job.e2, gy * 0.5 * job.cellAng)
-        .normalize();
-        // the candidate belongs to THIS tile only (no double-planting from
-        // the neighbour's overlapping scan)
-      if (Math.round(_v.x * job.Q) === job.qx && Math.round(_v.y * job.Q) === job.qy
-        && Math.round(_v.z * job.Q) === job.qz) {
-        const cx = Math.floor(_v.x * job.Q3), cy = Math.floor(_v.y * job.Q3), cz = Math.floor(_v.z * job.Q3);
-        for (let c = 0; c < 8; c++) {
-          const ux = cx + (c & 1), uy = cy + ((c >> 1) & 1), uz = cz + (c >> 2);
-          // Exact numeric packing stays below Number.MAX_SAFE_INTEGER for the
-          // supported planet radii and avoids thousands of temporary strings.
-          const ck = (ux + 32768) + (uy + 32768) * 65536
-            + (uz + 32768) * 4294967296;
-          if (job.seen.has(ck)) continue;
-          job.seen.add(ck);
-          if (Math.abs(Math.hypot(ux, uy, uz) - job.Q3) > 0.7) continue;
-          _up.set(ux, uy, uz).normalize();
-          if (Math.round(_up.x * job.Q) !== job.qx || Math.round(_up.y * job.Q) !== job.qy
-            || Math.round(_up.z * job.Q) !== job.qz) continue;
-          const h0 = hash3i(ux, uy, uz, job.seedI);
-          const hgt = p.height(_up, 96);
-          const dens = FAR_DENSITY[p.biomeAt(_up, hgt)];
-          if (!dens) continue;
-          const sel = hashFloat(h0, 0);
-          if (sel >= dens[0] * this.density) continue;
-          // jitter inside the cell, ground the tree at full terrain detail
-          frame(_up, _ce1, _ce2);
-          _jd.copy(_up)
-            .addScaledVector(_ce1, (hashFloat(h0, 1) - 0.5) * job.cellAng)
-            .addScaledVector(_ce2, (hashFloat(h0, 2) - 0.5) * job.cellAng)
-            .normalize();
-          // full terrain frequency: a coarse height differs from the drawn
-          // surface by tens of metres — trees planted with it are BURIED
-          const hh = p.height(_jd, p.fullMaxFreq);
-          if (p.hasLiquid && hh < p.seaLevel + 0.6) continue;
-          _p.copy(_jd).multiplyScalar(p.R + hh - 0.25).sub(job.origin);
-          _q.setFromUnitVectors(Y, _jd);
-          _q2.setFromAxisAngle(Y, hashFloat(h0, 1) * Math.PI * 2);
-          _q.multiply(_q2);
-          const sc = 0.7 + hashFloat(h0, 2) * 0.6;
-          _s.set(sc, sc * (0.9 + hashFloat(h0, 0) * 0.25), sc);
-          _m.compose(_p, _q, _s);
-          appendMatrix(job, hashFloat(h0, 3) < dens[1] ? 0 : 1, _m.elements,
-            hashFloat(hash3i(ux, uy, uz, job.seedI ^ 0x3d1f), 0));
-        }
+    const cell = job.cell;
+    let checks = 0;
+    for (;;) {
+      // pause between candidates, never inside one: the cursor is resumable
+      if ((++checks & 63) === 0 && performance.now() >= deadline) return false;
+      // A column crosses the shell's 1.4-cell thickness at a slant, so up to
+      // five lattice points along it can lie inside; `step` walks them.
+      if (job.step > 2) {
+        if (job.ib > job.b1) return true;
+        job.step = -2;
+        job.ca = job.ia; job.cb = job.ib;
+        job.ia++;
+        if (job.ia > job.a1) { job.ia = job.a0; job.ib++; }
+        const rest = job.Q3 * job.Q3 - job.ca * job.ca - job.cb * job.cb;
+        job.cm = rest > 0 ? Math.round(Math.sqrt(rest)) : -1;
       }
-      if (performance.now() >= deadline) return false;
+      const offset = job.step++;
+      if (job.cm < 0) { job.step = 3; continue; }
+      cell[job.minorA] = job.ca;
+      cell[job.minorB] = job.cb;
+      cell[job.major] = job.majorSign * (job.cm + offset);
+      const ux = cell[0], uy = cell[1], uz = cell[2];
+      if (Math.abs(Math.hypot(ux, uy, uz) - job.Q3) > 0.7) continue;
+      _up.set(ux, uy, uz).normalize();
+      // the candidate belongs to THIS tile only
+      if (Math.round(_up.x * job.Q) !== job.qx || Math.round(_up.y * job.Q) !== job.qy
+        || Math.round(_up.z * job.Q) !== job.qz) continue;
+      const h0 = hash3i(ux, uy, uz, job.seedI);
+      const sel = hashFloat(h0, 0);
+      // most rolls fail in every biome; skip the terrain queries for them
+      if (sel >= MAX_DENSITY * this.density) continue;
+      const hgt = p.height(_up, 96);
+      const dens = FAR_DENSITY[p.biomeAt(_up, hgt)];
+      if (!dens || sel >= dens[0] * this.density) continue;
+      // jitter inside the cell, ground the tree at full terrain detail
+      frame(_up, _ce1, _ce2);
+      _jd.copy(_up)
+        .addScaledVector(_ce1, (hashFloat(h0, 1) - 0.5) * job.cellAng)
+        .addScaledVector(_ce2, (hashFloat(h0, 2) - 0.5) * job.cellAng)
+        .normalize();
+      // full terrain frequency: a coarse height differs from the drawn
+      // surface by tens of metres — trees planted with it are BURIED
+      const hh = p.height(_jd, p.fullMaxFreq);
+      if (p.hasLiquid && hh < p.seaLevel + 0.6) continue;
+      _p.copy(_jd).multiplyScalar(p.R + hh - 0.25).sub(job.origin);
+      _q.setFromUnitVectors(Y, _jd);
+      _q2.setFromAxisAngle(Y, hashFloat(h0, 1) * Math.PI * 2);
+      _q.multiply(_q2);
+      const sc = 0.7 + hashFloat(h0, 2) * 0.6;
+      _s.set(sc, sc * (0.9 + hashFloat(h0, 0) * 0.25), sc);
+      _m.compose(_p, _q, _s);
+      appendMatrix(job, hashFloat(h0, 3) < dens[1] ? 0 : 1, _m.elements,
+        hashFloat(hash3i(ux, uy, uz, job.seedI ^ 0x3d1f), 0));
     }
-    return true;
   }
 
   finishTileJob(job) {
@@ -578,11 +617,33 @@ export class FarFlora {
           const targetRand = mesh.geometry.getAttribute('aRand').array;
           let n = counts[level][species];
           if (level === 0) {
-            const take = Math.min(available, tier.cap - n);
-            if (take > 0) {
-              copyTileMatrices(target, source, n, take, _offset);
-              targetRand.set(rand.subarray(0, take), n);
-              n += take;
+            const nearest = Math.max(0, _offset.distanceTo(_cam) - TILE_M);
+            if (nearest + TILE_M * 2 < HORIZON_THIN_FROM * (1 - BAND_JITTER)) {
+              // the whole tile is inside the unthinned disc
+              const take = Math.min(available, tier.cap - n);
+              if (take > 0) {
+                copyTileMatrices(target, source, n, take, _offset);
+                targetRand.set(rand.subarray(0, take), n);
+                n += take;
+              }
+            } else if (nearest < RIM_M) {
+              for (let i = 0; i < available && n < tier.cap; i++) {
+                const x = source[i * 16 + 12] + _offset.x - _cam.x;
+                const y = source[i * 16 + 13] + _offset.y - _cam.y;
+                const z = source[i * 16 + 14] + _offset.z - _cam.z;
+                const d = Math.sqrt(x * x + y * y + z * z);
+                const r = rand[i];
+                // same tests as the shader, with a little slack for camera
+                // travel until the next repack
+                if (d > RIM_M + 150) continue;
+                if ((r * 7.13) % 1 > horizonKeep(d - 150) + 0.02) continue;
+                target.set(source.subarray(i * 16, i * 16 + 16), n * 16);
+                target[n * 16 + 12] += _offset.x;
+                target[n * 16 + 13] += _offset.y;
+                target[n * 16 + 14] += _offset.z;
+                targetRand[n] = r;
+                n++;
+              }
             }
           } else {
             for (let i = 0; i < available && n < tier.cap; i++) {
