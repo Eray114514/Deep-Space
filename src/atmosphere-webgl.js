@@ -117,7 +117,7 @@ export function makeAtmosphereMaterialWebGL(color, density, groundR, atmoR) {
           uGroundR + clamp(uGroundR / 60.0, 26000.0, 120000.0));
         vec2 outer = sphereHits(uCameraLocal, opticalTop, dir);
         if (outer.y <= 0.0) discard;
-        vec2 ground = sphereHits(uCameraLocal, uGroundR, dir);
+        vec2 ground = sphereHits(uCameraLocal, max(uGroundR - 8000.0, uGroundR * 0.88), dir);
         float t0 = max(outer.x, 0.0);
         float t1 = outer.y;
         if (ground.x > t0) t1 = min(t1, ground.x);

@@ -241,8 +241,10 @@ export class AtmospherePass extends Pass {
           }
           float t0 = max(outer.x, 0.0);
           float t1 = outer.y;
-          vec2 ground = sphereHits(uCameraLocal, uGroundR, direction);
-          if (ground.x > t0) t1 = min(t1, ground.x);
+          // Rendered terrain and liquid already write logarithmic depth into
+          // tSceneDepth. Intersecting an unrendered uGroundR sphere truncated
+          // sky rays wherever seas, coastal lowlands or basins lay below R,
+          // painting a dark-blue band above the real horizon.
           if (sceneDepth < 0.999999) {
             float forwardDistance = pow(uCameraFar + 1.0, sceneDepth) - 1.0;
             float forwardCosine = max(-directionView.z, 0.0005);

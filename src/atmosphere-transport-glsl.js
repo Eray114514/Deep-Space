@@ -211,6 +211,12 @@ export const atmosphereTransportGLSL = `
             float next = atmosphereSampleBoundary(t0, t1, closest, float(i + 1) * invSteps);
             float distance = next - previous;
             vec3 position = origin + direction * (previous + next) * 0.5;
+            // Oceans, coastal plains and dry basins can sit below the nominal
+            // body radius R; keep sea-level air there instead of a vacuum gap.
+            float positionRadius = length(position);
+            if (positionRadius < uGroundR && positionRadius > 1.0) {
+              position *= uGroundR / positionRadius;
+            }
             vec3 extinction, source;
             airSample(position, direction, distance, extinction, source);
             mediumStep(L, T, extinction, source, distance);
