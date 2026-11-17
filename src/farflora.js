@@ -46,7 +46,7 @@ const CACHE_LIMIT = 384;
 
 // level bands in metres; each tree jitters them by ±15% (see the shader)
 const TIERS = [
-  { name: 'horizon', geometry: 'horizon', lo: 800, hi: Infinity, cap: 70000, shadow: false },
+  { name: 'horizon', geometry: 'horizon', lo: 800, hi: Infinity, cap: 115000, shadow: false },
   { name: 'far', geometry: 'far', lo: 140, hi: 800, cap: 14000, shadow: false },
   { name: 'mid', geometry: 'mid', lo: 45, hi: 140, cap: 1000, shadow: true },
   { name: 'near', geometry: 'near', lo: 0, hi: 45, cap: 160, shadow: true },
@@ -561,7 +561,7 @@ export class FarFlora {
       const sc = 0.7 + hashFloat(h0, 2) * 0.6;
       // A woodland stand closes overhead; open-country trees keep their
       // isolated silhouettes. One transform serves every distance tier.
-      const spread = biome === 'forest' ? sc * 1.55 : sc;
+      const spread = biome === 'forest' ? sc * 1.85 : sc;
       _s.set(spread, sc * (0.9 + hashFloat(h0, 0) * 0.25), spread);
       _m.compose(_p, _q, _s);
       const variant = hash3i(ux, uy, uz, job.seedI ^ 0x3d1f);

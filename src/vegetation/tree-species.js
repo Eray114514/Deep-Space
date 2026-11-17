@@ -124,7 +124,7 @@ function mergeTree({ branches, leaves }, { scale, barkColor, leafColor, cell, cr
   return geometry;
 }
 
-function horizonCard(width, height, cell, leafColor, crownHeight) {
+function horizonCard(width, height, cell, leafColor, crownHeight, footprint) {
   const rect = cellRect(cell);
   const position = [], normal = [], uv = [], color = [], index = [];
   for (let k = 0; k < 2; k++) {
@@ -142,7 +142,8 @@ function horizonCard(width, height, cell, leafColor, crownHeight) {
   const top = crownTopRect(cell - CELL_IMPOSTOR_0);
   const base = position.length / 3;
   for (const [x, z] of [[-0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]]) {
-    position.push(x * width, crownHeight, z * width);
+    position.push((footprint.x - 0.5 + x * footprint.span) * width, crownHeight,
+      (footprint.z + z * footprint.span) * width);
     normal.push(x, 0.85, z);
     uv.push(top.u0 + (x + 0.5) * (top.u1 - top.u0), top.v0 + (z + 0.5) * (top.v1 - top.v0));
     color.push(leafColor.r, leafColor.g, leafColor.b);
@@ -220,12 +221,20 @@ function growSpecies(archetypeName, rng, colors, slot) {
       light: Math.min(1, Math.max(0, 0.45 + 0.5 * (y / height) + z / width)),
     });
   }
+  const minX = Math.min(...clumps.map(c => c.x - c.r * 1.22));
+  const maxX = Math.max(...clumps.map(c => c.x + c.r * 1.22));
+  const minZ = Math.min(...clumps.map(c => c.z / width - c.r * 1.22));
+  const maxZ = Math.max(...clumps.map(c => c.z / width + c.r * 1.22));
+  // Fit leaning crowns around their own centre and leave a transparent
+  // apron on every side for the overhead atlas mips.
+  const footprint = { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2,
+    span: Math.max(maxX - minX, maxZ - minZ, 0.1) * 1.16 };
   const impostor = {
-    clumps,
+    clumps, footprint,
     trunk: { top: Math.min(0.9, (leafBox.min.y * scale) / height + 0.25), halfWidth: Math.max(0.006, (trunkRadius * scale) / width * 0.6) },
   };
   // an up-lit flat card reads brighter than the self-shadowing crown it replaces
-  geometries.horizon = horizonCard(width, height, CELL_IMPOSTOR_0 + slot, colors.leaf.clone().multiplyScalar(0.66), crownCenter.y);
+  geometries.horizon = horizonCard(width, height, CELL_IMPOSTOR_0 + slot, colors.leaf.clone().multiplyScalar(0.50), crownCenter.y, footprint);
   full.branches.dispose(); full.leaves.dispose();
   mid.branches.dispose(); mid.leaves.dispose();
   far.branches.dispose(); far.leaves.dispose();

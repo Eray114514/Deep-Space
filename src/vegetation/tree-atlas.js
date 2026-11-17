@@ -229,11 +229,11 @@ export function buildTreeAtlas(seedInt, rng, species) {
   species.forEach((entry, index) => {
     if (entry.impostor && index < 3) {
       for (const clump of [...entry.impostor.clumps].sort((a, b) => a.y - b.y)) {
-        const x = (index % 2 + clump.x) * 0.5;
-        const z = (Math.floor(index / 2) + 0.5 + clump.z / entry.width) * 0.5;
-        const edge = Math.min(clump.x, 1 - clump.x, 0.5 - Math.abs(clump.z / entry.width));
-        if (edge > 0.02) overhead.blob(x, z, Math.min(edge - 0.01, clump.r) * 0.5,
-          0.52 + clump.y * 0.47, seedInt + index);
+        const { x, z, span } = entry.impostor.footprint;
+        const u = 0.5 + (clump.x - x) / span;
+        const v = 0.5 + (clump.z / entry.width - z) / span;
+        overhead.blob((index % 2 + u) * 0.5, (Math.floor(index / 2) + v) * 0.5,
+          clump.r / span * 0.5, 0.52 + clump.y * 0.47, seedInt + index);
       }
       paintImpostor(cellPainter(data, CELL_IMPOSTOR_0 + index), entry.impostor.clumps, entry.impostor.trunk, seedInt + index);
     }

@@ -537,20 +537,23 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             // As trees thin with range, resolve crown groups and their sun-facing
             // shoulders on the terrain itself. Filter each scale by pixel footprint.
             float canopyCover = uEarthLike * smoothstep(0.08, 0.88, vExtra.w + (standField - 0.5) * 0.42)
-              * smoothstep(180.0, 1300.0, viewDist);
+              * smoothstep(35.0, 310.0, viewDist);
             if (canopyCover > 0.001) {
               vec3 sunTangent = uCanopySun - nd * dot(nd, uCanopySun);
-              float grove = terrainField(vLocalPos * 0.012 + standField * 2.3);
+              mat3 groveFrame = mat3(0.36, 0.48, -0.8, -0.8, 0.60, 0.0, 0.48, 0.64, 0.60);
+              vec3 groveP = groveFrame * vLocalPos * 0.012 + standField * vec3(2.3, -3.1, 1.7);
+              float grove = terrainField(groveP);
               float coarse = 1.0 - smoothstep(12.0, 68.0, pixelMetres);
-              vec3 q = vLocalPos * 0.065 + grove * 1.6;
+              vec3 q = groveFrame * groveP.yzx * 5.42 + grove * vec3(-1.3, 1.6, 2.1);
               float crown = terrainField(q);
-              float lit = crown - terrainField(q + sunTangent * 0.58);
+              float lit = crown - terrainField(q + groveFrame * (groveFrame * sunTangent).yzx * 0.58);
               float fine = 1.0 - smoothstep(2.5, 14.0, pixelMetres);
-              float gaps = mix(0.84, smoothstep(0.18, 0.49, grove), coarse);
-              float shoulders = grove - terrainField((vLocalPos + sunTangent * 22.0) * 0.012 + standField * 2.3);
+              float gaps = mix(0.84, 0.42 + 0.58 * smoothstep(0.18, 0.58, grove), coarse);
+              float shoulders = grove - terrainField(groveP + groveFrame * sunTangent * 0.264);
+              float sunlight = smoothstep(-0.01, 0.30, dot(nd, uCanopySun)) * vMat.z;
               vec3 leaves = uCanopyC * max(0.22, 0.88 + (standField - 0.5) * 0.85
-                + coarse * ((grove - 0.5) * 1.1 + shoulders * 1.2)
-                + fine * ((crown - 0.5) * 0.86 + lit * 1.6));
+                + coarse * ((grove - 0.5) * 1.1 + shoulders * 1.2 * sunlight)
+                + fine * ((crown - 0.5) * 0.86 + lit * 1.6 * sunlight));
               base = mix(base, leaves, canopyCover * gaps);
             }
             base = mix(base, uBlotchC, vExtra.y * vertexFieldFade);
