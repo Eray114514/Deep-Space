@@ -544,8 +544,14 @@ const marchShader = /* glsl */`
         // span alone so every pixel's samples stay at the same distances as
         // its neighbours'. Only that thin band pays for them.
         float reach = clamp(span / 60000.0, 1.0, 2.0);
-        int steps = int(float(MARCH_STEPS) * reach);
-        for (int i = 0; i < MARCH_STEPS * 2; i++) {
+        float baseSteps = float(MARCH_STEPS);
+        #if MARCH_STEPS == 56
+          // A long, grazing path needs finer spacing to hit distant cloudlets.
+          // Short paths retain the Performance preset's usual sampling cost.
+          baseSteps += 40.0 * smoothstep(10000.0, 40000.0, span);
+        #endif
+        int steps = int(baseSteps * reach);
+        for (int i = 0; i < max(MARCH_STEPS, 96) * 2; i++) {
           if (i >= steps || t > t1) break;
           // Steps grow with distance, but never past a fair share of the
           // span: looking down from 17 km the growth alone reached kilometre
