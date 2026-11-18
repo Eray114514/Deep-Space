@@ -63,7 +63,7 @@ import { SurfaceWeapons, SURFACE_WEAPONS, isSoftwareWebGL } from './surface-weap
 import { SurveyUnits } from './saltline/robots.js';
 import { SurfaceGameplay } from './saltline/surface-gameplay.js';
 import { buildFragGrenade } from './golden-hour/weapons-engine.js';
-import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
+import { ACTIVE_GALAXY_ID, applySystemBodyTuning, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
@@ -285,6 +285,7 @@ let weaponPipelinesWarmed = false;
 let heroTransitionActive = false;
 let startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 24000;
+const STARTUP_SHADER_BUDGET_MS = isSoftwareWebGL(renderer) ? STARTUP_WARM_BUDGET_MS : 24000;
 const startupCompile = new AbortController();
 // Shader compilation may consume most of the general warm-up deadline on a
 // cold browser profile.  Give the visible terrain/water LOD a separate,
@@ -539,7 +540,10 @@ function prewarmLoadedShipPipelines() {
     if (RENDER_LOOK_NEXT) await compileLayer(SHIP_INTERIOR_LAYER, 'writeBuffer');
   };
   void prepare().then(() => {
-    if (!startupPrewarmExpired) shipPipelinesWarmed = true;
+    if (!startupPrewarmExpired) {
+      shipPipelinesWarmed = true;
+      if (typeof prewarmWarpConduitWithShipLights === 'function') prewarmWarpConduitWithShipLights();
+    }
   }).catch(error => {
     if (!startupPrewarmExpired) console.warn('ship pipeline prewarm failed', error);
   }).finally(() => {
@@ -560,30 +564,25 @@ function prewarmWeaponAndPostPipelines() {
   });
   // The conduit programs are linked during loading, never on the
   // first frame of a warp or a pulse.
+  prewarmWarpConduitWithShipLights(isCurrent);
+  // Warm sky sprites and star/Milky Way backdrop on all tiers so spool camera
+  // turns never link SpriteMaterial or backdrop shaders mid-frame.
   void nodePipeline.prepare(() => {
-    const group = warpConduit.group;
-    const visible = [group.visible, ...group.children.map((child) => child.visible)];
-    const conduitCamera = camera.clone();
-    conduitCamera.layers.enableAll();
-    group.visible = true;
-    for (const child of group.children) child.visible = true;
+    const skyObjects = [universe.nebulas, universe.backdropMesh, universe.nearStarsMesh].filter(Boolean);
+    if (!skyObjects.length) return;
+    const sunVis = sunShadow.visible, sunInt = sunShadow.intensity;
+    sunShadow.visible = true;
+    sunShadow.intensity = 0;
     try {
-      const foreground = compilePrograms(renderer, group, conduitCamera, null, { signal });
-      if (!warpConduit.lowVolume) return foreground;
-      const target = renderer.getRenderTarget();
-      const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
-      try {
-        renderer.setRenderTarget(warpConduit.fogTarget);
-        return Promise.all([foreground, compilePrograms(renderer, warpConduit.lowVolume, conduitCamera, null, { signal })]);
-      } finally {
-        renderer.setRenderTarget(target, face, mip);
-      }
+      return Promise.all(skyObjects.map((obj) => compileRenderVariant(renderer, obj, camera, scene, {
+        layer: 0, target: nodePipeline.composer.readBuffer, shadowLight: sunShadow, signal,
+      })));
     } finally {
-      group.visible = visible[0];
-      group.children.forEach((child, i) => { child.visible = visible[i + 1]; });
+      sunShadow.visible = sunVis;
+      sunShadow.intensity = sunInt;
     }
-  }, { signal, label: 'warp-conduit', isCurrent }).catch((error) => {
-    if (!startupPrewarmExpired) console.warn('warp conduit prewarm failed', error);
+  }, { signal, label: 'startup-sky', isCurrent }).catch((error) => {
+    if (!startupPrewarmExpired) console.warn('sky prewarm failed', error);
   });
 
   if (QUALITY_LOW) return;
@@ -644,6 +643,35 @@ function prewarmWeaponAndPostPipelines() {
       }, { signal, label: 'startup-ship-parallel', isCurrent }).catch(() => {});
     }
   }
+}
+
+function prewarmWarpConduitWithShipLights(isCurrent = () => !startupPrewarmExpired) {
+  if (startupPrewarmExpired) return;
+  const signal = startupCompile.signal;
+  void nodePipeline.prepare(() => {
+    configureShipForegroundLightingLayers();
+    const group = warpConduit.group;
+    const visible = [group.visible, ...group.children.map((child) => child.visible)];
+    const conduitCamera = camera.clone();
+    conduitCamera.layers.set(SHIP_FOREGROUND_LAYER);
+    group.visible = true;
+    for (const child of group.children) child.visible = true;
+    const target = renderer.getRenderTarget();
+    const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
+    try {
+      renderer.setRenderTarget(nodePipeline.composer.readBuffer);
+      const foreground = compilePrograms(renderer, group, conduitCamera, scene, { signal });
+      if (!warpConduit.lowVolume) return foreground;
+      renderer.setRenderTarget(warpConduit.fogTarget);
+      return Promise.all([foreground, compilePrograms(renderer, warpConduit.lowVolume, conduitCamera, null, { signal })]);
+    } finally {
+      renderer.setRenderTarget(target, face, mip);
+      group.visible = visible[0];
+      group.children.forEach((child, i) => { child.visible = visible[i + 1]; });
+    }
+  }, { signal, label: 'warp-conduit', isCurrent }).catch((error) => {
+    if (!startupPrewarmExpired) console.warn('warp conduit prewarm failed', error);
+  });
 }
 
 function configureShipForegroundLightingLayers() {
@@ -1161,10 +1189,35 @@ surfaceWeapons.onGrenade = () => surfaceGameplay.throwGrenade({
 // landing does not stall; software rasterizers (SwiftShader CI) skip eager
 // background bakes and build lazily on deploy().
 if (!isSoftwareWebGL(renderer)) {
-  setTimeout(() => {
-    const run = () => surveyUnits.prewarm({ renderer, camera, scene });
-    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else run();
-  }, 6000);
+  const scheduleSurveyPrewarm = (delayMs = 8000) => {
+    setTimeout(() => {
+      if (surveyUnits.fleet || surveyUnits.prewarming) return;
+      const busy = () => !loadingCleared || paused || starMap?.isOpen || pendingRoute
+        || state !== 'space' || transitHoldsQuality() || deferredSystemBuildActive;
+      if (busy()) {
+        scheduleSurveyPrewarm(2500);
+        return;
+      }
+      const run = () => {
+        if (busy()) {
+          scheduleSurveyPrewarm(2500);
+          return;
+        }
+        void surveyUnits.prewarm({
+          renderer,
+          camera,
+          scene,
+          target: nodePipeline.composer?.readBuffer || null,
+          prepare: (work) => nodePipeline.prepare(work, {
+            label: 'survey-robots',
+            isCurrent: () => !busy(),
+          }),
+        });
+      };
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else run();
+    }, delayMs);
+  };
+  scheduleSurveyPrewarm(8000);
 }
 // Hands and optics sit closer than the world camera's 0.12 m near plane, so
 // the weapon layer renders through the rig's own view camera.
@@ -1230,13 +1283,14 @@ function horizonQuat(up, fwdHint, out) {
 
 // ---- tweens -----------------------------------------------------------------
 const tweens = [];
-function addTween(dur, fn, onDone, { realTime = false } = {}) {
+function addTween(dur, fn, onDone, { realTime = false, timeLimit = null } = {}) {
   tweens.push({
     t: 0,
     dur,
     fn,
     onDone,
     realTime,
+    timeLimit,
     startedAt: realTime ? performance.now() : 0,
   });
 }
@@ -1245,6 +1299,7 @@ function stepTweens(dt) {
   for (let i = tweens.length - 1; i >= 0; i--) {
     const tw = tweens[i];
     tw.t = tw.realTime ? (now - tw.startedAt) / 1000 : tw.t + dt;
+    if (tw.timeLimit) tw.t = Math.min(tw.t, tw.timeLimit());
     const k = clamp(tw.t / tw.dur, 0, 1);
     tw.fn(k);
     if (k >= 1) {
@@ -2989,7 +3044,10 @@ function approachBlackHole(blackHole) {
 }
 
 function routeArrival(star, bodyId = null, forwardHint = null) {
-  const systemSpec = generateSystemSpec(SEED, star);
+  const systemSpec = applySystemBodyTuning(
+    generateSystemSpec(SEED, star),
+    (targetBodyId) => universe.bodyTuning?.(star.id, targetBodyId) || null,
+  );
   const systemBodies = [...systemSpec.bodies, ...(systemSpec.compactObjects || [])];
   const bodies = new Map(systemBodies.map((body) => [body.bodyId, body]));
   const body = selectRouteBody(systemSpec, bodyId);
@@ -3285,19 +3343,30 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, t
       const shadowState = {
         visible: sunShadow.visible,
         intensity: sunShadow.intensity,
+        autoUpdate: sunShadow.shadow?.autoUpdate,
       };
       const previousVolumePlanet = volumePass?.activePlanet || null;
       const previousAtmospherePlanet = atmospherePass.activePlanet || null;
       const oldTarget = renderer.getRenderTarget();
       const oldFace = renderer.getActiveCubeFace(), oldMip = renderer.getActiveMipmapLevel();
       const oldMrt = renderer.getMRT?.();
+      const presentationPasses = [nodePipeline.foregroundPass, nodePipeline.parkedInteriorPass,
+        nodePipeline.warp, nodePipeline.bloom, nodePipeline.grade, nodePipeline.outputPass,
+        nodePipeline.smaa, nodePipeline.temporalAA].filter(pass => pass?.enabled);
       const targetQuat = lookQuatAt(route.target.entry, route.target.center, new THREE.Quaternion());
 
       try {
+        // This private frame only prepares the destination world. Running
+        // display AA here links a different final-pass program for the HDR
+        // buffer. The player only ever sees that pass on the display target.
+        for (const pass of presentationPasses) pass.enabled = false;
+        prepared.updateCelestial?.(celestialClock.hours);
+        universe.relativizeSystem?.(prepared, route.target.entry);
         camera.quaternion.copy(targetQuat);
         camera.updateMatrixWorld(true);
-        sunShadow.visible = false;
+        sunShadow.visible = true;
         sunShadow.intensity = 0;
+        if (sunShadow.shadow) sunShadow.shadow.autoUpdate = false;
         volumePass?.setActivePlanet(targetBody, route.target.entry, 0);
         nodePipeline.setActiveAtmosphere(targetBody, route.target.entry);
         targetBody.syncAtmoMaterial?.();
@@ -3309,6 +3378,7 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, t
         // or upload every binding. Exercise a real offscreen frame before entry.
         if(draw()===false)throw Error('Destination warm frame was not submitted');
       } finally {
+        for (const pass of presentationPasses) pass.enabled = true;
         // That draw ran the production graph from the destination's arrival pose
         // into a private target with most of the scene masked out. Its pixels are a
         // valid warm-up for the GPU pipeline and complete nonsense as temporal
@@ -3330,6 +3400,8 @@ async function renderPreparedDestinationWarmFrame(targetBody, route, prepared, t
           camera.updateMatrixWorld(true);
           sunShadow.visible = shadowState.visible;
           sunShadow.intensity = shadowState.intensity;
+          if (sunShadow.shadow) sunShadow.shadow.autoUpdate = shadowState.autoUpdate;
+          if (universe.system) universe.relativizeSystem?.(universe.system, nav.pos);
           for (const state of visibility) state.object.visible = state.visible;
         }
       }
@@ -3417,7 +3489,7 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
       restorePriority();
       return;
     }
-    if (transferredPreparedDestination?.owner === 'rift'
+    if (transferredPreparedDestination?.system === prepared
         && warpPreparedRiftWarmState === 'complete') {
       // Once the crossing-critical root set and exact production pipelines are
       // warm, return the remaining LOD work to the ordinary 1.6 ms frame
@@ -3439,7 +3511,7 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
           water.focused = true;
           water.update(camLocal, 1);
         }
-        flushChunkQueue(QUALITY_LOW ? 4 : 12);
+        flushChunkQueue(QUALITY_LOW ? 2.5 : 4);
         terrain.update(camLocal, 1);
         water?.update(camLocal, 1);
 
@@ -3491,8 +3563,9 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
             });
           return;
         }
-      } while (performance.now() - sliceStartedAt < (QUALITY_LOW ? 5 : 14));
-      setTimeout(step, 0);
+      } while (performance.now() - sliceStartedAt < (QUALITY_LOW ? 3 : 4.5));
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(step);
+      else setTimeout(step, 0);
     } catch (error) {
       const message = String(error?.message || error);
       console.error('Destination terrain LOD prewarm failed:', error);
@@ -3503,7 +3576,8 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
       }
     }
   };
-  setTimeout(step, 0);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(step);
+  else setTimeout(step, 0);
 }
 
 async function prewarmPreparedWater(targetBody, token, route, prepared) {
@@ -3535,12 +3609,27 @@ async function prewarmPreparedWater(targetBody, token, route, prepared) {
 
       const lightVisibility = new Map([...(universe.system?.starViews || []), ...prepared.starViews]
         .map(view => [view.light, view.light.visible]));
+      const shadowWasVisible = sunShadow.visible;
+      const savedTarget = renderer.getRenderTarget?.();
+      const savedFace = renderer.getActiveCubeFace?.() ?? 0;
+      const savedMip = renderer.getActiveMipmapLevel?.() ?? 0;
       let compilation;
       try {
         for (const view of universe.system?.starViews || []) view.light.visible = false;
         for (const view of prepared.starViews) view.light.visible = true;
-        compilation = compilePrograms(renderer, mesh, camera, scene, {signal});
+        sunShadow.visible = true;
+        if (renderer.setRenderTarget && nodePipeline.composer?.readBuffer) {
+          renderer.setRenderTarget(nodePipeline.composer.readBuffer);
+        }
+        const runCompile = () => compilePrograms(renderer, mesh, camera, scene, {signal});
+        compilation = typeof withSurfaceWarmupVariant === 'function'
+          ? withSurfaceWarmupVariant(mesh, runCompile)
+          : runCompile();
       } finally {
+        if (renderer.setRenderTarget && nodePipeline.composer?.readBuffer) {
+          renderer.setRenderTarget(savedTarget, savedFace, savedMip);
+        }
+        sunShadow.visible = shadowWasVisible;
         for (const [light, visible] of lightVisibility) light.visible = visible;
         mesh.removeFromParent();
       }
@@ -3568,7 +3657,8 @@ function prepareWarpDestination(route) {
   const token = warpPreparationToken;
   const prepared = new StarSystem(universe, route.star, {
     deferred: true,
-    fadeInPlanets: true,
+    fadeInPlanets: false,
+    deferRoots: true,
     timeHours: celestialClock.hours,
   });
   warpPreparedSystem = prepared;
@@ -3591,30 +3681,55 @@ function prepareWarpDestination(route) {
   };
   const step = () => {
     if (!preparedDestinationIsActive(token, route, prepared)) return;
-    const startedAt = performance.now();
-    do {
-      const previousBodyCount = prepared.planets.length + prepared.compactObjects.length;
-      prepared.buildNext();
-      const bodies = [...prepared.planets, ...prepared.compactObjects];
-      if (bodies.length > previousBodyCount) primePreparedBodyTextures(bodies.at(-1), prepared);
+    if (route.bodyId && typeof prepared.buildBody === 'function') {
+      const beforeIds = new Set(prepared.bodyById.keys());
+      prepared.buildBody(route.bodyId, { deferRoots: true });
+      for (const body of [...prepared.planets, ...prepared.compactObjects]) {
+        if (!beforeIds.has(body.bodyId)) {
+          body.deferWeatherStream = true;
+          primePreparedBodyTextures(body, prepared);
+        }
+      }
       hideBuiltBodies();
-      if (route.bodyId && prepared.bodyById.has(route.bodyId)) break;
-    } while (!prepared.built && performance.now() - startedAt < 3.5);
-    if ((route.bodyId && prepared.bodyById.has(route.bodyId)) || prepared.built) {
-      const targetBody = route.bodyId ? prepared.bodyById.get(route.bodyId) : null;
+    } else {
+      const startedAt = performance.now();
+      do {
+        const previousBodyCount = prepared.planets.length + prepared.compactObjects.length;
+        prepared.buildNext();
+        const bodies = [...prepared.planets, ...prepared.compactObjects];
+        if (bodies.length > previousBodyCount) {
+          const newest = bodies.at(-1);
+          if (newest) newest.deferWeatherStream = true;
+          primePreparedBodyTextures(newest, prepared);
+        }
+        hideBuiltBodies();
+        if (route.bodyId && prepared.bodyById.has(route.bodyId)) break;
+        if (!route.bodyId) break;
+      } while (!prepared.built && performance.now() - startedAt < 3.5);
+    }
+    if (!route.bodyId || prepared.bodyById.has(route.bodyId) || prepared.built) {
+      const targetBody = route.bodyId ? prepared.bodyById.get(route.bodyId) : (prepared.planets[0] || null);
+      if (targetBody && !targetBody.isGasGiant && targetBody.type !== 'artificialHabitat'
+          && typeof atmospherePass !== 'undefined' && typeof warpCompile !== 'undefined') {
+        void atmospherePass?.prewarmPlanetProfileAsync?.(targetBody, { signal: warpCompile.signal });
+      }
       warpPreparedWaterWarmPlanet = targetBody;
       warpPreparedWaterWarmState = 'waiting';
       warpPreparedLodWarmPlanet = targetBody;
       warpPreparedLodWarmState = 'waiting';
       prewarmPreparedLod(targetBody, token, route, prepared);
-      // Do not put planet construction and WebGL program capture in one event
-      // loop turn. Each is bounded on its own, but together they previously
-      // formed the single half-second route/warp frame seen by the player.
-      setTimeout(() => {
-        if (preparedDestinationIsActive(token, route, prepared)) {
-          void prewarmPreparedWater(targetBody, token, route, prepared);
+      // Wait until water roots are built before capturing the water program,
+      // reusing the warm HDR variant once ready.
+      const scheduleWaterWarm = () => {
+        if (!preparedDestinationIsActive(token, route, prepared)) return;
+        const rootsPending = targetBody?.waterLod?.roots?.some((root) => !root.mesh);
+        if (rootsPending && typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(scheduleWaterWarm);
+          return;
         }
-      }, 0);
+        void prewarmPreparedWater(targetBody, token, route, prepared);
+      };
+      setTimeout(scheduleWaterWarm, 0);
       // An immediate Warp click is accepted as a queued launch while the route
       // screen constructs the selected body. Never move that synchronous
       // constructor into live starflow: a complex ocean/cloud planet can cost
@@ -3627,15 +3742,18 @@ function prepareWarpDestination(route) {
   setTimeout(step, 0);
 }
 
+function warpLaunchReady() {
+  const settled = (state) => state === 'complete' || state === 'failed';
+  return settled(warpPreparedRiftWarmState) && settled(warpPreparedWaterWarmState);
+}
+
 function scheduleQueuedWarpLaunch(route, token, prepared) {
   if (route.warpLaunchScheduled) return;
   route.warpLaunchScheduled = true;
   const check = () => {
     if (!preparedDestinationIsActive(token, route, prepared)
         || pendingRoute !== route || !route.warpRequested || state !== 'space') return;
-    const lodDone = ['complete', 'failed'].includes(warpPreparedLodWarmState);
-    const waterDone = ['complete', 'failed'].includes(warpPreparedWaterWarmState);
-    if (!lodDone || !waterDone) {
+    if (route.bodyId && !prepared.built && !prepared.bodyById.has(route.bodyId)) {
       setTimeout(check, 16);
       return;
     }
@@ -3865,9 +3983,10 @@ function beginSelectedWarp() {
   if (!pendingRoute || state !== 'space') return;
   const route = pendingRoute;
   route.warpRequested = true;
-  if (route.bodyId && warpPreparedSystem?.star.id === route.star.id
-      && !warpPreparedSystem.bodyById.has(route.bodyId)) {
-    ui.setHint('正在构建目的地实景 · 跃迁将在就绪后立即开始', true);
+  if (warpPreparedSystem?.star.id === route.star.id && route.bodyId
+      && !warpPreparedSystem.built && !warpPreparedSystem.bodyById.has(route.bodyId)) {
+    ui.setWarpPreparing(true);
+    scheduleQueuedWarpLaunch(route, warpPreparationToken, warpPreparedSystem);
     return;
   }
   const prepared = takePreparedDestination(route, 'warp');
@@ -4108,7 +4227,11 @@ function syncRiftDestination() {
     body = riftPreviewSystem.bodyById.get(riftRoute.arrival.bodyId);
   }
   if (!body) return;
-  if (typeof riftPreviewReady !== 'undefined' && !riftPreviewReady && !riftRoute.previewPreloaded && typeof flushChunkQueue === 'function') {
+  if ('appear' in body && body.appear < 1) {
+    body.appear = 1;
+    body.applyAppear?.();
+  }
+  if (typeof riftPreviewReady !== 'undefined' && !riftPreviewReady && typeof flushChunkQueue === 'function') {
     const terrainRootsMissing = body.lod?.roots?.some((root) => !root.mesh);
     const waterRootsMissing = body.waterLod?.roots?.some((root) => !root.mesh);
     if (terrainRootsMissing || waterRootsMissing) {
@@ -4242,6 +4365,13 @@ function finishRiftCrossing() {
     if (!visibleAtHandoff) deferredSystemWarmQueue.push({ system: destination, body });
   }
   systemBuildResumeAt = performance.now() + 1800;
+  if (typeof setTimeout === 'function') {
+    setTimeout(() => {
+      if (universe.system === destination) {
+        for (const p of destination.planets || []) p.deferWeatherStream = false;
+      }
+    }, 2000);
+  }
   universe.relativizeSystem(destination, nav.pos);
   if (arrivalBody) {
     focusPlanet = arrivalBody;
@@ -4328,9 +4458,9 @@ function updateRiftRoute(dt) {
       cancelRiftRoute('未找到目的地坐标 · 航道已关闭');
       return;
     }
-    if (riftFarWarmState === 'compiling'
-        && (riftRoute.farPrograms?.token !== riftFarWarmToken || riftRoute.farPrograms?.state !== 'compiling')) {
-      riftFarWarmState = riftRoute.farPrograms?.state || 'idle';
+    if (riftFarWarmState === 'compiling') {
+      const record = riftRoute.farPrograms;
+      riftFarWarmState = record?.token === riftFarWarmToken ? record.state : 'idle';
     }
     if (riftFarWarmState === 'idle' && riftDestinationPreparationReady()
         && (!riftFarBodyId || riftPreviewSystem?.bodyById.has(riftFarBodyId))
@@ -4393,7 +4523,7 @@ function updateRiftRoute(dt) {
       ui.setHint(`${riftRoute.label} · 正在同步目的地 · 即将穿越`, true);
     } else if (riftRoute.pendingCrossing) {
       const loc = riftPortal.locate(nav.pos);
-      if (loc.z > Math.max(50, riftRoute.reach * 0.05)) {
+      if (loc.radial > .985 || loc.z > Math.max(50, riftRoute.reach * 0.05)) {
         riftRoute.pendingCrossing = false;
         riftRoute.heldVelocity = null;
       } else if (readyToCross) {
@@ -4526,12 +4656,16 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
       for (const group of standaloneSiteGroups(retiredRiftSystem)) group.visible = false;
       preparedSystem = null;
     } else {
-      destination = universe.setSystem(star, true);
+      destination = universe.setSystem(star, true, { fadeInPlanets: false, deferRoots: true });
     }
     // Route-choice idle time normally builds the selected body. A very fast
-    // confirmation can still arrive first; build at most one body here.
-    for (let guard = 0; preferBodyId && !destination.bodyById.has(preferBodyId) && !destination.built && guard < 64; guard++) {
-      destination.buildNext();
+    // confirmation can still arrive first; build only the target body.
+    if (preferBodyId && !destination.bodyById.has(preferBodyId) && typeof destination.buildBody === 'function') {
+      destination.buildBody(preferBodyId, { deferRoots: true });
+    } else {
+      for (let guard = 0; preferBodyId && !destination.bodyById.has(preferBodyId) && !destination.built && guard < 64; guard++) {
+        destination.buildNext();
+      }
     }
     let hero = null;
     if (preferBodyId) {
@@ -4565,14 +4699,19 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
     warpTransit.t = t;
     if (preparedSystem && preferBodyId && !preparedSystem.bodyById.has(preferBodyId)
         && !preparedSystem.built) {
-      const previousBodyCount = preparedSystem.planets.length + preparedSystem.compactObjects.length;
-      preparedSystem.buildNext();
+      const beforeIds = new Set(preparedSystem.bodyById.keys());
+      if (typeof preparedSystem.buildBody === 'function') {
+        preparedSystem.buildBody(preferBodyId, { deferRoots: true });
+      } else {
+        preparedSystem.buildNext();
+      }
       for (const group of standaloneSiteGroups(preparedSystem)) group.visible = false;
-      const bodies = [...preparedSystem.planets, ...preparedSystem.compactObjects];
-      const builtBody = bodies.length > previousBodyCount ? bodies.at(-1) : null;
-      if (builtBody) {
-        builtBody.group.visible = false;
-        primePreparedBodyTextures(builtBody, preparedSystem);
+      for (const builtBody of [...preparedSystem.planets, ...preparedSystem.compactObjects]) {
+        if (!beforeIds.has(builtBody.bodyId)) {
+          builtBody.group.visible = false;
+          builtBody.deferWeatherStream = true;
+          primePreparedBodyTextures(builtBody, preparedSystem);
+        }
       }
     }
     if (!enterCued && t >= plan.entryStart + 0.6) {
@@ -4632,9 +4771,22 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
     warpRevealBody = null;
     warpRevealCameraOffset = null;
     warpRevealActive = false;
-    systemBuildResumeAt = performance.now() + 900;
+    systemBuildResumeAt = performance.now() + 4500;
+    const arrivedSys = universe.system;
+    if (typeof setTimeout === 'function') {
+      setTimeout(() => {
+        if (universe.system === arrivedSys) {
+          for (const p of arrivedSys?.planets || []) p.deferWeatherStream = false;
+        }
+      }, 4200);
+    }
     ui.endWarpPower();
     ui.showArrival(arrivalDisplayName, universe.system.name, '跃迁抵达');
+  }, {
+    // Continue advecting fog and lighting at cruise until the first destination
+    // frame is ready. Release from this same timeline instant on the next tick.
+    timeLimit: () => preparedSystem && transferredPreparedDestination?.system === preparedSystem && !warpLaunchReady()
+      ? plan.swapAt - .01 : Infinity,
   });
 }
 
@@ -6356,7 +6508,7 @@ function frame(rafTs) {
 
   if (!FREEZE && !photoMode && !(DEV_SERVER && devWaterWakeFixture?.held)) tickShaders(dt);
   if (QUALITY_LOW && !surfacePipelinesReady
-    && performance.now() - startupWarmStartedAt >= STARTUP_WARM_BUDGET_MS) {
+    && performance.now() - startupWarmStartedAt >= STARTUP_SHADER_BUDGET_MS) {
     releaseStartupPrewarm('low-tier startup deadline exceeded');
   }
   // Skip the actual GPU work while the WebGL context is lost — Three.js
@@ -6476,7 +6628,7 @@ function frame(rafTs) {
     for (const p of universe.system?.planets || []) p.deferWeatherStream = false;
   } else if (!loadingCleared && !cloudPreparation.blocked && Boolean(universe.system?.built)
     && performance.now() - startupWarmStartedAt
-      > STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS + 3000) {
+      > STARTUP_SHADER_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS + 3000) {
     // Keep the older escape for unrelated startup stages, but never reveal an
     // empty canvas while a required cloud program still owns readiness. Its
     // own deadline/failure remains explicit; it is not a completed world draw.

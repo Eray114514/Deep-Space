@@ -25,7 +25,7 @@ function worldMatrix(object) {
   return matrix;
 }
 
-function compileSelection(renderer, { scene, compileCamera, target, selected, lights, signal }) {
+function compileSelection(renderer, { scene, compileCamera, target, selected, lights, signal, includeClearSky = false }) {
   const source = new THREE.Group();
   source.traverse = work => { work(source);for (const object of selected) work(object); };
   source.traverseVisible = () => {};
@@ -54,8 +54,26 @@ function compileSelection(renderer, { scene, compileCamera, target, selected, li
   };
   try {
     renderer.setRenderTarget(target);
-    compilation = withSurfaceWarmupVariant(source,
-      () => compilePrograms(renderer, source, compileCamera, lighting, { signal }));
+    const compile = () => compilePrograms(renderer, source, compileCamera, lighting, { signal });
+    compilation = withSurfaceWarmupVariant(source, compile);
+    // Arrival can first draw this same terrain while the opaque warp suppresses
+    // the active cloud receiver. Only surface materials whose program key varies
+    // with setScreenClouds need that second compile pass.
+    if (includeClearSky) {
+      const clearSkyObjects = [...selected].filter((object) => [object.material].flat()
+        .some((material) => typeof material?.userData?.setScreenClouds === 'function'));
+      if (clearSkyObjects.length) {
+        const clearSkySource = new THREE.Group();
+        clearSkySource.traverse = work => { work(clearSkySource);for (const object of clearSkyObjects) work(object); };
+        clearSkySource.traverseVisible = () => {};
+        const clearCompile = () => compilePrograms(renderer, clearSkySource, compileCamera, lighting, { signal });
+        try {
+          compilation = Promise.all([compilation, withSurfaceWarmupVariant(clearSkySource, clearCompile, false)]);
+        } finally {
+          clearSkySource.traverse = () => {};
+        }
+      }
+    }
   } catch (error) { failed = true;failure = error; }
   attempt(() => renderer.setRenderTarget(saved, face, mip));
   source.traverse = () => {};
@@ -117,7 +135,7 @@ export function compileDestinationVariant(renderer, {
   }, true);
 
   lights.delete(undefined);lights.delete(null);
-  return compileSelection(renderer, { scene, compileCamera, target, selected, lights, signal });
+  return compileSelection(renderer, { scene, compileCamera, target, selected, lights, signal, includeClearSky: shadows });
 }
 
 function publicationSelection({ scene, universeRoot, ship, shadowLight, shadows = false, publication }) {

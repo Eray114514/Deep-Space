@@ -279,7 +279,12 @@ export class ChunkedLOD {
     this._frame = 0;
     for (let f = 0; f < 6; f++) {
       const root = makeNode(this, f, 0, 0, 0);
-      this.buildNodeMesh(root);           // synchronous: planet visible immediately
+      if (planet.deferRoots) {
+        root.queued = true;
+        buildQueue.push(root);
+      } else {
+        this.buildNodeMesh(root);         // synchronous: planet visible immediately
+      }
       this.roots.push(root);
     }
   }
@@ -439,6 +444,13 @@ export class ChunkedLOD {
     const wantMerge = node.level >= this._levelCap || beyond
       || (!forcedAcrossFace && d > node.size * mergeDistance && !screenRetainSplit);
 
+    if (!node.mesh) {
+      if (!node.queued) {
+        node.queued = true;
+        buildQueue.push(node);
+      }
+      return;
+    }
     if (!node.children && !beyond && node.level < this._levelCap) {
       // prefetch exists to feed morphs; water (noMorph) swaps sub-pixel and
       // creates at the display threshold like before

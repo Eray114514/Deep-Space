@@ -107,9 +107,10 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet extends TerrainHeightField {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, fadeIn = false, sunDir = null, tuning = null, formation = null, ringSystem = null }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, fadeIn = false, deferRoots = false, sunDir = null, tuning = null, formation = null, ringSystem = null }) {
     super();
     this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
+    this.deferRoots = Boolean(deferRoots);
     // known at construction so even the root chunks bake sun shadows
     this.sunDirWorld = sunDir ? sunDir.clone() : new THREE.Vector3(0, 1, 0);
     this.sunDirLocal = this.sunDirWorld.clone();
@@ -823,6 +824,7 @@ export class Planet extends TerrainHeightField {
         noMorph: false, noSkirt: true,
         faceBoundarySkirts: false,
         noShadow: true,
+        deferRoots: this.deferRoots,
         // Terrain collision and silhouette detail must reach the player first
         // after a teleport/landing. The local patch already supplies nearby
         // water geometry, so far-water shell jobs may safely yield to terrain
@@ -2026,7 +2028,7 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
       if (weatherField?.synoptic) {
         // Sample the native weather model directly rather than allocating
         // gameplay wind/morphology wrapper objects 32,768 times per planet.
-        const w = weatherField.sampleRaw(dir, 0), index = j * W + i, k = index * 4;
+        const w = (weatherField.sampleAtlas || weatherField.sampleRaw).call(weatherField, dir, 0), index = j * W + i, k = index * 4;
         lowRaw[index] = clamp(0.5 + w.lowPotential / 4);
         highRaw[index] = clamp(0.5 + w.highPotential / 4);
         lowData[k + 1] = Math.round(w.convective * 255);

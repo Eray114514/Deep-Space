@@ -92,7 +92,7 @@ function fixture(options = {}) {
     const draw = () => {
       assert.equal(closed, false);assert.equal(drawUsed, false);drawUsed = true;borrow('draw');pipeline.renderCalls++;events.push('draw');
       assert.equal(target, context.surfaceBootstrapTarget);if (mrt) assert.equal(currentMrt, null);
-      assert.equal(atmospherePlanet, targetBody);if (volume) assert.equal(volumePlanet, targetBody);assert.equal(shadowRaw.visible, false);assert.equal(shadowRaw.intensity, 0);
+      assert.equal(atmospherePlanet, targetBody);if (volume) assert.equal(volumePlanet, targetBody);assert.equal(shadowRaw.visible, true);assert.equal(shadowRaw.intensity, 0);
       assert.equal(cells.find(cell => cell.name === 'old-body').raw, false);assert.equal(cells.find(cell => cell.name === 'destination-body').raw, true);assert.equal(cells.find(cell => cell.name === 'destination-other').raw, false);
       assert.equal(cells.find(cell => cell.name === 'old-orphan').raw, false);assert.equal(cells.find(cell => cell.name === 'fade-orphan').raw, false);
       assert.equal(cells.find(cell => cell.name === 'destination-orphan').raw, true);

@@ -54,8 +54,13 @@ function unitLuminance(rgb) {
  * @param {number} temperatureK
  * @returns {[number, number, number]} linear RGB
  */
+const BLACKBODY_CACHE_LIMIT = 512;
+const blackbodyCache = new Map();
+
 export function blackbodyLinearRgb(temperatureK) {
   const temperature = clamp(Number(temperatureK) || 6500, 1000, 50000);
+  const cached = blackbodyCache.get(temperature);
+  if (cached) return [cached[0], cached[1], cached[2]];
   const samples = [];
   let maxLogRadiance = -Infinity;
 
@@ -79,7 +84,12 @@ export function blackbodyLinearRgb(temperatureK) {
 
   const rgb = linearRgbFromXyz(xyz).map((channel) => Math.max(0, channel));
   const peak = Math.max(1e-12, ...rgb);
-  return rgb.map((channel) => channel / peak);
+  const normalized = rgb.map((channel) => channel / peak);
+  if (blackbodyCache.size >= BLACKBODY_CACHE_LIMIT) {
+    blackbodyCache.delete(blackbodyCache.keys().next().value);
+  }
+  blackbodyCache.set(temperature, normalized);
+  return [normalized[0], normalized[1], normalized[2]];
 }
 
 /**

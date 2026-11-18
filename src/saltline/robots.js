@@ -434,19 +434,28 @@ export class SurveyUnits {
     });
   }
 
-  async prewarm({ renderer, camera, scene }) {
+  async prewarm({ renderer, camera, scene, target = null, prepare = null }) {
     if (this.fleet || this.prewarming || !this.materials) return;
     this.prewarming = true;
     try {
       await this.materials.prepareAsync?.(['armor_white', 'gunmetal']);
       if (!this.fleet) this.ensureFleet();
       if (renderer?.compileAsync && !this.deployed) {
-        const hidden = [];
-        this.root.traverse((o) => { if (!o.visible) { hidden.push(o); o.visible = true; } });
-        let pending;
-        try { pending = renderer.compileAsync(this.root, camera, scene); }
-        finally { for (const o of hidden) o.visible = false; }
-        await pending;
+        const compileFleet = () => {
+          const hidden = [];
+          const prevTarget = target ? renderer.getRenderTarget?.() : null;
+          const prevFace = target ? renderer.getActiveCubeFace?.() : 0;
+          const prevMip = target ? renderer.getActiveMipmapLevel?.() : 0;
+          this.root.traverse((o) => { if (!o.visible) { hidden.push(o); o.visible = true; } });
+          try {
+            if (target && renderer.setRenderTarget) renderer.setRenderTarget(target);
+            return renderer.compileAsync(this.root, camera, scene);
+          } finally {
+            if (target && renderer.setRenderTarget) renderer.setRenderTarget(prevTarget, prevFace, prevMip);
+            for (const o of hidden) o.visible = false;
+          }
+        };
+        await (typeof prepare === 'function' ? prepare(compileFleet) : compileFleet());
       }
     } catch (error) {
       console.warn('[survey] prewarm failed (robots will build on landing)', error);

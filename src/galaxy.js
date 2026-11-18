@@ -497,7 +497,7 @@ export class Universe {
 // ============================================================================
 
 export class StarSystem {
-  constructor(universe, star, { deferred = false, fadeInPlanets = deferred, timeHours = 0 } = {}) {
+  constructor(universe, star, { deferred = false, fadeInPlanets = deferred, deferRoots = false, timeHours = 0 } = {}) {
     this.universe = universe;
     this.star = star;
     this.spec = applySystemBodyTuning(
@@ -537,17 +537,44 @@ export class StarSystem {
     this.artificialSites = [];
     this._civilizationBuilt = false;
     this._buildIdx = 0;
+    this._specOrder = new Map(this._specs.map((body, idx) => [body.bodyId, idx]));
     this._deferred = deferred;
     this._fadeInPlanets = fadeInPlanets;
+    this._deferRoots = Boolean(deferRoots);
     this.updateCelestial(timeHours);
     if (!deferred) while (this.buildNext());
   }
 
-  get built() { return this._buildIdx >= this._specs.length; }
+  get built() { return this.bodyById.size >= this._specs.length; }
 
-  buildNext() {
-    if (this.built) return false;
+  _advanceBuildIndex() {
+    while (this._buildIdx < this._specs.length && this.bodyById.has(this._specs[this._buildIdx].bodyId)) {
+      this._buildIdx++;
+    }
+  }
+
+  buildBody(bodyId, options = {}) {
+    if (!bodyId) return null;
+    if (this.bodyById.has(bodyId)) return this.bodyById.get(bodyId);
+    const spec = this._specs.find((candidate) => candidate.bodyId === bodyId);
+    if (!spec) return null;
+    if (spec.parentId && !this.bodyById.has(spec.parentId)) {
+      this.buildBody(spec.parentId, options);
+    }
+    return this._constructBody(spec, options);
+  }
+
+  buildNext(options = {}) {
+    this._advanceBuildIndex();
+    if (this.built || this._buildIdx >= this._specs.length) return false;
     const s = this._specs[this._buildIdx++];
+    this._constructBody(s, options);
+    this._advanceBuildIndex();
+    return !this.built;
+  }
+
+  _constructBody(s, { deferRoots = this._deferRoots } = {}) {
+    if (this.bodyById.has(s.bodyId)) return this.bodyById.get(s.bodyId);
     const frame = this.frames.get(s.bodyId);
     if (s.type === 'blackHole') {
       const blackHole = new BlackHole({ spec: s, posUniv: frame.position, fadeIn: this._fadeInPlanets, scene: this.universe.scene });
@@ -558,16 +585,18 @@ export class StarSystem {
       blackHole.frameVelocity.copy(frame.velocity);
       this.compactObjects.push(blackHole);
       this.bodyById.set(s.bodyId, blackHole);
+      this._advanceBuildIndex();
       this.universe.group.add(blackHole.group);
       if (this.built) this.buildCivilization();
-      return !this.built;
+      return blackHole;
     }
     const Ctor = s.type === 'gasGiant' || s.type === 'iceGiant' ? GasGiant : Planet;
     const planet = new Ctor({
       seed: s.seed, name: s.name, catalogName: s.catalogName,
       posUniv: frame.position, type: s.type, isMoon: s.isMoon, radius: s.radius,
       atmosphere: s.atmosphere, clouds: s.clouds,
-      fadeIn: this._fadeInPlanets, sunDir: this.sunDirFrom(frame.position, _v).clone(),
+      fadeIn: this._fadeInPlanets, deferRoots: Boolean(deferRoots),
+      sunDir: this.sunDirFrom(frame.position, _v).clone(),
       tuning: this.universe.bodyTuning?.(this.star.id, s.bodyId) || null,
       formation: s.formation, ringSystem: s.ringSystem,
     });
@@ -591,11 +620,17 @@ export class StarSystem {
     if (s.parentId) planet.parentPlanet = this.bodyById.get(s.parentId) || null;
     planet.setFrame(frame.orientation);
     planet.setStellarLights?.(this.stellarLightFieldFrom(frame.position));
-    this.planets.push(planet);
+    const order = this._specOrder.get(s.bodyId) ?? Infinity;
+    let insertAt = this.planets.length;
+    while (insertAt > 0 && (this._specOrder.get(this.planets[insertAt - 1].bodyId) ?? -1) > order) {
+      insertAt--;
+    }
+    this.planets.splice(insertAt, 0, planet);
     this.bodyById.set(s.bodyId, planet);
+    this._advanceBuildIndex();
     this.universe.group.add(planet.group);
     if (this.built) this.buildCivilization();
-    return !this.built;
+    return planet;
   }
 
   buildCivilization() {

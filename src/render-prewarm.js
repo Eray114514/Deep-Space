@@ -10,7 +10,7 @@ const screenDefine='SURFACE_CLOUD_SCREEN';
 // compile() does not run material draw hooks. Select the same screen receiver
 // variant as an actual receiver-depth draw, without retaining live state across
 // readiness awaits. A private warm draw uses this same synchronous scope.
-export function withSurfaceWarmupVariant(source, work) {
+export function withSurfaceWarmupVariant(source, work, screenClouds = true) {
   const materials=new Map();
   source.traverse(object=>{
     if(!object.isMesh)return;
@@ -19,7 +19,7 @@ export function withSurfaceWarmupVariant(source, work) {
       if(owner)materials.set(material,owner);
     }
   });
-  const screen=Number([...materials.values()].some(cloudSurfaceReceiverReady));
+  const screen=Number(screenClouds && [...materials.values()].some(cloudSurfaceReceiverReady));
   const saved=[];
   try {
     for(const [material,owner] of materials) {

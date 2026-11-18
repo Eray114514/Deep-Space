@@ -103,10 +103,9 @@ export function atmosphereRenderProfile(planet) {
 
 // RGB stores normalized Rayleigh/Mie/ozone optical depth; alpha marks rays
 // which reach space without intersecting the ground.
-export function createAtmosphereOpticalDepthLut(profile,
+function computeAtmosphereOpticalDepthRows(data, profile, yStart, yEnd,
   width = LUT_WIDTH, height = LUT_HEIGHT, steps = LUT_STEPS) {
-  const data = new Float32Array(width * height * 4);
-  for (let y = 0; y < height; y++) {
+  for (let y = yStart; y < yEnd; y++) {
     const altitude = profile.topAltitudeMeters * (y / Math.max(1, height - 1)) ** 2;
     const radius = profile.groundRadiusMeters + altitude;
     for (let x = 0; x < width; x++) {
@@ -146,11 +145,16 @@ export function createAtmosphereOpticalDepthLut(profile,
       data[offset + 3] = blocked ? 0 : 1;
     }
   }
+}
+
+export function createAtmosphereOpticalDepthLut(profile,
+  width = LUT_WIDTH, height = LUT_HEIGHT, steps = LUT_STEPS) {
+  const data = new Float32Array(width * height * 4);
+  computeAtmosphereOpticalDepthRows(data, profile, 0, height, width, height, steps);
   return { data, width, height };
 }
 
-function makeLutTexture(profile) {
-  const lut = createAtmosphereOpticalDepthLut(profile);
+function makeLutTextureFromData(lut) {
   const half = new Uint16Array(lut.data.length);
   for (let i = 0; i < lut.data.length; i++) {
     half[i] = THREE.DataUtils.toHalfFloat(Math.min(65000, Math.max(-65000, lut.data[i])));
@@ -168,6 +172,10 @@ function makeLutTexture(profile) {
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return texture;
+}
+
+function makeLutTexture(profile) {
+  return makeLutTextureFromData(createAtmosphereOpticalDepthLut(profile));
 }
 
 function groundAlbedo(planet) {
@@ -340,6 +348,47 @@ export class AtmospherePass extends Pass {
     this.visualEnabled = !!enabled;
     this.material.uniforms.uEnabled.value
       = this.activePlanet && this.visualEnabled ? 1 : 0;
+  }
+
+  prewarmPlanetProfileAsync(planet, { signal, sliceRows = 12 } = {}) {
+    if (!planet?.atmoMesh) return Promise.resolve(false);
+    const { profile } = atmosphereRenderProfile(planet);
+    const cacheKey = JSON.stringify(profile);
+    if (this.profileCache.has(cacheKey)) return Promise.resolve(true);
+    const data = new Float32Array(LUT_WIDTH * LUT_HEIGHT * 4);
+    let y = 0;
+    const schedule = typeof requestAnimationFrame === 'function'
+      ? (fn) => requestAnimationFrame(fn)
+      : (fn) => setTimeout(fn, 0);
+    return new Promise((resolve) => {
+      const step = () => {
+        if (signal?.aborted) { resolve(false); return; }
+        if (this.profileCache.has(cacheKey)) { resolve(true); return; }
+        const end = Math.min(LUT_HEIGHT, y + Math.max(1, sliceRows));
+        computeAtmosphereOpticalDepthRows(data, profile, y, end, LUT_WIDTH, LUT_HEIGHT, LUT_STEPS);
+        y = end;
+        if (y < LUT_HEIGHT) {
+          schedule(step);
+          return;
+        }
+        if (signal?.aborted) { resolve(false); return; }
+        if (!this.profileCache.has(cacheKey)) {
+          const cached = { texture: makeLutTextureFromData({ data, width: LUT_WIDTH, height: LUT_HEIGHT }) };
+          this.profileCache.set(cacheKey, cached);
+          if (this.profileCache.size > LUT_CACHE_LIMIT) {
+            for (const [key, entry] of this.profileCache) {
+              if (entry === this.activeCache) continue;
+              entry.texture.dispose();
+              entry.multiple?.dispose();
+              this.profileCache.delete(key);
+              break;
+            }
+          }
+        }
+        resolve(true);
+      };
+      schedule(step);
+    });
   }
 
   updatePlanetUniforms(planet, nav) {

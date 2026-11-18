@@ -12,6 +12,17 @@
 
 恒星跃迁沿每条视线分层采样三维密度场，累计散射与透射。远端光源照亮碎雾，暗处露出更深的云层，视线中心保留向目的地打开的区域。两档均取 18 个深度样本。低档在四分之一宽高的缓冲区中计算雾，全分辨率重建并与船体深度合成。实际星空的星迹在入雾和重新显露目的地时各有一次峰值。
 
+实飞录像保存在 `test-results/fold-ref/fold-flight.mp4` 和 `stellar-flight.mp4`。从航线按钮进入后，按 W 穿越弦界抵达 MW-0001，抵达后复核了 HUD 和飞行控制。恒星跃迁在目的地准备阶段预热带云和晴空的地表程序，准备期间允许在巡航段维持雾流。
+
+## 第六轮 · 恒星跃迁冷启动长帧治理（2026-11-18）
+
+针对「法拉第星系 → MW-0919 `planet-4`（伊庇鲁斯星）」普通恒星跃迁在冷启动下的多秒冻结（上轮蓄力阶段最高 `6135.4 ms`、蓄力后 `3517.5 ms`，无并发基线蓄力最高 `884.6–915.4 ms`、HUD 恢复 `294.8 ms`），按统一时间线定位并修复了全部阻塞点：
+
+- **后处理与前景预热漏项修复**：修复 `GameLegacyPipeline.prewarmPostPasses` 中 `ShaderPass._fsQuad` 属性名拼写错误（此前 `TransitShader` 与 `grade` 未进入启动预热，跃迁蓄力首帧同步阻塞 `~230 ms`），补齐 `outputPass` / `smaa` 屏幕目标编译、`LiteCloudPass` 3-RTV MRT 编译与多重散射 LUT 着色器跨天体缓存；分离硬件 GPU 的启动着色器预算（`STARTUP_SHADER_BUDGET_MS`）并在飞船加载完成后按真实前景灯光域重预热 `warpConduit` 与星空/星云精灵；在 `compilePrograms` 就绪轮询中预取 `getUniforms()` / `getAttributes()`，并将已有活动材质的 `__version` 置为 `-1`，防止后台 `renderer.compile()` 覆盖活动 `currentProgram` 导致下一帧 `ForegroundPass` 在 `ACTIVE_UNIFORMS` 上同步等待 `~400 ms`。
+- **后台勘测机器人预热避让**：`surveyUnits.prewarm` 改为检测空闲太空态（避开星图、选路、跃迁、脉冲与弦界航道）并在 `nodePipeline.prepare` 队列中针对 HDR 缓冲编译，消除原固定 `6s` 定时器落入跃迁蓄力段造成的 `~900 ms` 冻结。
+- **按需单天体异步准备与不透明直出**：`prepareWarpDestination` 仅构建目标天体（`StarSystem.buildBody`），启用 `deferRoots: true` 将 12 个地形/海面根块拆入 `requestAnimationFrame` 时间片构建，启用 `fadeInPlanets: false` 避免出隧渐显中途 `terrainMaterial.transparent` 由 `true` 翻转为 `false` 触发冷着色器重编译（原 `1.06–3.52 s` 交接/揭示卡顿根因），并在跃迁期间暂缓目标星 `PlanetWeatherStream` 纹理工人替换；`prewarmPreparedWater` 对齐线性 HDR 目标与云阴影接收体变体以复用缓存；`renderPreparedDestinationWarmFrame` 对齐主循环常驻 `sunShadow.visible = true`（零强度、禁自动更新）与真实到达相对坐标；大气光学深度 LUT（`256×96×64`）支持异步行分片预热，天气云图采样增加免云属权重的快速通道，黑体辐射积分增加有界纯函数缓存；抵达后延迟后台非目标天体发布至 HUD 完全恢复之后（`+4.5 s`）。
+- **冷启动实测验收**（RTX 5080 Laptop D3D11 ANGLE，无并发重型测试）：3 次独立 `quality=low` 冷启动、1 次 `quality=high` 冷启动及对应热启动对照中，全流程各阶段（选路、蓄力、巡航、星系交接、目的地可见制动、HUD 恢复）**零帧超过 `250 ms`**；蓄力后最长帧间隔冷启动实测 `68.9–77.0 ms`（热启动 `13.1–28.6 ms`），`mw0919.mjs` 与 `tools/rifttest.js` 均全绿通过。
+
 ## 第四轮 · 恒星隧道与弦界裂口
 
 恒星跃迁保留几何隧道。真实恒星随管壁覆盖程度淡出和复现，近景星迹随星等改变拖尾长度。外壁沿飞行方向卷曲，在约一个管道半径的尺度上形成横向褶皱。内层介质以另一速率掠过，既散射光也遮住远壁。低档保留外壁褶皱和星迹。

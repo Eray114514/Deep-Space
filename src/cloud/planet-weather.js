@@ -1,5 +1,5 @@
 import { createWeatherField } from '../weather-field.js';
-import { createWeatherSystem, sampleWeather } from './weather-system.js';
+import { createWeatherSystem, sampleWeather, sampleWeatherAtlasChannels } from './weather-system.js';
 import { sampleCloudColumn } from './cloud-environment.js';
 import { sampleWeatherAtlas, decodeSynopticCoverage } from './weather-atlas.js';
 import { calibrateProductionCoverage } from './production-coverage.js';
@@ -88,6 +88,7 @@ export function createPlanetWeatherField(body, options = {}) {
         temperatureK: profile.temperatureK, polarCoolingK: profile.polarCoolingK,
         windSpeed: profile.windSpeed, weatherSpeed: profile.weatherSpeed, diurnalRangeK: 0 } },
     sampleRaw(direction, hours) { return sampleWeather(system, direction, hours); },
+    sampleAtlas(direction, hours) { return sampleWeatherAtlasChannels(system, direction, hours); },
     surfaceRangeMeters, surfaceBoundsMeters: [terrain.minSurface, terrain.maxSurface],
     surfaceAt(direction) {
       // Re-baking the 128-wide terrain into a 256-wide weather image smooths

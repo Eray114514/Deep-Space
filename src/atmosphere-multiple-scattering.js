@@ -1,20 +1,40 @@
 import * as THREE from 'three';
 import { OwnedScreenTriangle as FullScreenQuad } from './owned-screen-triangle.js';
 import { atmosphereUniformGLSL, atmosphereTransportGLSL } from './atmosphere-transport-glsl.js';
+import { atmosphereUniforms } from './atmosphere-uniforms.js';
 
-// Hillaire's isotropic higher-order closure: sphere-mean incident radiance
-// divided by one minus the mean scattering return probability. This is an
-// approximation to higher orders, not an observer-dependent ambient floor.
-export function createMultipleScatteringLut(renderer, uniforms, { directions = 128, steps = 48 } = {}) {
-  const target = new THREE.WebGLRenderTarget(32, 32, {
-    type: THREE.HalfFloatType, depthBuffer: false,
-    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
-  });
-  target.texture.name = 'atmosphere.multiple-scattering';
+const FIXED_BAKE_UNIFORMS = new Set([
+  'uEnabled', 'uMultipleEnabled', 'uMultipleDirections', 'uMultipleSteps',
+  'uLocalOccluderCount', 'uEclipseEnabled', 'uRadianceScale',
+  'uSunDirection0', 'uSunEnergy0', 'uSunColor0', 'uSunEnergy1',
+]);
+
+const rendererBakeCache = new WeakMap();
+
+function getBakeEntry(renderer, directions, steps) {
+  let cache = rendererBakeCache.get(renderer);
+  if (!cache) {
+    const map = new Map();
+    const onLost = () => {
+      for (const item of map.values()) {
+        item.material.dispose();
+        item.quad.dispose();
+      }
+      map.clear();
+    };
+    renderer?.domElement?.addEventListener?.('webglcontextlost', onLost);
+    cache = { map };
+    if (renderer && typeof renderer === 'object') rendererBakeCache.set(renderer, cache);
+  }
+  const key = `${directions}:${steps}`;
+  let entry = cache.map.get(key);
+  if (entry) return entry;
+  const baseUniforms = atmosphereUniforms();
   const material = new THREE.ShaderMaterial({
+    name: 'Atmosphere multiple-scattering LUT',
     depthTest: false, depthWrite: false, blending: THREE.NoBlending,
     defines: { STELLAR_UNION_OCCLUSION: 0 },
-    uniforms: { ...uniforms,
+    uniforms: { ...baseUniforms,
       uEnabled: { value: 1 }, uMultipleEnabled: { value: 0 },
       uMultipleDirections: { value: directions },
       uMultipleSteps: { value: steps },
@@ -73,19 +93,64 @@ export function createMultipleScatteringLut(renderer, uniforms, { directions = 1
         gl_FragColor=vec4(meanL/max(vec3(0.001),vec3(1)-meanReturn),1);
       }`,
   });
-  const quad = new FullScreenQuad(material), previous = renderer.getRenderTarget();
+  const quad = new FullScreenQuad(material);
+  entry = { material, quad };
+  cache.map.set(key, entry);
+  return entry;
+}
+
+export function prewarmMultipleScatteringLut(renderer, { directions = 128, steps = 48, signal } = {}) {
+  const { quad } = getBakeEntry(renderer, directions, steps);
+  const target = new THREE.WebGLRenderTarget(1, 1, {
+    type: THREE.HalfFloatType, depthBuffer: false,
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  });
+  const previous = renderer.getRenderTarget();
   const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
-  // FullScreenQuad normally shares one geometry with every post pass. A
-  // transient LUT bake must not dispose that shared geometry after each bake.
-  quad._mesh.geometry = quad._mesh.geometry.clone();
+  let pending;
+  try {
+    renderer.setRenderTarget(target);
+    pending = quad.prepare(renderer, { signal });
+  } finally {
+    renderer.setRenderTarget(previous, face, mip);
+    target.dispose();
+  }
+  return pending;
+}
+
+// Hillaire's isotropic higher-order closure: sphere-mean incident radiance
+// divided by one minus the mean scattering return probability. This is an
+// approximation to higher orders, not an observer-dependent ambient floor.
+export function createMultipleScatteringLut(renderer, uniforms, { directions = 128, steps = 48 } = {}) {
+  const target = new THREE.WebGLRenderTarget(32, 32, {
+    type: THREE.HalfFloatType, depthBuffer: false,
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  });
+  target.texture.name = 'atmosphere.multiple-scattering';
+  const { material, quad } = getBakeEntry(renderer, directions, steps);
+  const dst = material.uniforms;
+  for (const [name, src] of Object.entries(uniforms || {})) {
+    if (FIXED_BAKE_UNIFORMS.has(name) || !(name in dst)) continue;
+    const cur = dst[name].value, val = src?.value;
+    if (cur?.copy && val && typeof cur.copy === 'function' && cur.constructor === val.constructor) {
+      cur.copy(val);
+    } else {
+      dst[name].value = val;
+    }
+  }
+  dst.uMultipleDirections.value = directions;
+  dst.uMultipleSteps.value = steps;
+  const previous = renderer.getRenderTarget();
+  const face = renderer.getActiveCubeFace(), mip = renderer.getActiveMipmapLevel();
   const scissor = renderer.getScissorTest();
   try {
     renderer.setScissorTest(false); renderer.setRenderTarget(target); quad.render(renderer);
   } catch (error) {
     target.dispose(); throw error;
   } finally {
+    dst.tOpticalDepth.value = null;
+    dst.tMultipleScattering.value = null;
     renderer.setRenderTarget(previous, face, mip); renderer.setScissorTest(scissor);
-    material.dispose(); quad.dispose();
   }
   return target;
 }

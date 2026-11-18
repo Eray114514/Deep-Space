@@ -24,6 +24,10 @@ function captured(work) {
 function worldFixture({ busy = false, ready = true, shipPending = false, bootstrapReady = false, fault = null } = {}) {
   const events = [], context = {
     renderer: { info: { reset() { events.push('reset'); } } },
+    camera: {}, warpConduit: { renderLowFog(renderer, camera) {
+      events.push('fog');assert.equal(renderer, context.renderer);assert.equal(camera, context.camera);
+      if (fault === 'fog') throw null;
+    } },
     surfaceWeapons: { prepareLighting() { events.push('lighting');if (fault === 'lighting') throw null; },
       renderScopeView() { events.push('scope');if (fault === 'scope') throw null; } },
     renderRiftPortal() { events.push('portal');if (fault === 'portal') throw null; },
@@ -55,7 +59,7 @@ test(() => {
 });
 test(() => {
   const f = worldFixture();assert.equal(f.run(), true);
-  assert.deepEqual(f.events, ['admitted', 'reset', 'lighting', 'portal', 'scope', 'bootstrap', 'resize', 'graph', 'fence']);
+  assert.deepEqual(f.events, ['admitted', 'reset', 'lighting', 'portal', 'scope', 'bootstrap', 'resize', 'fog', 'graph', 'fence']);
   assert.equal(f.context.gradePass_.uniforms.uTime.value, 12);
   f.context.ship.foregroundOnly = false;assert.equal(f.run(), true);
 });
@@ -67,7 +71,7 @@ for (const options of [{ ready: false }, { shipPending: true }]) test(() => {
   const f = worldFixture(options);assert.equal(f.run(), false);
   assert.equal(f.events.includes('graph'), false);assert.equal(f.events.at(-1), 'fence');
 });
-for (const fault of ['lighting', 'portal', 'scope']) test(() => {
+for (const fault of ['lighting', 'portal', 'scope', 'fog']) test(() => {
   const f = worldFixture({ fault });assert.equal(captured(f.run), null);assert.equal(f.events.includes('graph'), false);
 });
 

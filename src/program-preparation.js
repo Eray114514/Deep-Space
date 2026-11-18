@@ -25,6 +25,24 @@ export function compilePrograms(renderer, source, camera, targetScene = null, {
   if (renderer.getContext().isContextLost()) return Promise.reject(error('context-lost', 'Shader preparation context lost'));
   signal?.addEventListener('abort', onAbort);
   canvas.addEventListener('webglcontextlost', onLost);
+  // renderer.compile() overwrites materialProperties.currentProgram with the
+  // newly created variant while ANGLE compiles it in the background. For
+  // ShaderMaterials with lights:false, setProgram() skips light-version checks
+  // when material.version === materialProperties.__version and would bind that
+  // unfinished variant on the next live frame. Marking pre-existing entries
+  // with __version = -1 forces the next live draw to re-key against the live
+  // scene and pick its already-warm cached program.
+  const hadActiveProgram = new Set();
+  if (typeof source?.traverse === 'function' && typeof registry?.has === 'function') {
+    source.traverse(object => {
+      if (!object?.material) return;
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+        if (material && registry.has(material) && registry.get(material)?.currentProgram) {
+          hadActiveProgram.add(material);
+        }
+      }
+    });
+  }
   try {
     for (const material of renderer.compile(source, camera, targetScene)) {
       material.addEventListener('dispose', onDispose);
@@ -33,6 +51,7 @@ export function compilePrograms(renderer, source, camera, targetScene = null, {
       for (const program of properties.programs?.values() || []) programs.add(program);
       if (properties.currentProgram) programs.add(properties.currentProgram);
       if (!properties.currentProgram) throw error('program-missing', 'Shader preparation produced no current program');
+      if (hadActiveProgram.has(material) && '__version' in properties) properties.__version = -1;
     }
   } catch (cause) {
     cleanup();throw cause;
@@ -74,7 +93,11 @@ export function compilePrograms(renderer, source, camera, targetScene = null, {
           if (typeof ready !== 'boolean') {
             finish(error('program-query-failed', 'Shader preparation readiness query failed'));return;
           }
-          if (ready) programs.delete(program);
+          if (ready) {
+            program.getUniforms?.();
+            program.getAttributes?.();
+            programs.delete(program);
+          }
         }
         if (!programs.size) { finish();return; }
         timer = setTimeout(check, Math.min(10, remaining));

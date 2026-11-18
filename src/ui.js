@@ -532,7 +532,16 @@ export class UI {
     }
   }
 
+  setWarpPreparing(preparing) {
+    const button = this.els.routeWarp;
+    const label = button.querySelector('.route-card-index');
+    if (!label) return;
+    label.textContent = preparing ? '正在同步目的地…' : '01 // AUTO TRANSIT';
+    button.setAttribute('aria-busy', String(preparing));
+  }
+
   showRouteChoice(show, name = '') {
+    this.setWarpPreparing(false);
     this.els.routeChoice.classList.toggle('hidden', !show);
     document.body.classList.toggle('route-choice-active', show);
     if (show) {

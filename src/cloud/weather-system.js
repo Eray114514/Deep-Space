@@ -451,14 +451,17 @@ function evaluateField(system, directionValue, hours, full) {
   if (!full) return { obstruction };
 
   // -- Thermodynamics -------------------------------------------------------
-  const sunDirection = rotateY(system.sunDirection,
-    hours * TAU / system.rotationPeriodHours);
-  const lights=system.lightDirectionsAt?.(hours);
-  const cosSun = Array.isArray(lights)
-    ? Math.max(-1,...lights.filter(light=>light.irradianceFraction>0).map(light=>
-      dot(direction,{x:light.direction[0],y:light.direction[1],z:light.direction[2]})))
-    : dot(direction, sunDirection);
-  const nightSide = smoothstep(0.1, -0.14, cosSun);
+  let cosSun = 0;
+  if (full !== 'atlas' || system.diurnalRangeK !== 0) {
+    const sunDirection = rotateY(system.sunDirection,
+      hours * TAU / system.rotationPeriodHours);
+    const lights = system.lightDirectionsAt?.(hours);
+    cosSun = Array.isArray(lights)
+      ? Math.max(-1, ...lights.filter(light => light.irradianceFraction > 0).map(light =>
+        dot(direction, { x: light.direction[0], y: light.direction[1], z: light.direction[2] })))
+      : dot(direction, sunDirection);
+  }
+  const nightSide = full === 'atlas' ? 0 : smoothstep(0.1, -0.14, cosSun);
 
   const temperatureK = system.baseTemperatureK
     - absLatitude * absLatitude * system.polarCoolingK
@@ -513,6 +516,10 @@ function evaluateField(system, directionValue, hours, full) {
   const lclMeters = liftingCondensationLevel({
     temperatureK, dewpointK, orographicLift, stability,
   });
+
+  if (full === 'atlas') {
+    return { lowPotential, highPotential, convective, stability, humidity, lclMeters };
+  }
 
   const sample = {
     kind: 'weather-sample',
@@ -630,11 +637,28 @@ function windowLogAffinity(value, window) {
   return -3 * distance / margin;
 }
 
-function fallbackSpeciesLogScore(species, weather) {
-  if (species.id === 'anvil') return -Infinity;
+const SPECIES_COMPILED = CLOUD_SPECIES.map((species, idx) => ({
+  species,
+  id: species.id,
+  family: species.family,
+  idx,
+  triggerEntries: Object.entries(species.triggers),
+}));
+const CUMULONIMBUS_IDX = SPECIES_COMPILED.findIndex((s) => s.id === 'cumulonimbus');
+const ANVIL_IDX = SPECIES_COMPILED.findIndex((s) => s.id === 'anvil');
+const SPECIES_FAMILIES = ['low', 'mid', 'high'].map((family) => ({
+  family,
+  members: SPECIES_COMPILED.filter((s) => s.family === family),
+}));
+const SPECIAL_SPECIES = SPECIES_COMPILED.filter((s) => s.family === 'special');
+
+function fallbackSpeciesLogScoreCompiled(compiled, weather) {
+  if (compiled.id === 'anvil') return -Infinity;
   let score = 0;
-  for (const [key, window] of Object.entries(species.triggers)) {
-    score += windowLogAffinity(finite(weather[key], 0), window);
+  const entries = compiled.triggerEntries;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    score += windowLogAffinity(finite(weather[entry[0]], 0), entry[1]);
   }
   return score;
 }
@@ -648,21 +672,25 @@ function fallbackSpeciesLogScore(species, weather) {
 // is what the density function consumes.
 export function speciesWeights(weather) {
   if (!weather) throw new TypeError('speciesWeights() needs a weather sample');
-  const raw = new Map();
-  for (const species of CLOUD_SPECIES) {
+  const rawScores = new Float64Array(SPECIES_COMPILED.length);
+  for (let i = 0; i < SPECIES_COMPILED.length; i++) {
+    const entries = SPECIES_COMPILED[i].triggerEntries;
     let score = 1;
-    for (const [key, window] of Object.entries(species.triggers)) {
-      const value = finite(weather[key], 0);
-      score *= windowScore(value, window);
+    for (let j = 0; j < entries.length; j++) {
+      const entry = entries[j];
+      const value = finite(weather[entry[0]], 0);
+      score *= windowScore(value, entry[1]);
       if (score <= 0) break;
     }
-    raw.set(species.id, score);
+    rawScores[i] = score;
   }
 
   // An anvil only exists downwind of a tower that reached the tropopause.
   // Without this gate the high family would grow ice sheets over calm air.
-  const parentScore = raw.get('cumulonimbus') || 0;
-  raw.set('anvil', (raw.get('anvil') || 0) * clamp(parentScore * 2.5));
+  if (ANVIL_IDX >= 0) {
+    const parentScore = CUMULONIMBUS_IDX >= 0 ? rawScores[CUMULONIMBUS_IDX] : 0;
+    rawScores[ANVIL_IDX] *= clamp(parentScore * 2.5);
+  }
 
   const familyAmounts = {
     low: clamp(finite(weather.lowMask, 0)),
@@ -671,33 +699,40 @@ export function speciesWeights(weather) {
   };
 
   const weights = {};
-  for (const family of ['low', 'mid', 'high']) {
-    const members = CLOUD_SPECIES.filter((s) => s.family === family);
-    let scores = members.map((species) => raw.get(species.id) || 0);
-    let total = scores.reduce((sum, score) => sum + score, 0);
-    if (total <= 1e-6) {
-      const logScores = members.map((species) =>
-        fallbackSpeciesLogScore(species, weather));
-      const bestLog = Math.max(...logScores);
-      scores = logScores.map((score) => Math.exp(score - bestLog));
-      total = scores.reduce((sum, score) => sum + score, 0);
+  for (let f = 0; f < SPECIES_FAMILIES.length; f++) {
+    const { family, members } = SPECIES_FAMILIES[f];
+    const len = members.length;
+    const scores = new Float64Array(len);
+    let total = 0;
+    for (let i = 0; i < len; i++) {
+      const s = rawScores[members[i].idx];
+      scores[i] = s;
+      total += s;
     }
-    // The calibrated synoptic mask owns covered AREA. Formation triggers only
-    // partition that amount among genera; applying a second "best fit" amount
-    // here silently erased fully covered columns when all strict windows missed.
+    if (total <= 1e-6) {
+      let bestLog = -Infinity;
+      for (let i = 0; i < len; i++) {
+        const ls = fallbackSpeciesLogScoreCompiled(members[i], weather);
+        scores[i] = ls;
+        if (ls > bestLog) bestLog = ls;
+      }
+      total = 0;
+      for (let i = 0; i < len; i++) {
+        const es = Math.exp(scores[i] - bestLog);
+        scores[i] = es;
+        total += es;
+      }
+    }
     const amount = familyAmounts[family];
     familyAmounts[family] = amount;
-    for (let index = 0; index < members.length; index++) {
-      const species = members[index];
-      weights[species.id] = total > 1e-6
+    for (let index = 0; index < len; index++) {
+      weights[members[index].id] = total > 1e-6
         ? amount * (scores[index] / total) : 0;
     }
   }
-  // Special species are absolute, not a share of a deck: fog is a surface
-  // phenomenon and noctilucent cloud lives above the troposphere entirely.
-  for (const species of CLOUD_SPECIES) {
-    if (species.family !== 'special') continue;
-    weights[species.id] = raw.get(species.id) || 0;
+  for (let i = 0; i < SPECIAL_SPECIES.length; i++) {
+    const sp = SPECIAL_SPECIES[i];
+    weights[sp.id] = rawScores[sp.idx] || 0;
   }
   return { weights, familyAmounts };
 }
@@ -711,6 +746,13 @@ export function sampleWeather(system, direction, timeHours = 0) {
     throw new TypeError('sampleWeather() expects a system from createWeatherSystem()');
   }
   return evaluateField(system, direction, finite(timeHours, 0), true);
+}
+
+export function sampleWeatherAtlasChannels(system, direction, timeHours = 0) {
+  if (system?.kind !== 'weather-system') {
+    throw new TypeError('sampleWeatherAtlasChannels() expects a system from createWeatherSystem()');
+  }
+  return evaluateField(system, direction, finite(timeHours, 0), 'atlas');
 }
 
 // Equal-area sampling directions. The Fibonacci lattice gives near-uniform

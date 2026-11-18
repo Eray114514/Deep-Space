@@ -9,6 +9,7 @@ import { ForegroundPass } from './foreground-pass.js';
 import { VolumetricPass, lightBatchNoLongerPrepared } from './volumetric-pass-webgl.js';
 import { LiteCloudPass } from './cloud/lite-cloud-pass.js';
 import { AtmospherePass } from './atmosphere-pass-webgl.js';
+import { prewarmMultipleScatteringLut } from './atmosphere-multiple-scattering.js';
 import { TransitShader } from './transit-shader.js';
 import { PortalCompositePass } from './portal/portal-composite-pass.js';
 import { BlackHolePass } from './black-hole-pass.js';
@@ -576,35 +577,82 @@ export class GameLegacyPipeline {
         this.atmospherePass.prepareTransport(this.renderer);
       }
       const group = new THREE.Group();
+      const displayGroup = new THREE.Group();
+      const cloudMrtGroup = new THREE.Group();
       const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-      const seen = new Set();
-      const addQuad = (quad) => {
+      const addQuadTo = (targetGroup, seen, quad) => {
         const mesh = quad?._mesh || (quad?.isMesh ? quad : null);
         if (!mesh?.geometry || !mesh.material || seen.has(mesh.material)) return;
         seen.add(mesh.material);
         const wrapper = new THREE.Mesh(mesh.geometry, mesh.material);
         wrapper.frustumCulled = false;
-        group.add(wrapper);
+        targetGroup.add(wrapper);
       };
-      addQuad(this.atmospherePass?.quad);
+      const seenHdr = new Set(), seenDisplay = new Set(), seenMrt = new Set();
+      addQuadTo(group, seenHdr, this.atmospherePass?.quad);
       if (this.cloudPass) {
+        if (!this.cloudPass.targetTypeChosen) {
+          this.cloudPass.targetTypeChosen = true;
+          if (this.renderer.extensions?.has?.('EXT_color_buffer_float')) {
+            this.cloudPass.target.textures[1].type = THREE.FloatType;
+            this.cloudPass.target.dispose();
+          }
+        }
+        addQuadTo(cloudMrtGroup, seenMrt, this.cloudPass.marchQuad);
         for (const value of Object.values(this.cloudPass)) {
-          if (value && typeof value === 'object' && ('_mesh' in value || value.isMesh)) addQuad(value);
+          if (value === this.cloudPass.marchQuad) continue;
+          if (value && typeof value === 'object' && ('_mesh' in value || value.isMesh)) {
+            addQuadTo(group, seenHdr, value);
+          }
         }
       }
-      addQuad(this.grade?.fsQuad);
-      addQuad(this.warp?.fsQuad);
-      addQuad(this.blackHolePass?.quad);
-      addQuad(this.portalComposite?.quad);
-      if (!group.children.length) return Promise.resolve(group);
+      const gradeQuad = this.grade?._fsQuad || this.grade?.fsQuad;
+      const warpQuad = this.warp?._fsQuad || this.warp?.fsQuad;
+      const outputQuad = this.outputPass?._fsQuad || this.outputPass?.fsQuad;
+      const smaaQuad = this.smaa?._fsQuad || this.smaa?.fsQuad;
+      addQuadTo(group, seenHdr, gradeQuad);
+      addQuadTo(group, seenHdr, warpQuad);
+      addQuadTo(group, seenHdr, outputQuad);
+      addQuadTo(group, seenHdr, this.blackHolePass?.quad);
+      addQuadTo(group, seenHdr, this.portalComposite?.quad);
+      if (this.smaa) {
+        const smaaEdges = this.smaa._materialEdges || this.smaa.materialEdges;
+        const smaaWeights = this.smaa._materialWeights || this.smaa.materialWeights;
+        const smaaBlend = this.smaa._materialBlend || this.smaa.materialBlend;
+        for (const mat of [smaaEdges, smaaWeights, smaaBlend]) {
+          if (mat && smaaQuad?._mesh?.geometry) {
+            addQuadTo(group, seenHdr, { _mesh: { geometry: smaaQuad._mesh.geometry, material: mat } });
+          }
+        }
+        if (smaaBlend && smaaQuad?._mesh?.geometry) {
+          addQuadTo(displayGroup, seenDisplay, { _mesh: { geometry: smaaQuad._mesh.geometry, material: smaaBlend } });
+        }
+      }
+      addQuadTo(displayGroup, seenDisplay, gradeQuad);
+      addQuadTo(displayGroup, seenDisplay, outputQuad);
       const saved = this.renderer.getRenderTarget();
       const face = this.renderer.getActiveCubeFace(), mip = this.renderer.getActiveMipmapLevel();
+      const jobs = [];
       try {
-        this.renderer.setRenderTarget(this.composer.writeBuffer);
-        return compilePrograms(this.renderer, group, ortho, null, { signal });
+        if (group.children.length) {
+          this.renderer.setRenderTarget(this.composer.writeBuffer);
+          jobs.push(compilePrograms(this.renderer, group, ortho, null, { signal }));
+        }
+        if (cloudMrtGroup.children.length && this.cloudPass?.target) {
+          this.renderer.setRenderTarget(this.cloudPass.target);
+          jobs.push(compilePrograms(this.renderer, cloudMrtGroup, ortho, null, { signal }));
+        }
+        if (displayGroup.children.length) {
+          this.renderer.setRenderTarget(null);
+          jobs.push(compilePrograms(this.renderer, displayGroup, ortho, null, { signal }));
+        }
+        jobs.push(prewarmMultipleScatteringLut(this.renderer, { signal }));
+        return Promise.all(jobs).then(() => group);
       } finally {
         this.renderer.setRenderTarget(saved, face, mip);
         group.clear();
+        displayGroup.clear();
+        cloudMrtGroup.clear();
       }
     }, { signal, label: 'startup-post-passes', isCurrent });
   }

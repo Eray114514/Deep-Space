@@ -1078,7 +1078,7 @@ body.walking #app, body.walking #app * { cursor: none !important; }
 
 /* Fold navigation unfolds above the line of flight while the far view warms. */
 #fold-nav {
-  position: absolute; z-index: 20; top: clamp(32px, 7vh, 88px); left: 50%;
+  position: absolute; z-index: 20; top: clamp(7px, 2vh, 32px); left: 50%;
   transform: translateX(-50%); width: min(410px, 82vw); text-align: center;
   color: #bdebf4; font: 11px/1.35 ui-monospace, monospace; pointer-events: none;
   filter: drop-shadow(0 1px 3px #08141b);
@@ -1103,6 +1103,11 @@ body.walking #app, body.walking #app * { cursor: none !important; }
 #fold-abort kbd { color: #93dbe9; }
 #fold-nav[data-phase="open"] .fold-traces { opacity: 0; transition: opacity .32s; }
 #fold-nav[data-phase="open"] #fold-state { color: #d3f9ed; }
+@media (max-height: 620px) {
+  #fold-nav { top: 5px; }
+  .fold-instrument { min-height: 44px; }
+  #fold-abort { padding-block: 3px; }
+}
 @keyframes fold-ignition { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes fold-unfurl { from { clip-path: inset(0 49%); } to { clip-path: inset(0); } }
 @keyframes fold-scan { to { stroke-dashoffset: -96; } }
