@@ -1,11 +1,11 @@
-// HALCYON survey units & Outpost robot patrols / combat AI (ported from Saltline).
+// HALCYON survey units & Outpost robot patrols / combat AI.
 //
-// `robots-engine.js` contains Saltline's articulated "hound" quadruped and
-// "gull" quad-duct drone rigs together with their full state-machine AI
-// (vision cone, acoustic alert radius, patrol -> investigate -> engage -> search,
-// attack token quota, weakpoint hitboxes, plasma bolts, and crash wrecks).
+// `robots-engine.js` contains the articulated "hound" quadruped and "gull"
+// quad-duct drone rigs together with their full state-machine AI (vision cone,
+// acoustic alert radius, patrol -> investigate -> engage -> search, attack
+// token quota, weakpoint hitboxes, plasma bolts, and crash wrecks).
 //
-// This adapter bridges Saltline's flat-ground Y-up space to any spherical planet:
+// This adapter bridges local flat tangent Y-up space to any spherical planet:
 //  - builds a local tangent basis (E, N, F) at the ship pad or outpost anchor;
 //  - samples `planet.height` (cached) for walkable ground, slope, water, and
 //    ray-marched line-of-sight;
@@ -16,7 +16,7 @@
 
 import * as THREE from 'three';
 import { createRobotFleet, ROBOT_TUNE } from './robots-engine.js';
-import { SOUND_TABLE } from './sfx-generators.js';
+import { SOUND_TABLE } from '../audio/sfx-generators.js';
 
 const NOOP = () => {};
 const MAX_SLOPE_RISE = 0.65;

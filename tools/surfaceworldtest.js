@@ -1,13 +1,13 @@
-// Pure-Node verification suite for Golden Hour world systems ported to Deep Space:
-//   1. src/golden-hour/furniture.js     — 44 procedural furniture/habitation props & materials
-//   2. src/golden-hour/destructibles.js — shattering Voronoi glass panes & Verlet physics props
-//   3. src/golden-hour/k9-and-body.js   — GoldenHourK9, ColonistRig, FirstPersonBody
+// Pure-Node verification suite for surface outpost & world systems:
+//   1. src/surface/furniture.js     — 44 procedural furniture/habitation props & materials
+//   2. src/surface/destructibles.js — shattering Voronoi glass panes & Verlet physics props
+//   3. src/surface/k9-and-body.js   — SurveyK9, ColonistRig, FirstPersonBody
 
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { createGoldenHourMaterials, createGoldenHourFurniture } from '../src/golden-hour/furniture.js';
-import { OutpostDestructibles } from '../src/golden-hour/destructibles.js';
-import { GoldenHourK9, ColonistRig, FirstPersonBody } from '../src/golden-hour/k9-and-body.js';
+import { createHabitatMaterials, createHabitatFurniture } from '../src/surface/furniture.js';
+import { OutpostDestructibles } from '../src/surface/destructibles.js';
+import { SurveyK9, ColonistRig, FirstPersonBody } from '../src/surface/k9-and-body.js';
 
 let failures = 0;
 const test = (name, work) => {
@@ -62,9 +62,9 @@ const slopedGround = (x, z) => Math.sin(x * 0.18) * 0.14 + Math.cos(z * 0.14) * 
 let sharedMaterials = null;
 let sharedFurniture = null;
 
-test('createGoldenHourMaterials builds procedural materials & signage safely in pure Node', () => {
+test('createHabitatMaterials builds procedural materials & signage safely in pure Node', () => {
   assert.equal(typeof document, 'undefined', 'test runs in pure Node without DOM');
-  sharedMaterials = createGoldenHourMaterials({ anisotropy: 4, detail: true });
+  sharedMaterials = createHabitatMaterials({ anisotropy: 4, detail: true });
   assert.ok(sharedMaterials.names.length >= 45, `expected >=45 materials, got ${sharedMaterials.names.length}`);
   for (const key of ['marbleFloor', 'walnut', 'brass', 'velvetTeal', 'leatherTan', 'onyx', 'steel']) {
     assert.ok(sharedMaterials[key]?.isMaterial, `missing material ${key}`);
@@ -73,8 +73,8 @@ test('createGoldenHourMaterials builds procedural materials & signage safely in 
   assert.ok(sign.isMesh && sign.material.map?.isTexture, 'makeSign returns textured Mesh');
 });
 
-test('createGoldenHourFurniture builds all 44 procedural items with >0 tris, valid bounds, and non-NaN geometry', () => {
-  sharedFurniture = createGoldenHourFurniture({ materials: sharedMaterials, anisotropy: 4 });
+test('createHabitatFurniture builds all 44 procedural items with >0 tris, valid bounds, and non-NaN geometry', () => {
+  sharedFurniture = createHabitatFurniture({ materials: sharedMaterials, anisotropy: 4 });
   for (const req of REQUIRED_PROPS) {
     assert.ok(sharedFurniture.names.includes(req), `missing expected furniture item "${req}"`);
   }
@@ -239,11 +239,11 @@ test('OutpostDestructibles raycasts, cracks & shatters glass into tumbling shard
 });
 
 // -----------------------------------------------------------------------------
-// 3. GoldenHourK9, ColonistRig & FirstPersonBody
+// 3. SurveyK9, ColonistRig & FirstPersonBody
 // -----------------------------------------------------------------------------
 
-test('GoldenHourK9 instantiates halcyon & rogue variants, raycasts head weakpoint, barks, walks/trots/gallops over 60 steps without NaN', () => {
-  const k9 = new GoldenHourK9({
+test('SurveyK9 instantiates halcyon & rogue variants, raycasts head weakpoint, barks, walks/trots/gallops over 60 steps without NaN', () => {
+  const k9 = new SurveyK9({
     variant: 'halcyon',
     position: [0, 0, 0],
     yaw: 0,
@@ -251,7 +251,7 @@ test('GoldenHourK9 instantiates halcyon & rogue variants, raycasts head weakpoin
     groundHeight: slopedGround,
     seed: 7,
   });
-  const rogue = new GoldenHourK9({
+  const rogue = new SurveyK9({
     variant: 'rogue',
     position: [4, 0, 2],
     yaw: Math.PI * 0.5,
@@ -295,8 +295,8 @@ test('GoldenHourK9 instantiates halcyon & rogue variants, raycasts head weakpoin
     seenGaits.has('walk') || seenGaits.has('trot') || seenGaits.has('gallop'),
     `expected K9 locomotion gait, saw: ${[...seenGaits].join(', ')}`
   );
-  assertFiniteObject3D(k9.root, 'GoldenHourK9.halcyon');
-  assertFiniteObject3D(rogue.root, 'GoldenHourK9.rogue');
+  assertFiniteObject3D(k9.root, 'SurveyK9.halcyon');
+  assertFiniteObject3D(rogue.root, 'SurveyK9.rogue');
 
   // Damage & death animation
   const dmg1 = k9.damage(60, { hitDir: [0, 0, 1] });
@@ -306,7 +306,7 @@ test('GoldenHourK9 instantiates halcyon & rogue variants, raycasts head weakpoin
   assert.equal(dmg2.alive, false);
   assert.equal(dmg2.killed, true);
   for (let i = 0; i < 20; i++) k9.update(1 / 60);
-  assertFiniteObject3D(k9.root, 'GoldenHourK9.dead');
+  assertFiniteObject3D(k9.root, 'SurveyK9.dead');
 
   k9.dispose();
   rogue.dispose();
@@ -424,5 +424,5 @@ if (failures > 0) {
   console.error(`\n${failures} test(s) failed.`);
   process.exit(1);
 } else {
-  console.log('\nPASS: all Golden Hour world tests passed.');
+  console.log('\nPASS: all surface world tests passed.');
 }

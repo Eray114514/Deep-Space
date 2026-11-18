@@ -1,5 +1,4 @@
-// Ground rain-wetness and expanding concentric rain-drop ripple shader patch,
-// ported from Saltline (`TR / AR / RR` in statement #637, see docs/saltline-reuse.md).
+// Ground rain-wetness and expanding concentric rain-drop ripple shader patch.
 //
 // Zero RNG mutation: all puddle masks and rain-ring ripples are pure analytical
 // hashes evaluated in local/tangent coordinates. Works on both standard +Y-up
@@ -41,7 +40,7 @@ float rainValueNoise(vec2 p) {
   );
 }
 
-// One sparse layer of rain rings (ported from Saltline): every cell gets a new
+// One sparse layer of rain rings: every cell gets a new
 // drop (position, size, strength) each cycle, with a thin soft crest that
 // fades as it expands. Returns a tangent-plane (x, y) slope contribution.
 vec2 rainRippleLayer(vec2 p, float t, float cell, float seed, float rainAmount) {

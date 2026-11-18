@@ -1,10 +1,10 @@
-// Saltline industrial prop & port megastructure library for Deep Space.
+// Industrial outpost prop & spaceport megastructure library.
 //
-// Wraps the 36 procedural harbor/outpost props (`$g`) plus 5 standalone port
-// megastructures (`Eb`: `port_crane`, `rtg_crane`, `cargo_ship`, `rigid_boat`,
-// `comms_tower`). Works both with a live GPU-baked `createSaltlineMaterials`
-// instance in WebGL2 and in pure Node (`materials = null`), with support for
-// `'industrial'`, `'frontier'`, and `'halcyon'` color palettes.
+// Wraps 36 procedural industrial/outpost props plus 5 standalone megastructures
+// (`port_crane`, `rtg_crane`, `cargo_ship`, `rigid_boat`, `comms_tower`).
+// Works both with a live GPU-baked `createSurfaceMaterials` instance in WebGL2
+// and in pure Node (`materials = null`), with `'industrial'`, `'frontier'`,
+// and `'halcyon'` color palettes.
 
 import * as THREE from 'three';
 import {
@@ -13,7 +13,7 @@ import {
   disposePropEngineCaches,
 } from './props-engine.js';
 
-export const SALTLINE_PROP_SIZES = Object.freeze(
+export const OUTPOST_PROP_SIZES = Object.freeze(
   Object.fromEntries(
     Object.entries(ENGINE_PROP_SIZES).map(([name, spec]) => [name, Object.freeze([...spec])]),
   ),
@@ -21,7 +21,7 @@ export const SALTLINE_PROP_SIZES = Object.freeze(
 
 const VALID_SURFACES = new Set(['metal', 'concrete', 'wood', 'rubber', 'dirt']);
 
-// Physically-plausible base PBR recipes matching Saltline's `MATERIALS` table
+// Physically-plausible base PBR recipes matching the procedural material table
 // when `materials = null` (pure Node tests or unbaked fallback).
 const FALLBACK_MATERIALS = {
   asphalt: { color: 0x2a2b2d, roughness: 0.88, metalness: 0.0 },
@@ -74,7 +74,7 @@ const FALLBACK_MATERIALS = {
 };
 
 // Palette color overrides applied to painted/polymer/hull materials.
-export const SALTLINE_PROP_PALETTES = Object.freeze({
+export const OUTPOST_PROP_PALETTES = Object.freeze({
   industrial: Object.freeze({}),
   frontier: Object.freeze({
     paint_red: 0x9e4724,
@@ -137,7 +137,7 @@ const LABEL_COLORS = {
 };
 
 function createPaletteMaterialAdapter(liveMaterials, paletteName, ownedMaterials) {
-  const paletteOverrides = SALTLINE_PROP_PALETTES[paletteName] || SALTLINE_PROP_PALETTES.industrial;
+  const paletteOverrides = OUTPOST_PROP_PALETTES[paletteName] || OUTPOST_PROP_PALETTES.industrial;
   const localCache = new Map();
   const decalCache = new Map();
   const hasDomCanvas = typeof document !== 'undefined' && typeof document.createElement === 'function';
@@ -258,15 +258,15 @@ function createPaletteMaterialAdapter(liveMaterials, paletteName, ownedMaterials
   return { get, emissive, decal, label, number };
 }
 
-export function createSaltlineProps({ materials = null, palette = 'industrial' } = {}) {
-  const defaultPalette = SALTLINE_PROP_PALETTES[palette] ? palette : 'industrial';
-  const names = Object.freeze(Object.keys(SALTLINE_PROP_SIZES).sort());
+export function createOutpostProps({ materials = null, palette = 'industrial' } = {}) {
+  const defaultPalette = OUTPOST_PROP_PALETTES[palette] ? palette : 'industrial';
+  const names = Object.freeze(Object.keys(OUTPOST_PROP_SIZES).sort());
   const ownedMaterials = new Set();
   const createdGeometries = new Set();
   const enginesByPalette = new Map();
 
   function getEngineForPalette(paletteName) {
-    const key = SALTLINE_PROP_PALETTES[paletteName] ? paletteName : defaultPalette;
+    const key = OUTPOST_PROP_PALETTES[paletteName] ? paletteName : defaultPalette;
     let entry = enginesByPalette.get(key);
     if (!entry) {
       const mats = createPaletteMaterialAdapter(materials, key, ownedMaterials);
@@ -286,10 +286,10 @@ export function createSaltlineProps({ materials = null, palette = 'industrial' }
     } = options || {};
 
     const activePalette = requestedPalette
-      ? (SALTLINE_PROP_PALETTES[requestedPalette] ? requestedPalette : defaultPalette)
+      ? (OUTPOST_PROP_PALETTES[requestedPalette] ? requestedPalette : defaultPalette)
       : defaultPalette;
     const { engine } = getEngineForPalette(activePalette);
-    const spec = SALTLINE_PROP_SIZES[name] || [1, 1, 1, 'concrete', 'concrete'];
+    const spec = OUTPOST_PROP_SIZES[name] || [1, 1, 1, 'concrete', 'concrete'];
     const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
 
     const group = engine.build(name, { ...builderOpts, seed });
@@ -346,8 +346,8 @@ export function createSaltlineProps({ materials = null, palette = 'industrial' }
 
   return {
     names,
-    sizes: SALTLINE_PROP_SIZES,
-    has: (name) => Boolean(SALTLINE_PROP_SIZES[name]),
+    sizes: OUTPOST_PROP_SIZES,
+    has: (name) => Boolean(OUTPOST_PROP_SIZES[name]),
     create,
     dispose,
   };

@@ -1,14 +1,8 @@
-// Saltline's robots: the "hound" quadruped and the "gull" ducted-fan drone —
-// rigid-skinned procedural meshes, procedural gait / hover / gimbal animation,
-// rotor and servo audio loops, and the enemy AI they carry (sight cone,
-// hearing, attack tokens). In 深空 they run in passive mode (patrol only) as
-// the HALCYON's survey units; see src/saltline/robots.js for the adapter that
-// supplies the flat local "physics", player and fx this code expects.
-//
-// Produced by
-//   node tools/saltline/extract.mjs Em --stop sa --rename tools/saltline/maps/robots.json
-// (`async` dropped from the factory: it never awaited). Kept as generated.
-// See docs/saltline-reuse.md.
+// Articulated surface robot rigs: the "hound" quadruped and the "gull"
+// ducted-fan drone — rigid-skinned procedural meshes, procedural gait / hover /
+// gimbal animation, rotor and servo audio loops, and tactical AI (sight cone,
+// hearing, attack tokens). See src/surface/robots.js for the spherical-planet
+// tangent adapter.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 

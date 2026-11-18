@@ -1,8 +1,5 @@
-// Golden Hour articulated K9 robotic quadruped, Colonist humanoid rig, and
-// First-Person lower-body controller (`fpbody`) ported for Deep Space.
-//
-// Extracted from Golden Hour (Ht0, Bt0, TB, Gt0, pU / R7, oC, n7, lB / X7)
-// via tools/saltline/extract.mjs. Pure-Node safe and logarithmic-depth
+// Articulated K9 robotic quadruped, Colonist humanoid rig, and first-person
+// lower-body controller (`fpbody`). Pure-Node safe and logarithmic-depth
 // compatible (all meshes use `MeshStandardMaterial` / `ShaderMaterial` with
 // `#include <logdepthbuf_...>` preserved).
 
@@ -1154,12 +1151,12 @@ varying vec4 vAux;
 varying vec3 vAux2;
 uniform vec4 ghRim;
 uniform vec3 ghFill;
-#ifdef GH_FP
+#ifdef FP_BODY
 uniform vec3 ghFpFill, ghFpRim, ghFpSky, ghFpGnd;
 uniform float ghFpSun;
 #endif
 vec3 ghCharacterFill( vec3 N, vec3 V, vec3 albedo, float ao ) {
-  #ifdef GH_FP
+  #ifdef FP_BODY
     // the player's own body: the first-person rig of the weapon and sleeves (render/vmlight.js: over-the-shoulder key,
     // cool rim, hemisphere, all in camera space) at the levels that rig has this frame, so cloth meets cloth
     float f = saturate( dot( N, vec3( 0.332, 0.730, 0.597 ) ) ), r = saturate( dot( N, vec3( -0.684, 0.456, 0.570 ) ) );
@@ -1182,7 +1179,7 @@ vec3 ghCharacterFill( vec3 N, vec3 V, vec3 albedo, float ao ) {
           normal = normalize( tbn * vec3( ghXY, sqrt( max( 1.0 - dot( ghXY, ghXY ), 0.05 ) ) ) );
         #endif`).replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>
 totalEmissiveRadiance += vColor.rgb * vAux.x;`).replace("#include <aomap_fragment>", `
-        #ifdef GH_FP
+        #ifdef FP_BODY
           reflectedLight.directDiffuse *= ghFpSun; reflectedLight.directSpecular *= ghFpSun;
         #endif
         reflectedLight.indirectDiffuse *= vAux.w;
@@ -1224,7 +1221,7 @@ var Up = { fill: { value: new THREE.Vector3() }, rim: { value: new THREE.Vector3
 function GN(o2, t) {
   if (Gk[o2]) return Gk[o2];
   let e = Xk(o2, t), s = e.clone();
-  return s.userData.rim = e.userData.rim, s.userData.fill = e.userData.fill, s.userData.fp = Up, s.defines = { ...s.defines || {}, GH_FP: 1 }, Gk[o2] = Wk(s);
+  return s.userData.rim = e.userData.rim, s.userData.fill = e.userData.fill, s.userData.fp = Up, s.defines = { ...s.defines || {}, FP_BODY: 1 }, Gk[o2] = Wk(s);
 }
 function WN(o2) {
   let t = o2.clone();
@@ -3664,7 +3661,7 @@ function pU({ team: o2 = 0, ground: t = null, clear: e = null, seed: s = 0 } = {
 
 
 // =============================================================================
-// Public Deep Space Controllers: GoldenHourK9, ColonistRig, FirstPersonBody
+// Public Surface Controllers: SurveyK9, ColonistRig, FirstPersonBody
 // =============================================================================
 
 const _tmpV0 = new THREE.Vector3();
@@ -3722,10 +3719,10 @@ function rayCapsuleIntersect(ro, rd, a, b, radius, maxDist) {
 }
 
 // -----------------------------------------------------------------------------
-// 1. GoldenHourK9 — Articulated quadrupedal K9 robot unit
+// 1. SurveyK9 — Articulated quadrupedal K9 robot unit
 // -----------------------------------------------------------------------------
 
-export class GoldenHourK9 {
+export class SurveyK9 {
   constructor({
     variant = 'halcyon',
     position = [0, 0, 0],
@@ -3749,7 +3746,7 @@ export class GoldenHourK9 {
     });
 
     this.root = this._unit.root;
-    this.root.name = `golden-hour-k9-${this.variant}`;
+    this.root.name = `survey-k9-${this.variant}`;
     this.root.castShadow = true;
     this.root.receiveShadow = true;
 

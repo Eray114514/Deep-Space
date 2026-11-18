@@ -1,24 +1,23 @@
-// Unified surface gameplay coordinator integrating Saltline & Golden Hour ports:
+// Unified surface gameplay coordinator:
 //  - Surface raycast hit model (robots, K9, Voronoi destructible glass, Verlet
 //    physics props, static outpost props, ocean water, and planetary terrain)
-//  - Saltline GPU impact/explosion/decal FX (`fx.js`) with floating-origin shifts
-//  - Frontier Survey & Habitation Outpost (Saltline industrial props + Golden
-//    Hour furnished pavilion + shootable destructible glass & explosive props +
-//    Colonist crew + K9 unit)
+//  - GPU impact/explosion/decal FX (`fx.js`) with floating-origin shifts
+//  - Frontier Survey & Habitation Outpost (industrial props, furnished pavilion,
+//    shootable destructible glass & explosive props, Colonist crew & K9 unit)
 //  - Outpost robot patrols & active Hound/Gull combat encounters (`robots.js`)
 //  - First-person explorer lower body (`FirstPersonBody` from `k9-and-body.js`)
 //  - Throwable Frag Grenades (`KeyQ`) with terrain bounce & blast physics
-//  - Walk-mode tactical HUD (`CombatHud`) & D-03 surface footsteps/wind/sea audio
+//  - Walk-mode tactical HUD (`CombatHud`) & surface footsteps/wind/sea audio
 
 import * as THREE from 'three';
-import { createSaltlineFx } from './fx.js';
-import { createSaltlineProps } from './props.js';
-import { RAIN_WET_UNIFORMS, patchShaderWithRainWetness } from './wet-ground.js';
+import { createSurfaceFx } from './fx.js';
+import { createOutpostProps } from './props.js';
+import { RAIN_WET_UNIFORMS, patchShaderWithRainWetness } from '../weather/wet-ground.js';
 import { SurveyUnits } from './robots.js';
 import { CombatHud } from './combat-hud.js';
-import { createGoldenHourFurniture } from '../golden-hour/furniture.js';
-import { OutpostDestructibles } from '../golden-hour/destructibles.js';
-import { GoldenHourK9, ColonistRig, FirstPersonBody } from '../golden-hour/k9-and-body.js';
+import { createHabitatFurniture } from './furniture.js';
+import { OutpostDestructibles } from './destructibles.js';
+import { SurveyK9, ColonistRig, FirstPersonBody } from './k9-and-body.js';
 
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -61,7 +60,7 @@ export class SurfaceGameplay {
     this.getEnvironment = getEnvironment;
     this.grenadeFactory = grenadeFactory || buildDefaultGrenadeMesh;
 
-    this.fx = createSaltlineFx({ scene, maxParticles: 640, maxDecals: 140 });
+    this.fx = createSurfaceFx({ scene, maxParticles: 640, maxDecals: 140 });
     this.hud = new CombatHud();
 
     // First-person lower body (legs & boots when looking down on foot)
@@ -198,8 +197,8 @@ export class SurfaceGameplay {
   _ensureCampAssets() {
     if (this.campBuilt) return;
     this.campBuilt = true;
-    this._propsLib = createSaltlineProps({ materials: null, palette: 'halcyon' });
-    this._furnLib = createGoldenHourFurniture({ anisotropy: 4 });
+    this._propsLib = createOutpostProps({ materials: null, palette: 'halcyon' });
+    this._furnLib = createHabitatFurniture({ anisotropy: 4 });
     this._campStaticItems = null;
     this._campPhysItems = null;
     this._campYardItems = null;
@@ -274,7 +273,7 @@ export class SurfaceGameplay {
       { rig: exp, homeX: -3.5, homeZ: 6.5, mode: 'patrol', phase: 1.4 },
     ];
 
-    this.k9Companion = new GoldenHourK9({ variant: 'halcyon' });
+    this.k9Companion = new SurveyK9({ variant: 'halcyon' });
     this.campRoot.add(this.k9Companion.root);
   }
 
@@ -364,7 +363,7 @@ export class SurfaceGameplay {
       });
     }
 
-    // Exterior Saltline industrial yard props placed on real planet groundHeight!
+    // Exterior industrial yard props placed on real planet groundHeight!
     const yardSpecs = [
       ['guard_booth', -9.2, 4.8, 0.35, 'halcyon'],
       ['generator', 10.6, -3.5, -0.4, 'industrial'],
@@ -1100,7 +1099,7 @@ export class SurfaceGameplay {
       this.fx.update(dt, camWorld);
     }
 
-    // D-03 Surface wind & ocean surf loops via SaltlineSfx
+    // Surface wind & ocean surf loops via ProceduralSfx
     const audio = this.getAudio();
     if (audio?.ready && audio.sfx) {
       let windGain = 0;

@@ -1,5 +1,5 @@
-// Surface & combat visual effects ported from Saltline (`Cf` in module `Sv`,
-// see docs/saltline-reuse.md).
+// Surface & combat visual effects (GPU particle pools, sparks, smoke,
+// explosions, tracers, debris, and world decals).
 //
 // Adapted for Deep Space:
 //  - WebGL2 logarithmic depth buffer chunks in both instanced particle shaders
@@ -1649,7 +1649,7 @@ function coneSample(axis, spread, rnd, out) {
   return len < 1e-4 ? out.copy(axis) : out.multiplyScalar(1 / len);
 }
 
-export function createSaltlineFx({
+export function createSurfaceFx({
   scene = null,
   maxParticles = 512,
   maxDecals = 120,
@@ -1689,7 +1689,7 @@ export function createSaltlineFx({
   const decals = new DecalRingBuffer(decalCap, rng);
 
   const root = new THREE.Group();
-  root.name = 'saltline-fx';
+  root.name = 'surface-fx';
   root.frustumCulled = false;
   root.add(decals.mesh, debris.mesh, litBatch.mesh, addBatch.mesh);
   if (scene) scene.add(root);

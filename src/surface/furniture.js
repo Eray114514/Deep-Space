@@ -1,7 +1,5 @@
-// Golden Hour procedural material library & interior habitation/furniture library
-// ported for Deep Space (WebGL2 baseline, pure-Node safe via DataTexture fallback).
-//
-// Extracted from Golden Hour (PD, lD) via tools/saltline/extract.mjs.
+// Procedural habitat material library & interior habitation/furniture props
+// (WebGL2 baseline, pure-Node safe via DataTexture fallback).
 
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices, toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -1038,7 +1036,7 @@ function Rj() {
     let b = Math.PI + (g + 1) / 6 * Math.PI;
     s.beginPath(), s.moveTo(d(88) + Math.cos(b) * d(27), d(84) + Math.sin(b) * d(27)), s.lineTo(d(88) + Math.cos(b) * d(35), d(84) + Math.sin(b) * d(35)), s.stroke();
   }
-  s.fillStyle = "#e9c98a", s.font = `500 ${d(20)}px ${u}`, s.fillText("W E L C O M E   T O", d(64), d(156)), s.fillStyle = "#ffffff", s.font = `300 ${d(84)}px ${u}`, s.fillText("SOLSTICE", d(58), d(240)), s.fillStyle = "#e9c98a", s.font = `400 ${d(24)}px ${u}`, s.fillText("H O T E L   &   S K Y   L O U N G E", d(64), d(280)), s.fillStyle = "rgba(233,201,138,0.7)", s.fillRect(d(64), d(304), d(300), Math.max(1, d(1.5))), s.fillStyle = "rgba(255,255,255,0.9)", s.font = `400 ${d(23)}px ${u}`, s.fillText("Suite 4701  \xB7  Level 47", d(64), d(346)), s.fillStyle = "rgba(255,255,255,0.62)", s.font = `400 ${d(18)}px ${u}`, s.fillText("Sunset 19:58   \xB7   24\xB0 Clear   \xB7   Pool terrace open until 23:00", d(64), d(378));
+  s.fillStyle = "#e9c98a", s.font = `500 ${d(20)}px ${u}`, s.fillText("W E L C O M E   T O", d(64), d(156)), s.fillStyle = "#ffffff", s.font = `300 ${d(84)}px ${u}`, s.fillText("HALCYON", d(58), d(240)), s.fillStyle = "#e9c98a", s.font = `400 ${d(24)}px ${u}`, s.fillText("F R O N T I E R   H A B I T A T", d(64), d(280)), s.fillStyle = "rgba(233,201,138,0.7)", s.fillRect(d(64), d(304), d(300), Math.max(1, d(1.5))), s.fillStyle = "rgba(255,255,255,0.9)", s.font = `400 ${d(23)}px ${u}`, s.fillText("Bay 04  \xB7  Deck 02", d(64), d(346)), s.fillStyle = "rgba(255,255,255,0.62)", s.font = `400 ${d(18)}px ${u}`, s.fillText("Local 19:58   \xB7   1.01 atm   \xB7   Airlock seal nominal", d(64), d(378));
   let m = ["ROOM SERVICE", "SPA", "CONCIERGE", "SKY BAR", "CHECK-OUT"], p = ["\u25D4", "\u274B", "\u260E", "\u266A", "\u2794"];
   for (let g = 0; g < m.length; g++) {
     let b = d(64 + g * 184), v = d(452), y = d(170), M = d(84);
@@ -1095,7 +1093,7 @@ function makeNodeDetailTex(seed, tile) {
   return Mb(S, h, r, a, 0.8, tile);
 }
 function iD(o2 = 8) {
-  if (typeof document === 'undefined' || !globalThis.GH_FURNITURE_FULL_TEX) {
+  if (typeof document === 'undefined' || !globalThis.HABITAT_FULL_TEX) {
     _9 = o2;
     Ga = yb(11, 3, 2);
     yn = yb(23, 6, 3);
@@ -1184,7 +1182,7 @@ varying vec2 vGhW;
 	}
 `, Cj = `
 uniform sampler2D ghMacro;
-#ifdef GH_DETAIL
+#ifdef HAB_DETAIL
 	uniform sampler2D ghDetail;
 #endif
 uniform vec4 ghP, ghT, ghL, ghX, ghD, ghD2, ghJ, ghJc, ghC, ghW0, ghW1, ghW2, ghFl;
@@ -1274,7 +1272,7 @@ float ghHash( vec2 p ) { vec3 p3 = fract( vec3( p.xyx ) * 0.1031 ); p3 += dot( p
 		ghUv += ( textureGrad( ghMacro, ghM * gWs + 0.31, ghDxM * gWs, ghDyM * gWs ).rg - 0.5 ) * ghX.x;
 	}
 	float ghPa = 0.0, ghRim = 0.0, ghSt = 0.0, ghBd = 0.0;
-	#ifdef GH_WEAR
+	#ifdef HAB_WEAR
 		vec4 ghWr = texture2D( ghMacro, ghM * ghP.w + vec2( 0.37, 0.61 ) );
 		ghPa = smoothstep( ghW0.x, ghW0.y, ghWr.b + ( ghMc.g - 0.5 ) * ghW0.z );
 		ghSt = ghWr.a - 0.5;
@@ -1291,7 +1289,7 @@ float ghHash( vec2 p ) { vec3 p3 = fract( vec3( p.xyx ) * 0.1031 ); p3 += dot( p
 	#endif
 	vec4 ghOrm = textureGrad( roughnessMap, ghUv, ghDx, ghDy );
 	vec4 ghDt = vec4( 0.5 );
-	#ifdef GH_DETAIL
+	#ifdef HAB_DETAIL
 		ghDt = texture2D( ghDetail, ghM * ghD.xy );
 	#endif
 	float ghDm = mix( 1.0, ghOrm.b, ghD2.y ) * ( 1.0 - ghJt );
@@ -1305,7 +1303,7 @@ float ghHash( vec2 p ) { vec3 p3 = fract( vec3( p.xyx ) * 0.1031 ); p3 += dot( p
 	}
 	diffuseColor *= sampledDiffuseColor;
 	diffuseColor.rgb *= ( 1.0 + ( ghH.x - 0.5 ) * ghC.x * ghLod ) * ( 1.0 + ( ghMc.r - 0.5 ) * 2.0 * ghP.x ) * ( 1.0 + ( ghDt.a - 0.5 ) * ghD2.x * ghDm );
-#ifdef GH_WEAR
+#ifdef HAB_WEAR
 	diffuseColor.rgb *= mix( vec3( 1.0 ), ghWc, ghPa ) * ( 1.0 + ghW1.y * ghRim + ghW2.x * ghSt ) * ( 1.0 - ghW1.x * ghBd );
 	diffuseColor.rgb *= 1.0 - ghOrm.a * ghW0.w * smoothstep( 0.84, 0.92, ghMc.b );
 #endif
@@ -1327,14 +1325,14 @@ roughnessFactor = clamp( mix( roughnessFactor, ghJc.a, ghJt ), 0.04, 1.0 );
 `, Hj = `
 #ifdef USE_EMISSIVEMAP
 	vec4 emissiveColor = textureGrad( emissiveMap, ghUv, ghDx, ghDy );
-	#ifdef GH_DEPTH
+	#ifdef HAB_DEPTH
 	{
 		// back-lit stone: a deeper layer of the same slab, seen through the surface, slides with the eye
 		vec3 ghV = normalize( vViewPosition );
 		vec2 ghPx = vec2( dot( ghV, tbn[ 0 ] ), dot( ghV, tbn[ 1 ] ) ) / max( dot( ghV, nonPerturbedNormal ), 0.3 );
-		vec2 ghUd = ( ghUv - ghPx * ghT.xy * GH_DEPTH ) * 0.57 + vec2( 0.31, 0.67 );
+		vec2 ghUd = ( ghUv - ghPx * ghT.xy * HAB_DEPTH ) * 0.57 + vec2( 0.31, 0.67 );
 		vec3 ghDeep = textureGrad( emissiveMap, ghUd, ghDx * 0.57, ghDy * 0.57 ).rgb;
-		vec2 ghUe = ( ghUv - ghPx * ghT.xy * GH_DEPTH * 0.4 ) * 1.31 + vec2( 0.13, 0.41 );
+		vec2 ghUe = ( ghUv - ghPx * ghT.xy * HAB_DEPTH * 0.4 ) * 1.31 + vec2( 0.13, 0.41 );
 		vec3 ghMid = textureGrad( emissiveMap, ghUe, ghDx * 1.31, ghDy * 1.31 ).rgb;
 		emissiveColor.rgb = emissiveColor.rgb * ( 0.34 + 0.66 * ghOrm.b ) * ( 0.46 + 1.0 * ghDeep.g + 0.3 * ghMid.r ) + ghDeep * 0.05;
 		emissiveColor.rgb *= 1.0 + ( ghMc.r - 0.5 ) * 0.5;
@@ -1354,7 +1352,7 @@ roughnessFactor = clamp( mix( roughnessFactor, ghJc.a, ghJt ), 0.04, 1.0 );
 function Nj(o2, t, e = {}) {
   if (t.lite) return o2;
   let s = e.tile || o2.map && o2.map.userData.tile || o2.roughnessMap && o2.roughnessMap.userData.tile || o2.normalMap && o2.normalMap.userData.tile || [1, 1], n = o2.defines = o2.defines || {}, i = e.layout ? Array.isArray(e.cell) ? e.cell : [e.cell, e.cell] : [1, 1], a = e.layout ? e.joint : null, r = e.cellVar || {}, l = t.lite ? null : e.detail, c = t.lite ? null : e.wear;
-  t.lite || (n.GH_DETAIL = "", n.GH_WEAR = ""), e.depth && (n.GH_DEPTH = Number(e.depth).toFixed(5)), o2.map || (o2.map = t.white), o2.roughnessMap || (o2.roughnessMap = t.ormWhite), o2.normalMap || (o2.normalMap = t.flat, o2.normalScale.set(1, 1));
+  t.lite || (n.HAB_DETAIL = "", n.HAB_WEAR = ""), e.depth && (n.HAB_DEPTH = Number(e.depth).toFixed(5)), o2.map || (o2.map = t.white), o2.roughnessMap || (o2.roughnessMap = t.ormWhite), o2.normalMap || (o2.normalMap = t.flat, o2.normalScale.set(1, 1));
   let h = l ? Array.isArray(l.tile) ? l.tile : [l.tile, l.tile] : [1, 1], f = a ? rD(a.color ?? 2105376) : [0, 0, 0], u = c && c.tint !== void 0 ? Array.isArray(c.tint) ? c.tint : rD(c.tint) : [1, 1, 1], d = (v, y, M, w) => ({ value: new THREE.Vector4(v, y, M, w) }), m = { ghMacro: { value: t.macro }, ghDetail: { value: l ? l.map : t.anyDetail }, ghP: d(e.macro || 0, e.macroRough || 0, 1 / (e.period || 13.7), c ? 1 / (c.period || 6.3) : 1), ghT: d(1 / s[0], 1 / s[1], i[0], i[1]), ghL: d(e.layout ? Oj[e.layout] : 0, e.layout === "grid" && e.turn || 0, e.round || 0, e.herr || 5), ghX: d(e.warp || 0, e.dual ? 0.9 : 0, e.chips ? 15 : 0, 0), ghD: l ? d(1 / h[0], 1 / h[1], l.normal ?? 0.3, l.rough ?? 0.1) : d(1, 1, 0, 0), ghD2: d(l ? l.albedo ?? 0 : 0, l ? l.mask ?? 0 : 0, l ? l.boost ?? 0 : 0, a && a.burnish || 0), ghJ: a ? d(a.w ?? 1e-3, a.bevel ?? 2e-3, a.slope ?? 0.6, a.ao ?? 0.5) : d(0, 0, 0, 0), ghJc: d(f[0], f[1], f[2], a ? a.rough ?? 0.85 : 1), ghC: d(r.tone || 0, r.tilt || 0, r.pillow || 0, r.rough || 0), ghW0: c ? d(c.lo ?? 0.55, c.hi ?? 0.7, c.breakup ?? 0.3, c.crack || 0) : d(2, 3, 0, 0), ghW1: c ? d(c.baseAlbedo ?? 0.45, c.rim || 0, c.rough || 0, c.rimRough || 0) : d(0, 0, 0, 0), ghW2: c ? d(c.streak || 0, c.streakRough || 0, c.baseRough ?? 0.25, 0) : d(0, 0, 0, 0), ghFl: d(t.floors[0], t.floors[1], c && e.world !== false && c.base || 0, c && c.hand || 0), ghWc: { value: new THREE.Vector3(u[0], u[1], u[2]) } };
   Object.defineProperty(o2, "ghUniforms", { value: m, configurable: true });
   let p = (v) => {
@@ -1372,7 +1370,7 @@ function Nj(o2, t, e = {}) {
   }, o2;
 }
 function lD({ anisotropy: o2 = 8, floors: t = [0, 3.8], detail: e = false } = {}) {
-  globalThis.GH_MAT_LITE && (e = false);
+  globalThis.HABITAT_MAT_LITE && (e = false);
   let s = performance.now(), n = iD(o2), i = performance.now() - s, a = { macro: n.macro, flat: n.flat, white: n.white, ormWhite: n.ormWhite, anyDetail: n.detail.polish, floors: t, lite: !e }, r = (C, L) => Nj(C, a, L), l = n.detail, c = (C, L = C) => new THREE.Vector2(C, L), h = (C) => {
     for (let L of Object.keys(C)) C[L] === void 0 && delete C[L];
     return C;
@@ -2210,7 +2208,7 @@ function yD({ M: o2, L: t, def: e, lib: s, mt: n, fine: i, P: a }) {
     O.fillStyle = "#b9bcc0", O.fillRect(528, 560, 128, 32), O.fillStyle = "#060607";
     for (let [n0, e0, p0] of [[6, 26, 12], [40, 26, 12], [76, 14, 8], [100, 18, 18]]) z(O, 528 + n0, 576 - p0 / 2, e0, p0, p0 > 14 ? 9 : 3), O.fill();
     let K = "#d9b25a";
-    ["THE GILDED HOUR", "SOLSTICE \xB7 A HISTORY", "ATLAS OF HARBOURS", "NOCTURNES", "ON LIGHT & STONE", "THE LONG SUMMER"].forEach((n0, e0) => {
+    ["DEEP SPACE ATLAS", "HALCYON \xB7 A HISTORY", "ATLAS OF HARBOURS", "NOCTURNES", "ON LIGHT & STONE", "ORBITAL MECHANICS"].forEach((n0, e0) => {
       let p0 = 280 + e0 * 44;
       O.fillStyle = K, O.font = `${e0 % 2 ? "italic 600" : "700"} ${e0 % 2 ? 26 : 22}px ${e0 % 2 ? "Georgia, serif" : '"Segoe UI", Arial, sans-serif'}`, O.textAlign = "center", O.textBaseline = "middle", "letterSpacing" in O && (O.letterSpacing = e0 % 2 ? "1px" : "4px"), O.fillText(n0, 768, p0 + 21), "letterSpacing" in O && (O.letterSpacing = "0px"), O.fillRect(536, p0 + 6, 28, 3), O.fillRect(536, p0 + 31, 28, 3), O.fillRect(972, p0 + 6, 28, 3), O.fillRect(972, p0 + 31, 28, 3);
     });
@@ -3215,7 +3213,7 @@ function o$() {
   {
     let [y, M, w, T] = g("plq");
     d("#231608", 0.7, 0, (S) => {
-      S.lineWidth = 2, S.strokeRect(y + 7, M + 7, w - 14, T - 14), m("47", y + 62, M + T / 2 + 2, f(56, 700, h))(S), m("SKY LOBBY", y + 168, M + 36, f(19, 700), 3)(S), m("SOLSTICE HOTEL", y + 168, M + 62, f(11, 600), 2.5)(S), S.fillRect(y + 112, M + 49, 112, 1.5);
+      S.lineWidth = 2, S.strokeRect(y + 7, M + 7, w - 14, T - 14), m("47", y + 62, M + T / 2 + 2, f(56, 700, h))(S), m("SKY LOBBY", y + 168, M + 36, f(19, 700), 3)(S), m("HALCYON OUTPOST", y + 168, M + 62, f(11, 600), 2.5)(S), S.fillRect(y + 112, M + 49, 112, 1.5);
     }, 70);
   }
   {
@@ -3232,7 +3230,7 @@ function o$() {
         let R = Tn + Tn * (_ + 0.5) / 9;
         E.lineWidth = 2, E.beginPath(), E.moveTo(S + pi(R) * 17, M + 44 + So(R) * 17), E.lineTo(S + pi(R) * (_ % 2 ? 26 : 31), M + 44 + So(R) * (_ % 2 ? 26 : 31)), E.stroke();
       }
-      E.fillRect(S - 44, M + 47, 88, 2), m("SOLSTICE", S, M + 64, f(19, 700, h), 5)(E), m("HOTEL  \xB7  BELL SERVICE", S, M + 82, f(8, 700), 1.5)(E);
+      E.fillRect(S - 44, M + 47, 88, 2), m("HALCYON", S, M + 64, f(19, 700, h), 5)(E), m("OUTPOST  \xB7  FIELD SERVICE", S, M + 82, f(8, 700), 1.5)(E);
     }, 70);
   }
   {
@@ -3340,7 +3338,7 @@ function o$() {
     let S = (E) => {
       E.beginPath(), E.moveTo(y + 44, M + 6), E.lineTo(y + w - 44, M + 6), E.lineTo(y + w - 8, M + 50), E.lineTo(y + w - 8, M + T - 16), E.quadraticCurveTo(y + w - 8, M + T - 6, y + w - 18, M + T - 6), E.lineTo(y + 18, M + T - 6), E.quadraticCurveTo(y + 8, M + T - 6, y + 8, M + T - 16), E.lineTo(y + 8, M + 50), E.closePath();
     };
-    t.fillStyle = "#e6d9b8", S(t), t.fill(), t.save(), S(t), t.clip(), x(y, M, w, T, 1400, "#a08a5c", 0.3, 2.4), t.fillStyle = "#9c2a1a", t.fillRect(y + 8, M + 62, w - 16, 30), t.fillStyle = "#f2e6c8", m("SOLSTICE", y + w / 2, M + 78, f(19, 700, h), 4)(t), t.fillStyle = "#4a3a22", m("GUEST LUGGAGE", y + w / 2, M + 106, f(10, 700), 2)(t), t.strokeStyle = "#7a6a48", t.lineWidth = 1;
+    t.fillStyle = "#e6d9b8", S(t), t.fill(), t.save(), S(t), t.clip(), x(y, M, w, T, 1400, "#a08a5c", 0.3, 2.4), t.fillStyle = "#9c2a1a", t.fillRect(y + 8, M + 62, w - 16, 30), t.fillStyle = "#f2e6c8", m("HALCYON", y + w / 2, M + 78, f(19, 700, h), 4)(t), t.fillStyle = "#4a3a22", m("CREW GEAR", y + w / 2, M + 106, f(10, 700), 2)(t), t.strokeStyle = "#7a6a48", t.lineWidth = 1;
     for (let E of [140, 172, 204]) t.beginPath(), t.moveTo(y + 20, M + E), t.lineTo(y + w - 20, M + E), t.stroke();
     t.fillStyle = "#6a5a3a", t.font = f(7, 700), t.textAlign = "left", t.fillText("NAME", y + 20, M + 148), t.fillText("ROOM", y + 20, M + 180), t.fillText("ONWARD TO", y + 20, M + 212), t.strokeStyle = "#1c2a55", t.lineWidth = 1.8, t.lineJoin = "round";
     for (let [E, _] of [[134, 9], [166, 4], [198, 7]]) {
@@ -3373,7 +3371,7 @@ function o$() {
     t.fillStyle = "#0f3a4a", t.fillRect(S - 70, E + 12, 140, 60), t.strokeStyle = "#5fb8b4", t.lineWidth = 2;
     for (let L = 0; L < 4; L++) t.beginPath(), t.moveTo(S - 60 + L * 9, E + 24 + L * 11), t.lineTo(S + 60 - L * 9, E + 24 + L * 11), t.stroke();
     t.fillStyle = "#f3e7c4";
-    let R = "GRAND HOTEL AURELIA", C = "RIVIERA";
+    let R = "HALCYON STATION", C = "SECTOR 04";
     for (let L = 0; L < R.length; L++) p(t, R[L], S, E, 90, Tn * 1.5 + (L - (R.length - 1) / 2) * 0.132, f(17, 700));
     for (let L = 0; L < C.length; L++) {
       let A = Tn * 0.5 - (L - (C.length - 1) / 2) * 0.17;
@@ -3398,7 +3396,7 @@ function o$() {
       let R = Tn + Tn * (_ + 0.5) / 11;
       t.beginPath(), t.moveTo(S + pi(R) * 50, M + 150 + So(R) * 50), t.lineTo(S + pi(R) * (_ % 2 ? 76 : 92), M + 150 + So(R) * (_ % 2 ? 76 : 92)), t.stroke();
     }
-    t.fillStyle = "#c7772c", t.fillRect(y, M + 150, w, 6), t.fillStyle = "#f1dfb4", m("SOLSTICE", S, M + 182, f(30, 700, h), 4)(t), m("HOTEL & SKY LOUNGE", S, M + 208, f(11, 700), 2.5)(t), m("47", S, M + 236, f(20, 700, h))(t), t.strokeStyle = "#d9b566", t.lineWidth = 5, E(), t.stroke(), v(y, M, w, T, 150), t.restore();
+    t.fillStyle = "#c7772c", t.fillRect(y, M + 150, w, 6), t.fillStyle = "#f1dfb4", m("HALCYON", S, M + 182, f(30, 700, h), 4)(t), m("FRONTIER HABITAT", S, M + 208, f(11, 700), 2.5)(t), m("47", S, M + 236, f(20, 700, h))(t), t.strokeStyle = "#d9b566", t.lineWidth = 5, E(), t.stroke(), v(y, M, w, T, 150), t.restore();
   }
   return { map: ll(o2), orm: ll(e, { srgb: false }), nrm: ll(Hd(n, 2.4, false), { srgb: false }) };
 }
@@ -4081,7 +4079,7 @@ function h$() {
   let o2 = we(AD, kD), t = o2.getContext("2d"), e = Re(515), s = '"Segoe UI", Arial, sans-serif', n = 'Bahnschrift, "Arial Narrow", "Segoe UI", sans-serif', i = (a, r, l, c, h = "#111", f = "center") => {
     t.font = c, t.fillStyle = h, t.textAlign = f, t.textBaseline = "middle", t.fillText(a, r, l);
   };
-  for (let [a, r, l] of [[0, "SOLSTICE", "PROVISIONS  \xB7  12 \xD7 750 ml"], [320, "MARCH\xC9 SUD", "DRY GOODS  \xB7  KEEP DRY"]]) {
+  for (let [a, r, l] of [[0, "HALCYON", "PROVISIONS  \xB7  12 \xD7 750 ml"], [320, "ORBITAL", "DRY GOODS  \xB7  KEEP DRY"]]) {
     t.fillStyle = "#a9824f", t.fillRect(a, 0, 320, 224);
     for (let c = 0; c < 900; c++) t.fillStyle = `rgba(${60 + e() * 60 | 0},${40 + e() * 40 | 0},20,${0.04 + e() * 0.07})`, t.fillRect(a + e() * 320, e() * 224, 6 + e() * 26, 1);
     t.fillStyle = "rgba(214,190,140,0.9)", t.fillRect(a, 96, 320, 30), t.fillStyle = "rgba(60,40,20,0.25)", t.fillRect(a, 96, 320, 1.5), t.fillRect(a, 125, 320, 1.5), i(r, a + 160, 44, `800 34px ${n}`, "#2a1c10"), i(l, a + 160, 74, `600 13px ${s}`, "#2a1c10"), t.strokeStyle = "#2a1c10", t.lineWidth = 2.5;
@@ -4310,8 +4308,8 @@ function disposeTextureSet(val, seen) {
 
 const _sharedMaterialSets = new Map();
 
-export function createGoldenHourMaterials({ anisotropy = 4, detail = false, floors = [0, 3.8], shared = true } = {}) {
-  const effectiveDetail = globalThis.GH_MAT_LITE ? false : !!detail;
+export function createHabitatMaterials({ anisotropy = 4, detail = false, floors = [0, 3.8], shared = true } = {}) {
+  const effectiveDetail = globalThis.HABITAT_MAT_LITE ? false : !!detail;
   const cacheKey = shared && !effectiveDetail && floors[0] === 0 && floors[1] === 3.8
     ? `default:${anisotropy}`
     : null;
@@ -4333,8 +4331,8 @@ export function createGoldenHourMaterials({ anisotropy = 4, detail = false, floo
   return mats;
 }
 
-export function createGoldenHourFurniture({ materials = null, anisotropy = 4, detail = false } = {}) {
-  const mats = materials || createGoldenHourMaterials({ anisotropy, detail });
+export function createHabitatFurniture({ materials = null, anisotropy = 4, detail = false } = {}) {
+  const mats = materials || createHabitatMaterials({ anisotropy, detail });
   const ownsMaterials = !materials && !mats.isShared;
   const registry = PD(mats);
   const names = [...registry.names];
@@ -4346,7 +4344,7 @@ export function createGoldenHourFurniture({ materials = null, anisotropy = 4, de
     create(name, opts = {}) {
       const builder = registry[name];
       if (typeof builder !== 'function' || !builder.hero) {
-        throw new Error(`Unknown Golden Hour furniture prop "${name}". Available: ${names.join(', ')}`);
+        throw new Error(`Unknown habitat furniture prop "${name}". Available: ${names.join(', ')}`);
       }
       const group = builder(opts);
       group.name = name;

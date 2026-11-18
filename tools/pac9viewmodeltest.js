@@ -1,4 +1,4 @@
-// PAC-9 viewmodel check (Saltline port): boots, lands, and exercises the
+// PAC-9 viewmodel check: boots, lands, and exercises the
 // first-person weapon in walk mode — hip, ADS, automatic fire, tactical and
 // empty reloads — asserting the controller state and saving captures.
 //
@@ -123,7 +123,7 @@ try {
   const raised = await state();
   check(raised.equip === 'ready' && raised.ammo < ammoBefore, `trigger raises the rifle and fires (${raised.equip}, ${ammoBefore} -> ${raised.ammo})`);
 
-  // Saltline synthesized foley: the input gestures above unlock WebAudio
+  // Procedural synthesized foley: the input gestures above unlock WebAudio
   const played = await page.evaluate(() => {
     const audio = NMS._internals.audio;
     return { ready: !!audio?.ready, played: audio?.sfx?.played || {} };

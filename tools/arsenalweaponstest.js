@@ -1,6 +1,6 @@
-// Pure-Node verification suite for the shared Saltline viewmodel kit and the
-// ported Golden Hour weapon arsenal, frag grenade, and 48 kHz stereo weapon SFX:
-//   node tools/goldenhourweaponstest.js
+// Pure-Node verification suite for the shared viewmodel kit and the
+// surface weapon arsenal, frag grenade, and 48 kHz stereo weapon SFX:
+//   node tools/arsenalweaponstest.js
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {
@@ -12,14 +12,14 @@ import {
   buildOpticLens,
   buildMagnifiedScopeDisplay,
   rectWindowPoly,
-} from '../src/saltline/viewmodel-kit.js';
+} from '../src/weapons/viewmodel-kit.js';
 import {
-  buildGoldenHourGun,
+  buildProceduralWeapon,
   buildFragGrenade,
-  GH_WEAPON_SPECS,
-  GH_ATTACHMENTS,
-  GH_CAMOS,
-} from '../src/golden-hour/weapons-engine.js';
+  WEAPON_SPECS,
+  WEAPON_ATTACHMENTS,
+  WEAPON_CAMOS,
+} from '../src/weapons/weapons-engine.js';
 import {
   createKr7CarbineViewmodel,
   createKr7VantageViewmodel,
@@ -31,12 +31,12 @@ import {
   VESPER9_SPEC,
   M12_SPEC,
   STRIX9_SPEC,
-  GOLDEN_HOUR_WEAPONS,
-} from '../src/golden-hour/viewmodels.js';
+  ARSENAL_WEAPONS,
+} from '../src/weapons/viewmodels.js';
 import {
-  GH_SOUND_TABLE,
-  renderGoldenHourSound,
-} from '../src/golden-hour/weapon-sfx.js';
+  WEAPON_SOUND_TABLE,
+  renderWeaponSound,
+} from '../src/weapons/weapon-sfx.js';
 import { SurfaceWeapons } from '../src/surface-weapons.js';
 
 let passed = 0;
@@ -65,9 +65,9 @@ function assertFiniteGeometryAndHands(root, label, { requireHands = true } = {})
   root.traverse((obj) => {
     if (obj.isSkinnedMesh) skinnedCount++;
     if (obj.isBone) boneCount++;
-    if (obj.name === 'saltline-right-glove') rightGloveFound = true;
-    if (obj.name === 'saltline-trigger-finger') triggerFingerFound = true;
-    if (obj.name === 'saltline-left-glove') leftGloveFound = true;
+    if (obj.name === 'fp-right-glove') rightGloveFound = true;
+    if (obj.name === 'fp-trigger-finger') triggerFingerFound = true;
+    if (obj.name === 'fp-left-glove') leftGloveFound = true;
     if (obj.isMesh && obj.geometry) {
       meshCount++;
       for (const attrName of ['position', 'normal']) {
@@ -87,9 +87,9 @@ function assertFiniteGeometryAndHands(root, label, { requireHands = true } = {})
     && size.length() > 0.05 && size.length() < 5;
 
   check(meshCount > 0 && nonFiniteVerts === 0 && finiteBox, `${label}: finite non-NaN geometry bounds (${meshCount} meshes, size ${size.toArray().map((v) => v.toFixed(3)).join('x')}m)`);
-  check(skinnedCount === 0 && boneCount === 0, `${label}: zero Golden Hour SkinnedMesh/Bone rig remnants`);
+  check(skinnedCount === 0 && boneCount === 0, `${label}: zero SkinnedMesh/Bone rig remnants`);
   if (requireHands) {
-    check(rightGloveFound && triggerFingerFound && leftGloveFound, `${label}: uses Saltline articulated gloved right+left hands with morphing trigger finger`);
+    check(rightGloveFound && triggerFingerFound && leftGloveFound, `${label}: uses articulated gloved right+left hands with morphing trigger finger`);
   }
 }
 
@@ -132,9 +132,9 @@ function stepSeconds(vm, seconds, input = {}, dt = 1 / 120) {
 }
 
 // ----------------------------------------------------------------------------
-// 1. Shared Saltline Viewmodel Kit & Lens Environment / Wetness Shader Checks
+// 1. Shared Viewmodel Kit & Lens Environment / Wetness Shader Checks
 // ----------------------------------------------------------------------------
-console.log('\n--- 1. Saltline Viewmodel Kit ---');
+console.log('\n--- 1. Viewmodel Kit ---');
 {
   const parts = [];
   const hand = buildHand({
@@ -178,19 +178,19 @@ console.log('\n--- 1. Saltline Viewmodel Kit ---');
 }
 
 // ----------------------------------------------------------------------------
-// 2. Golden Hour Weapons Engine & Frag Grenade
+// 2. Weapons Engine & Frag Grenade
 // ----------------------------------------------------------------------------
-console.log('\n--- 2. Golden Hour Weapons Engine & Frag Grenade ---');
+console.log('\n--- 2. Weapons Engine & Frag Grenade ---');
 {
-  check(Object.keys(GH_WEAPON_SPECS).length === 4 && Object.keys(GH_ATTACHMENTS).length === 5 && GH_CAMOS.length >= 8,
-    `GH_WEAPON_SPECS (4), GH_ATTACHMENTS (5 slots), GH_CAMOS (${GH_CAMOS.length} finishes) exported`);
+  check(Object.keys(WEAPON_SPECS).length === 4 && Object.keys(WEAPON_ATTACHMENTS).length === 5 && WEAPON_CAMOS.length >= 8,
+    `WEAPON_SPECS (4), WEAPON_ATTACHMENTS (5 slots), WEAPON_CAMOS (${WEAPON_CAMOS.length} finishes) exported`);
 
   const frag = buildFragGrenade();
   check(frag.tris > 2000, `buildFragGrenade() has >2,000 triangles (${frag.tris} tris)`);
   assertFiniteGeometryAndHands(frag.root, 'Frag Grenade', { requireHands: false });
 
   // Verify camo + detail wetness onBeforeCompile shader chain compiles clean GLSL hooks
-  const damascusAr = buildGoldenHourGun('ar', { camo: 'damascus', optic: 'irons', muzzle: 'brake', underbarrel: 'angled' });
+  const damascusAr = buildProceduralWeapon('ar', { camo: 'damascus', optic: 'irons', muzzle: 'brake', underbarrel: 'angled' });
   let wetShaderVerified = false;
   damascusAr.root.traverse((obj) => {
     if (wetShaderVerified || !obj.isMesh || !obj.material?.onBeforeCompile) return;
@@ -221,7 +221,7 @@ const WEAPON_CASES = [
   { spec: STRIX9_SPEC, create: createStrix9Viewmodel, expectedMag: 18 },
 ];
 
-check(GOLDEN_HOUR_WEAPONS.length === 5, 'GOLDEN_HOUR_WEAPONS exports all 5 weapon descriptors');
+check(ARSENAL_WEAPONS.length === 5, 'ARSENAL_WEAPONS exports all 5 weapon descriptors');
 
 for (const { spec, create, expectedMag } of WEAPON_CASES) {
   const { ctx, log } = makeTestContext();
@@ -490,9 +490,9 @@ for (const [label, factory] of [['KR-7 CARBINE', createKr7CarbineViewmodel], ['V
 }
 
 // ----------------------------------------------------------------------------
-// 5. Golden Hour Synthesized Stereo 48 kHz Weapon Audio (`GH_SOUND_TABLE`)
+// 5. Synthesized Stereo 48 kHz Weapon Audio (`WEAPON_SOUND_TABLE`)
 // ----------------------------------------------------------------------------
-console.log('\n--- 5. Golden Hour Synthesized Weapon Audio ---');
+console.log('\n--- 5. Synthesized Weapon Audio ---');
 
 const EXPECTED_SOUNDS = [
   'kr7_shot',
@@ -516,8 +516,8 @@ const EXPECTED_SOUNDS = [
 ];
 
 for (const soundName of EXPECTED_SOUNDS) {
-  const rendered = renderGoldenHourSound(soundName, 0);
-  const renderedV1 = renderGoldenHourSound(soundName, 1);
+  const rendered = renderWeaponSound(soundName, 0);
+  const renderedV1 = renderWeaponSound(soundName, 1);
   const validStruct = Boolean(
     rendered
       && rendered.sr === 48000

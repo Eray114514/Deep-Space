@@ -1,11 +1,11 @@
-// First-person viewmodel controllers for the 5 Golden Hour surface weapons,
-// combining Golden Hour's high-detail procedural receivers/parts/attachments/camos
-// (`./weapons-engine.js`) with Saltline's articulated gloved hands, optic shaders,
-// magnified scope display, and 9-spring weapon dynamics (`../saltline/viewmodel-kit.js`).
+// First-person viewmodel controllers for the modular surface arsenal,
+// combining procedural receivers/parts/attachments/camos (`./weapons-engine.js`)
+// with articulated gloved hands, optic shaders, magnified scope display, and
+// 9-spring weapon dynamics (`./viewmodel-kit.js`).
 import * as THREE from 'three';
 import {
   SHARED_RAIN_WETNESS,
-  SALTLINE_BASE_COLOURS,
+  VIEWMODEL_BASE_COLOURS,
   applyDetailShader,
   createRightHandRig,
   createLeftHandRig,
@@ -24,8 +24,8 @@ import {
   saturate,
   quatEuler,
   countObjectTriangles,
-} from '../saltline/viewmodel-kit.js';
-import { buildGoldenHourGun } from './weapons-engine.js';
+} from './viewmodel-kit.js';
+import { buildProceduralWeapon } from './weapons-engine.js';
 
 const Vec3 = THREE.Vector3;
 const Quaternion = THREE.Quaternion;
@@ -186,7 +186,7 @@ function makeKeyHelpers(defaultAnchor = new Vec3(0, -0.015, -0.055)) {
 function makeGloveMaterial(ctx, wetUniform) {
   const custom = ctx?.material?.('glove_fabric');
   if (custom) return custom;
-  return applyDetailShader(SALTLINE_BASE_COLOURS.glove_fabric(), 2, wetUniform);
+  return applyDetailShader(VIEWMODEL_BASE_COLOURS.glove_fabric(), 2, wetUniform);
 }
 
 function makeViewProjector(root, ctx, fallbackCam) {
@@ -327,7 +327,7 @@ function createArPlatformViewmodel(ctx = {}, variant = 'carbine') {
   const root = new THREE.Group();
   root.name = isVantage ? 'viewmodel-kr7-vantage' : 'viewmodel-kr7-carbine';
 
-  const gun = buildGoldenHourGun('ar', buildSpec, { wetUniform });
+  const gun = buildProceduralWeapon('ar', buildSpec, { wetUniform });
   root.add(gun.root);
 
   let scopeDisplay = null;
@@ -348,7 +348,7 @@ function createArPlatformViewmodel(ctx = {}, variant = 'carbine') {
   flash.visible = false;
   root.add(flash);
 
-  // ---- Saltline Gloved Hands
+  // ---- Articulated Gloved Hands
   const gloveMat = makeGloveMaterial(ctx, wetUniform);
   const gripQ = quatEuler(-0.26, 0, 0).multiply(quatEuler(0, 0, -Math.PI / 2));
   const rightRig = createRightHandRig({
@@ -879,7 +879,7 @@ export function createVesper9Viewmodel(ctx = {}) {
   const root = new THREE.Group();
   root.name = 'viewmodel-vesper9';
 
-  const gun = buildGoldenHourGun(
+  const gun = buildProceduralWeapon(
     'smg',
     { optic: 'reflex', muzzle: 'suppressor', underbarrel: 'none', magazine: 'ext', stock: 'light', camo: 'fracture' },
     { wetUniform }
@@ -1359,7 +1359,7 @@ export function createM12BreacherViewmodel(ctx = {}) {
   const root = new THREE.Group();
   root.name = 'viewmodel-m12-breacher';
 
-  const gun = buildGoldenHourGun(
+  const gun = buildProceduralWeapon(
     'shotgun',
     { optic: 'reflex', muzzle: 'choke', underbarrel: 'laser', magazine: 'std', stock: 'heavy', camo: 'dune' },
     { wetUniform }
@@ -1943,7 +1943,7 @@ export function createStrix9Viewmodel(ctx = {}) {
   const root = new THREE.Group();
   root.name = 'viewmodel-strix9';
 
-  const gun = buildGoldenHourGun(
+  const gun = buildProceduralWeapon(
     'pistol',
     { optic: 'reflex', muzzle: 'comp', underbarrel: 'laser', magazine: 'ext', camo: 'carbon' },
     { wetUniform }
@@ -1962,7 +1962,7 @@ export function createStrix9Viewmodel(ctx = {}) {
   flash.visible = false;
   root.add(flash);
 
-  // Two-handed thumbs-forward Saltline gloved pistol grip!
+  // Two-handed thumbs-forward gloved pistol grip!
   const gloveMat = makeGloveMaterial(ctx, wetUniform);
   const gripQ = quatEuler(-0.26, 0, 0).multiply(quatEuler(0, 0, -Math.PI / 2));
   const rightRig = createRightHandRig({
@@ -2562,7 +2562,7 @@ export const STRIX9_SPEC = {
   },
 };
 
-export const GOLDEN_HOUR_WEAPONS = [
+export const ARSENAL_WEAPONS = [
   KR7_SPEC,
   KR7_VANTAGE_SPEC,
   VESPER9_SPEC,

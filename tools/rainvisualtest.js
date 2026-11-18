@@ -1,4 +1,4 @@
-// Surface rain check (Saltline GPU rain): forces rain with ?rain=, lands,
+// Surface rain check (GPU rain): forces rain with ?rain=, lands,
 // asserts the rain/splash meshes are live and fixed in the world while the
 // player walks, and saves captures facing toward and away from the sun.
 //

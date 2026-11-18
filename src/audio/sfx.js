@@ -1,24 +1,24 @@
-// Plays Saltline's synthesized sounds (sfx-generators.js) on the game's
-// AudioContext: renders lazily, caches one AudioBuffer per variant, rotates
+// Plays procedural synthesized sounds (sfx-generators.js + weapon-sfx.js) on the
+// game's AudioContext: renders lazily, caches one AudioBuffer per variant, rotates
 // variants, caps voices per sound, and pre-renders a warm list during idle
 // time so the first shot never stalls the frame.
 import { renderSound, SOUND_TABLE } from './sfx-generators.js';
-import { renderGoldenHourSound, GH_SOUND_TABLE } from '../golden-hour/weapon-sfx.js';
+import { renderWeaponSound, WEAPON_SOUND_TABLE } from '../weapons/weapon-sfx.js';
 
 function lookupSoundDef(name) {
-  return SOUND_TABLE[name] || GH_SOUND_TABLE[name] || null;
+  return SOUND_TABLE[name] || WEAPON_SOUND_TABLE[name] || null;
 }
 
 function synthesizeSound(name, variant) {
   if (SOUND_TABLE[name]) return renderSound(name, variant);
-  if (GH_SOUND_TABLE[name]) return renderGoldenHourSound(name, variant);
+  if (WEAPON_SOUND_TABLE[name]) return renderWeaponSound(name, variant);
   return null;
 }
 
 const idle = (fn) => (typeof requestIdleCallback === 'function'
   ? requestIdleCallback(fn, { timeout: 400 }) : setTimeout(fn, 16));
 
-export class SaltlineSfx {
+export class ProceduralSfx {
   constructor() {
     this.ctx = null;
     this.bus = null;

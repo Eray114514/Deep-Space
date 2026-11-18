@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { SaltlineRain, GROUND_GRID, GROUND_SPAN } from './saltline/rain.js';
+import { RainSystem, GROUND_GRID, GROUND_SPAN } from './weather/rain.js';
 
 const SNOW_FLAKES = 760;
 const _axis = new THREE.Vector3();
@@ -26,9 +26,8 @@ function basisFromUp(up) {
 export class WeatherEffects {
   constructor(scene) {
     this.scene = scene;
-    // GPU rain ported from Saltline: lit, pixel-aware streaks in a world-fixed
-    // field plus ground splashes (replaced 1450 CPU-rebuilt line segments).
-    this.rainFx = new SaltlineRain(scene);
+    // GPU rain: lit, pixel-aware streaks in a world-fixed field plus ground splashes.
+    this.rainFx = new RainSystem(scene);
     this.groundHeights = new Float32Array(GROUND_GRID * GROUND_GRID);
 
     this.snowPositions = new Float32Array(SNOW_FLAKES * 3);

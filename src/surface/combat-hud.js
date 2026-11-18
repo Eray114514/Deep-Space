@@ -1,7 +1,7 @@
 // Walk-mode tactical HUD overlay (dynamic spread crosshair, hitmarker,
 // directional damage indicator, explorer suit shield bar, and grenade/stance
-// readout). Follows docs/ui-design-language.md: line-art HUD directly over the
-// viewport with dark halo (--hud-halo), no opaque plates, Barlow Semi Condensed.
+// readout): line-art HUD directly over the viewport with dark halo
+// (--hud-halo), no opaque plates, Barlow Semi Condensed.
 
 const STYLE_ID = 'nms-combat-hud-style';
 

@@ -1,9 +1,9 @@
-// Golden Hour destructible architectural glass panes (Ew) & Verlet shootable
-// physics props (_w), adapted into a local tangent-space controller for Deep Space.
+// Destructible architectural glass panes & Verlet shootable physics props in
+// local tangent space.
 //
 // Operates inside a caller-supplied local tangent `THREE.Group` (`root`, where
 // +Y is local surface up and `groundHeight(x, z)` returns local terrain height),
-// matching `SurveyUnits` in `src/saltline/robots.js`. All materials use
+// matching `SurveyUnits` in `src/surface/robots.js`. All materials use
 // `MeshStandardMaterial` (preserving Three.js's `#include <logdepthbuf_...>`
 // chunks) so glass panes, tumbling shards, frames, and debris never Z-fight in
 // Deep Space's astronomical logarithmic depth buffer.
@@ -58,9 +58,9 @@ function toVec3(input, out = new THREE.Vector3()) {
   return out.set(Number(input.x) || 0, Number(input.y) || 0, Number(input.z) || 0);
 }
 
-// Architectural glass material with procedural Voronoi fracture lines (adapted
-// from Golden Hour's `d$`). Built on `MeshStandardMaterial` so Three.js's
-// logarithmic depth buffer (`#include <logdepthbuf_...>`) remains active.
+// Architectural glass material with procedural Voronoi fracture lines. Built on
+// `MeshStandardMaterial` so Three.js's logarithmic depth buffer
+// (`#include <logdepthbuf_...>`) remains active.
 export function createDestructibleGlassMaterial() {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xb9d4f8,
@@ -192,7 +192,7 @@ export class OutpostDestructibles {
     });
     this._unitFrameBox = new THREE.BoxGeometry(1, 1, 1);
 
-    // Tumbling 3D triangular glass shard pool (Golden Hour Ew)
+    // Tumbling 3D triangular glass shard pool
     this._shardPos = new Float32Array(MAX_SHARDS * 3);
     this._shardVel = new Float32Array(MAX_SHARDS * 3);
     this._shardLocalTri = new Float32Array(MAX_SHARDS * 9);
@@ -227,7 +227,7 @@ export class OutpostDestructibles {
     this.shardMesh.renderOrder = 11;
     this.root.add(this.shardMesh);
 
-    // Tumbling 3D instanced debris chunks pool (Golden Hour _w)
+    // Tumbling 3D instanced debris chunks pool
     this._chunkGeom = new THREE.BoxGeometry(1, 1, 1);
     this._chunkMat = new THREE.MeshStandardMaterial({ roughness: 0.78, metalness: 0.18 });
     this.chunkMesh = new THREE.InstancedMesh(this._chunkGeom, this._chunkMat, MAX_CHUNKS);

@@ -1,18 +1,18 @@
 import * as THREE from 'three';
 import { WeaponLighting } from './weapon-lighting.js';
 import { WEAPON_FOREGROUND_LAYER, SKY_BACKDROP_LAYER } from './render-layers.js';
-import { createPac9Viewmodel, PAC9_ADS_FOV, PAC9_VIEW_FOV, PAC9_SPEC } from './saltline/pac9-viewmodel.js';
-import { setLensEnvironment } from './saltline/viewmodel-kit.js';
-import { createSaltlineMaterials } from './saltline/materials.js';
+import { createPac9Viewmodel, PAC9_ADS_FOV, PAC9_VIEW_FOV, PAC9_SPEC } from './weapons/pac9-viewmodel.js';
+import { setLensEnvironment } from './weapons/viewmodel-kit.js';
+import { createSurfaceMaterials } from './surface/materials.js';
 import {
   KR7_SPEC,
   KR7_VANTAGE_SPEC,
   VESPER9_SPEC,
   M12_SPEC,
   STRIX9_SPEC,
-} from './golden-hour/viewmodels.js';
+} from './weapons/viewmodels.js';
 
-// Triplanar scale per library material, as Saltline dressed the PAC-9.
+// Triplanar scale per library material for first-person weapon viewmodels.
 const VIEWMODEL_MATERIAL_SCALE = { anodized_black: 2, gunmetal: 2, brass: 4, glove_fabric: 3, rubber: 4 };
 
 export function isSoftwareWebGL(renderer) {
@@ -28,12 +28,12 @@ export function isSoftwareWebGL(renderer) {
 }
 
 // First-person surface arsenal:
-//  - Slot 1: PAC-9 LONGSHORE (Saltline 9mm PDW)
-//  - Slot 2: KR-7 CARBINE (Golden Hour 5.56 carbine w/ Halo holo & foregrip, Saltline gloved hands)
-//  - Slot 3: KR-7 VANTAGE (Golden Hour DMR w/ live 2.5x PiP prism scope & suppressor, Saltline hands)
-//  - Slot 4: VESPER 9 (Golden Hour suppressed high-ROF SMG, Saltline hands)
-//  - Slot 5: M12 BREACHER (Golden Hour 9-pellet pump-action 12ga shotgun w/ per-shell reload, Saltline hands)
-//  - Slot 6: STRIX 9 (Golden Hour striker pistol w/ microdot & carbon camo, Saltline hands)
+//  - Slot 1: PAC-9 LONGSHORE (9mm PDW)
+//  - Slot 2: KR-7 CARBINE (5.56 carbine w/ Halo holo & foregrip)
+//  - Slot 3: KR-7 VANTAGE (DMR w/ live 2.5x PiP prism scope & suppressor)
+//  - Slot 4: VESPER 9 (suppressed high-ROF SMG)
+//  - Slot 5: M12 BREACHER (9-pellet pump-action 12ga shotgun w/ per-shell reload)
+//  - Slot 6: STRIX 9 (striker pistol w/ microdot & carbon camo)
 export const SURFACE_WEAPONS = [
   {
     id: 'PAC9', name: 'PAC-9 LONGSHORE', short: 'PAC-9', kind: 'viewmodel', create: createPac9Viewmodel,
@@ -123,7 +123,7 @@ export class SurfaceWeapons {
     this.materials = null;
     if (renderer) {
       const texSize = isSoftwareWebGL(renderer) ? 256 : 1024;
-      try { this.materials = createSaltlineMaterials({ renderer, params: { tex: texSize, wet: 0 } }); }
+      try { this.materials = createSurfaceMaterials({ renderer, params: { tex: texSize, wet: 0 } }); }
       catch (error) { console.warn('[weapons] material library unavailable', error); }
     }
 
@@ -132,7 +132,7 @@ export class SurfaceWeapons {
     this.models = SURFACE_WEAPONS.map((def, i) => (i === 0 ? this.createViewmodel(def) : null));
     if (this.materials) {
       const st = this.materials.stats();
-      console.info(`[weapons] Saltline materials: ${st.sets} texture sets baked in ${st.genMs} ms (${st.textureMB} MB)`);
+      console.info(`[weapons] surface materials: ${st.sets} texture sets baked in ${st.genMs} ms (${st.textureMB} MB)`);
     }
     this.models[0].group.visible = true;
     this.lighting.register(this.rig);

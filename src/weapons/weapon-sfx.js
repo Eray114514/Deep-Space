@@ -1,13 +1,12 @@
-// Offline 48 kHz stereo PCM weapon & foley sound synthesizers ported and adapted
-// from Golden Hour (`eZ` in `dist/game.js`), matching the exact `{ sr, ch, loop }`
-// contract of `renderSound` in `src/saltline/sfx-generators.js`.
+// Offline 48 kHz stereo PCM weapon & foley sound synthesizers, matching the
+// `{ sr, ch, loop }` contract of `renderSound` in `src/audio/sfx-generators.js`.
 
 const TAU = Math.PI * 2;
 const SR_DEFAULT = 48000;
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-// Deterministic mulberry32 PRNG & FNV-1a string seed (identical to Golden Hour's `Pg` / `Iw`)
+// Deterministic mulberry32 PRNG & FNV-1a string seed.
 function makePrng(seed) {
   let t = seed >>> 0;
   const next = () => {
@@ -924,7 +923,7 @@ function genHitmarker(sr, rng, v) {
 
 // ------------------------------------------------ Sound Table & Renderer
 
-export const GH_SOUND_TABLE = {
+export const WEAPON_SOUND_TABLE = {
   kr7_shot: { gen: genKr7Shot, n: 4, sr: SR_DEFAULT, peak: 0.96, bus: 'near', max: 5, pri: 9 },
   suppressed_shot: { gen: genSuppressedShot, n: 4, sr: SR_DEFAULT, peak: 0.82, bus: 'near', max: 5, pri: 9 },
   vesper_shot: { gen: genVesperShot, n: 4, sr: SR_DEFAULT, peak: 0.86, bus: 'near', max: 6, pri: 9 },
@@ -945,8 +944,8 @@ export const GH_SOUND_TABLE = {
   hitmarker: { gen: genHitmarker, n: 2, sr: SR_DEFAULT, peak: 0.62, bus: 'dry', max: 3, pri: 9 },
 };
 
-export function renderGoldenHourSound(name, variant = 0, sampleRate) {
-  const def = GH_SOUND_TABLE[name];
+export function renderWeaponSound(name, variant = 0, sampleRate) {
+  const def = WEAPON_SOUND_TABLE[name];
   if (!def) return null;
   const sr = sampleRate || def.sr || SR_DEFAULT;
   const v = ((variant | 0) % def.n + def.n) % def.n;

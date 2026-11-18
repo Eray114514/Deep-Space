@@ -1,24 +1,24 @@
-// Pure-Node verification suite for Saltline procedural world modules:
-//  1. src/saltline/props.js (+ src/saltline/props-engine.js): all 36 Gi props +
+// Pure-Node verification suite for procedural surface world modules:
+//  1. src/surface/props.js (+ src/surface/props-engine.js): all 36 industrial props +
 //     5 standalone backdrop megastructures across palettes
-//  2. src/saltline/fx.js: surface impacts, sparks, muzzleSmoke, explosion,
+//  2. src/surface/fx.js: surface impacts, sparks, muzzleSmoke, explosion,
 //     dynamic lighting, floating-origin shiftOrigin, logdepth shader contract
-//  3. src/saltline/wet-ground.js: RAIN_WET_UNIFORMS, RAIN_RIPPLE_GLSL, and
+//  3. src/weather/wet-ground.js: RAIN_WET_UNIFORMS, RAIN_RIPPLE_GLSL, and
 //     patchShaderWithRainWetness on standard & planet-terrain shaders
 
 import * as THREE from 'three';
 import {
-  SALTLINE_PROP_SIZES,
-  SALTLINE_PROP_PALETTES,
-  createSaltlineProps,
-} from '../src/saltline/props.js';
-import { createSaltlineFx } from '../src/saltline/fx.js';
+  OUTPOST_PROP_SIZES,
+  OUTPOST_PROP_PALETTES,
+  createOutpostProps,
+} from '../src/surface/props.js';
+import { createSurfaceFx } from '../src/surface/fx.js';
 import {
   RAIN_WET_UNIFORMS,
   RAIN_RIPPLE_GLSL,
   createRainWetUniforms,
   patchShaderWithRainWetness,
-} from '../src/saltline/wet-ground.js';
+} from '../src/weather/wet-ground.js';
 
 let failures = 0;
 function check(condition, message) {
@@ -109,19 +109,19 @@ function validatePropGroup(group, expectedName, expectedScale = 1) {
 }
 
 // ============================================================================
-// 1. Test Saltline Props (`src/saltline/props.js`)
+// 1. Test Outpost Props (`src/surface/props.js`)
 // ============================================================================
 {
-  const props = createSaltlineProps({ materials: null, palette: 'industrial' });
+  const props = createOutpostProps({ materials: null, palette: 'industrial' });
   check(Array.isArray(props.names) && props.names.length >= 41, `props.names exposes ${props.names.length} registered props (36 Gi + 5 backdrop)`);
 
   const sortedCopy = [...props.names].sort();
   check(JSON.stringify(props.names) === JSON.stringify(sortedCopy), 'props.names is sorted alphabetically');
 
-  const missingOrig = ORIGINAL_36_PROPS.filter((n) => !props.names.includes(n) || !SALTLINE_PROP_SIZES[n]);
-  check(missingOrig.length === 0, `all 36 original Saltline Gi props registered (missing: ${missingOrig.length})`);
+  const missingOrig = ORIGINAL_36_PROPS.filter((n) => !props.names.includes(n) || !OUTPOST_PROP_SIZES[n]);
+  check(missingOrig.length === 0, `all 36 industrial props registered (missing: ${missingOrig.length})`);
 
-  const missingBackdrop = BACKDROP_PROPS.filter((n) => !props.names.includes(n) || !SALTLINE_PROP_SIZES[n]);
+  const missingBackdrop = BACKDROP_PROPS.filter((n) => !props.names.includes(n) || !OUTPOST_PROP_SIZES[n]);
   check(missingBackdrop.length === 0, `all 5 backdrop megastructures registered (${BACKDROP_PROPS.join(', ')})`);
 
   let totalIndustrialTris = 0;
@@ -129,7 +129,7 @@ function validatePropGroup(group, expectedName, expectedScale = 1) {
   const triSummary = {};
 
   for (const palette of ['industrial', 'frontier', 'halcyon']) {
-    check(Boolean(SALTLINE_PROP_PALETTES[palette]), `palette "${palette}" exists in SALTLINE_PROP_PALETTES`);
+    check(Boolean(OUTPOST_PROP_PALETTES[palette]), `palette "${palette}" exists in OUTPOST_PROP_PALETTES`);
     for (let idx = 0; idx < props.names.length; idx++) {
       const name = props.names[idx];
       const group = props.create(name, { seed: idx + 1, palette });
@@ -170,7 +170,7 @@ function validatePropGroup(group, expectedName, expectedScale = 1) {
   props.dispose();
   check(true, 'props.dispose() completes cleanly');
 
-  // Verify live createSaltlineMaterials-compatible adapter (including Node guard when canvas throws)
+  // Verify live createSurfaceMaterials-compatible adapter (including Node guard when canvas throws)
   let liveGetCalls = 0;
   const mockLiveMaterials = {
     get(name, opts = {}) {
@@ -186,7 +186,7 @@ function validatePropGroup(group, expectedName, expectedScale = 1) {
     decal() { throw new ReferenceError('document is not defined'); },
     label() { throw new ReferenceError('document is not defined'); },
   };
-  const liveProps = createSaltlineProps({ materials: mockLiveMaterials, palette: 'frontier' });
+  const liveProps = createOutpostProps({ materials: mockLiveMaterials, palette: 'frontier' });
   const liveForklift = liveProps.create('forklift', { seed: 3 });
   const liveRes = validatePropGroup(liveForklift, 'forklift', 1);
   check(liveRes.ok && liveGetCalls > 0, `live materials instance works in Node even if decal/label canvas helpers throw (get calls: ${liveGetCalls})`);
@@ -194,12 +194,12 @@ function validatePropGroup(group, expectedName, expectedScale = 1) {
 }
 
 // ============================================================================
-// 2. Test Saltline FX (`src/saltline/fx.js`)
+// 2. Test Surface FX (`src/surface/fx.js`)
 // ============================================================================
 {
   const scene = new THREE.Scene();
-  const fx = createSaltlineFx({ scene, maxParticles: 512, maxDecals: 120, seed: 42 });
-  check(fx.root.parent === scene, 'createSaltlineFx attaches fx.root to scene');
+  const fx = createSurfaceFx({ scene, maxParticles: 512, maxDecals: 120, seed: 42 });
+  check(fx.root.parent === scene, 'createSurfaceFx attaches fx.root to scene');
 
   // Check logarithmic depth buffer chunks & frustumCulled=false
   let shaderMeshesChecked = 0;
@@ -289,7 +289,7 @@ function validatePropGroup(group, expectedName, expectedScale = 1) {
 }
 
 // ============================================================================
-// 3. Test Ground Rain-Wetness & Ripples (`src/saltline/wet-ground.js`)
+// 3. Test Ground Rain-Wetness & Ripples (`src/weather/wet-ground.js`)
 // ============================================================================
 function braceCounts(glsl) {
   let curly = 0;
@@ -399,4 +399,4 @@ if (failures > 0) {
   console.error(`\n${failures} check(s) FAILED.`);
   process.exit(1);
 }
-console.log('\nsaltlinepropstest: ALL CHECKS PASSED (100%).');
+console.log('\nsurfacepropstest: ALL CHECKS PASSED (100%).');

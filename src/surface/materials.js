@@ -1,16 +1,11 @@
-// Saltline material library: 27 procedural texture sets (concrete, paint,
-// galvanised/bare/rusted steel, gun finishes, polymer, fabric, wood, rubber,
-// glass…) baked on the GPU at first use into albedo / ORM / normal maps, and
-// ~50 named materials on top of them. One shared onBeforeCompile patch adds
-// triplanar mapping, macro variation, grime and rain wetness (darker, glossier
-// up-facing faces, streaks on verticals, beads). No image files.
+// Procedural surface material library: 27 GPU-baked texture sets (concrete,
+// paint, galvanised/bare/rusted steel, gun finishes, polymer, fabric, wood,
+// rubber, glass…) into albedo / ORM / normal maps, and ~50 named materials on
+// top of them. One shared onBeforeCompile patch adds triplanar mapping, macro
+// variation, grime and rain wetness (darker, glossier up-facing faces, streaks
+// on verticals, beads). No image files.
 //
-// Produced by
-//   node tools/saltline/extract.mjs Gg --stop sa --effects Tn --rename tools/saltline/maps/materials.json
-// (`async` dropped from the factory: it never awaited). Shader and recipe code
-// is kept as generated. See docs/saltline-reuse.md.
-//
-//   const mats = createSaltlineMaterials({ renderer, params: { tex: 1024, wet: 0 } });
+//   const mats = createSurfaceMaterials({ renderer, params: { tex: 1024, wet: 0 } });
 //   mats.get('paint_orange', { triplanar, vertexColors, scale, doubleSide, interior, color })
 //   mats.uniforms.wet.value = 0..1   // global rain wetness for every material
 //   mats.names                        // every material name
@@ -1034,13 +1029,13 @@ float metalnessFactor = metalness * slORM.b;
     normal = normalize(tbn * mapN); }
 #endif
 `, PATCH_AO_FRAGMENT = THREE.ShaderChunk.aomap_fragment.replace("texture2D( aoMap, vAoMapUv ).r", "slORM.r");
-function applySaltlinePatch(i, e) {
+function applySurfaceMaterialPatch(i, e) {
   Object.assign(i.uniforms, e), i.vertexShader = i.vertexShader.replace("#include <common>", `#include <common>
 ` + PATCH_VERT_PARS).replace("#include <project_vertex>", `#include <project_vertex>
 ` + PATCH_VERT_MAIN), i.fragmentShader = i.fragmentShader.replace("#include <common>", `#include <common>
 ` + PATCH_FRAG_PARS).replace("#include <map_fragment>", PATCH_MAP_FRAGMENT).replace("#include <roughnessmap_fragment>", PATCH_ROUGHNESS_FRAGMENT).replace("#include <metalnessmap_fragment>", PATCH_METALNESS_FRAGMENT).replace("#include <normal_fragment_maps>", PATCH_NORMAL_FRAGMENT).replace("#include <aomap_fragment>", PATCH_AO_FRAGMENT);
 }
-function createSaltlineMaterials(i) {
+function createSurfaceMaterials(i) {
   let e = i.renderer || i.render && i.render.renderer, t = i.params || {}, n = +(t.tex || 0) || i.quality && i.quality.tex || 1024, s = Math.min(n, 1024), o = Math.min(8, e.capabilities.getMaxAnisotropy ? e.capabilities.getMaxAnisotropy() : 1), r = { wet: { value: t.wet !== void 0 ? +t.wet : 1 } }, a = { sets: 0, bytes: 0, ms: 0 }, l = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), c = new THREE.Scene(), u = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
   u.frustumCulled = false, c.add(u);
   let h = /* @__PURE__ */ new Map(), f = /* @__PURE__ */ new Map(), p = /* @__PURE__ */ new Map(), d = 0, v = null, g = (O, q) => new THREE.RawShaderMaterial({ glslVersion: THREE.GLSL3, vertexShader: BAKE_VERT, fragmentShader: O, uniforms: q, depthTest: false, depthWrite: false });
@@ -1095,7 +1090,7 @@ function createSaltlineMaterials(i) {
     let G = !!q.triplanar, j = !D.transparent && !D.alphaCut;
     T = new THREE.MeshStandardMaterial({ map: C.albedo, normalMap: C.normal, roughnessMap: C.orm, metalnessMap: C.orm, aoMap: C.orm, color: q.color !== void 0 ? q.color : D.color, roughness: D.rough, metalness: D.metal, vertexColors: !!q.vertexColors }), T.normalScale.set(D.nrm, D.nrm), T.name = O, (q.doubleSide || D.side === 2) && (T.side = THREE.DoubleSide), D.transparent && (T.transparent = true, T.depthWrite = false, T.envMapIntensity = 1.4), D.alphaCut && (T.alphaTest = 0.5), T.defines = { ...T.defines, SL_TINT: D.tint }, G && (T.defines.SL_TRIPLANAR = ""), j && (T.defines.SL_FX = ""), D.alphaCut && !G && (T.defines.SL_ACUT = "");
     let N = { uSlWet: r.wet, uSlWetP: { value: new THREE.Vector4(...D.wet) }, uSlMacro: { value: new THREE.Vector4(...D.macro) }, uSlUv: { value: new THREE.Vector3(1, 1, G ? (q.scale || 1) / C.tile[0] : C.size) }, uSlX: { value: new THREE.Vector2(q.interior ? 0.12 : 1, 0) } };
-    T.userData.sl = N, T.userData.set = C.key, T.userData.tile = C.tile, q.interior && (T.userData.interior = true), T.onBeforeCompile = (K) => applySaltlinePatch(K, N);
+    T.userData.sl = N, T.userData.set = C.key, T.userData.tile = C.tile, q.interior && (T.userData.interior = true), T.onBeforeCompile = (K) => applySurfaceMaterialPatch(K, N);
     let Q = "sl2|" + D.tint + (G ? "t" : "") + (j ? "f" : "") + (D.alphaCut ? "a" : "");
     return T.customProgramCacheKey = () => Q, M.set(U, T), T;
   }
@@ -1138,4 +1133,4 @@ function createSaltlineMaterials(i) {
   } };
 }
 
-export { createSaltlineMaterials, MATERIALS, TEXTURE_SETS };
+export { createSurfaceMaterials, MATERIALS, TEXTURE_SETS };

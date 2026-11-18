@@ -60,9 +60,9 @@ import { SpacePortal, lanePortalProfile, lanePortalSize } from './portal/space-p
 import { WarpConduit } from './warp-conduit.js';
 import { PortalView } from './portal/portal-view.js';
 import { SurfaceWeapons, SURFACE_WEAPONS, isSoftwareWebGL } from './surface-weapons.js';
-import { SurveyUnits } from './saltline/robots.js';
-import { SurfaceGameplay } from './saltline/surface-gameplay.js';
-import { buildFragGrenade } from './golden-hour/weapons-engine.js';
+import { SurveyUnits } from './surface/robots.js';
+import { SurfaceGameplay } from './surface/surface-gameplay.js';
+import { buildFragGrenade } from './weapons/weapons-engine.js';
 import { ACTIVE_GALAXY_ID, applySystemBodyTuning, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
@@ -1194,8 +1194,7 @@ function prepareRainFrame(dt, body) {
     rainFrame.groundSampler = null;
   }
   rainFrame.sunDir.copy(body?.sunDirWorld || _up);
-  // Saltline lit its rain with a dusk harbour (ambient = fog x 0.15). Our
-  // open daylight scenes are far brighter, so the drops take their ambient
+  // Open daylight planetary scenes are bright, so raindrops take their ambient
   // from the live fog/sky colour at a higher gain to stay legible.
   const sunUp = THREE.MathUtils.clamp(rainFrame.sunDir.dot(_up) * 4 + 0.3, 0, 1);
   rainFrame.sunColor.setRGB(1, 0.93, 0.82).multiplyScalar(RAIN_GAIN * 5 * envDay * sunUp);
@@ -1279,12 +1278,12 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
     surfaceWeaponHud.classList.toggle('holstered', !!holstered);
     for (const item of surfaceWeaponHud.querySelectorAll('[data-weapon-slot]')) item.classList.toggle('active', Number(item.dataset.weaponSlot) === index);
   },
-  // gunshot, reload foley and dry click are Saltline + Golden Hour synthesized sounds
+  // gunshot, reload foley and dry click are procedural synthesized sounds
   onEvent: (type, data, def) => audio.weaponEvent(type, data, def),
   renderer,
 });
-// HALCYON survey units (Saltline's robot dog and drone, patrol-only) share the
-// weapon's Saltline material library; prewarmed in idle time (below).
+// HALCYON survey units (quadruped dog and drone, patrol-only) share the
+// surface procedural material library; prewarmed in idle time (below).
 const surveyUnits = new SurveyUnits({
   scene,
   materials: surfaceWeapons.materials,

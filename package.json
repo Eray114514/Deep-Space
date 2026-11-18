@@ -105,8 +105,7 @@
     "test:cloud-fading-resources:gpu": "node tools/cloudfadingresourcegputest.js",
     "test:ship": "node tools/halcyon-playtest.js && node tools/shipdynamicstest.js",
     "test:pac9": "node tools/pac9viewmodeltest.js",
-    "test:rain": "node tools/rainvisualtest.js",
-    "saltline:extract": "node tools/saltline/extract.mjs"
+    "test:rain": "node tools/rainvisualtest.js"
   },
   "devDependencies": {
     "@gltf-transform/cli": "^4.3.0",

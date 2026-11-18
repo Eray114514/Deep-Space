@@ -1,4 +1,4 @@
-// HALCYON survey units (Saltline robot dog + drone): land, check they deploy
+// HALCYON survey units (quadruped dog + drone): land, check they deploy
 // around the parked ship, patrol (move, stay clear of the hull), carry their
 // positional rotor/servo loops, use the outdoor reflection environment, and
 // are recalled on takeoff.

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildHand } from './saltline/viewmodel-kit.js';
+import { buildHand } from './weapons/viewmodel-kit.js';
 import { SKYDIVE_RIG_LAYER } from './render-layers.js';
 
 const CELLS = 9;

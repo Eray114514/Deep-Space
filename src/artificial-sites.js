@@ -3,9 +3,9 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { makeRng } from './rng.js';
 import { createPbrMaterial, normalizeImportedPbrMaterial } from './pbr-materials.js';
-import { createSaltlineProps } from './saltline/props.js';
-import { patchShaderWithRainWetness, RAIN_WET_UNIFORMS } from './saltline/wet-ground.js';
-import { createGoldenHourFurniture } from './golden-hour/furniture.js';
+import { createOutpostProps } from './surface/props.js';
+import { patchShaderWithRainWetness, RAIN_WET_UNIFORMS } from './weather/wet-ground.js';
+import { createHabitatFurniture } from './surface/furniture.js';
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const heroAssetCache = new Map();
@@ -26,14 +26,14 @@ function markSharedAssets(root) {
 
 function getOutpostProps() {
   if (!_sharedOutpostProps) {
-    _sharedOutpostProps = createSaltlineProps({ materials: null, palette: 'frontier' });
+    _sharedOutpostProps = createOutpostProps({ materials: null, palette: 'frontier' });
   }
   return _sharedOutpostProps;
 }
 
 function getOutpostFurniture() {
   if (!_sharedOutpostFurniture) {
-    _sharedOutpostFurniture = createGoldenHourFurniture({ anisotropy: 4 });
+    _sharedOutpostFurniture = createHabitatFurniture({ anisotropy: 4 });
   }
   return _sharedOutpostFurniture;
 }
@@ -190,7 +190,7 @@ function buildCommandPavilion(parent, mats, colliders, x, y, z, yaw = 0) {
 }
 
 function dressOutpostYard(group, mats, site, padRadius = 28) {
-  const rand = makeRng(`${site.seed}:saltline-props`);
+  const rand = makeRng(`${site.seed}:outpost-props`);
   const props = getOutpostProps();
   const colliders = [];
   const deckY = 1.6;
@@ -226,7 +226,7 @@ function dressOutpostYard(group, mats, site, padRadius = 28) {
     });
   }
 
-  // Site-specific Saltline megastructure landmark
+  // Site-specific megastructure landmark
   if (site.type === 'relay-outpost') {
     placeProp(group, colliders, props, 'comms_tower', -46, 0, -34, 0.4, { seed: 71, palette: 'halcyon' });
     placeProp(group, colliders, props, 'relay_node', -38, 0, -28, 0.6, { seed: 72, palette: 'halcyon' });
@@ -267,7 +267,7 @@ function cityCluster(site, scale = 1) {
     road.position.y = 0.9 * scale;
     road.rotation.y = i * Math.PI / 9;
   }
-  // Dress the hero city's spaceport apron with Saltline cranes & cargo stacks
+  // Dress the hero city's spaceport apron with industrial cranes & cargo stacks
   const props = getOutpostProps();
   const colliders = [];
   const padR = 52 * scale;
@@ -336,7 +336,7 @@ function floatingCity(site, body) {
     glow.position.y = -deckRadius * 0.38;
     glow.rotation.x = Math.PI;
   }
-  // Dress the aerostat flight deck with Saltline & Golden Hour props
+  // Dress the aerostat flight deck with outpost & habitat props
   const props = getOutpostProps();
   const furn = getOutpostFurniture();
   const colliders = [];

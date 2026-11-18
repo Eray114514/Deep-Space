@@ -3,7 +3,7 @@
 // follow actual simulation state continuously.
 
 import { makeRng } from './rng.js';
-import { SaltlineSfx } from './saltline/sfx.js';
+import { ProceduralSfx } from './audio/sfx.js';
 import { SkydiveAudio } from './skydive-audio.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
@@ -63,15 +63,15 @@ export class FlightAudio {
     this.compressor.release.value = 0.18;
     this.master.connect(this.compressor).connect(ctx.destination);
 
-    // Saltline's synthesized foley (weapon, rain, thunder) on its own bus.
-    this.sfx = new SaltlineSfx();
+    // Procedural synthesized foley (weapon, rain, thunder) on its own bus.
+    this.sfx = new ProceduralSfx();
     this.sfx.attach(ctx, this.master, 1.15);
     this.sfx.prewarm(['rifle_shot', 'rifle_tail_out', 'rifle_dry', 'reload_magout', 'reload_magin',
       'reload_bolt', 'shell_bounce', 'rain', 'thunder']);
 
     // Menu foley bypasses the master so it still plays while the game (and
     // therefore the master gain) is paused.
-    this.uiSfx = new SaltlineSfx();
+    this.uiSfx = new ProceduralSfx();
     this.uiSfx.attach(ctx, this.compressor, 0.55);
     this.uiSfx.prewarm(['ui_hover', 'ui_click']);
 

@@ -1,9 +1,9 @@
-// Procedural weapon & attachment geometry engine ported from Golden Hour.
+// Procedural weapon & attachment geometry engine.
 //
-// Keeps all high-detail receivers, barrels, handguards, stocks, rails, moving
+// Builds high-detail receivers, barrels, handguards, stocks, rails, moving
 // parts, modular optics/muzzles/underbarrels, procedural camo/wear shaders, and
-// the fragmentation grenade, with Golden Hour's `hf` arm rig and brute-force
-// finger-collision search stripped in favor of Saltline's gloved hand rig.
+// the fragmentation grenade, paired with the shared first-person gloved hand
+// rig (`./viewmodel-kit.js`).
 // Includes a fast headless DataTexture + 2D raster shim when `document` is
 // absent so pure-Node tests construct every weapon and camo with zero DOM.
 import * as THREE from 'three';
@@ -16,7 +16,7 @@ import {
   applyDetailShader,
   SHARED_RAIN_WETNESS,
   countObjectTriangles,
-} from '../saltline/viewmodel-kit.js';
+} from './viewmodel-kit.js';
 
 const IS_HEADLESS = typeof document === 'undefined';
 
@@ -308,7 +308,7 @@ function _n(o = 1) {
   return { noise: r, fbm: l };
 }
 var Ya = { ar: { id: "ar", name: "KR-7 CARBINE", cls: "ASSAULT RIFLE", auto: true, rpm: 720, dmg: [31, 22], range: [20, 46], head: 1.55, mag: 30, reserve: 150, adsTime: 0.23, zoom: 1.34, sprintOut: 0.19, hip: [1.5, 5.2], ads: 0.05, pellets: 1, recoil: { v: 1.05, h: 0.4, rec: 6.5, climb: 0.55, first: 1.3, punch: 0.55 }, kick: 1.35, mobility: 1, adsMove: 1, casing: 0, flash: 1, shake: 0.11, impulse: 7 }, smg: { id: "smg", name: "VESPER 9", cls: "SUBMACHINE GUN", auto: true, rpm: 910, dmg: [25, 15], range: [11, 30], head: 1.4, mag: 32, reserve: 160, adsTime: 0.17, zoom: 1.22, sprintOut: 0.12, hip: [1.1, 4], ads: 0.09, pellets: 1, recoil: { v: 0.78, h: 0.56, rec: 8, climb: 0.5, first: 1.15, punch: 0.42 }, kick: 1, mobility: 1.06, adsMove: 1.15, casing: 1, flash: 0.8, shake: 0.085, impulse: 5 }, shotgun: { id: "shotgun", name: "M12 BREACHER", cls: "SHOTGUN", auto: false, rpm: 72, dmg: [23, 7], range: [7, 17], head: 1.2, mag: 6, reserve: 30, adsTime: 0.25, zoom: 1.14, sprintOut: 0.2, hip: [2.7, 3.6], ads: 2.1, pellets: 9, recoil: { v: 5.4, h: 1.5, rec: 4.5, climb: 0.35, first: 1, punch: 2.4 }, kick: 3, mobility: 0.98, adsMove: 1, casing: 2, flash: 1.5, shake: 0.42, impulse: 6, pump: true }, pistol: { id: "pistol", name: "STRIX 9", cls: "PISTOL", auto: false, rpm: 400, dmg: [40, 22], range: [13, 32], head: 1.5, mag: 15, reserve: 60, adsTime: 0.13, zoom: 1.16, sprintOut: 0.09, hip: [1.3, 3.6], ads: 0.12, pellets: 1, recoil: { v: 2.3, h: 0.62, rec: 8, climb: 0.3, first: 1, punch: 1.1 }, kick: 1.9, mobility: 1.08, adsMove: 1.2, casing: 1, flash: 0.8, shake: 0.14, impulse: 6 } }, rZ = /* @__PURE__ */ new Set(["wood", "plaster", "fabric", "plastic", "ceramic", "foliage", "carpet", "glass"]), jd = new THREE.Vector3(), Nw = new THREE.Vector3(), vn = new THREE.Vector3(), n2 = new THREE.Vector3(), $d = new THREE.Vector3(), uI = new THREE.Vector3(), dI = new THREE.Vector3(), Bw = new THREE.Vector3(), br = { t: 0, nx: 0, ny: 0, nz: 0, col: null }, bu = { t: 0, body: null, nx: 0, ny: 0, nz: 0 }, yu = { t: 0, pane: null, a: 0, y: 0 };
-var R1 = ["optic", "muzzle", "underbarrel", "magazine", "stock"], iR = { optic: "OPTIC", muzzle: "MUZZLE", underbarrel: "UNDERBARREL", magazine: "MAGAZINE", stock: "STOCK" }, Lg = { optic: { irons: { name: "IRON SIGHTS", desc: "Nothing between you and the target. Fastest to the eye.", mods: { adsTime: 0.93 } }, reflex: { name: "KITE REFLEX", desc: "Open red dot. Precise and quick.", mods: {} }, holo: { name: "HALO HOLOGRAPHIC", desc: "Wide window with a ring-and-dot reticle.", mods: { adsTime: 1.04, zoom: 1.05 } }, prism: { name: "VANTAGE 2.5\xD7", desc: "Magnified prism sight for the long lanes.", mods: { adsTime: 1.15, zoom: 1.7, adsMove: 0.9 } } }, muzzle: { none: { name: "FACTORY MUZZLE", desc: "Standard flash hider.", mods: {} }, suppressor: { name: "MONOLITH SUPPRESSOR", desc: "Quiet report and a hidden flash. Enemies hear you late.", mods: { range: 0.92, adsTime: 1.05, flash: 0.22 }, suppressed: true }, comp: { name: "PORTED COMPENSATOR", desc: "Vents gas upward to hold the muzzle down.", mods: { recoilV: 0.8 } }, brake: { name: "SLOTTED BRAKE", desc: "Kills side-to-side drift.", mods: { recoilH: 0.7 } }, choke: { name: "FULL CHOKE", desc: "Tighter pattern, longer reach.", mods: { hip: 0.72, range: 1.18 } } }, underbarrel: { none: { name: "NO UNDERBARREL", desc: "Bare handguard.", mods: {} }, vgrip: { name: "VERTICAL FOREGRIP", desc: "A firm hold that steadies sustained fire.", mods: { recoilV: 0.9, recoilH: 0.84, mobility: 0.985 } }, angled: { name: "ANGLED FOREGRIP", desc: "Snappier to the shoulder and out of a sprint.", mods: { adsTime: 0.91, sprintOut: 0.88 } }, laser: { name: "TAC LASER", desc: "Visible beam. Tightens hip fire.", mods: { hip: 0.74, sprintOut: 0.94 }, laser: true } }, magazine: { std: { name: "STANDARD MAG", desc: "Factory capacity.", mods: {} }, ext: { name: "EXTENDED MAG", desc: "Half again as many rounds; a little slower to handle.", mods: { mag: 1.5, reload: 1.1, adsTime: 1.04, mobility: 0.99 } }, fast: { name: "SPEED MAG", desc: "Flared well and a pull tab for faster changes.", mods: { reload: 0.8 } } }, stock: { std: { name: "FACTORY STOCK", desc: "Balanced.", mods: {} }, light: { name: "SKELETON STOCK", desc: "Light and fast; kicks harder.", mods: { mobility: 1.03, adsMove: 1.12, sprintOut: 0.88, recoilV: 1.08 } }, heavy: { name: "PADDED STOCK", desc: "Soaks up recoil at the cost of speed.", mods: { recoilV: 0.87, recoilH: 0.9, adsTime: 1.06 } } } }, vu = { ar: { optic: ["reflex", "irons", "holo", "prism"], muzzle: ["none", "suppressor", "comp", "brake"], underbarrel: ["none", "vgrip", "angled", "laser"], magazine: ["std", "ext", "fast"], stock: ["std", "light", "heavy"] }, smg: { optic: ["irons", "reflex", "holo"], muzzle: ["none", "suppressor", "comp"], underbarrel: ["none", "vgrip", "laser"], magazine: ["std", "ext", "fast"], stock: ["std", "light"] }, shotgun: { optic: ["irons", "reflex"], muzzle: ["none", "choke", "brake"], underbarrel: ["none", "laser"], magazine: ["std", "ext"], stock: ["std", "heavy"] }, pistol: { optic: ["irons", "reflex"], muzzle: ["none", "suppressor", "comp"], underbarrel: ["none", "laser"], magazine: ["std", "ext"], stock: [] } }, yr = [{ id: "factory", name: "FACTORY", tier: 0, need: null, desc: "As issued." }, { id: "dune", name: "DUNE", tier: 1, need: { kills: 5 }, desc: "Flat dark earth with worn edges." }, { id: "timberline", name: "TIMBERLINE", tier: 1, need: { kills: 15 }, desc: "Hand-sprayed woodland through netting." }, { id: "fracture", name: "FRACTURE", tier: 1, need: { kills: 30 }, desc: "Urban shards in three greys." }, { id: "tigerstripe", name: "TIGERSTRIPE", tier: 2, need: { headshots: 5 }, desc: "Black brushstrokes over olive and tan." }, { id: "topo", name: "EMBER TOPO", tier: 2, need: { headshots: 15 }, desc: "Burnt-orange contour lines on matte black." }, { id: "carbon", name: "CARBON WEAVE", tier: 2, need: { kills: 60 }, desc: "Twill-weave carbon under clear coat." }, { id: "damascus", name: "DAMASCUS", tier: 3, need: { kills: 100 }, desc: "Folded-steel waves, acid etched." }, { id: "gold", name: "SOLSTICE GOLD", tier: 3, need: { kills: 150, headshots: 30 }, desc: "Polished gold with engraved scrollwork." }, { id: "obsidian", name: "MOLTEN OBSIDIAN", tier: 4, need: { allGold: true }, desc: "Black glass with a slow ember glow in the cracks." }], Ol = ["ar", "smg", "shotgun", "pistol"], Gw = ["ar", "smg", "shotgun"], mI = "golden-hour-builds-v1", gI = "golden-hour-profile-v1";
+var R1 = ["optic", "muzzle", "underbarrel", "magazine", "stock"], iR = { optic: "OPTIC", muzzle: "MUZZLE", underbarrel: "UNDERBARREL", magazine: "MAGAZINE", stock: "STOCK" }, Lg = { optic: { irons: { name: "IRON SIGHTS", desc: "Nothing between you and the target. Fastest to the eye.", mods: { adsTime: 0.93 } }, reflex: { name: "KITE REFLEX", desc: "Open red dot. Precise and quick.", mods: {} }, holo: { name: "HALO HOLOGRAPHIC", desc: "Wide window with a ring-and-dot reticle.", mods: { adsTime: 1.04, zoom: 1.05 } }, prism: { name: "VANTAGE 2.5\xD7", desc: "Magnified prism sight for the long lanes.", mods: { adsTime: 1.15, zoom: 1.7, adsMove: 0.9 } } }, muzzle: { none: { name: "FACTORY MUZZLE", desc: "Standard flash hider.", mods: {} }, suppressor: { name: "MONOLITH SUPPRESSOR", desc: "Quiet report and a hidden flash. Enemies hear you late.", mods: { range: 0.92, adsTime: 1.05, flash: 0.22 }, suppressed: true }, comp: { name: "PORTED COMPENSATOR", desc: "Vents gas upward to hold the muzzle down.", mods: { recoilV: 0.8 } }, brake: { name: "SLOTTED BRAKE", desc: "Kills side-to-side drift.", mods: { recoilH: 0.7 } }, choke: { name: "FULL CHOKE", desc: "Tighter pattern, longer reach.", mods: { hip: 0.72, range: 1.18 } } }, underbarrel: { none: { name: "NO UNDERBARREL", desc: "Bare handguard.", mods: {} }, vgrip: { name: "VERTICAL FOREGRIP", desc: "A firm hold that steadies sustained fire.", mods: { recoilV: 0.9, recoilH: 0.84, mobility: 0.985 } }, angled: { name: "ANGLED FOREGRIP", desc: "Snappier to the shoulder and out of a sprint.", mods: { adsTime: 0.91, sprintOut: 0.88 } }, laser: { name: "TAC LASER", desc: "Visible beam. Tightens hip fire.", mods: { hip: 0.74, sprintOut: 0.94 }, laser: true } }, magazine: { std: { name: "STANDARD MAG", desc: "Factory capacity.", mods: {} }, ext: { name: "EXTENDED MAG", desc: "Half again as many rounds; a little slower to handle.", mods: { mag: 1.5, reload: 1.1, adsTime: 1.04, mobility: 0.99 } }, fast: { name: "SPEED MAG", desc: "Flared well and a pull tab for faster changes.", mods: { reload: 0.8 } } }, stock: { std: { name: "FACTORY STOCK", desc: "Balanced.", mods: {} }, light: { name: "SKELETON STOCK", desc: "Light and fast; kicks harder.", mods: { mobility: 1.03, adsMove: 1.12, sprintOut: 0.88, recoilV: 1.08 } }, heavy: { name: "PADDED STOCK", desc: "Soaks up recoil at the cost of speed.", mods: { recoilV: 0.87, recoilH: 0.9, adsTime: 1.06 } } } }, vu = { ar: { optic: ["reflex", "irons", "holo", "prism"], muzzle: ["none", "suppressor", "comp", "brake"], underbarrel: ["none", "vgrip", "angled", "laser"], magazine: ["std", "ext", "fast"], stock: ["std", "light", "heavy"] }, smg: { optic: ["irons", "reflex", "holo"], muzzle: ["none", "suppressor", "comp"], underbarrel: ["none", "vgrip", "laser"], magazine: ["std", "ext", "fast"], stock: ["std", "light"] }, shotgun: { optic: ["irons", "reflex"], muzzle: ["none", "choke", "brake"], underbarrel: ["none", "laser"], magazine: ["std", "ext"], stock: ["std", "heavy"] }, pistol: { optic: ["irons", "reflex"], muzzle: ["none", "suppressor", "comp"], underbarrel: ["none", "laser"], magazine: ["std", "ext"], stock: [] } }, yr = [{ id: "factory", name: "FACTORY", tier: 0, need: null, desc: "As issued." }, { id: "dune", name: "DUNE", tier: 1, need: { kills: 5 }, desc: "Flat dark earth with worn edges." }, { id: "timberline", name: "TIMBERLINE", tier: 1, need: { kills: 15 }, desc: "Hand-sprayed woodland through netting." }, { id: "fracture", name: "FRACTURE", tier: 1, need: { kills: 30 }, desc: "Urban shards in three greys." }, { id: "tigerstripe", name: "TIGERSTRIPE", tier: 2, need: { headshots: 5 }, desc: "Black brushstrokes over olive and tan." }, { id: "topo", name: "EMBER TOPO", tier: 2, need: { headshots: 15 }, desc: "Burnt-orange contour lines on matte black." }, { id: "carbon", name: "CARBON WEAVE", tier: 2, need: { kills: 60 }, desc: "Twill-weave carbon under clear coat." }, { id: "damascus", name: "DAMASCUS", tier: 3, need: { kills: 100 }, desc: "Folded-steel waves, acid etched." }, { id: "gold", name: "SOLAR GOLD", tier: 3, need: { kills: 150, headshots: 30 }, desc: "Polished gold with engraved scrollwork." }, { id: "obsidian", name: "MOLTEN OBSIDIAN", tier: 4, need: { allGold: true }, desc: "Black glass with a slow ember glow in the cracks." }], Ol = ["ar", "smg", "shotgun", "pistol"], Gw = ["ar", "smg", "shotgun"], mI = "ds-weapon-builds-v1", gI = "ds-weapon-profile-v1";
 var hh = (o) => o * Math.PI / 180, hs = (o, t, e) => new THREE.Vector3(o, t, e), $n = (o, t, e) => new THREE.Vector3(o, t, -e), Bi = false, Vg = new THREE.Matrix4(), kZ = new THREE.Quaternion(), mR = new THREE.Vector3(), MR = new THREE.Vector3(0, 1, 0);
 function Mr(o) {
   o.index && (o = o.toNonIndexed()), o.attributes.normal || o.computeVertexNormals();
@@ -2927,7 +2927,7 @@ function _J() {
     s.save(), s.fillStyle = b, s.strokeStyle = b, s.lineWidth = 4, s.beginPath(), s.moveTo(p - y / 2, x + g / 2), s.lineTo(p - y / 2, x - g * 0.12), s.quadraticCurveTo(p - y / 2, x - g * 0.36, p, x - g / 2), s.quadraticCurveTo(p + y / 2, x - g * 0.36, p + y / 2, x - g * 0.12), s.lineTo(p + y / 2, x + g / 2), s.closePath(), v ? s.fill() : s.stroke(), s.restore();
   };
   c("kr7", 760, 300, () => {
-    f(84, 92, 62), h("KR-7", 150, 176, 84, 700), s.lineWidth = 5, s.strokeRect(574, 34, 168, 78), h("MK II", 46, 596, 76, 700), h("CAL 5.56\xD745 NATO", 50, 16, 206, 600, null, 2), h("GH-ARMS  \xB7  SOLSTICE CITY", 36, 18, 266, 500, mT, 1.5);
+    f(84, 92, 62), h("KR-7", 150, 176, 84, 700), s.lineWidth = 5, s.strokeRect(574, 34, 168, 78), h("MK II", 46, 596, 76, 700), h("CAL 5.56\xD745 NATO", 50, 16, 206, 600, null, 2), h("HALCYON ARMS  \xB7  CORE FOUNDRY", 36, 18, 266, 500, mT, 1.5);
   }), c("sn", 420, 56, () => {
     h("SN GH07731", 46, 6, 30, 600, null, 3);
   }), c("safe", 110, 110, () => {
@@ -3006,7 +3006,7 @@ function _J() {
 }
 function P4() {
   if (vA) return vA;
-  let o = ao(), t = TJ(), e = globalThis.GH_TUNE || {}, s = (r, l) => e[r] != null ? e[r] : l, n = { metal: MA("anodised", { color: s("cMetal", 5395289), metal: s("mMetal", 0.3), rough: s("rMetal", 0.4), n: o.alu.normalMap, r: o.alu.roughnessMap, nRep: 90, ns: 0.3, wear: [s("wFlat", 0.025), s("wEdge", 0.31), 0.8], edge: [0.55, 0.22], wearTile: 16, bare: 9409175, bareRM: [0.4, 1], alt: s("cMetal2", 4868945) }, t), poly: MA("polymer", { color: s("cPoly", 4145220), metal: 0, rough: s("rPoly", 0.52), n: o.poly.normalMap, r: o.poly.roughnessMap, nRep: 60, ns: 0.3, wear: [0.015, 0.2, 0.7], edge: [0.3, 0.18], wearTile: 13, bare: 6711147, bareRM: [0.42, 0], alt: s("cFde", 9205591), altBare: 11245690 }, t), furn: MA("furniture", { color: s("cFurn", 9205591), metal: 0, rough: s("rFurn", 0.68), n: o.gripFDE.normalMap, r: o.gripFDE.roughnessMap, nRep: 34, ns: 0.9, wear: [0.015, 0.18, 0.7], edge: [0.25, 0.15], wearTile: 13, bare: 11245690, bareRM: [0.5, 0] }, t), hard: SJ(o, t), mark: _J(), world: new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.42, roughness: 0.56 }) };
+  let o = ao(), t = TJ(), e = globalThis.WEAPON_TUNE || {}, s = (r, l) => e[r] != null ? e[r] : l, n = { metal: MA("anodised", { color: s("cMetal", 5395289), metal: s("mMetal", 0.3), rough: s("rMetal", 0.4), n: o.alu.normalMap, r: o.alu.roughnessMap, nRep: 90, ns: 0.3, wear: [s("wFlat", 0.025), s("wEdge", 0.31), 0.8], edge: [0.55, 0.22], wearTile: 16, bare: 9409175, bareRM: [0.4, 1], alt: s("cMetal2", 4868945) }, t), poly: MA("polymer", { color: s("cPoly", 4145220), metal: 0, rough: s("rPoly", 0.52), n: o.poly.normalMap, r: o.poly.roughnessMap, nRep: 60, ns: 0.3, wear: [0.015, 0.2, 0.7], edge: [0.3, 0.18], wearTile: 13, bare: 6711147, bareRM: [0.42, 0], alt: s("cFde", 9205591), altBare: 11245690 }, t), furn: MA("furniture", { color: s("cFurn", 9205591), metal: 0, rough: s("rFurn", 0.68), n: o.gripFDE.normalMap, r: o.gripFDE.roughnessMap, nRep: 34, ns: 0.9, wear: [0.015, 0.18, 0.7], edge: [0.25, 0.15], wearTile: 13, bare: 11245690, bareRM: [0.5, 0] }, t), hard: SJ(o, t), mark: _J(), world: new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.42, roughness: 0.56 }) };
   n.world.name = "kr7:world", n.world.userData = { base: new THREE.Color(3421755), wear: 1 };
   let i = n.studio = { ...n }, a = (r, l, c, h, f) => {
     let u = r.clone();
@@ -3051,13 +3051,13 @@ function QF(o) {
 var RJ = [[15.2, 24], [15.2, 26], [16, 26.8], [16, 59.15, 2], [15.75, 59.75], [10.8, 64.7], [10.8, Ms.TOP]], AJ = [[15.2, 24], [15.2, 26], [16, 26.8], [16, 51.65, 2], [15.75, 52.25], [11.5, 57.5], [10.8, 58.5]], _A = QF(RJ), RA = [[11, -19.5], [19.5, -11], [19.5, 9], [9, 19.5], [-9, 19.5], [-19.5, 9], [-19.5, -11], [-11, -19.5]], AA = [[-48, 13, 4], [-18, 4, 6], [-4, -7, 4], [34, -7, 1.5], [40, -12, 1.5], [86, -12], [88, 14], [-34, 14], [-34, 38], [-48, 38]], kA = [[-34, 24], [176, 24], [178, 12, 2], [171.5, 5, 3], [158, 5], [150, 13], [-30, 13], [-34, 16]], C5 = (o) => -38 - (o - 88) * 0.11, bT = [[86, 22], [160, 22], [160, 4], [157.6, C5(157.6)], [87.4, C5(87.4)], [86, -12]], CA = [[31.5, -20.6], [35.5, -26.5], [43, -37.5], [51, -42.8], [76, -43.6], [87.5, -36]], PA = [[61, -7], [58.8, -15], [57.4, -22], [57.6, -29], [59.8, -34.5]], oi = { c0: [14.5, -8], ax: [-0.2924, -0.9563], keys: [[-8, 1.5, 22.5, 12.3, 3.2], [6, 2.25, 23.25, 14.6, 3], [22, 0.6, 20.2, 15.9, 3.1], [44, 0, 20.5, 16.4, 3.5], [66, -0.1, 20.7, 15.9, 3.5], [80, 0.25, 21.6, 15.5, 2.8], [88, 0.5, 22.3, 15.7, 3]], s0: -8, s1: 88 }, jF = false, _y = (o) => {
   if (!jF) {
     jF = true;
-    let t = (globalThis.GH_TUNE && globalThis.GH_TUNE.heel) ?? 4;
+    let t = (globalThis.WEAPON_TUNE && globalThis.WEAPON_TUNE.heel) ?? 4;
     for (let [e, s] of [[4, 0.5], [5, 0.85], [6, 1]]) oi.keys[e][1] -= t * s, oi.keys[e][2] += t * s;
   }
   return qF(oi.keys, o);
 }, z4 = null, kJ = () => {
   if (z4) return z4;
-  let o = globalThis.GH_TUNE || {}, t = o.swell ?? 1;
+  let o = globalThis.WEAPON_TUNE || {}, t = o.swell ?? 1;
   return z4 = [[2, -0.5, 10, 0.45, (o.sw1 ?? 3.6) * t], [22, -0.35, 11, 0.4, (o.sw2 ?? 2.2) * t], [42, -0.6, 11, 0.4, (o.sw3 ?? 0.4) * t], [o.sw4p ?? 60, o.sw4q ?? -1, o.sw4s ?? 12, o.sw4c ?? 0.35, (o.sw4 ?? 0) * t]], z4.g0 = o.swg0 ?? 0.05, z4.g1 = o.swg1 ?? 0.3, z4;
 }, EA = (o, t) => {
   let e = 0, s = kJ(), n = Math.min(1, Math.max(0, (s.g0 - o) / s.g1));
@@ -3825,7 +3825,7 @@ function YO() {
   }), e.fillStyle = "#fff", e.textBaseline = "middle", n("proof", 0, 80, 224, 48, () => {
     e.font = i(30, 700), e.fillText("GH", 4, 26), e.beginPath(), e.moveTo(66, 38), e.lineTo(80, 10), e.lineTo(94, 38), e.closePath(), e.lineWidth = 3, e.strokeStyle = "#fff", e.stroke(), e.font = i(26), e.fillText("11/26  N", 108, 26);
   }), n("made", 224, 80, 288, 48, () => {
-    e.font = i(20), e.fillText("GH-ARMS \xB7 SOLSTICE WORKS", 4, 26);
+    e.font = i(20), e.fillText("HALCYON ARMS \xB7 ORBITAL WORKS", 4, 26);
   }), n("cal", 0, 136, 200, 44, () => {
     e.font = i(30, 700), e.fillText("9 mm \xD7 19", 4, 24);
   }), n("n32", 208, 136, 64, 44, () => {
@@ -4399,7 +4399,7 @@ function VT() {
     s.save(), s.translate(h, f), m(u, d), s.restore(), n[c] = [h / 512, 1 - (f + d) / 256, (h + u) / 512, 1 - f / 256];
   };
   a("maker", 0, 0, 400, 56, () => {
-    s.font = i(30), s.fillText("GH-ARMS  \xB7  SOLSTICE CITY", 6, 30);
+    s.font = i(30), s.fillText("HALCYON ARMS  \xB7  CORE FOUNDRY", 6, 30);
   }), a("serial", 0, 60, 230, 46, () => {
     s.font = i(30, 700), s.fillText("SX9-04127", 6, 25);
   }), a("hood", 240, 60, 130, 46, () => {
@@ -4521,7 +4521,7 @@ function iN(o, t) {
     }
   }
 }
-var Oy = (o, t) => (globalThis.GH_TUNE || {})[o] ?? t, aN = /* @__PURE__ */ new Map(), Rk = 0.26, bN = Gt(-0.12, -0.06, 0.02);
+var Oy = (o, t) => (globalThis.WEAPON_TUNE || {})[o] ?? t, aN = /* @__PURE__ */ new Map(), Rk = 0.26, bN = Gt(-0.12, -0.06, 0.02);
 function z00(o) {
   let t = o || {};
   return { camo: t.camo || "factory", optic: t.optic === "reflex" ? "reflex" : "irons", muzzle: t.muzzle === "suppressor" || t.muzzle === "comp" ? t.muzzle : "none", underbarrel: t.underbarrel === "laser" ? "laser" : "none", magazine: t.magazine === "ext" ? "ext" : "std" };
@@ -4756,7 +4756,7 @@ function KT(o) {
     return d / m;
   } };
 }
-var Tl = (o, t) => (globalThis.GH_TUNE || {})[o] ?? t;
+var Tl = (o, t) => (globalThis.WEAPON_TUNE || {})[o] ?? t;
 function Z00(o, t, e, s, n) {
   let i = o - 0.055 - e * 0.09, a = t + 0.11 * n.off + e * 0.22 * n.skew, r = Math.hypot(i, a);
   r += (s.fbm(o * 6, t * 6, e * 1.6, 3) - 0.5) * 0.075 + (s.fbm(o * 30, t * 30, e * 5, 2) - 0.5) * 4e-3;
@@ -4826,7 +4826,7 @@ function Q00() {
   p("gauge", 0, 0, 640, 64, () => {
     u.font = m(40, 700), u.fillText("12 GA", 6, 34), u.font = m(30), u.fillText("FOR 2\xBE AND 3 INCH SHELLS", 150, 35);
   }), p("maker", 0, 72, 800, 56, () => {
-    u.font = m(30), u.fillText("GH-ARMS  \xB7  SOLSTICE WORKS  \xB7  CYL BORE  \xB7  STEEL SHOT OK", 6, 30);
+    u.font = m(30), u.fillText("HALCYON ARMS  \xB7  ORBITAL WORKS  \xB7  CYL BORE  \xB7  STEEL SHOT OK", 6, 30);
   }), p("proof", 0, 136, 200, 80, () => {
     u.lineWidth = 4, u.strokeStyle = "#fff", u.beginPath(), u.arc(38, 40, 28, 0, 6.283), u.stroke(), u.font = m(30, 700), u.fillText("GH", 17, 42), u.strokeRect(84, 14, 52, 52), u.fillText("P", 100, 42), u.font = m(24, 700), u.fillText("N", 152, 42);
   }), p("safe", 220, 136, 150, 80, () => {
@@ -5326,7 +5326,7 @@ function nt0(o, t) {
 
 // ---------------------------------------------------------------- exports
 
-function patchGoldenHourMaterialsForWetness(root, wetUniform = SHARED_RAIN_WETNESS) {
+function patchWeaponMaterialsForWetness(root, wetUniform = SHARED_RAIN_WETNESS) {
   root.traverse((obj) => {
     obj.frustumCulled = false;
     if (!obj.isMesh || !obj.material) return;
@@ -5350,36 +5350,36 @@ const GUN_BUILDERS = {
   pistol: GT,
 };
 
-export const GH_WEAPON_SPECS = Ya;
-export const GH_ATTACHMENTS = Lg;
-export const GH_CAMOS = yr;
+export const WEAPON_SPECS = Ya;
+export const WEAPON_ATTACHMENTS = Lg;
+export const WEAPON_CAMOS = yr;
 
-export function buildGoldenHourOptic(kind, opts = {}) {
+export function buildWeaponOptic(kind, opts = {}) {
   return Mp(kind, opts);
 }
 
-export function buildGoldenHourMuzzle(kind, opts = {}) {
+export function buildWeaponMuzzle(kind, opts = {}) {
   return gf(kind, opts);
 }
 
-export function buildGoldenHourUnderbarrel(kind, opts = {}) {
+export function buildWeaponUnderbarrel(kind, opts = {}) {
   return wp(kind, opts);
 }
 
-export function getGoldenHourCamoMaterial(camoId, surface = 'metal') {
+export function getWeaponCamoMaterial(camoId, surface = 'metal') {
   return xl(camoId, surface);
 }
 
-export function buildGoldenHourGun(kind, buildSpec = {}, { wetUniform = SHARED_RAIN_WETNESS } = {}) {
+export function buildProceduralWeapon(kind, buildSpec = {}, { wetUniform = SHARED_RAIN_WETNESS } = {}) {
   const fn = GUN_BUILDERS[kind];
-  if (!fn) throw new Error(`buildGoldenHourGun: unknown weapon kind "${kind}"`);
+  if (!fn) throw new Error(`buildProceduralWeapon: unknown weapon kind "${kind}"`);
   const built = fn({ detail: 'view', build: buildSpec });
   // Hide unused bundled frag child inside shotgun/pistol view roots (standalone buildFragGrenade is exported).
   if (built.parts?.frag) {
     built.parts.frag.parent?.remove(built.parts.frag);
     delete built.parts.frag;
   }
-  patchGoldenHourMaterialsForWetness(built.root, wetUniform);
+  patchWeaponMaterialsForWetness(built.root, wetUniform);
   const tris = countObjectTriangles(built.root);
   return {
     id: built.id,
@@ -5405,8 +5405,8 @@ export function buildFragGrenade({ wetUniform = SHARED_RAIN_WETNESS } = {}) {
   let cached = _fragGrenadeCache.get(wetUniform);
   if (!cached) {
     const root = Z2();
-    root.name = 'gh-frag-grenade';
-    patchGoldenHourMaterialsForWetness(root, wetUniform);
+    root.name = 'frag-grenade';
+    patchWeaponMaterialsForWetness(root, wetUniform);
     const tris = countObjectTriangles(root);
     cached = { root, tris };
     _fragGrenadeCache.set(wetUniform, cached);

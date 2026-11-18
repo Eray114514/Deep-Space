@@ -1,8 +1,6 @@
-// Saltline procedural prop & port megastructure geometry builders.
-// Extracted from `$g` (36 industrial props: Gi, Yg, M3..B3, J3, eb, sb) and
-// `Eb` (5 standalone port/megastructure models: port_crane, rtg_crane,
-// cargo_ship, rigid_boat, comms_tower) via tools/saltline/extract.mjs.
-// See src/saltline/props.js for the public palette & Node-safe material adapter.
+// Procedural outpost prop & spaceport megastructure geometry builders
+// (36 industrial props + 5 standalone megastructures).
+// See src/surface/props.js for the public palette & Node-safe material adapter.
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 const sa = mergeGeometries;
@@ -1504,7 +1502,7 @@ function YA(i, e) {
       let m = b * At / 3 + 0.3;
       t.add("steel_galv", ot(0.017, 0.017, 0.014, 6), { p: [Math.cos(m) * 0.3, Math.sin(m) * 0.3, y * (r + 6e-3)], r: [tt, 0, 0] }, n.range(0.5, 0.9));
     }
-    t.label(y > 0 ? "NYY-J 4x95 mm2  500 m" : "SALTLINE TERMINAL", { color: "white", font: "stencil", distress: 0.45 }, 0.7, 0.085, { p: [0, 0.4, y * (r + 6e-3)], r: [0, y > 0 ? 0 : At, 0] }), y > 0 && t.decal(i.mats.decal("arrow"), 0.2, { p: [0.36, -0.2, r + 6e-3], r: [0, 0, -1.2] });
+    t.label(y > 0 ? "NYY-J 4x95 mm2  500 m" : "HALCYON TERMINAL", { color: "white", font: "stencil", distress: 0.45 }, 0.7, 0.085, { p: [0, 0.4, y * (r + 6e-3)], r: [0, y > 0 ? 0 : At, 0] }), y > 0 && t.decal(i.mats.decal("arrow"), 0.2, { p: [0.36, -0.2, r + 6e-3], r: [0, 0, -1.2] });
   }
   let u = 16, h = r - a, f = 2 * h / u, p = 0.47, d = [];
   for (let y = 0; y <= u; y++) d.push([p - 0.017, -h + y * f]), y < u && d.push([p, -h + (y + 0.5) * f]);
@@ -1867,7 +1865,7 @@ function oR(i, e) {
       K.x += 0.03 * ie * (K.x < 0 ? 1 : 0);
     }
   }), t.add(a, gr(A), { p: [-1.39, 0.915, 0] }, c(0.97)), t.add(a, Ge(0.56, 0.37, 0.64, 0.05), { p: [-1.4, 0.43, 0] }, c(0.85)), t.add("hazard_stripes", Ge(0.014, 0.085, 0.84, 4e-3), { p: [-1.702, 0.77, 0] }, 0.95), t.label(f, { color: "black", font: "stencil", distress: 0.35 }, 0.4, 0.2, { p: [-1.703, 0.96, 0], r: [0, -tt, 0] });
-  for (let K of [1, -1]) t.add(i.mats.emissive(16722450, 0.16), Ge(0.012, 0.05, 0.11, 4e-3), { p: [-1.69, 1.1, K * 0.37] }, 1, { raw: true }), t.add(u, Ge(0.016, 0.066, 0.126, 4e-3), { p: [-1.684, 1.1, K * 0.37] }, 0.4), t.label("SALTLINE", { color: "black", font: "sans", distress: 0.3 }, 0.42, 0.085, { p: [-1.39, 0.99, K * 0.5625], r: [0, K > 0 ? 0 : At, 0] }), t.add(u, Ge(0.06, 0.05, 0.02, 4e-3), { p: [-1.67, 0.44, K * 0.05] }, 0.5);
+  for (let K of [1, -1]) t.add(i.mats.emissive(16722450, 0.16), Ge(0.012, 0.05, 0.11, 4e-3), { p: [-1.69, 1.1, K * 0.37] }, 1, { raw: true }), t.add(u, Ge(0.016, 0.066, 0.126, 4e-3), { p: [-1.684, 1.1, K * 0.37] }, 0.4), t.label("HALCYON", { color: "black", font: "sans", distress: 0.3 }, 0.42, 0.085, { p: [-1.39, 0.99, K * 0.5625], r: [0, K > 0 ? 0 : At, 0] }), t.add(u, Ge(0.06, 0.05, 0.02, 4e-3), { p: [-1.67, 0.44, K * 0.05] }, 0.5);
   t.add("steel_worn", ot(0.02, 0.02, 0.13, 8), { p: [-1.68, 0.44, 0] }, 0.7), t.add(a, Ge(0.98, 0.46, 0.94, 0.04), { p: [-0.59, 0.79, 0] }, c());
   for (let K of [1, -1]) {
     t.label(f, { color: "black", font: "stencil", distress: 0.35 }, 0.3, 0.19, { p: [-0.84, 0.8, K * 0.4715], r: [0, K > 0 ? 0 : At, 0] }), t.add(u, $e(0.34, 0.2, 4e-3), { p: [-0.36, 0.8, K * 0.47] }, 0.2);
@@ -2436,7 +2434,7 @@ function z1(i, e, t = {}) {
   g(d, Ee(X - 0.04, $ + 0.14, ne + 0.06, X - 0.02, ue, re - 0.06)), g(d, Ee(X - 0.9, $ + 0.02, ne + 0.3, X - 0.1, $ + 0.04, re - 0.3)), g(f, Ee(F + 0.9, $ + 0.14, 3.1, F + 1.45, $ + 0.6, 3.65, 0.04)), g(f, Ee(F + 0.82, $ + 0.6, 3.1, F + 0.96, $ + 1.35, 3.65, 0.04));
   for (let R of [2.75, 4]) g(f, Ee(F + 1.2, $ + 0.14, R - 0.16, F + 1.75, $ + 0.85, R + 0.16, 0.03)), r.add(Ee(F + 1.3, $ + 0.855, R - 0.1, F + 1.6, $ + 0.865, R + 0.1), [0.75, 0.5, 0.26], 0);
   r.add(Ee(F + 0.5, ue - 0.045, 3, F + 1.5, ue - 0.03, 3.2), [0.75, 0.5, 0.26], 0), ie(X + 0.15, $ + 0.1, 3.37, 2, "z"), g(h, Ee(F - 0.9, $ + 0.1, ne, F, $ + 0.14, re)), ns(o, l, [[F, $ + 0.14, ne + 0.03], [F - 0.87, $ + 0.14, ne + 0.03], [F - 0.87, $ + 0.14, re - 0.03], [F, $ + 0.14, re - 0.03]], { post: 1, tint: En });
-  let me = i.mats.label("SALTLINE 04", { color: "white", font: "stencil", distress: 0.35 }), ee = Math.max(1, me.aspect || 6);
+  let me = i.mats.label("HALCYON 04", { color: "white", font: "stencil", distress: 0.35 }), ee = Math.max(1, me.aspect || 6);
   {
     let R = Math.min(1.15, 8.6 / ee);
     for (let I of [-1, 1]) g(me.material, ll(R * ee, R, 36.9, 22, I * (On + 0.453), I > 0 ? 0 : Math.PI));

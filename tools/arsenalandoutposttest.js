@@ -1,16 +1,16 @@
 // End-to-end browser verification & visual capture suite for the complete
-// Saltline + Golden Hour surface gameplay integration:
-//  - All 6 first-person weapons (Saltline gloved hands + Golden Hour guns + L-7 sky optics)
+// Surface arsenal & outpost gameplay integration:
+//  - All 6 first-person weapons (gloved hands + modular rifles/SMG/shotgun/pistol + L-7 sky optics)
 //  - KR-7 VANTAGE live 2.5x magnified picture-in-picture scope (`surfaceScopeSample`)
 //  - M12 BREACHER 9-pellet buckshot + pump rack + per-shell reload
 //  - First-person explorer lower body (`FirstPersonBody`), crouch (`KeyC`), sprint-slide
-//  - Frontier Survey & Habitation Outpost (Saltline props + Golden Hour furniture +
+//  - Frontier Survey & Habitation Outpost (industrial props + habitat furniture +
 //    Voronoi destructible glass + Verlet physics props + Colonist crew + K9 unit)
 //  - Throwable Frag Grenade (`KeyQ`) terrain bounce & detonation FX
 //  - Active Hound & Gull robot combat encounter AI
 //
 // Usage:
-//   node tools/arsenalandoutposttest.js [--gpu] [--out docs/reviews/saltline-golden-hour-2026-11-17]
+//   node tools/arsenalandoutposttest.js [--gpu] [--out screenshots/arsenal-outpost]
 
 import { mkdirSync } from 'node:fs';
 import { launchBrowser, launchHardwareBrowser } from './browser.js';

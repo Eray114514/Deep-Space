@@ -1,10 +1,5 @@
-// Saltline's synthesized sound library: every effect is rendered offline from
+// Procedural synthesized sound library: every effect is rendered offline from
 // noise, modal resonators and filtered bursts — there are no audio files.
-//
-// Produced by
-//   node tools/saltline/extract.mjs r_ --rename "r_=renderSound,Go=SOUND_TABLE,ki=SR_HI,Xn=SR_MID,pl=SR_LO,ao=seededRandom,Kb=soundSeed,s_=isGenerator"
-// and kept as generated (the generator bodies are synthesis recipes; treat
-// their local names as data). See docs/saltline-reuse.md.
 //
 // renderSound(name, variant = 0, sampleRate?) -> { sr, ch: Float32Array[], loop }
 //   channels are peak-normalised to the table's `peak`; SOUND_TABLE lists every

@@ -1,5 +1,4 @@
-// GPU rain and ground splashes, ported from Saltline (`Nb` + the kR/FR/UR/NR
-// shaders, see docs/saltline-reuse.md).
+// GPU precipitation streaks and ground splashes.
 //
 // What makes it read as rain instead of a line field:
 //  - 9k instanced camera-facing quads, wrapped in a box that is fixed in the
@@ -10,13 +9,11 @@
 //    so rain glows when backlit and nearly vanishes with the sun behind you
 //  - near/far fades, and crown-shaped splashes on the ground around the player
 //
-// Saltline is a flat level (+Y up, ground at y = 0). Here everything is
-// computed in a tangent frame around the camera: the mesh sits at the camera
-// with its basis (side, up, forward), `uOffset` carries the accumulated player
-// displacement in that frame, and splash heights come from a small terrain
-// height grid supplied by the game. The game renders with a logarithmic depth
-// buffer, so both shaders carry three's logdepth chunks (without them every
-// drop failed the depth test against terrain and rain only showed over sky).
+// Everything is computed in a spherical tangent frame around the camera: the
+// mesh sits at the camera with its basis (side, up, forward), `uOffset` carries
+// the accumulated player displacement in that frame, and splash heights come
+// from a small terrain height grid supplied by the game. The game renders with
+// a logarithmic depth buffer, so both shaders carry three's logdepth chunks.
 
 import * as THREE from 'three';
 
@@ -152,11 +149,11 @@ const WRAP = new THREE.Vector3(26 * 40, 15 * 40, 26 * 40);
 export const GROUND_GRID = 7;
 export const GROUND_SPAN = 16;
 
-export class SaltlineRain {
+export class RainSystem {
   constructor(scene, { drops = 12000, splashes = 900, seed = 0x5a17 } = {}) {
     const rand = mulberry32(seed);
     this.group = new THREE.Group();
-    this.group.name = 'saltline-rain';
+    this.group.name = 'surface-rain';
     this.group.matrixAutoUpdate = false;
     this.offset = new THREE.Vector3();
     this.ground = Array.from({ length: 13 }, () => new THREE.Vector4());

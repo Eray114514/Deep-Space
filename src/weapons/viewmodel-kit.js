@@ -1,5 +1,4 @@
-// Shared first-person viewmodel building blocks extracted from Saltline's PAC-9
-// (`src/saltline/pac9-viewmodel.js`) and extended for multi-weapon arsenals:
+// Shared first-person viewmodel building blocks for the surface arsenal:
 //   - Real-time planetary sun/sky environment uniforms for optic glass
 //   - Micro-detail & rain-bead PBR shader patcher (chainable on existing shaders)
 //   - Articulated gloved hands (`buildHand`) + right/left hand rig helpers
@@ -188,7 +187,7 @@ const DETAIL_NORMAL_GLSL = `
 normal = vmBump(normal, vmDHt + vmDDropH * 0.32);
 `;
 
-// Patch a MeshStandardMaterial / MeshPhysicalMaterial with Saltline's procedural
+// Patch a MeshStandardMaterial / MeshPhysicalMaterial with procedural
 // micro-detail (kind 0 = anodised, 1 = machined steel, 2 = polymer, -1 = wetness
 // & rain beads only, preserving existing wear/camo shaders). Safe to chain onto
 // materials that already define `onBeforeCompile`.
@@ -246,9 +245,9 @@ export function applyDetailShader(material, kind = 0, wetUniform = SHARED_RAIN_W
   return material;
 }
 
-// ------------------------------------------------ Saltline base materials
+// ------------------------------------------------ Viewmodel base materials
 
-export const SALTLINE_BASE_COLOURS = {
+export const VIEWMODEL_BASE_COLOURS = {
   brass: () => new THREE.MeshStandardMaterial({
     color: 0xc29a45, roughness: 0.42, metalness: 1, vertexColors: true,
   }),
@@ -275,8 +274,8 @@ export const SALTLINE_BASE_COLOURS = {
   },
 };
 
-// ------------------------------------------------ Saltline gloved hands
-// Saltline glove geometry, with a shared wrist, forearm and elbow for every pose.
+// ------------------------------------------------ Articulated gloved hands
+// Procedural glove geometry, with a shared wrist, forearm and elbow for every pose.
 
 function mergeColored(list) {
   const valid = list.filter(Boolean).map((g) => {
@@ -784,7 +783,7 @@ export function createRightHandRig({
   const q = gripQuat
     ? gripQuat.clone()
     : quatEuler(-0.24, 0, 0).multiply(quatEuler(0, 0, -Math.PI / 2));
-  const mat = gloveMaterial || applyDetailShader(SALTLINE_BASE_COLOURS.glove_fabric(), 2);
+  const mat = gloveMaterial || applyDetailShader(VIEWMODEL_BASE_COLOURS.glove_fabric(), 2);
   const hand = buildHand({
     mirror: false,
     fingers: fingers || [null, [0.62, 1.72, 0.8, 0], [0.68, 1.7, 0.8, -0.03], [0.74, 1.66, 0.8, -0.09]],
@@ -800,14 +799,14 @@ export function createRightHandRig({
   });
 
   const group = new THREE.Group();
-  group.name = 'saltline-right-hand';
+  group.name = 'fp-right-hand';
   group.quaternion.copy(q);
   const gp = Array.isArray(gripPos) ? new V3().fromArray(gripPos) : gripPos.clone();
   const po = Array.isArray(palmOffset) ? new V3().fromArray(palmOffset) : palmOffset.clone();
   group.position.copy(gp).sub(po.applyQuaternion(q));
 
-  const fabricMesh = makeViewMesh(hand.fabric, mat, 'saltline-right-glove');
-  const triggerFingerMesh = makeViewMesh(hand.index[0].clone(), mat, 'saltline-trigger-finger');
+  const fabricMesh = makeViewMesh(hand.fabric, mat, 'fp-right-glove');
+  const triggerFingerMesh = makeViewMesh(hand.index[0].clone(), mat, 'fp-trigger-finger');
   group.add(fabricMesh, triggerFingerMesh);
 
   const restAttr = hand.index[0].attributes;
@@ -846,7 +845,7 @@ export function createLeftHandRig({
   const q = supportQuat
     ? supportQuat.clone()
     : quatEuler(0, 0, Math.PI / 2).multiply(quatEuler(0.06, 0, 0));
-  const mat = gloveMaterial || applyDetailShader(SALTLINE_BASE_COLOURS.glove_fabric(), 2);
+  const mat = gloveMaterial || applyDetailShader(VIEWMODEL_BASE_COLOURS.glove_fabric(), 2);
   const hand = buildHand({
     mirror: true,
     fingers: fingers || [
@@ -866,8 +865,8 @@ export function createLeftHandRig({
   });
 
   const group = new THREE.Group();
-  group.name = 'saltline-left-hand';
-  const fabricMesh = makeViewMesh(hand.fabric, mat, 'saltline-left-glove');
+  group.name = 'fp-left-hand';
+  const fabricMesh = makeViewMesh(hand.fabric, mat, 'fp-left-glove');
   group.add(fabricMesh);
   const tris = Math.round(triangleCount(hand.fabric));
   return { group, tris, fabricMesh, supportQuat: q };

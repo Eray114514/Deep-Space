@@ -1,10 +1,4 @@
-// PAC-9 Longshore first-person viewmodel, ported from Saltline.
-//
-// This file was produced by
-//   node tools/saltline/extract.mjs dm --stop sa --rename tools/saltline/maps/pac9.json
-// and adapted for the game's controllers and shared first-person glove rig.
-// The procedural weapon geometry and micro-detail shader retain their original
-// generated local names.
+// PAC-9 Longshore first-person viewmodel and animation controller.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildHand, SHARED_LENS_SUN, SHARED_LENS_SKY } from './viewmodel-kit.js';
@@ -319,7 +313,7 @@ function drawMarkingAtlas() {
     let [v, g, x, y] = MARKING_ATLAS[u];
     e.font = f, e.fillStyle = p, e.textAlign = d, e.fillText(h, d === "left" ? v + 2 : v + x / 2, g + y / 2 + 1, x - 4);
   }, n = '"Barlow Condensed", "Arial Narrow", Arial, sans-serif', s = '"IBM Plex Mono", "Courier New", monospace', o = '"Big Shoulders Display", "Barlow Condensed", Impact, sans-serif', r = "rgba(196,198,194,0.92)";
-  t("model", "PAC-9", `700 78px ${o}`, r), t("maker", "LONGSHORE ARMS WORKS  \xB7  SALTLINE", `600 30px ${n}`, r), t("cal", "CAL 5.8\xD740   SN PA-004217", `500 27px ${s}`, r), t("prop", "PROPERTY OF PORT AUTHORITY \u2014 BERTH 4 ARMOURY", `600 28px ${n}`, r), t("safe", "S", `700 30px ${n}`, r, "center"), t("semi", "1", `700 30px ${n}`, r, "center"), t("auto", "A", `700 30px ${n}`, "rgba(205,60,40,0.95)", "center"), t("rack", "B4-07", `800 104px ${o}`, "rgba(214,206,170,0.9)", "center");
+  t("model", "PAC-9", `700 78px ${o}`, r), t("maker", "LONGSHORE ARMS WORKS  \xB7  HALCYON", `600 30px ${n}`, r), t("cal", "CAL 5.8\xD740   SN PA-004217", `500 27px ${s}`, r), t("prop", "PROPERTY OF PORT AUTHORITY \u2014 BERTH 4 ARMOURY", `600 28px ${n}`, r), t("safe", "S", `700 30px ${n}`, r, "center"), t("semi", "1", `700 30px ${n}`, r, "center"), t("auto", "A", `700 30px ${n}`, "rgba(205,60,40,0.95)", "center"), t("rack", "B4-07", `800 104px ${o}`, "rgba(214,206,170,0.9)", "center");
   for (let u of [2, 4, 6, 8, 10, 12]) t("r" + u, "T" + u, `600 30px ${s}`, "rgba(190,192,188,0.85)", "center");
   t("optic", "HX-2 REFLEX", `700 44px ${n}`, r, "center"), t("light", "900 LM  IPX8", `600 40px ${n}`, r, "center");
   {
@@ -536,10 +530,8 @@ var quatEuler = (i, e, t, n = "XYZ") => new Quaternion().setFromEuler(new THREE.
 
 // ---------------------------------------------------------------- controller
 //
-// Rewritten from Saltline's `dm`. Geometry, poses, reload keyframes, spring
-// constants and the recoil pattern are unchanged; the game-specific plumbing
-// (Saltline's material library, player, input, combat and fx singletons) is
-// replaced by an explicit context and a per-frame input record.
+// Geometry, poses, reload keyframes, spring constants and recoil pattern are
+// driven by an explicit context and a per-frame input record.
 //
 // ctx:
 //   camera, viewCamera   world camera and the camera the viewmodel layer is
@@ -555,18 +547,14 @@ var quatEuler = (i, e, t, n = "XYZ") => new Quaternion().setFromEuler(new THREE.
 //   input = { fire, ads, reload, move:{x,y}, look:{dx,dy}, speed, onGround,
 //             velY, sprinting, crouching, eye: Vector3, vel?: Vector3 }
 
-const SALTLINE_BASE_COLOURS = {
-  // From Saltline's material table: brass = brushed metal 0xc29a45,
-  // glove_fabric = woven fabric 0x23262a. Their vertex colours are multipliers
-  // on these bases, so the base value matters more than any texture.
+const FALLBACK_BASE_COLOURS = {
+  // Base metal/fabric recipes; vertex colours act as multipliers on these bases.
   brass: () => new THREE.MeshStandardMaterial({ color: 0xc29a45, roughness: 0.42, metalness: 1, vertexColors: true }),
-  // Saltline's fabric also multiplies a dark weave albedo (~0.5) we do not
-  // bake, so the plain base is halved to keep the glove from reading white.
+  // Plain glove base is halved to match the dark woven albedo without a texture.
   glove_fabric: () => new THREE.MeshStandardMaterial({ color: new THREE.Color(0x23262a).multiplyScalar(0.5), roughness: 0.93, metalness: 0, vertexColors: true }),
 };
 
-// Draw/holster and relaxed-carry poses, added here (Saltline never holsters):
-// offsets layered on top of the hip pose like Saltline's sprint/reload poses.
+// Draw/holster and relaxed-carry poses layered on top of the hip pose.
 const POSE_HOLSTER = { p: [0.07, -0.34, 0.1], r: [-0.85, 0.6, 0.55] };
 const POSE_LOWER = { p: [-0.01, -0.028, 0.02], r: [-0.22, 0.26, 0.15] };
 
@@ -580,7 +568,7 @@ export function createPac9Viewmodel(ctx) {
   const root = new THREE.Group();
   root.name = 'viewmodel-pac9';
   const geo = buildPac9Geometry();
-  const material = (name) => ctx.material?.(name) || SALTLINE_BASE_COLOURS[name]();
+  const material = (name) => ctx.material?.(name) || FALLBACK_BASE_COLOURS[name]();
   const mesh = (g, m) => {
     const out = new THREE.Mesh(g, m);
     out.castShadow = false;
@@ -795,7 +783,7 @@ export function createPac9Viewmodel(ctx) {
 
   // Viewmodel-local point -> world point as the player perceives it: the
   // viewmodel is drawn with its own (narrower) fov, so re-project from the
-  // view frustum into the world camera frustum like Saltline did.
+  // view frustum into the world camera frustum.
   function viewToWorld(local, out) {
     out.fromArray(local);
     root.updateWorldMatrix(true, false);
