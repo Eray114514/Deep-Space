@@ -381,8 +381,9 @@ try {
   occupied.server.close();
 }
 
-// Keep the shared terrain sampling contract in the fast default gate.
+// Keep the shared terrain sampling and soundtrack contracts in the fast default gate.
 await import('./terraindetailframetest.js');
 await import('./oceanrenderframetest.js');
+await import('./musictest.js');
 
 console.log(`PASS: ${sourceFiles.length} modules parse; version ${runtimeVersion}, flight controls, stationary hover, polar approach guidance, horizon stabilization, terrain detail phases, and dev-port fallback are valid.`);

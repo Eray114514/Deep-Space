@@ -5574,10 +5574,9 @@ function frame(rafTs) {
     // screen, the BGM director must still run so it can switch to the starmap
     // theme (and back when the map closes).
     music.update({
+      dt: rawDt,
       state,
-      planetType: null,
-      snowWeight: 0,
-      nearBlackHole: false,
+      heroActive: document.body.classList.contains('hero-active'),
       starmapOpen: true,
     });
     return;
@@ -6337,16 +6336,95 @@ function frame(rafTs) {
       events: ship.events,
     });
   }
-  // Background music director: pickTrack decides what should be playing based
-  // on state, planet biome, snow coverage, black-hole vicinity and star-map
-  // open state. Only switches when the target changes.
-  music.update({
-    state,
-    planetType: (state === 'walk' && walkCtl.planet?.type) || null,
-    snowWeight: state === 'walk' ? currentWalkSnowWeight : 0,
-    nearBlackHole: !!nearbyBlackHole(),
-    starmapOpen: !!starMap?.isOpen,
-  });
+  // Background music director: resolves multi-track pools, biome day/night &
+  // alpine snow hysteresis, civilization landmarks, underwater/gas-giant dives,
+  // rift/warp transits, and surface robot combat (+ 5 s cooldown linger).
+  {
+    const heroActive = document.body.classList.contains('hero-active');
+    let blackHoleRatio = Infinity;
+    for (const object of universe.system?.compactObjects || []) {
+      const accR = object.spec?.accretionRadius;
+      if (accR > 0) {
+        const ratio = nav.pos.distanceTo(object.posUniv) / accR;
+        if (ratio < blackHoleRatio) blackHoleRatio = ratio;
+      }
+    }
+    const scorePlanet = state === 'walk' ? walkCtl.planet
+      : (state === 'landing' || ((state === 'landed' || state === 'shipwalk') && shipLanded))
+        ? (ship.parkedPlanet || nearest)
+        : nearest;
+    let scoreSnowWeight = state === 'walk' ? currentWalkSnowWeight : 0;
+    if (state !== 'walk' && scorePlanet && (scorePlanet.type === 'lush' || scorePlanet.type === 'ocean')
+      && (state === 'landing' || ((state === 'landed' || state === 'shipwalk') && shipLanded))
+      && ship.parkedLocal) {
+      _v.copy(ship.parkedLocal).normalize();
+      scoreSnowWeight = Math.max(0, scorePlanet.snowWeightAt?.(_v, scorePlanet.height(_v, 64)) || 0);
+    }
+    let civilizationSiteType = null;
+    let civilizationDistance = Infinity;
+    if (scorePlanet?.type === 'artificialHabitat') {
+      civilizationSiteType = 'hero-floating-city';
+      civilizationDistance = Math.max(0, nav.pos.distanceTo(scorePlanet.posUniv) - (scorePlanet.R || 0));
+    } else if (scorePlanet?.civilizationSite?.landingZone?.normal) {
+      civilizationSiteType = scorePlanet.civilizationSite.type;
+      const n = scorePlanet.civilizationSite.landingZone.normal;
+      _v.set(n[0], n[1], n[2]).normalize();
+      _v.multiplyScalar(scorePlanet.surfaceRadius ? scorePlanet.surfaceRadius(_v) : scorePlanet.R);
+      scorePlanet.localPositionToWorld(_v, _v2);
+      civilizationDistance = nav.pos.distanceTo(_v2);
+    }
+    let nearOrbitalStation = false;
+    if (state === 'space' || state === 'flyto') {
+      for (const entry of universe.system?.artificialSites || []) {
+        if (!entry.parentBody && entry.posUniv && nav.pos.distanceTo(entry.posUniv) < 320000) {
+          nearOrbitalStation = true;
+          break;
+        }
+      }
+    }
+    const outpostRobots = surfaceGameplay?.outpostRobots;
+    const surfaceCombat = Boolean(
+      state === 'walk'
+      && outpostRobots?.deployed
+      && !outpostRobots.friendly
+      && outpostRobots.units.some((u) => u.alive && !u.passive && (
+        u.mode === 'engage'
+        || u.mode === 'search'
+        || (outpostRobots.player?.pos && u.pos.distanceToSquared(outpostRobots.player.pos) < 46 * 46)
+      )),
+    );
+    const gasGiantAltRatio = nearest?.isGasGiant && nearest.atmoHeight > 0
+      ? nearestAlt / nearest.atmoHeight
+      : null;
+    const muffledCabin = Boolean(
+      shipLanded
+      && (state === 'landed' || state === 'shipwalk')
+      && !shipView.rampOpen(),
+    );
+
+    music.update({
+      dt: rawDt,
+      state,
+      heroActive,
+      starmapOpen: !!starMap?.isOpen,
+      routeChoiceOpen: Boolean(pendingRoute && !pendingRoute.warpRequested && !riftRoute),
+      riftActive: Boolean(riftRoute && !riftRoute.arrived),
+      nearBlackHole: blackHoleRatio < 7.0,
+      blackHoleRatio: Number.isFinite(blackHoleRatio) ? blackHoleRatio : null,
+      gasGiantAltRatio,
+      underwater: envUnderwater,
+      surfaceCombat,
+      planetType: scorePlanet?.type || null,
+      planetKey: scorePlanet?.bodyId || scorePlanet?.seed || null,
+      shipLanded,
+      snowWeight: scoreSnowWeight,
+      dayFactor: envDay,
+      civilizationSiteType,
+      civilizationDistance,
+      nearOrbitalStation,
+      muffledCabin,
+    });
+  }
 
   // HUD
   const boostSpeedLimit = flightBoostSpeedLimit(
