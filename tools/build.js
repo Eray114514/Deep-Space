@@ -1,6 +1,7 @@
 import { cp, glob, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseJs } from 'acorn';
 
 const ROOT = dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const OUT = resolve(ROOT, 'dist');
@@ -67,23 +68,30 @@ await writeFile(indexHtmlPath, indexHtml, 'utf8');
 // module unless the request URL changes. Append the release version to every
 // relative ES module import so each deployment invalidates the module graph.
 const staticImportRe = /((?:import|export)(?:\s+[^'"]+?from\s+)?)['"](\.{1,2}\/[^'"]+?)['"]/g;
-const dynamicImportRe = /(import\s*\(\s*)['"](\.{1,2}\/[^'"]+?)['"]\s*\)/g;
+const dynamicImportRe = /(import\s*\(\s*)['"](\.{1,2}\/[^'"]+?)['"](\s*[,)])/g;
 
 function rewriteRelativeImports(text) {
-  const appendVersion = (match, prefix, path) => {
+  const appendVersion = (match, prefix, path, suffix = '') => {
     if (path.includes('?')) return match;
-    return `${prefix}'${path}?v=${BUILD_VERSION}'`;
+    return `${prefix}'${path}?v=${BUILD_VERSION}'${suffix}`;
   };
   return text
-    .replace(staticImportRe, appendVersion)
-    .replace(dynamicImportRe, appendVersion);
+    .replace(staticImportRe, (match, prefix, path) => appendVersion(match, prefix, path))
+    .replace(dynamicImportRe, (match, prefix, path, suffix) => appendVersion(match, prefix, path, suffix));
 }
 
 async function versionModuleImports(dir) {
   for await (const file of glob(join(dir, '**/*.js'))) {
     const original = await readFile(file, 'utf8');
     const updated = rewriteRelativeImports(original);
-    if (updated !== original) await writeFile(file, updated, 'utf8');
+    if (updated !== original) {
+      try {
+        parseJs(updated, { ecmaVersion: 'latest', sourceType: 'module' });
+      } catch (err) {
+        throw new Error(`Build failed: rewritten module has invalid syntax (${relative(OUT, file)}): ${err.message}`);
+      }
+      await writeFile(file, updated, 'utf8');
+    }
   }
 }
 
