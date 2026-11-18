@@ -2783,7 +2783,7 @@ function handOffRampExitToSurface() {
 
   if (ship.hoverMode === 'high' || dropClearance > 8.5) {
     // HALO / hover jump! Leap clear of the aft ramp lip into freefall.
-    const aftPush = new THREE.Vector3(0, 1.2, 6.4).applyQuaternion(ship.parkedLocalQuat);
+    const aftPush = new THREE.Vector3(0, run ? 5.8 : 4.6, run ? 6.8 : 5.2).applyQuaternion(ship.parkedLocalQuat);
     carryLocal.add(aftPush);
     skydiveCtl.enter(planet, posLocal, viewDir, carryLocal);
     audio.cue('chute-exit');
@@ -5818,6 +5818,10 @@ function frame(rafTs) {
     seatedOnPad: state === 'landed',
     planet: ship.parkedPlanet,
   });
+  if (!skydiveCtl.active && skydiveCtl.rig) {
+    skydiveCtl.showRampPose(state === 'shipwalk' && shipView.shipwalk && shipView.seatT >= 1 && ship.hoverMode === 'high'
+      ? shipView.rampPush : 0, ship.parkedPlanet, nav, nearestAlt);
+  }
   if (state === 'shipwalk' && shipView.pendingSurfaceExit && !paused) {
     handOffRampExitToSurface();
   } else if (state === 'shipwalk' && !shipView.shipwalk && !paused) {
@@ -6497,7 +6501,7 @@ function frame(rafTs) {
   // foreground layer. Walking parks the ship back in world space, but the gun
   // still owns this pass; tying it only to ship.foregroundOnly hid all four
   // weapon models after landing.
-  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible || skydiveCtl.active;
+  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible || !!skydiveCtl.rig?.root.visible;
   // During scripted surface manoeuvres (recall fly-in, landing, liftoff, hover
   // departure) keep the ship on ForegroundPass AFTER LiteCloudPass so clouds
   // never paste over the moving hull, while retaining the opaque scene depth

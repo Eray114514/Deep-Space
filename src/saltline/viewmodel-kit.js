@@ -722,7 +722,19 @@ export function buildHand(opts) {
     poseSection(m + .006);
     for (let z = 0; z < v; z++) y.v(center, E_, 0.3);
     y.collapse();
-    add('sleeve', y.geo(true));
+    const sleeve = y.geo(true);
+    if (opts.shoulderSocket) {
+      // The viewmodel can bind the proximal sleeve to the player's shoulder.
+      // Encode ring weights before merging, preserving the wrist and elbow.
+      for (const part of parts) part.attributes.uv?.array.fill(0);
+      for (let i = 0; i < sleeve.attributes.uv.count; i++) {
+        const z = A[Math.floor(i / v)]?.[0] ?? m + .006;
+        sleeve.attributes.uv.setY(i, xl(elbowZ - elbowBlend, m, z));
+      }
+      opts.shoulderSocket.copy(center);
+      if (opts.mirror) opts.shoulderSocket.x *= -1;
+    }
+    add('sleeve', sleeve);
   }
 
   let out = {

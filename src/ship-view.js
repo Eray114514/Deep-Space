@@ -123,6 +123,7 @@ export class ShipView {
     this.bob = 0;
     this.stepCount = 0;
     this.pendingSurfaceExit = false;
+    this.rampPush = 0;
 
     /* cockpit free look (RMB) + smoothed hull angular velocity for tilt */
     this.freeYaw = 0;
@@ -561,12 +562,18 @@ export class ShipView {
     const bobScale = p.z > 6.2 ? 1 - smoothstep(p.z, tip.z - 0.9, tip.z + 0.1) : 1;
     const bobY = Math.sin(this.bob * 2) * 0.028 * bobScale;
     const bobX = Math.sin(this.bob) * 0.022 * bobScale;
-    _v.set(p.x + bobX * 0.4, SHIP_WALK_EYE_HEIGHT + rampY + this.eyeOffset + bobY, p.z);
-    _q.setFromEuler(_e.set(this.walkPitch, this.walkYaw, bobX * 0.35 + this.rollCarry, 'YXZ'));
+    const jumpRamp = this.ship.hoverMode === 'high' && this.rampWalkable(landed);
+    const lip = tip.z - .72;
+    this.rampPush = jumpRamp ? smoothstep(p.z, lip - 1.65, lip) : 0;
+    const plant = jumpRamp ? smoothstep(p.z, lip - 1.05, lip - .32) : 0;
+    const drive = jumpRamp ? smoothstep(p.z, lip - .32, lip) : 0;
+    const crouch = plant * (1 - drive);
+    _v.set(p.x + bobX * 0.4, SHIP_WALK_EYE_HEIGHT + rampY + this.eyeOffset + bobY - .17 * crouch + .065 * drive, p.z);
+    _q.setFromEuler(_e.set(this.walkPitch - .13 * crouch + .035 * drive, this.walkYaw, bobX * 0.35 + this.rollCarry, 'YXZ'));
     nav.pos.copy(this.anchorPos).add(_v.applyQuaternion(this.anchorQuat));
     nav.quat.copy(this.anchorQuat).multiply(_q);
 
-    if (this.rampWalkable(landed) && p.z > tip.z + 0.16) {
+    if (this.rampWalkable(landed) && p.z > (jumpRamp ? lip : tip.z + .16)) {
       this.pendingSurfaceExit = true;
     }
   }

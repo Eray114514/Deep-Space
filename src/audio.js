@@ -347,6 +347,8 @@ export class FlightAudio {
     } else if (kind === 'water-splash') {
       this.noiseBurst({ duration: 0.32, gain: 0.085, from: 1600, to: 420, q: 0.48 });
     } else if (kind === 'chute-exit') {
+      this.tone({ from: 114, to: 51, duration: .13, gain: .15, lowpass: 380 });
+      this.noiseBurst({ duration: .09, from: 820, to: 240, gain: .19, q: .72 });
       this.noiseBurst({ duration: .34, from: 550, to: 2400, gain: .26, q: .6 });
       this.noiseBurst({ duration: .16, from: 2200, to: 570, gain: .16, delay: .14 });
     } else if (kind === 'chute-open') {

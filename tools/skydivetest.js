@@ -195,6 +195,29 @@ try {
   await page.waitForFunction('NMS.shipViewState().rampWalkable', null, { timeout: 30000 });
   await shot('02-hover-ramp-abyss');
 
+  await page.evaluate(() => {
+    window.jumpTrace = { rise: 0, minShoulderZ: Infinity, gripGap: 0, heldFrames: 0 };
+    const { scene, camera } = NMS._internals;
+    const sample = () => {
+      const s = NMS.skydiveState();
+      if (s.active) {
+        jumpTrace.rise = Math.max(jumpTrace.rise, -s.sinkRate);
+        for (const side of ['left', 'right']) {
+          const hand = scene.getObjectByName('jump-glove-' + side);
+          const socket = hand.geometry.userData.shoulderSocket.clone().add(hand.material.uniforms.shoulderOffset.value);
+          jumpTrace.minShoulderZ = Math.min(jumpTrace.minShoulderZ, camera.worldToLocal(hand.localToWorld(socket)).z);
+          if (s.deployT >= .58) {
+            const grip = hand.localToWorld(new NMS._THREE.Vector3(0, -.026, -.106));
+            const toggle = scene.getObjectByName('jump-toggle-' + side);
+            jumpTrace.gripGap = Math.max(jumpTrace.gripGap, grip.distanceTo(toggle.getWorldPosition(socket)));
+            jumpTrace.heldFrames++;
+          }
+        }
+      }
+      if (s.deployT < 1) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
   await page.keyboard.down('ShiftLeft');
   await page.keyboard.down('KeyW');
   await page.waitForFunction('NMS.state === "skydive"', null, { timeout: 30000 });
@@ -209,6 +232,7 @@ try {
   await page.waitForTimeout(700);
   await shot('03-skydive-freefall');
 
+  await page.waitForFunction('NMS.skydiveState().sinkRate > 14');
   const freefallPeak = await page.evaluate(() => NMS.skydiveState());
   check(freefallPeak.airspeed > 14, `freefall builds downward airspeed (${freefallPeak.airspeed} m/s)`);
 
@@ -227,6 +251,10 @@ try {
   });
   await page.waitForTimeout(300);
   await shot('04-parafoil-canopy-overhead');
+  await page.waitForFunction('NMS.skydiveState().deployT === 1 && jumpTrace.heldFrames > 0');
+  const trace = await page.evaluate(() => jumpTrace);
+  check(trace.rise > 4 && trace.minShoulderZ > .05 && trace.gripGap < .001,
+    `ramp pushes off upward, sleeve ends stay behind the eye, toggles stay in the grasp ${JSON.stringify(trace)}`);
 
   // Look toward the mountain horizon (-6° pitch so peripheral risers/toggles + mountain both show) and bank right!
   await page.evaluate('NMS.lookPitch(-76)');

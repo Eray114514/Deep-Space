@@ -65,6 +65,8 @@ export class SkydiveController {
     this.touchMove = new THREE.Vector2();
     this.frameAxis = Y_AXIS;
     this.rig = null;
+    this.rampPose = { quat: new THREE.Quaternion(), posLocal: new THREE.Vector3(),
+      phase: 'ramp', deployT: 0, brakeLeft: 0, brakeRight: 0, dive: 0, airspeed: 0 };
 
     this._drag = null;
     this._onMove = (e) => {
@@ -106,6 +108,22 @@ export class SkydiveController {
     if (this.rig) return;
     this.rig = createSkydiveRig();
     this.scene.add(this.rig.root);
+  }
+
+  showRampPose(progress, planet, nav, altitude) {
+    if (this.active || !this.rig) return;
+    if (!progress || !planet) {
+      this.rig.root.visible = false;
+      this.rampPose.planet = null;
+      return;
+    }
+    const pose = this.rampPose;
+    pose.planet = planet;
+    pose.time = (progress - 1) * .65;
+    planet.worldPositionToLocal(nav.pos, pose.posLocal);
+    pose.quat.copy(planet.frameOrientation).invert().multiply(nav.quat);
+    pose.agl = altitude;
+    this.rig.update(pose, pose.quat, this.dom.clientWidth / Math.max(1, this.dom.clientHeight));
   }
 
   enter(planet, posLocal, viewDir, initialVelLocal = null) {
@@ -203,7 +221,9 @@ export class SkydiveController {
     const tremor = this.phase === 'freefall'
       ? Math.sin(this.time * 31.0) * 0.0032 * clamp(this.airspeed / 55, 0, 1)
       : 0;
-    const effPitch = clamp(this.pitch + this.pitchJolt + tremor - .29 * this.dive, -1.49, 1.47);
+    const tipForward = .13 * Math.sin(Math.PI * THREE.MathUtils.smoothstep(this.time, .18, 1.42))
+      * (1 - this.deployT);
+    const effPitch = clamp(this.pitch + this.pitchJolt + tremor - tipForward - .29 * this.dive, -1.49, 1.47);
     _viewDir.copy(_fwd).multiplyScalar(Math.cos(effPitch)).addScaledVector(_u, Math.sin(effPitch));
     _camRight.crossVectors(_viewDir, _u);
     if (_camRight.lengthSq() < 1e-6) _camRight.set(1, 0, 0);
@@ -252,12 +272,13 @@ export class SkydiveController {
       // descent for a deliberate dive, so releasing W opens the body again.
       const thinAir = 1 - Math.exp(-Math.max(0, this.agl) / 7800);
       const terminalDown = 57 + thinAir * 13 + this.dive * (76 + thinAir * 148) + Math.min(0, fIn) * 15;
-      const accel = g * (1 + this.dive * 2.35);
+      const airborne = THREE.MathUtils.smoothstep(this.time, .32, 1.10);
+      const accel = g * (1 + this.dive * airborne * 2.35);
       vVert -= accel * dt * (1 - Math.pow(Math.max(0, -vVert) / terminalDown, 2));
       const targetHoriz = _camRight.set(0, 0, 0)
         .addScaledVector(_fwd, fIn * (21 + 19 * this.dive))
         .addScaledVector(_right, rIn * 15);
-      horizVel.lerp(targetHoriz, 1 - Math.exp(-dt * 2.6));
+      horizVel.lerp(targetHoriz, 1 - Math.exp(-dt * lerp(.16, 2.6, airborne)));
       this.bankRoll = damp(this.bankRoll, rIn * 0.14, 5.5, dt);
       this.pitchJolt = damp(this.pitchJolt, 0, 6.0, dt);
       this.glideYaw = this.yaw;
