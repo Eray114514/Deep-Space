@@ -39,3 +39,11 @@ Thumbs.db
 
 # Blender 脚本的 Python 字节码缓存
 __pycache__/
+
+# 本地文档与开发记录（保留在本地工作区，不纳入远端最新版本）
+docs/
+AGENTS.md
+CLAUDE.md
+README.md
+README.en.md
+THIRD_PARTY_NOTICES.md

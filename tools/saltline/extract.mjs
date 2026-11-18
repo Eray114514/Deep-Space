@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Saltline bundle extractor.
 //
-// Saltline (the user's other AI-built game, see docs/saltline-reuse.md) only
-// survives as one minified esbuild IIFE. This tool parses that bundle, runs a
+// Saltline survives as one minified esbuild IIFE. This tool parses that bundle, runs a
 // small lexical-scope analysis over every top-level statement, and pulls out a
 // requested symbol together with the transitive closure of top-level
 // declarations it depends on. three.js aliases (the bundle's `lt` namespace)
@@ -18,16 +17,16 @@
 //                             reference these names (registries like Tn.x = …)
 //        [--deps]             print the dependency list only
 //
-// The bundle path defaults to the local Saltline checkout; override with
-// SALTLINE_BUNDLE=/path/to/saltline.js.
+// Provide bundle paths via SALTLINE_BUNDLE / GOLDEN_HOUR_BUNDLE env vars
+// (or place them at the default filenames below).
 
 import fs from 'node:fs';
 import path from 'node:path';
 import * as acorn from 'acorn';
 import { transformSync } from 'esbuild';
 
-const DEFAULT_BUNDLE = process.env.SALTLINE_BUNDLE || 'D:/Eray0/下载/Saltline/public/engine/saltline.js';
-const GOLDEN_HOUR_BUNDLE = process.env.GOLDEN_HOUR_BUNDLE || 'D:/Eray0/下载/GOLDEN HOUR — Solstice Hotel/dist/game.js';
+const DEFAULT_BUNDLE = process.env.SALTLINE_BUNDLE || './saltline.js';
+const GOLDEN_HOUR_BUNDLE = process.env.GOLDEN_HOUR_BUNDLE || './golden-hour.js';
 
 // three.js addons that the bundle inlined after the core; they are not in the
 // `lt` / `Ct` namespace, so map them to our vendored addon modules by hand.

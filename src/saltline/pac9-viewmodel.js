@@ -1,12 +1,10 @@
 // PAC-9 Longshore first-person viewmodel, ported from Saltline.
 //
-// Saltline (D:\Eray0\下载\Saltline, the user's other AI-built game) only ships
-// as a minified bundle. This file was produced by
+// This file was produced by
 //   node tools/saltline/extract.mjs dm --stop sa --rename tools/saltline/maps/pac9.json
 // and adapted for the game's controllers and shared first-person glove rig.
 // The procedural weapon geometry and micro-detail shader retain their original
 // generated local names.
-// See docs/saltline-reuse.md for what else can be taken from Saltline.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildHand, SHARED_LENS_SUN, SHARED_LENS_SKY } from './viewmodel-kit.js';

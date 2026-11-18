@@ -1,5 +1,4 @@
-// Procedural weapon & attachment geometry engine ported from Golden Hour
-// (`D:\Eray0\下载\GOLDEN HOUR — Solstice Hotel\dist\game.js`).
+// Procedural weapon & attachment geometry engine ported from Golden Hour.
 //
 // Keeps all high-detail receivers, barrels, handguards, stocks, rails, moving
 // parts, modular optics/muzzles/underbarrels, procedural camo/wear shaders, and
