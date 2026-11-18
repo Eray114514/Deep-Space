@@ -47,7 +47,7 @@ const CACHE_LIMIT = 384;
 // level bands in metres; each tree jitters them by ±15% (see the shader)
 const TIERS = [
   { name: 'horizon', geometry: 'horizon', lo: 800, hi: Infinity, cap: 115000, shadow: false },
-  { name: 'far', geometry: 'far', lo: 140, hi: 800, cap: 14000, shadow: false },
+  { name: 'far', geometry: 'far', lo: 140, hi: 800, cap: 14000, shadow: true },
   { name: 'mid', geometry: 'mid', lo: 45, hi: 140, cap: 1000, shadow: true },
   { name: 'near', geometry: 'near', lo: 0, hi: 45, cap: 160, shadow: true },
 ];
@@ -153,6 +153,15 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             float bend = lift * lift * 0.0011 * uTreeWind.z * (1.0 - crush) * ${tier.name === 'horizon' ? '0.0' : '1.0'};
             transformed.x += uTreeWind.x * sway * bend;
             transformed.z += uTreeWind.y * sway * bend;
+            ${depthOnly && tier.name === 'far' ? `
+            // At 140..800 m a shadow-map texel is 1.2..2.5 m across; pad the
+            // lower trunk slightly in the shadow pass so it never falls between
+            // texels and leaves the crown shadow detached from its root.
+            float stemMask = smoothstep(5.5, 0.8, max(transformed.y, 0.0)) * step(length(transformed.xz), 0.75);
+            if (stemMask > 0.001) {
+              vec2 radialXZ = length(transformed.xz) > 1e-4 ? normalize(transformed.xz) : vec2(1.0, 0.0);
+              transformed.xz += radialXZ * (0.48 * stemMask);
+            }` : ''}
             transformed = treeBend() * transformed;
             transformed *= g;
           }
@@ -164,11 +173,11 @@ function applyTreeField(material, uniforms, tier, depthOnly = false) {
             return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
           }`)
       .replace('void main() {', `void main() {
-          ${depthOnly ? '' : `{
+          {
             float n = treeDither(gl_FragCoord.xy);
             if (n > vTreeFade.x) discard;
             if (n <= 1.0 - vTreeFade.y) discard;
-          }`}`)
+          }`)
       // Foliage normals describe the crown as one rounded volume. Flipping
       // them on back faces would shade the far side of every card as if it
       // faced into the tree, turning half the canopy black.
@@ -242,10 +251,13 @@ export class FarFlora {
         const geometry = species.geometries[tier.geometry].clone();
         geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(new Float32Array(tier.cap), 1));
         geometry.getAttribute('aRand').setUsage(THREE.DynamicDrawUsage);
-        const material = applyTreeField(new THREE.MeshStandardMaterial({
-          map: trees.atlas, alphaTest: 0.42, vertexColors: true, roughness: 0.86,
-          side: THREE.DoubleSide,
-        }), this.uniforms, tier);
+        const foliage = { map: trees.atlas, alphaTest: 0.42, vertexColors: true, side: THREE.DoubleSide };
+        // At flight distances (and for consistent tier transitions), a single
+        // dielectric/PMREM specular highlight across leaf cards makes frosted
+        // silver tops in sunlight. Keep uniform direct and ambient diffuse
+        // lighting across every tree level.
+        const crown = new THREE.MeshLambertMaterial(foliage);
+        const material = applyTreeField(crown, this.uniforms, tier);
         const im = new THREE.InstancedMesh(geometry, material, tier.cap);
         im.name = 'trees:' + tier.name + ':' + species.name;
         im.count = 0;
@@ -256,6 +268,7 @@ export class FarFlora {
         if (tier.shadow) {
           im.customDepthMaterial = applyTreeField(new THREE.MeshDepthMaterial({
             depthPacking: THREE.RGBADepthPacking, map: trees.atlas, alphaTest: 0.42,
+            side: THREE.DoubleSide,
           }), this.uniforms, tier, true);
         }
         im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -540,10 +553,13 @@ export class FarFlora {
       const sel = hashFloat(h0, 0);
       // most rolls fail in every biome; skip the terrain queries for them
       if (sel >= MAX_DENSITY * this.density) continue;
-      const hgt = p.height(_up, 96);
-      const biome = p.biomeAt(_up, hgt);
-      const dens = FAR_DENSITY[biome];
-      if (!dens || sel >= dens[0] * this.density) continue;
+      const temperate = p.type === 'lush' || p.type === 'ocean';
+      let biome, dens;
+      if (!temperate) {
+        biome = p.biomeAt(_up, p.height(_up, 96));
+        dens = FAR_DENSITY[biome];
+        if (!dens || sel >= dens[0] * this.density) continue;
+      }
       // jitter inside the cell, ground the tree at full terrain detail
       frame(_up, _ce1, _ce2);
       _jd.copy(_up)
@@ -554,6 +570,15 @@ export class FarFlora {
       // surface by tens of metres — trees planted with it are BURIED
       const hh = p.height(_jd, p.fullMaxFreq);
       if (p.hasLiquid && hh < p.seaLevel + 0.6) continue;
+      let cover = biome === 'forest' ? 1 : 0;
+      if (temperate) {
+        const moist = p.landMoisture(_jd);
+        biome = p.biomeAt(_jd, hh, moist);
+        dens = FAR_DENSITY[biome];
+        if (!dens || !dens[0]) continue;
+        cover = p.woodlandCover(_jd, p.landT(hh), moist, p.fullMaxFreq);
+        if (sel >= MAX_DENSITY * cover * this.density) continue;
+      }
       _p.copy(_jd).multiplyScalar(p.R + hh - 0.25).sub(job.origin);
       _q.setFromUnitVectors(Y, _jd);
       _q2.setFromAxisAngle(Y, hashFloat(h0, 1) * Math.PI * 2);
@@ -561,7 +586,7 @@ export class FarFlora {
       const sc = 0.7 + hashFloat(h0, 2) * 0.6;
       // A woodland stand closes overhead; open-country trees keep their
       // isolated silhouettes. One transform serves every distance tier.
-      const spread = biome === 'forest' ? sc * 1.85 : sc;
+      const spread = sc * (1 + 0.85 * cover);
       _s.set(spread, sc * (0.9 + hashFloat(h0, 0) * 0.25), spread);
       _m.compose(_p, _q, _s);
       const variant = hash3i(ux, uy, uz, job.seedI ^ 0x3d1f);

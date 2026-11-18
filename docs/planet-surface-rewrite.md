@@ -149,6 +149,18 @@
 
 ## 完成记录
 
+### 中空草原观感与树影修正（2026-11-18，用户反馈\"中空像偏黄的软地毯，树像散点，影子脱离树根，树冠泛白\"）
+
+- **取证路线**：母星 0 号草原区内选出真正开阔、疏林的缓起伏草地（落差 72 m，平均坡度 0.099，平均林覆盖 1.25%），固定航向，从 600 m 滑降到 20 m（路线与阈值写在 `test-results/meadow-open-flight/route.json`，复拍 `node test-results/meadow-open-flight/capture.mjs <label> [--video]`）。
+- **原因与修正**：
+  - 偏黄：地表着色器把 70% 的海滩沙色混进草地，干草色主要取自沙色；改为保持草色的三向扫描采样，并收紧干草混合。
+  - 130 m 处出现一圈暗绿环：`meadowNear` 近景加深带，缩窄到 18～62 m 并降低混合量。
+  - 缺少 26～110 m 的中景起伏：片元法线加入 26 m 与 42 m 两层行星局部切向扫描法线（经 `uTerrainViewToLocal` 转回视图空间）。`terrain-detail-frame.js` 的草皮域频率调到 1/42、石南 1/160，草簇相位改用稳定的 `terrainDetailPosition()`，避免在 R=1.2e6 处量化。
+  - 树影脱离树根：`main.js` 的太阳阴影偏移固定为 `bias=-0.0002`（NDC），在 8.5～26 km 的阴影范围里等于把深度推开 1.7～5.3 m，叠加 2.0～5.7 m 的法线偏移，细树干被整段抬离。改为按阴影范围换算的世界尺度：`bias=-0.22/shadowRange`、`normalBias=max(0.25, 阴影纹素×0.55)`、`radius=1.4`；远树深度材质改为双面、保留 `vTreeFade` 抖动，并在远级树干底部加宽，使细干落进 1.2～2.5 m 的阴影纹素。
+  - 树冠泛白：近、中级树仍用 `MeshStandardMaterial`，会吃到 `scene.environment` 的天空反射；四级全部改用 `MeshLambertMaterial`。
+- **证据**：`test-results/meadow-open-flight/before-vs-after.png`（同机位，上排基线 `a51d8ed`，下排修正后，400/150/65/20 m）；`after/open-meadow-descent.webm` 与 `after/frames/` 为连续下降录像及抽帧；`test-results/meadow-midflight/after-final/` 为林缘机位复拍（`16m.png` 泛白树冠消失，树影贴根）。
+- **余项**：以上只在母星（lush）草原验证；荒漠、冰封、火山、毒雾、异相、海洋类型只通过 `tools/sanity.js` 的生成检查，未做实飞。`16m` 机位地面上仍有几处深色小团（旧有散布物，未改动），留待 T4c/T4b。
+
 ### T2b 母星潮汐河谷与海洋星球群岛（2026-11-18）
 
 - 母星海湾内选定一个入海口及内陆方向。生成器读取当地地形，以通向出口的累计代价决定每格的下游，按汇水面积选择主谷和一条支谷。34 km 的剖面里，海水可延伸约 17 km；弯道两侧有不同的沉积宽度，曲率在采样点之间连续插值，陡壁可见岩层与侧沟。地形网格、降落碰撞、海底深度和地形 worker 共用剖面。这个版本只在母星的这个流域启用。

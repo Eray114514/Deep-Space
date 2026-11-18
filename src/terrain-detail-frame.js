@@ -13,6 +13,7 @@ export function terrainDetailDomains(scale1 = 1 / 26, scale2 = 1 / 3.2) {
     ['Grain', scale1], ['GrainFine', scale2], ['Organic', scale2 * 0.32],
     ['Patch', 0.0035], ['PatchFine', 0.0012],
     ['Grass', 0.085], ['Rock', 0.085 * 0.78, 0.17],
+    ['Sward', 1 / 42], ['Heath', 1 / 160],
   ].map(([name, scale, shift = 0]) => ({ name, scale, shift }));
 }
 

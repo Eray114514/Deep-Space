@@ -82,18 +82,19 @@ function paintBark(data, seed, style) {
 }
 
 // rasterise soft-edged shapes into one cell; later shapes overwrite earlier
-function cellPainter(data, cell) {
+function cellPainter(data, cell, side = null) {
   const col = cell % 2, row = Math.floor(cell / 2);
-  const x0 = HALF + col * CELL, y0 = row * CELL;
+  const width = side === null ? CELL : CELL / 2;
+  const x0 = HALF + col * CELL + (side || 0) * width, y0 = row * CELL;
   const put = (px, py, r, g, b) => {
-    if (px < 0 || py < 0 || px >= CELL || py >= CELL) return;
+    if (px < 0 || py < 0 || px >= width || py >= CELL) return;
     const i = ((y0 + py) * ATLAS_SIZE + x0 + px) * 4;
     data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
   };
   return {
     fill(r, g, b) {
       for (let py = 0; py < CELL; py++) {
-        for (let px = 0; px < CELL; px++) {
+        for (let px = 0; px < width; px++) {
           const i = ((y0 + py) * ATLAS_SIZE + x0 + px) * 4;
           data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 0;
         }
@@ -123,20 +124,20 @@ function cellPainter(data, cell) {
       const w = Math.max(0, Math.round(halfWidth * CELL));
       for (let s = 0; s <= steps; s++) {
         const t = s / steps;
-        const px = Math.round((ax + (bx - ax) * t) * CELL), py = Math.round((ay + (by - ay) * t) * CELL);
+        const px = Math.round((ax + (bx - ax) * t) * width), py = Math.round((ay + (by - ay) * t) * CELL);
         for (let oy = -w; oy <= w; oy++) for (let ox = -w; ox <= w; ox++) put(px + ox, py + oy, lum * 255, lum * 255, lum * 235);
       }
     },
-    blob(cx, cy, radius, lum, seed) {
-      const reach = Math.ceil(radius * CELL) + 1;
-      const pcx = cx * CELL, pcy = cy * CELL;
-      for (let dy = -reach; dy <= reach; dy++) {
-        for (let dx = -reach; dx <= reach; dx++) {
-          const d = Math.hypot(dx, dy) / (radius * CELL);
+    blob(cx, cy, radius, lum, seed, radiusY = radius) {
+      const rx = radius * width, ry = radiusY * CELL;
+      const pcx = cx * width, pcy = cy * CELL;
+      for (let dy = -Math.ceil(ry * 1.22); dy <= Math.ceil(ry * 1.22); dy++) {
+        for (let dx = -Math.ceil(rx * 1.22); dx <= Math.ceil(rx * 1.22); dx++) {
+          const d = Math.hypot(dx / rx, dy / ry);
           const ragged = 0.72 + 0.5 * valueNoise((pcx + dx) * 0.14, (pcy + dy) * 0.14, 1.5, seed);
           if (d >= ragged) continue;
           // lit from above: the underside of every clump is darker
-          const shade = lum * (0.8 + 0.28 * (dy / reach) + 0.14 * valueNoise((pcx + dx) * 0.5, (pcy + dy) * 0.5, 4.5, seed));
+          const shade = lum * (0.8 + 0.28 * (dy / ry) + 0.14 * valueNoise((pcx + dx) * 0.5, (pcy + dy) * 0.5, 4.5, seed));
           put(Math.round(pcx + dx), Math.round(pcy + dy),
             Math.min(255, shade * 240), Math.min(255, shade * 255), Math.min(255, shade * 215));
         }
@@ -207,12 +208,15 @@ function paintFrondCard(painter, rng) {
 
 // Whole-tree silhouette for the horizon tier: the species' own crown clumps
 // (normalised x across, y up, r radius) splatted over a trunk.
-function paintImpostor(painter, clumps, trunk, seed) {
+function paintImpostor(painter, entry, seed, side) {
+  const { clumps, trunk } = entry.impostor;
   painter.fill(120, 140, 105);
-  painter.line(0.5, 0.0, 0.5, trunk.top, trunk.halfWidth, 0.46);
-  const ordered = [...clumps].sort((a, b) => a.z - b.z);
+  painter.line(0.5, 0.0, 0.5, trunk.top, trunk.halfWidth * 0.5, 0.46);
+  const ordered = [...clumps].sort((a, b) => side ? b.x - a.x : a.z - b.z);
   for (const clump of ordered) {
-    painter.blob(clump.x, clump.y, clump.r, 0.6 + 0.4 * clump.light, seed + Math.round(clump.x * 977));
+    const x = side ? 0.5 + clump.z / entry.width : clump.x;
+    painter.blob(x, clump.y, clump.r, 0.56 + 0.44 * clump.light, seed + Math.round(clump.x * 977),
+      clump.r * entry.width / entry.height);
   }
 }
 
@@ -235,7 +239,9 @@ export function buildTreeAtlas(seedInt, rng, species) {
         overhead.blob((index % 2 + u) * 0.5, (Math.floor(index / 2) + v) * 0.5,
           clump.r / span * 0.5, 0.52 + clump.y * 0.47, seedInt + index);
       }
-      paintImpostor(cellPainter(data, CELL_IMPOSTOR_0 + index), entry.impostor.clumps, entry.impostor.trunk, seedInt + index);
+      for (let side = 0; side < 2; side++) {
+        paintImpostor(cellPainter(data, CELL_IMPOSTOR_0 + index, side), entry, seedInt + index, side);
+      }
     }
   });
   const texture = new THREE.DataTexture(data, ATLAS_SIZE, ATLAS_SIZE, THREE.RGBAFormat);

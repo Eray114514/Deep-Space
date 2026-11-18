@@ -372,6 +372,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         varying vec4 vExtra;
         float gSnowW = 0.0;
         float gMeadow = 0.0;
+        float gSlopeBreak = 0.0;
         float gPatch = 0.0;
         float gShoreWet = 0.0;
         float gSand = 0.0;
@@ -395,6 +396,12 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           if (an.x > an.y && an.x > an.z) return q.yz;
           if (an.y > an.z) return q.zx;
           return q.xy;
+        }
+        vec3 triScanSample(sampler2D tex, vec3 q, vec3 weights, vec2 bend, vec3 meanColor) {
+          vec3 sampleColor = texture2D(tex, q.yz + bend).rgb * weights.x
+            + texture2D(tex, q.zx + bend).rgb * weights.y
+            + texture2D(tex, q.xy + bend).rgb * weights.z;
+          return sampleColor / max(meanColor, vec3(0.02));
         }
         float triDetail(vec3 p, vec3 w, vec4 domain, int ch) {
           vec3 q = p * domain.w + domain.xyz;
@@ -511,21 +518,27 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               // woodland mapped on the CPU (where trees are planted) keeps a
               // forest floor whatever the per-pixel moisture says
               float wooded = smoothstep(0.12, 0.4, forestW);
-              float dryW = (1.0 - smoothstep(0.3, 0.44, moisture)) * (1.0 - wooded);
-              vec3 steppe = mix(uLandC[0], base, 0.55) * vec3(1.0, 0.97, 0.88);
-              base = mix(base, steppe, dryW * 0.7);
+              float dryW = (1.0 - smoothstep(0.24, 0.42, moisture)) * (1.0 - wooded);
+              vec3 steppe = mix(base, uMeadowC * vec3(1.12, 0.98, 0.68), 0.45);
+              base = mix(base, steppe, dryW * 0.52);
               // the driest country is bare: pale sand and ochre rock
-              float aridW = (1.0 - smoothstep(0.14, 0.27, moisture)) * (1.0 - wooded);
-              base = mix(base, uLandC[0] * vec3(1.02, 0.93, 0.78), aridW * 0.8);
-              // where grass grows near the player, the ground is grass
-              gMeadow = (1.0 - aridW) * (1.0 - dryW * 0.6) * (1.0 - chill)
-                * (1.0 - smoothstep(uSlopeLo, uSlopeHi, slope)) * smoothstep(0.02, 0.06, t);
+              float aridW = (1.0 - smoothstep(0.08, 0.22, moisture)) * (1.0 - wooded);
+              base = mix(base, mix(uRockC, uLandC[0], 0.45) * vec3(0.98, 0.90, 0.74), aridW * 0.72);
+              // Terrestrial ground cover shares the rock and alpine limits
+              // used by the planting biomes. Snow and beaches overlay it.
+              gMeadow = (1.0 - aridW * 0.85) * (1.0 - dryW * 0.22) * (1.0 - chill)
+                * (1.0 - smoothstep(uSlopeLo, uSlopeHi, slope)) * smoothstep(0.012, 0.05, t)
+                * (1.0 - smoothstep(0.47, 0.61, t));
               vec3 tundra = mix(uRockC, base, 0.35) * vec3(0.96, 0.94, 0.9);
               base = mix(base, tundra, chill * 0.7);
               forestW = max(smoothstep(0.3, 0.62, forestW * 0.75 + (moisture - 0.5) * 0.9
                 + (standField - 0.5) * 0.8) * (1.0 - chill * 0.8)
                 * smoothstep(0.02, 0.07, t) * (1.0 - smoothstep(0.42, 0.56, t)),
                 wooded * (0.6 + 0.4 * standField));
+              // Ground around scattered tree groves shifts toward a fertile
+              // mossy under-story instead of bare sand.
+              float groveFloor = smoothstep(0.03, 0.40, vExtra.w) * (1.0 - chill);
+              base = mix(base, mix(uMeadowC * 0.78, uForestC, 0.52), groveFloor * 0.55);
               base *= 0.9 + 0.2 * terrainField(vLocalPos.yxz * 0.00017 + 9.1);
               // wet country is deeper and bluer-green, dry country warmer
               float wetW = smoothstep(0.46, 0.7, moisture);
@@ -580,8 +593,62 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             float fadeD = 1.0 - smoothstep(3000.0, 9000.0, viewDist);
             float mottle = (mA - 0.5) * 0.9 + (mB - 0.5) * 0.7 * fadeB
               + (mC - 0.5) * 0.5 * fadeC + (mD - 0.5) * 0.35 * fadeD;
-            vec3 lean = mix(vec3(1.10, 1.0, 0.82), vec3(0.86, 1.0, 0.9), clamp(mottle + 0.5, 0.0, 1.0));
-            base *= mix(vec3(1.0), lean, 0.55) * (1.0 + mottle * 0.34);
+            vec3 lean = mix(vec3(1.04, 1.0, 0.90), vec3(0.86, 1.0, 0.92), clamp(mottle + 0.5, 0.0, 1.0));
+            base *= mix(vec3(1.0), lean, 0.42) * (1.0 + mottle * 0.30);
+            // Grass blades disappear at tens of metres. Keep their living colour
+            // and multi-scale structure in the turf across 20..2000 m, with
+            // stony soil breaks on rolling slope faces.
+            float meadow = gMeadow * (1.0 - smoothstep(0.22, 0.82, vExtra.w))
+              * (1.0 - smoothstep(18.0, 110.0, pixelMetres));
+            if (meadow > 0.001) {
+              vec3 groundN = normalize(vLocalNrm);
+              float slopeAng = sqrt(max(0.0, slope * (2.0 - slope)));
+              // Long-term exposure depends on slope and latitude, even
+              // when the current sun has moved to the other side of the sky.
+              vec3 poleward = (vec3(0, 1, 0) - nd * nd.y) * sign(nd.y);
+              float exposure = -dot(groundN, poleward);
+              float dryBank = smoothstep(0.36, 0.72,
+                mB * 0.30 + mC * 0.42 + mD * 0.28 + exposure * 0.32);
+              // Sample the ground scans in two independent, phase-stable
+              // domains (terrainDetailPosition) so nothing swims or tiles.
+              vec3 rel = terrainDetailPosition();
+              vec3 weights = pow(abs(groundN), vec3(6.0));
+              weights /= max(dot(weights, vec3(1.0)), 1e-5);
+              vec3 uv = rel * terrainSward.w + terrainSward.xyz;
+              vec3 broadUv = rel * terrainHeath.w + terrainHeath.xyz;
+              vec3 grassMean = max(textureLod(uGrassColor, vec2(0.5), 12.0).rgb, vec3(0.02));
+              vec3 rockMean = max(textureLod(uRockColor, vec2(0.5), 12.0).rgb, vec3(0.02));
+              vec3 swardScan = clamp(triScanSample(uGrassColor, uv, weights,
+                vec2(mC, mD) * 0.46, grassMean), vec3(0.32), vec3(1.85));
+              vec3 heathScan = clamp(triScanSample(uGrassColor, -broadUv.zyx, weights.zyx,
+                vec2(mB, mC) * 0.73, grassMean), vec3(0.36), vec3(1.75));
+              float fibre = dot(swardScan, vec3(0.2126, 0.7152, 0.0722));
+              float breaks = dot(heathScan, vec3(0.2126, 0.7152, 0.0722));
+              // Phase-stable turf hummock relief from terrainGrain (no Float32 vLocalPos).
+              float tuft = triDetail(rel, weights, terrainGrain, 0);
+              vec3 sunTangent = uCanopySun - nd * dot(nd, uCanopySun);
+              float shoulder = tuft - triDetail(rel + sunTangent * 3.2, weights, terrainGrain, 0);
+              float resolved = 1.0 - smoothstep(2.5, 28.0, pixelMetres);
+              float lit = smoothstep(0.01, 0.3, dot(groundN, uCanopySun)) * vMat.z;
+              vec3 lush = mix(base, uMeadowC * vec3(0.78, 0.94, 0.80), 0.76);
+              vec3 drySward = mix(lush, uMeadowC * vec3(1.24, 1.08, 0.68), 0.58);
+              vec3 swardTex = mix(vec3(1.0), swardScan, 0.55) * mix(vec3(1.0), heathScan, 0.35);
+              vec3 sward = mix(lush, drySward, smoothstep(0.12, 0.95,
+                dryBank * 0.72 + (breaks - 0.85) * 0.55));
+              sward *= swardTex * (0.68 + 0.32 * clamp(fibre, 0.4, 1.7))
+                * (0.78 + 0.22 * clamp(breaks, 0.4, 1.6));
+              sward *= 1.0 + resolved * (0.24 * (tuft - 0.5) + 0.70 * shoulder * lit);
+              // Steeper rolling hillside shoulders expose stony soil breaks.
+              float slopeBreak = smoothstep(0.11, 0.30,
+                slopeAng + (1.0 - breaks) * 0.12 + (dryBank - 0.5) * 0.08);
+              gSlopeBreak = slopeBreak * meadow;
+              vec3 rockScan = clamp(triScanSample(uRockColor, -uv.zyx + vec3(0.37, 0.71, 0.19), weights.zyx,
+                vec2(mD, mB) * 0.35, rockMean), vec3(0.32), vec3(1.85));
+              vec3 slopeSoil = mix(uRockC * vec3(0.95, 0.92, 0.86),
+                base * vec3(0.74, 0.68, 0.56), 0.35) * mix(vec3(1.0), rockScan, 0.78);
+              sward = mix(sward, slopeSoil, slopeBreak * 0.68);
+              base = mix(base, sward, meadow);
+            }
             // Exposed terrestrial bedding reads across a valley, beyond the
             // range of the metre-scale rock scan. Warped heights and broken
             // exposures keep the bands local to the outcrop.
@@ -646,7 +713,7 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
 
           float pbrNear = 1.0 - smoothstep(70.0, 720.0, viewDist);
           if (pbrNear > 0.001) {
-            float pbrRock = smoothstep(uSlopeLo, uSlopeHi, slope);
+            float pbrRock = max(smoothstep(uSlopeLo, uSlopeHi, slope), gSlopeBreak * 0.7);
             vec2 pbrUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
             vec2 pbrRockUv = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
             // The scans are tints around their own average colour: divide by
@@ -666,16 +733,17 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             // keep the planet's hue on alien worlds, the scan's on earth-like ones
             vec3 pbrStructure = mix(vec3(pbrLum), pbrSample, 0.25 + uEarthLike * 0.45);
             pbrStructure = clamp(pbrStructure, vec3(0.25), vec3(2.2));
-            // Inside the grass ring the ground is the base of the sward:
-            // its colour, deep in shade, with only a hint of the scan.
-            float meadowNear = gMeadow * (1.0 - gSand) * (1.0 - smoothstep(40.0, 130.0, viewDist));
-            vec3 swardBase = mix(diffuseColor.rgb, uMeadowC, 0.75) * 0.7
-              * mix(vec3(1.0), pbrStructure, 0.35);
+            // Inside the 3D grass ring (~20..62 m), keep subtle root shade
+            // matching the sward rather than creating a dark ring past 100 m.
+            float meadowNear = gMeadow * (1.0 - gSand) * (1.0 - gSlopeBreak * 0.8)
+              * (1.0 - smoothstep(18.0, 62.0, viewDist));
+            vec3 swardBase = mix(diffuseColor.rgb, uMeadowC * 0.68, 0.42)
+              * mix(vec3(1.0), pbrStructure, 0.62);
             // Sand carries fine granular contrast without the green blades
             // and deep crevices photographed in the grassland scan.
             diffuseColor.rgb *= mix(vec3(1.0), mix(pbrStructure, vec3(0.83 + 0.17 * pbrLum), gSand),
-              pbrNear * 0.85 * (1.0 - meadowNear));
-            diffuseColor.rgb = mix(diffuseColor.rgb, swardBase, meadowNear);
+              pbrNear * 0.85 * (1.0 - meadowNear * 0.65));
+            diffuseColor.rgb = mix(diffuseColor.rgb, swardBase, meadowNear * 0.65);
             gSurfaceRoughness = mix(texture2D(uGrassOrm, pbrUv).g,
               texture2D(uRockRoughness, pbrRockUv).r, pbrRock);
           }
@@ -683,8 +751,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
           // ---- continental-scale tint drift: dry-brown swathes
           float macro = terrainRegionalField(vLocalPos) * 2.0 - 1.0;
           float mw = clamp(macro * 1.5 + 0.5, 0.0, 1.0) * uMacroK;
-          diffuseColor.rgb *= mix(vec3(1.0), vec3(1.09, 0.99, 0.84), mw);
-          diffuseColor.rgb *= 1.0 + macro * 0.55 * uMacroK;
+          diffuseColor.rgb *= mix(vec3(1.0), vec3(1.04, 0.99, 0.90), mw);
+          diffuseColor.rgb *= 1.0 + macro * 0.48 * uMacroK;
 
           // ---- mid-scale patchiness (~100–500 m)
           float patchNear = 1.0 - smoothstep(1800.0, 10000.0, viewDist);
@@ -735,33 +803,56 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
         {
           normal = normalize(normal);
           float viewDistNrm = length(vViewPosition);
+          float pixelMetresNrm = max(length(dFdx(vLocalPos)), length(dFdy(vLocalPos)));
           float normalVertexFieldFade = 1.0 - smoothstep(4500.0, 24000.0, viewDistNrm);
           if (normalVertexFieldFade > 0.001) {
-            vec3 wN = pow(abs(normalize(vLocalNrm)), vec3(4.0));
+            vec3 locN = normalize(vLocalNrm);
+            vec3 refAxis = abs(locN.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+            vec3 locT = normalize(cross(refAxis, locN));
+            vec3 locB = cross(locN, locT);
+            vec3 wN = pow(abs(locN), vec3(4.0));
             wN /= max(wN.x + wN.y + wN.z, 1e-5);
-            float gx = triDetail(terrainDetailPosition() + vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1)
-                     - triDetail(terrainDetailPosition() - vec3(0.35, 0.0, 0.0), wN, terrainGrainFine, 1);
-            float gy = triDetail(terrainDetailPosition() + vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1)
-                     - triDetail(terrainDetailPosition() - vec3(0.0, 0.35, 0.0), wN, terrainGrainFine, 1);
-            float scanNear = 1.0 - smoothstep(35.0, 420.0, viewDistNrm);
-            if (scanNear > 0.001) {
-              vec3 ndPbr = normalize(vLocalPos);
-              float slopePbr = 1.0 - clamp(dot(normalize(vLocalNrm), ndPbr), 0.0, 1.0);
-              float rockPbr = smoothstep(uSlopeLo, uSlopeHi, slopePbr);
-              vec2 uvPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainGrass);
-              vec2 uvRockPbr = surfaceMaterialUv(terrainDetailPosition(), normalize(vLocalNrm), terrainRock);
-              vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
-              vec2 rockN = texture2D(uRockNormal, uvRockPbr).xy * 2.0 - 1.0;
-              vec2 scanN = mix(grassN, rockN, rockPbr);
-              gx += scanN.x * scanNear * 0.34;
-              gy += scanN.y * scanNear * 0.34;
+            vec3 detailPos = terrainDetailPosition();
+            float gx = triDetail(detailPos + locT * 0.35, wN, terrainGrainFine, 1)
+                     - triDetail(detailPos - locT * 0.35, wN, terrainGrainFine, 1);
+            float gy = triDetail(detailPos + locB * 0.35, wN, terrainGrainFine, 1)
+                     - triDetail(detailPos - locB * 0.35, wN, terrainGrainFine, 1);
+            // Mid-altitude turf swells & erosion micro-topography (26..110 m).
+            float grainMid = 1.0 - smoothstep(14.0, 110.0, pixelMetresNrm);
+            if (grainMid > 0.001) {
+              gx += (triDetail(detailPos + locT * 1.8, wN, terrainGrain, 0)
+                   - triDetail(detailPos - locT * 1.8, wN, terrainGrain, 0)) * 1.35 * grainMid;
+              gy += (triDetail(detailPos + locB * 1.8, wN, terrainGrain, 0)
+                   - triDetail(detailPos - locB * 1.8, wN, terrainGrain, 0)) * 1.35 * grainMid;
             }
-            vec3 tang = normalize(cross(normal, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
-            vec3 bitn = cross(normal, tang);
-            normal = normalize(normal
-              + (tang * gx + bitn * gy) * uDetailK
+            float scanNear = 1.0 - smoothstep(35.0, 420.0, viewDistNrm);
+            float swardScanNear = (1.0 - smoothstep(10.0, 65.0, pixelMetresNrm)) * uEarthLike;
+            if (scanNear > 0.001 || swardScanNear > 0.001) {
+              vec3 ndPbr = normalize(vLocalPos);
+              float slopePbr = 1.0 - clamp(dot(locN, ndPbr), 0.0, 1.0);
+              float rockPbr = max(smoothstep(uSlopeLo, uSlopeHi, slopePbr), gSlopeBreak * 0.7);
+              if (scanNear > 0.001) {
+                vec2 uvPbr = surfaceMaterialUv(detailPos, locN, terrainGrass);
+                vec2 uvRockPbr = surfaceMaterialUv(detailPos, locN, terrainRock);
+                vec2 grassN = texture2D(uGrassNormal, uvPbr).xy * 2.0 - 1.0;
+                vec2 rockN = texture2D(uRockNormal, uvRockPbr).xy * 2.0 - 1.0;
+                vec2 scanN = mix(grassN, rockN, rockPbr);
+                gx += scanN.x * scanNear * 0.36;
+                gy += scanN.y * scanNear * 0.36;
+              }
+              if (swardScanNear > 0.001) {
+                vec2 uvSward = surfaceMaterialUv(detailPos, locN, terrainSward);
+                vec2 sGrassN = texture2D(uGrassNormal, uvSward).xy * 2.0 - 1.0;
+                vec2 sRockN = texture2D(uRockNormal, vec2(-uvSward.y, uvSward.x) + vec2(0.37, 0.71)).xy * 2.0 - 1.0;
+                vec2 sScanN = mix(sGrassN, sRockN, rockPbr);
+                gx += sScanN.x * swardScanNear * 0.30;
+                gy += sScanN.y * swardScanNear * 0.30;
+              }
+            }
+            vec3 localPerturb = (locT * gx + locB * gy) * uDetailK
               * normalVertexFieldFade
-              * (1.7 + vMat.x * normalVertexFieldFade * 1.5));
+              * (1.7 + vMat.x * normalVertexFieldFade * 1.5);
+            normal = normalize(normal + localPerturb * uTerrainViewToLocal);
           }
         }`);
     installSurfaceAtmosphere(material, planet, shader);

@@ -10,7 +10,7 @@ import { makeRng, strHash32 } from './rng.js';
 import { createOceanClimate, sampleOceanClimate, placeOceanTidalEvent } from './ocean-climate.js';
 import { oceanSeconds } from './ocean-clock.js';
 import { createOceanSurface, sampleOceanSurface } from './ocean-surface.js';
-import { clamp, lerp, smoothstep } from './noise.js';
+import { clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
 import { TerrainSimplex } from './terrain-noise.js';
 import { TerrainHeightField } from './terrain-height-field.js';
 import { buildCoastalDrainage } from './coastal-drainage.js';
@@ -537,15 +537,13 @@ export class Planet extends TerrainHeightField {
     const x = dir.x, y = dir.y, z = dir.z;
     const tl = this.landT(h);
 
-    if (p.forest && tl > 0.04 && tl < 0.55) {
-      const moist = this.nC.fbm(x + 11.3, y - 4.1, z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
+    if (p.forest && tl < 0.6) {
+      const moist = this.landMoisture(dir, maxFreq);
       out.x = smoothstep(0.05, 0.3, moist) * smoothstep(0.04, 0.1, tl)
         * (1 - smoothstep(0.4, 0.55, tl)) * 0.85;
       if (this.snowWeightAt(dir, h) > 0.28) out.x = 0;
       else if (!this.hasLiquid || h >= this.seaLevel + 1.5) {
-        // Interpolate the signed distance to the planting thresholds. A
-        // binary flag at coarse vertices draws straight triangular borders.
-        out.w = clamp(0.5 + 0.5 * this.woodlandMargin(tl, moist), 0, 1);
+        out.w = this.woodlandCover(dir, tl, moist, maxFreq);
       }
     }
     if (p.blotch) {
@@ -723,18 +721,31 @@ export class Planet extends TerrainHeightField {
       smoothstep(this.pal.capLat, this.pal.capLat + 0.085, lat));
   }
 
-  woodlandMargin(landT, moisture) {
-    return Math.min((landT - 0.05) / 0.03, (0.45 - landT) / 0.045, (moisture - 0.14) / 0.075);
+  landMoisture(dir, maxFreq = 64) {
+    return this.nC.fbm(dir.x + 11.3, dir.y - 4.1, dir.z + 7.7, 2.4, 3, 0.5, 2.15, maxFreq);
   }
 
-  biomeAt(dir, h) {
+  woodlandCover(dir, landT, moisture, maxFreq) {
+    const margin = Math.min((landT - 0.05) / 0.03, (0.45 - landT) / 0.045, (moisture - 0.14) / 0.075);
+    const broad = this.R / 640, fine = this.R / 155;
+    const broadWeight = frequencyBlend(broad, maxFreq), fineWeight = frequencyBlend(fine, maxFreq);
+    const patch = (broadWeight ? this.nD.noise(dir.x * broad + 17, dir.y * broad, dir.z * broad) * broadWeight * 0.72 : 0)
+      + (fineWeight ? this.nC.noise(dir.z * fine, dir.x * fine - 29, dir.y * fine) * fineWeight * 0.28 : 0);
+    const forest = smoothstep(-1.05, 1.0, margin + patch * 2.2);
+    const pocket = smoothstep(-0.04, 0.52, patch);
+    const meadow = (0.008 + 0.70 * pocket * pocket) * smoothstep(-0.42, 0.06, moisture);
+    const cover = lerp(meadow, 0.77 + 0.23 * pocket, forest);
+    return cover * (1 - smoothstep(0.46, 0.60, landT));
+  }
+
+  biomeAt(dir, h, sampledMoisture) {
     if ((this.type === 'lush' || this.type === 'ocean') && this.snowWeightAt(dir, h) > 0.28) return 'snow';
     if (this.hasLiquid && h < this.seaLevel + 1.5) return 'shore';
     switch (this.type) {
       case 'lush': case 'ocean': {
         const tl = this.landT(h);
         if (tl > 0.6) return 'rock';                 // olive-brown high country: bare
-        const moist = this.nC.fbm(dir.x + 11.3, dir.y - 4.1, dir.z + 7.7, 2.4, 3, 0.5, 2.15, 64);
+        const moist = sampledMoisture ?? this.landMoisture(dir);
         if (tl > 0.45) return moist > 0.25 ? 'grass' : 'rock';
         // forests only where the palette actually darkens green
         if (moist > 0.14 && tl > 0.05) return 'forest';

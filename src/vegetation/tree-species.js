@@ -43,7 +43,7 @@ const DEFAULT_TREES = [['oak', 'aspen'], ['pine', 'ash']];
 const DETAIL = {
   near: {},
   mid: { sectionStride: 5, segmentFactor: 0.4, leafStride: 10, leafScale: 3.0 },
-  far: { sectionStride: 99, segmentFactor: 0.01, leafStride: 90, leafScale: 8.5 },
+  far: { sectionStride: 99, segmentFactor: 0.01, leafStride: 40, leafScale: 5.3 },
 };
 
 const _v = new THREE.Vector3();
@@ -133,8 +133,9 @@ function horizonCard(width, height, cell, leafColor, crownHeight, footprint) {
     for (const [sx, sy] of [[-0.5, 0], [0.5, 0], [0.5, 1], [-0.5, 1]]) {
       position.push(sx * width * ax, sy * height, sx * width * az);
       // lit like the canopy it stands for: mostly from above
-      normal.push(sx * 0.5 * ax, 0.85, sx * 0.5 * az);
-      uv.push(rect.u0 + (sx + 0.5) * (rect.u1 - rect.u0), rect.v0 + sy * (rect.v1 - rect.v0));
+      normal.push(0, 1, 0);
+      const half = (rect.u1 - rect.u0) * 0.5;
+      uv.push(rect.u0 + k * half + (sx + 0.5) * half, rect.v0 + sy * (rect.v1 - rect.v0));
       color.push(leafColor.r, leafColor.g, leafColor.b);
     }
     index.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -144,7 +145,7 @@ function horizonCard(width, height, cell, leafColor, crownHeight, footprint) {
   for (const [x, z] of [[-0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]]) {
     position.push((footprint.x - 0.5 + x * footprint.span) * width, crownHeight,
       (footprint.z + z * footprint.span) * width);
-    normal.push(x, 0.85, z);
+    normal.push(0, 1, 0);
     uv.push(top.u0 + (x + 0.5) * (top.u1 - top.u0), top.v0 + (z + 0.5) * (top.v1 - top.v0));
     color.push(leafColor.r, leafColor.g, leafColor.b);
   }
@@ -206,18 +207,18 @@ function growSpecies(archetypeName, rng, colors, slot) {
     far: mergeTree(far, { ...shared, rng: makeRng('far' + o.seed), branchIndex: limbTriangles(far.branches, trunkRadius * 0.3) }),
   };
 
-  // the horizon silhouette is painted from the same crown: the far level's
-  // foliage cards, seen from the side
-  const width = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * scale * 1.08;
-  const farLeaves = far.leaves.getAttribute('position');
+  // Project the actual mid-detail foliage in both side views and overhead.
+  // Centre the footprint on the trunk and leave room for asymmetric branches.
+  const width = 2.2 * scale * Math.max(-box.min.x, box.max.x, -box.min.z, box.max.z);
+  const leaves = mid.leaves.getAttribute('position');
   const clumps = [];
-  for (let q = 0; q < farLeaves.count; q += 4) {
+  for (let q = 0; q < leaves.count; q += 4) {
     let x = 0, y = 0, z = 0;
-    for (let k = 0; k < 4; k++) { x += farLeaves.getX(q + k); y += farLeaves.getY(q + k); z += farLeaves.getZ(q + k); }
+    for (let k = 0; k < 4; k++) { x += leaves.getX(q + k); y += leaves.getY(q + k); z += leaves.getZ(q + k); }
     x *= 0.25 * scale; y *= 0.25 * scale; z *= 0.25 * scale;
     clumps.push({
       x: 0.5 + x / width, y: Math.min(0.96, y / height), z,
-      r: Math.min(0.2, (o.leaves.size * DETAIL.far.leafScale * scale * 0.42) / width),
+      r: Math.min(0.13, (o.leaves.size * DETAIL.mid.leafScale * scale * 0.47) / width),
       light: Math.min(1, Math.max(0, 0.45 + 0.5 * (y / height) + z / width)),
     });
   }

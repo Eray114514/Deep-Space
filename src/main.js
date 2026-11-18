@@ -6173,7 +6173,14 @@ function frame(rafTs) {
       sunShadow.shadow.camera.far = farDist;
       sunShadow.shadow.camera.updateProjectionMatrix();
     }
-    sunShadow.shadow.normalBias = 2.0 * Math.sqrt(activeShadowOctave);
+    // Calibrate depth bias in world metres (not fixed NDC fraction across
+    // 8.5..26 km far planes) and keep normalBias proportional to shadow texel
+    // size so tree shadows stay rooted at their trunks instead of floating.
+    const shadowRange = Math.max(1000, farDist - sunShadow.shadow.camera.near);
+    const shadowTexel = (2 * activeShadowRadius) / Math.max(512, SHADOW_MAP);
+    sunShadow.shadow.bias = -0.22 / shadowRange;
+    sunShadow.shadow.normalBias = Math.max(0.25, shadowTexel * 0.55);
+    sunShadow.shadow.radius = 1.4;
     sunShadow.position.copy(sunDirCam).multiplyScalar(lightDist);
     sunShadow.target.position.set(0, 0, 0);
     surfaceShadowGrid.update(sunShadow, nav.pos, nearest.posUniv,
@@ -8714,6 +8721,20 @@ if (DEV_SERVER && qs.get('scene') === 'river-approach' && universe.system.planet
   const pose = course.pose(-6500, 800, 5200, -0.30, 0);
   window.NMS.teleport(0, 0.01, pose);
   window.NMS.setLocalSunAltitude(0, 32, { azimuthHint: course.along });
+  window.NMS.setContinuousAtmosphereAltitude(0, 0, pose);
+}
+
+// Over the grassland looking along its woodland edge. Keep the heading and
+// solar phase fixed when comparing individual heights on this slope.
+if (DEV_SERVER && qs.get('scene') === 'meadow-flight') {
+  const pose = {
+    dir: [0.728242993, -0.254944453, 0.636133217],
+    forward: [-0.684938586, -0.234444805, 0.689851264],
+    clearance: Math.max(1, Number(qs.get('alt') ?? 150) || 150),
+    pitch: -0.49,
+  };
+  window.NMS.setTime(29.667732);
+  window.NMS.teleport(0, 0.001, pose);
   window.NMS.setContinuousAtmosphereAltitude(0, 0, pose);
 }
 
