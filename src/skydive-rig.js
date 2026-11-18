@@ -158,6 +158,13 @@ function rigMaterial(light, { color = 0xffffff, sail = null, dial = null, glove 
       uniform vec2 brakes;
       #ifdef GLOVE
       uniform vec3 shoulderOffset;
+      uniform vec3 sleeveAxis, restShoulder;
+      // Rotate a complete cross section from its rest axis onto the new
+      // centreline tangent. This preserves both sleeve thickness and lighting.
+      vec3 turnSection(vec3 v, vec3 tangent) {
+        vec3 k = cross(sleeveAxis, tangent);
+        return v + cross(k, v) + cross(k, cross(k, v)) / max(.0001, 1. + dot(sleeveAxis, tangent));
+      }
       #endif
       uniform float clock;
       void main() {
@@ -166,7 +173,19 @@ function rigMaterial(light, { color = 0xffffff, sail = null, dial = null, glove 
         #include <begin_vertex>
         #include <morphtarget_vertex>
         #ifdef GLOVE
-        transformed += uv.y * shoulderOffset;
+        if (uv.x > .082) {
+          vec3 wrist = vec3(0., 0., .022);
+          float end = length(restShoulder - wrist);
+          float t = clamp((uv.x - .082) / (end - .082), 0., 1.);
+          vec3 start = wrist + sleeveAxis * .082;
+          vec3 elbow = wrist + sleeveAxis * .28;
+          vec3 shoulder = restShoulder + shoulderOffset;
+          vec3 a = mix(start, elbow, t), b = mix(elbow, shoulder, t);
+          vec3 tangent = normalize(b - a);
+          vec3 radial = transformed - wrist - sleeveAxis * uv.x;
+          transformed = mix(a, b, t) + turnSection(radial, tangent);
+          objectNormal = turnSection(objectNormal, tangent);
+        }
         #endif
         tex = uv;
         pLocal = transformed;
@@ -233,7 +252,7 @@ const forearmAxis = [.24, -.51, .83];
 function gloveGeometry(side) {
   const socket = new THREE.Vector3();
   const make = (closed) => buildHand({
-    mirror: side < 0, forearm: forearmAxis, upperArm: [-.58, -.3, .76],
+    mirror: side < 0, forearm: forearmAxis, upperArm: forearmAxis,
     sleeve: .54, shoulderSocket: socket,
     fingers: closed
       ? [[.86, 1.55, .92, .03], [.96, 1.55, 1.0, 0], [1.02, 1.5, 1.05, -.04], [1.12, 1.46, .99, -.075]]
@@ -251,8 +270,8 @@ function gloveGeometry(side) {
 function toggleGeometry() {
   // A continuous folded tape with a reinforced grip and a narrow stitch line
   // along each selvage. Its loaded eye and the last brake-line segment coincide.
-  const profile = [[-.052, .005], [-.042, 0], [.042, 0], [.052, .005], [.047, .019],
-    [.018, .060], [.005, .077], [-.006, .077], [-.020, .059], [-.047, .019]];
+  const profile = [[-.059, .003], [-.036, 0], [.036, 0], [.059, .003], [.063, .021],
+    [.055, .057], [.030, .090], [0, .099], [-.030, .090], [-.055, .057], [-.063, .021]];
   const path = new THREE.CatmullRomCurve3(profile.map(([x, y]) => new THREE.Vector3(x, y, 0)), true);
   const cross = [[-1, 0, .46], [-.92, 1, .78], [-.76, 1, 1.32], [-.62, 1, .82],
     [.62, 1, .82], [.76, 1, 1.32], [.92, 1, .78], [1, 0, .46], [.86, -1, .74], [-.86, -1, .74]];
@@ -384,6 +403,8 @@ export function createSkydiveRig() {
     const gloveMat = rigMaterial(light, { glove: true, color: 0x191c20 });
     gloveMat.uniforms.shoulderOffset = { value: new THREE.Vector3() };
     const hand = new THREE.Mesh(gloveGeometry(side), gloveMat);
+    gloveMat.uniforms.restShoulder = { value: hand.geometry.userData.shoulderSocket };
+    gloveMat.uniforms.sleeveAxis = { value: new THREE.Vector3(side * forearmAxis[0], forearmAxis[1], forearmAxis[2]).normalize() };
     hand.name = side < 0 ? 'jump-glove-left' : 'jump-glove-right';
     root.add(hand);
     const toggle = new THREE.Mesh(tape, toggleMat);
@@ -417,7 +438,12 @@ export function createSkydiveRig() {
     const closeFingers = smooth(t, .56, .69);
     const pullDown = smooth(t, .69, .97);
     canopy.visible = ctl.phase === 'canopy';
-    handBasis.copy(cameraLocal).slerp(identity, loaded * .92);
+    // Looking sideways under a deploying wing must not swing the wrists
+    // through its risers. Pitch still follows the body into the dive.
+    angles.setFromQuaternion(cameraLocal, 'YXZ');
+    angles.y = .10 * Math.tanh(angles.y / .10);
+    angles.z = .16 * Math.tanh(angles.z / .16);
+    handBasis.setFromEuler(angles).slerp(identity, Math.max(loaded, takeGrip));
     light.vertical.value.copy(ctl.posLocal).normalize().applyQuaternion(ctl.planet.frameOrientation);
     if (ctl.planet.sunDirWorld) light.sun.value.copy(ctl.planet.sunDirWorld);
     light.daylight.value = .23 + .77 * smooth(light.vertical.value.dot(light.sun.value), -.18, .34);
@@ -456,15 +482,22 @@ export function createSkydiveRig() {
       grip.copy(gripPoint).applyQuaternion(hand.quaternion);
       const rear = rings[1].position;
       const slack = .055 * (1 - loaded);
-      rings[0].position.set(side * .29 * width, .25 - slack, -.64);
-      rear.set(side * .32 * width, .19 - slack, -.57);
-      stowed.set(side * .226, -.35, .16).lerp(rear, .82);
-      stowed.z += .012;
+      // The steering loops hang inboard on their own brake leaders. Leave
+      // room for the full glove and loop as the palm approaches from below.
+      rings[0].position.set(side * (.39 * width + .125), .25 - slack, -.67);
+      rear.set(side * (.36 * width + .125), .20 - slack, -.61);
+      stowed.set(side * .264 * width, .12 - slack, -.55);
       hand.position.lerp(delta.copy(stowed).sub(grip), takeGrip * (1 - pullDown));
+      // Approach from the back of the glove so the extended fingertips sweep
+      // past the face of the loop before curling around its lower edge.
+      delta.set(0, .08 * Math.sin(Math.PI * takeGrip), 0).applyQuaternion(hand.quaternion);
+      hand.position.add(delta);
       if (t < .58) toggle.position.copy(stowed);
       const offset = hand.material.uniforms.shoulderOffset.value;
-      offset.set(side * .22 * width, -.29, .12).applyQuaternion(cameraLocal)
-        .sub(hand.position).applyQuaternion(inverseHand.copy(hand.quaternion).invert())
+      offset.set(side * .22 * width, -.29, .12).applyQuaternion(handBasis);
+      delta.set(0, 0, 1).applyQuaternion(cameraLocal);
+      offset.addScaledVector(delta, Math.max(0, .10 - offset.dot(delta)));
+      offset.sub(hand.position).applyQuaternion(inverseHand.copy(hand.quaternion).invert())
         .sub(hand.geometry.userData.shoulderSocket);
       if (!canopy.visible) continue;
 
@@ -472,9 +505,9 @@ export function createSkydiveRig() {
       // two ranks of suspension lines. All anchors share the inflating wing.
       for (let row = 0; row < 2; row++) {
         const r = rings[row];
-        shoulder.set(side * .226, -.35, .12 + row * .04);
+        shoulder.set(side * (.31 * width + .125), -.35, .12 + row * .04);
         ring.copy(r.position);
-        connect(straps, shoulder, ring, .035, .007);
+        connect(straps, shoulder, ring, .027, .005);
         for (let pair = 0; pair < 3; pair++) {
           const s = Math.min(4.25, pair * 2 + .5) / CELLS;
           const across = side < 0 ? s : 1 - s;
@@ -495,10 +528,12 @@ export function createSkydiveRig() {
       pointInRig(grip, hand);
       if (t >= .58) toggle.position.copy(grip);
       crossbar.set(1, 0, 0).applyQuaternion(hand.quaternion);
-      tapeUp.subVectors(rear, toggle.position).projectOnPlane(crossbar).normalize();
+      // The brake line can change direction at the stitched eye. Once
+      // gripped, the loop stays on the fingertip side of the crossbar.
+      tapeUp.set(0, -.44, -.898).normalize().applyQuaternion(hand.quaternion);
       face.crossVectors(crossbar, tapeUp);
       toggle.quaternion.setFromRotationMatrix(tapeFrame.makeBasis(crossbar, tapeUp, face));
-      loop.copy(toggle.position).addScaledVector(tapeUp, .079);
+      loop.copy(toggle.position).addScaledVector(tapeUp, .099);
       connect(lines, loop, rear, .004);
       attach(junction, side < 0 ? .2 : .8, .94).lerp(rear, .48);
       connect(lines, rear, junction, .006);

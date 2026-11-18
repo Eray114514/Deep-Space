@@ -699,6 +699,9 @@ export function buildHand(opts) {
           let C = um((z - 0.0685) / (elbowZ - 0.0685));
           let G = 48e-4 * Math.exp(-Math.pow((C - 0.13) / 0.11, 2));
           let j = 48e-4 * xl(0.62, 0.85, C);
+          // Past the elbow, tension smooths the outside panel. Keep shallow
+          // fabric folds on the inside instead of ridges around a whole arm.
+          if (opts.shoulderSocket) j *= .12 + .38 * (.5 + .5 * Math.sin(q - .7));
           let N = Math.pow(Math.abs(Math.sin(Math.PI * z / 0.027 + 1.7 * Math.sin(q + 0.5) + 0.8 * Math.sin(2 * q + 1.3))), 0.6) * 2 - 1.25;
           let Q = Math.pow(Math.abs(Math.sin(Math.PI * z / 0.034 + 1.9 * Math.sin(q - 0.8) + 0.7 * Math.sin(2 * q))), 0.6) * 2 - 1.25;
           let K = Math.sin(z * 40 + 2 * Math.sin(q * 2 + 1)) + 0.6 * Math.sin(3 * q + z * 25);
@@ -706,6 +709,7 @@ export function buildHand(opts) {
           const upperArm = .017 * xl(elbowZ - .012, elbowZ + .095, z);
           U = .0375 + muscle + upperArm + .003 * C + G * N + j * Q + .0016 * K;
           T = 0.78 + 0.26 * xl(-1.1, 0.5, (G * N + j * Q) / (G + j + 8e-4)) + 0.04 * K;
+          if (opts.shoulderSocket) T += (.90 - T) * .55 * C;
           let ie = vC(w);
           if (z > 0.1575 && z < 0.167) { D = gC; T *= 0.85 + 0.25 * ie; }
           else if (z > 0.1425 && z < 0.1815) { D = mC; T *= 0.78 + 0.3 * ie; }
@@ -724,12 +728,12 @@ export function buildHand(opts) {
     y.collapse();
     const sleeve = y.geo(true);
     if (opts.shoulderSocket) {
-      // The viewmodel can bind the proximal sleeve to the player's shoulder.
-      // Encode ring weights before merging, preserving the wrist and elbow.
+      // A posed sleeve uses the authored longitudinal station of each ring.
+      // The other glove parts keep zero here and remain rigid.
       for (const part of parts) part.attributes.uv?.array.fill(0);
       for (let i = 0; i < sleeve.attributes.uv.count; i++) {
         const z = A[Math.floor(i / v)]?.[0] ?? m + .006;
-        sleeve.attributes.uv.setY(i, xl(elbowZ - elbowBlend, m, z));
+        sleeve.attributes.uv.setX(i, z - wristZ);
       }
       opts.shoulderSocket.copy(center);
       if (opts.mirror) opts.shoulderSocket.x *= -1;
