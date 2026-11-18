@@ -341,9 +341,12 @@ function evaluateField(system, directionValue, hours, full) {
   const oceanic = clamp(terrain.oceanic);
 
   // -- Circulation skeleton -------------------------------------------------
-  // The ITCZ meanders instead of being a drawn stripe.
+  // The ITCZ meanders and breaks into tropical wave clusters rather than
+  // forming an unbroken 360-degree rain wall along the equator.
   const itczShift = fbm(system.macroNoise, advected, 1.1, 2) * 0.055;
-  const itcz = 1.28 * gaussian(sinLat, itczShift, 0.135);
+  const itczWave = smoothstep(-0.32, 0.42,
+    fbm(system.macroNoise, advected, 2.1, 3));
+  const itcz = (0.44 + 0.94 * itczWave) * gaussian(sinLat, itczShift, 0.135);
 
   // Rossby waves displace the storm track in longitude, so mid latitudes are
   // alternately stormy and clear rather than banded.
@@ -472,11 +475,11 @@ function evaluateField(system, directionValue, hours, full) {
   const humidity = clamp(
     0.26
     + oceanic * 0.30
-    + itcz * 0.20
+    + itcz * 0.16
     + lowMask * 0.17
-    + shield * 0.10
-    + front * 0.08
-    + fbm(system.humidityNoise, advected, 2.6, 3) * 0.13
+    + shield * 0.12
+    + front * 0.14
+    + fbm(system.humidityNoise, advected, 2.6, 3) * 0.14
     - leeDrying * 0.24
     - highCells * 0.13
     - polarDry * 0.16
@@ -499,7 +502,7 @@ function evaluateField(system, directionValue, hours, full) {
   const warmth = smoothstep(272, 302, temperatureK);
   const convective = clamp(
     warmth * (humidity - 0.34) * 1.9
-    + itcz * 0.42 + eyewall * 0.62 + spiral * 0.2
+    + itcz * itczWave * 0.42 + eyewall * 0.62 + spiral * 0.2
     + coldFront * 0.3
     - subsidenceBand * 0.28 - highCells * 0.24);
   // Subsidence inversions are the strongest stabilizers; deep convection is the
@@ -753,6 +756,24 @@ export function sampleWeatherAtlasChannels(system, direction, timeHours = 0) {
     throw new TypeError('sampleWeatherAtlasChannels() expects a system from createWeatherSystem()');
   }
   return evaluateField(system, direction, finite(timeHours, 0), 'atlas');
+}
+
+// Derive surface precipitation intensity (0..1) from active storm/frontal genera.
+// Towering cumulus congestus only drops localized showers when moisture and
+// convective instability are both strong, avoiding continuous dry-sky drizzle.
+export function samplePrecipitation(weather) {
+  const w = weather?.speciesWeights;
+  if (!w) return 0;
+  const humidity = clamp(finite(weather.humidity, 0));
+  const convective = clamp(finite(weather.convective, 0));
+  const congestusShower = (w.cumulusCongestus || 0) * 0.45
+    * smoothstep(0.68, 0.86, humidity)
+    * smoothstep(0.68, 0.84, convective);
+  return clamp(
+    (w.nimbostratus || 0) * 0.85
+    + (w.cumulonimbus || 0)
+    + congestusShower,
+  );
 }
 
 // Equal-area sampling directions. The Fibonacci lattice gives near-uniform

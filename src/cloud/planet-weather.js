@@ -1,5 +1,5 @@
 import { createWeatherField } from '../weather-field.js';
-import { createWeatherSystem, sampleWeather, sampleWeatherAtlasChannels } from './weather-system.js';
+import { createWeatherSystem, samplePrecipitation, sampleWeather, sampleWeatherAtlasChannels } from './weather-system.js';
 import { sampleCloudColumn } from './cloud-environment.js';
 import { sampleWeatherAtlas, decodeSynopticCoverage } from './weather-atlas.js';
 import { calibrateProductionCoverage } from './production-coverage.js';
@@ -129,9 +129,9 @@ export function createPlanetWeatherField(body, options = {}) {
       const windCurrent=windAtlas && Math.abs(windAtlas.hours-hours)<=1/300+1e-9;
       const nativeWind=windCurrent ? sampleWeatherAtlas(windAtlas,d,spin) : null;
       const native=atlasCurrent?null:structure();
-      const precipitation = nativeWind ? nativeWind[3] : native
-        ? clamp((native.speciesWeights.nimbostratus||0)*.8+(native.speciesWeights.cumulonimbus||0)+(native.speciesWeights.cumulusCongestus||0)*.5)
-        : smooth(0.48, 0.9, coverage * humidity * (0.72 + convective * 0.58));
+      const precipitation = nativeWind ? nativeWind[3]
+        : (native ? samplePrecipitation(native)
+          : (coverage > 0.55 && humidity > 0.64 ? samplePrecipitation(structure()) : 0));
       const precipitationKind = precipitation > 0.02 ? (temperatureK < 273.15 ? 'snow' : 'rain') : 'none';
       const gust = (0.1 + convective * 0.7) * (0.75 + 0.25 * Math.sin(hours * 0.83 + d.x * 5.7));
       const fog = smooth(0.65, 0.97, humidity) * profile.fogginess * coverage;

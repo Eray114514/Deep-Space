@@ -1,6 +1,6 @@
 // Compact production weather forecasts. Terrain bytes are the same regional
 // Planet.height source as the initial atlas, never the standalone fake terrain.
-import { createWeatherSystem, sampleWeather } from './weather-system.js';
+import { createWeatherSystem, samplePrecipitation, sampleWeather } from './weather-system.js';
 import { sampleWeatherAtlas } from './weather-atlas.js';
 import { buildProductionBands } from './production-bands.js';
 
@@ -31,7 +31,7 @@ self.onmessage = ({ data }) => {
       const physical=rotate(direction,hours*descriptor.angularSpeed);
       const w=sampleWeather(system,physical,hours),k=(y*width+x)*4;
       wind.set([w.windVector.x*w.windSpeedMs,w.windVector.y*w.windSpeedMs,w.windVector.z*w.windSpeedMs,
-        Math.min(1,(w.speciesWeights.nimbostratus||0)*.8+(w.speciesWeights.cumulonimbus||0)+(w.speciesWeights.cumulusCongestus||0)*.5)],k);
+        samplePrecipitation(w)],k);
       low.set([clamp(.5+w.lowPotential/4),w.convective,w.stability*(1-w.convective),w.humidity],k);
       const surface=sampleWeatherAtlas(descriptor.terrain,direction)[0];
       high.set([clamp(.5+w.highPotential/4),clamp(.5+surface/(2*surfaceRange)),

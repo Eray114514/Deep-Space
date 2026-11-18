@@ -19,8 +19,33 @@
 import * as THREE from 'three';
 import { Pass, FullScreenQuad } from '../../vendor/jsm/postprocessing/Pass.js';
 import { atmosphereTransportGLSL, atmosphereUniformGLSL } from '../atmosphere-transport-glsl.js';
-import { weatherAtlasGLSL } from './weather-atlas.js';
+import { weatherAtlasGLSL, sampleWeatherAtlas } from './weather-atlas.js';
 import { liteCloudNoiseTexture } from './lite-cloud-noise.js';
+
+function fract(value) { return value - Math.floor(value); }
+function smoothstep(a, b, x) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+function sampleLiteNoiseB(noiseTex, u, v, w) {
+  const data = noiseTex?.image?.data;
+  const N = noiseTex?.image?.width || 0;
+  if (!data || !N) return 0.5;
+  const x = u * N - 0.5, y = v * N - 0.5, z = w * N - 0.5;
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const fx = x - ix, fy = y - iy, fz = z - iz;
+  const x0 = ((ix % N) + N) % N, x1 = (x0 + 1) % N;
+  const y0 = ((iy % N) + N) % N, y1 = (y0 + 1) % N;
+  const z0 = ((iz % N) + N) % N, z1 = (z0 + 1) % N;
+  const at = (i, j, k) => data[((k * N + j) * N + i) * 4 + 2] / 255;
+  const c00 = at(x0, y0, z0) * (1 - fx) + at(x1, y0, z0) * fx;
+  const c10 = at(x0, y1, z0) * (1 - fx) + at(x1, y1, z0) * fx;
+  const c01 = at(x0, y0, z1) * (1 - fx) + at(x1, y0, z1) * fx;
+  const c11 = at(x0, y1, z1) * (1 - fx) + at(x1, y1, z1) * fx;
+  const c0 = c00 * (1 - fy) + c10 * fy;
+  const c1 = c01 * (1 - fy) + c11 * fy;
+  return c0 * (1 - fz) + c1 * fz;
+}
 
 const SHADOW_SIZE = 1024;
 // Depth of the cumulus layer. The deck fills under half of it; towers use the rest.
@@ -1152,6 +1177,50 @@ export class LiteCloudPass extends Pass {
     if (planet) planet.liteCloudActive = this.enabled;
   }
 
+  // CPU mirror of GLSL liftAt + weatherAt at the local cloud base directly above
+  // `localPos` so surface rain/snow stays below the rendered clouds and under
+  // real cloud cover rather than falling out of clear sky or above the deck.
+  weatherSampleAt(localPos) {
+    const planet = this.activePlanet;
+    if (!planet || !localPos) return null;
+    const len = localPos.length();
+    if (!(len > 0)) return null;
+    const u = this.marchMaterial.uniforms;
+    const dir = { x: localPos.x / len, y: localPos.y / len, z: localPos.z / len };
+    const base = u.uLiftBase.value;
+    const isSynoptic = Boolean(planet.weatherField?.synoptic);
+    let lift = 0;
+    if (isSynoptic && this.terrainLift && planet.cloudWeatherHiTex) {
+      const surfaceAtlas = planet.cloudWeatherHiTex?.userData?.weatherAtlas;
+      const surface = planet.weatherField?.surfaceAt
+        ? planet.weatherField.surfaceAt(dir)
+        : (surfaceAtlas ? (sampleWeatherAtlas(surfaceAtlas, dir)[1] * 2 - 1) * u.uSurfaceRange.value : 0);
+      lift = THREE.MathUtils.clamp(Math.max(surface + 500 - base, 0) * 0.85, 0, u.uLiftMax.value);
+    }
+    const cloudBaseAlt = base + lift;
+    const rBase = planet.R + cloudBaseAlt;
+    const px = dir.x * rBase, py = dir.y * rBase, pz = dir.z * rBase;
+    const spin = planet.cloudSpin || 0;
+    const cs = Math.cos(spin), sn = Math.sin(spin);
+    const qx = cs * px - sn * pz, qy = py, qz = sn * px + cs * pz;
+    const cloudAtlas = planet.cloudShadowTex?.userData?.weatherAtlas;
+    let c = cloudAtlas ? sampleWeatherAtlas(cloudAtlas, dir, spin)[0] : 0;
+    if (isSynoptic) c = smoothstep(-0.42, 0.42, (c - 0.5) * 4);
+    const noiseTex = u.uNoise.value || liteCloudNoiseTexture();
+    const cycles = ((planet.weatherHours || 0) / EVOLVE_HOURS) % 1024;
+    const fa = Math.floor(cycles), fb = Math.floor(cycles + 0.5);
+    const wa = 1 - Math.abs(2 * fract(cycles) - 1);
+    const bA = sampleLiteNoiseB(noiseTex, qx / 93000 + fract(0.731 * fa),
+      qy / 93000 + fract(0.317 * fa), qz / 93000 + fract(0.547 * fa));
+    const bB = sampleLiteNoiseB(noiseTex, qx / 93000 + fract(0.413 * fb) + 0.5,
+      qy / 93000 + fract(0.871 * fb) + 0.5, qz / 93000 + fract(0.229 * fb) + 0.5);
+    const breakup = 0.5 + (bA * wa + bB * (1 - wa) - 0.5) / Math.hypot(wa, 1 - wa);
+    c = Math.max(0, Math.min(1, c * 1.15 + (breakup - 0.5) * 0.8 * (1 - 0.6 * c) - 0.07));
+    const regime = sampleLiteNoiseB(noiseTex, qy / 310000 + 0.61, qz / 310000 + 0.61, qx / 310000 + 0.61);
+    const cover = c * (0.42 + (0.95 - 0.42) * smoothstep(0.34, 0.66, regime));
+    return { cloudBaseAlt, cover };
+  }
+
   #renderShadowMap(renderer, planet) {
     const u = this.marchMaterial.uniforms;
     _sun.copy(u.uSunDirection0.value).normalize();
@@ -1232,8 +1301,11 @@ export class LiteCloudPass extends Pass {
   render(renderer, writeBuffer, readBuffer) {
     const planet = this.activePlanet;
     const u = this.marchMaterial.uniforms;
+    const isSynoptic = Boolean(planet.weatherField?.synoptic);
     u.uCloudTex.value = planet.cloudShadowTex;
     u.uSurfaceTex.value = planet.cloudWeatherHiTex || planet.cloudShadowTex;
+    u.uSynoptic.value = isSynoptic ? 1 : 0;
+    u.uLiftOn.value = isSynoptic && this.terrainLift && Boolean(planet.cloudWeatherHiTex) ? 1 : 0;
     // Same inverse deck spin the terrain and water cloud shadows use.
     _matrix.makeRotationFromQuaternion(_quaternion.copy(planet.cloudMesh.quaternion).invert());
     u.uCloudMat.value.setFromMatrix4(_matrix);

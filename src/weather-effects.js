@@ -80,7 +80,7 @@ export class WeatherEffects {
     this.rainFx.update({
       dt: frame.dt ?? 1 / 60,
       time: seconds,
-      level: rainVisible ? THREE.MathUtils.clamp(0.15 + precipitation * 0.95, 0, 1) : 0,
+      level: rainVisible ? THREE.MathUtils.clamp((precipitation - 0.045) * 1.12, 0.04, 1) : 0,
       origin: frame.origin,
       side: _side, up: _axis, forward: _forward,
       displacement: frame.displacement,

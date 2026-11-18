@@ -979,14 +979,18 @@ let currentWalkSnowWeight = 0;
 function walkWeatherFor(planet, localUp, sunLocal) {
   if (!planet) return 'clear';
   const terrainHeight = planet.height(localUp, 64);
-  const direction = planet.worldOffsetToLocal?.(localUp, new THREE.Vector3()).normalize()
-    || localUp;
-  const weather = planet.weatherAt?.(direction);
+  if (RAIN_OVERRIDE !== null && RAIN_OVERRIDE > 0.045) return 'rain';
+  const weather = planet.weatherAt?.(localUp);
   if (weather) {
+    if (planet === walkCtl.planet && weatherEffects.state) {
+      if (weather.kind === 'storm' && weatherEffects.state.rainVisible) return 'storm';
+      if (weatherEffects.state.snowVisible) return 'snow';
+      if (weatherEffects.state.rainVisible) return 'rain';
+      return 'clear';
+    }
     if (weather.kind === 'storm') return 'storm';
     if (weather.precipitationKind === 'snow' && weather.precipitation > 0.14) return 'snow';
     if (weather.precipitationKind === 'rain' && weather.precipitation > 0.14) return 'rain';
-    if (weather.kind === 'stratus' && weather.visibility < 0.62) return 'rain';
     return 'clear';
   }
   if (planet.type === 'ice' || planet.snowWeightAt?.(localUp, terrainHeight) > 0.32) return 'snow';
@@ -6038,11 +6042,30 @@ function frame(rafTs) {
       activeWeather.wind?.z || 0,
     );
     nearest.localOffsetToWorld(windLocal, _v3);
-    const surfaceWeather = envInAtmo * (1 - smoothstep(
-      nearest.atmoHeight * 0.04,
-      nearest.atmoHeight * 0.22,
-      Math.max(0, nearestAlt),
-    ));
+    const cloudPass = nodePipeline.cloudPass;
+    const liteSample = cloudPass?.enabled && cloudPass.activePlanet === nearest
+      ? cloudPass.weatherSampleAt(nearest.worldPositionToLocal(nav.pos, _v4))
+      : null;
+    const camDatumAlt = nav.pos.distanceTo(nearest.posUniv) - nearest.R;
+    const hasClouds = Boolean(nearest.cloudBands?.length);
+    const surfaceAlt = nearest.weatherField?.surfaceAt?.(
+      nearest.worldOffsetToLocal(_up, _v4).normalize(),
+    ) ?? 0;
+    // Rain and snow only fall from the local cloud base downward: never above
+    // the cloud layer, never underwater, and never out of cloudless sky.
+    const cloudBaseAlt = liteSample
+      ? liteSample.cloudBaseAlt
+      : hasClouds
+        ? Math.max(250, surfaceAlt + (activeWeather.cloudBaseMeters || 1200) + 200)
+        : Math.min(nearest.atmoHeight * 0.08, 3000);
+    const underCloud = envUnderwater
+      ? 0
+      : 1 - smoothstep(cloudBaseAlt - 320, cloudBaseAlt, camDatumAlt);
+    const forcedRain = RAIN_OVERRIDE !== null || Boolean(activeWeather.fixture);
+    const cloudCoverGate = forcedRain || !liteSample
+      ? (hasClouds || forcedRain ? 1 : 0)
+      : smoothstep(0.42, 0.70, liteSample.cover);
+    const surfaceWeather = envInAtmo * underCloud * cloudCoverGate;
     const fxWeather = RAIN_OVERRIDE !== null && activeWeather
       ? { ...activeWeather, precipitationKind: 'rain', precipitation: RAIN_OVERRIDE } : activeWeather;
     weatherEffects.update(fxWeather, _up, _v3, clock.elapsedTime, surfaceWeather,
@@ -6050,7 +6073,7 @@ function frame(rafTs) {
   } else {
     setWeatherWind(null, 0.18, 0);
     weatherEffects.update(null, _up.set(0, 1, 0), _v3.set(1, 0, 0),
-      clock.elapsedTime, 0);
+      clock.elapsedTime, 0, { dt, origin: camera.getWorldPosition(_v4) });
   }
   surfaceWeapons.setWetness(weatherEffects.state.rainVisible ? weatherEffects.state.precipitation : 0, dt);
   // Rain is heard on foot; aboard the ship the hull shuts it out.

@@ -197,11 +197,17 @@ export class SaltlineRain {
   //   groundHeights (Float32Array(49) | null, local y relative to origin) }
   update(frame) {
     const target = THREE.MathUtils.clamp(frame.level || 0, 0, 1);
-    this.level += (target - this.level) * Math.min(1, (frame.dt || 0) * 0.8);
+    // Fade in smoothly (~1.5 s), but clear crisply (~0.8 s) when climbing above
+    // clouds or leaving rain so streaks never trail kilometres into blue sky.
+    const rate = target <= 0.001 ? 6.0 : (target < this.level ? 2.5 : 0.9);
+    this.level += (target - this.level) * Math.min(1, (frame.dt || 0) * rate);
     if (target > 0 && this.level < 0.02) this.level = Math.min(target, 0.02);
     const visible = this.level > 0.01;
     this.group.visible = visible;
-    if (!visible) return false;
+    if (!visible) {
+      this.level = 0;
+      return false;
+    }
     const { side, up, forward } = frame;
     this._basis.makeBasis(side, up, forward).setPosition(frame.origin || this._v.set(0, 0, 0));
     this.group.matrix.copy(this._basis);
