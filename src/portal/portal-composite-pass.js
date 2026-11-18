@@ -50,6 +50,7 @@ export const PortalCompositeShader = {
     uHarmP: { value: new THREE.Vector4(0.7, 2.1, 4.0, 1.3) },
     uHarmS: { value: new THREE.Vector4(0.12, -0.2, 0.3, 0.5) },
     uLiving: { value: 1 },
+    uCleft: { value: 0 },
     uRimWidth: { value: 0.006 },
     uRimColor: { value: new THREE.Color(0.78, 0.9, 1.0) },
     uRimIntensity: { value: 6 },
@@ -70,13 +71,15 @@ export const PortalCompositeShader = {
     uniform vec3 uCenter, uRight, uUp, uNormal;
     uniform vec2 uHalf, uOpen, uCenterUv;
     uniform vec4 uHarmK, uHarmA, uHarmP, uHarmS;
-    uniform float uRimWidth, uRimIntensity, uLensing, uLensWidth, uTension, uFlash;
+    uniform float uRimWidth, uRimIntensity, uLensing, uLensWidth, uTension, uFlash, uCleft;
     uniform vec3 uRimColor, uFarLight;
     varying vec2 vUv;
 
     float contour(float a) {
       vec4 phase = uHarmK * a + uHarmP + uHarmS * uTime * uLiving;
-      return 1.0 + dot(uHarmA, sin(phase)) - uTension * .20 * abs(sin(2.0*a));
+      float diagonal = abs(sin(2.0*a));
+      return 1.0 + dot(uHarmA, sin(phase)) - uTension * .20 * diagonal
+        - uCleft * .25 * pow(diagonal, 1.35);
     }
     vec3 sampleBase(vec2 uv) { return texture2D(tBase, clamp(uv, vec2(.001), vec2(.999))).rgb; }
     vec3 sampleFar(vec2 uv) { return texture2D(tPortal, clamp(uv, vec2(.001), vec2(.999))).rgb; }
@@ -165,7 +168,12 @@ export const PortalCompositeShader = {
       // Bound the entire discharge in metres, including its halo. Near a
       // grazing plane a single screen pixel can span the whole aperture.
       vec2 margin = abs(q * halfOpen) - 1.4 * halfOpen;
-      if (!hit || max(margin.x, margin.y) > unit*.30 || edge > .32) {
+      // The precursor has its own height in WORLD space while the aperture
+      // is still a line. Clipping it to the opening would erase the plumes.
+      float charge = uCleft * uTension * (1.0-smoothstep(.08,.64,uOpen.y));
+      float plumeReach = 1.35 * charge * uHalf.y;
+      if (!hit || margin.x > unit*.30 || margin.y > unit*.30 + plumeReach
+          || edge > .32 + plumeReach / unit) {
         return vec4(uEyeAcross > .5 ? sampleFar(vUv) : base.rgb, depth);
       }
       float inside = 1.0 - smoothstep(-aa, aa, edge);
@@ -207,6 +215,28 @@ export const PortalCompositeShader = {
       col *= 1.0 - .54*curtain*bank*(.6+.4*splitting);
       vec3 rim = prism*curtain*(.10+strength*.90)*(.66+.34*pulse)
         + uRimColor*(white*(.22+.44*pulse) + .50*thread);
+      // Light leaks out of the horizontal fault before the far view opens.
+      // Each bank fans out from its own off-centre peak. Distance up the
+      // bank drives the spectrum; the sloping envelope fades without a rim.
+      if (uCleft > 0.0) {
+        float x = q.x;
+        float y = abs(q.y) * halfOpen.y / uHalf.y;
+        float peakX = .075*side + .026*sin(uTime*1.4 + side);
+        float tent = max(0.0, 1.0 - abs(x - peakX)*1.12);
+        float rayX = x / (1.0 + y*.67) + .018*sin(7.0*y - uTime*2.0 + side);
+        float rays = .5+.5*sin(34.0*rayX + 2.3*sin(13.0*rayX + side + uTime*.74));
+        float height = 1.06*charge*tent*(.84+.16*rays)*(1.0+.08*side);
+        float climb = y/max(height,.002);
+        float veil = charge*tent*(1.0-smoothstep(.12,1.15,climb))
+          * (.27+.73*rays*rays);
+        vec3 spectrum = .5+.5*cos(6.28318*(climb*.68+.19*x+.09*side+vec3(.04,.37,.69)));
+        // Leave stretches of open sky between the remaining arc knots.
+        float knots = smoothstep(.42,.93,pulse) * (.45+.55*bank);
+        rim *= mix(1.0,.025+.95*knots, min(1.0,1.5*uCleft)*smoothstep(.04,.62,uOpen.y));
+        // A little extinction keeps transmitted colour visible against a sunlit planet.
+        col *= 1.0 - .70*veil;
+        rim += veil*(.025 + spectrum*spectrum)*.95;
+      }
       col += rim*uRimIntensity*(1.0+.48*uTension+.60*uFlash)*smoothstep(.0,.08,uOpen.x);
       float outDepth = depth;
       if (inside > .5) outDepth = log2(t * max(-dirView.z, 5e-4) + 1.0) / log2(uCameraFar + 1.0);

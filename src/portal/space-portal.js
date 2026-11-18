@@ -24,6 +24,7 @@ export const DEFAULT_PORTAL_PROFILE = Object.freeze({
   radius: 400, // metres, sphere mouths
   halfWidth: 380, // metres, plane seams
   halfHeight: 300,
+  cleft: 0, // taper the banks towards the tips of a torn spatial fold
   // contour = 1 + Σ amp·sin(k·θ + phase + speed·t); four harmonics
   harmonics: Object.freeze([
     Object.freeze({ k: 3, amp: 0.055, phase: 0.7, speed: 0.12 }),
@@ -51,7 +52,23 @@ export function createPortalProfile(options = {}) {
   return profile;
 }
 
-// The 弦界 lane: a wormhole mouth that forms ahead of the ship.
+export function lanePortalSize(reach) {
+  return { halfWidth: reach * .28, halfHeight: reach * .155 };
+}
+
+export function lanePortalProfile() {
+  return createPortalProfile({
+    shape: 'plane', cleft: .76, ...lanePortalSize(2200),
+    openSeconds: 1.85, closeSeconds: 1.1, seamFraction: .48,
+    harmonics: [
+      { k: 2, amp: .095, phase: 1.49, speed: .018 },
+      { k: 3, amp: .042, phase: .63, speed: -.085 },
+      { k: 5, amp: .032, phase: 2.30, speed: .12 },
+      { k: 9, amp: .024, phase: 4.10, speed: -.30 },
+    ],
+  });
+}
+
 export function wormholePortalProfile(options = {}) {
   return createPortalProfile({
     shape: 'sphere', radius: 420, rimIntensity: 2.2, lensing: 1.0, openSeconds: 1.5,
@@ -177,9 +194,9 @@ export class SpacePortal {
     for (const h of this.profile.harmonics) {
       r += h.amp * Math.sin(h.k * angle + h.phase + h.speed * time * this.profile.living);
     }
-    // The banks separate first at the middle. The tips remain pinned
-    // during the snap, then relax to the authored contour.
-    return r - this.open.tension * .20 * Math.abs(Math.sin(2 * angle));
+    const diagonal = Math.abs(Math.sin(2 * angle));
+    return r - this.open.tension * .20 * diagonal
+      - this.profile.cleft * .25 * Math.pow(diagonal, 1.35);
   }
 
   // Universe-space point -> source-frame local coordinates.
@@ -241,7 +258,7 @@ export class SpacePortal {
     if (this.shape !== 'plane') return true;
     this.toSourceLocal(eye, _eye);
     const inner = 1 - this.profile.harmonics.reduce((sum, h) => sum + Math.abs(h.amp), 0)
-      - .2 * this.open.tension;
+      - .2 * this.open.tension - .25 * this.profile.cleft;
     const rx = this.halfWidth * this.open.x, ry = this.halfHeight * this.open.y;
     for (const x of [-1, 1]) for (const y of [-1, 1]) {
       _ray.set(x, y, .5).applyMatrix4(camera.projectionMatrixInverse)
@@ -290,6 +307,7 @@ export class SpacePortal {
     u.uHarmP.value.set(h[0].phase, h[1].phase, h[2].phase, h[3].phase);
     u.uHarmS.value.set(h[0].speed, h[1].speed, h[2].speed, h[3].speed);
     u.uLiving.value = p.living;
+    u.uCleft.value = p.cleft;
     u.uRimWidth.value = p.rimWidth;
     u.uRimIntensity.value = p.rimIntensity;
     u.uRimColor.value.setRGB(...p.rimColor);

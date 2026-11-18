@@ -133,19 +133,19 @@ export function pulseChannels(t, out = emptyTransitChannels(), { power = 1, char
 // Warp: one shot driven by a single flow scalar w(u) over normalised time u.
 //   spool     0    – .085  charge: space pinches, the lens tightens
 //   accelerate .085 – .16   near-field stars start to streak past
-//   enter     .16  – .34   a formation front sweeps from the far end back over
+//   enter     .16  – .33   a formation front sweeps from the far end back over
 //                           the ship; streaks are bent onto the conduit and
 //                           become its filaments (see warp-conduit.js)
-//   covered   .34  – .62   inside the conduit; the universe is swapped here
-//   exit      .62  – .80   an opening front sweeps the same way; the
+//   covered   .33  – .66   inside the conduit; the universe is swapped here
+//   exit      .66  – .82   an opening front sweeps the same way; the
 //                           destination appears through the dissolving mouth
-//   arrive    .80  – 1     streaks shorten back to points while braking
+//   arrive    .82  – 1     streaks shorten back to points while braking
 // Visual travel is the integral of the speed curve, pre-computed into a
 // table, so streak flow, the departure drift and the arrival approach all
 // follow the same speed.
 export const WARP_MARKS = Object.freeze({
-  spoolEnd: 0.085, enterStart: 0.16, enterEnd: 0.34, decelStart: 0.58,
-  exitStart: 0.62, exitEnd: 0.80, decelEnd: 0.93,
+  spoolEnd: 0.085, enterStart: 0.16, enterEnd: 0.33, decelStart: 0.62,
+  exitStart: 0.66, exitEnd: 0.82, decelEnd: 0.94,
 });
 const WARP_SAMPLES = 1024;
 const WARP_SPEED_K = 4.2;
@@ -164,8 +164,7 @@ export function warpSpeedFraction(w, cruise = 0.0015) {
 }
 
 export function warpPlan(distance = 0) {
-  // 14 s for a neighbour, up to 18 s for the far side of the galaxy.
-  const duration = Math.max(14, Math.min(18, 14 + Math.log10(Math.max(distance, 1e10) / 1e10) * 1.3));
+  const duration = 14.8 + Math.min(4, Math.log10(Math.max(distance, 1e10) / 1e10) * 1.3);
   const travel = new Float64Array(WARP_SAMPLES + 1);
   const accel = new Float32Array(WARP_SAMPLES + 1);
   // travel speed: the flow curve, settling to exactly zero at the end so
@@ -240,7 +239,7 @@ export function warpChannels(t, plan, out = emptyTransitChannels()) {
   // the central opening reveals the sky before the near banks fall away.
   out.sky = Math.max(1 - smoothstep(0.14, 0.92, enter), smoothstep(0, .30, exit));
   const entrySurge = envelope(u, .09, .18, .21, .29);
-  const exitSurge = envelope(u, .64, .72, .75, .84);
+  const exitSurge = envelope(u, .68, .75, .78, .86);
   out.streak = Math.min(1, (.82 * Math.sqrt(w) + .12 * charge) * out.sky + .42 * Math.max(entrySurge, exitSurge) * out.sky);
   out.aberr = 0.22 * w * out.sky + 0.08 * charge;
   out.doppler = (.5 * w + .28 * Math.max(entrySurge, exitSurge)) * out.sky;
@@ -250,7 +249,7 @@ export function warpChannels(t, plan, out = emptyTransitChannels()) {
   // lens: tightens while charging, opens with the flow, punches with accel
   out.fov = 62 * (-0.045 * charge * (1 - w) + 0.19 * w + 0.07 * accel);
   out.kick += 0.85 * accel - 0.25 * charge * (1 - w);
-  out.flash = Math.max(out.flash, .30 * envelope(u, .21, .255, .26, .315), .36 * envelope(u, .67, .72, .73, .79));
+  out.flash = Math.max(out.flash, .30 * envelope(u, .21, .255, .26, .315), .36 * envelope(u, .70, .75, .76, .81));
   out.hull = Math.max(out.hull, 0.25 * charge + 0.75 * smoothstep(0.15, 1, w));
   return out;
 }

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
+import { lanePortalSize } from '../src/portal/space-portal.js';
 import { startServer } from './server.js';
 import { launchBrowser, launchWebGPUHardwareBrowser } from './browser.js';
 
@@ -160,10 +161,12 @@ try {
     cinematic: document.body.classList.contains('travel-cinematic'),
     hudVisibility: getComputedStyle(document.getElementById('ship-hud-stage')).visibility,
   }));
+  const expectedSize = lanePortalSize(stable.rift.reach);
   check(stable.rift.visible && stable.rift.composite && stable.rift.farRendered && stable.rift.phase === 'open'
-      && stable.rift.shape === 'plane' && Math.abs(stable.rift.halfWidth / stable.rift.halfHeight - 0.23 / 0.14) < 1e-4
+      && stable.rift.shape === 'plane' && Math.abs(stable.rift.halfWidth - expectedSize.halfWidth) < 1e-4
+      && Math.abs(stable.rift.halfHeight - expectedSize.halfHeight) < 1e-4
       && stable.rift.destinationLight.length > 0,
-    'stable planar lane renders a live destination system with dynamic 0.23/0.14 reach sizing');
+    'stable planar lane renders the destination at the flight lane profile dimensions');
   check(stable.events.some((e) => e.phase === 'open') && !stable.cinematic && stable.hudVisibility !== 'hidden',
     'stable opening dispatches fold-nav open and keeps the real flight HUD available');
   const portalContract = await page.evaluate(() => {
@@ -470,9 +473,17 @@ try {
     await page.waitForFunction(() => !document.getElementById('route-choice').classList.contains('hidden'));
     await page.locator('#route-rift-btn').click();
     const portalStartAnchor = await page.evaluate(() => NMS._internals.riftPortal.source.position.toArray());
-    if (type === 'gasGiant') await page.keyboard.down('KeyW');
+    if (type === 'gasGiant') {
+      await page.keyboard.down('KeyW');
+      await page.keyboard.down('KeyD');
+      await page.keyboard.down('ShiftLeft');
+    }
     await page.waitForTimeout(420);
-    if (type === 'gasGiant') await page.keyboard.up('KeyW');
+    if (type === 'gasGiant') {
+      await page.keyboard.up('ShiftLeft');
+      await page.keyboard.up('KeyD');
+      await page.keyboard.up('KeyW');
+    }
     const waiting = await page.evaluate((startAnchor) => {
       const anchorNow = NMS._internals.riftPortal.source.position;
       const drift = Math.hypot(anchorNow.x - startAnchor[0], anchorNow.y - startAnchor[1], anchorNow.z - startAnchor[2]);
@@ -482,11 +493,12 @@ try {
         hud: getComputedStyle(document.getElementById('ship-hud-stage')).visibility === 'hidden' ? 'none' : 'shown',
         hint: document.getElementById('hint').textContent,
         anchorDrift: drift,
+        speed: NMS._internals.nav.vel.length(),
       };
     }, portalStartAnchor);
     check(waiting.rift.active && waiting.rift.visible && !waiting.cinematic && waiting.hud !== 'none'
         && waiting.rift.open < 0.1 && !waiting.rift.anchorLocked && !waiting.rift.arrived
-        && waiting.rift.distanceToThreshold > 0 && waiting.anchorDrift < 1e-3,
+        && waiting.speed < .001 && Math.abs(waiting.rift.distanceToThreshold - waiting.rift.reach) < .02 && waiting.anchorDrift < 1e-3,
       `${type} holds at the world-anchored glowing seam while preparing without hiding HUD or black aperture (drift=${waiting.anchorDrift.toFixed(4)})`);
     if (type === 'gasGiant') {
       await page.screenshot({ path: path.join(os.tmpdir(), 'deep-space-rift-loading.png') });
@@ -890,6 +902,27 @@ try {
   check(warpChangedPixels > 1200,
     `post-warp forward flight visibly changes the final image (${warpChangedPixels} changed pixels)`);
 
+  const hole = await page.evaluate(() => {
+    NMS.openStarMap();
+    const map = NMS._internals.starMap;
+    const star = map.globalStars.find(s => s.kind === 'blackHole');
+    NMS.selectStarMapTarget(star.id);
+    const body = map.systemPreview(star).bodies.find(b => b.type === 'blackHole');
+    return { star: star.id, id: body.bodyId, index: body.index };
+  });
+  await page.locator(`#sm-systemGlyph [data-glyph-index="${hole.index}"]`).click({ force: true });
+  await page.locator('#sm-routeAction').click();
+  await page.locator('#route-rift-btn').click();
+  await page.waitForFunction(() => NMS.riftState().anchorLocked, null, { timeout: 90000 });
+  await page.evaluate(() => NMS.approachRift(25));
+  await page.keyboard.down('KeyW');
+  try {
+    await page.waitForFunction(() => NMS.riftState().arrived, null, { timeout: 20000 });
+  } finally { await page.keyboard.up('KeyW'); }
+  await page.waitForFunction(() => !NMS.riftState().active);
+  check(await page.evaluate(({ star, id }) => NMS._internals.universe.system.star.id === star
+    && NMS._internals.universe.system.compactObjects.includes(NMS._internals.universe.system.bodyById.get(id))
+    && NMS.state === 'space', hole), 'black-hole fold closes in the selected system and resumes flight');
   check(shaderErrors.length === 0, 'rift shaders compile without browser errors');
   check(errors.length === 0, 'rift traversal produces no page errors');
   console.log(`captures: ${routeFrame}, ${routeMobileFrame}, ${openingFrame}, ${frameA}, ${frameB}, ${thresholdFrame}, ${arrivalFrame}, ${warpTunnelFrameA}, ${warpTunnelFrameB}, ${warpArrivalFrame}, ${warpMovedFrame}`);

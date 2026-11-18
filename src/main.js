@@ -56,7 +56,7 @@ import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
 import { StarMap } from './starmap.js';
 import './walkdial.js';
-import { SpacePortal, createPortalProfile } from './portal/space-portal.js';
+import { SpacePortal, lanePortalProfile, lanePortalSize } from './portal/space-portal.js';
 import { WarpConduit } from './warp-conduit.js';
 import { PortalView } from './portal/portal-view.js';
 import { SurfaceWeapons, SURFACE_WEAPONS, isSoftwareWebGL } from './surface-weapons.js';
@@ -1096,20 +1096,7 @@ const skydiveCtl = new SkydiveController(renderer.domElement, scene, {
     setState('walk');
   },
 });
-riftPortal = new SpacePortal(createPortalProfile({
-  shape: 'plane',
-  harmonics: [
-    { k: 2, amp: .095, phase: 1.49, speed: .018 },
-    { k: 3, amp: .042, phase: .63, speed: -.085 },
-    { k: 5, amp: .032, phase: 2.30, speed: .12 },
-    { k: 9, amp: .024, phase: 4.10, speed: -.30 },
-  ],
-  halfWidth: 506,
-  halfHeight: 308,
-  openSeconds: 1.15,
-  closeSeconds: 1.1,
-  seamFraction: 0.26,
-}));
+riftPortal = new SpacePortal(lanePortalProfile());
 // The warp conduit is real geometry on the ship's foreground layer: drawn
 // after the world and its post effects, depth-tested against the hull.
 warpConduit = new WarpConduit({ radius: 220, layer: SHIP_FOREGROUND_LAYER, quality: QUALITY_LOW ? 'low' : 'medium' });
@@ -1367,6 +1354,7 @@ function touchPickPlanet(clientX, clientY) {
 const spaceCtl = new SpaceControls(renderer.domElement, nav, {
   onClick: (x, y) => touchPickPlanet(x, y),
 });
+spaceCtl.holdingPosition = () => Boolean(riftRoute && !riftRoute.anchorLocked && !riftRoute.arrived);
 spaceCtl.canSteer = () => !shipView.rmbLookActive();
 spaceCtl.canMouseBoost = () => !shipView.rmbLookActive();
 const walkCtl = new WalkControls(renderer.domElement, {
@@ -1491,14 +1479,17 @@ function updateTransitChannels(dt) {
   warpIntensity = warpTransit
     ? clamp(Math.max(transitChannels.warp, transitChannels.tunnel), 0, 1) : 0;
   transitFlow += transitChannels.flowSpeed * dt;
-  if (warpTransit) transitAxisTarget.copy(warpTransit.dir);
-  else if (pulseBurst) transitAxisTarget.copy(pulseBurst.direction);
+  if (warpTransit) {
+    // The two stellar frames can have entirely different world bearings.
+    // In either frame the vanishing point stays on the pilot's flight axis.
+    transitAxisWorld.set(0, 0, -1).applyQuaternion(nav.quat);
+    return;
+  }
+  if (pulseBurst) transitAxisTarget.copy(pulseBurst.direction);
   else if (pulseEchoes.length) transitAxisTarget.copy(pulseEchoes.at(-1).direction);
   else transitAxisTarget.set(0, 0, -1).applyQuaternion(nav.quat);
-  // A chained pulse after a turn swings the vanishing point over instead of
-  // jumping it; a warp follows its heading closely.
-  const axisRate = warpTransit ? 18 : 10;
-  transitAxisWorld.lerp(transitAxisTarget, 1 - Math.exp(-dt * axisRate)).normalize();
+  // A chained pulse after a turn swings the vanishing point over.
+  transitAxisWorld.lerp(transitAxisTarget, 1 - Math.exp(-dt * 10)).normalize();
 }
 
 // Push the channels into starflow, the transit pass and the hull light. Runs
@@ -1525,7 +1516,8 @@ function applyTransitVisuals(dt = 1 / 60) {
   conduitBend.set(Math.sin(clock_ * 0.13) * 0.12 + Math.sin(clock_ * 0.051 + 1.3) * 0.05,
     Math.cos(clock_ * 0.11 + 0.4) * 0.09 + Math.sin(clock_ * 0.037) * 0.04);
   conduitFrame.position.copy(camera.position);
-  conduitFrame.quaternion.setFromUnitVectors(CONDUIT_FORWARD, transitAxisWorld);
+  if (warpTransit) conduitFrame.quaternion.copy(nav.quat);
+  else conduitFrame.quaternion.setFromUnitVectors(CONDUIT_FORWARD, transitAxisWorld);
   const conduit = warpConduit.update(dt, conduitFrame, {
     enter: ch.conduitEnter || 0,
     exit: ch.conduitExit || 0,
@@ -4104,8 +4096,7 @@ function beginSelectedRift() {
   if (riftPortal.shape === 'sphere') {
     riftPortal.profile.radius = clamp(reach * 0.16, 300, 12000);
   } else {
-    riftPortal.profile.halfWidth = reach * 0.23;
-    riftPortal.profile.halfHeight = reach * 0.14;
+    Object.assign(riftPortal.profile, lanePortalSize(reach));
   }
   riftRoute = {
     ...route,
@@ -4120,6 +4111,10 @@ function beginSelectedRift() {
     closeAt: 0,
     reach,
   };
+  nav.vel.set(0, 0, 0);
+  spaceCtl.clearTransientInput();
+  spaceCtl.wheelImpulse = 0;
+  spaceCtl.firing = false;
   riftFarBodyId = arrival.bodyId;
   riftOrientation.copy(nav.quat);
   riftEntranceUniv.copy(nav.pos).addScaledVector(forward, reach);
@@ -4419,16 +4414,15 @@ function finishRiftCrossing() {
     }, 2000);
   }
   universe.relativizeSystem(destination, nav.pos);
-  if (arrivalBody) {
-    focusPlanet = arrivalBody;
-    spaceCtl.focus = arrivalBody;
-  }
+
   // This frame's reference body was resolved before the crossing; hand the
   // frame to the arrival body now so the medium is not rebound to the
   // departure planet and the swapped cloud history survives.
   nearest = typeof arrivalBody?.altitudeAt === 'function' ? arrivalBody : null;
-  const mainAtmoBody = arrivalBody?.isGasGiant || arrivalBody?.type === 'artificialHabitat'
-    ? null : arrivalBody;
+  focusPlanet = nearest;
+  spaceCtl.focus = nearest;
+  const mainAtmoBody = nearest?.isGasGiant || nearest?.type === 'artificialHabitat'
+    ? null : nearest;
   riftPortal.swapSides();
   // The two views trade worlds; the cloud reconstruction goes with them.
   const farPipeline = portalView?.pipeline;
@@ -4533,7 +4527,7 @@ function updateRiftRoute(dt) {
       if (!readyToCross) {
         const activity = riftPreviewReady ? '坐标锁定 · 展开裂口'
           : riftFarWarmState === 'compiling' ? '链接目的地视野' : '同步弦界坐标';
-        ui.setFoldActivity?.(activity);
+        ui.setFoldActivity?.(`稳船中 · ${activity}`);
       }
       if (readyToCross) {
         riftRoute.anchorLocked = true;
@@ -4648,7 +4642,7 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
   if (departColor) transitColorA.copy(departColor).lerp(TRANSIT_COOL, 0.25);
   if (star.color) transitColorB.copy(star.color).lerp(TRANSIT_COOL, 0.25);
   transitFlow = 0;
-  warpTransit = { t: 0, plan, dir: departDir.clone() };
+  warpTransit = { t: 0, plan };
   nav.vel.set(0, 0, 0);
   audio.cue('warp-spool');
   let swapped = false;
@@ -4767,10 +4761,10 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
     if (t < plan.swapAt) {
       nav.quat.copy(startQuat).slerp(departQuat, smoothstep(0.05, 1.5, t));
       nav.pos.copy(startPos).addScaledVector(departDir, spoolDistance * warpDepartureTravel(t, plan));
-      warpTransit.dir.copy(departDir);
       return;
     }
-    if (!swapped) swapDestination();
+    const handoffFrame = !swapped;
+    if (handoffFrame) swapDestination();
     if (arrivalSpec) {
       const heroPos = arrivalSystem.frames.get(arrivalSpec.bodyId).position;
       lookTarget.copy(heroPos);
@@ -4778,7 +4772,9 @@ function warpTo(star, preferBodyId = null, preparedSystem = null, preparedArriva
     }
     nav.pos.copy(endPos).addScaledVector(approachDir, approachDistance * warpApproachRemaining(t, plan));
     lookQuatAt(nav.pos, lookTarget, nav.quat);
-    warpTransit.dir.copy(lookTarget).sub(nav.pos).normalize();
+    // The stellar handoff changes the navigation basis instantaneously.
+    // The cockpit differentiates successive quaternions for head inertia.
+    if (handoffFrame) shipView.prevQuat.copy(nav.quat);
     // The destination's medium and ocean come alive inside the opaque tunnel,
     // well before the exit opens, so nothing pops while the planet grows.
     if (t >= plan.swapAt + 0.6 && warpRevealBody) warpRevealActive = true;
@@ -5717,23 +5713,6 @@ function frame(rafTs) {
       const forward = _v2.set(0, 0, -1).applyQuaternion(nav.quat);
       guidePlanetApproach(nav.vel, forward, radialOut, centerDistance,
         nearest.R + Math.max(nearest.atmoHeight * 0.28, nearest.hAmp), approachLimit, dt);
-    }
-    if (riftRoute && !riftRoute.anchorLocked && !riftRoute.arrived && riftPortal.shape === 'plane') {
-      // Keep the opening in view on an early approach. Brake only the incoming
-      // component, allowing the pilot to steer away or reverse at any time.
-      const normal = _v2.set(0, 0, 1).applyQuaternion(riftOrientation);
-      const startZ = _v.copy(flightStepStart).sub(riftEntranceUniv).dot(normal);
-      const endZ = _v.copy(nav.pos).sub(riftEntranceUniv).dot(normal);
-      const standOff = .48 * riftRoute.reach;
-      if (endZ < startZ && startZ > 0 && endZ < standOff * 1.6) {
-        const local = _v.subVectors(nav.pos, riftEntranceUniv).applyQuaternion(_q.copy(riftOrientation).invert());
-        if (Math.hypot(local.x / riftPortal.halfWidth, local.y / riftPortal.halfHeight) < 1.2) {
-          const allowed = Math.max(0, startZ - standOff) * (1 - Math.exp(-3*dt));
-          const excess = Math.max(0, startZ - endZ - allowed);
-          nav.pos.addScaledVector(normal, excess);
-          nav.vel.addScaledVector(normal, Math.min(excess / Math.max(dt, .001), Math.max(0, -nav.vel.dot(normal))));
-        }
-      }
     }
     // Sweep the camera's whole frame step against procedural terrain. Checking
     // only last frame's altitude allowed a low-FPS step to enter or cross a

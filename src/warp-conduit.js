@@ -102,6 +102,20 @@ void main(){
   float forward = smoothstep(.15,.9,-ray.z);
   float glow = forward * (.24*exp(-angle*7.5) + 1.55*exp(-angle*42.0));
   vec3 sky = vec3(.0025,.009,.027) + glow * mix(vec3(.44,.88,1.12),uColThroat,.32);
+  // Thin wisps peel off the inner cloud bank. At a fixed radial distance
+  // their depth projects as 1 / viewing angle: a wisp approaches from the
+  // throat, expands across the peripheral view, then passes the pilot.
+  float nearRange = .86 / max(length(ray.xy), .025);
+  vec3 nearPoint = ray * nearRange;
+  float nearDepth = -nearPoint.z;
+  vec3 nearUv = vec3(nearPoint.xy*.64, nearPoint.z*.075 - uDrift*1.5);
+  vec3 wake = texture(uCloud,nearUv).rgb;
+  vec3 fibres = texture(uCloud,nearUv*2.0 + vec3(.23,.62,.49) + (wake.r-.5)*.17).rgb;
+  float wisps = smoothstep(.42,.76,wake.g) * smoothstep(.36,.82,fibres.b);
+  float nearLight = wisps * smoothstep(.035,.32,angle) * exp(-max(nearDepth,0.0)*.09)
+    * formation(nearDepth*uR);
+  scatter += nearLight * vec3(.12,.35,.53);
+  transmit *= 1.0 - .30*nearLight;
   float alpha = 1.0 - transmit*(1.0-backdrop);
   if(alpha < .002) { gl_FragColor = vec4(0.0); return; }
   gl_FragColor = vec4((scatter + transmit*backdrop*sky)/alpha, alpha);
@@ -451,7 +465,7 @@ export class WarpConduit {
     const coverage = Math.min(enter, 1 - exit);
     this.fog.visible = active;
     // Two wraps keep the half-frequency curl continuous across the repeat.
-    this.fogDrift.value = (this.travel / this.radius * .006) % 2;
+    this.fogDrift.value = (this.travel / this.radius * .0105) % 2;
     this.stars.visible = starsLive && !(coverage > 0.999 && enclosure > 0.999);
     const sm = this.starMaterial.uniforms;
     sm.uTravel.value = this.travel % (4400 * k);

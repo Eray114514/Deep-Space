@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as THREE from 'three';
 import * as transit from '../src/transit.js';
-import { SpacePortal, createPortalProfile } from '../src/portal/space-portal.js';
+import { SpacePortal, lanePortalProfile } from '../src/portal/space-portal.js';
 
 const mainPath = process.argv.find(value => value.startsWith('--main-source='))?.slice('--main-source='.length) || 'src/main.js';
 const bytes = await readFile(mainPath), main = bytes.toString(), verifier = await readFile(new URL(import.meta.url));
@@ -136,7 +136,15 @@ function adoptionFixture() {
 await test('stellar warp transfers standalone ownership and retains deferred non-target bodies', () => {
   const f = adoptionFixture();let step;
   f.context.addTween = (_duration, update) => { step = update; };
-  load('warpTo', f.context)(f.destination.star, f.destination.body.bodyId, f.destination);step(.6);f.verify();
+  const arrivalBearing = new THREE.Quaternion().setFromEuler(new THREE.Euler(.2, -1.45, .3));
+  load('warpTo', f.context)(f.destination.star, f.destination.body.bodyId, f.destination);
+  step(.35);
+  f.context.lookQuatAt = (_from, _to, out) => out.copy(arrivalBearing);
+  step(.6);
+  assert.ok(f.context.nav.quat.angleTo(arrivalBearing) < 1e-6);
+  assert.ok(f.context.shipView.prevQuat.angleTo(arrivalBearing) < 1e-6,
+    'the cockpit must not differentiate the stellar basis change as a pilot head turn');
+  f.verify();
 });
 await test('an early stellar warp hides sites produced while finishing the prepared target, then adopts them', () => {
   const f = adoptionFixture(), sites = f.destination.artificialSites;let step;
@@ -154,9 +162,7 @@ await test('an early stellar warp hides sites produced while finishing the prepa
 });
 await test('direct planar lane crossing swaps immediately off-axis, keeps free lateral velocity and preserves cloud/camera handoff', () => {
   const reach = 2200;
-  const f = adoptionFixture(), portal = new SpacePortal(createPortalProfile({
-    shape: 'plane', openSeconds: 1.15, seamFraction: 0.26, halfWidth: 0.23 * reach, halfHeight: 0.14 * reach,
-  }));
+  const f = adoptionFixture(), portal = new SpacePortal(lanePortalProfile());
   const source = new THREE.Vector3(150, -80, -2200), target = new THREE.Vector3(5e9, -1e8, 3e9);
   const sourceQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.12, -0.35, 0.08, 'YXZ'));
   const targetQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.24, 1.45, 0.19, 'YXZ'));
@@ -222,9 +228,7 @@ await test('direct planar lane crossing swaps immediately off-axis, keeps free l
 
 await test('late destination holds crossing at near threshold and prevents black aperture while loading', () => {
   const reach = 2200;
-  const f = adoptionFixture(), portal = new SpacePortal(createPortalProfile({
-    shape: 'plane', openSeconds: 1.15, seamFraction: 0.26, halfWidth: 0.23 * reach, halfHeight: 0.14 * reach,
-  }));
+  const f = adoptionFixture(), portal = new SpacePortal(lanePortalProfile());
   const source = new THREE.Vector3(0, 0, -2200), target = new THREE.Vector3(5e9, 0, 0);
   const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.5);
   portal.setFrames(source, new THREE.Quaternion(), target, targetQuat);
@@ -273,9 +277,7 @@ await test('late destination holds crossing at near threshold and prevents black
 });
 
 await test('cancelRiftRoute tears down portal state, restores flight HUD controls, and clears fold-nav', () => {
-  const f = adoptionFixture(), portal = new SpacePortal(createPortalProfile({
-    shape: 'plane', openSeconds: 1.15, seamFraction: 0.26, halfWidth: 506, halfHeight: 308,
-  }));
+  const f = adoptionFixture(), portal = new SpacePortal(lanePortalProfile());
   portal.phase = 'opening';portal.open = { x: 1, y: 0.012, tension: 0.4, flash: 0 };
   const foldEvents = [];
   let endTravelCalls = 0, disposed = 0, released = 0;

@@ -2,7 +2,7 @@
 // choreography, far-view pass ownership and the cloud history exchange.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { SpacePortal, createPortalProfile, doorPortalProfile, portalClosing, portalOpening, wormholePortalProfile }
+import { SpacePortal, createPortalProfile, doorPortalProfile, lanePortalProfile, portalClosing, portalOpening, wormholePortalProfile }
   from '../src/portal/space-portal.js';
 import { PortalView } from '../src/portal/portal-view.js';
 import { LiteCloudPass } from '../src/cloud/lite-cloud-pass.js';
@@ -104,25 +104,16 @@ test('crossing exchanges cloud reconstruction state between the two views', () =
   assert.equal(b.history[0], 'a0');assert.equal(b.frame, 3);assert.equal(b.activePlanet, planetA);
 });
 
-test('planar lane profile opens from a 0.26 seam in 1.15 s and crosses off-axis cleanly', () => {
-  const reach = 2200;
-  const p = new SpacePortal(createPortalProfile({
-    shape: 'plane',
-    openSeconds: 1.15,
-    seamFraction: 0.26,
-    halfWidth: 0.23 * reach,
-    halfHeight: 0.14 * reach,
-  }));
+test('the flight lane charges at full width before opening and admits oblique crossings', () => {
+  const p = new SpacePortal(lanePortalProfile());
   const srcQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.18, -0.52, 0.09, 'YXZ'));
   const dstQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.27, 1.35, -0.14, 'YXZ'));
   p.setFrames(new THREE.Vector3(120, -40, -2200), srcQ, new THREE.Vector3(8e10, -2e9, 4e10), dstQ);
   p.beginOpening();
-  // During the seam fraction (u <= 0.26), width draws while height remains a thin seam.
-  p.update(0.28, 0.28);
+  p.update(0.84, 0.84);
   assert.equal(p.phase, 'opening');
-  assert.ok(p.open.x > 0.99 && p.open.y < 0.02, `expected seam at 0.28s, got x=${p.open.x}, y=${p.open.y}`);
-  // Finish opening at 1.15s total.
-  p.update(0.90, 1.18);
+  assert.ok(p.open.x > 0.99 && p.open.y < 0.02 && p.open.tension > 0.9);
+  p.update(1.02, 1.86);
   assert.equal(p.phase, 'open');
   assert.equal(p.open.y, 1);
 

@@ -133,6 +133,9 @@ export function applyFlightSteering(quat, angularVelocity, steerX, steerY, dt) {
 }
 
 export class SpaceControls {
+  get enabled() { return this._enabled && !this.holdingPosition?.(); }
+  set enabled(value) { this._enabled = value; }
+
   constructor(dom, nav, { onClick } = {}) {
     this.dom = dom;
     this.nav = nav;                  // { pos, quat, vel } — pos in universe coords
@@ -342,6 +345,7 @@ export class SpaceControls {
   }
 
   update(dt) {
+    if (this.holdingPosition?.()) return;
     const nav = this.nav;
     const lookDecay = Math.exp(-dt * 7.5);
     this.lookInput.yaw *= lookDecay;
