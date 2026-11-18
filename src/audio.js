@@ -7,6 +7,7 @@ import { SaltlineSfx } from './saltline/sfx.js';
 import { SkydiveAudio } from './skydive-audio.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const flightGain = (atmosphere = 0) => 0.52 + 0.20 * clamp01(atmosphere);
 
 // Deterministic brown-noise source: same seed yields the same buffer on every
 // load, keeping audio reproducible alongside the rest of the universe.
@@ -304,8 +305,9 @@ export class FlightAudio {
     } else if (kind === 'boost') {
       // A short intake, then the weight of the drive engaging. The held
       // sound comes from the continuous bed and can decay on a quick tap.
-      this.noiseBurst({ duration: 0.30, gain: 0.076, from: 430, to: 940, q: 0.55 });
-      this.tone({ from: 74, to: 42, duration: 0.48, gain: 0.078, type: 'sine', delay: 0.055 });
+      const gain = flightGain(options.atmosphere);
+      this.noiseBurst({ duration: 0.30, gain: 0.076 * gain, from: 430, to: 940, q: 0.55 });
+      this.tone({ from: 74, to: 42, duration: 0.48, gain: 0.078 * gain, type: 'sine', delay: 0.055 });
     } else if (kind === 'pulse') {
       // inhale -> low thump on the fold -> airy release; a charged fold is
       // deeper, louder and longer
@@ -486,10 +488,11 @@ export class FlightAudio {
       this.jumpWind.update(speed, canopy, cloud, brake, paused);
     } else this.jumpWind?.release();
     set(this.master.gain, active * 0.34, 0.05);
-    set(this.engineBus.gain, active * (flight ? 0.065 + speedK * 0.065 + boostK * 0.070 : 0),
+    const driveGain = flightGain(atmosphere);
+    set(this.engineBus.gain, active * driveGain * (flight ? 0.065 + speedK * 0.065 + boostK * 0.070 : 0),
       boostK ? 0.22 : 0.38);
     set(this.engineFilter.frequency, underwater ? 150 : 220 + speedK * 190 + boostK * 540, 0.32);
-    set(this.airGain.gain, jumping ? 0 : active * atmosphere * (0.02 + speedK * 0.25 + boostK * 0.12), 0.1);
+    set(this.airGain.gain, jumping ? 0 : active * atmosphere * (flight ? driveGain : 1) * (0.02 + speedK * 0.25 + boostK * 0.12), 0.1);
     set(this.airFilter.frequency, 480 + speedK * 3200 + boostK * 1200, 0.08);
     set(this.warpGain.gain, active * warpK * 0.26, 0.05);
     set(this.warpFilter.frequency, 900 + warpK * 4800, 0.05);
@@ -510,7 +513,7 @@ export class FlightAudio {
       else if (state === 'takeoff') this.cue('takeoff');
     }
     if (atmosphere > 0.18 && this.lastAtmosphere <= 0.18 && speed > 180) this.cue('atmosphere');
-    if (boostK && !this.wasBoosting) this.cue('boost');
+    if (boostK && !this.wasBoosting) this.cue('boost', { atmosphere });
     // Pulse and warp transients are cued explicitly by the transit timeline
     // ('pulse', 'warp-spool', 'warp-enter', 'warp-exit'); the bed above only
     // follows its intensity.
