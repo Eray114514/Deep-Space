@@ -206,10 +206,25 @@ try {
   // The 0.9 s boarding tween still needs multiple rendered frames; SwiftShader
   // can make that wall-clock slow even with the water material skipped.
   await page.waitForFunction('window.NMS.state === "shipwalk"', null, { timeout: 90000 });
-  check(await page.evaluate('document.getElementById("touch-ui").classList.contains("hidden")'),
-    'joystick hides after boarding');
 } catch {
   check(false, 'boarding completed within 90 s');
+}
+if (await page.evaluate('NMS.state === "shipwalk"')) {
+  check(await page.locator('#joystick').isVisible() && await page.locator('#btn-takeoff').isHidden(),
+    'boarding swaps surface actions for cabin controls');
+  const cabinButton = await rectOf('#btn-jump');
+  await tap(cabinButton.x, cabinButton.y);
+  check(await page.evaluate('NMS.shipViewState().rampTarget === 0'), 'cabin action closes the open ramp');
+  await tap(cabinButton.x, cabinButton.y);
+  check(await page.evaluate('NMS.shipViewState().rampTarget === 1'), 'cabin action opens the ramp again');
+  const cabin = await page.evaluate('NMS.shipViewState()');
+  await dragTouch(CX, CY, CX + 65, CY + 10);
+  check(Math.abs(await page.evaluate('NMS.shipViewState().walkYaw') - cabin.walkYaw) > .12,
+    'finger drag turns the player in the cabin');
+  const stick = await rectOf('#joystick');
+  await dragTouch(stick.x, stick.y, stick.x, stick.y - 28, 4, 1100);
+  check(await page.evaluate('NMS.shipViewState().walkPos[2]') < cabin.walkPos[2] - .2,
+    'cabin joystick moves the player through the hold');
 }
 await sleep(600);
 await page.screenshot({ path: `${OUT}/phone-03-shipwalk.png` });

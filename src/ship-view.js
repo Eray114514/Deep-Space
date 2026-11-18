@@ -149,16 +149,18 @@ export class ShipView {
     let cabinTouch = null;
     dom.addEventListener('pointerdown', e => {
       if (this.shipwalk && e.pointerType === 'touch' && cabinTouch === null) {
-        cabinTouch = e.pointerId;
-        dom.setPointerCapture(cabinTouch);
+        cabinTouch = { id: e.pointerId, x: e.clientX, y: e.clientY };
+        dom.setPointerCapture(e.pointerId);
       }
     });
     dom.addEventListener('pointermove', e => {
-      if (!this.shipwalk || e.pointerId !== cabinTouch) return;
-      this.walkYaw -= e.movementX * .004;
-      this.walkPitch = clamp(this.walkPitch - e.movementY * .004, -1.4, 1.4);
+      if (!this.shipwalk || e.pointerId !== cabinTouch?.id) return;
+      this.walkYaw -= (e.clientX - cabinTouch.x) * .004;
+      this.walkPitch = clamp(this.walkPitch - (e.clientY - cabinTouch.y) * .004, -1.4, 1.4);
+      cabinTouch.x = e.clientX;
+      cabinTouch.y = e.clientY;
     });
-    dom.addEventListener('lostpointercapture', e => { if (e.pointerId === cabinTouch) cabinTouch = null; });
+    dom.addEventListener('lostpointercapture', e => { if (e.pointerId === cabinTouch?.id) cabinTouch = null; });
     document.addEventListener('mousemove', (e) => {
       if (document.pointerLockElement !== dom) return;
       if (this.shipwalk && this.seatT >= 1) {
