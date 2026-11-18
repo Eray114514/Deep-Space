@@ -243,12 +243,20 @@ try {
   check(canopyState.canopyVisible && canopyState.handsVisible && !canopyState.aadTriggered,
     `manual deployment raises the nine-cell wing and keeps both gloves visible ${JSON.stringify(canopyState)}`);
 
-  const yawStops = await page.evaluate(() => [360, -720, 32].map(delta => {
+  const yawStops = await page.evaluate(() => [360, -720, 26].map(delta => {
     NMS.lookYaw(delta);
     return NMS.skydiveState().headYaw * 180 / Math.PI;
   }));
-  check(yawStops.every((angle, i) => Math.abs(angle - [32, -32, 0][i]) < .001),
+  check(yawStops.every((angle, i) => Math.abs(angle - [26, -26, 0][i]) < .001),
     'canopy look stops on both sides and releases immediately on reversal');
+  const pitchFloorOk = await page.evaluate(() => {
+    const startPitch = NMS._internals.skydiveCtl.pitch;
+    NMS.lookPitch(-300);
+    const clamped = NMS._internals.skydiveCtl.pitch;
+    NMS.lookPitch(Math.round((startPitch - clamped) * 180 / Math.PI));
+    return Math.abs(clamped + 0.62) < 0.01;
+  });
+  check(pitchFloorOk, 'canopy downward look pitch is clamped at -0.62 rad to prevent sleeve/riser clipping');
   // Look up overhead to capture the inflated wing and the loaded line groups.
   await page.evaluate(() => {
     const sd = NMS._internals;
@@ -535,6 +543,7 @@ try {
     if (height > 420) {
       await page.waitForFunction(() => document.getElementById('land-btn').classList.contains('hidden'));
     }
+    const hoverStartMs = Date.now();
     await page.keyboard.press(key);
     if (height === 130) {
       await page.keyboard.press('KeyF');
@@ -544,13 +553,21 @@ try {
       continue;
     }
     await page.waitForFunction('NMS.state === "landed"', null, { timeout: 60000 });
-    check(await page.evaluate(h => NMS.shipLandingState().hoverMode === 'high' && Math.abs(NMS.alt() - h) < 12, height),
-      `voluntary hover preserves ${height} m over landable terrain`);
+    const hoverElapsedMs = Date.now() - hoverStartMs;
+    check(await page.evaluate(h => NMS.shipLandingState().hoverMode === 'high'
+        && Math.abs(NMS.alt() - h) < 12
+        && !NMS.surfaceGameplayState().campDeployed
+        && NMS._internals.ship.foregroundOnly === true, height) && hoverElapsedMs < 5000,
+      `voluntary hover preserves ${height} m over landable terrain without ground-camp stall (${hoverElapsedMs} ms)`);
+    await page.keyboard.press('KeyV');
+    await page.evaluate(() => { NMS._internals.shipView.parkedOrbitYaw = 0.8; });
     await page.keyboard.down('KeyW');
     await page.waitForFunction('NMS.state === "space"');
     await page.keyboard.up('KeyW');
-    check(await page.evaluate(h => Math.abs(NMS.alt() - h) < 15 && !NMS.shipLandingState().hoverMode, height),
-      'forward input releases high hover at the held altitude');
+    check(await page.evaluate(h => Math.abs(NMS.alt() - h) < 15
+        && !NMS.shipLandingState().hoverMode
+        && Math.abs(NMS._internals.shipView.parkedOrbitYaw) < 1e-4, height),
+      'forward input releases high hover at the held altitude from chase/orbited view');
   }
 
   check(errors.length === 0, `no page errors ${JSON.stringify(errors.slice(0, 3))}`);

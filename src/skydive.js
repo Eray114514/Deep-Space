@@ -84,7 +84,8 @@ export class SkydiveController {
         return;
       }
       this.yaw += mx * 0.0024;
-      this.pitch = clamp(this.pitch - my * 0.0024, -1.48, 1.46);
+      const minPitch = this.phase === 'canopy' ? -0.62 : -1.48;
+      this.pitch = clamp(this.pitch - my * 0.0024, minPitch, 1.46);
     };
     this._onDown = (e) => {
       if (this.active && !document.pointerLockElement && !this._drag) {
@@ -216,7 +217,7 @@ export class SkydiveController {
 
   updateQuat() {
     if (this.phase === 'canopy') {
-      const headLimit = THREE.MathUtils.degToRad(32);
+      const headLimit = THREE.MathUtils.degToRad(26);
       this.yaw = this.glideYaw + clamp(this.yaw - this.glideYaw, -headLimit, headLimit);
     }
     _u.copy(this.posLocal).normalize();
@@ -297,6 +298,7 @@ export class SkydiveController {
       const previous = this.deployT;
       this.deployT = Math.min(1, previous + dt / this.openSeconds);
       if (previous < .46 && this.deployT >= .46) this.onLoad?.();
+      if (this.pitch < -0.62) this.pitch = damp(this.pitch, -0.62, 5.5, dt);
       const load = THREE.MathUtils.smoothstep(this.deployT, .14, .79);
       this.pitchJolt = .21 * Math.sin(Math.PI * load) - .041 * Math.sin(Math.PI * this.deployT * 2);
       const flare = Math.max(0, -fIn);

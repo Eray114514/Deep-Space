@@ -12,3 +12,6 @@ export const SHIP_INTERIOR_LAYER = 6;
 // First-person equipment has its own outdoor light list, independent of the
 // ship's calibrated exterior and cabin rigs.
 export const WEAPON_FOREGROUND_LAYER = 7;
+// Jump harness, gloves, sleeves and canopy lines. Drawn through their own
+// view camera so ultra-wide windows do not stretch limbs at the screen edge.
+export const SKYDIVE_RIG_LAYER = 8;

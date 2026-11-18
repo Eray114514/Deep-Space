@@ -857,12 +857,13 @@ export class Ship {
     }
     if (scriptedHull) this.parkAmt = this.landingPose.progress;
     else this.parkAmt += ((wantsPark ? 1 : 0) - this.parkAmt) * (1 - Math.exp(-dt * 2.0));
-    // Keep the hull on SHIP_FOREGROUND_LAYER throughout all active flight and
-    // scripted manoeuvres (landing, hover-entry, recall fly-in, liftoff and
-    // auto-depart) so half-res volumetric cloud history never composites over
-    // the moving ship; main.js preserves scene depth on ForegroundPass during
-    // scripted surface manoeuvres so terrain and trees still occlude the hull.
+    // Keep the hull on SHIP_FOREGROUND_LAYER throughout all active flight,
+    // airborne high-hover (`hoverMode === 'high'`), and scripted manoeuvres
+    // so half-res volumetric/lite cloud history never composites over the
+    // cockpit or open bay; main.js preserves scene depth on ForegroundPass
+    // during exterior scripted surface manoeuvres so terrain still occludes.
     const foregroundOnly = ['space', 'flyto', 'warp', 'takeoff'].includes(state)
+      || (this.hoverMode === 'high' && ['landing', 'landed', 'shipwalk'].includes(state))
       || (state === 'shipwalk' && !this.parkedPosUniv)
       || (scriptedHull && state !== 'landing')
       || (state === 'landing' && this.parkAmt < 0.58);

@@ -911,11 +911,13 @@ export class SurfaceGameplay {
     }
     this.wasWalking = walking;
 
-    // Deploy / recall the forward frontier camp alongside the landed ship
+    // Deploy / recall the forward frontier camp alongside a ground-landed ship
+    // (never spawn a surface camp underneath an airborne hover-skydive or extraction ship).
     if (ship?.parkedPlanet && ship.parkedLocal && !ship.orbitalStandby
+      && !ship.hoverMode
       && (state === 'walk' || state === 'shipwalk' || state === 'landed')) {
       this.deployForwardCamp(ship.parkedPlanet, ship.parkedLocal);
-    } else if (this.campPlanet && state !== 'walk' && state !== 'shipwalk' && state !== 'landed') {
+    } else if (this.campPlanet && (ship?.hoverMode || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
       this.recallForwardCamp();
     }
 

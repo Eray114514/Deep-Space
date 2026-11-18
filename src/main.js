@@ -45,7 +45,7 @@ import {
   createTakeoffSequence,
 } from './ship-landing.js';
 import { SkydiveController } from './skydive.js';
-import { WEAPON_FOREGROUND_LAYER } from './render-layers.js';
+import { WEAPON_FOREGROUND_LAYER, SKYDIVE_RIG_LAYER } from './render-layers.js';
 import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
@@ -621,6 +621,23 @@ function prewarmWeaponAndPostPipelines() {
     }).finally(() => {
       weaponPipelinesWarmPending = false;
     });
+  }
+
+  if (skydiveCtl?.rig?.root) {
+    void nodePipeline.prepare(() => {
+      const rootVis = skydiveCtl.rig.root.visible;
+      const canopyVis = skydiveCtl.rig.canopy.visible;
+      try {
+        skydiveCtl.rig.root.visible = true;
+        skydiveCtl.rig.canopy.visible = true;
+        return compileRenderVariant(renderer, skydiveCtl.rig.root, camera, scene, {
+          layer: SKYDIVE_RIG_LAYER, target: nodePipeline.composer.readBuffer, signal,
+        });
+      } finally {
+        skydiveCtl.rig.root.visible = rootVis;
+        skydiveCtl.rig.canopy.visible = canopyVis;
+      }
+    }, { signal, label: 'startup-skydive', isCurrent }).catch(() => {});
   }
 
   // Kick off ANGLE background FXC compilation for all ship pass variants right
@@ -1220,6 +1237,24 @@ if (!isSoftwareWebGL(renderer)) {
 // Hands and optics sit closer than the world camera's 0.12 m near plane, so
 // the weapon layer renders through the rig's own view camera.
 foregroundPass.setLayerCamera(WEAPON_FOREGROUND_LAYER, surfaceWeapons.viewCamera);
+// The jump rig is a viewmodel too: cap its horizontal field of view so a 21:9
+// window shows the same sleeves and gloves as 16:9 instead of stretching them,
+// and let it come closer than the world near plane.
+const SKYDIVE_RIG_MAX_HFOV = 96 * Math.PI / 180;
+const skydiveViewCamera = new THREE.PerspectiveCamera(BASE_FOV, camera.aspect, 0.01, 60);
+skydiveViewCamera.name = 'skydive-rig-view-camera';
+camera.add(skydiveViewCamera);
+foregroundPass.setLayerCamera(SKYDIVE_RIG_LAYER, skydiveViewCamera);
+function syncSkydiveViewCamera() {
+  const aspect = camera.aspect;
+  const cap = 2 * Math.atan(Math.tan(SKYDIVE_RIG_MAX_HFOV / 2) / aspect) * 180 / Math.PI;
+  const fov = Math.min(camera.fov, cap);
+  if (skydiveViewCamera.fov !== fov || skydiveViewCamera.aspect !== aspect) {
+    skydiveViewCamera.fov = fov;
+    skydiveViewCamera.aspect = aspect;
+    skydiveViewCamera.updateProjectionMatrix();
+  }
+}
 let warpIntensity = 0;
 let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
@@ -2968,8 +3003,17 @@ function launchParkedShip() {
   }
   surveyUnits.recall();
   if (ship.hoverMode === 'high') {
-    // The parked camera already owns nav.pos/quat. Release the hold in place
-    // and let normal flight input accelerate from rest at this altitude.
+    // Sync nav to this frame's planet-locked hover pose before releasing the
+    // hold so planetary orbit/rotation during this tick never drops altitude.
+    // Reset any 3rd-person parked orbit offset so the ship stays steady in place.
+    shipView.parkedOrbitYaw = 0;
+    shipView.parkedOrbitPitch = 0;
+    shipView.parkedCamBlend = 1;
+    if (ship.parkedPosUniv) {
+      shipView.evalParkedCameraLocal(planet, _v, _q);
+      nav.pos.copy(ship.parkedPosUniv).add(_v.applyQuaternion(ship.parkedQuat));
+      nav.quat.copy(ship.parkedQuat).multiply(_q);
+    }
     ship.landingPose = null;
     ship.hoverMode = null;
     ship.parkedPlanet = null;
@@ -6607,11 +6651,15 @@ function frame(rafTs) {
       ? [SHIP_FOREGROUND_LAYER, SHIP_INTERIOR_LAYER]
       : [SHIP_FOREGROUND_LAYER];
     if (surfaceWeapons.rig.visible) foregroundLayers.push(WEAPON_FOREGROUND_LAYER);
+    if (skydiveCtl.rig?.root.visible) foregroundLayers.push(SKYDIVE_RIG_LAYER);
     foregroundPass.setLayers(foregroundLayers);
   } else {
-    foregroundPass.setLayers(surfaceWeapons.rig.visible
-      ? [SHIP_FOREGROUND_LAYER, WEAPON_FOREGROUND_LAYER] : [SHIP_FOREGROUND_LAYER]);
+    const legacyLayers = surfaceWeapons.rig.visible
+      ? [SHIP_FOREGROUND_LAYER, WEAPON_FOREGROUND_LAYER] : [SHIP_FOREGROUND_LAYER];
+    if (skydiveCtl.rig?.root.visible) legacyLayers.push(SKYDIVE_RIG_LAYER);
+    foregroundPass.setLayers(legacyLayers);
   }
+  syncSkydiveViewCamera();
   if (parkedInteriorPass) parkedInteriorPass.enabled = !ship.foregroundOnly;
   configureShipForegroundLightingLayers();
 
@@ -7642,7 +7690,11 @@ window.NMS = {
   },
   lookPitch(deg) {
     if (state === 'walk') { walkCtl.pitch = clamp(walkCtl.pitch + deg * Math.PI / 180, -1.45, 1.45); walkCtl.update(0.001); }
-    else if (state === 'skydive') { skydiveCtl.pitch = clamp(skydiveCtl.pitch + deg * Math.PI / 180, -1.48, 1.46); skydiveCtl.updateQuat(); }
+    else if (state === 'skydive') {
+      const minPitch = skydiveCtl.phase === 'canopy' ? -0.62 : -1.48;
+      skydiveCtl.pitch = clamp(skydiveCtl.pitch + deg * Math.PI / 180, minPitch, 1.46);
+      skydiveCtl.updateQuat();
+    }
     else if (state === 'shipwalk') shipView.walkPitch = clamp(
       shipView.walkPitch + deg * Math.PI / 180, -1.4, 1.4);
     else nav.quat.multiply(_q.setFromAxisAngle(_v3.set(1, 0, 0), deg * Math.PI / 180));
@@ -8695,6 +8747,8 @@ window.NMS = {
       surveyUnits,
       surfaceGameplay,
       surfaceWeapons,
+      skydiveCtl,
+      skydiveViewCamera,
     };
   },
 };

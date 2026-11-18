@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { buildHand } from './saltline/viewmodel-kit.js';
-import { FOREGROUND_LAYER } from './render-layers.js';
+import { SKYDIVE_RIG_LAYER } from './render-layers.js';
 
 const CELLS = 9;
 const smooth = THREE.MathUtils.smoothstep;
@@ -419,7 +419,7 @@ export function createSkydiveRig() {
     return { side, hand, toggle, rings };
   });
   const altimeter = wristAltimeter(light, arms[0].hand);
-  root.traverse(o => o.layers.set(FOREGROUND_LAYER));
+  root.traverse(o => o.layers.set(SKYDIVE_RIG_LAYER));
   const lineEnd = new THREE.Vector3();
   const crossbar = new THREE.Vector3(), tapeUp = new THREE.Vector3(), face = new THREE.Vector3();
   const tapeFrame = new THREE.Matrix4(), loop = new THREE.Vector3();
@@ -494,9 +494,21 @@ export function createSkydiveRig() {
       hand.position.add(delta);
       if (t < .58) toggle.position.copy(stowed);
       const offset = hand.material.uniforms.shoulderOffset.value;
-      offset.set(side * .22 * width, -.29, .12).applyQuaternion(handBasis);
+      offset.set(side * .23 * width, -.32, .16).applyQuaternion(handBasis);
       delta.set(0, 0, 1).applyQuaternion(cameraLocal);
-      offset.addScaledVector(delta, Math.max(0, .10 - offset.dot(delta)));
+      const deficit = .16 - offset.dot(delta);
+      if (deficit > 0) {
+        const horizSq = delta.x * delta.x + delta.z * delta.z;
+        if (delta.y > 0 && horizSq > 0.25) {
+          // Keep the shoulder below eye level when pitching down so the sleeve
+          // exits beneath the near plane instead of crossing it mid-frame.
+          const s = deficit / horizSq;
+          offset.x += delta.x * s;
+          offset.z += delta.z * s;
+        } else {
+          offset.addScaledVector(delta, deficit);
+        }
+      }
       offset.sub(hand.position).applyQuaternion(inverseHand.copy(hand.quaternion).invert())
         .sub(hand.geometry.userData.shoulderSocket);
       if (!canopy.visible) continue;
