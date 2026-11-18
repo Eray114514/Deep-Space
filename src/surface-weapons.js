@@ -203,6 +203,13 @@ export class SurfaceWeapons {
     return this.models[index];
   }
 
+  prewarmModels() {
+    for (let i = 0; i < SURFACE_WEAPONS.length; i++) {
+      const m = this.ensureModel(i);
+      m.group.visible = i === this.index;
+    }
+  }
+
   releaseInput() {
     this.trigger = false;
     this.justPressed = false;

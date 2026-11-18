@@ -289,6 +289,7 @@ let shipPipelineWarmPending = false;
 let postPipelinesWarmPending = false;
 let weaponPipelinesWarmPending = false;
 let weaponPipelinesWarmed = false;
+let walkGameplayWarmPending = false;
 let heroTransitionActive = false;
 let startupWarmStartedAt = performance.now();
 const STARTUP_WARM_BUDGET_MS = QUALITY_LOW ? 1800 : 24000;
@@ -333,6 +334,7 @@ function releaseStartupPrewarm(reason) {
   surfacePipelinesReady = true;
   postPipelinesWarmPending = false;
   weaponPipelinesWarmPending = false;
+  walkGameplayWarmPending = false;
   for (const mesh of surfaceBootstrapMeshes) mesh.visible = false;
   surfaceBootstrapStats||={skipped:true,reason,cpuMs:0,calls:0,meshes:surfaceBootstrapMeshes.length};
   disposeSurfaceBootstrap();
@@ -387,6 +389,7 @@ function prewarmSurfacePipelines(planet, extraPlanets = null) {
   // renderer/program race on integrated GPUs.
   if (QUALITY_LOW) {
     if (planet && !warmedSurfacePlanet) warmedSurfacePlanet = planet;
+    renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
     return;
   }
   // Terrain/water/prop shader topology is shared between terrestrial bodies;
@@ -592,14 +595,19 @@ function prewarmWeaponAndPostPipelines() {
     if (!startupPrewarmExpired) console.warn('sky prewarm failed', error);
   });
 
-  if (QUALITY_LOW) return;
+  if (QUALITY_LOW && isSoftwareWebGL(renderer)) return;
   if (!weaponPipelinesWarmed && !weaponPipelinesWarmPending && surfaceWeapons?.rig) {
     weaponPipelinesWarmPending = true;
     void nodePipeline.prepare(() => {
+      if (!isSoftwareWebGL(renderer)) surfaceWeapons.prewarmModels();
       const rigVis = surfaceWeapons.rig.visible;
       const lightVis = surfaceWeapons.lighting?.root?.visible;
+      const prevModelVis = surfaceWeapons.models.map((m) => m?.group?.visible ?? false);
       try {
         surfaceWeapons.rig.visible = true;
+        for (const m of surfaceWeapons.models) {
+          if (m?.group) m.group.visible = true;
+        }
         if (surfaceWeapons.lighting?.root) surfaceWeapons.lighting.root.visible = true;
         // Seed the outdoor weapon PMREM probe during startup so entering walk
         // mode on an atmospheric planet never blocks ~600 ms on PMREMGGXConvolution.
@@ -612,6 +620,9 @@ function prewarmWeaponAndPostPipelines() {
         });
       } finally {
         surfaceWeapons.rig.visible = rigVis;
+        surfaceWeapons.models.forEach((m, i) => {
+          if (m?.group) m.group.visible = prevModelVis[i];
+        });
         if (surfaceWeapons.lighting?.root && lightVis !== undefined) surfaceWeapons.lighting.root.visible = lightVis;
       }
     }, { signal, label: 'startup-weapons', isCurrent }).then(() => {
@@ -638,6 +649,79 @@ function prewarmWeaponAndPostPipelines() {
         skydiveCtl.rig.canopy.visible = canopyVis;
       }
     }, { signal, label: 'startup-skydive', isCurrent }).catch(() => {});
+  }
+
+  if (!isSoftwareWebGL(renderer) && !walkGameplayWarmPending && surfaceGameplay?.campRoot && surveyUnits?.root) {
+    walkGameplayWarmPending = true;
+    const warmWalkGameplay = async () => {
+      await surveyUnits.materials?.prepareAsync?.(['armor_white', 'gunmetal']);
+      if (startupPrewarmExpired || loadingCleared) return;
+      await nodePipeline.prepare(() => {
+        const campVis = surfaceGameplay.campRoot.visible;
+        const fpVis = surfaceGameplay.fpBody?.root?.visible;
+        const surveyVis = surveyUnits.root.visible;
+        const sunVis = sunShadow.visible;
+        const sunInt = sunShadow.intensity;
+        const hiddenSurveyChildren = [];
+        const civVisual = universe.system?.planets?.[0]?.civilizationVisual || null;
+        const civVis = civVisual?.visible;
+        try {
+          surfaceGameplay._ensureCampAssets();
+          surfaceGameplay._populateCampDynamicProps();
+          if (!surveyUnits.fleet) surveyUnits.ensureFleet();
+          if (!surfaceWeapons.lighting?.skyProbe?.target?.texture) {
+            const rigVis = surfaceWeapons.rig.visible;
+            const lightVis = surfaceWeapons.lighting?.root?.visible;
+            try {
+              surfaceWeapons.rig.visible = true;
+              if (surfaceWeapons.lighting?.root) surfaceWeapons.lighting.root.visible = true;
+              surfaceWeapons.updateLighting(sceneRadiance,
+                { day: 1, atmosphere: 1, skyIrradiance: 0.5, sunset: 0 }, new THREE.Vector3(0, 1, 0));
+              surfaceWeapons.prepareLighting();
+              surfaceWeapons.updateLighting(sceneRadiance, environmentState, new THREE.Vector3(0, 1, 0));
+            } finally {
+              surfaceWeapons.rig.visible = rigVis;
+              if (surfaceWeapons.lighting?.root && lightVis !== undefined) surfaceWeapons.lighting.root.visible = lightVis;
+            }
+          }
+          const envTex = surfaceWeapons.lighting?.skyProbe?.target?.texture || null;
+          if (envTex) {
+            for (const m of surfaceGameplay.envMaterials) m.envMap = envTex;
+            for (const m of surveyUnits.envMaterials) m.envMap = envTex;
+          }
+          surfaceGameplay.campRoot.visible = true;
+          if (surfaceGameplay.fpBody?.root) surfaceGameplay.fpBody.root.visible = true;
+          surveyUnits.root.traverse((o) => {
+            if (!o.visible) { hiddenSurveyChildren.push(o); o.visible = true; }
+          });
+          if (civVisual) civVisual.visible = true;
+          sunShadow.visible = true;
+          sunShadow.intensity = 1e-7;
+          const targets = [
+            surfaceGameplay.campRoot,
+            surfaceGameplay.fpBody?.root,
+            surveyUnits.root,
+            civVisual,
+          ].filter(Boolean);
+          return Promise.all(targets.map((obj) => compileRenderVariant(renderer, obj, camera, scene, {
+            layer: 0, target: nodePipeline.composer.readBuffer, shadowLight: sunShadow, signal,
+          })));
+        } finally {
+          surfaceGameplay.campRoot.visible = campVis;
+          if (surfaceGameplay.fpBody?.root && fpVis !== undefined) surfaceGameplay.fpBody.root.visible = fpVis;
+          for (const o of hiddenSurveyChildren) o.visible = false;
+          surveyUnits.root.visible = surveyVis;
+          if (civVisual && civVis !== undefined) civVisual.visible = civVis;
+          sunShadow.visible = sunVis;
+          sunShadow.intensity = sunInt;
+        }
+      }, { signal, label: 'startup-walk-gameplay', isCurrent });
+    };
+    void warmWalkGameplay().catch((error) => {
+      if (!startupPrewarmExpired) console.warn('walk gameplay prewarm failed', error);
+    }).finally(() => {
+      walkGameplayWarmPending = false;
+    });
   }
 
   // Kick off ANGLE background FXC compilation for all ship pass variants right
@@ -1174,7 +1258,7 @@ const surveyUnits = new SurveyUnits({
   materials: surfaceWeapons.materials,
   getSfx: () => (audio.ready ? audio.sfx : null),
   getEnvironment: () => ({
-    texture: surfaceWeapons.lighting.environmentTexture,
+    texture: surfaceWeapons.lighting.environmentTexture || surfaceWeapons.lighting.skyProbe?.target?.texture,
     intensity: surfaceWeapons.lighting.reflectionScale ?? 1,
   }),
 });
@@ -1184,7 +1268,7 @@ const surfaceGameplay = new SurfaceGameplay({
   materials: surfaceWeapons.materials,
   getAudio: () => audio,
   getEnvironment: () => ({
-    texture: surfaceWeapons.lighting.environmentTexture,
+    texture: surfaceWeapons.lighting.environmentTexture || surfaceWeapons.lighting.skyProbe?.target?.texture,
     intensity: surfaceWeapons.lighting.reflectionScale ?? 1,
   }),
   grenadeFactory: () => buildFragGrenade(),
@@ -5755,13 +5839,15 @@ function frame(rafTs) {
     }
     flightStepStart.copy(nav.pos);
     spaceCtl.update(dt);
+    if (pulseBurst?.charging && !keys.Space) {
+      releasePulseCharge();
+    }
     if (pulseBurst?.charging) {
       // Holding: the fold waits just before the jump while the charge builds.
       pulseBurst.holdTime += dt;
       pulseBurst.elapsed = Math.min(PULSE_TIMING.hold, pulseBurst.elapsed + dt);
       pulseBurst.charge = Math.min(pulseChargeFromHold(pulseBurst.holdTime), affordablePulseCharge());
       audio.pulseCharge?.(pulseBurst.charge);
-      if (!keys.Space) releasePulseCharge();
     } else if (pulseBurst) {
       // A fold, not a sprint: almost all of the distance is covered inside the
       // short window where the starflow is longest (see transit.js).
@@ -6195,6 +6281,7 @@ function frame(rafTs) {
     navPos: nav.pos,
     walkCtl,
     ship,
+    recallInFlight,
     surfaceWeapons,
     weaponsList: SURFACE_WEAPONS,
     weather: activeWeather,
@@ -6710,7 +6797,7 @@ function frame(rafTs) {
 
   const adaptiveReady = loadingCleared
     && surfacePipelinesReady && !shipPipelineWarmPending
-    && !postPipelinesWarmPending && !weaponPipelinesWarmPending
+    && !postPipelinesWarmPending && !weaponPipelinesWarmPending && !walkGameplayWarmPending
     && !heroTransitionActive && !FREEZE;
   if (!adaptiveReady) {
     adaptiveStableSince = performance.now();
@@ -6729,7 +6816,7 @@ function frame(rafTs) {
   let worldRendered = false;
   if (!contextLost) {
     const startupDeferWorldDraw = !loadingCleared && (
-      postPipelinesWarmPending || weaponPipelinesWarmPending
+      postPipelinesWarmPending || weaponPipelinesWarmPending || walkGameplayWarmPending
       || (!QUALITY_LOW && (!startupTerrainReady() || pendingChunks() > 0)
         && performance.now() - startupWarmStartedAt < STARTUP_WARM_BUDGET_MS + STARTUP_TERRAIN_GRACE_MS)
     );
@@ -6823,7 +6910,7 @@ function frame(rafTs) {
     if (cloudPreparation.failed) ui.setLoading(true, '渲染准备失败，请刷新重试');
   }
   if (!loadingCleared && frameNo >= 3 && surfacePipelinesReady
-    && !postPipelinesWarmPending && !weaponPipelinesWarmPending
+    && !postPipelinesWarmPending && !weaponPipelinesWarmPending && !walkGameplayWarmPending
     && startupAssetsReady && terrainReady && worldRendered) {
     if (!shipPipelinesWarmed) {
       for (const mesh of surfaceBootstrapMeshes.splice(0)) {
@@ -6844,7 +6931,7 @@ function frame(rafTs) {
     // empty canvas while a required cloud program still owns readiness. Its
     // own deadline/failure remains explicit; it is not a completed world draw.
     console.warn('loading mask forced clear by safety-net timeout');
-    if(!surfacePipelinesReady||surfaceBootstrapPending||postPipelinesWarmPending||weaponPipelinesWarmPending)
+    if(!surfacePipelinesReady||surfaceBootstrapPending||postPipelinesWarmPending||weaponPipelinesWarmPending||walkGameplayWarmPending)
       releaseStartupPrewarm('loading mask safety deadline exceeded');
     loadingProgress = 1;
     ui.setLoadingProgress(1);

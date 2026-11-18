@@ -1123,7 +1123,10 @@ function createSaltlineMaterials(i) {
     if (e.compileAsync) await e.compileAsync(scene, l);
     for (const set of sets) A(set);
   }
-  return { get: w, emissive: S, prepareAsync, decal: z.decal, label: z.label, number: z.number, names: Object.keys(MATERIALS), decalNames: z.names, uniforms: r, update(O) {
+  return { get: w, emissive: S, prepareAsync, hasBaked(O) {
+    let D = MATERIALS[O] || FALLBACK_MATERIAL;
+    return p.has(D.set);
+  }, decal: z.decal, label: z.label, number: z.number, names: Object.keys(MATERIALS), decalNames: z.names, uniforms: r, update(O) {
     h.size && performance.now() - d > 4e3 && _();
   }, prewarm(O) {
     for (let q of O || Object.keys(MATERIALS)) w(q);

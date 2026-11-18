@@ -137,9 +137,6 @@ function addPad(group, mats, radius = 42) {
   const inset = mesh(new THREE.RingGeometry(radius * 0.36, radius * 0.82, 48), mats.amber, group);
   inset.rotation.x = -Math.PI / 2;
   inset.position.y = 1.7;
-  const beacon = new THREE.PointLight(0xff9f40, 65, radius * 3.5, 2);
-  beacon.position.y = 7;
-  group.add(beacon);
   group.userData.landingPad = pad;
 }
 
@@ -361,14 +358,6 @@ function floatingCity(site, body) {
   group.userData.propColliders = colliders;
 
   group.userData.materials = Object.values(mats);
-  const fill = new THREE.HemisphereLight(0x9ccde7, 0x322015, 1.35);
-  fill.position.y = deckRadius;
-  group.add(fill);
-  for (const x of [-1, 1]) {
-    const flood = new THREE.PointLight(x < 0 ? 0x8edcff : 0xffb45f, 220000, deckRadius * 5, 2);
-    flood.position.set(x * deckRadius * 0.48, deckRadius * 0.58, deckRadius * 0.16);
-    group.add(flood);
-  }
   return group;
 }
 

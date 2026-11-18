@@ -685,12 +685,18 @@ function nM(i, e, t, n, s, o, r) {
   return f = f < 0 ? 0 : f > 1 ? 1 : f, tM.copy(t).addScaledVector(au, f), sM(i, e, tM, s, o, r);
 }
 var ROBOT_TUNE = { gull: GULL_TUNE, hound: HOUND_TUNE, sightRange: 45, sightCone: 200, loseSight: 4, searchTime: 8, hearRadius: 45, maxTokens: 2, maxTokensCrowd: 3, tokenGap: 1.25, exposureUp: 0.1, exposureDown: 0.45, poolGulls: 10, poolHounds: 8, maxWrecks: 5, maxBolts: 32 }, BC = Math.cos(ROBOT_TUNE.sightCone / 2 * Math.PI / 180), oM = new THREE.Vector3(), pz = new THREE.Vector3(), Qv = new THREE.Vector3(), rM = new THREE.Quaternion(), aM = new THREE.Matrix4(), lM = new THREE.Vector3(1, 1, 1), OC = new THREE.Vector3(0, 0, 1), mz = new THREE.Vector3(0, -1, 0), cM = new THREE.Vector3(), uM = new THREE.Vector3();
+var _cachedHoundRig = null;
+var _cachedGullRig = null;
+function getCachedHoundRig() { return _cachedHoundRig || (_cachedHoundRig = buildHoundRig()); }
+function getCachedGullRig() { return _cachedGullRig || (_cachedGullRig = buildGullRig()); }
 function createRobotFleet(i) {
   let e = seededRng(+(i.params && i.params.eseed || 9001)), t = [], n = [], s = new THREE.Group();
   s.name = "enemies", i.scene.add(s);
   let o = i.mats.emissive(16777215, 1), r = o && o.isMeshBasicMaterial ? o.clone() : new THREE.MeshBasicMaterial();
   r.color.setRGB(1, 1, 1), r.vertexColors = true, r.needsUpdate = true;
-  let a = i.mats.emissive(16752704, 6), l = a && a.isMeshBasicMaterial ? a : new THREE.MeshBasicMaterial({ color: 16752704 }), c = o && o.toneMapped !== void 0 ? o.toneMapped : true, u = { shell: i.mats.get("armor_white", { triplanar: true, vertexColors: true }), metal: i.mats.get("gunmetal", { triplanar: true, vertexColors: true }), glow: r, lensBase: l, disc: new THREE.MeshBasicMaterial({ color: 789775, transparent: true, opacity: 0.42, depthWrite: false, side: THREE.DoubleSide, toneMapped: c }), cone: new THREE.ShaderMaterial({ uniforms: { uColor: { value: new THREE.Color(1, 0.9, 0.74) }, uGain: { value: 0.085 } }, vertexShader: `
+  let a = i.mats.emissive(16752704, 6), l = a && a.isMeshBasicMaterial ? a : new THREE.MeshBasicMaterial({ color: 16752704 }), c = o && o.toneMapped !== void 0 ? o.toneMapped : true;
+  let bakedReady = typeof i.mats.hasBaked !== "function" || (i.mats.hasBaked("armor_white") && i.mats.hasBaked("gunmetal"));
+  let u = { shell: bakedReady ? i.mats.get("armor_white", { triplanar: true, vertexColors: true }) : new THREE.MeshStandardMaterial({ color: 14212320, roughness: 0.42, metalness: 0.25, vertexColors: true }), metal: bakedReady ? i.mats.get("gunmetal", { triplanar: true, vertexColors: true }) : new THREE.MeshStandardMaterial({ color: 3817542, roughness: 0.38, metalness: 0.82, vertexColors: true }), glow: r, lensBase: l, disc: new THREE.MeshBasicMaterial({ color: 789775, transparent: true, opacity: 0.42, depthWrite: false, side: THREE.DoubleSide, toneMapped: c }), cone: new THREE.ShaderMaterial({ uniforms: { uColor: { value: new THREE.Color(1, 0.9, 0.74) }, uGain: { value: 0.085 } }, vertexShader: `
         #include <common>
         #include <skinning_pars_vertex>
         varying float vT; varying vec3 vN; varying vec3 vV;
@@ -760,7 +766,7 @@ function createRobotFleet(i) {
     T._deactivate();
     let D = t.indexOf(T);
     D >= 0 && t.splice(D, 1), D = n.indexOf(T), D >= 0 && n.splice(D, 1);
-  } }, f = buildGullRig(), p = buildHoundRig(), d = [], v = [];
+  } }, f = getCachedGullRig(), p = getCachedHoundRig(), d = [], v = [];
   for (let T = 0; T < ROBOT_TUNE.poolGulls; T++) {
     let D = createGull(h, f, u, T);
     d.push(D), s.add(D.rig.group);

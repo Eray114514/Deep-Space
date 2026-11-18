@@ -198,8 +198,11 @@ export class SurfaceGameplay {
   _ensureCampAssets() {
     if (this.campBuilt) return;
     this.campBuilt = true;
-    this._propsLib = createSaltlineProps({ materials: this.materials, palette: 'halcyon' });
+    this._propsLib = createSaltlineProps({ materials: null, palette: 'halcyon' });
     this._furnLib = createGoldenHourFurniture({ anisotropy: 4 });
+    this._campStaticItems = null;
+    this._campPhysItems = null;
+    this._campYardItems = null;
 
     this.destructibles = new OutpostDestructibles({
       root: this.campRoot,
@@ -259,10 +262,8 @@ export class SurfaceGameplay {
     for (const [cx, cz] of [[-6.0, -4.0], [6.0, -4.0], [-6.0, 4.0], [6.0, 4.0], [-1.8, 4.0]]) {
       addBox(0.28, 3.15, 0.28, frameMat, cx, 1.85, cz);
     }
-    // Warm interior ceiling light
-    const interiorLight = new THREE.PointLight(0xffd6a3, 18, 18, 2);
-    interiorLight.position.set(0, 3.1, 0);
-    this.staticGroup.add(interiorLight);
+    // Warm interior ceiling light fixture (emissive only, avoids mutating Layer-0 PointLight count)
+    addBox(1.8, 0.08, 0.36, trimMat, 0, 3.38, 0);
 
     // Colonists & K9 companion
     const eng = new ColonistRig({ palette: 'engineer' });
@@ -280,78 +281,91 @@ export class SurfaceGameplay {
   _populateCampDynamicProps() {
     this.destructibles.clear();
     this.campColliders.length = 0;
-    // Remove old dynamic prop meshes
-    if (this.propItemsGroup) {
-      this.campRoot.remove(this.propItemsGroup);
+    if (!this.propItemsGroup) {
+      this.propItemsGroup = new THREE.Group();
+      this.campRoot.add(this.propItemsGroup);
     }
-    this.propItemsGroup = new THREE.Group();
-    this.campRoot.add(this.propItemsGroup);
 
     const gh = (x, z) => this.campGroundHeight(x, z);
-    const floorY = Math.max(0.28, gh(0, 0));
-    this.staticGroup.position.y = gh(0, 0);
+    const groundAtOrigin = gh(0, 0);
+    this.staticGroup.position.y = groundAtOrigin;
 
     // Walkable pavilion floor collider
     this.campColliders.push({
-      x: 0, y: gh(0, 0), z: 0, yaw: 0, hw: 6.2, h: 0.28, hd: 4.2, walkableTop: true, surface: 'metal',
+      x: 0, y: groundAtOrigin, z: 0, yaw: 0, hw: 6.2, h: 0.28, hd: 4.2, walkableTop: true, surface: 'metal',
     });
     // Rear wall collider
     this.campColliders.push({
-      x: 0, y: gh(0, 0) + 0.28, z: -4.05, yaw: 0, hw: 6.1, h: 3.15, hd: 0.2, walkableTop: false, surface: 'concrete',
+      x: 0, y: groundAtOrigin + 0.28, z: -4.05, yaw: 0, hw: 6.1, h: 3.15, hd: 0.2, walkableTop: false, surface: 'concrete',
     });
 
     // 3 Voronoi-destructible glass observation windows!
-    const winBase = gh(0, 0) + 0.28;
+    const winBase = groundAtOrigin + 0.28;
     this.destructibles.addGlassPane({ center: new THREE.Vector3(-6.0, winBase + 1.55, 0), width: 7.4, height: 2.75, yaw: Math.PI * 0.5, hp: 30 });
     this.destructibles.addGlassPane({ center: new THREE.Vector3(6.0, winBase + 1.55, 0), width: 7.4, height: 2.75, yaw: Math.PI * 0.5, hp: 30 });
     this.destructibles.addGlassPane({ center: new THREE.Vector3(-3.9, winBase + 1.55, 4.0), width: 3.9, height: 2.75, yaw: 0, hp: 30 });
 
-    // Golden Hour interior furniture inside pavilion
-    const placeStatic = (lib, name, x, y, z, yaw = 0, addCol = true, opts = {}) => {
-      const m = lib.create(name, opts);
-      m.position.set(x, y, z);
-      m.rotation.y = yaw;
-      this.propItemsGroup.add(m);
-      const sz = m.userData.size || [1, 1, 1];
-      if (addCol) {
+    const interiorSpecs = [
+      ['desk', -3.2, 0, -2.2, 0, true],
+      ['officeChair', -3.2, 0, -1.15, Math.PI, false],
+      ['conferenceTable', 2.2, 0, -1.7, 0, true],
+      ['sofa', -2.6, 0, 1.5, Math.PI * 0.5, true],
+      ['shelfRack', -5.1, 0, -2.6, Math.PI * 0.5, true],
+      ['fridge', 4.8, 0, -2.8, -Math.PI * 0.5, true],
+      ['floorLamp', 4.9, 0, 2.6, 0, false],
+      ['planter', 5.0, 0, 3.3, 0, false],
+      ['serviceTrolley', 3.6, 0, 1.8, -0.35, true],
+    ];
+    if (!this._campStaticItems) {
+      this._campStaticItems = interiorSpecs.map(([name, x, yOff, z, yaw, addCol]) => {
+        const mesh = this._furnLib.create(name);
+        this.propItemsGroup.add(mesh);
+        return { mesh, name, x, yOff, z, yaw, addCol };
+      });
+    }
+    for (const item of this._campStaticItems) {
+      const y = winBase + item.yOff;
+      item.mesh.visible = true;
+      item.mesh.position.set(item.x, y, item.z);
+      item.mesh.rotation.set(0, item.yaw, 0);
+      if (item.addCol) {
+        const sz = item.mesh.userData.size || [1, 1, 1];
         this.campColliders.push({
-          name, x, y, z, yaw, hw: sz[0] * 0.5, h: sz[1], hd: sz[2] * 0.5,
-          walkableTop: sz[1] < 1.35 && (name.includes('container') || name.includes('crate') || name.includes('pallet')),
-          surface: m.userData.surface || 'metal',
+          name: item.name, x: item.x, y, z: item.z, yaw: item.yaw, hw: sz[0] * 0.5, h: sz[1], hd: sz[2] * 0.5,
+          walkableTop: sz[1] < 1.35 && (item.name.includes('container') || item.name.includes('crate') || item.name.includes('pallet')),
+          surface: item.mesh.userData.surface || 'metal',
         });
       }
-      return m;
-    };
-
-    placeStatic(this._furnLib, 'desk', -3.2, winBase, -2.2, 0);
-    placeStatic(this._furnLib, 'officeChair', -3.2, winBase, -1.15, Math.PI, false);
-    placeStatic(this._furnLib, 'conferenceTable', 2.2, winBase, -1.7, 0);
-    placeStatic(this._furnLib, 'sofa', -2.6, winBase, 1.5, Math.PI * 0.5);
-    placeStatic(this._furnLib, 'shelfRack', -5.1, winBase, -2.6, Math.PI * 0.5);
-    placeStatic(this._furnLib, 'fridge', 4.8, winBase, -2.8, -Math.PI * 0.5);
-    placeStatic(this._furnLib, 'floorLamp', 4.9, winBase, 2.6, 0, false);
-    placeStatic(this._furnLib, 'planter', 5.0, winBase, 3.3, 0, false);
-    placeStatic(this._furnLib, 'serviceTrolley', 3.6, winBase, 1.8, -0.35);
+    }
 
     // Shootable / Explosive Verlet physics props!
-    const addPhys = (name, x, y, z, yaw, cfg) => {
-      const m = this._furnLib.create(name);
-      this.destructibles.addPhysicsProp(m, {
-        pos: new THREE.Vector3(x, y, z),
-        yaw,
-        size: m.userData.size,
-        ...cfg,
+    const physSpecs = [
+      ['extinguisher', 5.4, 0.35, 3.5, 0, false, { mass: 3.5, explosive: true, breakable: true, hp: 24, surface: 'metal' }],
+      ['extinguisher', 8.2, 0.35, -2.2, 0.5, true, { mass: 3.5, explosive: true, breakable: true, hp: 24, surface: 'metal' }],
+      ['laptop', -3.1, 0.82, -2.2, 0.1, false, { mass: 1.4, breakable: true, hp: 18, surface: 'metal' }],
+      ['trashBin', -1.8, 0.25, -2.2, 0, false, { mass: 1.5, breakable: false, surface: 'metal' }],
+      ['suitcase', -1.2, 0.3, 2.4, 0.4, false, { mass: 2.2, breakable: false, surface: 'wood' }],
+      ['wetFloorSign', 1.2, 0.32, 3.2, -0.25, false, { mass: 1.1, breakable: true, hp: 20, surface: 'rubber' }],
+    ];
+    if (!this._campPhysItems) {
+      this._campPhysItems = physSpecs.map(([name, x, yOff, z, yaw, onGround, cfg]) => ({
+        mesh: this._furnLib.create(name),
+        x, yOff, z, yaw, onGround, cfg,
+      }));
+    }
+    for (const item of this._campPhysItems) {
+      item.mesh.visible = true;
+      const y = (item.onGround ? gh(item.x, item.z) : winBase) + item.yOff;
+      this.destructibles.addPhysicsProp(item.mesh, {
+        pos: new THREE.Vector3(item.x, y, item.z),
+        yaw: item.yaw,
+        size: item.mesh.userData.size,
+        ...item.cfg,
       });
-    };
-    addPhys('extinguisher', 5.4, winBase + 0.35, 3.5, 0, { mass: 3.5, explosive: true, breakable: true, hp: 24, surface: 'metal' });
-    addPhys('extinguisher', 8.2, gh(8.2, -2.2) + 0.35, -2.2, 0.5, { mass: 3.5, explosive: true, breakable: true, hp: 24, surface: 'metal' });
-    addPhys('laptop', -3.1, winBase + 0.82, -2.2, 0.1, { mass: 1.4, breakable: true, hp: 18, surface: 'metal' });
-    addPhys('trashBin', -1.8, winBase + 0.25, -2.2, 0, { mass: 1.5, breakable: false, surface: 'metal' });
-    addPhys('suitcase', -1.2, winBase + 0.3, 2.4, 0.4, { mass: 2.2, breakable: false, surface: 'wood' });
-    addPhys('wetFloorSign', 1.2, winBase + 0.32, 3.2, -0.25, { mass: 1.1, breakable: true, hp: 20, surface: 'rubber' });
+    }
 
     // Exterior Saltline industrial yard props placed on real planet groundHeight!
-    const yard = [
+    const yardSpecs = [
       ['guard_booth', -9.2, 4.8, 0.35, 'halcyon'],
       ['generator', 10.6, -3.5, -0.4, 'industrial'],
       ['forklift', -11.5, -2.5, 0.8, 'industrial'],
@@ -368,24 +382,40 @@ export class SurfaceGameplay {
       ['toolbox_cart', 8.4, -1.0, -0.8, 'industrial'],
       ['comms_tower', 0.0, -14.5, 0.0, 'halcyon'],
     ];
-    for (let i = 0; i < yard.length; i++) {
-      const [name, x, z, yaw, palette] = yard[i];
-      placeStatic(this._propsLib, name, x, gh(x, z), z, yaw, true, { seed: 500 + i, palette });
+    if (!this._campYardItems) {
+      this._campYardItems = yardSpecs.map(([name, x, z, yaw, palette], i) => {
+        const mesh = this._propsLib.create(name, { seed: 500 + i, palette });
+        this.propItemsGroup.add(mesh);
+        return { mesh, name, x, z, yaw };
+      });
+    }
+    for (const item of this._campYardItems) {
+      const y = gh(item.x, item.z);
+      item.mesh.visible = true;
+      item.mesh.position.set(item.x, y, item.z);
+      item.mesh.rotation.set(0, item.yaw, 0);
+      const sz = item.mesh.userData.size || [1, 1, 1];
+      this.campColliders.push({
+        name: item.name, x: item.x, y, z: item.z, yaw: item.yaw, hw: sz[0] * 0.5, h: sz[1], hd: sz[2] * 0.5,
+        walkableTop: sz[1] < 1.35 && (item.name.includes('container') || item.name.includes('crate') || item.name.includes('pallet')),
+        surface: item.mesh.userData.surface || 'metal',
+      });
     }
 
     // Collect metallic materials for outdoor reflection envMap
-    this.envMaterials.clear();
-    this.campRoot.traverse((o) => {
-      if (!o.isMesh) return;
-      o.frustumCulled = false;
-      const list = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
-      for (const m of list) {
-        if (m?.isMeshStandardMaterial) {
-          if (m.userData.baseEnvIntensity === undefined) m.userData.baseEnvIntensity = m.envMapIntensity ?? 1;
-          this.envMaterials.add(m);
+    if (!this.envMaterials.size) {
+      this.campRoot.traverse((o) => {
+        if (!o.isMesh) return;
+        o.frustumCulled = false;
+        const list = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+        for (const m of list) {
+          if (m?.isMeshStandardMaterial) {
+            if (m.userData.baseEnvIntensity === undefined) m.userData.baseEnvIntensity = m.envMapIntensity ?? 1;
+            this.envMaterials.add(m);
+          }
         }
-      }
-    });
+      });
+    }
   }
 
   deployForwardCamp(planet, shipPadLocal) {
@@ -880,6 +910,7 @@ export class SurfaceGameplay {
     navPos,
     walkCtl = null,
     ship = null,
+    recallInFlight = false,
     surfaceWeapons = null,
     weaponsList = null,
     weather = null,
@@ -914,10 +945,10 @@ export class SurfaceGameplay {
     // Deploy / recall the forward frontier camp alongside a ground-landed ship
     // (never spawn a surface camp underneath an airborne hover-skydive or extraction ship).
     if (ship?.parkedPlanet && ship.parkedLocal && !ship.orbitalStandby
-      && !ship.hoverMode
+      && !ship.hoverMode && !recallInFlight && (ship.parkAmt ?? 1) > 0.95
       && (state === 'walk' || state === 'shipwalk' || state === 'landed')) {
       this.deployForwardCamp(ship.parkedPlanet, ship.parkedLocal);
-    } else if (this.campPlanet && (ship?.hoverMode || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
+    } else if (this.campPlanet && (ship?.hoverMode || recallInFlight || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
       this.recallForwardCamp();
     }
 
@@ -935,7 +966,8 @@ export class SurfaceGameplay {
           patrolRadius: 26,
         });
       }
-    } else if (this.outpostRobots.deployed && (!planet || this.outpostRobots.planet !== planet)) {
+    } else if (this.outpostRobots.deployed && (!planet || this.outpostRobots.planet !== planet
+      || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
       this.outpostRobots.recall();
     }
 

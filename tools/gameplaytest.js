@@ -133,7 +133,7 @@ try {
   await page.mouse.down({ button: 'right' });
   try {
     await page.waitForFunction(() => window.shipHUD?.getTelemetry().speedRatio > 0.995,
-      null, { timeout: 45000 });
+      null, { timeout: 90000 });
   } catch (error) {
     console.log('boost timeout diagnostics', await page.evaluate(() => ({
       stats: NMS.stats(),

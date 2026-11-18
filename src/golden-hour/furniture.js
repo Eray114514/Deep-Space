@@ -1095,7 +1095,7 @@ function makeNodeDetailTex(seed, tile) {
   return Mb(S, h, r, a, 0.8, tile);
 }
 function iD(o2 = 8) {
-  if (typeof document === 'undefined') {
+  if (typeof document === 'undefined' || !globalThis.GH_FURNITURE_FULL_TEX) {
     _9 = o2;
     Ga = yb(11, 3, 2);
     yn = yb(23, 6, 3);
@@ -1352,6 +1352,7 @@ roughnessFactor = clamp( mix( roughnessFactor, ghJc.a, ghJt ), 0.04, 1.0 );
   return [t.r, t.g, t.b];
 };
 function Nj(o2, t, e = {}) {
+  if (t.lite) return o2;
   let s = e.tile || o2.map && o2.map.userData.tile || o2.roughnessMap && o2.roughnessMap.userData.tile || o2.normalMap && o2.normalMap.userData.tile || [1, 1], n = o2.defines = o2.defines || {}, i = e.layout ? Array.isArray(e.cell) ? e.cell : [e.cell, e.cell] : [1, 1], a = e.layout ? e.joint : null, r = e.cellVar || {}, l = t.lite ? null : e.detail, c = t.lite ? null : e.wear;
   t.lite || (n.GH_DETAIL = "", n.GH_WEAR = ""), e.depth && (n.GH_DEPTH = Number(e.depth).toFixed(5)), o2.map || (o2.map = t.white), o2.roughnessMap || (o2.roughnessMap = t.ormWhite), o2.normalMap || (o2.normalMap = t.flat, o2.normalScale.set(1, 1));
   let h = l ? Array.isArray(l.tile) ? l.tile : [l.tile, l.tile] : [1, 1], f = a ? rD(a.color ?? 2105376) : [0, 0, 0], u = c && c.tint !== void 0 ? Array.isArray(c.tint) ? c.tint : rD(c.tint) : [1, 1, 1], d = (v, y, M, w) => ({ value: new THREE.Vector4(v, y, M, w) }), m = { ghMacro: { value: t.macro }, ghDetail: { value: l ? l.map : t.anyDetail }, ghP: d(e.macro || 0, e.macroRough || 0, 1 / (e.period || 13.7), c ? 1 / (c.period || 6.3) : 1), ghT: d(1 / s[0], 1 / s[1], i[0], i[1]), ghL: d(e.layout ? Oj[e.layout] : 0, e.layout === "grid" && e.turn || 0, e.round || 0, e.herr || 5), ghX: d(e.warp || 0, e.dual ? 0.9 : 0, e.chips ? 15 : 0, 0), ghD: l ? d(1 / h[0], 1 / h[1], l.normal ?? 0.3, l.rough ?? 0.1) : d(1, 1, 0, 0), ghD2: d(l ? l.albedo ?? 0 : 0, l ? l.mask ?? 0 : 0, l ? l.boost ?? 0 : 0, a && a.burnish || 0), ghJ: a ? d(a.w ?? 1e-3, a.bevel ?? 2e-3, a.slope ?? 0.6, a.ao ?? 0.5) : d(0, 0, 0, 0), ghJc: d(f[0], f[1], f[2], a ? a.rough ?? 0.85 : 1), ghC: d(r.tone || 0, r.tilt || 0, r.pillow || 0, r.rough || 0), ghW0: c ? d(c.lo ?? 0.55, c.hi ?? 0.7, c.breakup ?? 0.3, c.crack || 0) : d(2, 3, 0, 0), ghW1: c ? d(c.baseAlbedo ?? 0.45, c.rim || 0, c.rough || 0, c.rimRough || 0) : d(0, 0, 0, 0), ghW2: c ? d(c.streak || 0, c.streakRough || 0, c.baseRough ?? 0.25, 0) : d(0, 0, 0, 0), ghFl: d(t.floors[0], t.floors[1], c && e.world !== false && c.base || 0, c && c.hand || 0), ghWc: { value: new THREE.Vector3(u[0], u[1], u[2]) } };
@@ -1370,7 +1371,7 @@ function Nj(o2, t, e = {}) {
     return v.onBeforeCompile = this.onBeforeCompile, v.customProgramCacheKey = this.customProgramCacheKey, Object.assign(v.defines, this.defines), v.clone = this.clone, Object.defineProperty(v, "ghUniforms", { value: m, configurable: true }), v;
   }, o2;
 }
-function lD({ anisotropy: o2 = 8, floors: t = [0, 3.8], detail: e = true } = {}) {
+function lD({ anisotropy: o2 = 8, floors: t = [0, 3.8], detail: e = false } = {}) {
   globalThis.GH_MAT_LITE && (e = false);
   let s = performance.now(), n = iD(o2), i = performance.now() - s, a = { macro: n.macro, flat: n.flat, white: n.white, ormWhite: n.ormWhite, anyDetail: n.detail.polish, floors: t, lite: !e }, r = (C, L) => Nj(C, a, L), l = n.detail, c = (C, L = C) => new THREE.Vector2(C, L), h = (C) => {
     for (let L of Object.keys(C)) C[L] === void 0 && delete C[L];
@@ -1379,6 +1380,7 @@ function lD({ anisotropy: o2 = 8, floors: t = [0, 3.8], detail: e = true } = {})
     let O = C.clone();
     return O.repeat.set(1 / L, 1 / A), O.userData = { tile: [L, A] }, O.needsUpdate = true, O;
   }, p = {};
+  Object.defineProperty(p, 'isLite', { value: !e, enumerable: false });
   p.marbleFloor = r(f(d(n.marble, { envMapIntensity: 1.2 })), { layout: "grid", cell: 1.2, joint: { w: 11e-4, bevel: 26e-4, slope: 0.85, ao: 0.55, color: 9077364, rough: 0.9 }, cellVar: { tone: 0.05, tilt: 0.014, rough: 0.3 }, macro: 0.03, macroRough: 0.3, detail: { map: l.polish, tile: 0.33, normal: 0.035, rough: 0.07, albedo: 0.12, boost: 2.2 }, wear: { period: 7.9, lo: 0.3, hi: 0.85, breakup: 0.35, tint: [0.975, 0.97, 0.96], rough: 0.12, streakRough: 0.03 } }), p.marbleDark = r(f(d(n.marbleDark, { envMapIntensity: 1.2 })), { dual: true, warp: 0.3, macroRough: 0.3, detail: { map: l.polish, tile: 0.29, normal: 0.03, rough: 0.07, albedo: 0.04, boost: 1.5 }, wear: { period: 2.9, lo: 0.3, hi: 0.9, tint: [0.98, 0.98, 0.98], rough: 0.07, streakRough: 0.025, base: 0.5, baseAlbedo: 0.25, baseRough: 0.3 } }), p.oakFloor = r(f(d(n.oak, { color: 14201996 })), { layout: "herringbone", cell: 0.09, herr: 5, joint: { w: 35e-5, bevel: 11e-4, slope: 0.7, ao: 0.6, color: 1839884, rough: 0.9, burnish: 0.1 }, cellVar: { tone: 0.42, tilt: 0.012, rough: 0.3 }, macro: 0.07, macroRough: 0.2, detail: { map: l.polish, tile: 0.27, normal: 0.03, rough: 0.07, boost: 1.6 }, wear: { period: 6.7, lo: 0.3, hi: 0.85, tint: [1.04, 1.03, 1.02], rough: 0.12, streakRough: 0.04 } });
   let x = (C, L = {}) => r(f(d(C, { roughness: 1, envMapIntensity: 0.5 })), { macro: 0.08, detail: { map: l.fibre, tile: 0.07, normal: 0.85, rough: 0, albedo: 0.55 }, wear: { period: 4.3, lo: 0.3, hi: 0.9, breakup: 0.5, tint: [1.1, 1.09, 1.08], streak: 0.08, base: 0 }, ...L });
   p.carpetLobby = x(n.carpetLobby), p.carpetHall = x(n.carpetHall), p.terraceStone = r(f(d(n.travertine)), { layout: "grid", cell: 0.9, turn: 0.3, joint: { w: 28e-4, bevel: 4e-3, slope: 0.75, ao: 0.6, color: 7234130, rough: 0.95 }, cellVar: { tone: 0.1, tilt: 0.02, rough: 0.12 }, macro: 0.06, macroRough: 0.1, detail: { map: l.grit, tile: 0.31, normal: 0.5, rough: 0.14, albedo: 0.36, mask: 0.55 }, wear: { period: 5.3, lo: 0.8, hi: 0.87, breakup: 0.5, tint: [0.86, 0.84, 0.81], rim: 0.06, rough: -0.3, rimRough: 0.06, streak: 0.03 } }), p.poolTile = r(f(d(n.poolGlass)), { layout: "grid", cell: 0.04, round: 4e-3, chips: true, joint: { w: 12e-4, bevel: 22e-4, slope: 0.9, ao: 0.5, color: 12174012, rough: 0.85 }, cellVar: { tone: 0.4, tilt: 0.05, pillow: 0.06, rough: 0.5 }, macro: 0.08, detail: { map: l.polish, tile: 0.17, normal: 0.05, rough: 0.06 }, wear: { period: 3.1, lo: 0.5, hi: 0.8, tint: [1.05, 1.06, 1.05], rough: 0.14, streakRough: 0.05 } }), p.kitchenFloor = r(f(d(n.quarry)), { layout: "grid", cell: 0.2, turn: 0.5, joint: { w: 26e-4, bevel: 3e-3, slope: 0.8, ao: 0.6, color: 4867392, rough: 0.9 }, cellVar: { tone: 0.28, tilt: 0.03, pillow: 0.03, rough: 0.35 }, macro: 0.06, macroRough: 0.25, detail: { map: l.grit, tile: 0.23, normal: 0.3, rough: 0.12, albedo: 0.3 }, wear: { period: 3.7, lo: 0.3, hi: 0.9, tint: [0.93, 0.92, 0.91], rough: -0.1, streakRough: 0.06, streak: 0.04 } }), p.kitchenTile = r(f(d(n.glaze)), { layout: "grid", cell: 0.15, turn: 0.5, joint: { w: 14e-4, bevel: 35e-4, slope: 0.8, ao: 0.4, color: 10328204, rough: 0.9 }, cellVar: { tone: 0.035, tilt: 0.03, pillow: 0.05, rough: 0.4 }, macroRough: 0.3, detail: { map: l.polish, tile: 0.21, normal: 0.04, rough: 0.05 }, wear: { period: 2.7, lo: 0.5, hi: 0.8, tint: [0.985, 0.975, 0.955], rough: 0.12, streakRough: 0.06, base: 0.5, baseAlbedo: 0.2, baseRough: 0.3 } });
@@ -1895,7 +1897,7 @@ function mD(o2, t) {
   let r = (h, f) => o2[h] || o2[f], l = null;
   return { M: o2, P: t, L: n, _geoCache: e, _matCache: s, def: a, lib: i, mt: r, fine: (h) => {
     let f = typeof h == "string" ? h : h && h.name, u = o2[f];
-    return u && u.ghUniforms || f !== "leatherTan" && f !== "leatherBlack" ? u || h : i(f + "Fine", () => {
+    return o2.isLite || (u && u.ghUniforms) || (f !== "leatherTan" && f !== "leatherBlack") ? u || h : i(f + "Fine", () => {
       l = l || Kj();
       let d = u.clone();
       return d.normalMap = l.normalMap, d.roughnessMap = l.roughnessMap, d.normalScale = new THREE.Vector2(0.55, 0.55), d.roughness = f === "leatherBlack" ? 0.94 : 1, d.name = f + "Fine", d;
@@ -4306,22 +4308,34 @@ function disposeTextureSet(val, seen) {
   }
 }
 
-export function createGoldenHourMaterials({ anisotropy = 4, detail = true, floors = [0, 3.8] } = {}) {
-  const mats = lD({ anisotropy, floors, detail });
+const _sharedMaterialSets = new Map();
+
+export function createGoldenHourMaterials({ anisotropy = 4, detail = false, floors = [0, 3.8], shared = true } = {}) {
+  const effectiveDetail = globalThis.GH_MAT_LITE ? false : !!detail;
+  const cacheKey = shared && !effectiveDetail && floors[0] === 0 && floors[1] === 3.8
+    ? `default:${anisotropy}`
+    : null;
+  if (cacheKey && _sharedMaterialSets.has(cacheKey)) {
+    return _sharedMaterialSets.get(cacheKey);
+  }
+  const mats = lD({ anisotropy, floors, detail: effectiveDetail });
   mats.names = Object.keys(A9);
+  mats.isShared = Boolean(cacheKey);
   mats.dispose = () => {
+    if (mats.isShared) return;
     const seen = new Set();
     for (const name of Object.keys(A9)) {
       if (mats[name]) disposeTextureSet(mats[name], seen);
     }
     if (mats.textures) disposeTextureSet(mats.textures, seen);
   };
+  if (cacheKey) _sharedMaterialSets.set(cacheKey, mats);
   return mats;
 }
 
-export function createGoldenHourFurniture({ materials = null, anisotropy = 4 } = {}) {
-  const ownsMaterials = !materials;
-  const mats = materials || createGoldenHourMaterials({ anisotropy });
+export function createGoldenHourFurniture({ materials = null, anisotropy = 4, detail = false } = {}) {
+  const mats = materials || createGoldenHourMaterials({ anisotropy, detail });
+  const ownsMaterials = !materials && !mats.isShared;
   const registry = PD(mats);
   const names = [...registry.names];
   const createdExtras = new Set();

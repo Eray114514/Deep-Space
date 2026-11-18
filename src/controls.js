@@ -655,7 +655,8 @@ export class WalkControls {
     }
     r += this.vR * dt;
     const groundR = p.R + p.height(_u, p.fullMaxFreq) + this.eyeHeight;
-    if (r <= groundR) { r = groundR; this.vR = 0; this.grounded = true; }
+    const snapTol = wasGrounded && this.vR <= 0 ? 0.24 : 0;
+    if (r <= groundR + snapTol) { r = groundR; this.vR = 0; this.grounded = true; }
     else if (r > groundR + 0.01) this.grounded = false;
     this.posLocal.copy(_u).multiplyScalar(r);
 

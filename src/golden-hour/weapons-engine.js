@@ -2342,7 +2342,7 @@ function zF(o) {
   let t = fA(o);
   if (!t.raw) {
     let e = performance.now();
-    if (t.raw = RF[o](IS_HEADLESS ? 256 : 1024), sJ[o] = performance.now() - e, t.N = t.raw.N, t.tile = t.raw.tile, LF(o), !t.tex) {
+    if (t.raw = RF[o](256), sJ[o] = performance.now() - e, t.N = t.raw.N, t.tile = t.raw.tile, LF(o), !t.tex) {
       if (_4 && _4 !== o) {
         let s = fT.get(_4);
         s && !s.tex && (s.raw = null);
@@ -2387,7 +2387,7 @@ function nJ(o) {
 var oJ = { spray: 0.032, grain: 0.04, stipple: 0.0324, hairline: 0.05, none: 1 }, cA = {};
 function iJ(o) {
   if (cA[o]) return cA[o];
-  let t = o === "none" ? 2 : (IS_HEADLESS ? 256 : 512), e = new Float32Array(t * t), s = new Float32Array(t * t).fill(0.5), n = 1;
+  let t = o === "none" ? 2 : 256, e = new Float32Array(t * t), s = new Float32Array(t * t).fill(0.5), n = 1;
   if (o === "spray") {
     let r = ql(t, 31), l = pf(r, t, 1), c = uf(t, 90, 90, 2, 32);
     for (let h = 0; h < e.length; h++) e[h] = (l[h] - 0.5) * 1.3 + (c[h] - 0.5) * 2.2 + (r[h] - 0.5) * 0.22, s[h] = 0.5 + (r[h] - 0.5) * 0.5 + (c[h] - 0.5) * 0.9;
@@ -5194,12 +5194,12 @@ function FN(o, t) {
   {
     let k = i.pump.userData.rest, I = S.geo;
     I.translate(-k.x, -k.y, -k.z);
-    let G = new THREE.Mesh(I, t && !d ? s.wood("forend", () => RN(IS_HEADLESS ? 128 : 512, IS_HEADLESS ? 64 : 256, S.at, 23, { off: 1.25, skew: -0.7, curl: 0.6 }), 22, 9) : null);
+    let G = new THREE.Mesh(I, t && !d ? s.wood("forend", () => RN(128, 64, S.at, 23, { off: 1.25, skew: -0.7, curl: 0.6 }), 22, 9) : null);
     G.name = "forend", G.userData.base = 4860437, i.pump.add(G), m.push([G, "furniture", k]);
   }
   let E = o.stock === "heavy", _ = E ? -0.327 : -0.311;
   {
-    let k = t ? 12 : 6, G = U5(t ? K00 : [-0.295, -0.24, -0.19, -0.15, -0.124, -0.102, -0.085, -0.069, -0.053, -0.037, -0.021, -6e-3, 7e-3, 0.022], (M0) => Ik(G4(M0), k), { crease: 0.9 }), K = new THREE.Mesh(G.geo, t && !d ? s.wood("stock", () => RN(IS_HEADLESS ? 128 : 1024, IS_HEADLESS ? 128 : 1024, G.at, 11, { off: 1, skew: 1, curl: 1 }), 46, 18) : null);
+    let k = t ? 12 : 6, G = U5(t ? K00 : [-0.295, -0.24, -0.19, -0.15, -0.124, -0.102, -0.085, -0.069, -0.053, -0.037, -0.021, -6e-3, 7e-3, 0.022], (M0) => Ik(G4(M0), k), { crease: 0.9 }), K = new THREE.Mesh(G.geo, t && !d ? s.wood("stock", () => RN(256, 256, G.at, 11, { off: 1, skew: 1, curl: 1 }), 46, 18) : null);
     K.name = "stock", K.userData.base = 4860437, n.add(K), m.push([K, "furniture", null]);
     let $ = G4(-0.295), n0 = ($[0] + $[1]) / 2, e0 = (M0) => Ik($, k).map((f0) => [f0[0] * M0, n0 + (f0[1] - n0) * (1 - (1 - M0) * 0.4)]);
     a.add(s.spacer, Qe(U5([-0.295, -0.2972], () => e0(1.004), { metric: true, crease: 0.9 }).geo));
@@ -5400,10 +5400,17 @@ export function buildGoldenHourGun(kind, buildSpec = {}, { wetUniform = SHARED_R
   };
 }
 
+const _fragGrenadeCache = new WeakMap();
+
 export function buildFragGrenade({ wetUniform = SHARED_RAIN_WETNESS } = {}) {
-  const root = Z2();
-  root.name = 'gh-frag-grenade';
-  patchGoldenHourMaterialsForWetness(root, wetUniform);
-  const tris = countObjectTriangles(root);
-  return { root, tris };
+  let cached = _fragGrenadeCache.get(wetUniform);
+  if (!cached) {
+    const root = Z2();
+    root.name = 'gh-frag-grenade';
+    patchGoldenHourMaterialsForWetness(root, wetUniform);
+    const tris = countObjectTriangles(root);
+    cached = { root, tris };
+    _fragGrenadeCache.set(wetUniform, cached);
+  }
+  return { root: cached.root.clone(true), tris: cached.tris };
 }
