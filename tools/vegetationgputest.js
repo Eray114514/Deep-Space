@@ -67,7 +67,7 @@ try {
     };
     const smooth = (a, b, value) => { const t = Math.max(0, Math.min(1, (value-a)/(b-a))); return t*t*(3-2*t); };
     const checkNativeShadows = () => {
-      const source = ['tree0','tree1','shrub'].map(kind => scatter.meshes[kind]).find(mesh => mesh.count);
+      const source = ['tree0','tree1','shrub'].map(kind => scatter.meshes[kind]).find(mesh => mesh?.count);
       if (!source) throw Error('Native shadow fixture requires a real generated plant.');
       const savedOrigin = scatter.frame.origin.clone();
       const canonical = new T.Vector3().fromArray(source.instanceMatrix.array,12).add(source.position);
@@ -148,7 +148,7 @@ try {
               }
               const configuration = { uniforms:{},vertexShader:'',fragmentShader:'' };
               source.material.onBeforeCompile(configuration);
-              const amount = configuration.uniforms.uSway.value, leaf = kind.startsWith('grass');
+              const amount = configuration.uniforms.uSway.value, leaf = kind.startsWith('grass') || kind === 'shrub';
               const variants = [['visible',source.material],['depth',source.customDepthMaterial],['distance',source.customDistanceMaterial]];
               for (const renderOrigin of [origin,origin.clone().add(new T.Vector3(83.25,-47.125,61.875))]) {
                 scatter.frame.setOrigin(renderOrigin);

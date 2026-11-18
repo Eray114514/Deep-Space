@@ -1,8 +1,6 @@
-// Procedural alien flora: every planet grows its own SPECIES. A seeded
-// grammar assembles each one from organic pieces — bent trunks, bulb
-// clusters, mushroom caps, frond fans, curling tentacles, glowing pods —
-// with colors baked per-vertex from a hue-shifted planet palette. Low-poly
-// flat-shaded to match the art style; alien by construction.
+// Seeded procedural flora: per-planet hue palette, ez-tree species & bushes
+// (built via tree-species.js), and multi-blade meadow patches. Old low-poly
+// geometric placeholder flora has been retired cleanly.
 
 import * as THREE from 'three';
 import { makeRng } from './rng.js';
@@ -66,203 +64,6 @@ function mergeGeos(list) {
   return out;
 }
 
-// a tapering tube along a quadratic bezier — trunks, stalks, tentacles
-function bentTube(rng, pal, h, r0, r1, leanX, leanZ, color, segs = 5, radial = 6) {
-  const parts = [];
-  const pt = (t) => _v.set(
-    leanX * h * t * t, h * (t - 0.12 * t * t * (leanX * leanX + leanZ * leanZ)),
-    leanZ * h * t * t).clone();
-  let prev = pt(0);
-  for (let s = 0; s < segs; s++) {
-    const t0 = s / segs, t1 = (s + 1) / segs;
-    const a = prev, b = pt(t1);
-    const mid = a.clone().lerp(b, 0.5);
-    const dir = b.clone().sub(a);
-    const len = dir.length();
-    const rA = r0 + (r1 - r0) * t0, rB = r0 + (r1 - r0) * t1;
-    const cyl = new THREE.CylinderGeometry(rB, rA, len, radial, 1);
-    _q.setFromUnitVectors(Y, dir.normalize());
-    paint(cyl, color, rng, 0.1);
-    parts.push(place(cyl, mid.x, mid.y, mid.z, _q.clone()));
-    prev = b;
-  }
-  return { parts, top: prev };
-}
-
-function blob(rng, r, color) {
-  // icosahedra are triangle soup: co-located corners must jitter together
-  // or the surface tears open
-  const g = new THREE.IcosahedronGeometry(r, 1);
-  const p = g.attributes.position;
-  const seen = new Map();
-  for (let i = 0; i < p.count; i++) {
-    const key = p.getX(i).toFixed(4) + ',' + p.getY(i).toFixed(4) + ',' + p.getZ(i).toFixed(4);
-    let k = seen.get(key);
-    if (k === undefined) {
-      k = [1 + (rng() - 0.5) * 0.35, 0.8 + rng() * 0.4];
-      seen.set(key, k);
-    }
-    p.setXYZ(i, p.getX(i) * k[0], p.getY(i) * k[1], p.getZ(i) * k[0]);
-  }
-  return paint(g, color, rng, 0.12);
-}
-
-function frond(rng, len, wid, curl, color) {
-  // a tapering strip, bent forward row by row — a leaf blade / palm frond
-  const rows = 4;
-  const g = new THREE.PlaneGeometry(wid, len, 1, rows);
-  g.translate(0, len / 2, 0);
-  const p = g.attributes.position;
-  for (let i = 0; i < p.count; i++) {
-    const t = p.getY(i) / len;
-    const taper = 1 - t * 0.8;
-    p.setX(i, p.getX(i) * taper);
-    p.setZ(i, Math.sin(t * curl) * len * 0.35);
-    p.setY(i, p.getY(i) * (1 - 0.25 * t * curl * 0.4));
-  }
-  return paint(g, color, rng, 0.12);
-}
-
-// ---- species builders (origin at base, ~2–6 m tall) ------------------------
-
-function buildTree(rng, pal, canopyColor) {
-  const style = ['orbs', 'cap', 'fronds', 'tentacles', 'orbs', 'cap'][(rng() * 6) | 0];
-  let h = 3.2 + rng() * 4.2;
-  if (rng() < 0.18) h *= 1.6;        // some worlds grow giants
-  const leanX = (rng() - 0.5) * 0.65, leanZ = (rng() - 0.5) * 0.65;
-  const bulb = rng() < 0.35 ? 1.8 + rng() : 1;      // some trunks are bulbous
-  const r0 = (0.05 + h * 0.028) * bulb, r1 = r0 * (0.22 + rng() * 0.2);
-  const trunk = bentTube(rng, pal, h, r0, r1, leanX, leanZ, pal.trunk, 7, 8);
-  const parts = trunk.parts;
-  const top = trunk.top;
-
-  // Secondary branches give the near tier a real hierarchy instead of the
-  // old pole-plus-primitive silhouette. Attachment height, taper and crown
-  // size remain species-seeded and therefore stable across every visit.
-  const branchCount = 3 + (rng() * 3) | 0;
-  for (let i = 0; i < branchCount; i++) {
-    const t = 0.46 + i / Math.max(1, branchCount - 1) * 0.34;
-    const a = i / branchCount * Math.PI * 2 + rng() * 0.7;
-    const len = h * (0.16 + rng() * 0.11);
-    const dir = new THREE.Vector3(Math.cos(a), 0.34 + rng() * 0.28, Math.sin(a)).normalize();
-    const branch = new THREE.CylinderGeometry(r1 * 0.34, r0 * 0.34, len, 6, 2);
-    paint(branch, pal.trunk, rng, 0.08);
-    _q.setFromUnitVectors(Y, dir);
-    const base = new THREE.Vector3(leanX * h * t * t, h * t, leanZ * h * t * t);
-    const mid = base.clone().addScaledVector(dir, len * 0.5);
-    parts.push(place(branch, mid.x, mid.y, mid.z, _q.clone()));
-    if (style === 'orbs' || style === 'fronds') {
-      const tip = base.addScaledVector(dir, len);
-      parts.push(place(blob(rng, h * (0.07 + rng() * 0.05), canopyColor), tip.x, tip.y, tip.z));
-    }
-  }
-
-  if (style === 'orbs') {
-    const n = 3 + (rng() * 3) | 0;
-    for (let i = 0; i < n; i++) {
-      const r = h * (0.16 + rng() * 0.14);
-      parts.push(place(blob(rng, r, canopyColor),
-        top.x + (rng() - 0.5) * h * 0.36,
-        top.y + (rng() - 0.6) * h * 0.22,
-        top.z + (rng() - 0.5) * h * 0.36));
-    }
-  } else if (style === 'cap') {
-    const r = h * (0.3 + rng() * 0.22), ch = r * (0.55 + rng() * 0.4);
-    const cap = new THREE.LatheGeometry([
-      new THREE.Vector2(0.02, 0), new THREE.Vector2(r * 0.9, ch * 0.18),
-      new THREE.Vector2(r, ch * 0.5), new THREE.Vector2(r * 0.5, ch * 0.85),
-      new THREE.Vector2(0.03, ch)], 9);
-    paint(cap, canopyColor, rng, 0.1);
-    parts.push(place(cap, top.x, top.y - ch * 0.15, top.z));
-    if (rng() < 0.6) {          // glowing spots under the cap rim
-      for (let i = 0; i < 5; i++) {
-        const a = (i / 5) * Math.PI * 2 + rng();
-        parts.push(place(blob(rng, r * 0.08, pal.accent),
-          top.x + Math.cos(a) * r * 0.8, top.y + ch * 0.18, top.z + Math.sin(a) * r * 0.8));
-      }
-    }
-  } else if (style === 'fronds') {
-    const n = 5 + (rng() * 4) | 0;
-    for (let i = 0; i < n; i++) {
-      const a = (i / n) * Math.PI * 2 + rng() * 0.5;
-      const f = frond(rng, h * (0.45 + rng() * 0.25), h * 0.09, 1.6 + rng(), canopyColor);
-      _q.setFromAxisAngle(Y, a).multiply(
-        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.9 + rng() * 0.5));
-      parts.push(place(f, top.x, top.y, top.z, _q.clone()));
-    }
-    parts.push(place(blob(rng, h * 0.07, pal.accent), top.x, top.y, top.z));
-  } else {                       // tentacles
-    const n = 4 + (rng() * 3) | 0;
-    for (let i = 0; i < n; i++) {
-      const a = (i / n) * Math.PI * 2 + rng() * 0.6;
-      const t = bentTube(rng, pal, h * (0.4 + rng() * 0.3), r1 * 1.5, 0.02,
-        Math.cos(a) * (0.8 + rng() * 0.7), Math.sin(a) * (0.8 + rng() * 0.7), canopyColor, 4, 5);
-      for (const g of t.parts) parts.push(place(g, top.x, top.y, top.z));
-      parts.push(place(blob(rng, h * 0.045, pal.accent), top.x + t.top.x, top.y + t.top.y, top.z + t.top.z));
-    }
-  }
-  return { geo: shadeVertical(mergeGeos(parts), 0.62, 1.16), style, h };
-}
-
-// a ~40-triangle stand-in with the species' silhouette and colours — the far
-// tier draws thousands of these out to the horizon so a forest is a forest
-// from any altitude, not a bubble that grows around the camera
-function buildFarTree(rng, pal, style, h, canopyColor) {
-  const parts = [];
-  const r0 = 0.06 + h * 0.03;
-  const trunk = new THREE.CylinderGeometry(r0 * 0.55, r0 * 1.15, h, 5, 1);
-  trunk.translate(0, h * 0.5, 0);
-  paint(trunk, pal.trunk, rng, 0.06);
-  parts.push(trunk);
-  let canopy;
-  if (style === 'cap') {
-    canopy = new THREE.ConeGeometry(h * 0.42, h * 0.32, 7);
-    canopy.translate(0, h * 1.0, 0);
-  } else if (style === 'fronds') {
-    canopy = new THREE.ConeGeometry(h * 0.34, h * 0.44, 6);
-    canopy.rotateX(Math.PI);
-    canopy.translate(0, h * 1.06, 0);
-  } else {           // orbs / tentacles read as a lumpy ball from afar
-    canopy = new THREE.IcosahedronGeometry(h * 0.36, 0);
-    canopy.scale(1, 0.82, 1);
-    canopy.translate(0, h * 1.0, 0);
-  }
-  // over-bright: distance fog pulls everything toward the haze colour, and
-  // canopies that match the forest-tinted ground vanish into it
-  paint(canopy, canopyColor.clone().multiplyScalar(1.6), rng, 0.09);
-  parts.push(canopy);
-  return shadeVertical(mergeGeos(parts), 0.6, 1.15);
-}
-
-function buildShrub(rng, pal) {
-  const parts = [];
-  const n = 6 + (rng() * 4) | 0;
-  const len = 0.7 + rng() * 0.6;
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 + rng() * 0.7;
-    const f = frond(rng, len * (0.8 + rng() * 0.4), len * 0.16, 1.2 + rng() * 0.9,
-      rng() < 0.25 ? pal.accent : pal.canopy);
-    _q.setFromAxisAngle(Y, a).multiply(
-      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.55 + rng() * 0.6));
-    parts.push(place(f, 0, 0.02, 0, _q.clone()));
-  }
-  return shadeVertical(mergeGeos(parts), 0.7, 1.15);
-}
-
-function buildPodPlant(rng, pal) {
-  // person-height glowing bulbs on bent stalks — a landmark, not a pebble
-  const parts = [];
-  const n = 2 + (rng() * 2.4) | 0;
-  for (let i = 0; i < n; i++) {
-    const h = 1.0 + rng() * 1.0;
-    const t = bentTube(rng, pal, h, 0.05, 0.03,
-      (rng() - 0.5) * 0.9, (rng() - 0.5) * 0.9, pal.trunk, 4, 5);
-    parts.push(...t.parts);
-    parts.push(place(blob(rng, 0.2 + rng() * 0.16, pal.accent), t.top.x, t.top.y + 0.08, t.top.z));
-  }
-  return { geo: shadeVertical(mergeGeos(parts), 0.78, 1.1), glow: pal.accent.clone() };
-}
-
 // A meadow patch: many fine blades of nearly even height spread over a
 // ~0.75 m disc, so neighbouring patches knit into continuous sward. (A tight
 // clump of mixed-height blades, the previous design, reads as weeds however
@@ -311,83 +112,6 @@ function buildMeadowPatch(rng, blades, rows, widthScale, spread = 0.38) {
   return g;
 }
 
-function buildGrassTuft(rng, bladeRange = [12, 18], rows = 4, widthScale = 1) {
-  // real blades (white — each instance is tinted per-planet at placement).
-  // The baked root→tip brightness gradient is what makes grass read as
-  // grass instead of spikes: dark at the soil, light where the sun sits.
-  const white = new THREE.Color(1, 1, 1);
-  const parts = [];
-  const n = bladeRange[0] + (rng() * (bladeRange[1] - bladeRange[0])) | 0;
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 + rng();
-    // a tuft is a few tall blades over many short ones
-    const len = 0.22 + Math.pow(rng(), 1.6) * 0.7;
-    // thin blades; coarser levels widen theirs to keep the same coverage
-    const f = new THREE.PlaneGeometry(0.022 * widthScale * (0.75 + rng() * 0.5), len, 1, rows);
-    f.translate(0, len / 2, 0);
-    const fp = f.attributes.position;
-    for (let v = 0; v < fp.count; v++) {
-      const t = Math.max(0, Math.min(1, fp.getY(v) / len));
-      fp.setX(v, fp.getX(v) * (1 - t * 0.8));
-      fp.setZ(v, Math.sin(t * (0.8 + rng() * 0.9)) * len * 0.35);
-    }
-    paint(f, white, rng, 0.12);
-    const pos = f.attributes.position, col = f.attributes.color;
-    // one blade in five has dried to straw; the rest vary in depth of green
-    const dry = rng() < 0.2;
-    const shade = 0.78 + rng() * 0.36;
-    const tint = dry ? [1.55, 1.3, 0.62] : [shade * 0.96, shade, shade * 0.9];
-    for (let v = 0; v < pos.count; v++) {
-      col.setXYZ(v, col.getX(v) * tint[0], col.getY(v) * tint[1], col.getZ(v) * tint[2]);
-    }
-    for (let v = 0; v < pos.count; v++) {
-      const t = Math.max(0, Math.min(1, pos.getY(v) / len));
-      // Strong root occlusion is more important than a bright tip.  The old
-      // 1.2x tip multiplier made the double-sided blades look self-lit under
-      // an overcast sky.  A curved rise keeps the base planted while the tip
-      // still catches the sky.
-      const k = 0.3 + 0.74 * Math.sqrt(t);
-      col.setXYZ(v, col.getX(v) * k, col.getY(v) * k, col.getZ(v) * k);
-    }
-    _q.setFromAxisAngle(Y, a).multiply(
-      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.22 + rng() * 0.4));
-    parts.push(place(f, (rng() - 0.5) * 0.22, 0, (rng() - 0.5) * 0.22, _q.clone()));
-  }
-  const g = mergeGeos(parts);
-  // Blades light mostly like the field (normals near straight up, so a
-  // meadow shades softly with the ground instead of flickering), but keep a
-  // third of their own facing: neighbouring blades then catch the sun
-  // differently and the tuft has depth instead of reading as paint.
-  const nrm = g.attributes.normal;
-  for (let i = 0; i < nrm.count; i++) {
-    const x = nrm.getX(i) * 0.35, z = nrm.getZ(i) * 0.35;
-    const y = 1;
-    const l = Math.hypot(x, y, z);
-    nrm.setXYZ(i, x / l, y / l, z / l);
-  }
-  return g;
-}
-
-// fake ambient occlusion, baked: plants darken toward the ground and
-// brighten toward the crown — flat-shaded solids stop reading as bare
-// untextured primitives the moment they carry a light gradient
-function shadeVertical(geo, k0 = 0.68, k1 = 1.14) {
-  const pos = geo.attributes.position, col = geo.attributes.color;
-  let yMin = Infinity, yMax = -Infinity;
-  for (let i = 0; i < pos.count; i++) {
-    const y = pos.getY(i);
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-  const span = Math.max(1e-4, yMax - yMin);
-  for (let i = 0; i < pos.count; i++) {
-    const t = (pos.getY(i) - yMin) / span;
-    const k = k0 + (k1 - k0) * Math.sqrt(t);
-    col.setXYZ(i, col.getX(i) * k, col.getY(i) * k, col.getZ(i) * k);
-  }
-  return geo;
-}
-
 // planet.js caches this at construction (planet.floraPal) so the terrain
 // palette can borrow the canopy colour BEFORE it gets blended — deriving it
 // twice from a mutated base would drift the species colours
@@ -419,26 +143,14 @@ export function floraPalette(planet, rng) {
 export function buildFlora(planet) {
   const rng = makeRng(planet.seed + ':flora');
   const pal = planet.floraPal || floraPalette(planet, rng);
-  const pod = buildPodPlant(rng, pal);
-  // The low-poly tree builders still consume their draws so pods and grass
-  // keep the shapes they had; their geometry is no longer shown.
-  const t0 = buildTree(rng, pal, pal.canopy);
-  const t1 = buildTree(rng, pal, pal.canopy2);
-  // retired weedy tuft: built only to keep the RNG stream (and so every
-  // later geometry) unchanged
-  buildGrassTuft(rng).dispose();
-  const legacyShrub = buildShrub(rng, pal);
-  t0.geo.dispose(); t1.geo.dispose(); legacyShrub.dispose();
-  // Trees and shrubs: grown by src/vegetation/tree-species.js, drawn at every
-  // distance by the tree field (farflora.js). `dispose` lets the planet's
-  // generic flora teardown release the species geometry and atlas.
+  // Trees and shrubs: grown by src/vegetation/tree-species.js, drawn by the
+  // tree field (farflora.js) and near scatter (scatter.js). `dispose` lets
+  // the planet's generic flora teardown release the species geometry and atlas.
   const trees = buildTreeSpecies(planet, pal);
   trees.dispose = () => disposeTreeSpecies(trees);
   return {
     trees,
     shrub: trees.shrub.geometries.mid,
-    pod: pod.geo,
-    podGlow: pod.glow,
     // The three meshes share the same deterministic placement field. Only
     // their blade complexity changes with distance: a dense meadow therefore
     // keeps its silhouette without paying near-blade cost at the far rim.

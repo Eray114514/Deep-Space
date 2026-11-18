@@ -104,7 +104,7 @@
 | T4a 余项 | 树的第一版已上线（见完成记录）。余项：叶片和树皮贴图还是程序画的简单图案，近看偏卡通；树冠背光面仍偏暗；替身目前是手绘轮廓，换成真正从网格渲染的八面体替身；树木接入太阳阴影贴图以外的天空环境光模型；森林机位帧率约 50（草原约 60），需要优化到 60 | 4 | 近看叶片可信；连续低飞时树的轮廓和颜色不突变；森林中 60 FPS |
 | T4b | 草、灌木、地被、花 | 4 | 读得出连片草地，风摆不同相 |
 | T4c | 岩石与崖壁 | 4 | 近处有层理和裂隙，没有贴图感 |
-| T4d | 外星植物重做、生态摆放规则，删除旧低多边形植被 | 4 | 外星感来自形态和配色，不来自低多边形；林缘和群落自然 |
+| T4d | 外星植物与生态摆放规则高模重做（旧低多边形植物与岩块/晶体/仙人掌/软泥球散布物已下线删除） | 4 | 外星感来自形态和配色，不来自低多边形；林缘和群落自然 |
 | T4e 余项 | 降落吹倒植被第一版已完成（见完成记录）。余项：倒下的树不贴合坡面，在斜坡上会悬空或插入地面；没有折断、扬尘和落叶；痕迹只在本次游戏内保留，不写入存档 | 3 | 斜坡上倒树贴地；存档后再进入仍可见 |
 | T5 | 地表树冠色与替身交接，植被各级无缝淡入，统一风场；顺带复核地形 LOD 的过渡 | 5 | 从轨道降到地面、以及贴地向前飞，全程看不到任何植被突然出现；逐帧录像核对 |
 | T6 | 性能收口、全量回归、用户实机签收 | 4 | 满足上面的帧率目标；`test:full`、`test:vegetation`、`test:gameplay` 通过；用户确认 |
@@ -149,6 +149,12 @@
 
 ## 完成记录
 
+### 下线旧低多边形散布物与修正灌木远景发黑/泛白（2026-11-18）
+
+- **移除内容**：从 `src/flora.js` 与 `src/scatter.js` 移除旧低多边形占位物：发光球茎植物 `pod`（弯曲五边管 + 扁平着色二十面体球茎）、扁平多面体碎石 `rock` / `boulder`、八面体晶体 `crystal`、低面球体 `blob`、六边柱仙人掌 `cactus`，以及 `flora.js` 中已废弃的 `buildTree`/`buildFarTree`/`buildShrub`/`buildGrassTuft` 死代码；`RECIPES` 只保留高精度的草皮（`grass*`）和位于 `grass`/`forest`/`dryland` 的 `ez-tree` 灌木（`shrub`），不再在光秃沙地/海岸硬插灌木。后续高模岩壁（T4c）与外星植物（T4d）重做后再单独上线。
+- **同步修正灌木（`shrub`）观感**：先前 `16m` 与 `20m` 机位地上残留的黑色小团实为 `shrub` 在 35～60 m 处因 `CELL_BUSH` 叶片填充率低、mipmap 低于 `alphaTest: 0.42` 导致叶片被整片裁空、只剩深色细枝；且 `shrub` 仍用 `MeshStandardMaterial` 吃到天空环境高光泛白。现改为与 `farflora.js` 一致的 `MeshLambertMaterial` 与 `diffuseColor * 0.2` 透射补光、`alphaTest: 0.22`（深度材质同步双面 + `alphaTest` + 叶片风摆），并在 `tree-species.js` 对 `bush` 中级提高叶片占比（`leafStride: 3, leafScale: 2.35`、裁掉最细暗枝）。
+- **证据与测试**：`test-results/meadow-midflight/after-clean/16m.png`（发光 `pod` 消失，草地灌木保持正常绿色与软影）、`test-results/surface-shots/clean-check/{07b-flight-15m,08-walk}.png`、`test-results/meadow-open-flight/after/`（更新后对照与连续录像）；修复 `tools/vegetationgputest.js` 与 `tools/vegetation-precision-fixture.js` 后 GPU 精度与原生阴影回归通过（21 万采样最大误差 0.18 mm）。
+
 ### 中空草原观感与树影修正（2026-11-18，用户反馈\"中空像偏黄的软地毯，树像散点，影子脱离树根，树冠泛白\"）
 
 - **取证路线**：母星 0 号草原区内选出真正开阔、疏林的缓起伏草地（落差 72 m，平均坡度 0.099，平均林覆盖 1.25%），固定航向，从 600 m 滑降到 20 m（路线与阈值写在 `test-results/meadow-open-flight/route.json`，复拍 `node test-results/meadow-open-flight/capture.mjs <label> [--video]`）。
@@ -159,7 +165,7 @@
   - 树影脱离树根：`main.js` 的太阳阴影偏移固定为 `bias=-0.0002`（NDC），在 8.5～26 km 的阴影范围里等于把深度推开 1.7～5.3 m，叠加 2.0～5.7 m 的法线偏移，细树干被整段抬离。改为按阴影范围换算的世界尺度：`bias=-0.22/shadowRange`、`normalBias=max(0.25, 阴影纹素×0.55)`、`radius=1.4`；远树深度材质改为双面、保留 `vTreeFade` 抖动，并在远级树干底部加宽，使细干落进 1.2～2.5 m 的阴影纹素。
   - 树冠泛白：近、中级树仍用 `MeshStandardMaterial`，会吃到 `scene.environment` 的天空反射；四级全部改用 `MeshLambertMaterial`。
 - **证据**：`test-results/meadow-open-flight/before-vs-after.png`（同机位，上排基线 `a51d8ed`，下排修正后，400/150/65/20 m）；`after/open-meadow-descent.webm` 与 `after/frames/` 为连续下降录像及抽帧；`test-results/meadow-midflight/after-final/` 为林缘机位复拍（`16m.png` 泛白树冠消失，树影贴根）。
-- **余项**：以上只在母星（lush）草原验证；荒漠、冰封、火山、毒雾、异相、海洋类型只通过 `tools/sanity.js` 的生成检查，未做实飞。`16m` 机位地面上仍有几处深色小团（旧有散布物，未改动），留待 T4c/T4b。
+- **余项**：以上只在母星（lush）草原验证；荒漠、冰封、火山、毒雾、异相、海洋类型只通过 `tools/sanity.js` 的生成检查，未做实飞。`16m` 机位地面残留的发光 `pod` 与深色 `shrub` 退化小团已由上条"下线旧低多边形散布物"处理完毕。
 
 ### T2b 母星潮汐河谷与海洋星球群岛（2026-11-18）
 

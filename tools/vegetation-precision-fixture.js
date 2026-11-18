@@ -9,12 +9,14 @@ export function vegetationPrecisionFixture(radius = 6000000, profile = 'flat') {
   const expected = [];
   const heightAt = direction => 13.125 + (profile === 'relief'
     ? 17000 * (direction.x * 0.31 + direction.y * 0.47 + direction.z * 0.19) : 0);
+  const atlas = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  atlas.needsUpdate = true;
   const planet = {
     R: radius, seed: 'VEGETATION-PRECISION', bodyId: 'fixture', intSeed: 76123,
     type: 'terrestrial', fullMaxFreq: 128, hasLiquid: false,
     group: new THREE.Group(), pal: { rock: new THREE.Color(0.4, 0.3, 0.2) },
-    flora: { shrub: geometry, pod: geometry,
-      trees: { atlas: new THREE.Texture(), shrub: { leafColor: new THREE.Color(0.1, 0.2, 0.05) } },
+    flora: { shrub: geometry,
+      trees: { atlas, shrub: { leafColor: new THREE.Color(0.1, 0.2, 0.05) } },
       grass: geometry, grassMid: geometry, grassFar: geometry, grassTint: new THREE.Color(0.2, 0.4, 0.1) },
     height: heightAt, biomeAt: () => 'grass',
     colorAt(direction, height, _strength, _frequency, color) {

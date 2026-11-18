@@ -1998,7 +1998,9 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         #ifdef USE_COLOR
-          totalEmissiveRadiance *= vColor.rgb;
+          ${foliageLighting && material.map
+            ? 'totalEmissiveRadiance += diffuseColor.rgb * 0.2;'
+            : 'totalEmissiveRadiance *= vColor.rgb;'}
         #endif`);
     }
     if (foliageLighting) {
@@ -2010,6 +2012,6 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         #endif`);
     }
   };
-  material.customProgramCacheKey = () => 'wind-sway-v6-disturb-' + amount + '-' + (foliageLighting ? 'leaf' : 'solid');
+  material.customProgramCacheKey = () => 'wind-sway-v7-disturb-' + amount + '-' + (foliageLighting ? (material.map ? 'card' : 'leaf') : 'solid');
   return material;
 }

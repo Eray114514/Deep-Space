@@ -194,16 +194,16 @@ function growSpecies(archetypeName, rng, colors, slot) {
   const shared = { scale, barkColor: colors.bark, leafColor: colors.leaf, cell, crownCenter };
 
   const bush = archetypeName === 'bush';
-  // Shrubs are scattered by the hundred: their mid level uses three-sided
-  // twigs and drops the thinnest ones.
+  // Shrubs are scattered by the hundred: keep denser enlarged leaf cards so
+  // distant mipmaps never cull every leaf and expose bare dark twigs.
   const mid = tree.createGeometry(bush
-    ? { sectionStride: 3, segmentFactor: 0.01, leafStride: 5, leafScale: 2.1 } : DETAIL.mid);
+    ? { sectionStride: 3, segmentFactor: 0.01, leafStride: 3, leafScale: 2.35 } : DETAIL.mid);
   const far = tree.createGeometry(DETAIL.far);
   const trunkRadius = o.branch.radius[0];
   const geometries = {
     near: mergeTree(full, { ...shared, rng: makeRng('near' + o.seed) }),
     mid: mergeTree(mid, { ...shared, rng: makeRng('mid' + o.seed),
-      branchIndex: bush ? limbTriangles(mid.branches, trunkRadius * 0.22) : null }),
+      branchIndex: bush ? limbTriangles(mid.branches, trunkRadius * 0.35) : null }),
     far: mergeTree(far, { ...shared, rng: makeRng('far' + o.seed), branchIndex: limbTriangles(far.branches, trunkRadius * 0.3) }),
   };
 
