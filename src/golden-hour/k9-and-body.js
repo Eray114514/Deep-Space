@@ -2575,7 +2575,7 @@ vec3 k9Fill( vec3 N, vec3 V, vec3 albedo, float ao ) {
   return ( albedo * ghFill * ( 0.3 + 0.7 * nv ) * ( 0.55 + 0.45 * up ) + ghRim.rgb * pow( 1.0 - nv, ghRim.w ) * ( 0.35 + 0.65 * up ) ) * ao;
 }
 `, qt0 = `
-  vec3 kAlb = vColor * ( 1.0 - 0.86 * step( 0.01, vFx.w ) );       // self-lit lenses are dark until they are powered
+  vec3 kAlb = vColor.rgb * ( 1.0 - 0.86 * step( 0.01, vFx.w ) );       // self-lit lenses are dark until they are powered
   float kMetal = vMat.x, kRough = vMat.y, kAO = vMat.z, kNrm = vMat.w;
   float kWear = vMat2.x, kDust = vMat2.y, kWeave = vMat2.z, kPaint = vMat2.w;
   float kPower = uK9State.x, kAlert = uK9State.y, kDamage = uK9State.z, kTime = uK9State.w;
@@ -2627,7 +2627,7 @@ vec3 k9Fill( vec3 N, vec3 V, vec3 albedo, float ao ) {
   vec3 kEmis = mix( uK9Team, uK9Hot, max( kAlert * 0.55, uK9Zap.y ) ) * ( vFx.x * kOn * kFlash * kBreath * mix( 2.1, 7.0, kAlert ) * ( 1.0 + 1.2 * uK9Zap.y ) * uK9Glow );
   // electrodes (and, faintly, the mouth they light): a hint when hostile, heating while they charge, a flash per discharge
   kEmis += vec3( 0.5, 0.78, 1.0 ) * ( vFx.z * kOn * ( 0.35 * kAlert * kAlert + uK9Zap.x * uK9Zap.x * ( 6.0 + 2.5 * sin( kTime * 53.0 ) ) + uK9Zap.y * 13.0 ) );
-  kEmis += vColor * ( vFx.w * kOn * kFlash * 5.0 );
+  kEmis += vColor.rgb * ( vFx.w * kOn * kFlash * 5.0 );
   kEmis += vec3( 5.0, 1.15, 0.14 ) * kEmber * ( 0.4 + 0.6 * kPower );
   // a wreck being cleared away burns out along its own grain: holes open from the scorched patches, a hot edge ahead of them
   if ( uK9Fade < 0.999 ) {
@@ -5128,10 +5128,16 @@ export class FirstPersonBody {
     yaw = 0,
     pitch = 0,
     up = null,
-    onGround = true,
-    crouch = false,
-    sprint = false,
-    slide = false,
+    forward = null,
+    velocity = null,
+    onGround = undefined,
+    grounded = true,
+    crouch = undefined,
+    crouching = false,
+    sprint = undefined,
+    sprinting = false,
+    slide = undefined,
+    sliding = false,
     slideDir = null,
     vy = 0,
     inCockpit = false,
@@ -5141,6 +5147,10 @@ export class FirstPersonBody {
     groundHeight = null,
   } = {}) {
     if (typeof groundHeight === 'function') this.groundHeight = groundHeight;
+    const resolvedOnGround = onGround !== undefined ? Boolean(onGround) : Boolean(grounded);
+    const resolvedCrouch = crouch !== undefined ? Boolean(crouch) : Boolean(crouching);
+    const resolvedSprint = sprint !== undefined ? Boolean(sprint) : Boolean(sprinting);
+    const resolvedSlide = slide !== undefined ? Boolean(slide) : Boolean(sliding);
 
     // Visibility gate: hide in cockpit, skydiving, non-walk states, or magnified scope ADS
     const scopedHide = (Number(ads) || 0) > 0.6 && Boolean(hasScope);
@@ -5162,7 +5172,36 @@ export class FirstPersonBody {
     this.time += stepDt;
 
     const worldPos = readVec3(pos, new THREE.Vector3());
-    this._updateTangentFrame(up, worldPos);
+    if (velocity) {
+      if (up) {
+        readVec3(up, _tmpV0);
+        if (_tmpV0.lengthSq() > 1e-8) {
+          _tmpV0.normalize();
+          if (this._up.dot(_tmpV0) < -0.999) {
+            _tmpV1.set(1, 0, 0);
+            if (Math.abs(this._up.dot(_tmpV1)) > 0.9) _tmpV1.set(0, 0, 1);
+            _tmpV1.addScaledVector(this._up, -_tmpV1.dot(this._up)).normalize();
+            _tmpQ0.setFromAxisAngle(_tmpV1, Math.PI);
+          } else {
+            _tmpQ0.setFromUnitVectors(this._up, _tmpV0);
+          }
+          this._basisQuat.premultiply(_tmpQ0).normalize();
+          this._up.copy(_tmpV0);
+        }
+      }
+      this._invBasisQuat.copy(this._basisQuat).invert();
+      const velBasis = readVec3(velocity, new THREE.Vector3()).applyQuaternion(this._invBasisQuat);
+      if (dt > 1e-6 && this._live) {
+        this._localPos.x += velBasis.x * stepDt;
+        this._localPos.z += velBasis.z * stepDt;
+      }
+      if (this._localPos.lengthSq() > 4096) {
+        this._localPos.set(0, 0, 0);
+        this._live = false;
+      }
+    } else {
+      this._updateTangentFrame(up, worldPos);
+    }
 
     // Position and orient this.root on the planet's local up normal
     if (renderPos) readVec3(renderPos, this.root.position);
@@ -5170,13 +5209,20 @@ export class FirstPersonBody {
     this.root.quaternion.copy(this._basisQuat);
 
     const clampedPitch = Zt(Number(pitch) || 0, -1.5, 1.5);
-    const sinY = Math.sin(yaw);
-    const cosY = Math.cos(yaw);
+    let resolvedYaw = yaw;
+    if (forward) {
+      const fwdBasis = readVec3(forward, new THREE.Vector3()).applyQuaternion(this._invBasisQuat);
+      if (fwdBasis.x * fwdBasis.x + fwdBasis.z * fwdBasis.z > 1e-8) {
+        resolvedYaw = Math.atan2(-fwdBasis.x, -fwdBasis.z);
+      }
+    }
+    const sinY = Math.sin(resolvedYaw);
+    const cosY = Math.cos(resolvedYaw);
     const fwd = new THREE.Vector3(-sinY, 0, -cosY);
     const right = new THREE.Vector3(cosY, 0, -sinY);
 
-    const isSlide = Boolean(slide);
-    const isCrouch = Boolean(crouch) && !isSlide;
+    const isSlide = resolvedSlide;
+    const isCrouch = resolvedCrouch && !isSlide;
     this.wSlide = Ee(this.wSlide, isSlide ? 1 : 0, 13, stepDt);
     const wUpright = 1 - this.wSlide;
     this.wCrouch = Ee(this.wCrouch, isCrouch ? 1 : 0, 11, stepDt);
@@ -5221,6 +5267,11 @@ export class FirstPersonBody {
       this._localPos.z
     );
 
+    let resolvedSlideDir = slideDir;
+    if (slideDir && forward) {
+      resolvedSlideDir = readVec3(slideDir, new THREE.Vector3()).applyQuaternion(this._invBasisQuat);
+    }
+
     zeroFpRig(this.rO);
     if (wUpright > 1e-3) {
       this._solveUpright(
@@ -5230,15 +5281,15 @@ export class FirstPersonBody {
         clampedPitch,
         this.wCrouch,
         speed,
-        Boolean(onGround),
-        Boolean(sprint),
+        resolvedOnGround,
+        resolvedSprint,
         Number(vy) || 0,
         eyeLocal
       );
       addScaledFpRig(this.rO, this.rU, wUpright);
     }
     if (this.wSlide > 1e-3) {
-      this._solveSlide(fwd, right, clampedPitch, speed, eyeLocal, slideDir);
+      this._solveSlide(fwd, right, clampedPitch, speed, eyeLocal, resolvedSlideDir);
       addScaledFpRig(this.rO, this.rS, this.wSlide);
     }
 

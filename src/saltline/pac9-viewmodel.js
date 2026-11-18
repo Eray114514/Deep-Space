@@ -11,11 +11,12 @@
 // See docs/saltline-reuse.md for what else can be taken from Saltline.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { SHARED_LENS_SUN, SHARED_LENS_SKY } from './viewmodel-kit.js';
 
-// Saltline scene light the red-dot glass reflects (its harbour sun and sky).
-// Exported so the game can feed its own sun/sky later.
-export const LENS_SUN = { dir: new THREE.Vector3(0.916, 0.225, 0.331).normalize(), color: new THREE.Color(1, 0.72, 0.42) };
-export const LENS_SKY = { zenith: new THREE.Color(0.055, 0.085, 0.13), horizon: new THREE.Color(0.95, 0.55, 0.28), horizonAway: new THREE.Color(0.16, 0.22, 0.3) };
+// Scene light the red-dot glass reflects: bound to the shared live-updated
+// planetary sun & sky vectors in viewmodel-kit.js (L-7).
+export const LENS_SUN = SHARED_LENS_SUN;
+export const LENS_SKY = SHARED_LENS_SKY;
 var clamp = (i, e, t) => Math.min(t, Math.max(e, i)), lerp = (i, e, t) => i + (e - i) * t, saturate = (i) => Math.min(1, Math.max(0, i)), smoothstep = (i, e, t) => {
   let n = saturate((t - i) / (e - i));
   return n * n * (3 - 2 * n);

@@ -882,6 +882,8 @@ export function buildMuzzleFlash({ suppressed = false } = {}) {
       uJet: { value: suppressed ? 0.18 : 1 },
     },
     vertexShader: `
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
       attribute float aType;
       varying vec2 vUv;
       varying float vType;
@@ -889,13 +891,17 @@ export function buildMuzzleFlash({ suppressed = false } = {}) {
         vUv = uv;
         vType = aType;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        #include <logdepthbuf_vertex>
       }`,
     fragmentShader: `
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
       varying vec2 vUv;
       varying float vType;
       uniform float uSeed, uInt, uHeat, uJet;
       float h1(float n){ return fract(sin(n * 127.1 + uSeed * 311.7) * 43758.5453); }
       void main(){
+        #include <logdepthbuf_fragment>
         vec2 p = vUv * 2.0 - 1.0;
         float r = length(p), a = atan(p.y, p.x);
         float I = 0.0;
@@ -1002,6 +1008,8 @@ export function buildOpticLens(
       uHorAway: { value: SHARED_LENS_SKY.horizonAway },
     },
     vertexShader: `
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
       varying vec3 vView, vFwd, vRight, vUp, vWPos, vWN;
       varying vec2 vUv;
       uniform float uTilt;
@@ -1015,13 +1023,17 @@ export function buildOpticLens(
         vWPos = (modelMatrix * vec4(position, 1.0)).xyz;
         vWN = normalize(mat3(modelMatrix) * normalize(vec3(0.0, -uTilt, 1.0)));
         gl_Position = projectionMatrix * mv;
+        #include <logdepthbuf_vertex>
       }`,
     fragmentShader: `
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
       varying vec3 vView, vFwd, vRight, vUp, vWPos, vWN;
       varying vec2 vUv;
       uniform float uBright, uReticleMode;
       uniform vec3 uRetCol, uSun, uSunCol, uUp, uZen, uHor, uHorAway;
       void main(){
+        #include <logdepthbuf_fragment>
         vec3 d = normalize(vView), fw = normalize(vFwd);
         float k = max(dot(d, fw), 1e-3);
         vec2 a = vec2(dot(d, normalize(vRight)), dot(d, normalize(vUp))) / k;
@@ -1139,6 +1151,8 @@ export function buildMagnifiedScopeDisplay({
     side: THREE.FrontSide,
     uniforms,
     vertexShader: `
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
       varying vec2 vUv;
       varying vec3 vWPos, vWN;
       void main(){
@@ -1146,8 +1160,11 @@ export function buildMagnifiedScopeDisplay({
         vWPos = (modelMatrix * vec4(position, 1.0)).xyz;
         vWN = normalize(mat3(modelMatrix) * vec3(0.0, 0.0, 1.0));
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        #include <logdepthbuf_vertex>
       }`,
     fragmentShader: `
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
       varying vec2 vUv;
       varying vec3 vWPos, vWN;
       uniform sampler2D tScope;
@@ -1156,6 +1173,7 @@ export function buildMagnifiedScopeDisplay({
       uniform vec3 uRetCol, uSun, uSunCol, uUp, uZen, uHor, uHorAway;
 
       void main(){
+        #include <logdepthbuf_fragment>
         vec2 p = vUv * 2.0 - 1.0;
         float r = length(p);
         float px = max(fwidth(r), 0.002);

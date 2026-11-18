@@ -3,6 +3,17 @@
 // variants, caps voices per sound, and pre-renders a warm list during idle
 // time so the first shot never stalls the frame.
 import { renderSound, SOUND_TABLE } from './sfx-generators.js';
+import { renderGoldenHourSound, GH_SOUND_TABLE } from '../golden-hour/weapon-sfx.js';
+
+function lookupSoundDef(name) {
+  return SOUND_TABLE[name] || GH_SOUND_TABLE[name] || null;
+}
+
+function synthesizeSound(name, variant) {
+  if (SOUND_TABLE[name]) return renderSound(name, variant);
+  if (GH_SOUND_TABLE[name]) return renderGoldenHourSound(name, variant);
+  return null;
+}
 
 const idle = (fn) => (typeof requestIdleCallback === 'function'
   ? requestIdleCallback(fn, { timeout: 400 }) : setTimeout(fn, 16));
@@ -29,8 +40,8 @@ export class SaltlineSfx {
   prewarm(names) {
     const queue = [];
     for (const name of names) {
-      const def = SOUND_TABLE[name];
-      if (def) for (let v = 0; v < def.n; v++) queue.push([name, v]);
+      const def = lookupSoundDef(name);
+      if (def) for (let v = 0; v < (def.n || 1); v++) queue.push([name, v]);
     }
     const step = () => {
       const job = queue.shift();
@@ -45,7 +56,7 @@ export class SaltlineSfx {
     const key = `${name}#${variant}`;
     let buffer = this.buffers.get(key);
     if (buffer || !this.ctx) return buffer || null;
-    const rendered = renderSound(name, variant);
+    const rendered = synthesizeSound(name, variant);
     if (!rendered) return null;
     buffer = this.ctx.createBuffer(rendered.ch.length, rendered.ch[0].length, rendered.sr);
     rendered.ch.forEach((data, i) => buffer.copyToChannel(data, i));
@@ -55,14 +66,15 @@ export class SaltlineSfx {
 
   // play(name, { gain, pitch, delay, variant }) -> source node or null
   play(name, { gain = 1, pitch = 1, delay = 0, variant = null } = {}) {
-    const def = SOUND_TABLE[name];
+    const def = lookupSoundDef(name);
     if (!def || !this.ctx || !this.bus) return null;
+    const count = def.n || 1;
     let v = variant;
     if (v === null) {
       v = this.nextVariant.get(name) || 0;
-      this.nextVariant.set(name, (v + 1) % def.n);
+      this.nextVariant.set(name, (v + 1) % count);
     }
-    const buffer = this.buffer(name, v % def.n);
+    const buffer = this.buffer(name, v % count);
     if (!buffer) return null;
     const now = this.ctx.currentTime + delay;
     const active = (this.voices.get(name) || []).filter((voice) => voice.end > this.ctx.currentTime);

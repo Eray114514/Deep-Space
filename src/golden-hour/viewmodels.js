@@ -56,16 +56,22 @@ function buildTacticalLaser(originVec, { color = 0x38ff7a, length = 2.6 } = {}) 
       uAlpha: { value: 0.52 },
     },
     vertexShader: `
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
       varying vec2 vUv;
       void main(){
         vUv = uv;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        #include <logdepthbuf_vertex>
       }`,
     fragmentShader: `
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
       varying vec2 vUv;
       uniform vec3 uColor;
       uniform float uAlpha;
       void main(){
+        #include <logdepthbuf_fragment>
         float core = exp(-pow((vUv.x - 0.5) * 5.2, 2.0));
         float fade = smoothstep(0.0, 0.03, 1.0 - vUv.y) * exp(-(1.0 - vUv.y) * 3.4);
         vec3 col = uColor * core * fade * uAlpha * 2.4;
@@ -148,7 +154,7 @@ function upgradePrismScope(gun, { reticleColor = [1, 0.22, 0.12] } = {}) {
   const scope = buildMagnifiedScopeDisplay({
     radius: 0.0136,
     y: 0.04,
-    z: 0.0466,
+    z: 0.0472,
     objectiveY: 0.04,
     objectiveZ: -0.054,
     reticleColor,
@@ -632,6 +638,7 @@ function createArPlatformViewmodel(ctx = {}, variant = 'carbine') {
   }
 
   function update(dt, input = {}) {
+    dt = Math.max(0, dt || 0);
     s.t += dt;
     let drawRack = 0;
     if (s.draw) {
@@ -1139,6 +1146,7 @@ export function createVesper9Viewmodel(ctx = {}) {
   }
 
   function update(dt, input = {}) {
+    dt = Math.max(0, dt || 0);
     s.t += dt;
     let chPull = 0, chRot = 0;
     if (s.draw) {
@@ -1507,7 +1515,7 @@ export function createM12BreacherViewmodel(ctx = {}) {
   function reset() {
     Object.assign(s, {
       draw: null, holster: null, holstered: true, equipW: 0, relaxW: 0, quietT: 0,
-      cooldown: 0, dryDone: false, autoReload: -1, reload: null, pump: null,
+      cooldown: 0, dryDone: false, autoReload: -1, reload: null, pump: null, wantReload: false,
       lastShot: -9, bloom: 0, heat: 0, adsLin: 0, adsE: 0, sprintT: 0, reloadW: 0, rackW: 0,
       flashT: 0, idleT: 0, inspect: -1,
     });
@@ -1533,6 +1541,7 @@ export function createM12BreacherViewmodel(ctx = {}) {
     if (s.reload) cancelReload();
     s.draw = null;
     s.pump = null;
+    s.wantReload = false;
     s.relaxW = 0;
     s.holster = { t: (1 - s.equipW) * T_HOLSTER };
     restPose();
@@ -1541,6 +1550,7 @@ export function createM12BreacherViewmodel(ctx = {}) {
   }
 
   function cancelReload() {
+    s.wantReload = false;
     if (!s.reload) return;
     s.reload = null;
     s.reloadW = 0;
@@ -1549,8 +1559,12 @@ export function createM12BreacherViewmodel(ctx = {}) {
   }
 
   function reloadNow() {
-    if (s.holstered || s.holster || s.draw || s.reload || s.pump || api.ammo >= api.magSize || api.reserve <= 0) {
+    if (s.holstered || s.holster || s.draw || s.reload || api.ammo >= api.magSize || api.reserve <= 0) {
       return false;
+    }
+    if (s.pump) {
+      s.wantReload = true;
+      return true;
     }
     const empty = api.ammo <= 0;
     const toLoad = Math.min(api.magSize - api.ammo, api.reserve);
@@ -1626,6 +1640,7 @@ export function createM12BreacherViewmodel(ctx = {}) {
   }
 
   function update(dt, input = {}) {
+    dt = Math.max(0, dt || 0);
     s.t += dt;
 
     // ---- Draw / Holster
@@ -1716,6 +1731,10 @@ export function createM12BreacherViewmodel(ctx = {}) {
       if (P.t >= P.endAt) {
         s.pump = null;
         restPose();
+        if (s.wantReload) {
+          s.wantReload = false;
+          reloadNow();
+        }
       }
     }
 
@@ -2214,6 +2233,7 @@ export function createStrix9Viewmodel(ctx = {}) {
   }
 
   function update(dt, input = {}) {
+    dt = Math.max(0, dt || 0);
     s.t += dt;
     let drawRack = 0;
     if (s.draw) {

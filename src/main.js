@@ -61,6 +61,8 @@ import { WarpConduit } from './warp-conduit.js';
 import { PortalView } from './portal/portal-view.js';
 import { SurfaceWeapons, SURFACE_WEAPONS, isSoftwareWebGL } from './surface-weapons.js';
 import { SurveyUnits } from './saltline/robots.js';
+import { SurfaceGameplay } from './saltline/surface-gameplay.js';
+import { buildFragGrenade } from './golden-hour/weapons-engine.js';
 import { ACTIVE_GALAXY_ID, getGalaxyConfig, resolveBodyTuning } from './world-config.js';
 import { setVolumetricCloudsEnabled } from './planet.js';
 import { resolveRendererPolicy } from './renderer-policy.js';
@@ -1114,8 +1116,8 @@ const surfaceWeapons = new SurfaceWeapons(scene, camera, renderer.domElement, {
     surfaceWeaponHud.classList.toggle('holstered', !!holstered);
     for (const item of surfaceWeaponHud.querySelectorAll('[data-weapon-slot]')) item.classList.toggle('active', Number(item.dataset.weaponSlot) === index);
   },
-  // gunshot, reload foley and dry click are Saltline's synthesized sounds
-  onEvent: (type, data) => audio.weaponEvent(type, data),
+  // gunshot, reload foley and dry click are Saltline + Golden Hour synthesized sounds
+  onEvent: (type, data, def) => audio.weaponEvent(type, data, def),
   renderer,
 });
 // HALCYON survey units (Saltline's robot dog and drone, patrol-only) share the
@@ -1128,6 +1130,32 @@ const surveyUnits = new SurveyUnits({
     texture: surfaceWeapons.lighting.environmentTexture,
     intensity: surfaceWeapons.lighting.reflectionScale ?? 1,
   }),
+});
+const surfaceGameplay = new SurfaceGameplay({
+  scene,
+  camera,
+  materials: surfaceWeapons.materials,
+  getAudio: () => audio,
+  getEnvironment: () => ({
+    texture: surfaceWeapons.lighting.environmentTexture,
+    intensity: surfaceWeapons.lighting.reflectionScale ?? 1,
+  }),
+  grenadeFactory: () => buildFragGrenade(),
+});
+surfaceWeapons.shotResolver = (eye, dir, def) => surfaceGameplay.resolveShot(eye, dir, {
+  planet: walkCtl.planet || nearest,
+  navPos: nav.pos,
+  surveyUnits,
+  damage: def?.damage ?? 28,
+  impulse: def?.impulse ?? 6,
+  maxRange: 180,
+});
+surfaceWeapons.onGrenade = () => surfaceGameplay.throwGrenade({
+  planet: walkCtl.planet || nearest,
+  navPos: nav.pos,
+  eyeWorld: camera.getWorldPosition(new THREE.Vector3()),
+  dirWorld: camera.getWorldDirection(new THREE.Vector3()),
+  playerVelLocal: walkCtl.hSpeed,
 });
 // Build the robots in idle time after startup on hardware GPUs so the first
 // landing does not stall; software rasterizers (SwiftShader CI) skip eager
@@ -1278,7 +1306,14 @@ spaceCtl.canMouseBoost = () => !shipView.rmbLookActive();
 const walkCtl = new WalkControls(renderer.domElement, {
   lookScale: () => surfaceWeapons.lookScale,
   onLook: (movementX, movementY) => surfaceWeapons.onLookDelta(movementX, movementY),
-  resolveCollision: resolveParkedShipCollision,
+  resolveCollision: (ctl, prev) => {
+    resolveParkedShipCollision(ctl, prev);
+    surfaceGameplay.resolveWalkCollision(ctl);
+  },
+  onStep: (info) => surfaceGameplay.onWalkStep({ ...info, planet: walkCtl.planet }),
+  onJump: () => surfaceGameplay.onWalkJump(),
+  onLand: (impact01) => surfaceGameplay.onWalkLand(impact01),
+  onSlide: (phase) => surfaceGameplay.onWalkSlide(phase),
 });
 
 // Abort any pulse: finish its remaining displacement visuals as an echo, but
@@ -5884,7 +5919,23 @@ function frame(rafTs) {
     grounded: walkCtl.grounded,
     velY: walkCtl.vR,
     sprinting: walkCtl.running,
+    crouching: walkCtl.crouching,
     move: walkCtl.moveInput,
+  });
+  surfaceGameplay.update(dt, {
+    state,
+    paused,
+    planet: walkCtl.planet || nearest,
+    navPos: nav.pos,
+    walkCtl,
+    ship,
+    surfaceWeapons,
+    weaponsList: SURFACE_WEAPONS,
+    weather: activeWeather,
+    rainWetness: surfaceWeapons.wetness,
+    sunDirWorld: sunDirCam,
+    sunColor: sunShadow.color,
+    skyColor: environmentState.skyColor,
   });
   document.body.classList.toggle('surface-ads', state === 'walk' && surfaceWeapons.ads);
 
@@ -8258,22 +8309,44 @@ window.NMS = {
     return true;
   },
   surfaceReload: () => surfaceWeapons.reload(),
-  surfaceWeaponState: () => ({
-    index: surfaceWeapons.index,
-    ammo: surfaceWeapons.models[surfaceWeapons.index].ammo,
-    rendered: surfaceWeapons.rig.visible
-      && surfaceWeapons.models[surfaceWeapons.index].group.visible
-      && foregroundPass.enabled,
-    // every surface weapon is a procedural viewmodel built synchronously
-    assetLoaded: true,
-    reloading: surfaceWeapons.reloadT > 0,
-    reloadProgress: surfaceWeapons.reloadDuration > 0
-      ? 1 - surfaceWeapons.reloadT / surfaceWeapons.reloadDuration : 0,
-    magazine: surfaceWeapons.models[surfaceWeapons.index].magazine?.position.toArray() || null,
-    ads: surfaceWeapons.ads,
-    equip: surfaceWeapons.models[surfaceWeapons.index].viewmodel.equipState(),
-    scopeEyeBox: surfaceWeapons.models[surfaceWeapons.index].opticGlass?.material?.uniforms?.eyeBox?.value ?? null,
+  throwGrenade: () => surfaceGameplay.throwGrenade({
+    planet: walkCtl.planet || nearest,
+    navPos: nav.pos,
+    eyeWorld: camera.getWorldPosition(new THREE.Vector3()),
+    dirWorld: camera.getWorldDirection(new THREE.Vector3()),
+    playerVelLocal: walkCtl.hSpeed,
   }),
+  spawnCombatEncounter: (opts = {}) => surfaceGameplay.spawnCombatEncounter({
+    planet: walkCtl.planet || nearest,
+    playerLocal: walkCtl.posLocal,
+    ...opts,
+  }),
+  surfaceGameplayState: () => surfaceGameplay.stats(),
+  surfaceWeaponState: () => {
+    const activeModel = surfaceWeapons.ensureModel(surfaceWeapons.index);
+    return {
+      index: surfaceWeapons.index,
+      weaponId: SURFACE_WEAPONS[surfaceWeapons.index].id,
+      weaponName: SURFACE_WEAPONS[surfaceWeapons.index].name,
+      weaponCount: SURFACE_WEAPONS.length,
+      ammo: activeModel.ammo,
+      rendered: surfaceWeapons.rig.visible
+        && activeModel.group.visible
+        && foregroundPass.enabled,
+      assetLoaded: true,
+      reloading: surfaceWeapons.reloadT > 0,
+      reloadProgress: surfaceWeapons.reloadDuration > 0
+        ? 1 - surfaceWeapons.reloadT / surfaceWeapons.reloadDuration : 0,
+      magazine: activeModel.magazine?.position.toArray() || null,
+      ads: surfaceWeapons.ads,
+      equip: activeModel.viewmodel.equipState(),
+      stance: walkCtl.stance,
+      crouching: walkCtl.crouching,
+      sliding: walkCtl.sliding,
+      grenades: surfaceGameplay.grenadeCount,
+      scopeEyeBox: activeModel.opticGlass?.material?.uniforms?.eyeBox?.value ?? null,
+    };
+  },
   surfaceScopeSample() {
     if (!SURFACE_WEAPONS[surfaceWeapons.index].hasScope) return null;
     const size = 16;
@@ -8321,6 +8394,8 @@ window.NMS = {
       weatherEffects,
       audio,
       surveyUnits,
+      surfaceGameplay,
+      surfaceWeapons,
     };
   },
 };

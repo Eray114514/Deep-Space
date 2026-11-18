@@ -134,6 +134,16 @@ body.route-choice-active #nms-combat-hud {
 .nms-suit-shield.low .nms-suit-shield-fill {
   background: #ff5a42;
 }
+#surface-weapon .surface-weapon-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  max-width: 310px;
+}
+#surface-weapon .surface-weapon-slots span {
+  white-space: nowrap;
+}
 .nms-weapon-aux {
   display: flex;
   gap: 10px;

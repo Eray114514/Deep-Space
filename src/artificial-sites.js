@@ -3,11 +3,66 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { makeRng } from './rng.js';
 import { createPbrMaterial, normalizeImportedPbrMaterial } from './pbr-materials.js';
+import { createSaltlineProps } from './saltline/props.js';
+import { patchShaderWithRainWetness, RAIN_WET_UNIFORMS } from './saltline/wet-ground.js';
+import { createGoldenHourFurniture } from './golden-hour/furniture.js';
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const heroAssetCache = new Map();
 const heroAssetLoader = new GLTFLoader();
 heroAssetLoader.setMeshoptDecoder(MeshoptDecoder);
+
+let _sharedOutpostProps = null;
+let _sharedOutpostFurniture = null;
+
+function markSharedAssets(root) {
+  root.traverse((obj) => {
+    if (obj.geometry) obj.geometry.userData.sharedPropAsset = true;
+    const mats = Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : [];
+    for (const m of mats) m.userData.sharedPropAsset = true;
+  });
+  return root;
+}
+
+function getOutpostProps() {
+  if (!_sharedOutpostProps) {
+    _sharedOutpostProps = createSaltlineProps({ materials: null, palette: 'frontier' });
+  }
+  return _sharedOutpostProps;
+}
+
+function getOutpostFurniture() {
+  if (!_sharedOutpostFurniture) {
+    _sharedOutpostFurniture = createGoldenHourFurniture({ anisotropy: 4 });
+  }
+  return _sharedOutpostFurniture;
+}
+
+function placeProp(parent, colliders, lib, name, x, y, z, yaw = 0, opts = {}) {
+  try {
+    const obj = markSharedAssets(lib.create(name, opts));
+    obj.position.set(x, y, z);
+    obj.rotation.y = yaw;
+    parent.add(obj);
+    const sz = obj.userData.size || [1.2, 1.2, 1.2];
+    if (colliders) {
+      colliders.push({
+        name,
+        x,
+        y,
+        z,
+        yaw,
+        hw: sz[0] * 0.5,
+        h: sz[1],
+        hd: sz[2] * 0.5,
+        surface: obj.userData.surface || 'metal',
+      });
+    }
+    return obj;
+  } catch {
+    return null;
+  }
+}
 
 function attachHeroAsset(group, site) {
   const path = site.type === 'hero-city-world'
@@ -35,8 +90,20 @@ function attachHeroAsset(group, site) {
   });
 }
 
+function withRainWetness(mat) {
+  if (!mat || !mat.isMeshStandardMaterial || mat.transparent) return mat;
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    if (typeof prev === 'function') prev(shader, renderer);
+    patchShaderWithRainWetness(shader, RAIN_WET_UNIFORMS);
+  };
+  const prevKey = mat.customProgramCacheKey?.bind(mat);
+  mat.customProgramCacheKey = () => `${prevKey ? prevKey() : 'site-pbr'}:rainwet-v1`;
+  return mat;
+}
+
 function material(color, profile, options = {}) {
-  return createPbrMaterial(profile, { color, ...options });
+  return withRainWetness(createPbrMaterial(profile, { color, ...options }));
 }
 
 function mesh(geometry, mat, parent, position = null) {
@@ -53,8 +120,8 @@ function modulePalette() {
     hull: material(0x8d969b, 'paintedDielectric'),
     dark: material(0x252d31, 'polymer'),
     ceramic: material(0xc4c8c2, 'ceramic'),
-    glass: material(0x17384a, 'glass', {
-      emissive: 0x183f55, emissiveIntensity: 0.32, opacity: 0.68,
+    glass: createPbrMaterial('glass', {
+      color: 0x17384a, emissive: 0x183f55, emissiveIntensity: 0.32, opacity: 0.68,
     }),
     amber: material(0x50341b, 'polymer', {
       emissive: 0xff9f40, emissiveIntensity: 2.1,
@@ -82,6 +149,103 @@ function addTruss(group, mats, length, radius = 5) {
   return truss;
 }
 
+// Build an open-front command/habitation pavilion furnished with Golden Hour
+// interior items so outposts feel inhabited up close.
+function buildCommandPavilion(parent, mats, colliders, x, y, z, yaw = 0) {
+  const bay = new THREE.Group();
+  bay.name = 'command-pavilion';
+  bay.position.set(x, y, z);
+  bay.rotation.y = yaw;
+  parent.add(bay);
+
+  // Foundation plinth, floor slab, roof canopy, rear wall, and corner columns (front left open for walk-in)
+  mesh(new THREE.BoxGeometry(11.4, 2.8, 7.4), mats.dark, bay, new THREE.Vector3(0, -1.4, 0));
+  mesh(new THREE.BoxGeometry(11.6, 0.36, 7.6), mats.dark, bay, new THREE.Vector3(0, 0.18, 0));
+  mesh(new THREE.BoxGeometry(12.0, 0.34, 8.0), mats.hull, bay, new THREE.Vector3(0, 3.65, 0));
+  mesh(new THREE.BoxGeometry(11.4, 3.3, 0.24), mats.ceramic, bay, new THREE.Vector3(0, 1.85, -3.65));
+  mesh(new THREE.BoxGeometry(0.24, 3.3, 7.4), mats.ceramic, bay, new THREE.Vector3(-5.65, 1.85, 0));
+  mesh(new THREE.BoxGeometry(10.6, 0.12, 0.16), mats.amber, bay, new THREE.Vector3(0, 3.42, 3.72));
+  for (const [cx, cz] of [[-5.6, 3.6], [5.6, 3.6], [5.6, -3.6]]) {
+    mesh(new THREE.BoxGeometry(0.32, 3.3, 0.32), mats.hull, bay, new THREE.Vector3(cx, 1.85, cz));
+  }
+
+  const furn = getOutpostFurniture();
+  const baseY = 0.36;
+  placeProp(bay, null, furn, 'desk', -2.6, baseY, -2.1, 0);
+  placeProp(bay, null, furn, 'officeChair', -2.6, baseY, -1.1, Math.PI);
+  placeProp(bay, null, furn, 'laptop', -2.4, baseY + 0.76, -2.15, 0.15);
+  placeProp(bay, null, furn, 'conferenceTable', 1.8, baseY, -1.6, 0);
+  placeProp(bay, null, furn, 'diningChair', 0.9, baseY, -0.7, Math.PI * 0.9);
+  placeProp(bay, null, furn, 'diningChair', 2.7, baseY, -0.7, -Math.PI * 0.9);
+  placeProp(bay, null, furn, 'shelfRack', -4.8, baseY, 0.6, Math.PI * 0.5);
+  placeProp(bay, null, furn, 'fridge', 4.6, baseY, -2.5, -Math.PI * 0.5);
+  placeProp(bay, null, furn, 'sofa', -2.2, baseY, 1.8, Math.PI * 0.5);
+  placeProp(bay, null, furn, 'floorLamp', -4.4, baseY, -2.6, 0);
+  placeProp(bay, null, furn, 'extinguisher', 5.2, baseY, 3.1, 0);
+  placeProp(bay, null, furn, 'serviceTrolley', 3.6, baseY, 1.6, -0.4);
+  placeProp(bay, null, furn, 'luggageCart', 4.6, baseY, 2.5, 0.3);
+
+  if (colliders) {
+    // Rear & side wall colliders in outpost space
+    colliders.push({ name: 'pavilion_slab', x, y, z, yaw, hw: 5.8, h: 0.36, hd: 3.8, walkableTop: true, surface: 'metal' });
+  }
+  return bay;
+}
+
+function dressOutpostYard(group, mats, site, padRadius = 28) {
+  const rand = makeRng(`${site.seed}:saltline-props`);
+  const props = getOutpostProps();
+  const colliders = [];
+  const deckY = 1.6;
+  const palette = site.type === 'mining-outpost' ? 'industrial' : 'frontier';
+
+  // Apron lighting masts, guard booth, and perimeter safety barriers around the pad
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI * 0.5 + Math.PI * 0.25;
+    const r = padRadius + 4.5;
+    placeProp(group, colliders, props, 'light_mast', Math.cos(a) * r, 0, Math.sin(a) * r, -a, { seed: i + 1, palette });
+    placeProp(group, colliders, props, 'bollard_post', Math.cos(a + 0.16) * (padRadius + 1.5), deckY, Math.sin(a + 0.16) * (padRadius + 1.5), 0, { palette: 'halcyon' });
+  }
+  placeProp(group, colliders, props, 'guard_booth', padRadius + 7.5, 0, -5.5, -Math.PI * 0.5, { seed: 11, palette: 'halcyon' });
+  placeProp(group, colliders, props, 'gate_arm', padRadius + 7.5, 0, 1.2, -Math.PI * 0.5, { seed: 12, palette });
+  placeProp(group, colliders, props, 'generator', padRadius + 11, 0, -11.5, 0.2, { seed: 13, palette });
+  placeProp(group, colliders, props, 'forklift', -(padRadius + 8.5), 0, 6.0, 0.85, { seed: 14, palette });
+
+  // Cargo yard ring (containers, totes, crates, barrels, sandbags, floodlights)
+  const yardPool = [
+    'container20', 'container40', 'reefer_unit', 'ibc_tote', 'crate_stack',
+    'pallet_stack', 'tarp_cargo', 'barrel', 'gas_cylinders', 'sandbags',
+    'cable_reel', 'toolbox_cart', 'floodlight_stand', 'relay_node', 'jersey_barrier',
+  ];
+  for (let i = 0; i < 18; i++) {
+    const a = (i / 18) * Math.PI * 2 + (rand() - 0.5) * 0.18;
+    // Leave an open approach lane at +Z
+    if (Math.abs(Math.atan2(Math.sin(a), Math.cos(a)) - Math.PI * 0.5) < 0.24) continue;
+    const dist = padRadius + 11 + rand() * 24;
+    const pick = yardPool[Math.floor(rand() * yardPool.length)];
+    placeProp(group, colliders, props, pick, Math.cos(a) * dist, 0, Math.sin(a) * dist, -a + Math.PI * 0.5, {
+      seed: 20 + i,
+      palette: i % 4 === 0 ? 'halcyon' : palette,
+    });
+  }
+
+  // Site-specific Saltline megastructure landmark
+  if (site.type === 'relay-outpost') {
+    placeProp(group, colliders, props, 'comms_tower', -46, 0, -34, 0.4, { seed: 71, palette: 'halcyon' });
+    placeProp(group, colliders, props, 'relay_node', -38, 0, -28, 0.6, { seed: 72, palette: 'halcyon' });
+  } else if (site.type === 'mining-outpost') {
+    placeProp(group, colliders, props, 'rtg_crane', 48, 0, -32, 0.3, { seed: 81, palette: 'industrial' });
+    placeProp(group, colliders, props, 'pipe_stack', 38, 0, -18, 0.3, { seed: 82, palette: 'industrial' });
+    placeProp(group, colliders, props, 'dumpster', 34, 0, -24, -0.5, { seed: 83, palette: 'industrial' });
+  } else {
+    placeProp(group, colliders, props, 'comms_tower', 46, 0, -34, -0.3, { seed: 91, palette: 'frontier' });
+  }
+
+  // Furnished walk-in Command & Habitation Pavilion
+  buildCommandPavilion(group, mats, colliders, 0, 0, -(padRadius + 13), 0);
+  group.userData.propColliders = colliders;
+}
+
 function cityCluster(site, scale = 1) {
   const rand = makeRng(`${site.seed}:city-cluster`);
   const group = new THREE.Group();
@@ -106,6 +270,19 @@ function cityCluster(site, scale = 1) {
     road.position.y = 0.9 * scale;
     road.rotation.y = i * Math.PI / 9;
   }
+  // Dress the hero city's spaceport apron with Saltline cranes & cargo stacks
+  const props = getOutpostProps();
+  const colliders = [];
+  const padR = 52 * scale;
+  placeProp(group, colliders, props, 'port_crane', padR + 28, 1.5, -24, 0.4, { seed: 301, palette: 'halcyon' });
+  placeProp(group, colliders, props, 'comms_tower', -(padR + 24), 1.5, -28, -0.3, { seed: 302, palette: 'halcyon' });
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + 0.2;
+    placeProp(group, colliders, props, i % 2 === 0 ? 'container40' : 'light_mast',
+      Math.cos(a) * (padR + 12), 1.5, Math.sin(a) * (padR + 12), -a, { seed: 310 + i, palette: 'halcyon' });
+  }
+  buildCommandPavilion(group, mats, colliders, 0, 1.5, -(padR + 14), 0);
+  group.userData.propColliders = colliders;
   group.userData.materials = Object.values(mats);
   return group;
 }
@@ -140,16 +317,18 @@ function floatingCity(site, body) {
   const mats = modulePalette();
   const rand = makeRng(`${site.seed}:aerostat`);
   const deckRadius = Math.max(180, body.R * 0.008);
+  const deckTopY = deckRadius * 0.06;
   mesh(new THREE.CylinderGeometry(deckRadius, deckRadius * 0.9, deckRadius * 0.12, 48), mats.dark, group);
   mesh(new THREE.TorusGeometry(deckRadius * 0.78, deckRadius * 0.07, 12, 72), mats.hull, group).rotation.x = Math.PI / 2;
-  addPad(group, mats, deckRadius * 0.24);
+  const padR = deckRadius * 0.24;
+  addPad(group, mats, padR);
   for (let i = 0; i < 12; i++) {
     const angle = i * Math.PI * 2 / 12;
     const radial = deckRadius * (0.48 + rand() * 0.18);
     const height = deckRadius * (0.3 + rand() * 0.9);
     const tower = mesh(new THREE.CylinderGeometry(deckRadius * 0.035, deckRadius * 0.065, height, 8),
       i % 3 === 0 ? mats.glass : mats.ceramic, group,
-      new THREE.Vector3(Math.cos(angle) * radial, height / 2 + deckRadius * 0.06, Math.sin(angle) * radial));
+      new THREE.Vector3(Math.cos(angle) * radial, height / 2 + deckTopY, Math.sin(angle) * radial));
     tower.rotation.y = angle;
   }
   for (let i = 0; i < 6; i++) {
@@ -160,6 +339,27 @@ function floatingCity(site, body) {
     glow.position.y = -deckRadius * 0.38;
     glow.rotation.x = Math.PI;
   }
+  // Dress the aerostat flight deck with Saltline & Golden Hour props
+  const props = getOutpostProps();
+  const furn = getOutpostFurniture();
+  const colliders = [];
+  placeProp(group, colliders, props, 'comms_tower', padR + 18, deckTopY, -16, 0.3, { seed: 401, palette: 'halcyon' });
+  placeProp(group, colliders, props, 'guard_booth', padR + 8, deckTopY, 6, -Math.PI * 0.5, { seed: 402, palette: 'halcyon' });
+  placeProp(group, colliders, props, 'forklift', -(padR + 9), deckTopY, 8, 0.9, { seed: 403, palette: 'halcyon' });
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + 0.4;
+    placeProp(group, colliders, props, i % 2 === 0 ? 'light_mast' : 'container20',
+      Math.cos(a) * (padR + 11), deckTopY, Math.sin(a) * (padR + 11), -a, { seed: 410 + i, palette: 'halcyon' });
+  }
+  // Aerostat terrace lounge
+  for (let i = -1; i <= 1; i++) {
+    placeProp(group, null, furn, 'sunLounger', i * 3.2, deckTopY, padR + 10, Math.PI);
+    placeProp(group, null, furn, 'planter', i * 4.5, deckTopY, padR + 7.5, 0);
+  }
+  placeProp(group, null, furn, 'parasol', 0, deckTopY, padR + 10.5, 0);
+  buildCommandPavilion(group, mats, colliders, 0, deckTopY, -(padR + 12), 0);
+  group.userData.propColliders = colliders;
+
   group.userData.materials = Object.values(mats);
   const fill = new THREE.HemisphereLight(0x9ccde7, 0x322015, 1.35);
   fill.position.y = deckRadius;
@@ -217,6 +417,7 @@ function surfaceOutpost(site) {
   } else if (site.type === 'mining-outpost') {
     addTruss(group, mats, 180, 5).position.set(-70, 28, 30);
   }
+  dressOutpostYard(group, mats, site, 28);
   group.userData.materials = Object.values(mats);
   return group;
 }
@@ -241,9 +442,6 @@ export function createCivilizationVisual(site, body = null) {
     group.userData.planetLights = lights;
   } else if (site.type === 'hero-floating-city') {
     group = floatingCity(site, body);
-    // The synthetic habitat is already anchored in the giant's upper
-    // atmosphere. Its local radius is the physical flight deck, so keep the
-    // visible pad and the walk/landing collision surface coincident.
     orientSurface(group, site, body,
       body.type === 'artificialHabitat' ? -body.deckTop : body.atmoHeight * 0.48);
   } else if (site.type.endsWith('outpost')) {
@@ -258,10 +456,6 @@ export function createCivilizationVisual(site, body = null) {
   return group;
 }
 
-// A floating city is a real landing target rather than a flag that makes the
-// gas giant itself solid.  This compact local-gravity frame travels with the
-// parent giant and supplies the same surface contract used by walking and
-// boarding, while the atmosphere below remains non-landable.
 export class ArtificialHabitat {
   constructor(site, parentBody, positionUniv, orientation = new THREE.Quaternion()) {
     this.site = site; this.parentPlanet = parentBody; this.bodyId = `site:${site.id}`;
@@ -296,10 +490,6 @@ export class ArtificialHabitat {
   update() {}
   updateVisual() {}
   followParent() {
-    // Thruster-stabilized aerostats hold an inertial longitude instead of
-    // inheriting a gas giant's extremely fast cloud-deck rotation. This keeps
-    // approach, landing and takeoff continuous while the parent still carries
-    // the city along its orbit.
     this.posUniv.copy(this.parentPlanet.posUniv)
       .addScaledVector(this.parentDirectionWorld, this.parentDistance);
     this.frameVelocity.copy(this.parentPlanet.frameVelocity);
@@ -314,9 +504,10 @@ export class ArtificialHabitat {
 export function disposeCivilizationVisual(group) {
   const textures = new Set(), materials = new Set(), geometries = new Set();
   group.traverse((object) => {
-    if (object.geometry) geometries.add(object.geometry);
+    if (object.geometry && !object.geometry.userData?.sharedPropAsset) geometries.add(object.geometry);
     const list = Array.isArray(object.material) ? object.material : object.material ? [object.material] : [];
     for (const mat of list) {
+      if (mat.userData?.sharedPropAsset) continue;
       materials.add(mat);
       for (const value of Object.values(mat)) if (value?.isTexture) textures.add(value);
     }

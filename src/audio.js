@@ -363,32 +363,55 @@ export class FlightAudio {
   }
 
   // First-person weapon events from SurfaceWeapons (see surface-weapons.js).
-  weaponEvent(type, data = {}) {
+  weaponEvent(type, data = {}, weaponDef = null) {
     if (this.disposed || !this.ready || !this.sfx || this.paused) return;
     const jitter = () => 0.97 + Math.random() * 0.06;
+    const id = weaponDef?.id || data?.weaponId || 'PAC9';
     if (type === 'weapon:fire') {
-      this.sfx.play('rifle_shot', { pitch: jitter() });
-      // outdoor slap-back tail; quieter while aiming down sights (less of the
-      // body behind the shoulder)
-      this.sfx.play('rifle_tail_out', { gain: data.ads > 0.5 ? 0.8 : 1 });
-      if (Math.random() < 0.55) this.sfx.play('shell_bounce', { delay: 0.42 + Math.random() * 0.25, gain: 0.7, pitch: jitter() });
+      if (id === 'KR7') {
+        this.sfx.play('kr7_shot', { pitch: jitter() });
+        this.sfx.play('rifle_tail_out', { gain: data.ads > 0.5 ? 0.72 : 0.92, pitch: 0.94 });
+        if (Math.random() < 0.55) this.sfx.play('shell_bounce', { delay: 0.42 + Math.random() * 0.25, gain: 0.7, pitch: jitter() });
+      } else if (id === 'KR7_VANTAGE') {
+        this.sfx.play('suppressed_shot', { pitch: jitter() });
+        if (Math.random() < 0.6) this.sfx.play('shell_bounce', { delay: 0.40 + Math.random() * 0.22, gain: 0.62, pitch: jitter() });
+      } else if (id === 'VESPER9') {
+        this.sfx.play('vesper_shot', { pitch: jitter() });
+        if (Math.random() < 0.45) this.sfx.play('shell_bounce', { delay: 0.38 + Math.random() * 0.22, gain: 0.58, pitch: 1.08 * jitter() });
+      } else if (id === 'M12') {
+        this.sfx.play('shotgun_shot', { pitch: jitter() });
+        this.sfx.play('rifle_tail_out', { gain: 1.0, pitch: 0.74 });
+      } else if (id === 'STRIX9') {
+        this.sfx.play('pistol_shot', { pitch: jitter() });
+        this.sfx.play('rifle_tail_out', { gain: 0.48, pitch: 1.15 });
+        if (Math.random() < 0.55) this.sfx.play('shell_bounce', { delay: 0.36 + Math.random() * 0.2, gain: 0.55, pitch: 1.12 * jitter() });
+      } else {
+        this.sfx.play('rifle_shot', { pitch: jitter() });
+        this.sfx.play('rifle_tail_out', { gain: data.ads > 0.5 ? 0.8 : 1 });
+        if (Math.random() < 0.55) this.sfx.play('shell_bounce', { delay: 0.42 + Math.random() * 0.25, gain: 0.7, pitch: jitter() });
+      }
+    } else if (type === 'weapon:pump') {
+      if (data.phase === 'back') this.sfx.play('shotgun_pump_back', { pitch: jitter() });
+      else if (data.phase === 'fwd') this.sfx.play('shotgun_pump_fwd', { pitch: jitter() });
     } else if (type === 'weapon:dry') {
       this.sfx.play('rifle_dry');
     } else if (type === 'weapon:reload') {
-      if (data.phase === 'magout') this.sfx.play('reload_magout');
-      else if (data.phase === 'magin') this.sfx.play('reload_magin');
-      else if (data.phase === 'bolt') this.sfx.play('reload_bolt');
+      if (data.phase === 'shell') this.sfx.play('shotgun_shell', { pitch: jitter() });
+      else if (data.phase === 'magout') this.sfx.play('reload_magout', { pitch: id === 'STRIX9' ? 1.15 : 1.0 });
+      else if (data.phase === 'magin') this.sfx.play('reload_magin', { pitch: id === 'STRIX9' ? 1.12 : 1.0 });
+      else if (data.phase === 'bolt') {
+        this.sfx.play(id === 'STRIX9' ? 'pistol_slide' : 'reload_bolt', { pitch: jitter() });
+      }
     } else if (type === 'weapon:draw') {
       if (data.phase === 'start') {
-        // harness/sling rustle as the rifle comes up
         this.noiseBurst({ duration: 0.22, gain: 0.032, from: 620, to: 1850, q: 0.9 });
         this.tone({ from: 135, to: 195, duration: 0.14, gain: 0.025, lowpass: 520 });
       } else if (data.phase === 'rack') {
-        // drawing racks a round: the charging-handle slam, a touch lighter
-        this.sfx.play('reload_bolt', { gain: 0.85, pitch: 1.06 });
+        if (id === 'STRIX9') this.sfx.play('pistol_slide', { gain: 0.85, pitch: 1.04 });
+        else if (id === 'M12') this.sfx.play('shotgun_pump_fwd', { gain: 0.85 });
+        else this.sfx.play('reload_bolt', { gain: 0.85, pitch: 1.06 });
       }
     } else if (type === 'weapon:holster' && data.phase === 'start') {
-      // stowing the rifle onto the chest/hip sling + magnetic catch
       this.noiseBurst({ duration: 0.24, gain: 0.036, from: 1650, to: 480, q: 0.85 });
       this.tone({ from: 190, to: 82, duration: 0.16, gain: 0.042, lowpass: 440, delay: 0.14 });
     }
