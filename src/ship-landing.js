@@ -633,7 +633,7 @@ export function createHoverEntrySequence({
   const camLocal = new THREE.Vector3();
   const camLocalQuat = new THREE.Quaternion();
 
-  const duration = wasCockpit ? 1.65 : 2.25;
+  const duration = wasCockpit ? 0.55 : 1.05;
   let cockpitSignaled = wasCockpit;
 
   function step(k) {
@@ -655,7 +655,7 @@ export function createHoverEntrySequence({
       _v1.lerpVectors(camStartShipOffset, eyeLocalP, e);
       _v1.y += Math.sin(Math.PI * e) * 1.45;
       _q2.copy(camStartShipQuat).slerp(eyeLocalQ, smootherstep01(Math.pow(k, 0.90)));
-      if (!cockpitSignaled && k >= 0.80) {
+      if (!cockpitSignaled && k >= 0.96) {
         cockpitSignaled = true;
         shipView.viewMode = 'cockpit';
         shipView.viewBlend = 1;

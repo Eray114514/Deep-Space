@@ -243,6 +243,12 @@ try {
   check(canopyState.canopyVisible && canopyState.handsVisible && !canopyState.aadTriggered,
     `manual deployment raises the nine-cell wing and keeps both gloves visible ${JSON.stringify(canopyState)}`);
 
+  const yawStops = await page.evaluate(() => [360, -720, 32].map(delta => {
+    NMS.lookYaw(delta);
+    return NMS.skydiveState().headYaw * 180 / Math.PI;
+  }));
+  check(yawStops.every((angle, i) => Math.abs(angle - [32, -32, 0][i]) < .001),
+    'canopy look stops on both sides and releases immediately on reversal');
   // Look up overhead to capture the inflated wing and the loaded line groups.
   await page.evaluate(() => {
     const sd = NMS._internals;
@@ -530,9 +536,21 @@ try {
       await page.waitForFunction(() => document.getElementById('land-btn').classList.contains('hidden'));
     }
     await page.keyboard.press(key);
+    if (height === 130) {
+      await page.keyboard.press('KeyF');
+      await page.waitForFunction('NMS.state === "shipwalk"');
+      check(await page.evaluate(h => NMS.shipLandingState().hoverMode === 'high' && Math.abs(NMS.alt() - h) < 12, height),
+        'stand input during hover capture carries through to the cabin at the held altitude');
+      continue;
+    }
     await page.waitForFunction('NMS.state === "landed"', null, { timeout: 60000 });
     check(await page.evaluate(h => NMS.shipLandingState().hoverMode === 'high' && Math.abs(NMS.alt() - h) < 12, height),
       `voluntary hover preserves ${height} m over landable terrain`);
+    await page.keyboard.down('KeyW');
+    await page.waitForFunction('NMS.state === "space"');
+    await page.keyboard.up('KeyW');
+    check(await page.evaluate(h => Math.abs(NMS.alt() - h) < 15 && !NMS.shipLandingState().hoverMode, height),
+      'forward input releases high hover at the held altitude');
   }
 
   check(errors.length === 0, `no page errors ${JSON.stringify(errors.slice(0, 3))}`);

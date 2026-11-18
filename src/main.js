@@ -1663,6 +1663,8 @@ window.addEventListener('keydown', (e) => {
     if (state === 'space' && shipView.isCockpit()) {
       shipView.standUp(nav, { landed: false });
       setState('shipwalk');
+    } else if (state === 'landing' && ship.hoverMode === 'high') {
+      standAfterHover = true;
     } else if (state === 'landed' && shipView.seatT >= 1) {
       if (shipView.standUp(nav, { landed: true })) setState('shipwalk');
     } else if (state === 'shipwalk') {
@@ -1749,7 +1751,8 @@ const ui = new UI({
     if (state === 'walk') walkCtl.touchJump = down;
     if (!down || paused) return;
     if (state === 'skydive') skydiveCtl.deployParachute();
-    if (state === 'shipwalk') shipView.interact(nav);
+    if (state === 'landing' && ship.hoverMode === 'high') standAfterHover = true;
+    else if (state === 'shipwalk') shipView.interact(nav);
     else if (state === 'landed' && shipView.seatT >= 1 && shipView.standUp(nav, { landed: true })) setState('shipwalk');
   },
   onTakeoff: () => boardShip(),
@@ -2517,8 +2520,10 @@ function probeCanTripodLand(planet) {
   return _landingProbeLandable;
 }
 
+let standAfterHover = false;
+
 function enterHighHover(planet, minClearance = 92) {
-  skydiveCtl.prepareRig();
+  standAfterHover = false;
   shipView.closeRamp();
   ship.orbitalStandby = false;
   ship.hoverMode = 'high';
@@ -2564,6 +2569,8 @@ function enterHighHover(planet, minClearance = 92) {
     shipView.freePitch = 0;
     landedRequireKeyRelease = Boolean(keys.KeyW || keys.Space);
     setState('landed');
+    if (standAfterHover && shipView.standUp(nav, { landed: true })) setState('shipwalk');
+    standAfterHover = false;
   });
 }
 
@@ -2960,6 +2967,20 @@ function launchParkedShip() {
     shipView.closeRamp();
   }
   surveyUnits.recall();
+  if (ship.hoverMode === 'high') {
+    // The parked camera already owns nav.pos/quat. Release the hold in place
+    // and let normal flight input accelerate from rest at this altitude.
+    ship.landingPose = null;
+    ship.hoverMode = null;
+    ship.parkedPlanet = null;
+    ship.parkedLocal = null;
+    ship.parkedLocalQuat = null;
+    ship.parkedPosUniv = null;
+    ship.parkAmt = 0;
+    nav.vel.set(0, 0, 0);
+    setState('space');
+    return true;
+  }
   const launchGround = groundPointUnder(planet, ship.parkedLocal, new THREE.Vector3());
   const seq = createTakeoffSequence({ planet, ship, shipView, nav });
   let prevK = 0;
@@ -6737,6 +6758,7 @@ if (volumePass && bootstrapSurfacePlanet) {
   volumePass.setActivePlanet(bootstrapSurfacePlanet.isGasGiant ? null : bootstrapSurfacePlanet, nav.pos, 0);
   nodePipeline.primeCloudPrograms?.({ origin: nav.pos });
 }
+skydiveCtl.prepareRig();
 prewarmWeaponAndPostPipelines();
 prewarmLoadedShipPipelines();
 // Submit all queued async shader compilations onto ANGLE C++ worker threads
@@ -7547,6 +7569,7 @@ window.NMS = {
   exitShip: () => exitShip(),
   shipDistance: () => parkedShipDistance(),
   skydiveState: () => ({
+    headYaw: skydiveCtl.yaw - skydiveCtl.glideYaw,
     active: skydiveCtl.active,
     phase: skydiveCtl.phase,
     agl: +skydiveCtl.agl.toFixed(2),

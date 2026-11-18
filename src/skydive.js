@@ -215,6 +215,10 @@ export class SkydiveController {
   }
 
   updateQuat() {
+    if (this.phase === 'canopy') {
+      const headLimit = THREE.MathUtils.degToRad(32);
+      this.yaw = this.glideYaw + clamp(this.yaw - this.glideYaw, -headLimit, headLimit);
+    }
     _u.copy(this.posLocal).normalize();
     this.frame(_u, _east, _north);
     _fwd.copy(_north).multiplyScalar(Math.cos(this.yaw)).addScaledVector(_east, Math.sin(this.yaw));
