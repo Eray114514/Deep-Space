@@ -80,24 +80,43 @@ export class FlightAudio {
 
     this.engineFilter = ctx.createBiquadFilter();
     this.engineFilter.type = 'lowpass';
-    this.engineFilter.frequency.value = 520;
-    this.engineFilter.Q.value = 0.9;
+    this.engineFilter.frequency.value = 230;
+    this.engineFilter.Q.value = 0.1;
     this.engineFilter.connect(this.engineBus);
 
-    this.engine = ctx.createOscillator();
-    this.engine.type = 'sawtooth';
-    this.engine.frequency.value = 42;
-    this.engineGain = ctx.createGain();
-    this.engineGain.gain.value = 0.16;
-    this.engine.connect(this.engineGain).connect(this.engineFilter);
-    this.engine.start();
+    // A diffuse stereo pressure bed. Keep the hull resonance centred underneath
+    // it, so thrust can open up the sound without a rotor-like pitch sweep.
+    const driveRng = makeRng('halcyon:drive-pressure:v1');
+    const length = ctx.sampleRate * 8;
+    const overlap = Math.round(ctx.sampleRate * 0.18);
+    const pressure = ctx.createBuffer(2, length, ctx.sampleRate);
+    const memory = Math.exp(-2 * Math.PI * 320 / ctx.sampleRate);
+    const step = Math.sqrt(1 - memory * memory);
+    for (let ch = 0; ch < pressure.numberOfChannels; ch++) {
+      const channel = pressure.getChannelData(ch);
+      let sample = 0;
+      for (let i = 0; i < length + overlap; i++) {
+        sample = memory * sample + step * (driveRng() * 2 - 1);
+        if (i < length) channel[i] = sample;
+        else {
+          const j = i - length;
+          const t = j / overlap;
+          channel[j] = channel[j] * t + sample * (1 - t);
+        }
+      }
+    }
+    this.drivePressure = ctx.createBufferSource();
+    this.drivePressure.buffer = pressure;
+    this.drivePressure.loop = true;
+    this.drivePressure.connect(this.engineFilter);
+    this.drivePressure.start();
 
     this.sub = ctx.createOscillator();
-    this.sub.type = 'triangle';
-    this.sub.frequency.value = 21;
-    this.subGain = ctx.createGain();
-    this.subGain.gain.value = 0.4;
-    this.sub.connect(this.subGain).connect(this.engineFilter);
+    this.sub.type = 'sine';
+    this.sub.frequency.value = 46;
+    const resonance = ctx.createGain();
+    resonance.gain.value = 0.11;
+    this.sub.connect(resonance).connect(this.engineBus);
     this.sub.start();
 
     this.noiseBuffer = ctx.createBuffer(1, ctx.sampleRate * 4, ctx.sampleRate);
@@ -283,8 +302,10 @@ export class FlightAudio {
       this.tone({ from: 92, to: 146, duration: 0.55, gain: 0.13, lowpass: 1100 });
       this.tone({ from: 184, to: 292, duration: 0.72, gain: 0.075, delay: 0.1, lowpass: 1700 });
     } else if (kind === 'boost') {
-      this.noiseBurst({ duration: 0.72, gain: 0.19, from: 360, to: 2300, q: 0.5 });
-      this.tone({ from: 48, to: 118, duration: 0.62, gain: 0.2, type: 'sawtooth', lowpass: 1500 });
+      // A short intake, then the weight of the drive engaging. The held
+      // sound comes from the continuous bed and can decay on a quick tap.
+      this.noiseBurst({ duration: 0.30, gain: 0.076, from: 430, to: 940, q: 0.55 });
+      this.tone({ from: 74, to: 42, duration: 0.48, gain: 0.078, type: 'sine', delay: 0.055 });
     } else if (kind === 'pulse') {
       // inhale -> low thump on the fold -> airy release; a charged fold is
       // deeper, louder and longer
@@ -465,10 +486,9 @@ export class FlightAudio {
       this.jumpWind.update(speed, canopy, cloud, brake, paused);
     } else this.jumpWind?.release();
     set(this.master.gain, active * 0.34, 0.05);
-    set(this.engineBus.gain, active * (flight ? 0.23 + speedK * 0.34 + boostK * 0.2 : jumping ? 0 : 0.018), 0.1);
-    set(this.engine.frequency, 38 + speedK * 92 + boostK * 42, 0.06);
-    set(this.sub.frequency, 19 + speedK * 40 + boostK * 15, 0.08);
-    set(this.engineFilter.frequency, 390 + speedK * 1750 + boostK * 1350, 0.07);
+    set(this.engineBus.gain, active * (flight ? 0.065 + speedK * 0.065 + boostK * 0.070 : 0),
+      boostK ? 0.22 : 0.38);
+    set(this.engineFilter.frequency, underwater ? 150 : 220 + speedK * 190 + boostK * 540, 0.32);
     set(this.airGain.gain, jumping ? 0 : active * atmosphere * (0.02 + speedK * 0.25 + boostK * 0.12), 0.1);
     set(this.airFilter.frequency, 480 + speedK * 3200 + boostK * 1200, 0.08);
     set(this.warpGain.gain, active * warpK * 0.26, 0.05);
@@ -483,7 +503,6 @@ export class FlightAudio {
     const waterK = clamp01(water);
     set(this.waterGain.gain, active * waterK * (state === 'walk' ? 0.12 : 0.22), 0.09);
     set(this.waterFilter.frequency, underwater ? 260 : 680 + waterK * 1700, 0.1);
-    set(this.engineFilter.frequency, underwater ? 240 : 390 + speedK * 1750 + boostK * 1350, 0.07);
 
     if (this.lastState !== null && state !== this.lastState) {
       if (state === 'landing') this.cue('landing');
@@ -525,7 +544,7 @@ export class FlightAudio {
       if (!node) return;
       try { node.stop(); } catch { /* already stopped or never started */ }
     };
-    stop(this.engine);
+    stop(this.drivePressure);
     stop(this.sub);
     stop(this.warpTone);
     stop(this.chargeOsc);
