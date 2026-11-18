@@ -1,14 +1,11 @@
-// First-person skydiving and ram-air parafoil controller (HALO / rugged-terrain
-// hover jump). Operates in planet-local coordinates so planet orbit and axial
-// rotation never introduce drift, and renders an overhead 7-cell ribbed
-// parafoil canopy with suspension lines and steering toggles on FOREGROUND_LAYER.
-
 import * as THREE from 'three';
 import { keys } from './controls.js';
-import { FOREGROUND_LAYER } from './render-layers.js';
+import { createSkydiveRig } from './skydive-rig.js';
 
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+const _horizontal = new THREE.Vector3();
 
 const _u = new THREE.Vector3();
 const _east = new THREE.Vector3();
@@ -33,282 +30,17 @@ function smootherstep01(t) {
   return x * x * x * (x * (x * 6 - 15) + 10);
 }
 
-/**
- * Build a 7-cell arched ram-air parafoil wing + ribs + 14 suspension lines +
- * left/right steering toggles, using a self-lit ripstop nylon shader (no scene
- * light dependencies, keeping world shader keys untouched).
- */
-function buildParafoilRig() {
-  const root = new THREE.Group();
-  root.name = 'halcyon-parafoil-rig';
-  root.visible = false;
-
-  const canopyGroup = new THREE.Group();
-  root.add(canopyGroup);
-
-  const cells = 7;
-  const span = 4.85;
-  const chord = 1.84;
-  const archDrop = 0.64;
-  const baseHeight = 4.35;
-  const segX = cells * 6;
-  const segZ = 10;
-
-  const positions = [];
-  const normals = [];
-  const colors = [];
-  const indices = [];
-
-  const cWhite = new THREE.Color(0xdce4ec);
-  const cOrange = new THREE.Color(0xe85d1a);
-  const cSlate = new THREE.Color(0x27323d);
-  const cRib = new THREE.Color(0x1b232c);
-
-  const airfoilProfile = (v, upper) => {
-    // v in [0..1] from leading edge (-Z) to trailing edge (+Z)
-    const camber = Math.sin(Math.PI * Math.pow(v, 0.78)) * 0.13;
-    const thick = Math.sin(Math.PI * Math.pow(v, 0.62)) * (1 - 0.55 * v) * 0.115;
-    return upper ? camber + thick : camber - thick * 0.38;
-  };
-
-  const canopyPoint = (u, v, upper, cellBillow = 1) => {
-    // u in [-0.5..0.5] across span, v in [0..1] front-to-back
-    const x = u * span;
-    const archAngle = u * 0.62;
-    const cellU = (u + 0.5) * cells;
-    const cellFrac = cellU - Math.floor(cellU);
-    const puff = Math.sin(Math.PI * clamp(cellFrac, 0, 1)) * 0.042 * (upper ? 1 : 0.35) * cellBillow;
-    const profY = airfoilProfile(v, upper) + puff;
-    const y = baseHeight - Math.sin(archAngle) * Math.sin(archAngle) * archDrop / 0.36 + profY;
-    const z = (v - 0.56) * chord;
-    return [x, y, z];
-  };
-
-  const pushShell = (upper) => {
-    const baseVertex = positions.length / 3;
-    for (let iz = 0; iz <= segZ; iz++) {
-      const v = iz / segZ;
-      for (let ix = 0; ix <= segX; ix++) {
-        const u = ix / segX - 0.5;
-        const [x, y, z] = canopyPoint(u, v, upper, 1);
-        positions.push(x, y, z);
-        const nx = -u * 0.55 * (upper ? 1 : -1);
-        const ny = upper ? 1 : -1;
-        const nz = (v - 0.35) * 0.25 * (upper ? 1 : -1);
-        const inv = 1 / Math.hypot(nx, ny, nz);
-        normals.push(nx * inv, ny * inv, nz * inv);
-
-        const cellIdx = Math.min(cells - 1, Math.floor((u + 0.5) * cells));
-        let col = cWhite;
-        if (cellIdx === 0 || cellIdx === cells - 1) col = cOrange;
-        else if (v < 0.20) col = cSlate;
-        else if (cellIdx === 3 && v > 0.68) col = cOrange;
-        colors.push(col.r, col.g, col.b);
-      }
-    }
-    const row = segX + 1;
-    for (let iz = 0; iz < segZ; iz++) {
-      for (let ix = 0; ix < segX; ix++) {
-        const a = baseVertex + iz * row + ix;
-        const b = a + 1;
-        const c = a + row;
-        const d = c + 1;
-        if (upper) indices.push(a, c, b, b, c, d);
-        else indices.push(a, b, c, b, d, c);
-      }
-    }
-  };
-
-  pushShell(true);
-  pushShell(false);
-
-  // Internal vertical airfoil ribs between the 7 cells.
-  for (let r = 0; r <= cells; r++) {
-    const u = r / cells - 0.5;
-    const baseVertex = positions.length / 3;
-    for (let iz = 0; iz <= segZ; iz++) {
-      const v = iz / segZ;
-      const top = canopyPoint(u, v, true, 0);
-      const bot = canopyPoint(u, v, false, 0);
-      positions.push(top[0], top[1], top[2], bot[0], bot[1], bot[2]);
-      normals.push(1, 0, 0, 1, 0, 0);
-      colors.push(cRib.r, cRib.g, cRib.b, cRib.r, cRib.g, cRib.b);
-    }
-    for (let iz = 0; iz < segZ; iz++) {
-      const a = baseVertex + iz * 2;
-      indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-      indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
-    }
-  }
-
-  const canopyGeo = new THREE.BufferGeometry();
-  canopyGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  canopyGeo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  canopyGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  canopyGeo.setIndex(indices);
-
-  const uniforms = {
-    uSunDir: { value: new THREE.Vector3(0.4, 0.8, 0.3).normalize() },
-    uSunColor: { value: new THREE.Color(1.0, 0.96, 0.90) },
-    uSkyColor: { value: new THREE.Color(0.38, 0.52, 0.72) },
-    uDeploy: { value: 1.0 },
-    uTime: { value: 0.0 },
-  };
-
-  const canopyMat = new THREE.ShaderMaterial({
-    name: 'halcyon-parafoil-ripstop',
-    uniforms,
-    side: THREE.DoubleSide,
-    lights: false,
-    vertexShader: /* glsl */ `
-      attribute vec3 color;
-      uniform float uDeploy;
-      uniform float uTime;
-      varying vec3 vColor;
-      varying vec3 vWorldNormal;
-      varying vec3 vLocalPos;
-      void main() {
-        vColor = color;
-        vec3 p = position;
-        // Unfurl from overhead pack during deployment (0 -> 1)
-        float open = clamp(uDeploy, 0.04, 1.0);
-        p.x *= mix(0.14, 1.0, open);
-        p.z *= mix(0.28, 1.0, open);
-        p.y = mix(1.95, p.y, open);
-        // Subtle trailing-edge fabric flutter in the airflow
-        float flutter = sin(uTime * 19.0 + p.x * 5.2) * 0.008 * smoothstep(-0.1, 0.7, p.z);
-        p.y += flutter;
-        vLocalPos = p;
-        vWorldNormal = normalize(mat3(modelMatrix) * normal);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform vec3 uSunDir;
-      uniform vec3 uSunColor;
-      uniform vec3 uSkyColor;
-      varying vec3 vColor;
-      varying vec3 vWorldNormal;
-      varying vec3 vLocalPos;
-      void main() {
-        vec3 n = normalize(vWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
-        vec3 L = normalize(uSunDir);
-        float ndl = max(0.0, dot(n, L));
-        // Ripstop nylon backlit translucency when looking up against the sun/sky
-        float backlit = max(0.0, dot(-n, L)) * 0.52 + 0.16;
-        float grid = 0.96 + 0.04 * step(0.5, fract(vLocalPos.x * 26.0)) * step(0.5, fract(vLocalPos.z * 26.0));
-        vec3 hemi = uSkyColor * (0.36 + 0.28 * clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
-        vec3 lit = vColor * grid * (hemi + uSunColor * (ndl * 0.85 + backlit));
-        gl_FragColor = vec4(lit, 1.0);
-      }
-    `,
-  });
-
-  const canopyMesh = new THREE.Mesh(canopyGeo, canopyMat);
-  canopyMesh.frustumCulled = false;
-  canopyGroup.add(canopyMesh);
-
-  // Suspension lines converging from the 8 ribs (front & rear attachment tabs)
-  // down to upper-peripheral riser shackles. Also animate lineunfurl in sync!
-  const lineVerts = [];
-  for (let r = 0; r <= cells; r++) {
-    const u = r / cells - 0.5;
-    const side = u < -0.02 ? -1 : u > 0.02 ? 1 : (r % 2 === 0 ? -1 : 1);
-    const riser = [side * 0.44, 0.36, -0.44];
-    for (const v of [0.16, 0.82]) {
-      const attach = canopyPoint(u, v, false, 0);
-      lineVerts.push(riser[0], riser[1], riser[2], attach[0], attach[1], attach[2]);
-    }
-  }
-  const lineGeo = new THREE.BufferGeometry();
-  lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(lineVerts, 3));
-  const lineMat = new THREE.LineBasicMaterial({
-    color: 0xc2ccd6,
-    transparent: true,
-    opacity: 0.82,
-  });
-  const lines = new THREE.LineSegments(lineGeo, lineMat);
-  lines.frustumCulled = false;
-  canopyGroup.add(lines);
-
-  const makeHardwareMat = (hex) => new THREE.ShaderMaterial({
-    uniforms: {
-      uSunDir: uniforms.uSunDir,
-      uSunColor: uniforms.uSunColor,
-      uSkyColor: uniforms.uSkyColor,
-      uBaseColor: { value: new THREE.Color(hex) },
-    },
-    lights: false,
-    vertexShader: /* glsl */ `
-      varying vec3 vNormalW;
-      void main() {
-        vNormalW = normalize(mat3(modelMatrix) * normal);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform vec3 uSunDir;
-      uniform vec3 uSunColor;
-      uniform vec3 uSkyColor;
-      uniform vec3 uBaseColor;
-      varying vec3 vNormalW;
-      void main() {
-        vec3 n = normalize(vNormalW);
-        float ndl = max(0.0, dot(n, normalize(uSunDir)));
-        vec3 hemi = uSkyColor * (0.34 + 0.30 * clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
-        gl_FragColor = vec4(uBaseColor * (hemi + uSunColor * (0.14 + ndl * 0.90)), 1.0);
-      }
-    `,
-  });
-
-  // Slim woven riser straps rising from behind the shoulders to the upper corners.
-  const strapGeo = new THREE.BoxGeometry(0.022, 0.34, 0.010);
-  const strapMat = makeHardwareMat(0x232a33);
-  for (const side of [-1, 1]) {
-    const strap = new THREE.Mesh(strapGeo, strapMat);
-    strap.position.set(side * 0.40, 0.24, -0.32);
-    strap.rotation.x = -0.68;
-    strap.rotation.z = -side * 0.22;
-    strap.frustumCulled = false;
-    root.add(strap);
-  }
-
-  // Left and right steering toggle handles + brake cords framed in upper peripheral vision.
-  const toggleGeo = new THREE.TorusGeometry(0.038, 0.0085, 10, 20);
-  const toggleMat = makeHardwareMat(0xe85d1a);
-  const cordGeo = new THREE.CylinderGeometry(0.0022, 0.0022, 0.22, 6);
-  cordGeo.translate(0, 0.11, 0);
-  const cordMat = makeHardwareMat(0xd0d8e0);
-  const makeToggle = () => {
-    const g = new THREE.Group();
-    const ring = new THREE.Mesh(toggleGeo, toggleMat);
-    const cord = new THREE.Mesh(cordGeo, cordMat);
-    cord.position.set(0, 0.035, 0.008);
-    cord.rotation.z = 0.05;
-    ring.frustumCulled = false;
-    cord.frustumCulled = false;
-    g.add(ring, cord);
-    return g;
-  };
-  const toggleLeft = makeToggle();
-  const toggleRight = makeToggle();
-  toggleLeft.position.set(-0.42, 0.24, -0.46);
-  toggleRight.position.set(0.42, 0.24, -0.46);
-  root.add(toggleLeft, toggleRight);
-
-  root.traverse((obj) => obj.layers.set(FOREGROUND_LAYER));
-  return { root, canopyGroup, uniforms, toggleLeft, toggleRight };
-}
-
 export class SkydiveController {
   constructor(dom, scene, {
     onDeploy = null,
     onAadWarning = null,
+    onLoad = null,
     onLand = null,
   } = {}) {
     this.dom = dom;
     this.scene = scene;
     this.onDeploy = onDeploy;
+    this.onLoad = onLoad;
     this.onAadWarning = onAadWarning;
     this.onLand = onLand;
 
@@ -330,8 +62,9 @@ export class SkydiveController {
     this.eyeHeight = 1.70;
     this.quat = new THREE.Quaternion();
 
-    this.rig = buildParafoilRig();
-    this.scene.add(this.rig.root);
+    this.touchMove = new THREE.Vector2();
+    this.frameAxis = Y_AXIS;
+    this.rig = null;
 
     this._drag = null;
     this._onMove = (e) => {
@@ -365,9 +98,14 @@ export class SkydiveController {
   }
 
   frame(up, east, north) {
-    if (Math.abs(up.y) < 0.93) east.crossVectors(Y_AXIS, up).normalize();
-    else east.crossVectors(X_AXIS, up).normalize();
+    east.crossVectors(this.frameAxis, up).normalize();
     north.crossVectors(up, east);
+  }
+
+  prepareRig() {
+    if (this.rig) return;
+    this.rig = createSkydiveRig();
+    this.scene.add(this.rig.root);
   }
 
   enter(planet, posLocal, viewDir, initialVelLocal = null) {
@@ -379,6 +117,7 @@ export class SkydiveController {
     else this.velLocal.set(0, 0, 0);
 
     _u.copy(posLocal).normalize();
+    this.frameAxis = Math.abs(_u.y) < .93 ? Y_AXIS : X_AXIS;
     this.frame(_u, _east, _north);
     _fwd.copy(viewDir).projectOnPlane(_u).normalize();
     if (_fwd.lengthSq() < 0.05) _fwd.copy(_north);
@@ -390,9 +129,15 @@ export class SkydiveController {
     this.deployT = 0;
     this.aadTriggered = false;
     this.time = 0;
-    this.rig.root.visible = false;
+    this.dive = 0;
+    this.brakeLeft = 0;
+    this.brakeRight = 0;
+    this.sinkRate = -this.velLocal.dot(_u);
+    this.airspeed = this.velLocal.length();
+    this.prepareRig();
     this.measureClearance();
     this.updateQuat();
+    this.syncRig();
   }
 
   exit() {
@@ -400,15 +145,18 @@ export class SkydiveController {
     this.planet = null;
     this.phase = 'idle';
     this.rig.root.visible = false;
+    this.rig.canopy.visible = false;
+    this.touchMove.set(0, 0);
+    this._drag = null;
     this.airspeed = 0;
   }
 
   deployParachute({ automatic = false } = {}) {
     if (!this.active || this.phase !== 'freefall') return false;
     this.phase = 'canopy';
-    this.deployT = 0.02;
+    this.deployT = 0.001;
+    this.openSeconds = lerp(1.05, 1.52, clamp(this.airspeed / 160, 0, 1));
     this.glideYaw = this.yaw;
-    this.pitchJolt = -0.24;
     this.aadTriggered = automatic;
     this.rig.root.visible = true;
     if (automatic) this.onAadWarning?.();
@@ -430,22 +178,22 @@ export class SkydiveController {
   fovOffset() {
     if (!this.active) return 0;
     if (this.phase === 'freefall') {
-      return clamp((this.airspeed - 8) / 48, 0, 1) * 13.0;
+      return 8 * clamp((this.airspeed - 8) / 58, 0, 1) + 7 * this.dive;
     }
     const settle = smootherstep01(this.deployT);
     return lerp(11.5, 3.0, settle);
   }
 
-  interactPrompt() {
+  interactPrompt(touch = false) {
     if (!this.active) return '';
     const meters = Math.max(0, Math.round(this.agl));
-    if (this.phase === 'freefall') {
-      return `[SPACE / F] 展开滑翔翼伞 · 离地高度 ${meters} m`;
-    }
+    const altitude = `${meters} m AGL`;
+    if (this.phase === 'freefall') return `${altitude}   ·   ${touch ? '前推俯冲' : 'W 俯冲   /   SPACE 开伞'}`;
     if (this.aadTriggered && this.deployT < 0.95) {
       return `紧急自动开伞保护（AAD）已触发 · 离地 ${meters} m`;
     }
-    return `WASD 控伞滑翔（W 俯冲 · S 减速飘降 · A/D 盘旋） · 离地 ${meters} m`;
+    if (meters < 25) return `${altitude}   ·   ${touch ? '后拉' : 'S'} 拉平着陆`;
+    return `${altitude}   ·   ${touch ? '摇杆控伞' : 'A / D 控伞   ·   S 刹伞'}`;
   }
 
   updateQuat() {
@@ -455,7 +203,7 @@ export class SkydiveController {
     const tremor = this.phase === 'freefall'
       ? Math.sin(this.time * 31.0) * 0.0032 * clamp(this.airspeed / 55, 0, 1)
       : 0;
-    const effPitch = clamp(this.pitch + this.pitchJolt + tremor, -1.49, 1.47);
+    const effPitch = clamp(this.pitch + this.pitchJolt + tremor - .29 * this.dive, -1.49, 1.47);
     _viewDir.copy(_fwd).multiplyScalar(Math.cos(effPitch)).addScaledVector(_u, Math.sin(effPitch));
     _camRight.crossVectors(_viewDir, _u);
     if (_camRight.lengthSq() < 1e-6) _camRight.set(1, 0, 0);
@@ -464,43 +212,18 @@ export class SkydiveController {
     _m.makeBasis(_camRight, _camUp, _fwd.copy(_viewDir).negate());
     this.quat.setFromRotationMatrix(_m);
     if (Math.abs(this.bankRoll) > 1e-4) {
-      this.quat.multiply(_qBank.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -this.bankRoll));
+      this.quat.multiply(_qBank.setFromAxisAngle(Z_AXIS, -this.bankRoll));
     }
   }
 
-  syncCanopyRig() {
-    if (!this.active || this.phase !== 'canopy' || !this.planet) {
-      this.rig.root.visible = false;
-      return;
-    }
-    this.rig.root.visible = true;
-    this.rig.root.position.set(0, 0, 0);
-
-    _u.copy(this.posLocal).normalize();
-    this.frame(_u, _east, _north);
+  syncRig() {
     _fwd.copy(_north).multiplyScalar(Math.cos(this.glideYaw)).addScaledVector(_east, Math.sin(this.glideYaw));
     _right.crossVectors(_fwd, _u).normalize();
-    _canopyUp.copy(_u).addScaledVector(_right, Math.sin(this.bankRoll) * 0.85).normalize();
+    _canopyUp.copy(_u).addScaledVector(_right, Math.sin(this.bankRoll) * .58).normalize();
     _canopyRight.copy(_right).projectOnPlane(_canopyUp).normalize();
-    _canopyBack.crossVectors(_canopyRight, _canopyUp).normalize();
-
-    _m.makeBasis(_canopyRight, _canopyUp, _canopyBack);
-    _q.setFromRotationMatrix(_m);
-    this.rig.root.quaternion.copy(this.planet.frameOrientation).multiply(_q);
-
-    const open = smootherstep01(this.deployT);
-    this.rig.uniforms.uDeploy.value = open;
-    this.rig.uniforms.uTime.value = this.time;
-    if (this.planet.sunDirWorld) {
-      this.rig.uniforms.uSunDir.value.copy(this.planet.sunDirWorld);
-    }
-
-    const fIn = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
-    const rIn = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
-    const leftPull = clamp((fIn < 0 ? -fIn * 0.14 : 0) + (rIn < 0 ? -rIn * 0.16 : 0), 0, 0.22);
-    const rightPull = clamp((fIn < 0 ? -fIn * 0.14 : 0) + (rIn > 0 ? rIn * 0.16 : 0), 0, 0.22);
-    this.rig.toggleLeft.position.set(-0.42, 0.24 - leftPull * 0.75, -0.46);
-    this.rig.toggleRight.position.set(0.42, 0.24 - rightPull * 0.75, -0.46);
+    _canopyBack.crossVectors(_canopyRight, _canopyUp);
+    _q.setFromRotationMatrix(_m.makeBasis(_canopyRight, _canopyUp, _canopyBack));
+    this.rig.update(this, _q, this.dom.clientWidth / Math.max(1, this.dom.clientHeight));
   }
 
   update(dt) {
@@ -509,8 +232,8 @@ export class SkydiveController {
     const p = this.planet;
     const g = clamp(p.gravity || 9.8, 6.8, 14.2);
 
-    const fIn = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
-    const rIn = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+    const fIn = clamp((keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0) + this.touchMove.y, -1, 1);
+    const rIn = clamp((keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) + this.touchMove.x, -1, 1);
 
     let r = this.posLocal.length();
     _u.copy(this.posLocal).multiplyScalar(1 / Math.max(r, 1));
@@ -518,63 +241,68 @@ export class SkydiveController {
 
     // Decompose current planet-local velocity into vertical (upward) and tangent components.
     let vVert = this.velLocal.dot(_u);
-    const horizVel = _camUp.copy(this.velLocal).addScaledVector(_u, -vVert);
+    const horizVel = _horizontal.copy(this.velLocal).addScaledVector(_u, -vVert);
+    this.dive = damp(this.dive, this.phase === 'freefall' ? Math.max(fIn, 0) : 0, 2.8, dt);
 
     if (this.phase === 'freefall') {
       _fwd.copy(_north).multiplyScalar(Math.cos(this.yaw)).addScaledVector(_east, Math.sin(this.yaw));
       _right.crossVectors(_fwd, _u).normalize();
 
-      const terminalDown = fIn > 0 ? 68 : fIn < 0 ? 43 : 54;
-      vVert -= g * dt;
-      const drag = g / (terminalDown * terminalDown);
-      if (vVert < 0) {
-        vVert += drag * vVert * vVert * dt;
-      }
+      // A tucked suit trades drag for speed in thin air. Reserve the fast
+      // descent for a deliberate dive, so releasing W opens the body again.
+      const thinAir = 1 - Math.exp(-Math.max(0, this.agl) / 7800);
+      const terminalDown = 57 + thinAir * 13 + this.dive * (76 + thinAir * 148) + Math.min(0, fIn) * 15;
+      const accel = g * (1 + this.dive * 2.35);
+      vVert -= accel * dt * (1 - Math.pow(Math.max(0, -vVert) / terminalDown, 2));
       const targetHoriz = _camRight.set(0, 0, 0)
-        .addScaledVector(_fwd, fIn * 21)
+        .addScaledVector(_fwd, fIn * (21 + 19 * this.dive))
         .addScaledVector(_right, rIn * 15);
       horizVel.lerp(targetHoriz, 1 - Math.exp(-dt * 2.6));
       this.bankRoll = damp(this.bankRoll, rIn * 0.14, 5.5, dt);
       this.pitchJolt = damp(this.pitchJolt, 0, 6.0, dt);
       this.glideYaw = this.yaw;
 
-      const surfaceR = this.measureClearance();
-      // Automatic Activation Device (AAD) safety canopy deployment near ground.
-      if (this.agl <= 32 && vVert < -10) {
+      // Line stretch and deceleration consume more altitude on a fast dive.
+      if (this.agl <= Math.max(32, -vVert * 1.45 + 14) && vVert < -8) {
         this.deployParachute({ automatic: true });
-      } else {
-        void surfaceR;
       }
     }
 
     if (this.phase === 'canopy') {
-      this.deployT = Math.min(1, this.deployT + dt / 0.80);
-      this.pitchJolt = damp(this.pitchJolt, 0, 3.8, dt);
+      const previous = this.deployT;
+      this.deployT = Math.min(1, previous + dt / this.openSeconds);
+      if (previous < .46 && this.deployT >= .46) this.onLoad?.();
+      const load = THREE.MathUtils.smoothstep(this.deployT, .14, .79);
+      this.pitchJolt = .21 * Math.sin(Math.PI * load) - .041 * Math.sin(Math.PI * this.deployT * 2);
+      const flare = Math.max(0, -fIn);
+      this.brakeLeft = damp(this.brakeLeft, clamp(flare - Math.min(0, rIn), 0, 1), 4.6, dt);
+      this.brakeRight = damp(this.brakeRight, clamp(flare + Math.max(0, rIn), 0, 1), 4.6, dt);
 
       // Steering toggles yaw both the parafoil heading and the suspended jumper.
-      const turnRate = -rIn * 1.32;
+      const turnRate = (this.brakeRight - this.brakeLeft) * 1.14 * load;
       this.glideYaw += turnRate * dt;
-      this.yaw += turnRate * dt * 0.92;
-      this.bankRoll = damp(this.bankRoll, rIn * 0.32, 4.6, dt);
+      this.yaw += turnRate * dt;
+      this.bankRoll = damp(this.bankRoll, turnRate * .28, 3.7, dt);
 
       _fwd.copy(_north).multiplyScalar(Math.cos(this.glideYaw)).addScaledVector(_east, Math.sin(this.glideYaw));
-      const targetSink = fIn > 0 ? 8.8 : fIn < 0 ? 3.1 : 5.6;
-      const targetGlide = fIn > 0 ? 18.5 : fIn < 0 ? 4.2 : 11.2;
+      const brake = Math.min(this.brakeLeft, this.brakeRight);
+      const targetSink = 6.2 + 8.8 * Math.max(0, fIn) - 3.8 * brake + 2.4 * Math.abs(turnRate);
+      const targetGlide = 14.8 + 12 * Math.max(0, fIn) - 9.6 * brake;
 
-      vVert = damp(vVert, -targetSink, 4.4, dt);
+      vVert = damp(vVert, -targetSink, .12 + 3.8 * load, dt);
       const targetHoriz = _camRight.copy(_fwd).multiplyScalar(targetGlide);
-      horizVel.lerp(targetHoriz, 1 - Math.exp(-dt * 3.8));
+      horizVel.lerp(targetHoriz, 1 - Math.exp(-dt * (.25 + 2.3 * load)));
     }
 
     this.velLocal.copy(horizVel).addScaledVector(_u, vVert);
     this.airspeed = this.velLocal.length();
+    this.sinkRate = -vVert;
     this.posLocal.addScaledVector(this.velLocal, dt);
 
     r = this.posLocal.length();
     _u.copy(this.posLocal).multiplyScalar(1 / Math.max(r, 1));
-    const groundSurfaceR = p.surfaceRadius(_u);
-    const touchR = groundSurfaceR + this.eyeHeight;
-    this.agl = Math.max(0, r - groundSurfaceR);
+    const surfaceR = this.measureClearance();
+    const touchR = surfaceR + this.eyeHeight;
 
     if (r <= touchR) {
       this.posLocal.copy(_u).multiplyScalar(touchR);
@@ -595,12 +323,13 @@ export class SkydiveController {
         posLocal: landedPos,
         viewDir: landedViewDir,
         carryHoriz: landedCarry,
+        water: (p.liquid === 'water' || p.liquid === 'toxic') && surfaceR === p.seaRadius,
       });
       return;
     }
 
     this.updateQuat();
-    this.syncCanopyRig();
+    this.syncRig();
   }
 
   dispose() {
@@ -608,6 +337,9 @@ export class SkydiveController {
     this.dom.removeEventListener('pointerdown', this._onDown);
     this.dom.removeEventListener('pointerup', this._onUp);
     this.dom.removeEventListener('pointercancel', this._onUp);
-    this.scene.remove(this.rig.root);
+    if (this.rig) {
+      this.scene.remove(this.rig.root);
+      this.rig.dispose();
+    }
   }
 }

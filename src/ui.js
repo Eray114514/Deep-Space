@@ -210,9 +210,17 @@ export class UI {
 
   }
 
-  showTouchUI(show) {
+  showTouchUI(show, mode = 'walk') {
     if (!this.els.touchUI) return;
     this.els.touchUI.classList.toggle('hidden', !show);
+    if (show) {
+      const label = { landed: '起身', shipwalk: '交互', skydive: '开伞', walk: '跳跃' }[mode];
+      this.els.btnJump.classList.remove('hidden');
+      this.els.btnJump.querySelector('span').textContent = label;
+      this.els.btnJump.setAttribute('aria-label', label);
+      this.els.btnTakeoff.classList.toggle('hidden', mode !== 'walk');
+      this.els.joystick.classList.toggle('hidden', mode === 'landed');
+    }
     if (!show) {
       if (this.els.knob) this.els.knob.style.transform = '';
       if (this.cb.onJoystick) this.cb.onJoystick(0, 0);
@@ -317,9 +325,20 @@ export class UI {
   }
 
   showLand(show, text = 'LAND — walk the surface') {
+    if (!show) {
+      this.els.land.classList.add('hidden');
+      this._landHintUntil = 0;
+      return;
+    }
+    const now = performance.now();
+    if (!this._landHintUntil) this._landHintUntil = now + 5500;
+    if (now > this._landHintUntil && !window.matchMedia('(pointer: coarse)').matches
+        && !this.els.land.matches(':hover, :focus-visible')) {
+      this.els.land.classList.add('hidden');
+      return;
+    }
     this.els.land.textContent = text.startsWith('DIVE') ? '潜入海底着陆  [L]'
       : text.startsWith('HOVER_RUGGED') ? '地形崎岖 · 悬停跳伞  [L]'
-      : text.startsWith('HOVER_HALO') ? '高空悬停 · 舱门跳伞  [L]'
       : text.startsWith('LAND') ? '自动驾驶着陆  [L]'
       : text;
     this.els.land.classList.toggle('hidden', !show);

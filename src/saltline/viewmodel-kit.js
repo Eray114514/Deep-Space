@@ -276,7 +276,7 @@ export const SALTLINE_BASE_COLOURS = {
 };
 
 // ------------------------------------------------ Saltline gloved hands
-// Preserved byte-accurately from Saltline's procedural hand generator (`pac9-viewmodel.js`).
+// Saltline glove geometry, with a shared wrist, forearm and elbow for every pose.
 
 function mergeColored(list) {
   const valid = list.filter(Boolean).map((g) => {
@@ -630,7 +630,12 @@ export function buildHand(opts) {
   add('web', buildThumbWeb(new V3(opts.thumb[0][0], opts.thumb[0][1], opts.thumb[0][2]).normalize()));
 
   let forearmDir = new V3(opts.forearm[0], opts.forearm[1], opts.forearm[2]).normalize();
-  let sleeveLen = opts.sleeve || 0.36, wristZ = 0.022;
+  const wristZ = 0.022;
+  // Distances are in metres. A longer sleeve continues up the upper arm.
+  const elbowZ = wristZ + 0.245;
+  const elbowBlend = 0.034;
+  const upperArmDir = new V3().fromArray(opts.upperArm ?? [0, -.25, .97]).normalize();
+  const center = new V3(), tangent = new V3(), sectionQ = new Quat();
   let forearmQ = new Quat().setFromUnitVectors(new V3(0, 0, 1), forearmDir), identQ = new Quat(), tmpQ = new Quat();
   let bendWrist = (pt) => {
     tmpQ.slerpQuaternions(identQ, forearmQ, xl(2e-3, 0.042, pt.z));
@@ -658,7 +663,17 @@ export function buildHand(opts) {
       if (z === 5 || z === 17) d.push(z * 15 + 3.5);
     }
     d.sort((z, H) => z - H);
-    let v = d.length, g = d.indexOf(75), x = d.indexOf(255), y = new RingStrip(v), b = new V3(), m = 0.04 + sleeveLen;
+    let v = d.length, g = d.indexOf(75), x = d.indexOf(255), y = new RingStrip(v), b = new V3(), m = wristZ + (opts.sleeve ?? 0.34);
+    // Integrate the two segment directions through a rounded elbow. Rotate
+    // each cross-section with the tangent so a bent sleeve retains its volume.
+    const poseSection = (z) => {
+      const blend = um((z - elbowZ + elbowBlend) / (2 * elbowBlend));
+      const upper = Math.max(0, z - elbowZ - elbowBlend) + elbowBlend * blend * blend;
+      center.copy(forearmDir).multiplyScalar(z - wristZ - upper).addScaledVector(upperArmDir, upper);
+      center.z += wristZ;
+      tangent.copy(forearmDir).lerp(upperArmDir, blend).normalize();
+      sectionQ.setFromUnitVectors(forearmDir, tangent).multiply(forearmQ);
+    };
     let A = [[0.0415, 0], [0.04, 1], [0.044, 2], [0.049, 3], [0.055, 3], [0.061, 3], [0.0655, 4], [0.0685, 5]];
     let _ = [0.1415, 0.143, 0.157, 0.1582, 0.1662, 0.1674, 0.181, 0.1825], M = _.slice(), E = Math.ceil((m - 0.074) / 52e-4);
     for (let z = 0; z <= E; z++) {
@@ -669,6 +684,7 @@ export function buildHand(opts) {
     for (let z of M) A.push([z, 6]);
     let w = 0;
     for (let [z, H] of A) {
+      poseSection(z);
       for (let O = 0; O < v; O++) {
         let q = d[O] * Math.PI / 180, U, T = 1, D = E_;
         if (H === 0) { U = 0.0292; T = 0.4; }
@@ -680,13 +696,15 @@ export function buildHand(opts) {
         } else if (H === 4) { U = 0.0356; T = 0.55; }
         else if (H === 5) { U = 0.038; T = 0.9; }
         else {
-          let C = (z - 0.0685) / (m - 0.0685);
+          let C = um((z - 0.0685) / (elbowZ - 0.0685));
           let G = 48e-4 * Math.exp(-Math.pow((C - 0.13) / 0.11, 2));
           let j = 48e-4 * xl(0.62, 0.85, C);
           let N = Math.pow(Math.abs(Math.sin(Math.PI * z / 0.027 + 1.7 * Math.sin(q + 0.5) + 0.8 * Math.sin(2 * q + 1.3))), 0.6) * 2 - 1.25;
           let Q = Math.pow(Math.abs(Math.sin(Math.PI * z / 0.034 + 1.9 * Math.sin(q - 0.8) + 0.7 * Math.sin(2 * q))), 0.6) * 2 - 1.25;
           let K = Math.sin(z * 40 + 2 * Math.sin(q * 2 + 1)) + 0.6 * Math.sin(3 * q + z * 25);
-          U = 0.0405 + 0.012 * Math.pow(C, 0.85) + 25e-4 * Math.exp(-Math.pow((z - 0.082) / 0.012, 2)) + G * N + j * Q + 16e-4 * K;
+          const muscle = .011 * Math.exp(-Math.pow((z - .183) / .068, 2));
+          const upperArm = .017 * xl(elbowZ - .012, elbowZ + .095, z);
+          U = .0375 + muscle + upperArm + .003 * C + G * N + j * Q + .0016 * K;
           T = 0.78 + 0.26 * xl(-1.1, 0.5, (G * N + j * Q) / (G + j + 8e-4)) + 0.04 * K;
           let ie = vC(w);
           if (z > 0.1575 && z < 0.167) { D = gC; T *= 0.85 + 0.25 * ie; }
@@ -696,16 +714,15 @@ export function buildHand(opts) {
           if (O === g || O === x) { U += 19e-4; T *= 1.3; }
           else if (Math.abs(O - g) === 1 || Math.abs(O - x) === 1) T *= 0.52;
         }
-        b.set(Math.cos(q) * U, Math.sin(q) * U * 0.84, z);
+        b.set(Math.cos(q) * U, Math.sin(q) * U * 0.84, 0).applyQuaternion(sectionQ).add(center);
         y.v(b, D, T);
         w++;
       }
     }
-    for (let z = 0; z < v; z++) y.v(b.set(0, 0, m + 6e-3), E_, 0.3);
+    poseSection(m + .006);
+    for (let z = 0; z < v; z++) y.v(center, E_, 0.3);
     y.collapse();
-    let S = y.geo(true);
-    S.applyMatrix4(new Mat4().makeTranslation(0, 0, wristZ).multiply(new Mat4().makeRotationFromQuaternion(forearmQ)).multiply(new Mat4().makeTranslation(0, 0, -wristZ)));
-    add('sleeve', S);
+    add('sleeve', y.geo(true));
   }
 
   let out = {
@@ -762,6 +779,7 @@ export function createRightHandRig({
       dirInFrame(q, [-0.05, -0.2, -0.97]),
     ],
     forearm: forearm || dirInFrame(q, [0.27, -0.44, 0.86]),
+    upperArm: dirInFrame(q, [-.16, -.18, .97]),
     sleeve,
   });
 
@@ -827,6 +845,7 @@ export function createLeftHandRig({
       dirInFrame(q, [0, 0, -1], true),
     ],
     forearm: forearm || dirInFrame(q, [-0.5, -0.35, 0.79], true),
+    upperArm: dirInFrame(q, [.24, -.10, .96], true),
     sleeve,
   });
 

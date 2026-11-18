@@ -202,7 +202,8 @@ try {
   await page.keyboard.up('ShiftLeft');
 
   const freefall0 = await page.evaluate(() => NMS.skydiveState());
-  check(freefall0.active && freefall0.phase === 'freefall' && freefall0.agl > 60,
+  check(freefall0.active && freefall0.phase === 'freefall' && freefall0.agl > 60
+      && freefall0.handsVisible && !freefall0.canopyVisible,
     `running off open hover ramp enters seamless freefall ${JSON.stringify(freefall0)}`);
   await page.evaluate('NMS.lookPitch(-35)');
   await page.waitForTimeout(700);
@@ -215,9 +216,10 @@ try {
   await page.keyboard.press('Space');
   await page.waitForFunction('NMS.skydiveState().phase === "canopy" && NMS.skydiveState().deployT > 0.65', null, { timeout: 20000 });
   const canopyState = await page.evaluate(() => NMS.skydiveState());
-  check(canopyState.canopyVisible, `7-cell parafoil canopy deploys overhead ${JSON.stringify(canopyState)}`);
+  check(canopyState.canopyVisible && canopyState.handsVisible && !canopyState.aadTriggered,
+    `manual deployment raises the nine-cell wing and keeps both gloves visible ${JSON.stringify(canopyState)}`);
 
-  // Look up overhead (+70°) to verify and capture the 7-cell parafoil canopy & suspension lines!
+  // Look up overhead to capture the inflated wing and the loaded line groups.
   await page.evaluate(() => {
     const sd = NMS._internals;
     NMS.lookPitch(120);
@@ -229,7 +231,7 @@ try {
   // Look toward the mountain horizon (-6° pitch so peripheral risers/toggles + mountain both show) and bank right!
   await page.evaluate('NMS.lookPitch(-76)');
   await page.keyboard.down('KeyD');
-  await page.waitForTimeout(550);
+  await page.waitForFunction('NMS.skydiveState().brakeRight > 0.8 && NMS.skydiveState().brakeLeft < 0.1');
   await shot('05-parafoil-glide-mountain');
   await page.keyboard.up('KeyD');
 
@@ -486,6 +488,24 @@ try {
       && lowTrace.padMin >= -0.08
       && lowTrace.bellyMax <= lowTrace.bellyFirst + 1.2,
     `ultra-low landing never sinks into terrain or balloons upward ${JSON.stringify(lowTrace)}`);
+
+  // Both voluntary entries must work over the same terrain that accepted a
+  // normal tripod landing earlier. Only the close approach has a landing hint.
+  for (const [height, key] of [[7300, 'KeyL'], [130, 'Shift+KeyL']]) {
+    await page.evaluate(({ dir, height }) => {
+      const p = NMS._planet(0);
+      const radius = p.surfaceRadius(new NMS._THREE.Vector3(...dir));
+      NMS.teleport(0, (radius + height - p.R) / p.R, { dir, horizon: true });
+    }, { dir: sites.moderate.dir, height });
+    await page.waitForFunction(h => Math.abs(NMS.alt() - h) < 5, height);
+    if (height > 420) {
+      await page.waitForFunction(() => document.getElementById('land-btn').classList.contains('hidden'));
+    }
+    await page.keyboard.press(key);
+    await page.waitForFunction('NMS.state === "landed"', null, { timeout: 60000 });
+    check(await page.evaluate(h => NMS.shipLandingState().hoverMode === 'high' && Math.abs(NMS.alt() - h) < 12, height),
+      `voluntary hover preserves ${height} m over landable terrain`);
+  }
 
   check(errors.length === 0, `no page errors ${JSON.stringify(errors.slice(0, 3))}`);
   check(shaderErrors.length === 0, `no shader errors ${JSON.stringify(shaderErrors.slice(0, 3))}`);

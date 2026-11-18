@@ -585,16 +585,13 @@ body.surface-ads #crosshair::after { opacity: 1; }
 #hint b { color: #ece8d4; font-weight: 600; }
 #hint.hint-faded { opacity: 0; }
 #land-btn {
-  pointer-events: auto; min-width: 228px; padding: 11px 20px;
-  color: var(--menu-ink); background: var(--menu-plate);
-  border: 1px solid var(--menu-line-strong); border-top: 2px solid #ece8d4;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .48);
-  cursor: pointer; font: 600 13px/1 var(--font-latin); letter-spacing: .12em;
-  transition: background .14s var(--ease-out), color .14s var(--ease-out), border-color .14s var(--ease-out), transform .14s var(--ease-out);
+  pointer-events: auto; padding: 9px 12px;
+  color: rgba(231, 239, 239, .78); background: transparent; border: 0;
+  text-shadow: var(--hud-halo); cursor: pointer;
+  font: 500 11px/1.2 var(--font-hud); letter-spacing: .08em;
 }
 #land-btn:hover, #land-btn:focus-visible {
-  color: var(--menu-select-ink); background: var(--menu-select);
-  border-color: var(--menu-select); transform: translateY(-1px); outline: 0;
+  color: var(--ship-cream); text-decoration: underline; text-underline-offset: 4px;
 }
 
 /* Contextual F/E prompt inside the HALCYON or beside exterior ramp */
@@ -606,6 +603,19 @@ body.surface-ads #crosshair::after { opacity: 1; }
   font: 600 12px/1.2 var(--font-latin); letter-spacing: .1em; white-space: nowrap;
 }
 #interact-prompt.hidden { display: none; }
+#touch-flight-menu { display: none; }
+@media (pointer: coarse) {
+  body.ui-space:not(.hero-active, .travel-cinematic, .hide-hud, .route-choice-active, .starmap-open) #touch-flight-menu:not([hidden]) {
+    display: block; position: fixed; z-index: 14; right: 15px; top: 54px;
+    width: 44px; height: 44px; color: var(--ship-cream); background: transparent;
+    border: 0; font: 600 18px/1 var(--font-hud); text-shadow: var(--hud-halo);
+  }
+}
+.ui-skydive #interact-prompt {
+  border: 0; background: none; box-shadow: none; color: var(--ship-cream);
+  text-shadow: var(--hud-halo); font: 500 13px/1.4 var(--font-hud); letter-spacing: .08em;
+}
+.ui-skydive #star-map-btn, .ui-skydive #brand, .ui-skydive #crosshair { display: none; }
 
 #stats { position: fixed; z-index: 12; left: 10px; bottom: 20px; display: none; color: rgba(200, 220, 220, .42); font: 9px/1.4 var(--ui-mono); white-space: pre; }
 .debug-hud #stats { display: block; }

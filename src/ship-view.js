@@ -115,6 +115,7 @@ export class ShipView {
 
     /* interior walk state (ship-local) */
     this.walkPos = new THREE.Vector3(0, 0, -6.4);
+    this.touchMove = new THREE.Vector2();
     this.walkYaw = Math.PI;
     this.walkPitch = 0;
     this.rollCarry = 0;
@@ -145,6 +146,19 @@ export class ShipView {
 
   bind() {
     const dom = this.camera.domElement ?? document.querySelector('canvas');
+    let cabinTouch = null;
+    dom.addEventListener('pointerdown', e => {
+      if (this.shipwalk && e.pointerType === 'touch' && cabinTouch === null) {
+        cabinTouch = e.pointerId;
+        dom.setPointerCapture(cabinTouch);
+      }
+    });
+    dom.addEventListener('pointermove', e => {
+      if (!this.shipwalk || e.pointerId !== cabinTouch) return;
+      this.walkYaw -= e.movementX * .004;
+      this.walkPitch = clamp(this.walkPitch - e.movementY * .004, -1.4, 1.4);
+    });
+    dom.addEventListener('lostpointercapture', e => { if (e.pointerId === cabinTouch) cabinTouch = null; });
     document.addEventListener('mousemove', (e) => {
       if (document.pointerLockElement !== dom) return;
       if (this.shipwalk && this.seatT >= 1) {
@@ -558,7 +572,7 @@ export class ShipView {
   /** WASD + Shift sprint with room collision, wall sliding and open-ramp walkout. */
   walk(dt, landed = false) {
     if (this.seatT < 1) return;
-    let f = 0, s = 0;
+    let f = this.touchMove.y, s = this.touchMove.x;
     if (keys.KeyW) f += 1;
     if (keys.KeyS) f -= 1;
     if (keys.KeyD) s += 1;

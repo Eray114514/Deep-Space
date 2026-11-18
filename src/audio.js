@@ -4,6 +4,7 @@
 
 import { makeRng } from './rng.js';
 import { SaltlineSfx } from './saltline/sfx.js';
+import { SkydiveAudio } from './skydive-audio.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
@@ -345,13 +346,22 @@ export class FlightAudio {
       this.noiseBurst({ duration: 0.045, gain: 0.026, from: 3600, to: 1300, q: 1.25 });
     } else if (kind === 'water-splash') {
       this.noiseBurst({ duration: 0.32, gain: 0.085, from: 1600, to: 420, q: 0.48 });
+    } else if (kind === 'chute-exit') {
+      this.noiseBurst({ duration: .34, from: 550, to: 2400, gain: .26, q: .6 });
+      this.noiseBurst({ duration: .16, from: 2200, to: 570, gain: .16, delay: .14 });
     } else if (kind === 'chute-open') {
-      this.noiseBurst({ duration: 0.16, gain: 0.09, from: 2900, to: 1150, q: 0.9 });
-      this.noiseBurst({ duration: 0.48, gain: 0.22, from: 760, to: 175, q: 0.65, delay: 0.08 });
-      this.tone({ from: 96, to: 34, duration: 0.44, gain: 0.24, type: 'sine', lowpass: 240, delay: 0.09 });
+      this.noiseBurst({ duration: .15, gain: .39, from: 3400, to: 1250, q: .83 });
+      this.noiseBurst({ duration: .34, gain: .32, from: 620, to: 3100, q: .68, delay: .10 });
+    } else if (kind === 'chute-load') {
+      this.noiseBurst({ duration: .17, gain: .57, from: 1350, to: 290, q: .65 });
+      this.tone({ from: 108, to: 38, duration: .29, gain: .31, type: 'sine', lowpass: 240 });
+      this.noiseBurst({ duration: .51, gain: .31, from: 2600, to: 720, delay: .07 });
+      this.noiseBurst({ duration: .12, gain: .16, from: 2200, to: 910, delay: .23 });
     } else if (kind === 'chute-land') {
       this.noiseBurst({ duration: 0.22, gain: 0.11, from: 420, to: 120, q: 1.1 });
       this.tone({ from: 78, to: 40, duration: 0.24, gain: 0.14, lowpass: 240 });
+      this.noiseBurst({ duration: .14, from: 670, to: 190, gain: .21, delay: .115 });
+      this.noiseBurst({ duration: .65, from: 2300, to: 510, gain: .21, delay: .23 });
     } else if (kind === 'aad-warn') {
       this.tone({ from: 980, to: 980, duration: 0.09, gain: 0.09, type: 'triangle', lowpass: 2600 });
       this.tone({ from: 1240, to: 1240, duration: 0.11, gain: 0.10, type: 'triangle', lowpass: 2800, delay: 0.11 });
@@ -433,7 +443,8 @@ export class FlightAudio {
     } else if (lightning < 0.1) this.lightningLatched = false;
   }
 
-  update({ state, speed, atmosphere, boosting, warp, rift = 0, water = 0, underwater = false, paused }) {
+  update({ state, speed, atmosphere, boosting, warp, rift = 0, water = 0, underwater = false,
+    canopy = 0, cloud = 0, brake = 0, paused }) {
     if (this.disposed) return;
     if (!this.ready || !this.ctx) return;
     const now = this.ctx.currentTime;
@@ -446,20 +457,18 @@ export class FlightAudio {
     const riftK = clamp01(rift);
     const active = paused ? 0 : 1;
 
-    const skydiveWind = state === 'skydive'
-      ? clamp01(speed / 58)
-      : 0;
+    const jumping = state === 'skydive';
+    if (jumping) {
+      this.jumpWind ??= new SkydiveAudio(this.ctx, this.master);
+      this.jumpWind.update(speed, canopy, cloud, brake, paused);
+    } else this.jumpWind?.release();
     set(this.master.gain, active * 0.34, 0.05);
-    set(this.engineBus.gain, active * (flight ? 0.23 + speedK * 0.34 + boostK * 0.2 : 0.018), 0.1);
+    set(this.engineBus.gain, active * (flight ? 0.23 + speedK * 0.34 + boostK * 0.2 : jumping ? 0 : 0.018), 0.1);
     set(this.engine.frequency, 38 + speedK * 92 + boostK * 42, 0.06);
     set(this.sub.frequency, 19 + speedK * 40 + boostK * 15, 0.08);
     set(this.engineFilter.frequency, 390 + speedK * 1750 + boostK * 1350, 0.07);
-    set(this.airGain.gain, active * (state === 'skydive'
-      ? 0.04 + skydiveWind * 0.24
-      : atmosphere * (0.02 + speedK * 0.25 + boostK * 0.12)), 0.1);
-    set(this.airFilter.frequency, state === 'skydive'
-      ? 520 + skydiveWind * 2350
-      : 480 + speedK * 3200 + boostK * 1200, 0.08);
+    set(this.airGain.gain, jumping ? 0 : active * atmosphere * (0.02 + speedK * 0.25 + boostK * 0.12), 0.1);
+    set(this.airFilter.frequency, 480 + speedK * 3200 + boostK * 1200, 0.08);
     set(this.warpGain.gain, active * warpK * 0.26, 0.05);
     set(this.warpFilter.frequency, 900 + warpK * 4800, 0.05);
     set(this.warpToneGain.gain, active * warpK * 0.12, 0.07);
@@ -525,6 +534,7 @@ export class FlightAudio {
     stop(this.warpNoise);
     stop(this.riftNoise);
     stop(this.waterNoise);
+    this.jumpWind?.release();
     const ctx = this.ctx;
     this.ctx = null;
     if (ctx && ctx.state !== 'closed') {

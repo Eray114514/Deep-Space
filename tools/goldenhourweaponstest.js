@@ -136,13 +136,21 @@ function stepSeconds(vm, seconds, input = {}, dt = 1 / 120) {
 // ----------------------------------------------------------------------------
 console.log('\n--- 1. Saltline Viewmodel Kit ---');
 {
+  const parts = [];
   const hand = buildHand({
     mirror: false,
     fingers: [[0.2, 0.3, 0.2, 0], [0.6, 1.5, 0.8, 0], [0.65, 1.5, 0.8, 0], [0.7, 1.5, 0.8, 0]],
     thumb: [[-0.5, -0.2, -0.8], [-0.3, -0.2, -0.9], [0, -0.1, -1]],
-    forearm: [0.2, -0.4, 0.88],
+    forearm: [0, 0, 1],
+    upperArm: [1, 0, 0],
+    sleeve: .39,
+    debugParts: parts,
   });
   check(hand.fabric.attributes.position.count > 1000, `buildHand produces detailed gloved geometry (${hand.fabric.attributes.position.count} verts)`);
+  const sleeve = parts.find(([name]) => name === 'sleeve')[1].attributes.position;
+  const end = new THREE.Vector3().fromBufferAttribute(sleeve, sleeve.count - 1);
+  check(Math.abs(end.z - (.022 + .245)) < .002 && end.x > .14,
+    'additional sleeve length follows the upper arm after a 24.5 cm forearm');
 
   const holoLens = buildOpticLens(rectWindowPoly(0, 0.038, 0.029, 0.021), 0.001, { reticle: 'holo' });
   setLensEnvironment({

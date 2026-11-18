@@ -891,6 +891,9 @@ export class LiteCloudPass extends Pass {
     this.scale = scale;
     this.maxPixels = maxPixels;
     this.activePlanet = null;
+    this.sampleListener = false;
+    this.listenerDensity = 0;
+    this.listenerProbe = null;
     this.visualEnabled = true;
     this.shadowsEnabled = true;
     this.terrainLift = true;
@@ -1192,6 +1195,40 @@ export class LiteCloudPass extends Pass {
     this.shadowQuad.render(renderer);
   }
 
+  // Sample the same eroded, moving medium as the beauty pass at the jumper's
+  // ears. A weather column alone cannot tell a clear hole from a cloud core.
+  #sampleListener(renderer, planet, u) {
+    const r = u.uCameraLocal.value.length();
+    if (!this.sampleListener || r < u.uShellBase.value || r > u.uShellTop.value) {
+      this.listenerDensity = 0;
+      return;
+    }
+    if (!this.listenerProbe) {
+      const mat = new THREE.ShaderMaterial({
+        name: 'Cloud density at listener', uniforms: u, vertexShader,
+        depthTest: false, depthWrite: false, blending: THREE.NoBlending,
+        fragmentShader: `${cloudFieldGLSL}
+          uniform vec3 uCameraLocal;
+          void main() {
+            vec2 weather = weatherAt(uCameraLocal);
+            float d = cloudDensity(uCameraLocal, weather.x, 2, 1.0, weather.y);
+            gl_FragColor = vec4(d, 0., 0., 1.);
+          }`,
+      });
+      this.listenerProbe = { target: new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false }),
+        quad: new FullScreenQuad(mat), pixel: new Uint8Array(4), at: -Infinity, busy: false };
+    }
+    const probe = this.listenerProbe, now = performance.now();
+    if (probe.busy || now - probe.at < 160) return;
+    probe.at = now;
+    probe.busy = true;
+    renderer.setRenderTarget(probe.target);
+    probe.quad.render(renderer);
+    renderer.readRenderTargetPixelsAsync(probe.target, 0, 0, 1, 1, probe.pixel).then(() => {
+      if (this.activePlanet === planet && this.sampleListener) this.listenerDensity = probe.pixel[0] / 255;
+    }).catch(() => { this.listenerDensity = 0; }).finally(() => { probe.busy = false; });
+  }
+
   render(renderer, writeBuffer, readBuffer) {
     const planet = this.activePlanet;
     const u = this.marchMaterial.uniforms;
@@ -1203,6 +1240,7 @@ export class LiteCloudPass extends Pass {
     u.uFrame.value = this.temporalEnabled || this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
 
     u.uEvolve.value = ((planet.weatherHours || 0) / EVOLVE_HOURS) % 1024;
+    if (this.sampleListener || this.listenerDensity) this.#sampleListener(renderer, planet, u);
     u.uShadowOn.value = this.shadowsEnabled ? 1 : 0;
     if (this.shadowsEnabled) this.#renderShadowMap(renderer, planet);
 
@@ -1310,6 +1348,12 @@ export class LiteCloudPass extends Pass {
   }
 
   dispose() {
+    if (this.listenerProbe) {
+      this.listenerProbe.target.dispose();
+      this.listenerProbe.quad.material.dispose();
+      this.listenerProbe.quad.dispose();
+      this.listenerProbe = null;
+    }
     if (this.activePlanet) this.activePlanet.liteCloudActive = false;
     this.activePlanet = null;
     this.target.dispose();

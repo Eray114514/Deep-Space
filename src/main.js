@@ -152,9 +152,12 @@ const IS_TOUCH = qs.get('desktop') !== '1'
 // Hybrid Windows devices can report touch support while the player is using a
 // mouse. Pointer Lock follows the active input modality, not hardware support.
 let pointerLockInput = !IS_TOUCH;
+let touchHints = IS_TOUCH && window.matchMedia('(pointer: coarse)').matches;
 window.addEventListener('pointerdown', (event) => {
   pointerLockInput = event.pointerType !== 'touch';
+  touchHints = !pointerLockInput;
 }, true);
+window.addEventListener('keydown', () => { touchHints = false; }, true);
 
 // ---- renderer ---------------------------------------------------------------
 const rendererOptions = {
@@ -1073,13 +1076,17 @@ const shipView = new ShipView(ship, camera);
 shipView.onHint = (text) => { if (!paused && !starMap?.isOpen) ui.setHint(text, true); };
 shipView.onStep = () => audio.cabinStep();
 const skydiveCtl = new SkydiveController(renderer.domElement, scene, {
-  onDeploy: () => audio.cue('chute-open'),
+  onDeploy: () => {
+    audio.cue('chute-open');
+    if (IS_TOUCH) ui.els.btnJump.classList.add('hidden');
+  },
+  onLoad: () => audio.cue('chute-load'),
   onAadWarning: () => audio.cue('aad-warn'),
-  onLand: ({ planet, posLocal, viewDir, carryHoriz }) => {
-    audio.cue('chute-land');
+  onLand: ({ planet, posLocal, viewDir, carryHoriz, water }) => {
+    audio.cue(water ? 'water-splash' : 'chute-land');
     walkCtl.enter(planet, posLocal, viewDir);
     walkCtl.hSpeed.copy(carryHoriz);
-    walkCtl.grounded = true;
+    walkCtl.grounded = !water;
     planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(planet.frameOrientation).multiply(walkCtl.quat);
     setState('walk');
@@ -1636,7 +1643,7 @@ window.addEventListener('keydown', (e) => {
     beginSelectedRift();
     return;
   }
-  if (e.code === 'KeyL') tryLand();
+  if (!e.repeat && e.code === 'KeyL') tryLand({ hover: e.shiftKey });
   if (!e.repeat && e.code === 'Space' && state === 'space') {
     e.preventDefault();
     triggerPulse({ hold: true });
@@ -1736,8 +1743,19 @@ const ui = new UI({
   onRouteWarp: () => beginSelectedWarp(),
   onRouteRift: () => beginSelectedRift(),
   onRouteCancel: () => clearPendingRoute(),
-  onJoystick: (x, y) => { walkCtl.touchMove.x = x; walkCtl.touchMove.y = y; },
-  onJump: (down) => { walkCtl.touchJump = down; },
+  onJoystick: (x, y) => {
+    walkCtl.touchMove.x = x;
+    walkCtl.touchMove.y = y;
+    skydiveCtl.touchMove.set(x, y);
+    shipView.touchMove.set(x, y);
+  },
+  onJump: (down) => {
+    if (state === 'walk') walkCtl.touchJump = down;
+    if (!down || paused) return;
+    if (state === 'skydive') skydiveCtl.deployParachute();
+    if (state === 'shipwalk') shipView.interact(nav);
+    else if (state === 'landed' && shipView.seatT >= 1 && shipView.standUp(nav, { landed: true })) setState('shipwalk');
+  },
   onTakeoff: () => boardShip(),
   onApplyGraphics: (settings) => {
     writeGraphicsSettings(settings);
@@ -1784,6 +1802,13 @@ const pauseOverlay = document.getElementById('pause-overlay');
 const pausePanel = pauseOverlay.querySelector('.pause-panel');
 const pauseStatus = document.getElementById('pause-status');
 const resumeButton = document.getElementById('resume-btn');
+const hoverButton = document.getElementById('pause-hover-btn');
+document.getElementById('touch-flight-menu').addEventListener('click', () => {
+  if (state === 'space' && !starMap?.isOpen) pauseGame();
+});
+hoverButton.addEventListener('click', async () => {
+  if (paused && await resumeGame()) tryLand({ hover: true });
+});
 
 function nearbyBlackHole() {
   let closest = null;
@@ -1977,6 +2002,8 @@ function pauseGame() {
   presentedFrames.setPaused(true,performance.now());
   spaceCtl.enabled = false;
   pauseOverlay.classList.remove('hidden');
+  hoverButton.disabled = !canStartJumpHover();
+  hoverButton.classList.toggle('hidden', hoverButton.disabled);
   ui.pauseMenu?.reset({ focus: true });
   pausePanel.classList.remove('is-acquiring');
   pauseStatus.textContent = '指针已释放 · 点击继续以重新接管视角';
@@ -2152,6 +2179,7 @@ let recallInFlight = false;
 
 function setState(s) {
   state = s;
+  document.getElementById('touch-flight-menu').hidden = s !== 'space';
   if (s !== 'space' && riftRoute && !riftRoute.arrived) cancelRiftRoute();
   document.body.classList.toggle('walking', s === 'walk');
   if (s !== 'space') {
@@ -2161,8 +2189,8 @@ function setState(s) {
     spaceCtl.clearTransientInput();
   }
   spaceCtl.enabled = s === 'space' && !starMap?.isOpen;
-  ui.setCrosshair(s === 'walk' || s === 'space' || s === 'skydive');
-  ui.showTouchUI(IS_TOUCH && s === 'walk');
+  ui.setCrosshair(s === 'walk' || s === 'space');
+  ui.showTouchUI(IS_TOUCH && ['walk', 'skydive', 'shipwalk', 'landed'].includes(s), s);
   walkDial?.setActive(s === 'walk');
   if (s === 'walk') dialAcc = 1;
   // Landing, parked cockpit/chase, cabin walk, warp and takeoff all preserve
@@ -2191,7 +2219,7 @@ function setState(s) {
   const hints = IS_TOUCH ? {
     space: spaceControlHint(),
     flyto: '自动接近中…',
-    landing: ship.hoverMode === 'high' ? '正在进入低空定高悬停…' : '正在平稳降落…',
+    landing: ship.hoverMode === 'high' ? '正在进入定高悬停…' : '正在平稳降落…',
     landed: '',
     skydive: '',
     walk: '<b>摇杆</b> 移动 · <b>拖动</b> 观察 · <b>空格</b> 跳跃 · 走至尾舱按 <b>F</b> 开门登舰',
@@ -2203,7 +2231,7 @@ function setState(s) {
     space: spaceControlHint(),
     flyto: '自动接近中… <b>Esc</b> 中止',
     landing: ship.hoverMode === 'high'
-      ? '地形崎岖 · 正在进入定高悬停…'
+      ? '正在进入定高悬停…'
       : (shipView.isCockpit() ? '第一人称着陆程序中… <b>RMB</b> 自由环视' : '自动着陆程序中…'),
     landed: '',
     skydive: '',
@@ -2430,7 +2458,14 @@ function parkShipNear(planet, landDir) {
 }
 
 const LANDING_CLEARANCE_METERS = 420;
-const HALO_CLEARANCE_METERS = 1650;
+
+function canStartJumpHover() {
+  if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false
+    || pulseBurst || riftRoute || starMap?.isOpen) return false;
+  const agl = landingClearanceMeters(nearest);
+  const datum = nav.pos.distanceTo(nearest.posUniv) - nearest.R;
+  return agl >= 45 && (agl < LANDING_CLEARANCE_METERS || datum < nearest.atmoHeight);
+}
 
 function hasDiveableOcean(planet) {
   return Boolean(planet?.hasLiquid
@@ -2483,6 +2518,7 @@ function probeCanTripodLand(planet) {
 }
 
 function enterHighHover(planet, minClearance = 92) {
+  skydiveCtl.prepareRig();
   shipView.closeRamp();
   ship.orbitalStandby = false;
   ship.hoverMode = 'high';
@@ -2535,25 +2571,26 @@ function enterHighHover(planet, minClearance = 92) {
 // - Below 420 m over landable terrain: 3-pad tripod landing into `landed`.
 // - Below 420 m over steep/rugged terrain (> 15.5° or rocky): enters stationary
 //   level hover (`hoverMode = 'high'`) so the pilot can open the rear ramp and skydive!
-// - Between 420 m and 1650 m: enters high-altitude HALO jump hover!
-function tryLand() {
+// - Above the landing band L arrests flight at the pilot's chosen altitude.
+//   Shift+L (also in the pause menu) requests that same hover over a low pad.
+function tryLand({ hover = false } = {}) {
   if (state !== 'space' || !nearest || nearest.isGasGiant || nearest.landable === false
-    || nav.vel.length() >= 4000) return;
+    || paused || starMap?.isOpen || pulseBurst || riftRoute) return;
   const clearance = landingClearanceMeters(nearest, nav.pos, nearestAlt);
-  if (clearance >= HALO_CLEARANCE_METERS) return;
+  const jump = hover || clearance >= LANDING_CLEARANCE_METERS;
+  if (jump ? !canStartJumpHover() : nav.vel.length() >= 4000) return;
 
   const planet = nearest;
-  if (!window.NMS_NOLOCK && pointerLockInput) renderer.domElement.requestPointerLock();
+  if (!window.NMS_NOLOCK && pointerLockInput && !document.pointerLockElement) requestGameplayPointerLock();
+
+  if (jump) {
+    enterHighHover(planet, clearance);
+    return;
+  }
 
   const overOpenWater = Boolean(hasDiveableOcean(planet)
     && (waterSurfaceHeight < 2
       || (nav.pos.distanceTo(planet.posUniv) - planet.seaRadius) < nearestAlt - 1.5));
-
-  if (clearance >= LANDING_CLEARANCE_METERS) {
-    if (overOpenWater) return;
-    enterHighHover(planet, Math.max(96, clearance));
-    return;
-  }
 
   const landing = evaluateFlightLanding(planet, overOpenWater);
 
@@ -2721,8 +2758,8 @@ function handOffRampExitToSurface() {
   const localCamQ = _q.copy(planet.frameOrientation).invert().multiply(nav.quat).normalize();
   const viewDir = new THREE.Vector3(0, 0, -1).applyQuaternion(localCamQ).normalize();
 
-  const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
-  const s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+  const f = clamp((keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0) + shipView.touchMove.y, -1, 1);
+  const s = clamp((keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) + shipView.touchMove.x, -1, 1);
   const run = keys.ShiftLeft || keys.ShiftRight;
   const spd = run ? 4.8 : 2.2;
   const dirX = Math.sin(shipView.walkYaw), dirZ = Math.cos(shipView.walkYaw);
@@ -2741,6 +2778,7 @@ function handOffRampExitToSurface() {
     const aftPush = new THREE.Vector3(0, 1.2, 6.4).applyQuaternion(ship.parkedLocalQuat);
     carryLocal.add(aftPush);
     skydiveCtl.enter(planet, posLocal, viewDir, carryLocal);
+    audio.cue('chute-exit');
     planet.localPositionToWorld(skydiveCtl.posLocal, nav.pos);
     nav.quat.copy(planet.frameOrientation).multiply(skydiveCtl.quat);
     setState('skydive');
@@ -5991,14 +6029,12 @@ function frame(rafTs) {
   const overWaterColumn = Boolean(nearest && hasDiveableOcean(nearest)
     && (waterSurfaceHeight < 2
       || (nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius) < nearestAlt - 1.5));
-  const inLowLandBand = clearanceForLand < LANDING_CLEARANCE_METERS;
-  const inHaloBand = !inLowLandBand && !overWaterColumn && clearanceForLand < HALO_CLEARANCE_METERS;
+  const inLowLandBand = clearanceForLand < LANDING_CLEARANCE_METERS && nav.vel.length() < 90;
   const overOpenWater = Boolean(inLowLandBand && overWaterColumn);
   let landPromptCode = 'LAND — walk the surface (L)';
   if (overOpenWater) landPromptCode = 'DIVE — walk the seabed (L)';
   else if (inLowLandBand && !probeCanTripodLand(nearest)) landPromptCode = 'HOVER_RUGGED';
-  else if (inHaloBand) landPromptCode = 'HOVER_HALO';
-  ui.showLand(inLowLandBand || inHaloBand, landPromptCode);
+  ui.showLand(!paused && inLowLandBand, landPromptCode);
 
   if (state === 'walk') {
     if (exteriorRampPrompt()) {
@@ -6227,7 +6263,7 @@ function frame(rafTs) {
   applyTransitVisuals(dt);
   // contextual F/E prompt inside the hull, in the pilot's seat, skydiving, or at the exterior ramp
   const interactText = paused ? ''
-    : state === 'skydive' ? skydiveCtl.interactPrompt()
+    : state === 'skydive' ? skydiveCtl.interactPrompt(touchHints)
     : state === 'shipwalk' ? shipView.interactPrompt(shipLanded)
     : state === 'landed' && shipView.seatT >= 1
       ? (ship.hoverMode === 'high'
@@ -6245,10 +6281,17 @@ function frame(rafTs) {
   }
   nearest?.liquidMat?.userData?.syncOceanField?.();
   prewarmLoadedShipPipelines();
+  const jumpCloudPass = nodePipeline.cloudPass;
+  if (jumpCloudPass) jumpCloudPass.sampleListener = skydiveCtl.active;
+  skydiveCtl.cloud = skydiveCtl.active
+    ? (jumpCloudPass?.enabled ? jumpCloudPass.listenerDensity : environmentState.cloudDensity) : 0;
   audio.update({
     state,
     speed: flightSpd,
     atmosphere: envInAtmo,
+    canopy: skydiveCtl.active ? skydiveCtl.deployT : 0,
+    cloud: skydiveCtl.cloud,
+    brake: Math.max(skydiveCtl.brakeLeft || 0, skydiveCtl.brakeRight || 0),
     boosting: boostVisual > 0.12,
     warp: Math.max(warpIntensity, pulseVisual * 0.68),
     rift: riftRoute ? riftPortal.openness * (riftRoute.arrived ? 0.35 : 1) : 0,
@@ -6446,7 +6489,7 @@ function frame(rafTs) {
   // foreground layer. Walking parks the ship back in world space, but the gun
   // still owns this pass; tying it only to ship.foregroundOnly hid all four
   // weapon models after landing.
-  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible || skydiveCtl.rig.root.visible;
+  foregroundPass.enabled = ship.foregroundOnly || surfaceWeapons.rig.visible || skydiveCtl.active;
   // During scripted surface manoeuvres (recall fly-in, landing, liftoff, hover
   // departure) keep the ship on ForegroundPass AFTER LiteCloudPass so clouds
   // never paste over the moving hull, while retaining the opaque scene depth
@@ -7518,7 +7561,12 @@ window.NMS = {
     agl: +skydiveCtl.agl.toFixed(2),
     airspeed: +skydiveCtl.airspeed.toFixed(2),
     deployT: +skydiveCtl.deployT.toFixed(3),
-    canopyVisible: skydiveCtl.rig.root.visible,
+    canopyVisible: !!skydiveCtl.rig?.canopy.visible && skydiveCtl.active,
+    handsVisible: !!skydiveCtl.rig?.root.visible,
+    sinkRate: skydiveCtl.sinkRate || 0,
+    brakeLeft: skydiveCtl.brakeLeft || 0,
+    brakeRight: skydiveCtl.brakeRight || 0,
+    cloud: skydiveCtl.cloud || 0,
     aadTriggered: skydiveCtl.aadTriggered,
   }),
   shipLandingState: () => {
