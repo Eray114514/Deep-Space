@@ -96,7 +96,7 @@ export function resolveGraphicsSettings({ params = new URLSearchParams(), storag
 // mapping them to the renderer-independent quality profiles above.
 export function classifyGpuTier(gpuName = '') {
   if (!gpuName) return 'unknown';
-  if (/SwiftShader|llvmpipe|Microsoft Basic Render|Google SwiftShader/i.test(gpuName)) return 'low';
+  if (/SwiftShader|llvmpipe|softpipe|lavapipe|Software Rasterizer|Microsoft Basic Render|Google SwiftShader|\bWARP\b/i.test(gpuName)) return 'low';
 
   if (/NVIDIA|GeForce/i.test(gpuName)) {
     if (/GeForce\s*(?:MX\d{3}|940M|930M|920M)/i.test(gpuName)) return 'low';
@@ -120,7 +120,12 @@ export function classifyGpuTier(gpuName = '') {
   }
 
   if (/AMD|Radeon/i.test(gpuName)) {
-    if (/Radeon\s*\(TM\)\s*Graphics|Vega\s*\d+|Vega Mobile/i.test(gpuName)) return 'low';
+    if (!/\bRX\b/i.test(gpuName) && (
+      /Radeon(?:\s*\(TM\))?\s*(?:R[2-7]\s*)?Graphics\b/i.test(gpuName)
+      || /Radeon(?:\s*\(TM\))?\s*(?:610|660|680|740|760|780|840|860|880|890)M\b/i.test(gpuName)
+      || /Vega\s*\d+|Vega Mobile/i.test(gpuName)
+      || /radeonsi.*\b(?:renoir|cezanne|barcelo|rembrandt|phoenix|hawk|strix|mendocino|lucien|picasso|raven|raphael|granite)\b/i.test(gpuName)
+    )) return 'low';
     if (/RX\s*9\d{3}/i.test(gpuName)) return 'high';
     if (/RX\s*7\d{3}/i.test(gpuName)) return /RX\s*79\d0/i.test(gpuName) ? 'high' : 'mid';
     if (/RX\s*6\d{3}/i.test(gpuName)) {
@@ -137,6 +142,10 @@ export function classifyGpuTier(gpuName = '') {
     if (/Arc[^\d]*[AB]\d{3,4}/i.test(gpuName)) {
       return /Arc[^\d]*[AB][5-8]\d{2,3}/i.test(gpuName) ? 'mid' : 'low';
     }
+    return 'low';
+  }
+
+  if (/\b(?:UHD|HD)\s*Graphics\b|\bIris(?:\(R\))?\s*(?:Xe|Plus|Pro)?\s*Graphics\b/i.test(gpuName)) {
     return 'low';
   }
 

@@ -22,6 +22,7 @@ const SAMPLES = {
   'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (AMD, AMD Radeon RX 7900 XTX Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (AMD, AMD Radeon RX 6900 XT Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
+  'ANGLE (AMD, AMD Radeon RX 6800M Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'ANGLE (AMD, AMD Radeon RX 9070 XT Direct3D11 vs_5_0 ps_5_0, D3D11)': 'high',
   'Apple M3 Max': 'high',
   'Apple M2 Pro': 'high',
@@ -47,14 +48,23 @@ const SAMPLES = {
   'Apple M2': 'mid',
 
   // 低端 → performance
+  'ANGLE (Intel, Intel(R) Graphics (0x00007D67) Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
   'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
   'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
+  'ANGLE (Intel, Intel(R) Arc(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
+  'UHD Graphics 770': 'low',
   'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
+  'ANGLE (AMD, AMD Radeon Graphics (0x0000164E) Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
+  'ANGLE (AMD, AMD Radeon(TM) 780M Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
+  'AMD Radeon 680M': 'low',
+  'AMD Radeon R7 Graphics': 'low',
+  'AMD Radeon Graphics (radeonsi, phoenix, LLVM 17.0.6, DRM 3.57, 6.8.0)': 'low',
   'ANGLE (NVIDIA, NVIDIA GeForce MX450 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
   'ANGLE (NVIDIA, NVIDIA GeForce GTX 1050 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
   'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
   'ANGLE (AMD, AMD Radeon RX 6500 XT Direct3D11 vs_5_0 ps_5_0, D3D11)': 'low',
   'Google SwiftShader': 'low',
+  'llvmpipe (LLVM 15.0.7, 256 bits)': 'low',
   'Microsoft Basic Render Driver': 'low',
 
   // 未知 → unknown

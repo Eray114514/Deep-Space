@@ -27,6 +27,17 @@ export function actualRendererBackend() {
 
 export function rendererAdapterLabel(renderer) {
   const gl = renderer?.getContext?.();
-  const ext = gl?.getExtension?.('WEBGL_debug_renderer_info');
-  return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'WebGL 2 adapter';
+  if (!gl) return 'WebGL 2 adapter';
+  const ext = gl.getExtension?.('WEBGL_debug_renderer_info');
+  const rawRenderer = (ext && gl.getParameter?.(ext.UNMASKED_RENDERER_WEBGL))
+    || gl.getParameter?.(gl.RENDERER)
+    || '';
+  const label = String(rawRenderer).trim();
+  if (!label) return 'WebGL 2 adapter';
+  if (/Intel|AMD|NVIDIA|ATI|Apple|SwiftShader|llvmpipe|softpipe|lavapipe|Microsoft/i.test(label)) {
+    return label;
+  }
+  const vendor = String((ext && gl.getParameter?.(ext.UNMASKED_VENDOR_WEBGL))
+    || gl.getParameter?.(gl.VENDOR) || '').trim();
+  return vendor && /Intel|AMD|NVIDIA|ATI/i.test(vendor) ? `${vendor} ${label}` : label;
 }

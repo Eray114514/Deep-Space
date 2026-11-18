@@ -275,6 +275,13 @@
     <div class="graphics-device">
       <span>当前图形设备</span><strong id="graphics-gpu">检测中</strong>
       <small id="graphics-backend">请求 AUTO · 实际检测中</small>
+      <div id="graphics-gpu-alert" class="graphics-gpu-alert hidden">
+        <div class="graphics-gpu-alert-copy">
+          <b>检测到核显 / 低性能设备</b>
+          <small id="graphics-gpu-alert-sub">浏览器默认可能未调度独显，按教程设为高性能可显著提升帧率。</small>
+        </div>
+        <button id="graphics-perf-tutorial-btn" type="button" aria-haspopup="dialog" aria-controls="perf-tutorial">启用独显教程</button>
+      </div>
     </div>
     <fieldset>
       <legend>画质档位</legend>

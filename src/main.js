@@ -69,7 +69,7 @@ import { resolveRendererPolicy } from './renderer-policy.js';
 import { createGameRenderer, installDeviceRecovery } from './renderer-runtime.js';
 import { GameLegacyPipeline } from './legacy-render-pipeline.js';
 import { SurfaceShadowGrid } from './surface-shadow-grid.js';
-import { isLowPowerGpu, rendererParamsForSettings, resolveGraphicsSettings,
+import { chooseAutomaticQuality, isLowPowerGpu, rendererParamsForSettings, resolveGraphicsSettings,
   resolveQualityProfile, writeGraphicsSettings } from './graphics-settings.js';
 import { createEnvironmentState, updateEnvironmentState } from './environment-state.js';
 import { SceneRadianceState } from './scene-radiance.js';
@@ -175,7 +175,11 @@ renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
 const actualRendererBackend = rendererRuntime.backend;
 const gpuName = rendererRuntime.gpuName;
 configureSurfaceMaterials(renderer);
-const AUTO_LOW_GPU = graphicsSettings.quality === 'auto' && isLowPowerGpu(gpuName);
+const RECOMMENDED_QUALITY = chooseAutomaticQuality(gpuName, {
+  width: window.innerWidth, height: window.innerHeight,
+});
+const LOW_POWER_GPU = isLowPowerGpu(gpuName);
+const AUTO_LOW_GPU = graphicsSettings.quality === 'auto' && LOW_POWER_GPU;
 const QUALITY_PROFILE = resolveQualityProfile(graphicsSettings, gpuName, {
   touch: IS_TOUCH, width: window.innerWidth, height: window.innerHeight,
 });
@@ -1762,11 +1766,15 @@ const ui = new UI({
     setTimeout(() => location.reload(), 180);
   },
 });
-// Surface a clickable low-power GPU hint on the hero start page before the
-// first frame, so the player can switch the browser to its discrete GPU.
-ui.setHeroPerfHint(AUTO_LOW_GPU, gpuName);
+// Surface a clickable low-power GPU hint on the hero start page and inside
+// graphics settings regardless of manual quality preset, so the player can
+// always discover the discrete-GPU setup tutorial when running on integrated
+// or software graphics.
+ui.setHeroPerfHint(LOW_POWER_GPU, gpuName, { quality: graphicsSettings.quality });
 ui.setGraphicsSettings(graphicsSettings, QUALITY_PROFILE, {
   gpu: gpuName,
+  lowPowerGpu: LOW_POWER_GPU,
+  recommendedQuality: RECOMMENDED_QUALITY,
   requestedBackend: rendererPolicy.requested,
   actualBackend: actualRendererBackend,
   reason: rendererRuntime.reason,

@@ -33,6 +33,7 @@ export class UI {
       graphicsClose: $('graphics-settings-close'), graphicsCancel: $('graphics-settings-cancel'),
       graphicsApply: $('graphics-settings-apply'), graphicsGpu: $('graphics-gpu'),
       graphicsBackend: $('graphics-backend'), graphicsNote: $('graphics-settings-note'),
+      graphicsGpuAlert: $('graphics-gpu-alert'), graphicsPerfBtn: $('graphics-perf-tutorial-btn'),
       graphicsRestartMask: $('graphics-restart-mask'),
       heroSplash: $('hero-splash'),
       heroPerfHint: $('hero-perf-hint'), perfTutorial: $('perf-tutorial'), perfTutorialClose: $('perf-tutorial-close'),
@@ -111,7 +112,17 @@ export class UI {
     });
     if (this.els.heroPerfHint) {
       this.els.heroPerfHint.addEventListener('pointerenter', () => playUiSound('ui_hover'));
-      this.els.heroPerfHint.addEventListener('click', () => { playUiSound('ui_click'); this.showPerfTutorial(true); });
+      this.els.heroPerfHint.addEventListener('click', () => {
+        playUiSound('ui_click');
+        this.showPerfTutorial(true, { opener: this.els.heroPerfHint });
+      });
+    }
+    if (this.els.graphicsPerfBtn) {
+      this.els.graphicsPerfBtn.addEventListener('pointerenter', () => playUiSound('ui_hover'));
+      this.els.graphicsPerfBtn.addEventListener('click', () => {
+        playUiSound('ui_click');
+        this.showPerfTutorial(true, { opener: this.els.graphicsPerfBtn });
+      });
     }
     if (this.els.perfTutorialClose) {
       this.els.perfTutorialClose.addEventListener('pointerenter', () => playUiSound('ui_hover'));
@@ -124,6 +135,13 @@ export class UI {
       });
     }
     this._modalKey = (e) => {
+      if (e.key === 'Escape' && this.els.perfTutorial && !this.els.perfTutorial.classList.contains('hidden')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        playUiSound('ui_click');
+        this.showPerfTutorial(false);
+        return;
+      }
       if (e.key === 'Escape' && this.els.graphicsPanel && !this.els.graphicsPanel.classList.contains('hidden')) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -131,11 +149,15 @@ export class UI {
         this.showGraphicsSettings(false);
         return;
       }
-      if (e.key === 'Escape' && this.els.perfTutorial && !this.els.perfTutorial.classList.contains('hidden')) {
+      if (e.key === 'ArrowRight' && !e.repeat
+          && this.els.hero && !this.els.hero.classList.contains('hidden')
+          && this.els.heroPerfHint && !this.els.heroPerfHint.classList.contains('hidden')
+          && this.els.graphicsPanel?.classList.contains('hidden') !== false
+          && this.els.perfTutorial?.classList.contains('hidden') !== false) {
         e.preventDefault();
         e.stopImmediatePropagation();
         playUiSound('ui_click');
-        this.showPerfTutorial(false);
+        this.showPerfTutorial(true, { opener: this.els.heroPerfHint });
         return;
       }
       if (this.els.routeChoice && !this.els.routeChoice.classList.contains('hidden')) {
@@ -500,41 +522,61 @@ export class UI {
   // Surfaces an inline hint on the hero start page when a low-power GPU is
   // detected. The hint is clickable and opens a short Windows graphics-setup
   // tutorial so the player can switch the browser to its discrete GPU before
-  // the first frame. gpuName customises the title for the detected adapter.
-  setHeroPerfHint(visible, gpuName = '') {
+  // the first frame. gpuName and quality customize the subtitle copy.
+  setHeroPerfHint(visible, gpuName = '', { quality = 'auto' } = {}) {
     const hint = this.els.heroPerfHint;
     if (!hint) return;
-    if (visible && gpuName) {
+    if (visible) {
       const sub = hint.querySelector('.hero-perf-hint-sub');
-      if (sub && !/Intel|AMD|SwiftShader|llvmpipe|Basic Render/i.test(gpuName)) {
-        sub.textContent = '当前设备图形性能受限 · 点击查看优化教程';
+      const isKnownGpu = !gpuName || /Intel|AMD|Radeon|UHD|HD\s*Graphics|Iris|SwiftShader|llvmpipe|softpipe|lavapipe|Basic Render|WARP/i.test(gpuName);
+      if (sub) {
+        sub.textContent = quality === 'performance'
+          ? '已设性能档（当前仍为核显）· 点击查看启用独显教程'
+          : quality === 'balanced' || quality === 'ultra'
+            ? '当前手动画质高于设备建议 · 点击查看启用独显教程'
+            : isKnownGpu
+              ? '画面可能偏卡 · 点击查看启用独显教程'
+              : '当前设备图形性能受限 · 点击查看优化教程';
       }
     }
     hint.classList.toggle('hidden', !visible);
   }
 
-  showPerfTutorial(show = true) {
+  showPerfTutorial(show = true, { opener = null } = {}) {
     const dialog = this.els.perfTutorial;
     if (!dialog) return;
+    if (show) this._perfTutorialOpener = opener || document.activeElement;
     dialog.classList.toggle('hidden', !show);
     if (show) {
       queueMicrotask(() => this.els.perfTutorialClose?.focus());
+    } else if (this._perfTutorialOpener?.isConnected && this._perfTutorialOpener.offsetParent !== null) {
+      this._perfTutorialOpener.focus();
+      this._perfTutorialOpener = null;
     } else if (this.els.heroPerfHint && !this.els.hero?.classList.contains('hidden')) {
       this.els.heroPerfHint.focus();
     }
   }
 
-  setGraphicsSettings(settings, profile, { gpu = '', actualBackend = '', reason = '' } = {}) {
+  setGraphicsSettings(settings, profile, { gpu = '', lowPowerGpu = false, recommendedQuality = profile.id, actualBackend = '', reason = '' } = {}) {
     const panel = this.els.graphicsPanel;
     if (!panel) return;
     const quality = panel.querySelector(`input[name="graphics-quality"][value="${settings.quality}"]`);
     if (quality) quality.checked = true;
     for (const label of panel.querySelectorAll('.graphics-choice-grid label')) {
-      label.classList.toggle('is-recommended', label.querySelector('input')?.value === profile.id);
+      label.classList.toggle('is-recommended', label.querySelector('input')?.value === recommendedQuality);
     }
     this._setText(this.els.graphicsGpu, gpu || '未能读取设备名称');
     this._setText(this.els.graphicsBackend,
       `WebGL 2 · ${profile.label}`);
+    if (this.els.graphicsGpuAlert) {
+      this.els.graphicsGpuAlert.classList.toggle('hidden', !lowPowerGpu);
+      const alertSub = document.getElementById('graphics-gpu-alert-sub');
+      if (alertSub && lowPowerGpu) {
+        alertSub.textContent = settings.quality === 'balanced' || settings.quality === 'ultra'
+          ? '当前手动画质高于核显建议（推荐“性能”或“自动”）；按教程设为高性能可启用独显。'
+          : '浏览器当前运行在核显或低性能渲染器上，按教程设为高性能可启用独显。';
+      }
+    }
   }
 
   showGraphicsSettings(show = true) {
