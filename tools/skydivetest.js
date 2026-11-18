@@ -228,6 +228,51 @@ try {
   check(freefall0.active && freefall0.phase === 'freefall' && freefall0.agl > 60
       && freefall0.handsVisible && !freefall0.canopyVisible,
     `running off open hover ramp enters seamless freefall ${JSON.stringify(freefall0)}`);
+  // Verify freefall camera pitch/yaw decoupling: looking up or sideways does not drag hands with camera!
+  const freefallLookCheck = await page.evaluate(() => {
+    const THREE = NMS._THREE;
+    const { scene, camera, skydiveCtl: ctl, skydiveViewCamera: cam } = NMS._internals;
+    const syncPose = () => {
+      ctl.updateQuat();
+      ctl.syncRig();
+      camera.quaternion.copy(ctl.planet.frameOrientation).multiply(ctl.quat);
+      scene.updateMatrixWorld(true);
+      cam.updateMatrixWorld(true);
+    };
+    const handR = ctl.rig.root.getObjectByName('jump-glove-right');
+    const handYInCam = () => {
+      const inv = new THREE.Matrix4().copy(cam.matrixWorld).invert();
+      return handR.localToWorld(new THREE.Vector3()).applyMatrix4(inv).y;
+    };
+    const origPitch = ctl.pitch;
+    const origYaw = ctl.yaw;
+    ctl.pitch = -0.18;
+    syncPose();
+    const levelHandY = handYInCam();
+    // Look sharply up (+60 deg): hands stay in belly pose below camera instead of rising skyward.
+    NMS.lookPitch(60);
+    syncPose();
+    const lookupHandY = handYInCam();
+    // Look down sharply (-75 deg): sleeve socket stays behind eye plane.
+    ctl.pitch = -1.32;
+    syncPose();
+    const sock = handR.geometry.userData.shoulderSocket.clone().add(handR.material.uniforms.shoulderOffset.value);
+    const inv = new THREE.Matrix4().copy(cam.matrixWorld).invert();
+    const sockZDown = handR.localToWorld(sock).applyMatrix4(inv).z;
+    // Turn head +22 deg sideways: body heading lags independently of camera yaw.
+    ctl.pitch = origPitch;
+    ctl.yaw = origYaw;
+    NMS.lookYaw(22);
+    syncPose();
+    const headYawAfter = (ctl.yaw - ctl.glideYaw) * 180 / Math.PI;
+    ctl.yaw = origYaw;
+    syncPose();
+    return { levelHandY, lookupHandY, sockZDown, headYawAfter };
+  });
+  check(freefallLookCheck.lookupHandY < freefallLookCheck.levelHandY - 0.15
+      && freefallLookCheck.sockZDown > 0.10
+      && Math.abs(freefallLookCheck.headYawAfter - 22) < 1.5,
+    `freefall hands stay anchored to body across up/down/yaw camera motion ${JSON.stringify(freefallLookCheck)}`);
   await page.evaluate('NMS.lookPitch(-35)');
   await page.waitForTimeout(700);
   await shot('03-skydive-freefall');

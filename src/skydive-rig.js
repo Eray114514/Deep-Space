@@ -6,9 +6,7 @@ const CELLS = 9;
 const smooth = THREE.MathUtils.smoothstep;
 const lerp = THREE.MathUtils.lerp;
 const up = new THREE.Vector3(0, 1, 0);
-const identity = new THREE.Quaternion();
 const cameraLocal = new THREE.Quaternion();
-const handBasis = new THREE.Quaternion();
 const angles = new THREE.Euler(0, 0, 0, 'YXZ');
 const segment = new THREE.Object3D();
 const delta = new THREE.Vector3();
@@ -438,12 +436,6 @@ export function createSkydiveRig() {
     const closeFingers = smooth(t, .56, .69);
     const pullDown = smooth(t, .69, .97);
     canopy.visible = ctl.phase === 'canopy';
-    // Looking sideways under a deploying wing must not swing the wrists
-    // through its risers. Pitch still follows the body into the dive.
-    angles.setFromQuaternion(cameraLocal, 'YXZ');
-    angles.y = .10 * Math.tanh(angles.y / .10);
-    angles.z = .16 * Math.tanh(angles.z / .16);
-    handBasis.setFromEuler(angles).slerp(identity, Math.max(loaded, takeGrip));
     light.vertical.value.copy(ctl.posLocal).normalize().applyQuaternion(ctl.planet.frameOrientation);
     if (ctl.planet.sunDirWorld) light.sun.value.copy(ctl.planet.sunDirWorld);
     light.daylight.value = .23 + .77 * smooth(light.vertical.value.dot(light.sun.value), -.18, .34);
@@ -458,6 +450,8 @@ export function createSkydiveRig() {
     wing.rotation.z = -.12 * (ctl.brakeRight - ctl.brakeLeft);
     lines.count = straps.count = 0;
     const width = Math.min(1, aspect / 1.38);
+    // Arms and hands stay anchored to the skydiver's body/harness attitude so
+    // looking up, down or sideways with the camera never waves the hands around.
     for (const { side, hand, toggle, rings } of arms) {
       const brake = side < 0 ? ctl.brakeLeft : ctl.brakeRight;
       const buffet = .35 * Math.sin(ctl.time * 7.3 + side) + .65 * Math.sin(ctl.time * 3.9 + side * 2);
@@ -471,11 +465,10 @@ export function createSkydiveRig() {
       const settle = Math.sin(Math.PI * smooth(ctl.time, .19, 1.12)) * (1 - loaded);
       hand.position.set(side * (x - .095 * (1 - swing) - .07 * handlePull),
         y - .30 * (1 - swing) + .046 * settle + .012 * flutter - .18 * handlePull,
-        z + .15 * (1 - swing) - .045 * settle + .12 * handlePull)
-        .applyQuaternion(handBasis);
+        z + .15 * (1 - swing) - .045 * settle + .12 * handlePull);
       angles.set(lerp(.54 + .12 * tuck, .91, loaded) + .07 * flutter,
         side * lerp(.58 + .09 * tuck, .18, loaded), side * lerp(.50, .27, loaded));
-      hand.quaternion.copy(handBasis).multiply(segment.quaternion.setFromEuler(angles));
+      hand.quaternion.setFromEuler(angles);
       hand.morphTargetInfluences[0] = closeFingers + (1 - closeFingers) * Math.max(handlePull * .78, tuck * .23 + .33 * (1 - swing));
       // Reach to the stowed toggle, close the fingers, then draw it down.
       // From contact onward the grip and webbing have one shared position.
@@ -494,17 +487,20 @@ export function createSkydiveRig() {
       hand.position.add(delta);
       if (t < .58) toggle.position.copy(stowed);
       const offset = hand.material.uniforms.shoulderOffset.value;
-      offset.set(side * .23 * width, -.32, .16).applyQuaternion(handBasis);
+      offset.set(side * .23 * width, -.32, .16);
       delta.set(0, 0, 1).applyQuaternion(cameraLocal);
       const deficit = .16 - offset.dot(delta);
       if (deficit > 0) {
         const horizSq = delta.x * delta.x + delta.z * delta.z;
-        if (delta.y > 0 && horizSq > 0.25) {
-          // Keep the shoulder below eye level when pitching down so the sleeve
-          // exits beneath the near plane instead of crossing it mid-frame.
-          const s = deficit / horizSq;
-          offset.x += delta.x * s;
-          offset.z += delta.z * s;
+        const horizWeight = delta.y > 0 ? smooth(horizSq, .25, .55) : 0;
+        if (horizWeight > 0) {
+          // Keep the shoulder below eye level on shallow-to-moderate downward looks
+          // while blending smoothly back toward view-normal on steep straight-down
+          // freefall looks so the sleeve never snaps or stretches across -60 deg.
+          const horizScale = 1 - horizWeight + horizWeight / horizSq;
+          offset.x += delta.x * horizScale * deficit;
+          offset.y += delta.y * (1 - horizWeight) * deficit;
+          offset.z += delta.z * horizScale * deficit;
         } else {
           offset.addScaledVector(delta, deficit);
         }

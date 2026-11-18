@@ -175,7 +175,9 @@ export class SkydiveController {
     this.phase = 'canopy';
     this.deployT = 0.001;
     this.openSeconds = lerp(1.05, 1.52, clamp(this.airspeed / 160, 0, 1));
-    this.glideYaw = this.yaw;
+    const headLimit = THREE.MathUtils.degToRad(26);
+    const headOffset = Math.atan2(Math.sin(this.yaw - this.glideYaw), Math.cos(this.yaw - this.glideYaw));
+    this.yaw = this.glideYaw + clamp(headOffset, -headLimit, headLimit);
     this.aadTriggered = automatic;
     this.rig.root.visible = true;
     if (automatic) this.onAadWarning?.();
@@ -219,6 +221,12 @@ export class SkydiveController {
     if (this.phase === 'canopy') {
       const headLimit = THREE.MathUtils.degToRad(26);
       this.yaw = this.glideYaw + clamp(this.yaw - this.glideYaw, -headLimit, headLimit);
+    } else if (this.phase === 'freefall') {
+      const maxNeck = THREE.MathUtils.degToRad(34);
+      const headOffset = Math.atan2(Math.sin(this.yaw - this.glideYaw), Math.cos(this.yaw - this.glideYaw));
+      if (Math.abs(headOffset) > maxNeck) {
+        this.glideYaw = this.yaw - clamp(headOffset, -maxNeck, maxNeck);
+      }
     }
     _u.copy(this.posLocal).normalize();
     this.frame(_u, _east, _north);
@@ -243,11 +251,26 @@ export class SkydiveController {
 
   syncRig() {
     _fwd.copy(_north).multiplyScalar(Math.cos(this.glideYaw)).addScaledVector(_east, Math.sin(this.glideYaw));
-    _right.crossVectors(_fwd, _u).normalize();
-    _canopyUp.copy(_u).addScaledVector(_right, Math.sin(this.bankRoll) * .58).normalize();
-    _canopyRight.copy(_right).projectOnPlane(_canopyUp).normalize();
-    _canopyBack.crossVectors(_canopyRight, _canopyUp);
+    const tipForward = .13 * Math.sin(Math.PI * THREE.MathUtils.smoothstep(this.time, .18, 1.42))
+      * (1 - this.deployT);
+    const canopySettle = this.phase === 'canopy' ? smootherstep01(this.deployT) : 0;
+    // Keep torso/arms pitched with the body's dive/arch state (never head pitch),
+    // then swing smoothly upright into the parachute harness on deployment.
+    const bodyPitch = clamp(
+      (this.pitchJolt - tipForward - .32 * this.dive) * (1 - canopySettle * .75)
+      + (this.phase === 'canopy' ? this.pitchJolt * canopySettle * .75 : 0),
+      -1.1, 0.6);
+    _viewDir.copy(_fwd).multiplyScalar(Math.cos(bodyPitch)).addScaledVector(_u, Math.sin(bodyPitch));
+    _canopyRight.crossVectors(_viewDir, _u);
+    if (_canopyRight.lengthSq() < 1e-6) _canopyRight.set(1, 0, 0);
+    _canopyRight.normalize();
+    _canopyUp.crossVectors(_canopyRight, _viewDir);
+    _canopyBack.copy(_viewDir).negate();
     _q.setFromRotationMatrix(_m.makeBasis(_canopyRight, _canopyUp, _canopyBack));
+    const rigBank = this.phase === 'canopy' ? this.bankRoll * .58 : this.bankRoll;
+    if (Math.abs(rigBank) > 1e-4) {
+      _q.multiply(_qBank.setFromAxisAngle(Z_AXIS, -rigBank));
+    }
     this.rig.update(this, _q, this.dom.clientWidth / Math.max(1, this.dom.clientHeight));
   }
 
@@ -270,7 +293,20 @@ export class SkydiveController {
     this.dive = damp(this.dive, this.phase === 'freefall' ? Math.max(fIn, 0) : 0, 2.8, dt);
 
     if (this.phase === 'freefall') {
-      _fwd.copy(_north).multiplyScalar(Math.cos(this.yaw)).addScaledVector(_east, Math.sin(this.yaw));
+      // Head free-look leads while the skydiver's torso aerodynamically banks
+      // and weathervanes into the new heading with natural rotational inertia
+      // (never snapping 1:1 with the camera, yet aligning for straight dives).
+      const maxNeck = THREE.MathUtils.degToRad(34);
+      const headOffset = Math.atan2(Math.sin(this.yaw - this.glideYaw), Math.cos(this.yaw - this.glideYaw));
+      const followRate = lerp(.65, 3.6, THREE.MathUtils.smoothstep(Math.abs(headOffset), .25, .55));
+      this.glideYaw = this.yaw - headOffset;
+      this.glideYaw += headOffset * (1 - Math.exp(-followRate * dt));
+      const after = Math.atan2(Math.sin(this.yaw - this.glideYaw), Math.cos(this.yaw - this.glideYaw));
+      if (Math.abs(after) > maxNeck) {
+        this.glideYaw = this.yaw - clamp(after, -maxNeck, maxNeck);
+      }
+
+      _fwd.copy(_north).multiplyScalar(Math.cos(this.glideYaw)).addScaledVector(_east, Math.sin(this.glideYaw));
       _right.crossVectors(_fwd, _u).normalize();
 
       // A tucked suit trades drag for speed in thin air. Reserve the fast
@@ -284,9 +320,9 @@ export class SkydiveController {
         .addScaledVector(_fwd, fIn * (21 + 19 * this.dive))
         .addScaledVector(_right, rIn * 15);
       horizVel.lerp(targetHoriz, 1 - Math.exp(-dt * lerp(.16, 2.6, airborne)));
-      this.bankRoll = damp(this.bankRoll, rIn * 0.14, 5.5, dt);
+      const turnBank = clamp(headOffset * .32, -.18, .18);
+      this.bankRoll = damp(this.bankRoll, rIn * 0.14 + turnBank, 5.5, dt);
       this.pitchJolt = damp(this.pitchJolt, 0, 6.0, dt);
-      this.glideYaw = this.yaw;
 
       // Line stretch and deceleration consume more altitude on a fast dive.
       if (this.agl <= Math.max(32, -vVert * 1.45 + 14) && vVert < -8) {
