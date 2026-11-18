@@ -62,7 +62,12 @@ button { color: inherit; }
 .hidden { display: none !important; }
 
 #app, #app canvas { position: fixed; inset: 0; display: block; }
-#app canvas { touch-action: none; }
+/* The canvas layout box is owned by CSS, never by renderer.setSize(). That call
+   is made with updateStyle=false so the backing store can be reallocated lazily
+   (one frame before a world draw), and a stale inline width/height would then
+   pin the world to the pre-fullscreen size — black bands on F11/resize while
+   the DOM HUD, which follows the viewport, keeps scaling. */
+#app canvas { width: 100%; height: 100%; touch-action: none; }
 
 kbd {
   min-width: 22px; padding: 3px 6px; display: inline-grid; place-items: center;

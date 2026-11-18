@@ -166,6 +166,10 @@ const rendererOptions = {
   // gives the volume/foreground passes a zero-alpha background so compositing
   // them cannot replace the main scene with an opaque black rectangle.
   alpha: true,
+  // Skipped/preparation-only submitFrame turns leave the default framebuffer
+  // untouched; keep the prior presented frame instead of letting the compositor
+  // expose an uninitialized black buffer.
+  preserveDrawingBuffer: true,
   logarithmicDepthBuffer: true,
   powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
 };
@@ -189,7 +193,10 @@ const QUALITY_LOW = QUALITY_PROFILE.id === 'performance';
 // retains the authored highest LOD.
 setGridCells(24);
 setTerrainScreenError(QUALITY_PROFILE.terrainScreenError);
-renderer.setSize(window.innerWidth, window.innerHeight);
+// updateStyle=false: style.css owns the canvas box (100% of #app). Letting
+// three.js write inline px sizes here would freeze the world at the boot
+// viewport and leave black bands after F11 / a window resize.
+renderer.setSize(window.innerWidth, window.innerHeight, false);
 const MAX_DPR = QUALITY_PROFILE.dprMax;
 const DESKTOP_DPR_FLOOR = QUALITY_PROFILE.dprMin;
 function computeCeilingDpr(width = window.innerWidth, height = window.innerHeight) {
@@ -892,6 +899,8 @@ let riftPortal = null;
 let portalView = null;
 let warpConduit = null;
 let pipelineResizePending = false;
+let pendingRenderDpr = null;
+let pendingViewportResize = false;
 function pipelineResourcesBusy() {
   return shipPipelineWarmPending || postPipelinesWarmPending || weaponPipelinesWarmPending
     || heroTransitionActive || !surfacePipelinesReady;
@@ -900,6 +909,16 @@ function sizePost(force = false) {
   if (!force && pipelineResourcesBusy()) {
     pipelineResizePending = true;
     return false;
+  }
+  if (pendingRenderDpr !== null) {
+    renderDpr = pendingRenderDpr;
+    pendingRenderDpr = null;
+    pendingViewportResize = true;
+  }
+  if (pendingViewportResize) {
+    pendingViewportResize = false;
+    renderer.setPixelRatio(renderDpr);
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
   nodePipeline.setSize(window.innerWidth, window.innerHeight, renderDpr);
   setStarflowViewport(window.innerWidth * renderDpr, window.innerHeight * renderDpr);
@@ -914,24 +933,37 @@ sizePost(true);
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  sizePost();
-  portalView?.setSize(window.innerWidth, window.innerHeight, renderDpr);
-  warpConduit?.setSize(window.innerWidth * renderDpr, window.innerHeight * renderDpr, renderDpr);
+  // Defer backing-store reallocation until right before a real world draw so
+  // resizing never leaves a blank cleared canvas on screen for a frame.
+  pendingViewportResize = true;
+  pipelineResizePending = true;
   updateStarProj();
 });
 
-function setRenderDpr(next) {
+function setRenderDpr(next, { defer = false } = {}) {
   // The hero ship is a high-frequency foreground asset; dropping below the
   // display's normal desktop scaling makes its wing silhouette visibly stair-
   // stepped even with post AA. Low quality remains an explicit opt-in.
   const qualityFloor = QUALITY_PROFILE.dprMin;
   const qualityCeiling = Math.max(qualityFloor, MAX_DPR);
   const dpr = clamp(next, qualityFloor, qualityCeiling);
-  if (Math.abs(dpr - renderDpr) < 0.04) return;
+  if (defer) {
+    if (Math.abs(dpr - renderDpr) < 0.04) {
+      pendingRenderDpr = null;
+      return;
+    }
+    if (pendingRenderDpr !== null && Math.abs(dpr - pendingRenderDpr) < 0.04) return;
+    pendingRenderDpr = dpr;
+    pipelineResizePending = true;
+    return;
+  }
+  pendingRenderDpr = null;
+  if (Math.abs(dpr - renderDpr) < 0.04) {
+    if (pendingViewportResize && !pipelineResourcesBusy()) sizePost();
+    return;
+  }
   renderDpr = dpr;
-  renderer.setPixelRatio(renderDpr);
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  pendingViewportResize = true;
   sizePost();
 }
 
@@ -5626,7 +5658,7 @@ function setShadowDistance(distance) {
   sunShadow.shadow.camera.updateProjectionMatrix();
 }
 
-function applyAdaptiveStage(stage) {
+function applyAdaptiveStage(stage, { defer = false } = {}) {
   adaptiveStage = clamp(Math.round(stage), 0, 5);
   effectiveWaterReflectionHz = QUALITY_PROFILE.waterReflectionHz
     * (adaptiveStage >= 2 ? 0.5 : 1);
@@ -5644,11 +5676,11 @@ function applyAdaptiveStage(stage) {
   farFlora.setDisplayDensity(adaptiveStage >= 5 ? 0.48 : adaptiveStage >= 3 ? 0.72 : 1);
   const ceilingDpr = computeCeilingDpr();
   if (adaptiveStage >= 5) {
-    setRenderDpr(Math.max(0.85, QUALITY_PROFILE.dprMin));
+    setRenderDpr(Math.max(0.85, QUALITY_PROFILE.dprMin), { defer });
   } else if (adaptiveStage >= 4) {
-    setRenderDpr(Math.max(QUALITY_PROFILE.dprMin, ceilingDpr - 0.08));
+    setRenderDpr(Math.max(QUALITY_PROFILE.dprMin, ceilingDpr - 0.08), { defer });
   } else {
-    setRenderDpr(ceilingDpr);
+    setRenderDpr(ceilingDpr, { defer });
   }
 }
 
@@ -6864,8 +6896,8 @@ function frame(rafTs) {
             ceilingDpr: computeCeilingDpr(),
             dprMin: QUALITY_PROFILE.dprMin,
           });
-          if (decision.action === 'stage') applyAdaptiveStage(decision.stage);
-          else if (decision.action === 'dpr') setRenderDpr(decision.dpr);
+          if (decision.action === 'stage') applyAdaptiveStage(decision.stage, { defer: true });
+          else if (decision.action === 'dpr') setRenderDpr(decision.dpr, { defer: true });
         }
         if(DEV_SERVER) {
           devFpsElapsed+=timing.elapsedMs/1000;devFpsFrames++;
