@@ -605,34 +605,101 @@ function prewarmWeaponAndPostPipelines() {
   if (QUALITY_LOW && isSoftwareWebGL(renderer)) return;
   if (!weaponPipelinesWarmed && !weaponPipelinesWarmPending && surfaceWeapons?.rig) {
     weaponPipelinesWarmPending = true;
-    void nodePipeline.prepare(() => {
-      if (!isSoftwareWebGL(renderer)) surfaceWeapons.prewarmModels();
-      const rigVis = surfaceWeapons.rig.visible;
-      const lightVis = surfaceWeapons.lighting?.root?.visible;
-      const prevModelVis = surfaceWeapons.models.map((m) => m?.group?.visible ?? false);
-      try {
-        surfaceWeapons.rig.visible = true;
-        for (const m of surfaceWeapons.models) {
-          if (m?.group) m.group.visible = true;
+    const warmWeapons = async () => {
+      await nodePipeline.prepare(() => {
+        if (!isSoftwareWebGL(renderer)) surfaceWeapons.prewarmModels();
+        const rigVis = surfaceWeapons.rig.visible;
+        const lightVis = surfaceWeapons.lighting?.root?.visible;
+        const prevModelVis = surfaceWeapons.models.map((m) => m?.group?.visible ?? false);
+        try {
+          surfaceWeapons.rig.visible = true;
+          for (const m of surfaceWeapons.models) {
+            if (m?.group) m.group.visible = true;
+          }
+          if (surfaceWeapons.lighting?.root) surfaceWeapons.lighting.root.visible = true;
+          // Seed the outdoor weapon PMREM probe during startup so entering walk
+          // mode on an atmospheric planet never blocks ~600 ms on PMREMGGXConvolution.
+          surfaceWeapons.updateLighting(sceneRadiance,
+            { day: 1, atmosphere: 1, skyIrradiance: 0.5, sunset: 0 }, new THREE.Vector3(0, 1, 0));
+          surfaceWeapons.prepareLighting();
+          surfaceWeapons.updateLighting(sceneRadiance, environmentState, new THREE.Vector3(0, 1, 0));
+          return compileRenderVariant(renderer, surfaceWeapons.rig, camera, scene, {
+            layer: WEAPON_FOREGROUND_LAYER, target: nodePipeline.composer.readBuffer, signal,
+          });
+        } finally {
+          surfaceWeapons.rig.visible = rigVis;
+          surfaceWeapons.models.forEach((m, i) => {
+            if (m?.group) m.group.visible = prevModelVis[i];
+          });
+          if (surfaceWeapons.lighting?.root && lightVis !== undefined) surfaceWeapons.lighting.root.visible = lightVis;
         }
-        if (surfaceWeapons.lighting?.root) surfaceWeapons.lighting.root.visible = true;
-        // Seed the outdoor weapon PMREM probe during startup so entering walk
-        // mode on an atmospheric planet never blocks ~600 ms on PMREMGGXConvolution.
-        surfaceWeapons.updateLighting(sceneRadiance,
-          { day: 1, atmosphere: 1, skyIrradiance: 0.5, sunset: 0 }, new THREE.Vector3(0, 1, 0));
-        surfaceWeapons.prepareLighting();
-        surfaceWeapons.updateLighting(sceneRadiance, environmentState, new THREE.Vector3(0, 1, 0));
-        return compileRenderVariant(renderer, surfaceWeapons.rig, camera, scene, {
-          layer: WEAPON_FOREGROUND_LAYER, target: nodePipeline.composer.readBuffer, signal,
-        });
-      } finally {
-        surfaceWeapons.rig.visible = rigVis;
-        surfaceWeapons.models.forEach((m, i) => {
-          if (m?.group) m.group.visible = prevModelVis[i];
-        });
-        if (surfaceWeapons.lighting?.root && lightVis !== undefined) surfaceWeapons.lighting.root.visible = lightVis;
-      }
-    }, { signal, label: 'startup-weapons', isCurrent }).then(() => {
+      }, { signal, label: 'startup-weapons', isCurrent });
+      if (startupPrewarmExpired || loadingCleared) return;
+      // Perform one tiny 2x2 HalfFloat draw of the default slot-0 viewmodel
+      // through its real foreground viewCamera under the loading mask so
+      // ANGLE/D3D11 uploads VBOs/textures and builds RGBA16F PSOs before
+      // the player ever steps out of the ship.
+      await nodePipeline.prepare(() => {
+        const active = surfaceWeapons.models[surfaceWeapons.index];
+        if (!active?.group || !surfaceWeapons.viewCamera) return;
+        const rigVis = surfaceWeapons.rig.visible;
+        const lightVis = surfaceWeapons.lighting?.root?.visible;
+        const prevModelVis = surfaceWeapons.models.map((m) => m?.group?.visible ?? false);
+        const hiddenWorldRoots = [];
+        const savedCulled = [];
+        const hideWorldOnly = (list) => {
+          if (!list) return;
+          for (let i = 0; i < list.length; i++) {
+            const child = list[i];
+            if (!child.visible) continue;
+            if (child.userData?.worldLayerOnly) {
+              child.visible = false;
+              hiddenWorldRoots.push(child);
+            } else if (child.userData?.hasWorldLayerChildren) {
+              hideWorldOnly(child.children);
+            }
+          }
+        };
+        const target = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, depthBuffer: true });
+        const viewCam = surfaceWeapons.viewCamera;
+        const oldMask = viewCam.layers.mask;
+        const oldTarget = renderer.getRenderTarget();
+        const oldFace = renderer.getActiveCubeFace(), oldMip = renderer.getActiveMipmapLevel();
+        const oldAutoClear = renderer.autoClear;
+        try {
+          hideWorldOnly(scene.children);
+          surfaceWeapons.rig.visible = true;
+          surfaceWeapons.models.forEach((m, i) => {
+            if (m?.group) m.group.visible = i === surfaceWeapons.index;
+          });
+          if (surfaceWeapons.lighting?.root) surfaceWeapons.lighting.root.visible = true;
+          active.group.traverse((o) => {
+            if (o.isMesh && o.frustumCulled) {
+              savedCulled.push(o);
+              o.frustumCulled = false;
+            }
+          });
+          renderer.autoClear = true;
+          renderer.setRenderTarget(target);
+          renderer.clear(true, true, false);
+          viewCam.layers.set(WEAPON_FOREGROUND_LAYER);
+          renderer.render(scene, viewCam);
+        } finally {
+          for (const o of savedCulled) o.frustumCulled = true;
+          for (const root of hiddenWorldRoots) root.visible = true;
+          viewCam.layers.mask = oldMask;
+          surfaceWeapons.rig.visible = rigVis;
+          surfaceWeapons.models.forEach((m, i) => {
+            if (m?.group) m.group.visible = prevModelVis[i];
+          });
+          if (surfaceWeapons.lighting?.root && lightVis !== undefined) surfaceWeapons.lighting.root.visible = lightVis;
+          renderer.setRenderTarget(oldTarget, oldFace, oldMip);
+          renderer.autoClear = oldAutoClear;
+          target.dispose();
+        }
+      }, { signal, label: 'startup-weapons-pso', isCurrent });
+    };
+    void warmWeapons().then(() => {
       if (!startupPrewarmExpired) weaponPipelinesWarmed = true;
     }).catch((error) => {
       if (!startupPrewarmExpired) console.warn('weapon prewarm failed', error);
@@ -723,6 +790,93 @@ function prewarmWeaponAndPostPipelines() {
           sunShadow.intensity = sunInt;
         }
       }, { signal, label: 'startup-walk-gameplay', isCurrent });
+      if (startupPrewarmExpired || loadingCleared) return;
+      // compileRenderVariant() only compiles forward shaders; WebGLShadowMap's
+      // MeshDepthMaterial variants (notably SkinnedMesh + map for fpBody and
+      // survey robots, InstancedMesh debris, and static camp casters) are only
+      // created during shadowMap.render(). Warm one representative mesh per
+      // unique shadow-depth variant into a 2x2 shadow map under the loading
+      // mask so stepping onto the surface never stalls on getProgramParameter.
+      await nodePipeline.prepare(() => {
+        const shadowGroup = new THREE.Group();
+        const seen = new Set();
+        const instancedProxies = [];
+        const civVisual = universe.system?.planets?.[0]?.civilizationVisual || null;
+        const roots = [
+          surfaceGameplay.fpBody?.root,
+          surfaceGameplay.campRoot,
+          surveyUnits.root,
+          civVisual,
+          ship.heroLoaded ? ship.group : null,
+        ].filter(Boolean);
+        const shadowKey = (object, material) => {
+          const custom = object.customDepthMaterial;
+          const customKey = typeof custom?.customProgramCacheKey === 'function'
+            ? custom.customProgramCacheKey() : (custom ? custom.uuid : '');
+          return [
+            object.isSkinnedMesh ? 1 : 0,
+            object.isInstancedMesh ? (object.instanceColor ? 2 : 1) : 0,
+            material?.map ? 1 : 0,
+            material?.alphaMap ? 1 : 0,
+            (material?.alphaTest > 0 || material?.alphaToCoverage) ? 1 : 0,
+            (material?.displacementMap && material?.displacementScale !== 0) ? 1 : 0,
+            material?.shadowSide ?? material?.side ?? 0,
+            object.geometry?.attributes?.normal ? 1 : 0,
+            object.geometry?.morphAttributes?.position ? 1 : 0,
+            customKey,
+          ].join(':');
+        };
+        for (const root of roots) {
+          root.traverse((object) => {
+            if (!object.isMesh || !object.castShadow || !object.geometry || !object.material) return;
+            const mats = Array.isArray(object.material) ? object.material : [object.material];
+            const keys = mats.map((m) => shadowKey(object, m));
+            if (keys.every((k) => seen.has(k))) return;
+            for (const k of keys) seen.add(k);
+            let proxy = null;
+            if (object.isSkinnedMesh && object.skeleton) {
+              proxy = new THREE.SkinnedMesh(object.geometry, object.material);
+              proxy.bind(object.skeleton, object.bindMatrix);
+            } else if (object.isInstancedMesh) {
+              proxy = new THREE.InstancedMesh(object.geometry, object.material, 1);
+              proxy.setMatrixAt(0, new THREE.Matrix4());
+              if (object.instanceColor) proxy.setColorAt(0, new THREE.Color(1, 1, 1));
+              instancedProxies.push(proxy);
+            } else {
+              proxy = new THREE.Mesh(object.geometry, object.material);
+            }
+            proxy.position.set(0, 0, 0);
+            proxy.castShadow = true;
+            proxy.receiveShadow = false;
+            proxy.frustumCulled = false;
+            if (object.customDepthMaterial) {
+              proxy.customDepthMaterial = object.customDepthMaterial;
+              proxy.onBeforeShadow = object.onBeforeShadow;
+            }
+            if (object.customDistanceMaterial) proxy.customDistanceMaterial = object.customDistanceMaterial;
+            shadowGroup.add(proxy);
+          });
+        }
+        if (!shadowGroup.children.length) return;
+        const target = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, depthBuffer: true });
+        const warmup = createSurfaceWarmupScene(scene, shadowGroup, camera, sunShadow);
+        const savedTarget = renderer.getRenderTarget();
+        const savedFace = renderer.getActiveCubeFace(), savedMip = renderer.getActiveMipmapLevel();
+        const savedAutoClear = renderer.autoClear;
+        try {
+          renderer.autoClear = true;
+          renderer.setRenderTarget(target);
+          renderer.clear(true, true, false);
+          renderer.render(warmup.scene, camera);
+        } finally {
+          warmup.dispose();
+          for (const p of instancedProxies) p.dispose();
+          shadowGroup.clear();
+          target.dispose();
+          renderer.setRenderTarget(savedTarget, savedFace, savedMip);
+          renderer.autoClear = savedAutoClear;
+        }
+      }, { signal, label: 'startup-walk-shadows', isCurrent });
     };
     void warmWalkGameplay().catch((error) => {
       if (!startupPrewarmExpired) console.warn('walk gameplay prewarm failed', error);
@@ -5499,8 +5653,10 @@ function ambience(dt = 1 / 60) {
     ship.updateAmbient(environmentState,
       nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null,
       nearest ? nearest.R / Math.max(nearest.R, nav.pos.distanceTo(nearest.posUniv)) : 0);
+    const keepProbeWarm = state === 'walk' || state === 'shipwalk' || state === 'landed' || state === 'boarding';
     surfaceWeapons.updateLighting(sceneRadiance, environmentState,
-      nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null);
+      nearest ? _v.copy(nav.pos).sub(nearest.posUniv).normalize() : null,
+      { keepProbeWarm });
   } else {
     renderer.toneMappingExposure = environmentState.exposure;
     shipSunDir.copy(nearest?.sunDirWorld || universe.system.sunDirFrom(nav.pos, _v));
@@ -6425,14 +6581,15 @@ function frame(rafTs) {
   const surfaceShotDistance = state === 'walk' ? surfaceBeamDistance(120) : 120;
   // Survey units patrol the parked ship while you are on its planet (on foot
   // or aboard, when actually landed on the ground); taking off or hovering recalls them.
+  const onGroundAroundShip = state === 'walk' || state === 'shipwalk' || state === 'landed' || state === 'boarding';
   if (surveyUnits.materials && ship.parkedPlanet && ship.parkedLocal
     && !ship.hoverMode && !ship.orbitalStandby && !recallInFlight
-    && (state === 'walk' || state === 'shipwalk' || state === 'landed')
+    && onGroundAroundShip
     && (state !== 'walk' || walkCtl.planet === ship.parkedPlanet)) {
     surveyUnits.deploy(ship.parkedPlanet, ship.parkedLocal);
   } else if (surveyUnits.deployed
     && (!ship.parkedPlanet || ship.hoverMode || ship.orbitalStandby || recallInFlight
-      || (state !== 'walk' && state !== 'shipwalk' && state !== 'landed'))) {
+      || !onGroundAroundShip)) {
     surveyUnits.recall();
   }
   if (surveyUnits.deployed) {

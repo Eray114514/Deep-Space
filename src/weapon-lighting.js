@@ -41,7 +41,7 @@ export class WeaponLighting {
     });
   }
 
-  update(radiance, environment = {}, active = false, worldUp = null, { deferEnvironment = false } = {}) {
+  update(radiance, environment = {}, active = false, worldUp = null, { deferEnvironment = false, keepProbeWarm = false } = {}) {
     this.root.visible = active;
     const day = THREE.MathUtils.clamp(environment.day ?? 1, 0, 1);
     // environment.day already includes eclipse; source.irradiance already
@@ -66,7 +66,7 @@ export class WeaponLighting {
     this.up.copy(worldUp || this.camera.up).normalize();
     // Simulation keeps lights and the latest environment current on every RAF.
     // PMREM generation belongs to the admitted GPU submission, not this clock.
-    this.environmentFrame = { radiance, environment, daylight };
+    this.environmentFrame = { radiance, environment, daylight, keepProbeWarm };
     const reflectionScale = radiance?.components?.reflections === false ? 0
       : (radiance?.environmentIntensity ?? 0) * (0.08 + daylight * 0.92);
     // Exposed so other near-field outdoor objects (survey robots) can share the
@@ -80,8 +80,8 @@ export class WeaponLighting {
 
   prepareEnvironment() {
     if (!this.environmentFrame) return;
-    const { radiance, environment, daylight } = this.environmentFrame;
-    const outdoor = this.root.visible && (environment.atmosphere ?? 0) > 0.02 && daylight > 0.02;
+    const { radiance, environment, daylight, keepProbeWarm } = this.environmentFrame;
+    const outdoor = (this.root.visible || keepProbeWarm) && (environment.atmosphere ?? 0) > 0.02 && daylight > 0.02;
     const outdoorTexture = outdoor
       ? this.skyProbe.update(radiance?.renderer, environment, this.up) : null;
     const texture = outdoorTexture || radiance?.spaceEnvironment || null;

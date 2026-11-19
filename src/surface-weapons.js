@@ -388,8 +388,8 @@ export class SurfaceWeapons {
     if (this.materials) this.materials.uniforms.wet.value = this.wetness;
   }
 
-  updateLighting(radiance, environment = {}, worldUp = null) {
-    this.lighting.update(radiance, environment, this.rig.visible, worldUp, { deferEnvironment: true });
+  updateLighting(radiance, environment = {}, worldUp = null, { keepProbeWarm = false } = {}) {
+    this.lighting.update(radiance, environment, this.rig.visible, worldUp, { deferEnvironment: true, keepProbeWarm });
     // L-7: keep optic lens reflections synced with real-time planetary sun & sky
     const primary = radiance?.sources?.[0];
     const day = Number.isFinite(environment.day) ? environment.day : 0.85;

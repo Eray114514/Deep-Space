@@ -2012,6 +2012,9 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         #endif`);
     }
   };
-  material.customProgramCacheKey = () => 'wind-sway-v7-disturb-' + amount + '-' + (foliageLighting ? (material.map ? 'card' : 'leaf') : 'solid');
+  // uSway carries the exact sway amplitude as a uniform; GLSL only branches on
+  // amount > 0, so keying by boolean avoids compiling separate identical
+  // programs for grassNear / grassMid / grassFar.
+  material.customProgramCacheKey = () => 'wind-sway-v7-disturb-' + (amount > 0 ? 'sway' : 'rigid') + '-' + (foliageLighting ? (material.map ? 'card' : 'leaf') : 'solid');
   return material;
 }

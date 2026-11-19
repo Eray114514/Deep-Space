@@ -14,7 +14,13 @@ export function createSurfaceWarmupScene(source,group,camera,shadowLight) {
       copy.target.position.copy(light.target.getWorldPosition(new THREE.Vector3()));
       scene.add(copy.target);
     }
-    if(copy.shadow)copy.shadow.mapSize.set(2,2);
+    if(copy.shadow) {
+      copy.shadow.mapSize.set(2,2);
+      if(light===shadowLight) {
+        copy.shadow.autoUpdate=true;
+        copy.shadow.needsUpdate=true;
+      }
+    }
     if(light===shadowLight) {
       copy.visible=true;copy.intensity=1;
       copy.position.set(0,4000,0);copy.target.position.set(0,0,0);

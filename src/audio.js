@@ -67,7 +67,7 @@ export class FlightAudio {
     this.sfx = new ProceduralSfx();
     this.sfx.attach(ctx, this.master, 1.15);
     this.sfx.prewarm(['rifle_shot', 'rifle_tail_out', 'rifle_dry', 'reload_magout', 'reload_magin',
-      'reload_bolt', 'shell_bounce', 'rain', 'thunder']);
+      'reload_bolt', 'shell_bounce', 'rain', 'thunder', 'wind', 'sea']);
 
     // Menu foley bypasses the master so it still plays while the game (and
     // therefore the master gain) is paused.

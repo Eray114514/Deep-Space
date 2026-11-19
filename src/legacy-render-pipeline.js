@@ -91,14 +91,36 @@ export class GameLegacyPipeline {
     };
     renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderPass = new RenderPass(scene, camera);
-    if (this.cloudSurfaceShadow) {
-      const renderOpaque=this.renderPass.render;
-      this.renderPass.render=(...args)=>{
-        try {return withPreparedShadows(this.renderer,this.cloudSurfaceShadow.depthValid,
-          ()=>renderOpaque.apply(this.renderPass,args));}
-        finally {this.cloudSurfaceShadow.depthValid=false;}
-      };
-    }
+    const renderOpaque = this.renderPass.render;
+    const shadowResetNode = new THREE.Object3D();
+    const shadowResetCamera = new THREE.Camera();
+    shadowResetCamera.layers.disableAll();
+    this.renderPass.render = (...args) => {
+      // Three.js WebGLRenderer.render() runs shadowMap.render() BEFORE
+      // currentRenderState.setupLights(), so MeshDepthMaterial program cache
+      // keys inherit stale light counts from whichever layer rendered last on
+      // the previous frame (e.g. cabin 0/12 vs weapon 2/0). Resetting the
+      // scene's light state to (0, 0) in O(1) keeps shadow depth cache keys
+      // invariant across layer/state transitions and matches startup warmup.
+      if (typeof this.renderer.compile === 'function') {
+        const prevVisible = this.scene.visible;
+        this.scene.visible = false;
+        try {
+          this.renderer.compile(shadowResetNode, shadowResetCamera, this.scene);
+        } finally {
+          this.scene.visible = prevVisible;
+        }
+      }
+      if (this.cloudSurfaceShadow) {
+        try {
+          return withPreparedShadows(this.renderer, this.cloudSurfaceShadow.depthValid,
+            () => renderOpaque.apply(this.renderPass, args));
+        } finally {
+          this.cloudSurfaceShadow.depthValid = false;
+        }
+      }
+      return renderOpaque.apply(this.renderPass, args);
+    };
     this.composer.addPass(this.renderPass);
 
     // Parked ships participate in the world depth buffer, but their cabin
