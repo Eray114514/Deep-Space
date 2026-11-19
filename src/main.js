@@ -3112,8 +3112,6 @@ function recallShip() {
     ship.finishLanding();
     nodePipeline.cloudPass?.resetHistory();
     shipView.openRamp();
-    prewarmSurfacePipelines(universe.system.planets[0]);
-    prewarmSurfacePipelines(universe.system.planets[0]);
     shipView.rampMax = shipView.groundClampedRampMax();
     shipView.rampT = shipView.rampMax;
     if (target.mode === 'landed') audio.cue('touchdown');

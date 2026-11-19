@@ -216,6 +216,7 @@ export class FarFlora {
     this.repackIntervalMs = repackIntervalMs;
     this.density = Math.max(0.35, Math.min(1, density));
     this.displayDensity = 1;
+    this.displayDensityTarget = 1;
     this.lastRepackAt = -Infinity;
     this.metrics = {
       builtTiles: 0, repacks: 0,
@@ -311,11 +312,13 @@ export class FarFlora {
   pending() { return this.queue.length + (this.job ? 1 : 0); }
 
   setDisplayDensity(density) {
+    // Only retarget here. The update loop eases `displayDensity` toward this
+    // value in small steps, so a quality-stage change thins the forest one
+    // tree at a time instead of deleting a whole batch in a single repack
+    // (which read as trees popping out of existence in front of the player).
     const next = Math.max(0.35, Math.min(1, density));
-    if (Math.abs(next - this.displayDensity) < 0.025) return;
-    this.displayDensity = next;
-    this.dirty = true;
-    if (this.pending() === 0) this.repack();
+    if (Math.abs(next - this.displayDensityTarget) < 0.005) return;
+    this.displayDensityTarget = next;
   }
 
   debugStats() {
@@ -342,6 +345,15 @@ export class FarFlora {
     }
     const p = this.planet;
     this.cameraLocal.copy(camLocal);
+    // Ease display density toward its target (~0.4 s at 60 fps). A quality
+    // stage change now thins the forest in small per-frame steps instead of
+    // dropping a large batch of trees the moment the stage flips.
+    if (this.displayDensity !== this.displayDensityTarget) {
+      const step = 0.02;
+      const delta = this.displayDensityTarget - this.displayDensity;
+      this.displayDensity += Math.abs(delta) <= step ? delta : Math.sign(delta) * step;
+      this.dirty = true;
+    }
     this.uCamL.value.copy(camLocal).sub(this.origin);
     this.uAltK.value = smooth01((13000 - alt) / 3000);
     const visible = alt < SHOW_BELOW && this.uAltK.value > 0.0001;
