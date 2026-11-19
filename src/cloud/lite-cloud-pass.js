@@ -781,19 +781,33 @@ const resolveShader = /* glsl */`
     vec2 off = st - cellF;
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
+    vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
+    vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
+    float r0 = length(uCameraLocal);
     float sceneDepth = texture2D(tSceneDepth, vUv).x;
     surfaceDistance = sceneDepth < 0.999999
       ? (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005) : -1.0;
+    // When both the camera and the opaque surface lie strictly below the cloud
+    // shell, no cloud can exist in front of this pixel. Keep the temporal
+    // cloud history unmasked behind foreground geometry (trees, props, ground)
+    // and let the full-resolution composite cut it out cleanly: moving trees
+    // never inherit stale sky-cloud history, newly uncovered sky already has
+    // converged clouds, and bilinear filtering never bleeds across leaf edges.
+    if (surfaceDistance >= 0.0 && r0 < uShellBase) {
+      float b = dot(uCameraLocal, rd);
+      float ld = length(uCameraLocal - b * rd);
+      float h = (uShellBase - ld) * (uShellBase + ld);
+      float deckExit = h >= 0.0 ? -b + sqrt(h) : 0.0;
+      if (surfaceDistance <= deckExit) surfaceDistance = -1.0;
+    }
     // From above the deck every cloud lies in front of the ground.
-    cloudAbove = length(uCameraLocal) > uShellTop ? 1.0 : 0.0;
+    cloudAbove = r0 > uShellTop ? 1.0 : 0.0;
     vec4 nearest = maskedTexel(cell);
     vec2 corner = floor(st), f = st - corner;
     ivec2 c0 = ivec2(corner);
     vec4 spatial = mix(mix(maskedTexel(c0), maskedTexel(c0 + ivec2(1, 0)), f.x),
       mix(maskedTexel(c0 + ivec2(0, 1)), maskedTexel(c0 + ivec2(1, 1)), f.x), f.y);
     if (uHistoryWeight <= 0.0) { gl_FragColor = spatial; return; }
-    vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
-    vec3 rd = normalize((uWorldToLocal * vec4(directionWorld, 0.0)).xyz);
     // Clear sky reprojects as a far point so the history follows rotation.
     float km = texelFetch(tCurrentAux, cell, 0).z;
     float distance = km > 0.0 ? km * 1000.0 : 150000.0;
@@ -837,10 +851,15 @@ const resolveShader = /* glsl */`
       vec4 n = maskedTexel(cell + ivec2(x, y));
       lo = min(lo, n); hi = max(hi, n);
     }
-    vec4 pad = (hi - lo) * 0.25 + vec4(vec3(0.02), 0.01);
-    // Cloud drifting behind a ridge is followed by its history onto the
-    // ridge itself; where the surface hides cloud, the current frame rules.
-    clampAmount = max(clampAmount, occluded * uDeckMoving);
+    // Where an opaque surface hides or cuts into the cloud layer (e.g. a ridge
+    // or high-altitude foliage above uShellBase), never let stale sky-cloud
+    // history bleed onto the foreground object during camera motion or drift.
+    if (occluded > 0.5 && max(hi.r, max(hi.g, hi.b)) < 1e-4 && lo.a > 0.999) {
+      gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      return;
+    }
+    vec4 pad = ((hi - lo) * 0.25 + vec4(vec3(0.02), 0.01)) * (1.0 - occluded * 0.85);
+    clampAmount = max(clampAmount, occluded);
     history = mix(history, clamp(history, lo - pad, hi + pad), clampAmount);
     // This pixel's own sample arrives when the shifted grid lands on it.
     float exact = 1.0 - smoothstep(0.15, 0.4, max(abs(off.x), abs(off.y)));
@@ -849,7 +868,7 @@ const resolveShader = /* glsl */`
     // interpolated current frame there.
     float moving = smoothstep(0.5, 2.5, motion);
     vec4 target = mix(spatial, nearest, exact);
-    gl_FragColor = mix(history, target, max(exact * uCurrentWeight, moving * 0.35));
+    gl_FragColor = mix(history, target, max(max(exact * uCurrentWeight, moving * 0.35), occluded * 0.5));
   }`;
 
 const compositeShader = /* glsl */`
@@ -864,7 +883,6 @@ const compositeShader = /* glsl */`
   varying vec2 vUv;
   void main() {
     vec4 base = texture2D(tBase, vUv);
-    vec4 cloud = texture2D(tCloud, vUv);
     vec4 view = uInvProjection * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
     vec3 directionWorld = normalize((uCameraWorld * vec4(directionView, 0.0)).xyz);
@@ -876,20 +894,20 @@ const compositeShader = /* glsl */`
     float r0 = length(uCameraLocal);
     float deck = r0 > uShellTop ? shellHits(uCameraLocal, rd, uShellTop).x
       : r0 < uShellBase ? shellHits(uCameraLocal, rd, uShellBase).y : 0.0;
-    float far = smoothstep(15000.0, 70000.0, deck);
-    if (far > 0.0) {
-      vec2 o = uHistTexel * 2.2;
-      vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
-        + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
-      cloud = mix(cloud, blurred, far * 0.15);
-    }
-    float coverage = 1.0, shade = 1.0;
+    float coverage = 1.0, shade = 1.0, shaftMask = 1.0;
     float sceneDepth = texture2D(tSceneDepth, vUv).x;
     if (sceneDepth < 0.999999) {
-      // Opaque geometry: the resolve already kept only the cloud in front of
-      // it; here the surface takes the cloud column's shadow.
+      // Opaque geometry: below the cloud shell cut clouds out at exact full
+      // resolution so fine silhouettes (trees, foliage) never get low-res
+      // cloud bleed; above uShellBase the resolve already masked frontCoverage.
       float distance = (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005);
-      coverage = 1.0;
+      if (r0 < uShellBase) {
+        coverage = distance <= deck ? 0.0 : smoothstep(deck, deck + 50.0, distance);
+      }
+      // Near-field opaque surfaces have negligible air-column shaft loss;
+      // fading out the low-res subpixel-shifted shaft buffer prevents a
+      // flickering dark halo around nearby tree edges.
+      shaftMask = smoothstep(50.0, 600.0, distance);
       if (uShadowOn > 0.5) {
         // Surfaces under the clouds lose their direct sun to the cloud column.
         vec3 p = uCameraLocal + rd * distance;
@@ -904,8 +922,16 @@ const compositeShader = /* glsl */`
         }
       }
     }
+    vec4 cloud = coverage > 0.0 ? texture2D(tCloud, vUv) : vec4(0.0, 0.0, 0.0, 1.0);
+    float far = smoothstep(15000.0, 70000.0, deck);
+    if (far > 0.0 && coverage > 0.0) {
+      vec2 o = uHistTexel * 2.2;
+      vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
+        + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
+      cloud = mix(cloud, blurred, far * 0.15);
+    }
     vec3 color = base.rgb * shade * mix(1.0, cloud.a, coverage) + cloud.rgb * coverage;
-    gl_FragColor = vec4(max(color - texture2D(tShaft, vUv).rgb, vec3(0.0)), base.a);
+    gl_FragColor = vec4(max(color - texture2D(tShaft, vUv).rgb * shaftMask, vec3(0.0)), base.a);
   }`;
 
 export class LiteCloudPass extends Pass {
