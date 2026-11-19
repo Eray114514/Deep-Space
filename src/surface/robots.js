@@ -71,6 +71,9 @@ export class SurveyUnits {
     this.root.name = name;
     this.root.matrixAutoUpdate = false;
     this.root.visible = false;
+    // Layer-0-only world subtree: let ForegroundPass skip the whole robot
+    // hierarchy during weapon/ship foreground layer passes.
+    this.root.userData.worldLayerOnly = true;
     scene.add(this.root);
     this.fleet = null;
     this.events = null;

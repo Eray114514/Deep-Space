@@ -90,6 +90,9 @@ export class SurfaceGameplay {
     this.campRoot.name = 'frontier-camp';
     this.campRoot.matrixAutoUpdate = false;
     this.campRoot.visible = false;
+    // Layer-0-only world subtree: let ForegroundPass skip the whole camp
+    // hierarchy during weapon/ship foreground layer passes.
+    this.campRoot.userData.worldLayerOnly = true;
     this.scene.add(this.campRoot);
 
     this.campPlanet = null;

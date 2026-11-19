@@ -211,9 +211,15 @@ export class GameLegacyPipeline {
 
   setSize(width, height, dpr = 1) {
     this.invalidateTemporalHistory('resize');
-    // Set _pixelRatio directly before setSize so composer targets are resized
-    // once instead of twice per DPR / viewport change.
-    this.composer._pixelRatio = dpr;
+    // EffectComposer.setPixelRatio() internally calls setSize() with the stale
+    // dimensions, so re-apply it only when the ratio actually changes; the
+    // explicit setSize below then resizes targets exactly once per viewport
+    // change. Track the ratio on this instance rather than reaching into
+    // EffectComposer's private `_pixelRatio` field.
+    if (this._composerDpr !== dpr) {
+      this._composerDpr = dpr;
+      this.composer.setPixelRatio(dpr);
+    }
     this.composer.setSize(width, height);
   }
 
