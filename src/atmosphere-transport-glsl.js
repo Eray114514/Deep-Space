@@ -11,6 +11,7 @@ export const atmosphereUniformGLSL = `        uniform sampler2D tOpticalDepth, t
         uniform float uRayleighScaleHeight, uMieScaleHeight;
         uniform float uOzoneCenter, uOzoneHalfWidth;
         uniform vec3 uBetaRayleigh, uBetaMieScatter, uBetaMieExtinction, uBetaOzone;
+        uniform float uMieAsymmetry;
         uniform float uDensityScale;
         uniform vec3 uGroundAlbedo;
         uniform vec3 uSunDirection0, uSunColor0;
@@ -131,7 +132,7 @@ export const atmosphereTransportGLSL = `
           vec3 radial = position / max(radius, 1.0);
           float mu = dot(viewDirection, sunDirection);
           float rayleighPhase = 3.0 / (16.0 * PI) * (1.0 + mu * mu);
-          float g = 0.8;
+          float g = clamp(uMieAsymmetry, -0.95, 0.95);
           float miePhase = (1.0 - g * g) / (4.0 * PI
             * pow(max(0.025, 1.0 + g * g - 2.0 * g * mu), 1.5));
           return starScatterWithPhase(position, viewDirection, segmentLength,
@@ -193,7 +194,7 @@ export const atmosphereTransportGLSL = `
           gAirHasSun1 = uSunEnergy1 > 0.00001;
           gAirSunDir0 = gAirHasSun0 ? normalize(uSunDirection0) : vec3(0.0, 1.0, 0.0);
           gAirSunDir1 = gAirHasSun1 ? normalize(uSunDirection1) : vec3(0.0, 1.0, 0.0);
-          float g = 0.8, g2 = g * g;
+          float g = clamp(uMieAsymmetry, -0.95, 0.95), g2 = g * g;
           float mu0 = dot(direction, gAirSunDir0);
           gAirRayleighPhase0 = 3.0 / (16.0 * PI) * (1.0 + mu0 * mu0);
           gAirMiePhase0 = (1.0 - g2) / (4.0 * PI * pow(max(0.025, 1.0 + g2 - 2.0 * g * mu0), 1.5));

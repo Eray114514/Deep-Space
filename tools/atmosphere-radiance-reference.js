@@ -8,7 +8,8 @@ export function referenceAir(profile, { origin, direction, distance, sun, densit
   const L = [0, 0, 0], T = [1, 1, 1], ds = distance / steps;
   const mu = direction.reduce((v, x, i) => v + x * sun[i], 0);
   const rayPhase = 3 / (16 * Math.PI) * (1 + mu * mu);
-  const miePhase = (1 - 0.8 ** 2) / (4 * Math.PI * (1 + 0.8 ** 2 - 1.6 * mu) ** 1.5);
+  const g = profile.mie?.asymmetry ?? 0.8;
+  const miePhase = (1 - g * g) / (4 * Math.PI * (1 + g * g - 2 * g * mu) ** 1.5);
   for (let i = 0; i < steps; i++) {
     const p = origin.map((x, c) => x + direction[c] * (i + 0.5) * ds);
     const r = Math.hypot(...p), h = r - R;

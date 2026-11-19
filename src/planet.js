@@ -33,6 +33,7 @@ import { VOLUME_LAYER } from './volumetric-pass.js';
 import { WORLD_LAYER } from './render-layers.js';
 import { floraPalette } from './flora.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
+import { atmosphereAppearance, resolveAtmosphereModel } from './atmosphere-chemistry.js';
 import {
   LCL_MAX_METERS, LCL_MIN_METERS,
   advanceWeatherField, createWeatherField, sampleWeatherField,
@@ -107,8 +108,9 @@ function sampleStops(st, t, out) {
 }
 
 export class Planet extends TerrainHeightField {
-  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, fadeIn = false, deferRoots = false, sunDir = null, tuning = null, formation = null, ringSystem = null }) {
+  constructor({ seed, name, posUniv, type, isMoon = false, radius = null, atmosphere = null, clouds = null, equilibriumK = null, fadeIn = false, deferRoots = false, sunDir = null, tuning = null, formation = null, ringSystem = null }) {
     super();
+    this.equilibriumK = Number.isFinite(equilibriumK) ? equilibriumK : null;
     this.appear = fadeIn ? 0 : 1;   // planets born mid-flight fade in, never pop
     this.deferRoots = Boolean(deferRoots);
     // known at construction so even the root chunks bake sun shadows
@@ -699,8 +701,9 @@ export class Planet extends TerrainHeightField {
 
     // liquid & atmosphere colors
     // `col()` already decoded sRGB → linear; a second decode was crushing it.
-    this.atmoColor = col(this.cfg.atmo);
-    this.skyColor = col(this.cfg.sky);
+    const atmoLook = atmosphereAppearance(this);
+    this.atmoColor = col(atmoLook.atmoHex ?? this.cfg.atmo);
+    this.skyColor = col(atmoLook.skyHex ?? this.cfg.sky);
     switch (this.liquid) {
       case 'water': this.liquidColor = col('#15527e'); this.liquidOpacity = 0.66; break;
       case 'toxic': this.liquidColor = col('#6fcc22'); this.liquidOpacity = 0.82; break;
@@ -883,22 +886,23 @@ export class Planet extends TerrainHeightField {
       }
     }
 
-    if (this.atmoDensity > 0.05) {
+    const authoredAtmoHeight = Number(this.tuning.atmosphereHeightMeters);
+    const gameplayAtmoHeight = Number.isFinite(authoredAtmoHeight)
+      ? clamp(authoredAtmoHeight, 30000, 1000000)
+      : Math.max(this.hAmp * 3.2, R * this.atmoFraction);
+    const atmoModel = resolveAtmosphereModel(this);
+    if (this.atmoDensity > 0.05 && atmoModel.hasSignificantAtmosphere) {
       // Authored atmosphere height remains the gameplay/weather envelope. The
-      // physical atmosphere pass derives an independent optical top and scale
-      // heights, so this value must never stretch molecular density.
-      const authoredAtmoHeight = Number(this.tuning.atmosphereHeightMeters);
-      const atmoHeight = Number.isFinite(authoredAtmoHeight)
-        ? clamp(authoredAtmoHeight, 30000, 1000000)
-        : Math.max(this.hAmp * 3.2, R * this.atmoFraction);
-      const atmoR = R + atmoHeight;
+      // rendered shell matches the physical optical top so distant bodies and
+      // moons never display an oversized ring or jump during pass handoff.
+      const opticalR = atmoModel.profile.topRadiusMeters;
       this.atmoMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(atmoR, 96, 64),
-        makeAtmosphereMaterial(this, this.atmoColor, this.atmoDensity, R, atmoR),
+        new THREE.SphereGeometry(opticalR, 96, 64),
+        makeAtmosphereMaterial(this, this.atmoColor, this.atmoDensity, R, opticalR, atmoModel),
       );
-      // This mesh is the thin fallback limb for distant bodies and portal
-      // views. The active planet is hidden by the full-resolution physical
-      // atmosphere pass before clouds composite independently.
+      this.atmoOpticalTopR = opticalR;
+      // This mesh is the physical limb for distant bodies and portal views.
+      // The active planet is hidden by the full-resolution AtmospherePass.
       this.atmoMesh.renderOrder = 1;
       // Distant-body atmosphere belongs to the world pass so ordinary depth
       // naturally occludes it.
@@ -906,7 +910,7 @@ export class Planet extends TerrainHeightField {
       this.atmoMesh.material.fog = false;
       this.atmoMesh.frustumCulled = false;
       this.group.add(this.atmoMesh);
-      this.atmoHeight = atmoR - R;
+      this.atmoHeight = gameplayAtmoHeight;
     } else {
       this.atmoHeight = Math.max(this.hAmp * 3.2, R * this.atmoFraction * 0.72);
     }
@@ -1187,6 +1191,7 @@ export class Planet extends TerrainHeightField {
     }
     const atmo = this.atmoUniforms || this.atmoMesh?.material?.uniforms;
     if (atmo) {
+      if (atmo.uRadianceScale) atmo.uRadianceScale.value = this.stellarLightField.radianceScale ?? 3.2;
       (atmo.uStellarDirections0 || atmo.sunDir)?.value.copy(primary.localDirection);
       atmo.uStellarRadiance0?.value.copy(primary.colorValue);
       if (atmo.uStarIrradiance0) atmo.uStarIrradiance0.value = primary.irradianceFraction ?? 1;
@@ -1707,6 +1712,11 @@ export class Planet extends TerrainHeightField {
     if (this.atmoMesh) {
       const au = this.atmoUniforms || this.atmoMesh.material.uniforms;
       if (au.uCameraLocal) au.uCameraLocal.value.copy(camLocal);
+      const topR = this.atmoOpticalTopR || au.uTopR?.value || (this.R * 1.15);
+      const wantedSide = camR < topR * 1.04 ? THREE.BackSide : THREE.FrontSide;
+      if (this.atmoMesh.material.side !== wantedSide) {
+        this.atmoMesh.material.side = wantedSide;
+      }
     }
     // shells vanish near their own altitude so you fly through, not pop through;
     // each deck also gets the sun direction in its own rotating frame
@@ -1973,8 +1983,8 @@ const _msp = new THREE.Vector3();
 const _msd = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
-function makeAtmosphereMaterial(planet, color, density, groundR, atmoR) {
-  return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR);
+function makeAtmosphereMaterial(planet, color, density, groundR, atmoR, profileState = null) {
+  return makeAtmosphereMaterialWebGL(color, density, groundR, atmoR, profileState);
 }
 
 function coverageCutoff(values, targetCoverage) {

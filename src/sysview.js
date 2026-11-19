@@ -10,6 +10,7 @@ import { UnrealBloomPass } from '../vendor/jsm/postprocessing/UnrealBloomPass.js
 import { OutputPass } from '../vendor/jsm/postprocessing/OutputPass.js';
 import { makeRng, strHash32 } from './rng.js';
 import { orbitalPosition } from './astronomy.js';
+import { atmosphereAppearance } from './atmosphere-chemistry.js';
 import { computeBlackHoleBasis, makeBlackHoleVolumeMaterial } from './black-hole.js';
 
 const ORBIT_PLANE_Y = 0.18;
@@ -252,18 +253,13 @@ function makeCloudTexture(body) {
 }
 
 const CLOUD_TYPES = new Set(['lush', 'ocean', 'toxic', 'desert', 'ice']);
-const ATMO_STYLES = {
-  lush: [0x63b8e8, 0.56], ocean: [0x4ea7ff, 0.52], desert: [0xd8b98a, 0.3],
-  ice: [0xb7d4d2, 0.42], lava: [0xff6a3a, 0.34], toxic: [0xb5e45d, 0.42],
-  exotic: [0xe47cff, 0.44], iceGiant: [0x68c7df, 0.34],
-};
 
 function atmosphereMaterial(color, opacity = 0.45) {
   return new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false, side: THREE.BackSide, blending: THREE.AdditiveBlending,
+    transparent: true, depthWrite: false, side: THREE.FrontSide, blending: THREE.AdditiveBlending,
     uniforms: { uColor: { value: new THREE.Color(color) }, uOpacity: { value: opacity } },
     vertexShader: `varying vec3 vN;varying vec3 vW;void main(){vN=normalize(mat3(modelMatrix)*normal);vec4 w=modelMatrix*vec4(position,1.);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}`,
-    fragmentShader: `uniform vec3 uColor;uniform float uOpacity;varying vec3 vN;varying vec3 vW;void main(){vec3 V=normalize(cameraPosition-vW);float f=pow(1.0-clamp(dot(V,normalize(vN)),0.0,1.0),2.8);gl_FragColor=vec4(uColor,f*uOpacity);}`,
+    fragmentShader: `uniform vec3 uColor;uniform float uOpacity;varying vec3 vN;varying vec3 vW;void main(){vec3 N=normalize(vN);vec3 V=normalize(cameraPosition-vW);vec3 L=normalize(vec3(0.0,1.12,0.0)-vW);float rim=pow(1.0-clamp(dot(V,N),0.0,1.0),3.0);float day=smoothstep(-0.32,0.45,dot(N,L));float a=rim*(0.12+0.88*day)*uOpacity;gl_FragColor=vec4(uColor*a,a);}`,
   });
 }
 
@@ -1018,11 +1014,11 @@ export class SystemView {
       );
       group.add(cloud);
     }
-    const atmo = ATMO_STYLES[body.type];
-    if (atmo) {
+    const atmoLook = atmosphereAppearance(body);
+    if (atmoLook.visible && atmoLook.opacity > 0.02) {
       const shell = new THREE.Mesh(
-        new THREE.SphereGeometry(visualRadius * 1.115, 48, 32),
-        atmosphereMaterial(atmo[0], atmo[1]),
+        new THREE.SphereGeometry(visualRadius * 1.075, 48, 32),
+        atmosphereMaterial(atmoLook.atmoHex, atmoLook.opacity),
       );
       group.add(shell);
     }

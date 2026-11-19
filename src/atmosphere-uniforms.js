@@ -24,6 +24,7 @@ export function atmosphereUniforms(camera = { far: 1e7 }) {
     uBetaMieScatter: { value: new THREE.Vector3() },
     uBetaMieExtinction: { value: new THREE.Vector3() },
     uBetaOzone: { value: new THREE.Vector3() },
+    uMieAsymmetry: { value: 0.8 },
     uDensityScale: { value: 1 },
     uGroundAlbedo: { value: new THREE.Color(0.18, 0.2, 0.16) },
     uSunDirection0: { value: new THREE.Vector3(0, 1, 0) },

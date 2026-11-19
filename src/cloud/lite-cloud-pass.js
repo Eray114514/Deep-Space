@@ -452,7 +452,7 @@ const marchShader = /* glsl */`
       if (sceneDepth < 0.999999) tMax = min(tMax, (pow(uCameraFar + 1.0, sceneDepth) - 1.0) / max(-directionView.z, 0.0005));
       else if (ground) tMax = min(tMax, groundHit.x);
       vec3 loss = vec3(0.0), through = vec3(1.0);
-      float previous = 0.0, phaseR = 3.0 / (16.0 * PI) * (1.0 + mu * mu), phaseM = hgPhase(mu, 0.8);
+      float previous = 0.0, phaseR = 3.0 / (16.0 * PI) * (1.0 + mu * mu), phaseM = hgPhase(mu, clamp(uMieAsymmetry, -0.95, 0.95));
       float sj = fract(jitter + 0.37);
       for (int i = 0; i < 16; i++) {
         float x = (float(i) + sj) / 16.0;
@@ -462,9 +462,11 @@ const marchShader = /* glsl */`
         float altitude = max(length(p) - uGroundR, 0.0);
         float rayleigh = exp(-altitude / uRayleighScaleHeight) * uDensityScale;
         float mie = exp(-altitude / uMieScaleHeight) * uDensityScale;
+        vec3 ext = uBetaRayleigh * rayleigh + uBetaMieExtinction * mie
+          + uBetaOzone * ozoneDensity(altitude) * uDensityScale;
         vec3 source = (uBetaRayleigh * rayleigh * phaseR + uBetaMieScatter * mie * phaseM) * sunAt(p, sunDirection) * irradiance;
-        loss += through * source * (1.0 - cloudShadowAt(p)) * dt;
-        through *= exp(-(uBetaRayleigh * rayleigh + uBetaMieExtinction * mie) * dt);
+        loss += through * source * (1.0 - cloudShadowAt(p)) * mediumIntegral(ext, dt);
+        through *= exp(-ext * dt);
       }
       if (eclipsing) loss *= eclipseVisibility(ro, sunDirection);
       gShaft = vec4(loss * uShaftStrength * smoothstep(baseHere, baseHere - 700.0, r0), 1.0);
@@ -472,7 +474,7 @@ const marchShader = /* glsl */`
 
     // ---- High cirrus: one thin sheet well above the cumulus layer. It costs
     // a handful of fetches and gives the sky a second, clearly higher storey.
-    float cirrusRadius = uShellTop + 4500.0, cirrusT = -1.0, cirrusA = 0.0;
+    float cirrusRadius = uShellTop + uShellDepth * 0.41, cirrusT = -1.0, cirrusA = 0.0;
     vec3 cirrusL = vec3(0.0);
     bool cirrusFront = r0 >= cirrusRadius;
     vec2 cirrusHit = shellHits(ro, rd, cirrusRadius);
@@ -931,7 +933,8 @@ const compositeShader = /* glsl */`
       cloud = mix(cloud, blurred, far * 0.15);
     }
     vec3 color = base.rgb * shade * mix(1.0, cloud.a, coverage) + cloud.rgb * coverage;
-    gl_FragColor = vec4(max(color - texture2D(tShaft, vUv).rgb * shaftMask, vec3(0.0)), base.a);
+    vec3 shaftLoss = min(texture2D(tShaft, vUv).rgb * shaftMask, base.rgb * 0.82);
+    gl_FragColor = vec4(max(color - shaftLoss, vec3(0.0)), base.a);
   }`;
 
 export class LiteCloudPass extends Pass {
@@ -1169,7 +1172,10 @@ export class LiteCloudPass extends Pass {
         u.uNoise.value = liteCloudNoiseTexture();
         u.uSynoptic.value = next.weatherField?.synoptic ? 1 : 0;
         const floor = next.hasLiquid && Number.isFinite(next.seaLevel) ? Math.max(next.seaLevel, 0) : 0;
-        const base = floor + THREE.MathUtils.clamp((next.hAmp || 0) * 0.25, 1500, 3500);
+        const atmoTop = Math.max(1000, Number(this.atmospherePass?.profileState?.profile?.topAltitudeMeters) || next.R * 0.09);
+        const tropoScale = THREE.MathUtils.clamp(atmoTop / 65000, 0.14, 1.0);
+        const shellDepth = LAYER_DEPTH * tropoScale;
+        const base = floor + THREE.MathUtils.clamp((next.hAmp || 0) * 0.25, 1500 * tropoScale, 3500 * tropoScale);
         // Over high ground the base lifts with the regional surface altitude.
         // Off by default. Real clouds sit below summits; what read as clipping was
         // the hard intersection, which the composite now softens. With the lift on,
@@ -1178,15 +1184,25 @@ export class LiteCloudPass extends Pass {
         // (On: without it, every snow-capped highland stood in a cloud-free hole,
         // because the fixed-altitude layer lay below the ground there.)
         const highest = synoptic ? Number(next.weatherField.surfaceBoundsMeters?.[1]) || 0 : 0;
-        const maxLift = synoptic ? THREE.MathUtils.clamp((highest + 500 - base) * 0.85, 0, 9000) : 0;
+        const maxLift = synoptic ? THREE.MathUtils.clamp((highest + 500 - base) * 0.85, 0, 9000 * tropoScale) : 0;
         u.uLiftOn.value = synoptic ? 1 : 0;
         u.uLiftMax.value = maxLift;
         u.uLiftBase.value = base;
         u.uSurfaceRange.value = synoptic ? next.weatherField.surfaceRangeMeters || 1 : 1;
+        u.uShellDepth.value = shellDepth;
         u.uShellBase.value = next.R + base;
-        u.uShellTop.value = next.R + base + LAYER_DEPTH + maxLift;
-        u.uCloudTint.value.set(next.type === 'toxic' ? 0xc8e890 : 0xffffff);
-        this.layerMeters = { base, top: base + LAYER_DEPTH };
+        u.uShellTop.value = next.R + base + shellDepth + maxLift;
+        u.uExtinction.value = 0.005 / Math.pow(tropoScale, 0.55);
+        u.uCloudTint.value.set(
+          next.type === 'toxic' ? 0xc8e890
+            : next.type === 'desert' ? 0xfff0dc
+              : next.type === 'lava' ? 0xffd5be
+                : 0xffffff,
+        );
+        if (next.type === 'exotic' && next.atmoColor) {
+          u.uCloudTint.value.lerp(next.atmoColor, 0.16);
+        }
+        this.layerMeters = { base, top: base + shellDepth };
       }
     }
     this.#refresh();

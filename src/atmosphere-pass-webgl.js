@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { Pass, FullScreenQuad } from '../vendor/jsm/postprocessing/Pass.js';
 import { atmosphereTransportGLSL, atmosphereUniformGLSL } from './atmosphere-transport-glsl.js';
 import { createMultipleScatteringLut } from './atmosphere-multiple-scattering.js';
-import { createAtmosphereProfile } from './atmosphere-physics.js';
+import { resolveAtmosphereModel } from './atmosphere-chemistry.js';
 import {
   ATMOSPHERE_VIEW_STEPS, ATMOSPHERE_LUT_STEPS,
   atmosphereSampleBoundary, atmosphereQuadratureGLSL,
@@ -50,55 +50,18 @@ function ozoneDensity(profile, altitude) {
 // Authored atmosphereHeight remains a gameplay/cloud envelope. It must not
 // stretch the molecular scale heights used for optical scattering.
 export function atmosphereRenderProfile(planet) {
-  const pressureBar = Number(planet?.atmosphere?.pressureBar);
-  const pressure = Number.isFinite(pressureBar) && pressureBar > 0
-    ? pressureBar : Math.max(0.02, Number(planet?.atmoDensity) || 1);
-  const groundRadiusMeters = Math.max(1000, Number(planet?.R) || 6371000);
-  const maxTerrainMeters = Math.max(0, Number(planet?.hAmp) || 0);
-  // The canonical 6,000 km world receives a 100 km optical top. Compressed
-  // procedural bodies retain enough clearance for relief without inheriting
-  // the old 9–13.5% uniform shell.
-  const physicalTopMeters = clamp(Math.max(
-    groundRadiusMeters * (100000 / 6000000),
-    maxTerrainMeters * 2.4 + 6000,
-  ), 26000, 120000);
-  // [2026-11-14] Limb scale. With true 8 km scale heights a 1,200 km world
-  // wears its air as a hairline: from orbit the limb is a thin pale ring and
-  // there is no depth of blue to fly down through. Compact worlds therefore
-  // get taller scale heights (up to 2.2x, never more than ~1.7% of the
-  // radius). The density is divided by limbScale^0.6, not by the full factor:
-  // a straight division kept the vertical column but cut the grazing column
-  // (which scales with sqrt(R*H)) to 1/sqrt(k), so sunsets lost their red and
-  // twilight went pale. Aerosols get the full height adjustment; the
-  // molecular profile uses a softer adjustment below. Bodies of 6,000 km and
-  // above keep physical scale heights; small moons keep their physical top.
-  const limbScale = clamp(Math.min(Math.sqrt(6000000 / groundRadiusMeters),
-    groundRadiusMeters * 0.017 / 8000), 1, 2.2);
-  const topAltitudeMeters = limbScale > 1.001
-    ? Math.max(physicalTopMeters, 8000 * limbScale * 5.2) : physicalTopMeters;
-  const type = planet?.type || 'lush';
-  const temperatureK = clamp(
-    Number(planet?.weatherProfile?.temperatureK) || 286, 170, 700);
-  const temperatureScale = clamp(temperatureK / 286, 0.68, 1.45);
-  // Ideal-gas reference density at the authored surface pressure/temperature.
-  // atmoDensity is only the fallback for worlds without a physical pressure.
-  const densityScale = pressure * 286 / temperatureK / limbScale ** 0.6;
-  // Keep most of the enhanced limb on compact worlds, but let molecular
-  // density fall off sooner so the outer blue fringe fades into space.
-  const molecularScale = 1 + 0.7 * (limbScale - 1);
-  const rayleighScaleHeightMeters = 8000 * temperatureScale * molecularScale;
-  const mieScaleHeightMeters = (type === 'desert' || type === 'toxic' ? 1800 : 1200)
-    * Math.sqrt(temperatureScale) * limbScale;
-  const profile = createAtmosphereProfile({
-    groundRadiusMeters,
-    topAltitudeMeters,
-    rayleighScaleHeightMeters,
-    mieScaleHeightMeters,
-    ozoneCenterMeters: Math.min(25000 * limbScale, topAltitudeMeters * 0.42),
-    ozoneHalfWidthMeters: Math.min(15000 * limbScale, topAltitudeMeters * 0.28),
-    multipleScatteringFactor: 0.1,
-  });
-  return { profile, densityScale };
+  return resolveAtmosphereModel(planet);
+}
+
+function opticalDepthCacheKey(profile) {
+  return JSON.stringify([
+    profile.groundRadiusMeters,
+    profile.topAltitudeMeters,
+    profile.rayleighScaleHeightMeters,
+    profile.mieScaleHeightMeters,
+    profile.ozoneCenterMeters,
+    profile.ozoneHalfWidthMeters,
+  ]);
 }
 
 // RGB stores normalized Rayleigh/Mie/ozone optical depth; alpha marks rays
@@ -303,8 +266,16 @@ export class AtmospherePass extends Pass {
     }
     this.activePlanet.atmoMesh.visible = false;
     this.profileState = atmosphereRenderProfile(this.activePlanet);
-    const cacheKey = JSON.stringify(this.profileState.profile);
-    const multipleKey = JSON.stringify([this.profileState.densityScale, groundAlbedo(this.activePlanet).toArray()]);
+    const cacheKey = opticalDepthCacheKey(this.profileState.profile);
+    const multipleKey = JSON.stringify([
+      this.profileState.profile.rayleigh,
+      this.profileState.profile.mie.scattering,
+      this.profileState.profile.mie.extinction,
+      this.profileState.profile.mie.asymmetry,
+      this.profileState.profile.ozoneAbsorption,
+      this.profileState.densityScale,
+      groundAlbedo(this.activePlanet).toArray(),
+    ]);
     let cached = this.profileCache.get(cacheKey);
     if (!cached) {
       cached = { texture: makeLutTexture(this.profileState.profile) };
@@ -339,6 +310,7 @@ export class AtmospherePass extends Pass {
     uniforms.uBetaMieScatter.value.fromArray(profile.mie.scattering);
     uniforms.uBetaMieExtinction.value.fromArray(profile.mie.extinction);
     uniforms.uBetaOzone.value.fromArray(profile.ozoneAbsorption);
+    uniforms.uMieAsymmetry.value = profile.mie.asymmetry ?? 0.8;
     uniforms.uDensityScale.value = densityScale;
     uniforms.uGroundAlbedo.value.copy(groundAlbedo(this.activePlanet));
     this.updatePlanetUniforms(this.activePlanet, nav);
@@ -353,7 +325,7 @@ export class AtmospherePass extends Pass {
   prewarmPlanetProfileAsync(planet, { signal, sliceRows = 12 } = {}) {
     if (!planet?.atmoMesh) return Promise.resolve(false);
     const { profile } = atmosphereRenderProfile(planet);
-    const cacheKey = JSON.stringify(profile);
+    const cacheKey = opticalDepthCacheKey(profile);
     if (this.profileCache.has(cacheKey)) return Promise.resolve(true);
     const data = new Float32Array(LUT_WIDTH * LUT_HEIGHT * 4);
     let y = 0;

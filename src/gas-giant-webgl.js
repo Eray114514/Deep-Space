@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { makeRng } from './rng.js';
+import { resolveAtmosphereModel } from './atmosphere-chemistry.js';
+import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
+
+const _camLocal = new THREE.Vector3();
 
 function makeBands(seed, type) {
   const rand = makeRng(`${seed}:gas-bands`);
@@ -38,28 +42,23 @@ function makeBands(seed, type) {
   return texture;
 }
 
-function atmosphereMaterial(color) {
-  return new THREE.ShaderMaterial({
-    uniforms: { uColor: { value: color.clone() }, uSunDir: { value: new THREE.Vector3(0, 1, 0) } },
-    vertexShader: `varying vec3 vN; varying vec3 vLN; varying vec3 vP; void main(){vLN=normalize(normal); vN=normalize(normalMatrix*normal); vec4 p=modelViewMatrix*vec4(position,1.); vP=p.xyz; gl_Position=projectionMatrix*p;}`,
-    fragmentShader: `uniform vec3 uColor; uniform vec3 uSunDir; varying vec3 vN; varying vec3 vLN; varying vec3 vP; void main(){vec3 v=normalize(-vP); float rim=pow(1.-max(dot(v,vN),0.),2.4); float day=.06+.94*max(dot(vLN,normalize(uSunDir)),0.); gl_FragColor=vec4(uColor*(.28+day)*rim,rim*.72);}`,
-    side: THREE.BackSide, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  });
-}
-
 export class GasGiant {
-  constructor({ seed, name, catalogName, posUniv, type, radius, atmosphere = null, fadeIn = false }) {
+  constructor({ seed, name, catalogName, posUniv, type, radius, atmosphere = null, equilibriumK = null, fadeIn = false }) {
     this.seed = seed; this.name = name; this.catalogName = catalogName;
     this.type = type; this.isGasGiant = true; this.isMoon = false; this.landable = false;
     this.atmosphere = atmosphere;
+    this.equilibriumK = Number.isFinite(equilibriumK) ? equilibriumK : null;
     this.posUniv = posUniv.clone(); this.R = radius;
-    this.atmoHeight = radius * 0.38; this.atmoDensity = type === 'iceGiant' ? 0.82 : 1.16;
+    this.atmoHeight = radius * 0.38; this.atmoDensity = type === 'iceGiant' ? 0.92 : 1.05;
     this.gravity = type === 'iceGiant' ? 12.5 : 21.5;
     this.hasLiquid = false; this.liquid = null; this.seaLevel = -1e9; this.seaRadius = 0;
     this.appear = fadeIn ? 0 : 1;
-    const ice = type === 'iceGiant';
-    this.skyColor = new THREE.Color(ice ? 0x59b7df : 0xd7a071);
+
+    const atmoModel = resolveAtmosphereModel(this);
+    this.atmoModel = atmoModel;
+    this.skyColor = new THREE.Color(atmoModel.appearance.skyHex);
     this.skyColorLin = this.skyColor.clone();   // Color(hex) already decoded to linear
+    this.atmoColor = new THREE.Color(atmoModel.appearance.atmoHex);
     this.pal = { land: [{ c: this.skyColor.clone().multiplyScalar(0.35) }, { c: this.skyColor.clone() }, { c: this.skyColor.clone().multiplyScalar(0.55) }] };
     this.group = new THREE.Group(); this.group.name = `gas-giant:${name}`;
     this.terrainMaterial = new THREE.MeshStandardMaterial({
@@ -69,9 +68,16 @@ export class GasGiant {
     this.terrainMaterial.userData.shader = null;
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 64), this.terrainMaterial);
     this.mesh.receiveShadow = true; this.group.add(this.mesh);
-    this.hazeMaterial = atmosphereMaterial(this.skyColor);
-    this.haze = new THREE.Mesh(new THREE.SphereGeometry(radius * 1.09, 72, 48), this.hazeMaterial);
+
+    const opticalR = atmoModel.profile.topRadiusMeters;
+    this.hazeTopR = opticalR;
+    this.hazeMaterial = makeAtmosphereMaterialWebGL(this.atmoColor, this.atmoDensity, radius, opticalR, atmoModel);
+    this.hazeMaterial.fog = false;
+    this.haze = new THREE.Mesh(new THREE.SphereGeometry(opticalR, 96, 64), this.hazeMaterial);
+    this.haze.renderOrder = 1;
+    this.haze.frustumCulled = false;
     this.group.add(this.haze);
+
     const rand = makeRng(`${seed}:ring`);
     if (rand() < 0.58) {
       const inner = radius * (1.38 + rand() * 0.2), outer = radius * (2.15 + rand() * 0.65);
@@ -92,11 +98,70 @@ export class GasGiant {
     this.lod = { countChunks: () => 0 };
   }
   get typeLabel() { return this.type === 'iceGiant' ? '冰巨星' : '气态巨星'; }
-  setFrame(orientation) { this.frameOrientation.copy(orientation); this._invFrame.copy(orientation).invert(); this.group.quaternion.copy(orientation); }
+  setFrame(orientation) {
+    this.frameOrientation.copy(orientation);
+    this._invFrame.copy(orientation).invert();
+    this.group.quaternion.copy(orientation);
+    this.sunDirLocal.copy(this.sunDirWorld).applyQuaternion(this._invFrame);
+    if (this.stellarLightField?.sources) {
+      for (const source of this.stellarLightField.sources) {
+        source.localDirection.copy(source.worldDirection).applyQuaternion(this._invFrame);
+      }
+      this.setStellarLights(this.stellarLightField);
+    } else {
+      const u = this.hazeMaterial.uniforms;
+      u.sunDir.value.copy(this.sunDirLocal);
+      u.uStellarDirections0.value.copy(this.sunDirLocal);
+    }
+  }
   setSunDir(worldDir) {
     this.sunDirWorld.copy(worldDir);
     this.sunDirLocal.copy(worldDir).applyQuaternion(this._invFrame);
-    this.hazeMaterial.uniforms.uSunDir.value.copy(this.sunDirLocal);
+    const u = this.hazeMaterial.uniforms;
+    u.sunDir.value.copy(this.sunDirLocal);
+    u.uStellarDirections0.value.copy(this.sunDirLocal);
+  }
+  setStellarLights(field) {
+    if (!field?.sources?.length) return this.setSunDir(this.sunDirWorld);
+    const ordered = [...field.sources];
+    const dominant = Math.max(0, Math.min(ordered.length - 1, field.dominantIndex ?? 0));
+    if (dominant !== 0) [ordered[0], ordered[dominant]] = [ordered[dominant], ordered[0]];
+    this.stellarLightField = {
+      ...field,
+      sources: ordered.map((source) => ({
+        ...source,
+        worldDirection: new THREE.Vector3().fromArray(source.direction).normalize(),
+        localDirection: new THREE.Vector3().fromArray(source.direction)
+          .applyQuaternion(this._invFrame).normalize(),
+        colorValue: new THREE.Color().fromArray(source.color || [1, 1, 1]),
+      })),
+      dominantIndex: 0,
+    };
+    const primary = this.stellarLightField.sources[0];
+    const secondary = this.stellarLightField.sources[1] || null;
+    this.sunDirWorld.copy(primary.worldDirection);
+    this.sunDirLocal.copy(primary.localDirection);
+    const u = this.hazeMaterial.uniforms;
+    u.uRadianceScale.value = this.stellarLightField.radianceScale ?? 3.2;
+    u.sunDir.value.copy(primary.localDirection);
+    u.uStellarDirections0.value.copy(primary.localDirection);
+    u.uStellarRadiance0.value.copy(primary.colorValue);
+    u.uStarIrradiance0.value = primary.irradianceFraction ?? 1;
+    if (secondary) {
+      u.uStellarDirections1.value.copy(secondary.localDirection);
+      u.uStellarRadiance1.value.copy(secondary.colorValue);
+      u.uStarIrradiance1.value = secondary.irradianceFraction ?? 0;
+    } else {
+      u.uStarIrradiance1.value = 0;
+    }
+  }
+  setEclipseOccluder(occluder = null) {
+    const u = this.hazeMaterial.uniforms;
+    if (!occluder) { u.uEclipseEnabled.value = 0; return; }
+    u.uEclipseCenter.value.copy(occluder.centerLocal);
+    u.uEclipseRadius.value = Math.max(1, occluder.radius || 1);
+    u.uEclipseStarAngle.value = Math.max(0, occluder.starAngularRadius || 0);
+    u.uEclipseEnabled.value = 1;
   }
   worldOffsetToLocal(v, out = new THREE.Vector3()) { return out.copy(v).applyQuaternion(this._invFrame); }
   localOffsetToWorld(v, out = new THREE.Vector3()) { return out.copy(v).applyQuaternion(this.frameOrientation); }
@@ -110,10 +175,17 @@ export class GasGiant {
   }
   applyAppear() {
     this.terrainMaterial.opacity = this.appear;
+    this.hazeMaterial.uniforms.density.value = this.appear;
   }
-  update(_camWorld, dt, _focused, animDt = dt) {
+  update(camWorld, dt, _focused, animDt = dt) {
     this.mesh.rotation.y += animDt * (this.type === 'iceGiant' ? 0.012 : 0.021);
     if (this.ringMesh) this.ringMesh.rotation.z += animDt * 0.0002;
+    if (camWorld) {
+      this.worldOffsetToLocal(camWorld, _camLocal);
+      this.hazeMaterial.uniforms.uCameraLocal.value.copy(_camLocal);
+      const wantedSide = _camLocal.length() < this.hazeTopR * 1.04 ? THREE.BackSide : THREE.FrontSide;
+      if (this.hazeMaterial.side !== wantedSide) this.hazeMaterial.side = wantedSide;
+    }
     if (this.appear < 1) { this.appear = Math.min(1, this.appear + dt / 1.2); this.applyAppear(); }
   }
   dispose() {
@@ -122,4 +194,3 @@ export class GasGiant {
     if (this.ringMesh) { this.ringMesh.geometry.dispose(); this.ringMesh.material.dispose(); }
   }
 }
-

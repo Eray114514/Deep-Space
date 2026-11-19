@@ -140,6 +140,65 @@ assert.ok(luminance(daySky) > luminance(nightSky) * 4,
 assert.ok(luminance(twilightSky) >= luminance(nightSky),
   'twilight never falls below the adapted night-sky floor');
 
+// Universal planetary atmosphere contracts: radius-proportional scale heights,
+// seamless zero-edge optical tops, vacuum fade on airless bodies, and genuine
+// chemical diversity across non-Earth planet and moon classes.
+{
+  const smallMoon = atmosphereRenderProfile({
+    seed: 'MILKY-038:m:0,0,0:0:0',
+    R: 37600,
+    hAmp: 1900,
+    type: 'exotic',
+    isMoon: true,
+    atmosphere: { pressureBar: 1.47 },
+    weatherProfile: { temperatureK: 281 },
+  });
+  assert.ok(smallMoon.profile.topAltitudeMeters < smallMoon.profile.groundRadiusMeters * 0.22,
+    'small moons must never wear a giant bloated atmosphere bubble');
+  assert.ok(smallMoon.profile.topAltitudeMeters >= smallMoon.profile.rayleighScaleHeightMeters * 9.5,
+    'optical top must exceed 9.5 scale heights so the outer limb fades cleanly without a hard edge');
+  assert.ok(smallMoon.profile.rayleighScaleHeightMeters / smallMoon.profile.groundRadiusMeters < 0.025,
+    'small-moon scale height must scale proportionally with moon radius');
+
+  const desert = atmosphereRenderProfile({
+    seed: 'MILKY-038:p:MW-0001:0',
+    R: 276000,
+    hAmp: 9000,
+    type: 'desert',
+    atmosphere: { pressureBar: 0.73 },
+    weatherProfile: { temperatureK: 298 },
+  });
+  assert.ok(desert.profile.mie.scattering[0] > desert.profile.mie.scattering[2] * 2,
+    'desert dust atmospheres must scatter red/amber stronger than blue');
+  assert.ok(desert.profile.mie.extinction[2] > desert.profile.mie.scattering[2] * 1.5,
+    'desert dust aerosols must physically absorb short wavelengths');
+
+  const toxic = atmosphereRenderProfile({
+    seed: 'MILKY-038:p:MW-0001:1',
+    R: 375000,
+    hAmp: 9500,
+    type: 'toxic',
+    atmosphere: { pressureBar: 7.29 },
+    weatherProfile: { temperatureK: 305 },
+  });
+  assert.ok(toxic.profile.mie.extinction[2] > toxic.profile.mie.extinction[1],
+    'toxic chlorine/sulfur extinction must absorb blue strongest to prevent magenta horizon inversion');
+  assert.ok(toxic.densityScale < 3.0,
+    'high-pressure atmospheres must compress smoothly instead of washing out to opaque soup');
+
+  const airless = atmosphereRenderProfile({
+    seed: 'MILKY-038:m:airless:0',
+    R: 42000,
+    hAmp: 1500,
+    type: 'barren',
+    isMoon: true,
+    atmosphere: { pressureBar: 0.0004 },
+    weatherProfile: { temperatureK: 220 },
+  });
+  assert.equal(airless.densityScale, 0, 'near-vacuum barren rocks must fade to zero atmosphere');
+  assert.equal(airless.hasSignificantAtmosphere, false);
+}
+
 console.log('PASS: Stage B stellar radiometry and physical atmosphere reference contracts');
 console.log(JSON.stringify({
   blackbody: { warm, solar, hot },

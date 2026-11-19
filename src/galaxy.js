@@ -593,7 +593,7 @@ export class StarSystem {
     const planet = new Ctor({
       seed: s.seed, name: s.name, catalogName: s.catalogName,
       posUniv: frame.position, type: s.type, isMoon: s.isMoon, radius: s.radius,
-      atmosphere: s.atmosphere, clouds: s.clouds,
+      atmosphere: s.atmosphere, clouds: s.clouds, equilibriumK: s.equilibriumK,
       fadeIn: this._fadeInPlanets, deferRoots: Boolean(deferRoots),
       sunDir: this.sunDirFrom(frame.position, _v).clone(),
       tuning: this.universe.bodyTuning?.(this.star.id, s.bodyId) || null,
