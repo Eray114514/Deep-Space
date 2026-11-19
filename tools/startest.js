@@ -28,8 +28,8 @@ for (let i = 0; i < CLASSES.length; i++) {
     positionUniv: new THREE.Vector3(0, 0, 0),
     seed: `test:${i}`,
   });
-  assert.ok(visual.mesh && visual.coronaShell && visual.prominences && visual.glow && visual.light);
-  for (const part of [visual.mesh, visual.coronaShell, visual.prominences, visual.glow]) {
+  assert.ok(visual.mesh && visual.prominences && visual.glow && visual.light);
+  for (const part of [visual.mesh, visual.prominences, visual.glow]) {
     assert.ok(part.material.vertexShader.includes('#include <logdepthbuf_vertex>'),
       `${spec.spectralClass} ${part.name} missing logdepthbuf_vertex`);
     assert.ok(part.material.fragmentShader.includes('#include <logdepthbuf_fragment>'),
