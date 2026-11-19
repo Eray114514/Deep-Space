@@ -52,7 +52,11 @@ function makeStar(rand, index, systemName, home = false, formation = null) {
     ? 0.01 + rand() * 0.09
     : Math.max(0.003, Math.pow(massSolar, massSolar < 0.43 ? 2.3 : massSolar < 2 ? 4 : 3.5));
   const radiusSolar = cls.spectral === 'D' ? 0.009 + rand() * 0.009 : Math.max(0.12, Math.pow(massSolar, 0.72));
-  const radiusRender = cls.spectral === 'D' ? 1.7e6 + rand() * 1.2e6 : 4e6 * Math.max(0.55, radiusSolar);
+  // Cinematic star scale: main-sequence stars span ~10,500–52,000 km (~15–40×
+  // terrestrial planets) so approaching a star conveys monumental presence.
+  const radiusRender = cls.spectral === 'D'
+    ? 4.8e6 + rand() * 2.4e6
+    : clamp(1.8e7 * Math.pow(Math.max(0.24, radiusSolar), 0.72), 1.05e7, 5.2e7);
   return {
     starId: `star-${index}`,
     displayName: index === 0 ? `${systemName}星` : `${systemName} ${String.fromCharCode(65 + index)}`,
@@ -124,9 +128,12 @@ export function generateStellarSpec(seed, starCell, systemName = '') {
   const totalLuminosity = stars.reduce((sum, star) => sum + star.luminositySolar, 0);
   const binarySemiMajorAU = stars.length === 2 ? 0.025 + rand() * 0.085 : 0;
   const binaryEccentricity = stars.length === 2 ? rand() * 0.28 : 0;
+  const minBinaryRender = stars.length === 2
+    ? (stars[0].radiusRender + stars[1].radiusRender) * 2.35
+    : 0;
   const binaryOrbit = stars.length === 2 ? {
     semiMajorAU: binarySemiMajorAU,
-    renderRadius: 1.1e7 + rand() * 2.3e7,
+    renderRadius: Math.max(minBinaryRender, 5.2e7 + rand() * 7.2e7),
     periodHours: Math.sqrt(Math.pow(binarySemiMajorAU, 3) / totalMass) * 365.25 * 24,
     eccentricity: binaryEccentricity,
     inclination: (rand() - 0.5) * 0.28,
@@ -323,7 +330,7 @@ export function generateBlackHoleSystemSpec(seed, destination) {
   const systemName = destination.systemName || '厄瑞玻斯观测区';
   const massSolar = 1850 + rand() * 950;
   const eventHorizonKm = massSolar * 2.95325;
-  const renderRadius = 2.6e6 + rand() * 8e5;
+  const renderRadius = 6.2e6 + rand() * 1.8e6;
   const centralObject = {
     bodyId: 'black-hole-0', parentId: null, host: 'system-barycenter',
     seed: `${seed}:bh:${systemId}:0`, name: destination.name || '厄瑞玻斯',
@@ -353,7 +360,7 @@ export function generateBlackHoleSystemSpec(seed, destination) {
     star.displayName = `${systemName} ${String.fromCharCode(65 + i)}`;
     star.orbit = {
       semiMajorAU,
-      renderRadius: 5.4e7 + i * 4.6e7,
+      renderRadius: 5.2e8 + i * 3.8e8,
       periodHours: Math.sqrt(Math.pow(semiMajorAU, 3) / massSolar) * 365.25 * 24,
       eccentricity: 0.08 + rand() * 0.24,
       inclination: (rand() - 0.5) * 0.46,
@@ -402,6 +409,11 @@ export function generateSystemSpec(seed, starCell) {
   let au = isHome
     ? Math.max(starCount === 2 ? binarySemiMajorAU * (1 + binaryEccentricity) * 3.4 : 0.16, 0.98 * Math.sqrt(totalLuminosity))
     : Math.max(starCount === 2 ? binarySemiMajorAU * (1 + binaryEccentricity) * 3.4 : 0.16, 0.16 + rand() * 0.12);
+  const innerOrbitFloor = Math.max(
+    3.4e8,
+    stars[0].radiusRender * 18.5,
+    binaryOrbit ? binaryOrbit.renderRadius * 3.1 : 0,
+  );
   let moonNameIndex = 0;
   for (let i = 0; i < bodyCount; i++) {
     au *= i === 0 ? 1 : 1.42 + rand() * 0.34;
@@ -422,7 +434,7 @@ export function generateSystemSpec(seed, starCell) {
     const bodyId = `planet-${i}`;
     const orbit = {
       semiMajorAU: au,
-      renderRadius: Math.min(6e7 * Math.pow(1.68, i) * (0.9 + rand() * 0.2), 1.6e9),
+      renderRadius: Math.min(innerOrbitFloor * Math.pow(1.52, i) * (0.92 + rand() * 0.16), 4.2e9),
       periodHours, eccentricity: rand() * (i === 0 ? 0.04 : 0.08),
       inclination: (rand() - 0.5) * 0.14, ascendingNode: rand() * TAU, phase: rand(),
     };

@@ -379,10 +379,16 @@ export class Ship {
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = 140;
-    this.sun.shadow.camera.left = this.sun.shadow.camera.bottom = -34;
-    this.sun.shadow.camera.right = this.sun.shadow.camera.top = 34;
+    this.sun.shadow.camera.left = this.sun.shadow.camera.bottom = -20;
+    this.sun.shadow.camera.right = this.sun.shadow.camera.top = 20;
     this.sun.shadow.bias = -0.0002;
     this.sun.shadow.normalBias = 0.05;
+    this.sun.shadow.autoUpdate = false;
+    this.sun.shadow.needsUpdate = true;
+    this._lastShipSunLocal = new THREE.Vector3();
+    this._lastShipSunPos = new THREE.Vector3(Infinity, 0, 0);
+    this._lastShipSunQuat = new THREE.Quaternion(0, 0, 0, 0);
+    this._lastShipArtic = -1;
     this.sun.layers.set(SHIP_FOREGROUND_LAYER);
     this.sun.target.layers.set(SHIP_FOREGROUND_LAYER);
     scene.add(this.sun, this.sun.target);
@@ -473,8 +479,29 @@ export class Ship {
       // USE_SHADOWMAP across the 7 Halcyon PBR materials (~1.6 s recompile).
       light.visible = this.foregroundOnly;
       if (light.shadow) {
-        light.shadow.autoUpdate = this.foregroundOnly && intensity > 0.001;
-        if (!light.shadow.map) light.shadow.needsUpdate = true;
+        if (!this.foregroundOnly || intensity <= 0.001) {
+          light.shadow.autoUpdate = false;
+        } else if (!light.shadow.map) {
+          light.shadow.autoUpdate = false;
+          light.shadow.needsUpdate = true;
+        } else if (source?.direction) {
+          // Dirty-gate the ship's 2048^2 directional shadow map: only re-render
+          // when ship-local sun angle, hull pose, or articulated parts change.
+          _sv.copy(source.direction).applyQuaternion(_sq2.copy(this.group.quaternion).invert());
+          const artic = (this.gearT || 0) * 10 + (this.rampT || 0) * 100 + (this.roll || 0) * 2;
+          const sunMoved = _sv.distanceToSquared(this._lastShipSunLocal) > 2e-6;
+          const posMoved = origin.distanceToSquared(this._lastShipSunPos) > 1e-4;
+          const quatMoved = Math.abs(this.group.quaternion.dot(this._lastShipSunQuat)) < 0.999999;
+          const articMoved = Math.abs(artic - this._lastShipArtic) > 1e-3;
+          light.shadow.autoUpdate = false;
+          if (sunMoved || posMoved || quatMoved || articMoved) {
+            this._lastShipSunLocal.copy(_sv);
+            this._lastShipSunPos.copy(origin);
+            this._lastShipSunQuat.copy(this.group.quaternion);
+            this._lastShipArtic = artic;
+            light.shadow.needsUpdate = true;
+          }
+        }
       }
     }
     this.ambient.intensity = radiance?.exteriorAmbient ?? 0.07;
@@ -491,24 +518,28 @@ export class Ship {
       setMaterialEnvironmentIntensity(material,
         radiance?.components?.reflections === false ? 0 : envScale);
     }
-    for (const material of [...this.cabinMaterials, ...this.cockpitMaterials]) {
-      // the zone probes were rendered with the cabin lit: dim them with it
-      setMaterialEnvironmentIntensity(material,
-        radiance?.components?.reflections === false ? 0 : THREE.MathUtils.lerp(0.12, 1, this.cabinLightT ?? 1));
-      if (material.userData?.interiorIndirectScale) {
-        material.userData.interiorIndirectScale.value = (radiance?.components?.indirect === false ? 0 : 1)
-          * THREE.MathUtils.lerp(0.10, 1, this.cabinLightT ?? 1);
-      }
-    }
     const cabin = this.cabinLightT ?? 1;
+    const cabinEnv = radiance?.components?.reflections === false ? 0 : THREE.MathUtils.lerp(0.12, 1, cabin);
+    const cabinInd = (radiance?.components?.indirect === false ? 0 : 1) * THREE.MathUtils.lerp(0.10, 1, cabin);
+    const lampScale = THREE.MathUtils.lerp(0.04, 1, cabin);
+    const updateZoneMats = (set) => {
+      if (!set) return;
+      for (const material of set) {
+        setMaterialEnvironmentIntensity(material, cabinEnv);
+        if (material.userData?.interiorIndirectScale) {
+          material.userData.interiorIndirectScale.value = cabinInd;
+        }
+        if (material.userData.lampBase !== undefined && /^lamp(Warm|Cool|Strip)$/.test(material.name)) {
+          material.emissiveIntensity = material.userData.lampBase * lampScale;
+        }
+      }
+    };
+    updateZoneMats(this.cabinMaterials);
+    updateZoneMats(this.cockpitMaterials);
     for (const light of this.interiorLights || []) {
       const level = light.userData.night ? 1 - cabin : THREE.MathUtils.lerp(0.08, 1, cabin);
       light.intensity = (light.userData.radianceBaseIntensity ?? light.intensity)
         * (radiance?.components?.localLights === false ? 0 : 1) * level;
-    }
-    for (const material of [...(this.cabinMaterials || []), ...(this.cockpitMaterials || [])]) {
-      if (material.userData.lampBase === undefined || !/^lamp(Warm|Cool|Strip)$/.test(material.name)) continue;
-      material.emissiveIntensity = material.userData.lampBase * THREE.MathUtils.lerp(0.04, 1, cabin);
     }
   }
 

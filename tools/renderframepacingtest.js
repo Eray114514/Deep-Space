@@ -74,7 +74,7 @@ function fixture({volume=true,tracking=true}={}) {
   }
   const lighting=pipeline.updateCloudLighting;
   pipeline.updateCloudLighting=function(...args){return invoke('cloud.update',()=>lighting.apply(this,args),args);};
-  pipeline.cloudSurfaceShadow.render=(r,write)=>invoke('shadow.draw',()=>{assert.equal(r,renderer);renderer.setRenderTarget(write,1,0);});
+  if (pipeline.cloudSurfaceShadow) pipeline.cloudSurfaceShadow.render=(r,write)=>invoke('shadow.draw',()=>{assert.equal(r,renderer);renderer.setRenderTarget(write,1,0);});
   pipeline.composer.render=()=>invoke('composer.draw',()=>{
     renderer.setRenderTarget(null);if(composerHook)composerHook();
   });

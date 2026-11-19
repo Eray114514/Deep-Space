@@ -42,6 +42,24 @@ export class ForegroundPass extends Pass {
     const oldMask = this.camera.layers.mask;
     const oldTarget = renderer.getRenderTarget();
     const oldFace = renderer.getActiveCubeFace(), oldMip = renderer.getActiveMipmapLevel();
+    // Skip massive Layer-0-only world subtrees (planet terrain/water/flora,
+    // outpost camps, robots) during foreground layer passes so Three.js does
+    // not traverse thousands of world meshes on every foreground layer.
+    const hiddenWorldRoots = [];
+    const hideWorldOnly = (list) => {
+      if (!list) return;
+      for (let i = 0; i < list.length; i++) {
+        const child = list[i];
+        if (!child.visible) continue;
+        if (child.userData?.worldLayerOnly) {
+          child.visible = false;
+          hiddenWorldRoots.push(child);
+        } else if (child.userData?.hasWorldLayerChildren) {
+          hideWorldOnly(child.children);
+        }
+      }
+    };
+    hideWorldOnly(this.scene?.children);
     try {
       renderer.autoClear = false;
       renderer.setRenderTarget(target);
@@ -64,6 +82,7 @@ export class ForegroundPass extends Pass {
         renderer.render(this.scene, this.camera);
       }
     } finally {
+      for (let i = 0; i < hiddenWorldRoots.length; i++) hiddenWorldRoots[i].visible = true;
       this.camera.layers.mask = oldMask;
       renderer.autoClear = oldAutoClear;
       renderer.setRenderTarget(oldTarget, oldFace, oldMip);

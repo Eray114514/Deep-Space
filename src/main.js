@@ -1977,6 +1977,26 @@ function nearbyBlackHole() {
   return closest && distance < closest.spec.accretionRadius * 7 ? closest : null;
 }
 
+let starThermalHintAt = 0;
+let starThermalZoneActive = false;
+
+function nearbyStar() {
+  let bestView = null;
+  let bestRatio = Infinity;
+  let bestDist = Infinity;
+  for (const view of universe.system?.starViews || []) {
+    const r = Math.max(view.spec.radiusRender || 1, 1);
+    const d = nav.pos.distanceTo(view.positionUniv);
+    const ratio = d / r;
+    if (ratio < bestRatio) {
+      bestView = view;
+      bestRatio = ratio;
+      bestDist = d;
+    }
+  }
+  return bestView ? { view: bestView, dist: bestDist, ratio: bestRatio } : null;
+}
+
 resumeButton.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || !paused) return;
   // Pointer Lock can cancel the click that follows pointerdown. Complete the
@@ -5196,6 +5216,7 @@ function ambience(dt = 1 / 60) {
       const flux = view.spec.luminositySolar / Math.max(1, delta.lengthSq());
       const directDay = smoothstep(-0.22, 0.28, _up.dot(delta.normalize()));
       const visibility = eclipseFraction(nav.pos, view.positionUniv, view.spec.radiusRender, blockers);
+      view.eclipseVis = visibility;
       totalFlux += flux;
       clearLitFlux += flux * directDay;
       litFlux += flux * directDay * (0.08 + visibility * 0.92);
@@ -5842,12 +5863,21 @@ function frame(rafTs) {
       // a roll-only correction; pitch and heading remain player-controlled.
       spaceCtl.horizonAssist = 1 - smoothstep(0.16, 0.95, alt / h);
       const surfaceScale = clamp(38 + Math.pow(alt, 0.58) * 0.32, 38, 620);
-      const orbitalScale = clamp(650 + alt * 0.018, 650, 120000);
+      const orbitalScale = clamp(650 + alt * 0.018, 650, 220000);
       const orbitalBlend = smoothstep(0.72, 3.5, alt / h);
       spaceCtl.speedScale = lerp(surfaceScale, orbitalScale, orbitalBlend);
     } else {
-      spaceCtl.speedScale = 120000;
+      spaceCtl.speedScale = 220000;
       spaceCtl.horizonAssist = 0;
+    }
+    // Distance-adaptive speed cap near stars so skimming a 18,000+ km corona
+    // conveys monumental scale instead of zipping through in two seconds.
+    const nearStarBefore = nearbyStar();
+    if (nearStarBefore && nearStarBefore.ratio < 14) {
+      const starR = nearStarBefore.view.spec.radiusRender;
+      const starClearance = Math.max(0, nearStarBefore.dist - starR * 1.52);
+      const starScale = clamp(1400 + starClearance * 0.02, 1400, 220000);
+      spaceCtl.speedScale = Math.min(spaceCtl.speedScale, starScale);
     }
     pulseActive = !!pulseBurst;
     // Planet approach cap. A pulse never injects velocity (it displaces the
@@ -5947,6 +5977,59 @@ function frame(rafTs) {
         ui.setHint('时空曲率临界 · 引力护航强制脱离光子球', true);
         cancelPulseBurst();
       }
+    }
+    // Sightseeing-friendly stellar thermal cushion & corona exclusion barrier:
+    // never clips into the photosphere, never damages shields, lets players
+    // glide smoothly along the corona and solar prominences.
+    const nearStar = nearbyStar();
+    if (nearStar && nearStar.ratio < 3.0) {
+      const starView = nearStar.view;
+      const starR = starView.spec.radiusRender;
+      const minSafeR = starR * 1.52;
+      const cushionR = starR * 1.95;
+      const thermalR = starR * 2.65;
+      _v.copy(nav.pos).sub(starView.positionUniv);
+      const d = _v.length();
+      if (d < 1) _v.set(0, 0.2, 1);
+      else _v.multiplyScalar(1 / d);
+      const radialSpeed = nav.vel.dot(_v);
+      const nowMs = performance.now();
+
+      if (pulseBurst && d < starR * 1.85 && pulseBurst.direction.dot(_v) < -0.15) {
+        cancelPulseBurst();
+      }
+      if (d < minSafeR) {
+        nav.pos.copy(starView.positionUniv).addScaledVector(_v, minSafeR);
+        if (radialSpeed < 650) {
+          nav.vel.addScaledVector(_v, 650 - radialSpeed);
+        }
+        cancelPulseBurst();
+        if (nowMs - starThermalHintAt > 3500) {
+          ui.setHint('日冕热障护航 · 自动保持安全观光距离', true);
+          starThermalHintAt = nowMs;
+        }
+        starThermalZoneActive = true;
+      } else if (d < cushionR) {
+        if (radialSpeed < 0) {
+          const dampT = 1 - smoothstep(minSafeR, cushionR, d);
+          nav.vel.addScaledVector(_v, -radialSpeed * clamp(dampT * dt * 6.5, 0, 0.92));
+        }
+        if (!starThermalZoneActive && nowMs - starThermalHintAt > 4000) {
+          ui.setHint(`已进入 ${starView.spec.displayName} 日冕近距观光区`, true);
+          starThermalHintAt = nowMs;
+        }
+        starThermalZoneActive = true;
+      } else if (d < thermalR) {
+        if (!starThermalZoneActive && nowMs - starThermalHintAt > 5000) {
+          ui.setHint(`接近 ${starView.spec.displayName} · 日冕热辐射升高`, true);
+          starThermalHintAt = nowMs;
+        }
+        starThermalZoneActive = true;
+      } else {
+        starThermalZoneActive = false;
+      }
+    } else {
+      starThermalZoneActive = false;
     }
   } else if (!paused && state === 'landed') {
     if (landedRequireKeyRelease && !keys.KeyW && !keys.Space) landedRequireKeyRelease = false;
@@ -7516,6 +7599,33 @@ window.NMS = {
     ship.parkedLocal = null;
     ship.parkedLocalQuat = null;
     ship.parkedPosUniv = null;
+    ship.parkAmt = 0;
+    ship.shipQuat?.copy(nav.quat);
+    return true;
+  },
+  approachStar(index = 0, factor = 2.4, opts = {}) {
+    const view = universe.system?.starViews?.[index];
+    if (!view) return false;
+    abortTransits();
+    nodePipeline.invalidateVolumeHistory('teleport');
+    tweens.length = 0;
+    if (walkCtl.active) walkCtl.exit();
+    setState('space');
+    const dir = opts.dir
+      ? new THREE.Vector3(...opts.dir).normalize()
+      : new THREE.Vector3(0.72, 0.22, 0.66).normalize();
+    const dist = Math.max(view.spec.radiusRender * 1.58, view.spec.radiusRender * factor);
+    nav.pos.copy(view.positionUniv).addScaledVector(dir, dist);
+    nav.vel.set(0, 0, 0);
+    lookQuatAt(nav.pos, view.positionUniv, nav.quat);
+    if (opts.yaw) nav.quat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), opts.yaw));
+    if (opts.pitch) nav.quat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), opts.pitch));
+    focusPlanet = null;
+    spaceCtl.focus = null;
+    ship.landingPose = null;
+    ship.hoverMode = null;
+    ship.orbitalStandby = false;
+    ship.parkedPlanet = null;
     ship.parkAmt = 0;
     ship.shipQuat?.copy(nav.quat);
     return true;

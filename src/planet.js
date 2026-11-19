@@ -378,6 +378,7 @@ export class Planet extends TerrainHeightField {
 
     // ---- scene objects ----------------------------------------------------
     this.group = new THREE.Group();
+    this.group.userData.worldLayerOnly = true;
     this.group.name = 'planet:' + name;
     // no vertex colors: the palette is evaluated per-pixel in the shader
     this.terrainMaterial = new THREE.MeshStandardMaterial({
@@ -892,7 +893,7 @@ export class Planet extends TerrainHeightField {
         : Math.max(this.hAmp * 3.2, R * this.atmoFraction);
       const atmoR = R + atmoHeight;
       this.atmoMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(atmoR, 96, 64),
+        new THREE.SphereGeometry(atmoR, 48, 32),
         makeAtmosphereMaterial(this, this.atmoColor, this.atmoDensity, R, atmoR),
       );
       // This mesh is the thin fallback limb for distant bodies and portal
@@ -1039,7 +1040,7 @@ export class Planet extends TerrainHeightField {
           surfaceRange: this.weatherField.surfaceRangeMeters,
           baseAltitude: cloudShellBaseAlt,
         } : null);
-      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 256, 160), cloudMat);
+      this.cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(cloudR, 64, 40), cloudMat);
       this.cloudMesh.renderOrder = 2;
       this.group.add(this.cloudMesh);
       this.cloudBands.push({
@@ -1104,7 +1105,7 @@ export class Planet extends TerrainHeightField {
           } : null);
         const upperR = cloudR + thick * 0.38;
         this.cloudMesh2 = new THREE.Mesh(
-          new THREE.SphereGeometry(upperR, 192, 128), upperCloudMat);
+          new THREE.SphereGeometry(upperR, 48, 32), upperCloudMat);
         this.cloudMesh2.renderOrder = 2;
         this.group.add(this.cloudMesh2);
         this.cloudSpin2 = o2[3];

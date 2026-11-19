@@ -764,9 +764,9 @@ export class SystemView {
     stars.forEach((starSpec, index) => {
       const color = new THREE.Color(starSpec.color);
       const radius = preview.isBlackHoleSystem
-        ? 1.1 + Math.min(0.65, starSpec.radiusRender / 7e6)
+        ? 1.1 + Math.min(0.65, starSpec.radiusRender / 2.8e7)
         : stars.length > 1
-        ? 2.35 + Math.min(1.05, starSpec.radiusRender / 5.5e6)
+        ? 2.35 + Math.min(1.05, starSpec.radiusRender / 2.2e7)
         : 4.15;
       const group = new THREE.Group();
       group.position.set(0, STAR_CENTER_Y, 0);

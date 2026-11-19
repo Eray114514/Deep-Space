@@ -59,7 +59,7 @@ function fixture() {
   // The graph is a CPU draw double; supply the budget's teardown recipient
   // without constructing the unrelated volume targets/shaders in these tests.
   pipeline.volumePass = { activePlanet: null, configureColumnWork() {}, resetHistory() {}, releaseTargets() {}, dispose() {} };
-  pipeline.cloudSurfaceShadow.render = () => {};
+  if (pipeline.cloudSurfaceShadow) pipeline.cloudSurfaceShadow.render = () => {};
   pipeline.composer.render = () => invoke('graph', () => renderer.setRenderTarget(null));
   const budget = { frame: 0, beginFrame() { this.frame++; }, dispose() {} };
   const profiler = { frame: 0, beginFrame() { this.frame++; }, run(_name, work) { return work(); }, dispose() {} };

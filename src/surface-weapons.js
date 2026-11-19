@@ -55,6 +55,10 @@ const _tmpZenith = new THREE.Color();
 const _tmpHorizon = new THREE.Color();
 const _tmpHorizonAway = new THREE.Color();
 const _tmpSunCol = new THREE.Color();
+const _scopePos = new THREE.Vector3();
+const _scopeQuat = new THREE.Quaternion();
+const _scopeEuler = new THREE.Euler();
+const _scopeFallbackObj = new THREE.Vector3(0, 0.315, -0.517);
 
 export class SurfaceWeapons {
   // onEvent(type, data, def): 'weapon:fire' | 'weapon:reload' {phase} | 'weapon:pump' {phase} | 'weapon:dry'
@@ -517,8 +521,8 @@ export class SurfaceWeapons {
     }
     this.recoilP *= Math.pow(0.001, dt);
     this.recoilY *= Math.pow(0.001, dt);
-    const cameraRecoil = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.recoilP, this.recoilY, 0, 'XYZ'));
-    this.camera.quaternion.multiply(cameraRecoil);
+    _scopeQuat.setFromEuler(_scopeEuler.set(this.recoilP, this.recoilY, 0, 'XYZ'));
+    this.camera.quaternion.multiply(_scopeQuat);
     if (active) {
       const targetFov = THREE.MathUtils.lerp(BASE_FOV, def.adsFov, vm.ads);
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, Math.min(1, dt * 20));
@@ -560,11 +564,21 @@ export class SurfaceWeapons {
     if (!this.rig.visible || !model?.hasScope || !lens?.isMesh
       || lens.material?.map !== this.scopeTarget.texture) return;
 
-    const objectivePosition = model.objective?.isObject3D
-      ? model.objective.getWorldPosition(new THREE.Vector3())
-      : model.group.localToWorld((model.objective || new THREE.Vector3(0, 0.315, -0.517)).clone());
-    this.scopeCamera.position.copy(objectivePosition);
-    this.scopeCamera.quaternion.copy(this.camera.getWorldQuaternion(new THREE.Quaternion()));
+    // When hip-firing (not ADS), the objective lens occupies only a tiny patch
+    // of screen; refresh every 3rd frame to cut idle scope RTT cost by 67%.
+    // When aiming down sights, render every frame at full clarity.
+    const adsBlend = model.viewmodel?.ads || (this.ads ? 1 : 0);
+    this._scopeFrame = (this._scopeFrame || 0) + 1;
+    if (adsBlend < 0.02 && this._scopeFrame > 2 && (this._scopeFrame % 3) !== 0) return;
+
+    if (model.objective?.isObject3D) {
+      model.objective.getWorldPosition(_scopePos);
+    } else {
+      _scopePos.copy(model.objective || _scopeFallbackObj);
+      model.group.localToWorld(_scopePos);
+    }
+    this.scopeCamera.position.copy(_scopePos);
+    this.scopeCamera.quaternion.copy(this.camera.getWorldQuaternion(_scopeQuat));
     this.scopeCamera.fov = SURFACE_WEAPONS[this.index]?.scopeFov || 4.2;
     this.scopeCamera.aspect = 1;
     this.scopeCamera.far = Math.max(this.camera.far, 1e6);
@@ -584,12 +598,18 @@ export class SurfaceWeapons {
     const rigWasVisible = this.rig.visible;
     const lensWasVisible = lens.visible;
     const previousAutoClear = renderer.autoClear;
+    const shadowMap = renderer.shadowMap;
+    const previousShadowAutoUpdate = shadowMap?.autoUpdate;
     const previousTarget = renderer.getRenderTarget();
     const previousFace = renderer.getActiveCubeFace(), previousMip = renderer.getActiveMipmapLevel();
     let failed = false;
     try {
       lens.visible = false;
       this.rig.visible = false;
+      // The main render pass already updates the world shadow map on this
+      // frame; keeping shadowMap.autoUpdate enabled here re-rendered the full
+      // 2048^2 shadow map (~400 draws & 10M+ triangles) a second time per frame.
+      if (shadowMap) shadowMap.autoUpdate = false;
       renderer.setRenderTarget(this.scopeTarget);
       renderer.autoClear = false;
       renderer.clear();
@@ -608,6 +628,7 @@ export class SurfaceWeapons {
     } finally {
       if (skyMat) skyMat.depthTest = prevSkyDepthTest;
       if (skyAlphaUni) skyAlphaUni.value = prevSkyAlpha;
+      if (shadowMap) shadowMap.autoUpdate = previousShadowAutoUpdate;
       renderer.autoClear = previousAutoClear;
       this.rig.visible = rigWasVisible;
       lens.visible = lensWasVisible;

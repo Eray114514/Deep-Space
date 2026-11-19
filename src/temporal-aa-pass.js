@@ -493,16 +493,31 @@ export class TemporalAAPass extends Pass {
     if (w === this.width && h === this.height) return;
     this.width = w;
     this.height = h;
+    this.resolveMaterial.uniforms.uResolution.value.set(w, h);
+    this.resolveMaterial.uniforms.uTexelSize.value.set(1 / w, 1 / h);
+    if (this.enabled) this.#syncTargetSize(w, h);
+    this.historyValid = false;
+  }
+
+  #syncTargetSize(w, h) {
+    if (this.motionA.width === w && this.motionA.height === h) return;
     this.motionA.setSize(w, h);
     this.motionB.setSize(w, h);
     this.historyA.setSize(w, h);
     this.historyB.setSize(w, h);
-    this.resolveMaterial.uniforms.uResolution.value.set(w, h);
-    this.resolveMaterial.uniforms.uTexelSize.value.set(1 / w, 1 / h);
-    this.historyValid = false;
+  }
+
+  syncEnabledTargets() {
+    if (this.enabled) {
+      this.#syncTargetSize(this.width, this.height);
+    } else if (this.motionA.width > 1 || this.motionA.height > 1) {
+      this.#syncTargetSize(1, 1);
+      this.historyValid = false;
+    }
   }
 
   render(renderer, writeBuffer, readBuffer) {
+    if (this.enabled) this.#syncTargetSize(this.width, this.height);
     const fs = this.frameState;
     if (!fs.pending) {
       this.copyMaterial.uniforms.tInput.value = readBuffer.texture;

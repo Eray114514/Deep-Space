@@ -65,7 +65,7 @@ export class GameLegacyPipeline {
       prepare: (work, options) => this.prepare(work, options), signal: this.programPreparation.signal,
     });
     this.cloudLightBanks=new Map();this.cloudLightFrame=0;this.cloudLightPrograms={};
-    this.cloudSurfaceShadow=new CloudSurfaceShadowPass(scene,camera);
+    this.cloudSurfaceShadow=volume ? new CloudSurfaceShadowPass(scene,camera) : null;
     const target = new THREE.WebGLRenderTarget(1, 1, {
       samples: 0,
       type: THREE.HalfFloatType,
@@ -87,16 +87,18 @@ export class GameLegacyPipeline {
       this.temporalAA?.releaseTargets();
       for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
       this.releaseCloudLightPrograms();
-      this.cloudSurfaceShadow.dispose();
+      this.cloudSurfaceShadow?.dispose();
     };
     renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderPass = new RenderPass(scene, camera);
-    const renderOpaque=this.renderPass.render;
-    this.renderPass.render=(...args)=>{
-      try {return withPreparedShadows(this.renderer,this.cloudSurfaceShadow.depthValid,
-        ()=>renderOpaque.apply(this.renderPass,args));}
-      finally {this.cloudSurfaceShadow.depthValid=false;}
-    };
+    if (this.cloudSurfaceShadow) {
+      const renderOpaque=this.renderPass.render;
+      this.renderPass.render=(...args)=>{
+        try {return withPreparedShadows(this.renderer,this.cloudSurfaceShadow.depthValid,
+          ()=>renderOpaque.apply(this.renderPass,args));}
+        finally {this.cloudSurfaceShadow.depthValid=false;}
+      };
+    }
     this.composer.addPass(this.renderPass);
 
     // Parked ships participate in the world depth buffer, but their cabin
@@ -184,6 +186,7 @@ export class GameLegacyPipeline {
     const next = Boolean(enabled);
     const changed = next !== this.temporalAA.enabled;
     this.temporalAA.enabled = next;
+    this.temporalAA.syncEnabledTargets?.();
     this.frameState.jitterEnabled = next;
     if (this.volumePass) this.volumePass.externalTaaActive = next;
     if (this.smaa) this.smaa.enabled = !next;
@@ -208,7 +211,9 @@ export class GameLegacyPipeline {
 
   setSize(width, height, dpr = 1) {
     this.invalidateTemporalHistory('resize');
-    this.composer.setPixelRatio(dpr);
+    // Set _pixelRatio directly before setSize so composer targets are resized
+    // once instead of twice per DPR / viewport change.
+    this.composer._pixelRatio = dpr;
     this.composer.setSize(width, height);
   }
 
@@ -380,12 +385,14 @@ export class GameLegacyPipeline {
         // atmosphere and volume passes, including the first frame of a body.
         if (this.atmospherePass.enabled && airBody)
           this.atmospherePass.prepareTransport(this.renderer, this.profiler);
-        this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
-        // RenderPass writes readBuffer. Preserve the receiver depth in the other
-        // target during that draw; sampling its own depth attachment is feedback.
-        // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
-        this.cloudSurfaceShadow.render(this.renderer,this.composer.writeBuffer,
-          this.volumePass?.activePlanet,this.profiler);
+        if (this.volumePass) {
+          this.profilePhase('cloud-cache',()=>this.updateCloudLighting());
+          // RenderPass writes readBuffer. Preserve the receiver depth in the other
+          // target during that draw; sampling its own depth attachment is feedback.
+          // The depth is no longer consumed once AtmospherePass reuses writeBuffer.
+          this.cloudSurfaceShadow?.render(this.renderer,this.composer.writeBuffer,
+            this.volumePass?.activePlanet,this.profiler);
+        }
         if (this.blackHolePass && (this.scene?.userData?.blackHoles?.size || this.blackHolePass.activeBlackHole)) {
           this.blackHolePass.syncFromScene(this.scene);
         }
@@ -675,7 +682,7 @@ export class GameLegacyPipeline {
     this.programPreparation.abort();
     this.stopProfiling();
     this.stopColumnWork();
-    this.cloudSurfaceShadow.dispose();
+    this.cloudSurfaceShadow?.dispose();
     for(const bank of this.cloudLightBanks.values())bank.dispose();this.cloudLightBanks.clear();
     this.releaseCloudLightPrograms();
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);

@@ -344,6 +344,13 @@ export function assembleShip(gltf, def) {
   const stick = optional('stick'), throttle = optional('throttle');
   if (stick) cockpitGroup.add(stick);
   if (throttle) cockpitGroup.add(throttle);
+  // Sealed cabin bulkheads, bunks, lockers and fans sit completely inside the
+  // exterior hull (cabin lighting is baked per-vertex + frozen spot shadow maps);
+  // excluding them from directional sun shadow maps removes ~250k occluded
+  // shadow triangles per frame while keeping cockpit & exterior shadows intact.
+  intGroup.traverse((object) => {
+    if (object.isMesh) object.castShadow = false;
+  });
   intGroup.add(cockpitGroup);
 
   const screenMaterials = [];

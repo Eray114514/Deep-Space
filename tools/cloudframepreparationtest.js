@@ -180,7 +180,7 @@ function pipelineFixture({ volume = true, active = true, experimental = true } =
   }
   const lighting = pipeline.updateCloudLighting;
   pipeline.updateCloudLighting = function(...args) { return invoke('cache.update', () => lighting.apply(this, args)); };
-  pipeline.cloudSurfaceShadow.render = () => invoke('receiver.render');
+  if (pipeline.cloudSurfaceShadow) pipeline.cloudSurfaceShadow.render = () => invoke('receiver.render');
   pipeline.composer.render = () => invoke('composer.render', () => renderer.setRenderTarget(null));
   pipeline.profiler = { beginFrame: () => invoke('profiler.begin'), run: (_name, work) => work(), dispose() {} };
   if (volume) pipeline.columnWorkBudget = { beginFrame: () => invoke('budget.begin'), dispose() {} };

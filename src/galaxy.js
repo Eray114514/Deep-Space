@@ -9,6 +9,7 @@ import { clamp } from './noise.js';
 import { Planet } from './planet.js';
 import { GasGiant } from './gas-giant.js';
 import { BlackHole } from './black-hole.js';
+import { createStarVisual } from './star.js';
 import { BodyFrame, generateStellarSpec, generateSystemSpec, orbitalPosition, orbitalVelocity, orientationAt as bodyOrientationAt } from './astronomy.js';
 import { buildGalaxyBackdrop, CELL, GalaxyCatalog, HOME_SYSTEM_ID } from './galaxy-layout.js';
 import { buildCivilizationSites, civilizationSitesForSystem } from './civilization.js';
@@ -118,6 +119,7 @@ export class Universe {
     this.scene = scene;
     this.group = new THREE.Group();           // current system lives here
     this.group.name = 'universe';
+    this.group.userData.hasWorldLayerChildren = true;
     scene.add(this.group);
 
     this.glowTex = glowTexture();
@@ -407,7 +409,9 @@ export class Universe {
   // camera-relative placement: camera sits at scene origin, the universe moves
   relativizeSystem(sys, camPos) {
     const d = camPos.distanceTo(sys.star.pos);
-    const tg = clamp((4.2e9 - d) / 2.2e9, 0, 1);
+    const tg = clamp((6.5e9 - d) / 2.5e9, 0, 1);
+    const fade = tg * tg * (3 - 2 * tg);
+    const nowSec = performance.now() * 0.001;
     const stellarField = sys.stellarLightFieldFrom(camPos);
     const totalLuminosity = sys.starViews.reduce(
       (sum, view) => sum + view.spec.luminositySolar, 0);
@@ -419,11 +423,11 @@ export class Universe {
       starView.light.position.copy(starView.group.position);
       starView.light.intensity = systemIntensity
         * (stellarField.sources[index]?.irradianceFraction || 0);
-      starView.glow.material.opacity = tg * tg * (3 - 2 * tg) * (starView.glowExt ?? 1);
+      starView.update(nowSec, fade, starView.eclipseVis ?? 1);
     }
     for (const p of [...sys.planets, ...sys.compactObjects]) {
       p.group.position.copy(p.posUniv).sub(camPos);
-      p.updateVisual?.(performance.now() * 0.001);
+      p.updateVisual?.(nowSec);
     }
     for (const site of sys.artificialSites || []) {
       if (!site.parentBody) site.group.position.copy(site.posUniv).sub(camPos);
@@ -511,19 +515,14 @@ export class StarSystem {
     // brightest star (see STELLAR_WHITE_ADAPTATION).
     const referenceK = referenceStellarTemperature(this.spec.stars);
     this.starViews = this.spec.stars.map((spec) => {
-      const group = new THREE.Group();
-      const color = new THREE.Color().fromArray(adaptedStellarRgb(spec.temperatureK, referenceK));
-      const material = new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(4), fog: false });
-      const mesh = new THREE.Mesh(new THREE.SphereGeometry(spec.radiusRender, 48, 32), material);
-      group.add(mesh);
-      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: universe.glowTexTight, color: color.clone().lerp(new THREE.Color(0xffffff), 0.3),
-        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-      }));
-      glow.scale.setScalar(spec.radiusRender * 7); group.add(glow);
-      const light = new THREE.PointLight(color, 3.2, 0, 0);
-      universe.group.add(group, light);
-      return { spec, group, mesh, glow, light, baseColor: material.color.clone(), glowBase: glow.material.color.clone(), glowExt: 1, positionUniv: star.pos.clone() };
+      const view = createStarVisual({
+        spec,
+        referenceK,
+        positionUniv: star.pos,
+        seed: `${universe.seed}:${this.catalogId}`,
+      });
+      universe.group.add(view.group, view.light);
+      return view;
     });
     const primary = this.starViews[0];
     this.sunGroup = primary.group; this.sunMesh = primary.mesh; this.sunGlow = primary.glow; this.sunLight = primary.light;
@@ -721,10 +720,7 @@ export class StarSystem {
     if (Math.abs(x - this._ext) < 0.004) return;   // colors only change on need
     this._ext = x;
     for (const view of this.starViews) {
-      view.mesh.material.color.copy(view.baseColor).multiplyScalar(1 - 0.82 * x)
-        .lerp(_extC.setRGB(1.35, 0.42, 0.12), x * 0.75);
-      view.glow.material.color.copy(view.glowBase).lerp(_extC.setRGB(1.0, 0.45, 0.18), x * 0.8);
-      view.glowExt = 1 - 0.75 * x;
+      view.setExtinction(x);
     }
   }
 
@@ -781,7 +777,7 @@ export class StarSystem {
     }
     for (const view of this.starViews) {
       this.universe.group.remove(view.group, view.light);
-      view.mesh.geometry.dispose(); view.mesh.material.dispose(); view.glow.material.dispose();
+      view.dispose();
     }
     for (const object of this.compactObjects) {
       this.universe.group.remove(object.group);
