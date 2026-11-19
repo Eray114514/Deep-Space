@@ -177,7 +177,7 @@ export class AdaptiveQualityGovernor {
     targetFrameMs = 16.67,
     maxStage = 5,
     warmupGraceMs = 2000,
-    downgradeHoldMs = 1400,
+    downgradeHoldMs = 2800,
     downgradeSettleMs = 850,
     upgradeHoldMs = 1100,
     maxStreamImmunityMs = 10000,
