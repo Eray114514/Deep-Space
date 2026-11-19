@@ -18,7 +18,7 @@ import { ChunkedLOD, GRID_CELLS } from './quadtree.js';
 import { NearWaterPatch } from './near-water-patch.js';
 import {
   applyTerrainDetail, applyWaterWaves, applyCloudField,
-  cloudBaseDensityCPU, cloudDensityCPU, detailTexture,
+  cloudBaseDensityCPU, cloudDensityCPU, detailTexture, terrainDepthMaterial,
 } from './shaders.js';
 import { makeCloudVolumeMaterial } from './clouds.js';
 import { getCloudResourceManager } from './cloud/cloud-resource-manager.js';
@@ -357,8 +357,8 @@ export class Planet extends TerrainHeightField {
     // (< ~110 m cells) to the 62-degree flight view. Scaling the mid-altitude
     // cutoff by physical cell size (~110 m: level 8 on 1,200 km, level 10 on
     // 6,000 km) prevents refining hundreds of 64×64 chunks behind the chase camera.
-    const lodScreenScale = lowTierGrouping ? 0.25 : 0.38;
-    const midAltitudeScreenScale = lowTierGrouping ? lodScreenScale : 0.62;
+    const lodScreenScale = lowTierGrouping ? 0.30 : 0.46;
+    const midAltitudeScreenScale = lowTierGrouping ? lodScreenScale : 0.72;
     const midAltitudeMaxLevel = Math.max(3, Math.floor(Math.log2(terrainFineRootCell / 110)));
     this.lodDistanceScale = (canonicalGridCells / this.gridCells) * lodScreenScale;
     this.lodDistanceScaleAtLevel = (lvl) => (canonicalGridCells / this.gridCellsAtLevel(lvl))
@@ -391,6 +391,7 @@ export class Planet extends TerrainHeightField {
     const detailK = { desert: 0.3, barren: 0.34, lava: 0.3, exotic: 0.26, ice: 0.18 }[type] ?? 0.22;
     const macroK = { lush: 0.5, ocean: 0.45, ice: 0.2, toxic: 0.35 }[type] ?? 0.3;
     this.terrainMaterial = applyTerrainDetail(this.terrainMaterial, this, detailK, macroK);
+    this.terrainDepthMaterial = terrainDepthMaterial();
     this.lod = new ChunkedLOD(this);
     this.buildEffects(rand);
     this.cloudSpin = rand() * Math.PI * 2;

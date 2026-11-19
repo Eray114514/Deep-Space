@@ -2018,3 +2018,25 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
   material.customProgramCacheKey = () => 'wind-sway-v7-disturb-' + (amount > 0 ? 'sway' : 'rigid') + '-' + (foliageLighting ? (material.map ? 'card' : 'leaf') : 'solid');
   return material;
 }
+
+let _terrainDepthMat = null;
+
+/**
+ * Shared morph-aware depth material for shadow-casting terrain chunks so
+ * directional shadows follow aLodMorph displacements without perimeter seams.
+ */
+export function terrainDepthMaterial() {
+  if (_terrainDepthMat) return _terrainDepthMat;
+  const mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  mat.customProgramCacheKey = () => 'terrain-lod-depth-v1';
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        attribute vec3 aPositionDelta;
+        attribute float aLodMorph;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        transformed += aPositionDelta * aLodMorph;`);
+  };
+  _terrainDepthMat = mat;
+  return mat;
+}

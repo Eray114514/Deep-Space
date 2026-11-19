@@ -21,7 +21,7 @@
     "test:terrain": "node tools/sanity.js",
     "test:smoke": "node tools/browsertest.js",
     "test:ship-view-input": "node tools/shipviewinputtest.js",
-    "test:quadtree-ownership": "node tools/quadtreeownershiptest.js",
+    "test:quadtree-ownership": "node tools/quadtreeownershiptest.js && node tools/quadtreeseamtest.js",
     "test:near-water": "node tools/nearwaterprecisiontest.js",
     "test:near-water:player": "node tools/nearwaterplaytest.js",
     "test:ocean-player": "node tools/oceanplaytest.js",

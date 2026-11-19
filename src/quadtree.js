@@ -77,6 +77,32 @@ export function crossFaceNeighbourAddress(face, edge, level, ix, iy) {
   };
 }
 
+/**
+ * Resolve the cardinal neighbor address (same-face or cross-face) at a given level.
+ * Edges are 0=v-, 1=v+, 2=u-, 3=u+.
+ */
+export function cardinalNeighbourAddress(face, edge, level, ix, iy) {
+  const span = 1 << level;
+  if (edge === 0) {
+    return iy > 0
+      ? { face, edge: 1, ix, iy: iy - 1, crossFace: false }
+      : { ...crossFaceNeighbourAddress(face, 0, level, ix, iy), crossFace: true };
+  }
+  if (edge === 1) {
+    return iy < span - 1
+      ? { face, edge: 0, ix, iy: iy + 1, crossFace: false }
+      : { ...crossFaceNeighbourAddress(face, 1, level, ix, iy), crossFace: true };
+  }
+  if (edge === 2) {
+    return ix > 0
+      ? { face, edge: 3, ix: ix - 1, iy, crossFace: false }
+      : { ...crossFaceNeighbourAddress(face, 2, level, ix, iy), crossFace: true };
+  }
+  return ix < span - 1
+    ? { face, edge: 2, ix: ix + 1, iy, crossFace: false }
+    : { ...crossFaceNeighbourAddress(face, 3, level, ix, iy), crossFace: true };
+}
+
 const _v = new THREE.Vector3();
 const _d1 = new THREE.Vector3();
 const _d2 = new THREE.Vector3();
@@ -116,9 +142,14 @@ function sampleSurface(p, dir, maxFreq, eps, outPos, outNrm) {
   _t2.crossVectors(dir, _t1);
   _d1.copy(dir).addScaledVector(_t1, eps).normalize();
   _p1.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq));
-  _d2.copy(dir).addScaledVector(_t2, eps).normalize();
-  _p2.copy(_d2).multiplyScalar(p.R + p.height(_d2, maxFreq));
-  outNrm.crossVectors(_p1.sub(outPos), _p2.sub(outPos)).normalize();
+  _d2.copy(dir).addScaledVector(_t1, -eps).normalize();
+  _p1.addScaledVector(_d2, -(p.R + p.height(_d2, maxFreq)));
+  _d1.copy(dir).addScaledVector(_t2, eps).normalize();
+  _p2.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq));
+  _d2.copy(dir).addScaledVector(_t2, -eps).normalize();
+  _p2.addScaledVector(_d2, -(p.R + p.height(_d2, maxFreq)));
+  outNrm.crossVectors(_p1, _p2).normalize();
+  if (outNrm.dot(dir) < 0) outNrm.negate();
   _ss.h = h;
   _ss.slope = Math.max(0, 1 - outNrm.dot(dir));
 }
@@ -305,7 +336,7 @@ export class ChunkedLOD {
     if (camR <= R0 + 1) return false;
     const horizon = Math.acos(Math.min(1, R0 / camR))
       + Math.sqrt(2 * Math.max(p.hAmp, 1) / R0)
-      + (node.size / p.R) * 0.9 + 0.08;
+      + (node.size / p.R) * (node.level <= 3 ? 1.4 : 0.9) + 0.08;
     const ang = Math.acos(Math.max(-1, Math.min(1,
       _camDir.copy(this.camLocal).normalize().dot(node.centerDir))));
     return ang > horizon;
@@ -315,7 +346,19 @@ export class ChunkedLOD {
     this.camLocal.copy(camLocal);
     this._dt = dt;
     this._frame++;
-    const radiusRatio = camLocal.length() / Math.max(this.planet.R, 1);
+    const camR = camLocal.length();
+    let localSurfaceR = this.planet.R;
+    if (camR > 1 && camR < this.planet.R * 1.15 && this.planet.height) {
+      _camDir.copy(camLocal).multiplyScalar(1 / camR);
+      const localH = this.planet.height(_camDir, this.planet.fullMaxFreq || 1e9);
+      if (Number.isFinite(localH)) localSurfaceR = this.planet.R + localH;
+    }
+    if (Number.isFinite(this.planet.seaRadius) && this.planet.seaRadius > 0) {
+      localSurfaceR = Math.max(localSurfaceR, this.planet.seaRadius);
+    }
+    const clearance = Math.max(0, camR - localSurfaceR);
+    this._cameraClearance = clearance;
+    const radiusRatio = 1 + clearance / Math.max(this.planet.R, 1);
     // A 64×64 terrain chunk already resolves sub-pixel geometry at orbit.
     // Refining beyond the authored orbit cap only rebuilt imperceptible
     // frequencies while the player watched the whole globe change shape.
@@ -348,7 +391,7 @@ export class ChunkedLOD {
     }
     // a planet that fills the screen must never show a polygonal limb:
     // force a minimum subdivision depth from its apparent size
-    const d = Math.max(camLocal.length() - this.planet.R, 1);
+    const d = Math.max(clearance, 1);
     const ang = this.planet.R / d;
     // The disk-rounding floor is an orbital rule. At walking altitude R / d
     // tends to infinity even though only a narrow horizon wedge is visible;
@@ -368,9 +411,16 @@ export class ChunkedLOD {
       this._forceLevel = Math.min(this._levelCap,
         Math.max(0, baseForceLevel - detailOffset));
     }
-    for (const root of this.roots) this.process(root);
+    this._deferMorphUpload = true;
+    try {
+      for (const root of this.roots) this.process(root);
+    } finally {
+      this._deferMorphUpload = false;
+    }
     if (!this.visible) {
       for (const root of this.roots) this.hideSubtree(root);
+    } else if (!this.planet.noMorph) {
+      this.syncVisibleEdgeMorphs();
     }
   }
 
@@ -381,14 +431,17 @@ export class ChunkedLOD {
     }
   }
 
-  setMorph(node, v) {
+  setMorph(node, v, deferAttribute = false) {
     node.morph = v;
     if (node.mesh) {
       node.mesh.userData.lodMorph = v;
-      const attribute = node.mesh.geometry?.getAttribute('aLodMorph');
-      if (attribute) {
-        attribute.array.fill(v);
-        attribute.needsUpdate = true;
+      if (!deferAttribute) {
+        node._appliedMorph = null;
+        const attribute = node.mesh.geometry?.getAttribute('aLodMorph');
+        if (attribute) {
+          attribute.array.fill(v);
+          attribute.needsUpdate = true;
+        }
       }
     }
   }
@@ -401,7 +454,7 @@ export class ChunkedLOD {
     const m = node.morph < node.morphTo
       ? Math.min(node.morphTo, node.morph + step)
       : Math.max(node.morphTo, node.morph - step);
-    this.setMorph(node, m);
+    this.setMorph(node, m, !!this._deferMorphUpload);
   }
 
   process(node) {
@@ -424,8 +477,9 @@ export class ChunkedLOD {
     // their centre can be far from the camera even while one corner covers
     // dozens of pixels. The projected cell footprint is the actual rendering
     // error, so it independently requests refinement anywhere in the view.
-    const cameraAltitude = Math.max(0,
-      this.camLocal.length() - this.planet.R);
+    const cameraAltitude = Number.isFinite(this._cameraClearance)
+      ? this._cameraClearance
+      : Math.max(0, this.camLocal.length() - this.planet.R);
     // This guard targets the orbital/approach failure. Near the surface the
     // centre-distance ladder already reaches its authored maximum; applying a
     // full-horizon pixel rule there would refine thousands of behind-camera
@@ -443,6 +497,7 @@ export class ChunkedLOD {
     const wantSplit = naturalWantSplit || forcedAcrossFace;
     const wantMerge = node.level >= this._levelCap || beyond
       || (!forcedAcrossFace && d > node.size * mergeDistance && !screenRetainSplit);
+    const keepSplit = wantSplit || (node.splitActive && !wantMerge);
 
     if (!node.mesh) {
       if (!node.queued) {
@@ -465,12 +520,14 @@ export class ChunkedLOD {
     }
 
     // A cube face is not a parent/child boundary, so normal geomorph ownership
-    // cannot protect it by itself. If a boundary node wants another level,
-    // prebuild and force the exact peer interval on the adjacent face. Both
-    // sides wait until they have been processed in the same frame before
-    // exposing children, then relax from identical parent-edge line segments.
-    if (wantSplit && node.level < this._levelCap) {
+    // cannot protect it by itself. Keep both cross-face peers synchronized
+    // throughout the split/hysteresis band, and maintain 2:1 balance across
+    // same-face neighbours while children are active or relaxing to merge.
+    if (keepSplit && node.level < this._levelCap) {
       this.synchronizeFaceBoundarySplit(node);
+    }
+    if ((keepSplit || node.splitActive) && node.level < this._levelCap) {
+      this.synchronizeBalancePeers(node);
     }
 
     if (node.children) {
@@ -480,15 +537,11 @@ export class ChunkedLOD {
       // The DISPLAYED level owns the hysteresis: once children are on screen
       // (splitActive) they stay on screen until a true merge — swapping
       // levels anywhere inside the SPLIT..MERGE band is an instant pop.
-      // Cross-face readiness is an activation barrier, not a condition for
-      // retaining children that are already displayed. Rechecking it every
-      // frame let a peer briefly rebuilding on the adjacent cube face force
-      // this node back to its parent for one frame, then forward again. That
-      // was a whole-patch hard cut during continuous descent even though both
-      // directions had valid parent-delta morph geometry.
+      // Cross-face and 2:1 balance readiness are activation barriers, not
+      // conditions for retaining children that are already displayed.
       const boundaryReady = node.splitActive || !wantSplit
-        || this.faceBoundaryPeersReady(node);
-      if (ready && boundaryReady && (wantSplit || (node.splitActive && !wantMerge))) {
+        || (this.faceBoundaryPeersReady(node) && this.balancePeersReady(node));
+      if (ready && boundaryReady && keepSplit) {
         if (node.mergePending) {            // re-approached mid-merge: refine again
           node.mergePending = false;
           for (const c of node.children) c.morphTo = 0;
@@ -496,7 +549,10 @@ export class ChunkedLOD {
         if (!node.splitActive) {
           node.splitActive = true;
           // children appear in the parent's exact shape, then relax into detail
-          for (const c of node.children) { this.setMorph(c, 1); c.morphTo = 0; }
+          for (const c of node.children) {
+            this.setMorph(c, 1, !!this._deferMorphUpload);
+            c.morphTo = 0;
+          }
         }
         if (node.mesh) node.mesh.visible = false;
         for (const c of node.children) this.process(c);
@@ -530,7 +586,10 @@ export class ChunkedLOD {
               node.mesh.visible = false;
               for (const c of node.children) {
                 c.pxBoost = node.pxBoost;
-                if (c.mesh) c.mesh.visible = true;
+                if (c.mesh) {
+                  if (!c.mesh.visible) c._appliedMorph = null;
+                  c.mesh.visible = true;
+                }
                 this.advanceMorph(c);
               }
               return;
@@ -556,6 +615,7 @@ export class ChunkedLOD {
       buildQueue.push(node);
     }
     if (node.mesh) {
+      if (!node.mesh.visible) node._appliedMorph = null;
       node.mesh.visible = true;
       this.advanceMorph(node);
     }
@@ -609,6 +669,18 @@ export class ChunkedLOD {
     );
   }
 
+  diagonalNeighbourAddress(face, level, ix, iy, dx, dy) {
+    const span = 1 << level;
+    const nx = ix + dx;
+    const ny = iy + dy;
+    const inX = nx >= 0 && nx < span;
+    const inY = ny >= 0 && ny < span;
+    if (inX && inY) return { face, ix: nx, iy: ny, crossFace: false };
+    if (inX && !inY) return { ...crossFaceNeighbourAddress(face, dy < 0 ? 0 : 1, level, nx, iy), crossFace: true };
+    if (!inX && inY) return { ...crossFaceNeighbourAddress(face, dx < 0 ? 2 : 3, level, ix, ny), crossFace: true };
+    return null;
+  }
+
   findNode(face, level, ix, iy, create = false) {
     let node = this.roots[face];
     for (let depth = 1; depth <= level; depth++) {
@@ -654,10 +726,192 @@ export class ChunkedLOD {
       if (!peer || this.beyondHorizon(peer)) continue;
       if (!peer.children || !peer.children.every((child) => child.mesh)) return false;
       // If the peer already ran before this force request, wait one frame so
-      // neither side can expose a finer edge on its own.
-      if (peer.processedFrame === this._frame && !peer.splitActive) return false;
+      // neither side can expose a finer edge on its own. Also ensure the peer
+      // is not still blocked by its own 2:1 balance peers.
+      if (!peer.splitActive && (peer.processedFrame === this._frame || !this.balancePeersReady(peer))) {
+        return false;
+      }
     }
     return true;
+  }
+
+  // Maintain an 8-connected 2:1 level balance across the quadtree: if `node`
+  // at level L wants to display children at L+1, every cardinal & diagonal
+  // level-L neighbour's parent (L-1) must stay split to level L.
+  synchronizeBalancePeers(node) {
+    if (node.level < 1) return;
+    const parentIx = node.ix >> 1;
+    const parentIy = node.iy >> 1;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        let addr;
+        if (dx === 0) addr = cardinalNeighbourAddress(node.face, dy < 0 ? 0 : 1, node.level, node.ix, node.iy);
+        else if (dy === 0) addr = cardinalNeighbourAddress(node.face, dx < 0 ? 2 : 3, node.level, node.ix, node.iy);
+        else addr = this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, dx, dy);
+        if (!addr) continue;
+        const pIx = addr.ix >> 1;
+        const pIy = addr.iy >> 1;
+        if (addr.face === node.face && pIx === parentIx && pIy === parentIy) continue;
+        const existingParent = this.findNode(addr.face, node.level - 1, pIx, pIy, false);
+        const visibilityParent = existingParent || makeNode(this, addr.face, node.level - 1, pIx, pIy);
+        if (this.beyondHorizon(visibilityParent)) continue;
+        const peerParent = this.findNode(addr.face, node.level - 1, pIx, pIy, true);
+        if (!peerParent || this.beyondHorizon(peerParent)) continue;
+        for (let owner = peerParent; owner; owner = owner.parent) {
+          owner.forceSplitUntil = Math.max(owner.forceSplitUntil || 0, this._frame + 2);
+        }
+        if (!peerParent.children && peerParent.level < this._levelCap) {
+          this.createChildren(peerParent);
+        }
+      }
+    }
+  }
+
+  balancePeersReady(node) {
+    if (node.level < 1) return true;
+    const parentIx = node.ix >> 1;
+    const parentIy = node.iy >> 1;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        let addr;
+        if (dx === 0) addr = cardinalNeighbourAddress(node.face, dy < 0 ? 0 : 1, node.level, node.ix, node.iy);
+        else if (dy === 0) addr = cardinalNeighbourAddress(node.face, dx < 0 ? 2 : 3, node.level, node.ix, node.iy);
+        else addr = this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, dx, dy);
+        if (!addr) continue;
+        const pIx = addr.ix >> 1;
+        const pIy = addr.iy >> 1;
+        if (addr.face === node.face && pIx === parentIx && pIy === parentIy) continue;
+        const peerParent = this.findNode(addr.face, node.level - 1, pIx, pIy, false);
+        const visibilityParent = peerParent || makeNode(this, addr.face, node.level - 1, pIx, pIy);
+        if (this.beyondHorizon(visibilityParent)) continue;
+        if (!peerParent || !peerParent.splitActive) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Lock chunk perimeter vertices to match coarser (L-1) or morphing
+  // neighbours along shared edges and corners so mixed-LOD boundaries are
+  // watertight without vertical skirts.
+  syncVisibleEdgeMorphs() {
+    const applyNode = (node) => {
+      if (node.mesh?.visible && node.level > 0) {
+        const attribute = node.mesh.geometry?.getAttribute('aLodMorph');
+        if (attribute) {
+          const base = node.morph;
+          const neighbourState = (addr) => {
+            if (!addr) return null;
+            const nb = this.findNode(addr.face, node.level, addr.ix, addr.iy, false);
+            if (!nb || (!nb.mesh?.visible && !nb.splitActive)) return 1.0;
+            if (nb.mesh?.visible) return Math.max(base, nb.morph);
+            return -1.0; // finer children (L+1) are active; lock shared vertices to L (0)
+          };
+          const s0 = neighbourState(cardinalNeighbourAddress(node.face, 0, node.level, node.ix, node.iy));
+          const s1 = neighbourState(cardinalNeighbourAddress(node.face, 1, node.level, node.ix, node.iy));
+          const s2 = neighbourState(cardinalNeighbourAddress(node.face, 2, node.level, node.ix, node.iy));
+          const s3 = neighbourState(cardinalNeighbourAddress(node.face, 3, node.level, node.ix, node.iy));
+          const sd00 = neighbourState(this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, -1, -1));
+          const sd10 = neighbourState(this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, 1, -1));
+          const sd01 = neighbourState(this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, -1, 1));
+          const sd11 = neighbourState(this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, 1, 1));
+
+          const edgeMorph = (s) => (s < 0 ? 0 : s);
+          const cornerMorph = (sa, sb, sd) => {
+            if (sa === 1.0 || sb === 1.0) return 1.0;
+            if (sa < 0 || sb < 0 || sd === -1.0) return 0;
+            return Math.max(base, sa, sb, sd ?? 0);
+          };
+          const e0 = edgeMorph(s0);
+          const e1 = edgeMorph(s1);
+          const e2 = edgeMorph(s2);
+          const e3 = edgeMorph(s3);
+          const c00 = cornerMorph(s0, s2, sd00);
+          const c10 = cornerMorph(s0, s3, sd10);
+          const c01 = cornerMorph(s1, s2, sd01);
+          const c11 = cornerMorph(s1, s3, sd11);
+
+          const prev = node._appliedMorph;
+          if (!prev
+            || Math.abs(prev[0] - base) > 1e-6
+            || Math.abs(prev[1] - e0) > 1e-6 || Math.abs(prev[2] - e1) > 1e-6
+            || Math.abs(prev[3] - e2) > 1e-6 || Math.abs(prev[4] - e3) > 1e-6
+            || Math.abs(prev[5] - c00) > 1e-6 || Math.abs(prev[6] - c10) > 1e-6
+            || Math.abs(prev[7] - c01) > 1e-6 || Math.abs(prev[8] - c11) > 1e-6) {
+            if (!prev) node._appliedMorph = [base, e0, e1, e2, e3, c00, c10, c01, c11];
+            else {
+              prev[0] = base;
+              prev[1] = e0; prev[2] = e1; prev[3] = e2; prev[4] = e3;
+              prev[5] = c00; prev[6] = c10; prev[7] = c01; prev[8] = c11;
+            }
+            const N = node.gridCells || (this.planet.gridCellsAtLevel
+              ? this.planet.gridCellsAtLevel(node.level) : this.planet.gridCells || GRID_CELLS);
+            const stride = N + 1;
+            const arr = attribute.array;
+            arr.fill(base);
+            const needEdges = Math.abs(e0 - base) > 1e-6 || Math.abs(e1 - base) > 1e-6
+              || Math.abs(e2 - base) > 1e-6 || Math.abs(e3 - base) > 1e-6
+              || Math.abs(c00 - base) > 1e-6 || Math.abs(c10 - base) > 1e-6
+              || Math.abs(c01 - base) > 1e-6 || Math.abs(c11 - base) > 1e-6;
+            if (needEdges) {
+              const feather = Math.min(4, Math.floor(N / 4));
+              const blendInterior = (i, j, edgeVal) => {
+                const idx = j * stride + i;
+                if (edgeVal > base) {
+                  if (edgeVal > arr[idx]) arr[idx] = edgeVal;
+                } else if (edgeVal < arr[idx]) {
+                  arr[idx] = edgeVal;
+                }
+              };
+              if (Math.abs(e0 - base) > 1e-6) {
+                for (let i = 1; i < N; i++) arr[i] = e0;
+                for (let k = 1; k < feather && k < N; k++) {
+                  const w = base + (e0 - base) * (1 - k / feather);
+                  for (let i = 1; i < N; i++) blendInterior(i, k, w);
+                }
+              }
+              if (Math.abs(e1 - base) > 1e-6) {
+                for (let i = 1; i < N; i++) arr[N * stride + i] = e1;
+                for (let k = 1; k < feather && k < N; k++) {
+                  const w = base + (e1 - base) * (1 - k / feather);
+                  for (let i = 1; i < N; i++) blendInterior(i, N - k, w);
+                }
+              }
+              if (Math.abs(e2 - base) > 1e-6) {
+                for (let j = 1; j < N; j++) arr[j * stride] = e2;
+                for (let k = 1; k < feather && k < N; k++) {
+                  const w = base + (e2 - base) * (1 - k / feather);
+                  for (let j = 1; j < N; j++) blendInterior(k, j, w);
+                }
+              }
+              if (Math.abs(e3 - base) > 1e-6) {
+                for (let j = 1; j < N; j++) arr[j * stride + N] = e3;
+                for (let k = 1; k < feather && k < N; k++) {
+                  const w = base + (e3 - base) * (1 - k / feather);
+                  for (let j = 1; j < N; j++) blendInterior(N - k, j, w);
+                }
+              }
+              arr[0] = c00;
+              arr[N] = c10;
+              arr[N * stride] = c01;
+              arr[N * stride + N] = c11;
+              if (node.skirtSrc?.length) {
+                const gridVerts = stride * stride;
+                for (let s = 0; s < node.skirtSrc.length; s++) {
+                  arr[gridVerts + s] = arr[node.skirtSrc[s]];
+                }
+              }
+            }
+            attribute.needsUpdate = true;
+          }
+        }
+      }
+      if (node.children) for (const c of node.children) applyNode(c);
+    };
+    for (const root of this.roots) applyNode(root);
   }
 
   disposeChildren(node) {
@@ -854,11 +1108,17 @@ export class ChunkedLOD {
           if (Math.abs(_dirV.y) < 0.95) _t1.set(-_dirV.z, 0, _dirV.x).normalize();
           else _t1.set(1, 0, 0).projectOnPlane(_dirV).normalize();
           _t2.crossVectors(_dirV, _t1);
-          _d1.copy(_dirV).addScaledVector(_t1, eps).normalize();
-          _p1.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq)).sub(_p0);
-          _d2.copy(_dirV).addScaledVector(_t2, eps).normalize();
-          _p2.copy(_d2).multiplyScalar(p.R + p.height(_d2, maxFreq)).sub(_p0);
+          const nEps = cellAngle;
+          _d1.copy(_dirV).addScaledVector(_t1, nEps).normalize();
+          _p1.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq));
+          _d2.copy(_dirV).addScaledVector(_t1, -nEps).normalize();
+          _p1.addScaledVector(_d2, -(p.R + p.height(_d2, maxFreq)));
+          _d1.copy(_dirV).addScaledVector(_t2, nEps).normalize();
+          _p2.copy(_d1).multiplyScalar(p.R + p.height(_d1, maxFreq));
+          _d2.copy(_dirV).addScaledVector(_t2, -nEps).normalize();
+          _p2.addScaledVector(_d2, -(p.R + p.height(_d2, maxFreq)));
           _n.crossVectors(_p1, _p2).normalize();
+          if (_n.dot(_dirV) < 0) _n.negate();
         }
         normals[idx * 3] = _n.x; normals[idx * 3 + 1] = _n.y; normals[idx * 3 + 2] = _n.z;
         const slope = Math.max(0, 1 - _n.dot(_dirV));
@@ -1163,6 +1423,7 @@ export class ChunkedLOD {
     // Only local surface chunks (< ~30 km wide) belong in the 0.65–4.8 km
     // directional shadow frustum; macro relief shadows own continent-scale ranges.
     mesh.castShadow = !p.noShadow && node.level >= 5;
+    if (mesh.castShadow && p.terrainDepthMaterial) mesh.customDepthMaterial = p.terrainDepthMaterial;
     mesh.receiveShadow = true;
     // Fine ocean chunks buried > 60 m beneath dry continental rock discard
     // every fragment; exclude them from render layers while keeping LOD node
@@ -1171,6 +1432,9 @@ export class ChunkedLOD {
       mesh.layers.mask = 0;
     }
     mesh.visible = false;
+    node.gridCells = N;
+    node.skirtSrc = edges.length ? edges : null;
+    node._appliedMorph = null;
     node.mesh = mesh;
     p.group.add(mesh);
   }

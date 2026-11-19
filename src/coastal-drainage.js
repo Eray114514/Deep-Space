@@ -59,7 +59,7 @@ export function buildCoastalDrainage(field, site) {
     return path;
   }
   const main = upstream(outlet);
-  const fork = main.filter(cell => cell.row >= 4 && cell.row <= 20)
+  const fork = main.filter(cell => cell.row >= 3 && cell.row <= 20)
     .map(cell => cell.children[1]).filter(Boolean).sort((l, r) => r.area - l.area)[0];
   const paths = [main];
   if (fork) paths.push([...main.slice(0, fork.row), ...upstream(fork)]);

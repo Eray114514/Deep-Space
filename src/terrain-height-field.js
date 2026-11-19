@@ -1,11 +1,13 @@
 // Exact, renderer-independent terrain authority. Snapshot copies own their
 // parameters and permutations; reconstruction consumes no RNG or renderer state.
-import { worley3, clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
+import { clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
+import { hash3i, hashFloat } from './rng.js';
 import { TerrainSimplex } from './terrain-noise.js';
 import { TerrainCraterField } from './terrain-crater-field.js';
 import { carveCoastalDrainage } from './coastal-drainage.js';
 
 const _g = { x: 0, y: 0, z: 0 };
+const ORIG_RIDGE_NORM = 0.5 * (1 - Math.pow(0.56, 11)) / 0.44;
 
 const PARAMETERS = [
   'R', 'seaRadius', 'seaLevel', 'fullMaxFreq', 'intSeed', 'hasLiquid', 'hAmp',
@@ -87,23 +89,39 @@ export class TerrainHeightField {
     const ay = y + this.nB.noise(x * wf, y * wf + 47.2, z * wf) * wa;
     const az = z + this.nB.noise(x * wf, y * wf, z * wf + 71.7) * wa;
     let c = this.nA.fbm(ax, ay, az, this.contFreq, 4, 0.52, 2.05, maxFreq);
-    // The four continental octaves stop near 70 km. Carry the same spectrum
-    // down to a few hundred metres so shores are bays, headlands and islets
-    // rather than the smooth outline of the last octave.
-    c += this.bandFbm(this.nA, ax + 5.3, ay - 2.1, az + 8.7,
-      this.contFreq * 17.6, 9, 0.5, 2.03, maxFreq) * 0.075;
+    if (this.hasLiquid) {
+      // The four continental octaves stop near 70 km. Carry the same spectrum
+      // down to a few hundred metres so shores are bays, headlands and islets
+      // rather than the smooth outline of the last octave.
+      c += this.bandFbm(this.nA, ax + 5.3, ay - 2.1, az + 8.7,
+        this.contFreq * 17.6, 9, 0.5, 2.03, maxFreq) * 0.075;
+    } else {
+      // Dry worlds have no marine shoreline; keep mid-scale basin undulation
+      // smooth and band-limited so dry basins never form jagged sawtooth shelves.
+      c += this.bandFbm(this.nA, ax + 5.3, ay - 2.1, az + 8.7,
+        this.contFreq * 12.0, 5, 0.45, 2.0, maxFreq * 0.5) * 0.03;
+    }
 
     // hypsometry: real continents sit low. Above the datum the continental
-    // swell is compressed into plains; below it nothing changes.
+    // swell is compressed into plains; below it wet worlds drop off into a
+    // marine shoreface shelf, while dry worlds use a smooth C1 basin curve.
     const raw = c * this.contAmp;
     const above = raw - this.landDatum;
-    let h = above > 0
-      ? this.landDatum + above * (this.landRise + 0.10 * smoothstep(0, this.contAmp * 0.7, above))
-      // the shoreface drops off about twice as fast for the first few hundred
-      // metres: a shelf, not a turquoise apron kilometres wide around every coast
-      : raw - this.contAmp * 0.07 * (1 - Math.exp(above / (this.contAmp * 0.06)));
+    let h;
+    if (this.hasLiquid) {
+      h = above > 0
+        ? this.landDatum + above * (this.landRise + 0.10 * smoothstep(0, this.contAmp * 0.7, above))
+        // the shoreface drops off about twice as fast for the first few hundred
+        // metres: a shelf, not a turquoise apron kilometres wide around every coast
+        : raw - this.contAmp * 0.07 * (1 - Math.exp(above / (this.contAmp * 0.06)));
+    } else {
+      const basinBlend = smoothstep(-this.contAmp * 0.35, this.contAmp * 0.35, above);
+      h = this.landDatum + above * lerp(0.32, this.landRise + 0.12, basinBlend);
+    }
     // detail thins out under deep water: sea floors are smooth sediment
-    const dry = smoothstep(-0.05 * this.contAmp, 0.012 * this.contAmp, above);
+    const dry = this.hasLiquid
+      ? smoothstep(-0.05 * this.contAmp, 0.012 * this.contAmp, above)
+      : 1;
 
     // mountain belts: ranges are long ridged bands inside the rugged
     // provinces, not a mask that covers every interior
@@ -121,6 +139,10 @@ export class TerrainHeightField {
       * (1 - this.plainsCalm * 0.5 * (1 - belt)) * (0.25 + 0.75 * dry);
     h += this.hillsEroded(x, y, z, maxFreq) * this.hillAmp * hilliness;
 
+    if (!this.hasLiquid && this.plateauAmt > 0) {
+      h = this.applyPlateau(x, y, z, h, mMask, maxFreq);
+    }
+
     // ground roughness: outcrops and gullies on steep country, soft
     // undulation elsewhere; then the relief you feel on foot
     if (maxFreq > this.roughFreq) {
@@ -133,28 +155,13 @@ export class TerrainHeightField {
       }
     }
 
-    // mesa country: whole provinces terraced into flat-topped plateaus
-    if (this.plateauAmt > 0) {
-      const pz = smoothstep(0.12, 0.5,
-        this.nC.fbm(x - 91.7, y + 33.3, z - 57.9, this.regFreq * 1.4, 2, 0.5, 2.1, maxFreq));
-      if (pz > 0.01) {
-        const base = this.hasLiquid ? this.seaLevel + 2 : -this.contAmp * 0.4;
-        const land = smoothstep(base, base + this.hAmp * 0.12, h);
-        if (land > 0.01) {
-          const t = h / this.plateauH;
-          const f = Math.floor(t);
-          // cliff sharpness is LOD-gated: coarse levels see gentle ramps,
-          // close up the mesa edges crispen
-          const w = Math.min(0.5, 0.2 + 10 / maxFreq);
-          const terraced = (f + smoothstep(0.5 - w, 0.5 + w, t - f)) * this.plateauH;
-          h = lerp(h, terraced, this.plateauAmt * pz * land);
-        }
-      }
+    if (this.hasLiquid && this.plateauAmt > 0) {
+      h = this.applyPlateau(x, y, z, h, mMask, maxFreq);
     }
 
     if (this.canyonAmp > 0) {
-      const cv = this.nD.fbm(x, y, z, this.canyonFreq, 4, 0.5, 2.3, maxFreq);
       if (this.hasLiquid) {
+        const cv = this.nD.fbm(x, y, z, this.canyonFreq, 4, 0.5, 2.3, maxFreq);
         const band = smoothstep(this.seaLevel - this.hAmp * 0.45, this.seaLevel + 4, h)
           * (1 - smoothstep(this.seaLevel + this.hAmp * 0.035,
             this.seaLevel + this.hAmp * 0.09, h));
@@ -182,50 +189,56 @@ export class TerrainHeightField {
           const channelTarget = this.seaLevel - this.hAmp * 0.018;
           h = lerp(h, Math.min(h, channelTarget), channelShape * band * 0.9);
         }
-      } else {
-        // Dry slot canyons retain their sharper geology.
-        const cw = Math.max(this.canyonWidth, 2.5 / maxFreq);
-        const depthScale = this.canyonWidth / cw;
-        const t = 1 - Math.abs(cv) / cw;
-        if (t > 0) {
-          const tt = t * t * (3 - 2 * t) * depthScale;
-          // dry slot canyons through the midlands
-          const band = smoothstep(-this.hAmp * 0.3, 0, h)
-            * (1 - smoothstep(this.hAmp * 0.45, this.hAmp * 0.8, h));
-          h -= tt * this.canyonAmp * band;
-        }
-      }
 
-      // tributaries: a finer branching carve feeding the main channels,
-      // so valleys form dendritic drainage networks like real watersheds
-      const cv2 = this.nD.fbm(x + 7.7, y - 3.3, z + 1.1, this.canyonFreq * 3.1, 3, 0.5, 2.25, maxFreq);
-      const cw2 = Math.max(this.canyonWidth * (this.hasLiquid ? 0.82 : 0.55),
-        2.5 / maxFreq);
-      const t2 = 1 - Math.abs(cv2) / cw2;
-      if (t2 > 0) {
-        const tt2 = t2 * t2 * (3 - 2 * t2) * (this.canyonWidth * 0.55 / cw2);
-        if (this.hasLiquid) {
+        // tributaries: a finer branching carve feeding the main channels,
+        // so valleys form dendritic drainage networks like real watersheds
+        const cv2 = this.nD.fbm(x + 7.7, y - 3.3, z + 1.1, this.canyonFreq * 3.1, 3, 0.5, 2.25, maxFreq);
+        const cw2 = Math.max(this.canyonWidth * 0.82, 2.5 / maxFreq);
+        const t2 = 1 - Math.abs(cv2) / cw2;
+        if (t2 > 0) {
+          const tt2 = t2 * t2 * (3 - 2 * t2) * (this.canyonWidth * 0.55 / cw2);
           const band2 = smoothstep(this.seaLevel - this.hAmp * 0.35, this.seaLevel + 3, h) *
                         (1 - smoothstep(this.seaLevel + this.hAmp * 0.02, this.seaLevel + this.hAmp * 0.05, h));
           const tributaryTarget = this.seaLevel - this.hAmp * 0.008;
           const floodplain = Math.min(this.hAmp * 0.006, Math.max(0, h - this.seaLevel) * 0.4 + this.hAmp * 0.001);
           h -= tt2 * floodplain * band2;
           h = lerp(h, Math.min(h, tributaryTarget), tt2 * band2 * 0.68);
-        } else {
+        }
+      } else {
+        // Dry canyons keep their width resolved by scaling the LOD guard with
+        // canyonFreq so coarse meshes carve broad valleys instead of sawtooth walls.
+        const canyonCap = maxFreq * 0.35;
+        const cv = this.nD.fbm(x, y, z, this.canyonFreq, 3, 0.48, 2.0, canyonCap);
+        const baseCw = Math.max(this.canyonWidth * 1.5, 0.12);
+        const cw = Math.max(baseCw, (6.0 * this.canyonFreq) / Math.max(maxFreq, 1));
+        const depthScale = baseCw / cw;
+        const t = 1 - Math.abs(cv) / cw;
+        if (t > 0) {
+          const tt = t * t * (3 - 2 * t) * depthScale;
+          const band = smoothstep(-this.hAmp * 0.3, 0, h)
+            * (1 - smoothstep(this.hAmp * 0.45, this.hAmp * 0.8, h));
+          h -= tt * this.canyonAmp * 0.55 * band;
+        }
+        const cv2 = this.nD.fbm(x + 7.7, y - 3.3, z + 1.1, this.canyonFreq * 3.1, 2, 0.48, 2.0, canyonCap);
+        const baseCw2 = Math.max(this.canyonWidth * 1.1, 0.09);
+        const cw2 = Math.max(baseCw2, (6.0 * this.canyonFreq * 3.1) / Math.max(maxFreq, 1));
+        const t2 = 1 - Math.abs(cv2) / cw2;
+        if (t2 > 0) {
+          const tt2 = t2 * t2 * (3 - 2 * t2) * (baseCw2 / cw2);
           const band2 = smoothstep(-this.hAmp * 0.25, 0, h) * (1 - smoothstep(this.hAmp * 0.4, this.hAmp * 0.7, h));
-          h -= tt2 * this.canyonAmp * 0.4 * band2;
+          h -= tt2 * this.canyonAmp * 0.24 * band2;
         }
       }
     }
 
     if (this.craterAmp > 0) {
-      const craterBlend = frequencyBlend(this.craterFreq * 2, maxFreq);
+      const craterBlend = frequencyBlend(this.craterFreq * 6, maxFreq);
       if (craterBlend > 0) {
         h += this.craters(x, y, z, this.craterFreq, this.craterAmp, 0) * craterBlend;
       }
-      const craterDetailBlend = frequencyBlend(this.craterFreq * 8, maxFreq);
+      const craterDetailBlend = frequencyBlend(this.craterFreq * 28, maxFreq);
       if (craterDetailBlend > 0) {
-        h += this.craters(x, y, z, this.craterFreq * 4.7, this.craterAmp * 0.3, 1)
+        h += this.craters(x, y, z, this.craterFreq * 4.7, this.craterAmp * 0.22, 1)
           * craterDetailBlend;
       }
     }
@@ -244,13 +257,9 @@ export class TerrainHeightField {
       h += (1 - Math.abs(Math.sin(tdt))) * this.duneAmp * flat * duneBlend;
     }
 
-    const spikeBlend = this.spikeAmp > 0 ? frequencyBlend(this.spikeFreq * 3, maxFreq) : 0;
+    const spikeBlend = this.spikeAmp > 0 ? frequencyBlend(this.spikeFreq * 6, maxFreq) : 0;
     if (spikeBlend > 0) {
-      const w = worley3(x * this.spikeFreq, y * this.spikeFreq, z * this.spikeFreq, (this.intSeed ^ 0x51ce) | 0);
-      const sp = Math.max(0, 1 - w.d * 1.45);
-      if ((w.h & 7) < 3) {
-        h += sp * sp * sp * this.spikeAmp * (0.4 + (w.h % 97) / 97 * 0.6) * spikeBlend;
-      }
+      h += this.spikes(x, y, z, this.spikeFreq, this.spikeAmp) * spikeBlend;
     }
 
     if (this.tidalCoast && Math.abs(h - this.landDatum) < 180) {
@@ -287,6 +296,28 @@ export class TerrainHeightField {
     return h;
   }
 
+  /**
+   * Apply LOD-guarded mesa terracing over continental lowlands while keeping
+   * escarpments gentle enough to avoid mesh sawtooth clipping.
+   */
+  applyPlateau(x, y, z, h, mMask, maxFreq) {
+    const pz = smoothstep(0.12, 0.5,
+      this.nC.fbm(x - 91.7, y + 33.3, z - 57.9, this.regFreq * 1.4, 2, 0.5, 2.1, maxFreq));
+    if (pz <= 0.01) return h;
+    const base = this.hasLiquid ? this.seaLevel + 2 : -this.contAmp * 0.4;
+    const land = smoothstep(base, base + this.hAmp * 0.12, h);
+    if (land <= 0.01) return h;
+    const t = h / this.plateauH;
+    const f = Math.floor(t);
+    const lodGuard = (1.8 * this.R) / (Math.max(this.plateauH, 1) * Math.max(maxFreq, 1));
+    const w = Math.min(0.5, (this.hasLiquid ? 0.30 : 0.34) + lodGuard);
+    const terraced = (f + smoothstep(0.5 - w, 0.5 + w, t - f)) * this.plateauH;
+    const amt = this.hasLiquid
+      ? this.plateauAmt
+      : Math.min(0.78, this.plateauAmt) * (1 - 0.55 * mMask);
+    return lerp(h, terraced, amt * pz * land);
+  }
+
   // fBm whose every octave (the first included) waits for the sampling grid
   // to resolve it. Simplex.fbm always admits its first octave, which is right
   // for continental shapes and wrong for a detail band that starts at 300 m.
@@ -310,7 +341,7 @@ export class TerrainHeightField {
   // the gradient counts: the radial part is not a slope on a sphere. Returns
   // roughly [0, 1].
   ridgedEroded(x, y, z, maxFreq) {
-    let sum = 0, amp = 0.5, norm = 0, f = this.ridgeFreq, weight = 1;
+    let sum = 0, amp = 0.5, f = this.ridgeFreq, weight = 1;
     // Unwarped ridged noise closes into cell-like loops. Bending the domain
     // with a field a little longer than the ridges pulls them into ranges.
     const wf = f * 0.43, wa = 0.55 / f;
@@ -319,33 +350,33 @@ export class TerrainHeightField {
     const wz = this.nC.noise(x * wf, y * wf, z * wf + 43.9) * wa;
     x += wx; y += wy; z += wz;
     let gx = 0, gy = 0, gz = 0;
+    const gain = this.hasLiquid ? 0.48 : 0.44;
     for (let o = 0; o < 11; o++) {
-      const blend = o === 0 ? 1 : frequencyBlend(f, maxFreq);
-      if (blend <= 0) {
-        // the remaining octaves are all above the cutoff: finish the
-        // full-spectrum normalizer without sampling them
-        norm += amp * (1 - Math.pow(0.56, 11 - o)) / 0.44;
-        break;
-      }
+      // (1 - |n|)^2 ridge harmonics carry ~2.8x higher spatial bandwidth than
+      // raw simplex octaves; require headroom so coarse meshes never sample sawtooths.
+      const blend = o === 0 ? 1 : frequencyBlend(f * 2.8, maxFreq);
+      if (blend <= 0) break;
       const n = this.nB.noiseD(x * f, y * f - o * 13.7, z * f, _g);
       const an = Math.abs(n), sign = n < 0 ? 1 : -1;
-      // C1 crest: the abs() cusp is rounded over a narrow band
+      // Smooth C1 crest rounding over a wide enough band to prevent knife-edge cusps.
       let ridge, slopeK;
-      if (an < 0.12) { ridge = 1 - (0.06 + an * an / 0.24); slopeK = an / 0.12; }
+      if (an < 0.24) { ridge = 1 - (0.12 + an * an / 0.48); slopeK = an / 0.24; }
       else { ridge = 1 - an; slopeK = 1; }
-      const dk = 2 * ridge * slopeK * sign * weight * blend;
+      const v = ridge * ridge * weight;
+      // Damp octave o using only prior (lower-frequency) amp-weighted gradients
+      // so an octave's own sign-flipping crest never cancels prior slope into a needle spike.
+      const g2 = gx * gx + gy * gy + gz * gz;
+      const dk = 2 * ridge * slopeK * sign * weight * blend * (amp * 2);
       const radial = _g.x * x + _g.y * y + _g.z * z;
       gx += (_g.x - radial * x) * dk;
       gy += (_g.y - radial * y) * dk;
       gz += (_g.z - radial * z) * dk;
-      const v = ridge * ridge * weight;
       weight = Math.min(1, Math.max(0, v * 2));
-      sum += v * amp * blend * (o === 0 ? 1 : 1 / (1 + 0.07 * (gx * gx + gy * gy + gz * gz)));
-      norm += amp;
-      amp *= 0.56;
+      sum += v * amp * blend * (o === 0 ? 1 : 1 / (1 + 0.15 * g2));
+      amp *= gain;
       f *= 2.07;
     }
-    return sum / norm;
+    return sum / ORIG_RIDGE_NORM;
   }
 
   // Slope-damped fBm for hill country, roughly [-1, 1].
@@ -403,6 +434,38 @@ export class TerrainHeightField {
       }
     }
     return sum;
+  }
+
+  /**
+   * Evaluate compact radial spires over a 3x3x3 hash lattice so adjacent sites
+   * sum smoothly without Voronoi bisector cliffs.
+   */
+  spikes(x, y, z, freq, amp) {
+    const sx = x * freq, sy = y * freq, sz = z * freq;
+    const cx = Math.floor(sx), cy = Math.floor(sy), cz = Math.floor(sz);
+    const seed = (this.intSeed ^ 0x51ce) | 0;
+    let sum = 0;
+    // Sum compact radial spires over the 27-cell neighbourhood instead of
+    // switching on the nearest Voronoi cell (which cut vertical cliffs along
+    // straight Voronoi bisectors wherever two sites had different hashes).
+    // Max support radius is 1 / 1.45 ≈ 0.69 < 1, so 3x3x3 visits every active site.
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const ix = cx + dx, iy = cy + dy, iz = cz + dz;
+          const hash = hash3i(ix, iy, iz, seed);
+          if ((hash & 7) >= 3) continue;
+          const px = sx - (ix + hashFloat(hash, 0));
+          const py = sy - (iy + hashFloat(hash, 1));
+          const pz = sz - (iz + hashFloat(hash, 2));
+          const d2 = px * px + py * py + pz * pz;
+          if (d2 >= 0.4756) continue;
+          const sp = 1 - Math.sqrt(d2) * 1.45;
+          if (sp > 0) sum += sp * sp * sp * (0.4 + (hash % 97) / 97 * 0.6);
+        }
+      }
+    }
+    return sum * amp;
   }
 
 }

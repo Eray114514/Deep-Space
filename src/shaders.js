@@ -13,11 +13,13 @@ import {
   applyWaterWaves as applyWaterWavesImpl,
   applyCloudField as applyCloudFieldImpl,
   applyWindSway as applyWindSwayImpl,
+  terrainDepthMaterial,
 } from './shaders-webgl.js';
 
 export {
   TIME, GROW, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
   detailTexture, disposeDetailTexture, cloudDensityCPU, cloudBaseDensityCPU,
+  terrainDepthMaterial,
 };
 export const applyTerrainDetail = (material, ...args) =>
   applyTerrainDetailImpl(material, ...args) || material;
