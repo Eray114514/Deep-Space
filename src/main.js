@@ -50,7 +50,7 @@ import { setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord } from './names.js';
-import { CelestialClock, TIME_SCALE, eclipseFraction, generateSystemSpec, orbitalPosition } from './astronomy.js';
+import { CelestialClock, TIME_SCALE, eclipseFraction, generateSystemSpec, orbitalPosition, orientationAt } from './astronomy.js';
 import { VERSION } from './version.js';
 import { FlightAudio } from './audio.js';
 import { BackgroundMusic } from './music.js';
@@ -1396,6 +1396,7 @@ const _v3 = new THREE.Vector3();
 const _v4 = new THREE.Vector3();
 const _v5 = new THREE.Vector3();
 const _up = new THREE.Vector3();
+const _eclipseSeparator = new THREE.Vector3();
 const flightStepStart = new THREE.Vector3();
 const flightProbeWorld = new THREE.Vector3();
 const flightProbeLocal = new THREE.Vector3();
@@ -2080,28 +2081,90 @@ function localSolarTimeAt(body, worldPosition = null) {
 function findNextEclipse(body, commit = false) {
   if (!body) return null;
   const system = universe.system;
-  const start = celestialClock.hours;
-  const localUp = state === 'walk' && walkCtl.planet === body
+  const specs = system.spec?.bodies || [];
+  if (specs.length < 2) return null;   // no other body can ever block a star
+  const indexByBodyId = new Map(specs.map((spec, index) => [spec.bodyId, index]));
+  let anchorView = body;
+  let anchorSpec = specs.find((spec) => spec.bodyId === body.bodyId) || null;
+  let localUp = state === 'walk' && walkCtl.planet === body
     ? walkCtl.posLocal.clone().normalize()
     : (state === 'landed' || state === 'shipwalk') && ship.parkedPlanet === body && ship.parkedLocal
       ? ship.parkedLocal.clone().normalize()
       : new THREE.Vector3(0, 1, 0);
+  if (!anchorSpec && body.parentPlanet) {
+    // Floating habitats are not catalogue bodies; observe from the parent
+    // world at the habitat's local direction instead.
+    const parentSpec = specs.find((spec) => spec.bodyId === body.parentPlanet.bodyId);
+    if (parentSpec) {
+      anchorView = body.parentPlanet;
+      anchorSpec = parentSpec;
+      localUp = anchorView.worldPositionToLocal(body.posUniv, new THREE.Vector3()).normalize();
+    }
+  }
+  if (!anchorSpec) return null;
+  const start = celestialClock.hours;
+  const observerLocal = localUp.multiplyScalar(anchorView.R + 2);
+
+  // The search only needs ephemeris positions; stepping the live system would
+  // re-run stellar lighting and weather-stream work thousands of times and
+  // freeze the main thread.
+  const positions = specs.map(() => new THREE.Vector3());
+  const parentIndices = specs.map((spec) => (spec.parentId ? indexByBodyId.get(spec.parentId) ?? -1 : -1));
+  const anchorIndex = indexByBodyId.get(anchorSpec.bodyId);
+  const blockers = [];
+  for (let i = 0; i < specs.length; i++) {
+    if (i === anchorIndex) continue;
+    blockers.push({
+      position: positions[i],
+      radius: system.bodyById.get(specs[i].bodyId)?.R ?? specs[i].radius,
+    });
+  }
+  const starViews = system.starViews;
+  const starPositions = starViews.map(() => new THREE.Vector3());
+  const starRadii = starViews.map((view) => view.spec.radiusRender);
+  const starMasses = starViews.map((view) => view.spec.massSolar);
+  const totalStarMass = starMasses.reduce((sum, mass) => sum + mass, 0) || 1;
+  const isBlackHoleSystem = !!system.spec.isBlackHoleSystem;
+  const updateStars = (time) => {
+    if (isBlackHoleSystem) {
+      for (let i = 0; i < starViews.length; i++) {
+        orbitalPosition(starViews[i].spec.orbit, time, starPositions[i]).add(system.star.pos);
+      }
+      return;
+    }
+    if (starViews.length === 1) {
+      starPositions[0].copy(system.star.pos);
+      return;
+    }
+    orbitalPosition(system.spec.binaryOrbit, time, _eclipseSeparator);
+    starPositions[0].copy(system.star.pos)
+      .addScaledVector(_eclipseSeparator, -starMasses[1] / totalStarMass);
+    starPositions[1].copy(system.star.pos)
+      .addScaledVector(_eclipseSeparator, starMasses[0] / totalStarMass);
+  };
+
   const observer = new THREE.Vector3();
+  const orientation = new THREE.Quaternion();
   const visibilityAt = (time) => {
-    system.updateCelestial(time);
-    body.localPositionToWorld(localUp.clone().multiplyScalar(body.R + 2), observer);
+    updateStars(time);
+    for (let i = 0; i < specs.length; i++) {
+      orbitalPosition(specs[i].orbit, time, positions[i]);
+      const parentIndex = parentIndices[i];
+      positions[i].add(parentIndex >= 0 ? positions[parentIndex] : system.star.pos);
+    }
+    orientationAt(anchorSpec, time, orientation);
+    observer.copy(observerLocal).applyQuaternion(orientation).add(positions[anchorIndex]);
     let visibility = 1;
-    for (const star of system.starViews) {
-      const blockers = system.planets.filter((p) => p !== body)
-        .map((p) => ({ position: p.posUniv, radius: p.R }));
+    for (let i = 0; i < starViews.length; i++) {
       visibility = Math.min(visibility, eclipseFraction(
-        observer, star.positionUniv, star.spec.radiusRender, blockers));
+        observer, starPositions[i], starRadii[i], blockers));
     }
     return visibility;
   };
+
   let previous = visibilityAt(start);
   let found = null;
-  const longestOrbit = Math.max(240, ...system.spec.bodies.map((b) => b.orbit.periodHours));
+  const longestOrbit = Math.max(240, ...specs.map((spec) => spec.orbit.periodHours));
   const step = Math.max(0.25, Math.min(3, longestOrbit / 5000));
   const limit = Math.min(longestOrbit * 1.2, 12000);
   for (let elapsed = step; elapsed <= limit; elapsed += step) {
@@ -2109,8 +2172,10 @@ function findNextEclipse(body, commit = false) {
     if (previous > 0.985 && visible <= 0.985) { found = start + elapsed; break; }
     previous = visible;
   }
-  system.updateCelestial(commit && found != null ? found : start);
-  if (commit && found != null) celestialClock.set(found);
+  if (commit && found != null) {
+    celestialClock.set(found);
+    system.updateCelestial(found);
+  }
   return found;
 }
 

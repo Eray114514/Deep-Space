@@ -73,6 +73,9 @@ function solveKepler(mean, eccentricity) {
   return e;
 }
 
+const ORBIT_AXIS_X = new THREE.Vector3(1, 0, 0);
+const ORBIT_AXIS_Y = new THREE.Vector3(0, 1, 0);
+
 export function orbitalPosition(orbit, timeHours, out = new THREE.Vector3()) {
   const mean = ((orbit.phase + timeHours / orbit.periodHours) * TAU) % TAU;
   const E = solveKepler(mean, orbit.eccentricity || 0);
@@ -80,8 +83,8 @@ export function orbitalPosition(orbit, timeHours, out = new THREE.Vector3()) {
   const x = a * (Math.cos(E) - orbit.eccentricity);
   const z = a * Math.sqrt(1 - orbit.eccentricity * orbit.eccentricity) * Math.sin(E);
   out.set(x, 0, z);
-  out.applyAxisAngle(new THREE.Vector3(1, 0, 0), orbit.inclination || 0);
-  out.applyAxisAngle(new THREE.Vector3(0, 1, 0), orbit.ascendingNode || 0);
+  if (orbit.inclination) out.applyAxisAngle(ORBIT_AXIS_X, orbit.inclination);
+  if (orbit.ascendingNode) out.applyAxisAngle(ORBIT_AXIS_Y, orbit.ascendingNode);
   return out;
 }
 
@@ -549,13 +552,16 @@ export function stellarIrradiance(stars, bodyPosition) {
   return total;
 }
 
+const _eclipseToLight = new THREE.Vector3();
+const _eclipseToBlocker = new THREE.Vector3();
+
 export function eclipseFraction(observer, lightPos, lightRadius, blockers) {
-  const toLight = new THREE.Vector3().subVectors(lightPos, observer);
+  const toLight = _eclipseToLight.subVectors(lightPos, observer);
   const lightDistance = toLight.length();
   const lightAngular = Math.asin(Math.min(1, lightRadius / lightDistance));
   let visible = 1;
   for (const blocker of blockers) {
-    const toBlocker = new THREE.Vector3().subVectors(blocker.position, observer);
+    const toBlocker = _eclipseToBlocker.subVectors(blocker.position, observer);
     const distance = toBlocker.length();
     if (distance >= lightDistance) continue;
     const separation = toBlocker.angleTo(toLight);
