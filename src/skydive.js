@@ -67,6 +67,11 @@ export class SkydiveController {
     this.rig = null;
     this.rampPose = { quat: new THREE.Quaternion(), posLocal: new THREE.Vector3(),
       phase: 'ramp', deployT: 0, brakeLeft: 0, brakeRight: 0, dive: 0, airspeed: 0 };
+    this.collapsing = false;
+    this.collapse = 0;
+    this.collapsePose = { quat: new THREE.Quaternion(), posLocal: new THREE.Vector3(), planet: null,
+      phase: 'canopy', deployT: 1, brakeLeft: 0, brakeRight: 0, dive: 0, airspeed: 0, agl: 0,
+      time: 0, collapse: 0, glideYaw: 0 };
 
     this._drag = null;
     this._onMove = (e) => {
@@ -112,7 +117,7 @@ export class SkydiveController {
   }
 
   showRampPose(progress, planet, nav, altitude) {
-    if (this.active || !this.rig) return;
+    if (this.active || !this.rig || this.collapsing) return;
     if (!progress || !planet) {
       this.rig.root.visible = false;
       this.rampPose.planet = null;
@@ -128,6 +133,7 @@ export class SkydiveController {
   }
 
   enter(planet, posLocal, viewDir, initialVelLocal = null) {
+    this.endCollapse();
     this.active = true;
     this.planet = planet;
     this.phase = 'freefall';
@@ -199,7 +205,9 @@ export class SkydiveController {
   fovOffset() {
     if (!this.active) return 0;
     if (this.phase === 'freefall') {
-      return 8 * clamp((this.airspeed - 8) / 58, 0, 1) + 7 * this.dive;
+      // Wind rush of the leap itself, before airspeed has built up.
+      const rush = 5 * Math.sin(Math.PI * THREE.MathUtils.smoothstep(this.time, 0, 1.3));
+      return 8 * clamp((this.airspeed - 8) / 58, 0, 1) + 7 * this.dive + rush;
     }
     const settle = smootherstep01(this.deployT);
     return lerp(11.5, 3.0, settle);
@@ -234,8 +242,7 @@ export class SkydiveController {
     const tremor = this.phase === 'freefall'
       ? Math.sin(this.time * 31.0) * 0.0032 * clamp(this.airspeed / 55, 0, 1)
       : 0;
-    const tipForward = .13 * Math.sin(Math.PI * THREE.MathUtils.smoothstep(this.time, .18, 1.42))
-      * (1 - this.deployT);
+    const { tip: tipForward, roll: exitRoll } = this.exitMotion();
     const effPitch = clamp(this.pitch + this.pitchJolt + tremor - tipForward - .29 * this.dive, -1.49, 1.47);
     _viewDir.copy(_fwd).multiplyScalar(Math.cos(effPitch)).addScaledVector(_u, Math.sin(effPitch));
     _camRight.crossVectors(_viewDir, _u);
@@ -244,15 +251,27 @@ export class SkydiveController {
     _camUp.crossVectors(_camRight, _viewDir);
     _m.makeBasis(_camRight, _camUp, _fwd.copy(_viewDir).negate());
     this.quat.setFromRotationMatrix(_m);
-    if (Math.abs(this.bankRoll) > 1e-4) {
-      this.quat.multiply(_qBank.setFromAxisAngle(Z_AXIS, -this.bankRoll));
+    const roll = this.bankRoll + exitRoll;
+    if (Math.abs(roll) > 1e-4) {
+      this.quat.multiply(_qBank.setFromAxisAngle(Z_AXIS, -roll));
     }
+  }
+
+  // The leap off the ramp: a short hop, then the head and shoulders roll
+  // forward into the airstream before the arch flattens belly-to-earth.
+  exitMotion() {
+    const t = this.time;
+    const env = 1 - this.deployT;
+    const hop = .09 * Math.sin(Math.PI * THREE.MathUtils.smoothstep(t, 0, .34));
+    const tumble = .50 * Math.pow(Math.sin(Math.PI * THREE.MathUtils.smoothstep(t, .12, 1.75)), 1.2);
+    const roll = .07 * Math.sin(t * 4.3 + .6) * Math.sin(Math.PI * THREE.MathUtils.smoothstep(t, .1, 1.5));
+    return { tip: (tumble - hop) * env, roll: roll * env };
   }
 
   syncRig() {
     _fwd.copy(_north).multiplyScalar(Math.cos(this.glideYaw)).addScaledVector(_east, Math.sin(this.glideYaw));
-    const tipForward = .13 * Math.sin(Math.PI * THREE.MathUtils.smoothstep(this.time, .18, 1.42))
-      * (1 - this.deployT);
+    const exit = this.exitMotion();
+    const tipForward = exit.tip * .95;
     const canopySettle = this.phase === 'canopy' ? smootherstep01(this.deployT) : 0;
     // Keep torso/arms pitched with the body's dive/arch state (never head pitch),
     // then swing smoothly upright into the parachute harness on deployment.
@@ -267,7 +286,7 @@ export class SkydiveController {
     _canopyUp.crossVectors(_canopyRight, _viewDir);
     _canopyBack.copy(_viewDir).negate();
     _q.setFromRotationMatrix(_m.makeBasis(_canopyRight, _canopyUp, _canopyBack));
-    const rigBank = this.phase === 'canopy' ? this.bankRoll * .58 : this.bankRoll;
+    const rigBank = (this.phase === 'canopy' ? this.bankRoll * .58 : this.bankRoll) + exit.roll * 1.3;
     if (Math.abs(rigBank) > 1e-4) {
       _q.multiply(_qBank.setFromAxisAngle(Z_AXIS, -rigBank));
     }
@@ -374,6 +393,8 @@ export class SkydiveController {
       const landedPos = this.posLocal.clone();
       const landedCarry = horizVel.clone().multiplyScalar(0.55);
       const landedPlanet = p;
+      const wasCanopy = this.phase === 'canopy';
+      const impact = clamp((this.sinkRate - 1.5) / 9, .15, 1);
       this.frame(_u, _east, _north);
       const landedViewDir = _fwd.copy(_north).multiplyScalar(Math.cos(this.yaw))
         .addScaledVector(_east, Math.sin(this.yaw))
@@ -386,13 +407,70 @@ export class SkydiveController {
         posLocal: landedPos,
         viewDir: landedViewDir,
         carryHoriz: landedCarry,
+        impact,
         water: (p.liquid === 'water' || p.liquid === 'toxic') && surfaceR === p.seaRadius,
       });
+      if (wasCanopy) this.beginCollapse(landedPlanet, landedPos, this.quat);
       return;
     }
 
     this.updateQuat();
     this.syncRig();
+  }
+
+  // Touchdown follow-through: the gloves let go and drop clear while the
+  // depressurised wing stalls behind the jumper as walking takes over.
+  beginCollapse(planet = null, posLocal = null, camQuatLocal = null) {
+    if (!this.rig) return;
+    this.collapsing = true;
+    this.collapse = 0;
+    const pose = this.collapsePose;
+    pose.phase = 'canopy';
+    pose.deployT = 1;
+    pose.time = this.time;
+    pose.collapse = 0;
+    pose.brakeLeft = this.brakeLeft;
+    pose.brakeRight = this.brakeRight;
+    pose.glideYaw = this.glideYaw;
+    pose.frameAxis = this.frameAxis;
+    this.rig.root.visible = true;
+    if (planet && posLocal && camQuatLocal) {
+      this.updateCollapse(0, planet, posLocal, camQuatLocal);
+    }
+  }
+
+  updateCollapse(dt, planet, posLocal, camQuatLocal) {
+    if (!this.collapsing) return;
+    if (!planet) { this.endCollapse(); return; }
+    if (dt > 0) this.collapse = Math.min(1, this.collapse + dt / .95);
+    if (this.collapse >= 1) { this.endCollapse(); return; }
+    const pose = this.collapsePose;
+    pose.planet = planet;
+    pose.posLocal.copy(posLocal);
+    pose.quat.copy(camQuatLocal);
+    pose.time += dt;
+    pose.collapse = this.collapse;
+    pose.brakeLeft = damp(pose.brakeLeft, 0, 6, dt);
+    pose.brakeRight = damp(pose.brakeRight, 0, 6, dt);
+    _u.copy(posLocal).normalize();
+    const axis = Math.abs(_u.y) < .93 ? Y_AXIS : X_AXIS;
+    _east.crossVectors(axis, _u).normalize();
+    _north.crossVectors(_u, _east);
+    _fwd.copy(_north).multiplyScalar(Math.cos(pose.glideYaw)).addScaledVector(_east, Math.sin(pose.glideYaw));
+    _canopyRight.crossVectors(_fwd, _u).normalize();
+    _canopyBack.copy(_fwd).negate();
+    _q.setFromRotationMatrix(_m.makeBasis(_canopyRight, _u, _canopyBack));
+    this.rig.update(pose, _q, this.dom.clientWidth / Math.max(1, this.dom.clientHeight));
+  }
+
+  endCollapse() {
+    if (!this.collapsing) return;
+    this.collapsing = false;
+    this.collapse = 0;
+    if (this.rig && !this.active) {
+      this.rig.root.visible = false;
+      this.rig.canopy.visible = false;
+    }
   }
 
   dispose() {

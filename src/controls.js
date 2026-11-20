@@ -4,7 +4,7 @@
 // ground is the planet's own height function, not a mesh raycast.
 
 import * as THREE from 'three';
-import { clamp } from './noise.js';
+import { clamp, lerp } from './noise.js';
 
 export const keys = {};
 if (typeof window !== 'undefined') {
@@ -473,6 +473,11 @@ export class WalkControls {
     this._wasCrouchKey = false;
     this._stepPhase = 0;
     this._rollTilt = 0;
+    this.landDip = 0;
+    this._landHold = 0;
+    this._nod = 0;
+    this._nodVel = 0;
+    this.runOut = 0;
     this.hSpeed = new THREE.Vector3();
     this.running = false;
     this.moveInput = { x: 0, y: 0 };   // last walk input: x strafe, y forward
@@ -531,6 +536,11 @@ export class WalkControls {
     this._wasCrouchKey = false;
     this._stepPhase = 0;
     this._rollTilt = 0;
+    this.landDip = 0;
+    this._landHold = 0;
+    this._nod = 0;
+    this._nodVel = 0;
+    this.runOut = 0;
     _u.copy(posLocal).normalize();
     this.frame(_u, _r, _f);                       // east in _r, north in _f
     _v.copy(viewDir).projectOnPlane(_u).normalize();
@@ -549,15 +559,32 @@ export class WalkControls {
     this.stance = 'stand';
     this.slideT = 0;
     this._rollTilt = 0;
+    this.landDip = 0;
+    this._landHold = 0;
+    this._nod = 0;
+    this._nodVel = 0;
+    this.runOut = 0;
     this.eyeHeight = this.standEyeHeight;
+  }
+
+  // A parachute or long-fall touchdown: knees take the load, the head nods
+  // forward, and the carried speed bleeds off over a few running steps.
+  absorbLanding(impact01 = 0.5) {
+    const k = clamp(impact01, 0, 1);
+    this.landDip = 0.2 + 0.5 * k;
+    this._landHold = 0.1 + 0.08 * k;
+    this._nodVel -= 1.1 + 2.2 * k;
+    this.runOut = 0.55 + 0.45 * k;
+    this._stepPhase = 0.25;
   }
 
   updateQuat() {
     _u.copy(this.posLocal).normalize();
     this.frame(_u, _r, _f);
     // view direction from yaw/pitch in the local frame
+    const pitch = clamp(this.pitch + this._nod, -1.5, 1.5);
     _v.copy(_f).multiplyScalar(Math.cos(this.yaw)).addScaledVector(_r, Math.sin(this.yaw));
-    _v2.copy(_v).multiplyScalar(Math.cos(this.pitch)).addScaledVector(_u, Math.sin(this.pitch)); // viewDir
+    _v2.copy(_v).multiplyScalar(Math.cos(pitch)).addScaledVector(_u, Math.sin(pitch)); // viewDir
     _r.crossVectors(_v2, _u);
     if (_r.lengthSq() < 1e-6) _r.set(1, 0, 0);
     _r.normalize();
@@ -613,9 +640,18 @@ export class WalkControls {
 
     this.crouching = this.sliding || crouchHeld;
     this.stance = this.sliding ? 'slide' : this.crouching ? 'crouch' : 'stand';
-    const targetEye = this.sliding ? 0.86 : this.crouching ? 1.08 : this.standEyeHeight;
+    const targetEye = Math.max(0.8, (this.sliding ? 0.86 : this.crouching ? 1.08 : this.standEyeHeight) - this.landDip);
     const prevEye = this.eyeHeight;
     this.eyeHeight += (targetEye - this.eyeHeight) * (1 - Math.exp(-dt * 14));
+    if (this._landHold > 0) this._landHold -= dt;
+    else if (this.landDip > 0) this.landDip = this.landDip < 0.004 ? 0 : this.landDip * Math.exp(-dt * 3.4);
+    if (this._nod !== 0 || this._nodVel !== 0) {
+      const nodStep = Math.min(dt, 0.04);
+      this._nodVel += (-70 * this._nod - 11.7 * this._nodVel) * nodStep;
+      this._nod += this._nodVel * nodStep;
+      if (Math.abs(this._nod) < 1e-4 && Math.abs(this._nodVel) < 1e-3) this._nod = this._nodVel = 0;
+    }
+    if (this.runOut > 0) this.runOut = Math.max(0, this.runOut - dt);
     const targetRoll = this.sliding ? -0.055 : 0;
     this._rollTilt += (targetRoll - this._rollTilt) * (1 - Math.exp(-dt * 12));
 
@@ -633,8 +669,8 @@ export class WalkControls {
       _f.set(0, 0, 0).addScaledVector(fwd, fIn).addScaledVector(right, rIn);
       if (_f.lengthSq() > 1) _f.normalize();          // keep analog magnitudes
       _f.multiplyScalar(speed);
-      // smooth accelerate / decelerate
-      this.hSpeed.lerp(_f, 1 - Math.exp(-dt * 10));
+      // smooth accelerate / decelerate; a touchdown run-out keeps momentum
+      this.hSpeed.lerp(_f, 1 - Math.exp(-dt * lerp(10, 1.6, clamp(this.runOut / 0.8, 0, 1))));
     }
     this.posLocal.addScaledVector(this.hSpeed, dt);
 

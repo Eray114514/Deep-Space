@@ -1376,11 +1376,12 @@ const skydiveCtl = new SkydiveController(renderer.domElement, scene, {
   },
   onLoad: () => audio.cue('chute-load'),
   onAadWarning: () => audio.cue('aad-warn'),
-  onLand: ({ planet, posLocal, viewDir, carryHoriz, water }) => {
+  onLand: ({ planet, posLocal, viewDir, carryHoriz, impact = 0.5, water }) => {
     audio.cue(water ? 'water-splash' : 'chute-land');
     walkCtl.enter(planet, posLocal, viewDir);
     walkCtl.hSpeed.copy(carryHoriz);
     walkCtl.grounded = !water;
+    walkCtl.absorbLanding(water ? impact * 0.4 : impact);
     planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(planet.frameOrientation).multiply(walkCtl.quat);
     setState('walk');
@@ -2607,6 +2608,7 @@ function setState(s) {
     shipView.seatT = 1;
   }
   if (s !== 'skydive' && skydiveCtl.active) skydiveCtl.exit();
+  if (s !== 'walk' && skydiveCtl.collapsing) skydiveCtl.endCollapse();
   if (s !== 'shipwalk' && s !== 'landed' && s !== 'walk' && s !== 'skydive') ui.setInteractPrompt('');
   const landed = !!ship.parkedPosUniv && ship.parkAmt > 0.98;
   const jumpHint = ship.hoverMode === 'high'
@@ -3422,6 +3424,7 @@ function takeoff(planet = walkCtl.planet ?? skydiveCtl.planet ?? ship.parkedPlan
   if (!planet) return false;
   if (walkCtl.active) walkCtl.exit();
   if (skydiveCtl.active) skydiveCtl.exit();
+  if (skydiveCtl.collapsing) skydiveCtl.endCollapse();
   shipView.closeRamp();
   surveyUnits.recall();
   recallInFlight = false;
@@ -6032,6 +6035,9 @@ function frame(rafTs) {
   if (paused && state === 'walk' && walkCtl.planet && universe.planets().includes(walkCtl.planet)) {
     walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
+    if (skydiveCtl.collapsing) {
+      skydiveCtl.updateCollapse(0, walkCtl.planet, walkCtl.posLocal, walkCtl.quat);
+    }
   } else if (paused && state === 'skydive' && skydiveCtl.active && skydiveCtl.planet
       && universe.planets().includes(skydiveCtl.planet)) {
     skydiveCtl.planet.localPositionToWorld(skydiveCtl.posLocal, nav.pos);
@@ -6272,6 +6278,9 @@ function frame(rafTs) {
     walkCtl.update(dt);
     walkCtl.planet.localPositionToWorld(walkCtl.posLocal, nav.pos);
     nav.quat.copy(walkCtl.planet.frameOrientation).multiply(walkCtl.quat);
+    if (skydiveCtl.collapsing) {
+      skydiveCtl.updateCollapse(dt, walkCtl.planet, walkCtl.posLocal, walkCtl.quat);
+    }
     tryEnterShipFromRamp();
   }
   // Export parked-seat and interior-walk nav BEFORE stepTweens, LOD, scatter,
@@ -8192,6 +8201,7 @@ window.NMS = {
     brakeRight: skydiveCtl.brakeRight || 0,
     cloud: skydiveCtl.cloud || 0,
     aadTriggered: skydiveCtl.aadTriggered,
+    collapsing: skydiveCtl.collapsing,
   }),
   shipLandingState: () => {
     const padGaps = [];

@@ -196,12 +196,19 @@ try {
   await shot('02-hover-ramp-abyss');
 
   await page.evaluate(() => {
-    window.jumpTrace = { rise: 0, minShoulderZ: Infinity, gripGap: 0, heldFrames: 0 };
-    const { scene, camera } = NMS._internals;
+    window.jumpTrace = { rise: 0, minShoulderZ: Infinity, gripGap: 0, heldFrames: 0,
+      minLeapSpan: Infinity, maxTumble: 0 };
+    const { scene, camera, skydiveCtl } = NMS._internals;
     const sample = () => {
       const s = NMS.skydiveState();
       if (s.active) {
         jumpTrace.rise = Math.max(jumpTrace.rise, -s.sinkRate);
+        jumpTrace.maxTumble = Math.max(jumpTrace.maxTumble, skydiveCtl.exitMotion().tip);
+        const hL = scene.getObjectByName('jump-glove-left');
+        const hR = scene.getObjectByName('jump-glove-right');
+        if (skydiveCtl.time > 0.05 && skydiveCtl.time < 0.55) {
+          jumpTrace.minLeapSpan = Math.min(jumpTrace.minLeapSpan, Math.abs(hR.position.x - hL.position.x));
+        }
         for (const side of ['left', 'right']) {
           const hand = scene.getObjectByName('jump-glove-' + side);
           const socket = hand.geometry.userData.shoulderSocket.clone().add(hand.material.uniforms.shoulderOffset.value);
@@ -312,8 +319,9 @@ try {
   await shot('04-parafoil-canopy-overhead');
   await page.waitForFunction('NMS.skydiveState().deployT === 1 && jumpTrace.heldFrames > 0');
   const trace = await page.evaluate(() => jumpTrace);
-  check(trace.rise > 4 && trace.minShoulderZ > .05 && trace.gripGap < .001,
-    `ramp pushes off upward, sleeve ends stay behind the eye, toggles stay in the grasp ${JSON.stringify(trace)}`);
+  check(trace.rise > 4 && trace.minShoulderZ > .05 && trace.gripGap < .001
+      && trace.minLeapSpan < 0.55 && trace.maxTumble > 0.30,
+    `ramp pushes off upward with forward leap throw, sleeve ends stay behind the eye, toggles stay in the grasp ${JSON.stringify(trace)}`);
 
   // Look toward the mountain horizon (-6° pitch so peripheral risers/toggles + mountain both show) and bank right!
   await page.evaluate('NMS.lookPitch(-76)');
@@ -331,10 +339,19 @@ try {
     state: NMS.state,
     weapon: NMS.surfaceWeaponState(),
     shipLanding: NMS.shipLandingState(),
+    landDip: NMS._internals.walkCtl.landDip,
+    runOut: NMS._internals.walkCtl.runOut,
+    collapsing: NMS.skydiveState().collapsing,
   }));
   check(postTouchdown.state === 'walk' && postTouchdown.weapon.rendered
-      && (postTouchdown.weapon.equip === 'drawing' || postTouchdown.weapon.equip === 'ready'),
-    `parachute touchdown transitions seamlessly to walk and draws PAC-9 ${JSON.stringify(postTouchdown.weapon)}`);
+      && (postTouchdown.weapon.equip === 'drawing' || postTouchdown.weapon.equip === 'ready')
+      && (postTouchdown.landDip > 0.05 || postTouchdown.runOut > 0.05 || postTouchdown.collapsing),
+    `parachute touchdown transitions seamlessly to walk with knee dip, run-out, canopy collapse and PAC-9 draw ${JSON.stringify(postTouchdown)}`);
+  await page.waitForFunction(() => !NMS.skydiveState().collapsing
+      && !NMS._internals.skydiveCtl.rig.root.visible
+      && Math.abs(NMS._internals.walkCtl.eyeHeight - NMS._internals.walkCtl.standEyeHeight) < 0.06,
+    null, { timeout: 10000 });
+  check(true, 'touchdown canopy collapse clears cleanly and knees recover to standing height');
 
   await page.waitForFunction('NMS.shipLandingState().orbitalStandby === true', null, { timeout: 30000 });
   check(true, 'unmanned hover ship automatically seals ramp and climbs to orbital standby');

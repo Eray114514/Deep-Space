@@ -448,6 +448,22 @@ export function createSkydiveRig() {
     wing.position.set(.14 * Math.sin(Math.PI * t * 2) * (1 - t),
       1.65 + 3.94 * smooth(t, 0, .62), -.44 - .72 * loaded);
     wing.rotation.z = -.12 * (ctl.brakeRight - ctl.brakeLeft);
+    // After touchdown the depressurised wing stalls and trails overhead behind
+    // the jumper as they run forward out of the harness and release the toggles.
+    const collapse = ctl.collapse || 0;
+    const release = smooth(collapse, 0, .28);
+    const stall = smooth(collapse, 0, .92);
+    if (collapse > 0) {
+      wing.scale.x *= 1 - .35 * stall;
+      wing.scale.y *= 1 - .60 * stall;
+      wing.scale.z *= 1 - .35 * stall;
+      wing.position.y = lerp(wing.position.y, 1.5, stall * stall);
+      wing.position.z = lerp(wing.position.z, 3.8, stall);
+      wing.rotation.x = .85 * stall;
+      canopy.visible = canopy.visible && collapse < .98;
+    } else {
+      wing.rotation.x = 0;
+    }
     lines.count = straps.count = 0;
     const width = Math.min(1, aspect / 1.38);
     // Arms and hands stay anchored to the skydiver's body/harness attitude so
@@ -461,30 +477,52 @@ export function createSkydiveRig() {
       const x = lerp(.35 - .038 * tuck, .314, loaded) * width;
       const y = lerp(-.19 - .018 * tuck, -.008 - .16 * brake, loaded);
       const z = lerp(-.415 + .029 * tuck, -.46 + .035 * brake, loaded);
-      const swing = smooth(ctl.time, -.56 + .12 * side, .48 + .10 * side);
-      const settle = Math.sin(Math.PI * smooth(ctl.time, .19, 1.12)) * (1 - loaded);
-      hand.position.set(side * (x - .095 * (1 - swing) - .07 * handlePull),
-        y - .30 * (1 - swing) + .046 * settle + .012 * flutter - .18 * handlePull,
-        z + .15 * (1 - swing) - .045 * settle + .12 * handlePull);
-      angles.set(lerp(.54 + .12 * tuck, .91, loaded) + .07 * flutter,
-        side * lerp(.58 + .09 * tuck, .18, loaded), side * lerp(.50, .27, loaded));
+      // Ramp run pumps the arms; the leap throws both hands forward with a
+      // subtle stride stagger, then they sweep out into the stable belly arch.
+      const time = ctl.time;
+      const pump = time < 0
+        ? Math.sin(time * 15 + (side > 0 ? Math.PI : 0)) * smooth(time, -.65, -.42) * (1 - smooth(time, -.16, 0))
+        : 0;
+      const leap = smooth(time, -.10 + .035 * side, .16 + .045 * side) * (1 - smooth(time, .42, 1.05));
+      const reach = leap * (1 - loaded);
+      const swing = smooth(time, .30 + .05 * side, 1.30 + .07 * side);
+      const flail = Math.sin(time * 8.6 + side * 1.7) * Math.sin(Math.PI * smooth(time, .05, 1.4)) * (1 - loaded);
+      const settle = Math.sin(Math.PI * smooth(time, .19, 1.12)) * (1 - loaded);
+      hand.position.set(side * (x - .095 * (1 - swing) - .14 * reach - .07 * handlePull + .02 * flail),
+        y - .30 * (1 - swing) + .27 * reach + .046 * settle + .012 * flutter + .03 * flail
+          + .04 * pump - .18 * handlePull,
+        z + .15 * (1 - swing) - .17 * reach - .045 * settle + .07 * pump + .12 * handlePull);
+      angles.set(lerp(.54 + .12 * tuck, .91, loaded) + .07 * flutter - .26 * reach,
+        side * lerp(.58 + .09 * tuck, .18, loaded) * (1 - .52 * reach),
+        side * lerp(.50, .27, loaded) * (1 - .45 * reach));
       hand.quaternion.setFromEuler(angles);
-      hand.morphTargetInfluences[0] = closeFingers + (1 - closeFingers) * Math.max(handlePull * .78, tuck * .23 + .33 * (1 - swing));
+      hand.morphTargetInfluences[0] = (1 - release) * (closeFingers + (1 - closeFingers)
+        * Math.max(handlePull * .78, tuck * .23 + .33 * (1 - swing) + .24 * reach));
       // Reach to the stowed toggle, close the fingers, then draw it down.
       // From contact onward the grip and webbing have one shared position.
       grip.copy(gripPoint).applyQuaternion(hand.quaternion);
       const rear = rings[1].position;
       const slack = .055 * (1 - loaded);
+      const riserBack = 1.15 * stall;
+      const riserY = .22 * stall - .45 * stall * stall;
+      const riserWide = 1 + .16 * stall;
       // The steering loops hang inboard on their own brake leaders. Leave
       // room for the full glove and loop as the palm approaches from below.
-      rings[0].position.set(side * (.39 * width + .125), .25 - slack, -.67);
-      rear.set(side * (.36 * width + .125), .20 - slack, -.61);
-      stowed.set(side * .264 * width, .12 - slack, -.55);
+      rings[0].position.set(side * (.39 * width + .125) * riserWide, .25 - slack + riserY, -.67 + riserBack);
+      rear.set(side * (.36 * width + .125) * riserWide, .20 - slack + riserY, -.61 + riserBack);
+      stowed.set(side * .264 * width * riserWide, .12 - slack + riserY, -.55 + riserBack);
       hand.position.lerp(delta.copy(stowed).sub(grip), takeGrip * (1 - pullDown));
       // Approach from the back of the glove so the extended fingertips sweep
       // past the face of the loop before curling around its lower edge.
       delta.set(0, .08 * Math.sin(Math.PI * takeGrip), 0).applyQuaternion(hand.quaternion);
       hand.position.add(delta);
+      hand.visible = release < .88;
+      if (release > 0) {
+        // Let go: the gloves drop cleanly below the lower frame before the rifle rises.
+        hand.position.x += side * .06 * release;
+        hand.position.y -= .72 * release;
+        hand.position.z += .14 * release;
+      }
       if (t < .58) toggle.position.copy(stowed);
       const offset = hand.material.uniforms.shoulderOffset.value;
       offset.set(side * .23 * width, -.32, .16);
@@ -534,7 +572,7 @@ export function createSkydiveRig() {
       // curled palm as the fingers close. Its brake line stays reeved above.
       grip.copy(gripPoint);
       pointInRig(grip, hand);
-      if (t >= .58) toggle.position.copy(grip);
+      if (t >= .58) toggle.position.copy(grip).lerp(stowed, release);
       crossbar.set(1, 0, 0).applyQuaternion(hand.quaternion);
       // The brake line can change direction at the stitched eye. Once
       // gripped, the loop stays on the fingertip side of the crossbar.
