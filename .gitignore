@@ -25,6 +25,7 @@ tools/transpile-glsl.js
 
 # 编辑器 / 操作系统私有文件
 .trae/
+.trae-html-share-packages/
 .idea/
 .vscode/
 *.swp
@@ -44,5 +45,4 @@ __pycache__/
 docs/
 AGENTS.md
 CLAUDE.md
-THIRD_PARTY_NOTICES.md
 tools/_local/

@@ -182,7 +182,7 @@ Terrestrial planet radii **160–400 km** (the homeworld is authored at 1,200 km
 | `vendor/` | Browser-ready Three.js files; do not edit unless intentionally upgrading the vendored dependency |
 | `assets/` | Static models (`halcyon/halcyon.glb` included), textures and audio, served at `/assets/...` from the URL root |
 | `tools/` | Dev, validation, performance and screenshot scripts |
-| `docs/` | Design language, render contracts, optimization roadmap and music archive (entry: `docs/README.md`) |
+| `THIRD_PARTY_NOTICES.md` | Third-party asset provenance and licences: soundtrack, Three.js |
 | `worlds/milky-way.lock.json` | Canonical-universe compatibility snapshot (see below) |
 
 ## Canonical Universe Contract
@@ -199,6 +199,5 @@ This project's code is released under the **MIT License**.
 
 ### Third-party and exceptions
 
-- **Soundtrack** (42 MP3s under `assets/audio/`, ~239 MB): 27 tracks generated with **Google DeepMind Lyria 3.5** (via Google Flow Music) and 15 earlier **Suno AI** tracks. The copyright status of AI-generated music varies by jurisdiction and service terms; these tracks are **not** released under the MIT license and are distributed with this project for **non-commercial** use only. The full catalogue, prompts and scene bindings are in `THIRD_PARTY_NOTICES.md`, `docs/music-catalog.md` and `src/music.js`. **Forkers note**: obtain your own authorisation before distributing or commercial use, or replace them with your own / CC0 tracks; the game still runs after removing the `assets/audio/` directory (audio load failures are silently handled).
+- **Soundtrack** (42 MP3s under `assets/audio/`, ~250 MB): 27 tracks generated with **Google DeepMind Lyria 3.5** (via Google Flow Music) and 15 earlier **Suno AI** tracks. The copyright status of AI-generated music varies by jurisdiction and service terms; these tracks are **not** released under the MIT license and are distributed with this project for **non-commercial** use only. The full track table and scene bindings are in `THIRD_PARTY_NOTICES.md` and `src/music.js`. **Forkers note**: obtain your own authorisation before distributing or commercial use, or replace them with your own / CC0 tracks; the game still runs after removing the `assets/audio/` directory (audio load failures are silently handled).
 - **Three.js**: vendored under `vendor/`, under its MIT license.
-- **Ocean optics**: the water-column optics in `src/shaders-webgl.js` adapt the author's separate `realistic-threejs-ocean-simulation` reference project (MIT). See `THIRD_PARTY_NOTICES.md` for the complete list.

@@ -182,7 +182,7 @@ colorAt(dir, h, slope, maxFreq) -> 表面颜色
 | `vendor/` | 浏览器版 Three.js 文件，除非有意升级依赖否则勿改 |
 | `assets/` | 静态模型（含 `halcyon/halcyon.glb`）、贴图与音频，以 `/assets/...` 提供于 URL 根 |
 | `tools/` | 开发、校验、性能与截图脚本 |
-| `docs/` | 设计语言、渲染契约、优化路线图与配乐档案（入口见 `docs/README.md`） |
+| `THIRD_PARTY_NOTICES.md` | 第三方素材来源与许可：配乐、Three.js |
 | `worlds/milky-way.lock.json` | 规范宇宙兼容性快照（见下） |
 
 ## 规范宇宙契约
@@ -199,6 +199,5 @@ colorAt(dir, h, slope, maxFreq) -> 表面颜色
 
 ### 第三方与例外
 
-- **配乐**（`assets/audio/` 下 42 首 MP3，约 239 MB）：27 首由 **Google DeepMind Lyria 3.5**（经 Google Flow Music）生成，15 首为早期 **Suno AI** 曲目。AI 生成音乐的版权状态因法域与服务条款而异，这些曲目**不**随 MIT 许可发布，仅按**非商业**用途随本项目分发。完整曲目表、生成提示词与场景绑定见 `THIRD_PARTY_NOTICES.md`、`docs/music-catalog.md` 与 `src/music.js`。**Fork 者注意**：自行分发或商业使用前须另行获取授权，或替换为自有 / CC0 曲目；移除 `assets/audio/` 目录后游戏仍可运行（音频加载失败被静默处理）。
+- **配乐**（`assets/audio/` 下 42 首 MP3，约 250 MB）：27 首由 **Google DeepMind Lyria 3.5**（经 Google Flow Music）生成，15 首为早期 **Suno AI** 曲目。AI 生成音乐的版权状态因法域与服务条款而异，这些曲目**不**随 MIT 许可发布，仅按**非商业**用途随本项目分发。完整曲目表与场景绑定见 `THIRD_PARTY_NOTICES.md` 与 `src/music.js`。**Fork 者注意**：自行分发或商业使用前须另行获取授权，或替换为自有 / CC0 曲目；移除 `assets/audio/` 目录后游戏仍可运行（音频加载失败被静默处理）。
 - **Three.js**：vendored 于 `vendor/`，遵循其 MIT 许可。
-- **水面光学**：`src/shaders-webgl.js` 的水体光学模型改编自作者另一个项目 `realistic-threejs-ocean-simulation`（MIT）。全部条目见 `THIRD_PARTY_NOTICES.md`。
