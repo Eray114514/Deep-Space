@@ -719,9 +719,10 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             float subDepth = max(0.0, uT0 - hgt);
             float subFade = 1.0 - smoothstep(3200.0, 6500.0, viewDist);
             vec3 depthAtten = exp(-uSeaAbsorption * min(subDepth, 75.0) * 0.82);
+            vec3 scatterFloor = clamp(uSeaScatter * 2.2, vec3(0.03), vec3(0.75));
             diffuseColor.rgb = mix(diffuseColor.rgb,
-              diffuseColor.rgb * mix(vec3(0.10, 0.42, 0.58), depthAtten, 0.72)
-                + uSeaScatter * (1.0 - depthAtten) * 0.14,
+              diffuseColor.rgb * mix(scatterFloor, depthAtten, 0.78)
+                + uSeaScatter * (1.0 - depthAtten) * 0.16,
               smoothstep(0.0, 2.4, subDepth) * subFade * 0.86);
             float sunElev = smoothstep(-0.02, 0.24, dot(nd, uCanopySun));
             float nDotSun = max(0.0, dot(normalize(vLocalNrm), uCanopySun));
@@ -744,7 +745,8 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
               float net2 = pow(clamp(1.0 - g2 * 0.62, 0.0, 1.0), 4.0);
               float causticWeb = clamp((net1 * 0.85 + net2 * 0.75 + net1 * net2 * 1.4), 0.0, 1.6)
                 * (1.0 - smoothstep(0.9, 8.5, pixelMetres));
-              vec3 causticTint = mix(vec3(0.32, 0.92, 1.0), vec3(0.88, 1.0, 0.86), exp(-subDepth * 0.16));
+              vec3 causticSpectral = depthAtten / max(max(depthAtten.r, max(depthAtten.g, depthAtten.b)), 0.08);
+              vec3 causticTint = mix(causticSpectral, vec3(1.0, 0.98, 0.92), exp(-subDepth * 0.22));
               // Darken inter-filament cells slightly and brighten glowing caustic webs for high contrast
               diffuseColor.rgb *= mix(1.0, 0.62 + causticWeb * 1.15 * uSeaCausticK, clamp(causticMask, 0.0, 0.94));
               diffuseColor.rgb += causticTint * causticWeb * causticMask * uSeaCausticK * 0.85;
@@ -1822,30 +1824,44 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           vec3 sunDirV = normalize(vSunDirView);
           vec3 waveUp = normalize(vWaveUp);
           vec3 sunTrans = surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSunDirView));
+          vec3 underN = normalize(normal);
+          vec3 refrSkyDir = normalize(mix(waveUp, -viewDir + underN * 0.36, 0.58));
+          vec3 reflectionDir = reflect(-viewDir, normal);
+          // Prevent steep wave backs from reflecting below-horizon darkness
+          float reflUp = dot(reflectionDir, waveUp);
+          if (reflUp < 0.035) {
+            reflectionDir = normalize(reflectionDir + waveUp * (0.045 - reflUp));
+          }
+          // Single shared surfaceWaterReflectedSky call for both above-water
+          // reflection and underwater Snell's window (prevents 2x FXC inlining).
+          vec3 skySampleDir = gl_FrontFacing ? reflectionDir : refrSkyDir;
+          float skySampleRough = gl_FrontFacing ? gWaterRoughness : 0.08;
+          float skyHeight = clamp(dot(skySampleDir, waveUp), 0.0, 1.0);
+          float cloud = gWaterCloud;
+          vec3 sampledSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
+          if (gl_FrontFacing) {
+            sampledSky = mix(sampledSky, vec3(0.46, 0.5, 0.56)
+              * (0.22 + uDay * 0.62), cloud * 0.62);
+          }
+          sampledSky = surfaceWaterReflectedSky(
+            vLocalPos,
+            normalize(uSurfaceViewToLocal * skySampleDir),
+            skySampleRough,
+            cloud,
+            sampledSky
+          );
           if (!gl_FrontFacing) {
             // Physical underwater ceiling optics: Snell's window refraction cone
             // (~48.6 deg for water IOR 1.333) surrounded by abyssal Total Internal Reflection.
-            vec3 underN = normalize(normal);
             float cosUnder = clamp(dot(underN, viewDir), 0.0, 1.0);
             float snellWindow = smoothstep(0.54, 0.72, cosUnder);
             float criticalRing = exp(-pow((cosUnder - 0.645) / 0.062, 2.0));
-            // Bend view ray toward sky zenith + wave slope for refracted air-side sky
-            vec3 refrSkyDir = normalize(mix(waveUp, -viewDir + underN * 0.36, 0.58));
-            float refrSkyH = clamp(dot(refrSkyDir, waveUp), 0.0, 1.0);
-            vec3 skyAbove = mix(uSkyHorizon, uSkyZenith, sqrt(refrSkyH));
-            skyAbove = surfaceWaterReflectedSky(
-              vLocalPos,
-              normalize(uSurfaceViewToLocal * refrSkyDir),
-              0.08,
-              gWaterCloud,
-              skyAbove
-            );
             float refrSunDot = max(dot(refrSkyDir, sunDirV), 0.0);
             vec3 sunOverhead = uSunColor * (pow(refrSunDot, 38.0) * 1.85 + pow(refrSunDot, 4.5) * 0.38)
               * min(uSunEnergy, 1.6) * sunTrans;
             // Dancing underside wave caustic sparkle inside the window
             float underRipple = smoothstep(0.45, 0.85, gWaterFacetLight) * (0.25 + 0.75 * uDay);
-            vec3 windowCol = (skyAbove * (0.72 + 0.45 * uDay) + sunOverhead)
+            vec3 windowCol = (sampledSky * (0.72 + 0.45 * uDay) + sunOverhead)
               * (0.84 + 0.36 * underRipple);
             // Total Internal Reflection outside Snell's window reflects the deep column
             vec3 tirCol = mix(uDeepC * 0.52, uWaterUnderScatter * 0.38,
@@ -1855,28 +1871,11 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
               * criticalRing * (0.16 + 0.40 * uDay) * (0.65 + 0.6 * gWaterFacetLight);
             totalEmissiveRadiance += mix(tirCol, windowCol, snellWindow) + rimCol;
           } else {
-            vec3 reflectionDir = reflect(-viewDir, normal);
-            // Prevent steep wave backs from reflecting below-horizon darkness
-            float reflUp = dot(reflectionDir, waveUp);
-            if (reflUp < 0.035) {
-              reflectionDir = normalize(reflectionDir + waveUp * (0.045 - reflUp));
-            }
             float ndv = clamp(abs(dot(normal, viewDir)), 0.0, 1.0);
             float fresnelRaw = 0.0201 + 0.9799 * pow(1.0 - ndv, 5.0);
             float fresnel = clamp(fresnelRaw * uWaterOpticsParams.y, 0.0, 0.96);
             diffuseColor.rgb *= mix(1.0 - fresnel * 0.64, 1.0, gWaterFoam);
-            float skyHeight = clamp(dot(reflectionDir, waveUp), 0.0, 1.0);
-            vec3 reflectedSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
-            float cloud = gWaterCloud;
-            reflectedSky = mix(reflectedSky, vec3(0.46, 0.5, 0.56)
-              * (0.22 + uDay * 0.62), cloud * 0.62);
-            reflectedSky = surfaceWaterReflectedSky(
-              vLocalPos,
-              normalize(uSurfaceViewToLocal * reflectionDir),
-              gWaterRoughness,
-              cloud,
-              reflectedSky
-            );
+            vec3 reflectedSky = sampledSky;
             float sunDot = max(dot(reflectionDir, sunDirV), 0.0);
             float glitterField = (sunDot > 0.008 || (uSunset > 1e-3 && sunDot > 1e-4))
               ? oceanGlitter(vOceanRelative, vec2(uTime * 0.16, -uTime * 0.11))

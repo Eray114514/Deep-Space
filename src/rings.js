@@ -204,8 +204,9 @@ uniform float uRingShadowEnabled;
 uniform vec3 uRingNormal;
 uniform vec4 uRingParams; // x: innerR, y: outerR, z: opticalDepth, w: seed
 uniform vec3 uRingGaps;   // x: gap1, y: gap2, z: iceFraction
-${RING_PROFILE_GLSL}
 
+// Single-tap penumbra-smoothed ring optical depth for planet/ocean/cloud/gas-giant
+// shadow receivers (avoids 3x FXC AST inlining across every surface shader).
 float ringShadowTransmission(vec3 localPos, vec3 lightDir) {
   if (uRingShadowEnabled < 0.5) return 1.0;
   float denom = dot(lightDir, uRingNormal);
@@ -217,13 +218,25 @@ float ringShadowTransmission(vec3 localPos, vec3 lightDir) {
   float span = max(uRingParams.y - uRingParams.x, 1.0);
   float u = (r - uRingParams.x) / span;
   if (u < -0.025 || u > 1.025) return 1.0;
-  // Soft 3-tap finite-sun penumbra across the radial ring band profile
-  float penU = clamp(t * 0.0045 / span, 0.0035, 0.022);
-  float tau = ringOpticalDensityAt(u, uRingParams.w, uRingGaps.xy, uRingParams.z) * 0.5
-    + ringOpticalDensityAt(u - penU, uRingParams.w, uRingGaps.xy, uRingParams.z) * 0.25
-    + ringOpticalDensityAt(u + penU, uRingParams.w, uRingGaps.xy, uRingParams.z) * 0.25;
+  float penU = clamp(t * 0.0045 / span, 0.004, 0.022);
+  float innerEdge = smoothstep(-penU, 0.045 + penU, u);
+  float mainOuterEdge = 1.0 - smoothstep(0.905 - penU, 0.942 + penU, u);
+  float crepe = smoothstep(0.0, 0.06, u) * (1.0 - smoothstep(0.19, 0.24, u)) * 0.28;
+  float bRing = smoothstep(0.17, 0.24, u) * (1.0 - smoothstep(uRingGaps.x - 0.028 - penU, uRingGaps.x, u)) * 0.96;
+  float aRing = smoothstep(uRingGaps.x + 0.012, uRingGaps.x + 0.048 + penU, u) * mainOuterEdge * 0.72;
+  float df = (u - 0.968) / (0.0075 + penU * 0.7);
+  float fRing = exp(-df * df) * 0.52;
+  float s1 = uRingParams.w * 62.8318;
+  float r1 = 0.5 + 0.5 * sin(u * 34.0 + s1);
+  float r2 = 0.5 + 0.5 * sin(u * 89.0 - s1 * 1.73 + r1 * 1.4);
+  float ringlets = 0.74 + 0.22 * r1 + 0.14 * r2 * (1.0 - smoothstep(0.006, 0.022, penU));
+  float d1 = (u - uRingGaps.x) / (0.028 + penU * 0.85);
+  float cassiniGap = 1.0 - 0.93 * exp(-d1 * d1);
+  float d2 = (u - uRingGaps.y) / (0.011 + penU * 0.85);
+  float enckeGap = 1.0 - 0.88 * exp(-d2 * d2);
+  float density = ((crepe + bRing + aRing) * ringlets * cassiniGap * enckeGap + fRing) * innerEdge;
+  float tau = clamp(density * (0.48 + uRingParams.z * 0.92), 0.0, 1.35);
   float softEdge = smoothstep(-0.02, 0.01, u) * (1.0 - smoothstep(0.99, 1.02, u));
-  // Grazing oblique passage lengthens shadow optical path subtly, bounded to avoid blackness
   float slant = clamp(1.0 / max(abs(denom), 0.28), 1.0, 2.2);
   float trans = clamp(exp(-tau * 1.18 * slant), 0.14, 1.0);
   return mix(1.0, trans, softEdge);

@@ -143,6 +143,8 @@ export function applySystemBodyTuning(spec, resolveTuning) {
     const tuned = { ...body, orbit: body.orbit ? { ...body.orbit } : body.orbit };
     if (typeof tuning.type === 'string') tuned.type = tuning.type;
     if (Number.isFinite(tuning.radiusMeters)) tuned.radius = Math.max(1000, tuning.radiusMeters);
+    if (typeof tuning.oceanProfile === 'string') tuned.oceanProfile = tuning.oceanProfile;
+    if (typeof tuning.oceanClass === 'string') tuned.oceanClass = tuning.oceanClass;
     if (tuning.atmosphere) tuned.atmosphere = { ...tuning.atmosphere };
     if (tuning.clouds) tuned.clouds = { ...tuning.clouds };
     if (tuned.orbit && Number.isFinite(tuning.orbitRadiusMeters)) {

@@ -333,3 +333,86 @@ export function sampleOceanClimate(climate, direction, {
       ? ((waveSeconds - climate.event.epoch) / climate.event.period % 1 + 1) % 1 : null,
   };
 }
+
+// Canonical ocean visual palette shared by Planet seabed/liquidColor AND
+// sysview.js star-map previews so star map, portal mouth, shallow bays, and
+// live water surface always agree on the world's true ocean color.
+const OCEAN_VISUAL_PALETTES = {
+  'copper-brine': {
+    seaHex: ['#2e1a06', '#5c380e', '#8e5f1e', '#c2923c'],
+    liquidHex: '#7d5015',
+    sysDeep: [86, 54, 22],
+    sysMid: [138, 94, 38],
+    sysShallow: [192, 148, 72],
+    biolumGlow: null,
+  },
+  'mineral-violet': {
+    seaHex: ['#180b2d', '#34195b', '#572f8b', '#865eb6'],
+    liquidHex: '#432270',
+    sysDeep: [42, 20, 74],
+    sysMid: [76, 40, 122],
+    sysShallow: [126, 88, 168],
+    biolumGlow: null,
+  },
+  'jade-shelf': {
+    seaHex: ['#051a28', '#0a3d4c', '#146f70', '#41ae93'],
+    liquidHex: '#12686c',
+    sysDeep: [12, 42, 62],
+    sysMid: [22, 92, 106],
+    sysShallow: [64, 162, 146],
+    biolumGlow: null,
+  },
+  'bioluminescent': {
+    seaHex: ['#04192a', '#0a3a52', '#126b7c', '#32b0aa'],
+    liquidHex: '#0e6072',
+    sysDeep: [8, 36, 58],
+    sysMid: [18, 84, 108],
+    sysShallow: [48, 168, 164],
+    biolumGlow: [18, 195, 172],
+  },
+  'temperate-blue': {
+    seaHex: ['#041124', '#082c52', '#135273', '#3f8f88'],
+    liquidHex: '#15527e',
+    sysDeep: [14, 38, 76],
+    sysMid: [26, 68, 118],
+    sysShallow: [58, 134, 152],
+    biolumGlow: null,
+  },
+};
+
+export function oceanVisualPalette(climate) {
+  const comp = climate?.composition || 'temperate-blue';
+  const base = OCEAN_VISUAL_PALETTES[comp] || OCEAN_VISUAL_PALETTES['temperate-blue'];
+  const arch = climate?.archetype;
+  if (comp === 'temperate-blue' && arch === 'pelagic-storm') {
+    return {
+      ...base,
+      seaHex: ['#040d1b', '#0a223d', '#143c5c', '#346d7a'],
+      liquidHex: '#103b59',
+      sysDeep: [10, 26, 52],
+      sysMid: [22, 52, 86],
+      sysShallow: [50, 98, 118],
+    };
+  }
+  if (comp === 'temperate-blue' && arch === 'polar-glacial') {
+    return {
+      ...base,
+      seaHex: ['#071c33', '#104068', '#227296', '#66b8cc'],
+      liquidHex: '#1c6b8e',
+      sysDeep: [16, 48, 84],
+      sysMid: [34, 88, 132],
+      sysShallow: [92, 168, 194],
+    };
+  }
+  if (comp === 'temperate-blue' && arch === 'tropical-lagoon') {
+    return {
+      ...base,
+      seaHex: ['#051d32', '#0b4768', '#188092', '#4cc4b4'],
+      liquidHex: '#167688',
+      sysDeep: [12, 48, 82],
+      sysMid: [24, 102, 126],
+      sysShallow: [72, 182, 174],
+    };
+  }
+  return base;
+}

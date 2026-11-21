@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {
   OCEAN_ARCHETYPES, createOceanClimate, sampleOceanClimate, resolveOceanArchetype,
+  oceanVisualPalette,
 } from '../src/ocean-climate.js';
 import { computeUnderwaterEnvironment, UnderwaterSystem } from '../src/underwater.js';
 import { Planet } from '../src/planet.js';
+import { applySystemBodyTuning } from '../src/world-config.js';
 
 // 1. Ocean archetype diversity across worlds without disturbing composition RNG
 const archetypes = new Set();
@@ -114,4 +116,33 @@ const sample = sampleOceanClimate(stormPlanet.oceanClimate, { x: 1, y: 0, z: 0 }
 assert.equal(sample.archetype, 'pelagic-storm');
 stormPlanet.dispose();
 
-console.log(`PASS: ocean overhaul (${archetypes.size} sea-state archetypes, Beer-Lambert depth optics, Snell sun shafts, marine snow, splash spray, Planet integration)`);
+// 5. Canonical oceanVisualPalette coherence (star map, seabed, liquidColor)
+const copperPal = oceanVisualPalette({ composition: 'copper-brine', archetype: 'acid-brine' });
+assert.ok(copperPal.sysMid[0] > copperPal.sysMid[2] * 1.6, 'copper-brine sysview palette must be warm amber, not blue');
+const violetPal = oceanVisualPalette({ composition: 'mineral-violet', archetype: 'mineral-exotic' });
+assert.ok(violetPal.sysMid[0] > violetPal.sysMid[1] && violetPal.sysMid[2] > violetPal.sysMid[1], 'mineral-violet sysview palette must be violet');
+const biolumPal = oceanVisualPalette({ composition: 'bioluminescent', archetype: 'abyssal-biolum' });
+assert.ok(Array.isArray(biolumPal.biolumGlow) && biolumPal.biolumGlow[1] > 150, 'bioluminescent palette must expose night glow');
+
+let copperSeed = null;
+for (let i = 0; i < 60 && !copperSeed; i++) {
+  const s = `copper-check-${i}`;
+  if (createOceanClimate(s, { type: 'ocean', equilibriumK: 295 }).composition === 'copper-brine') copperSeed = s;
+}
+assert.ok(copperSeed, 'Should find a deterministic copper-brine ocean seed');
+const copperPlanet = new Planet({
+  seed: copperSeed, name: 'Copper Test', posUniv: new THREE.Vector3(),
+  type: 'ocean', radius: 320000, deferRoots: true, equilibriumK: 295,
+});
+assert.equal(copperPlanet.oceanClimate.composition, 'copper-brine');
+assert.ok(copperPlanet.liquidColor.r > copperPlanet.liquidColor.b, 'copper-brine Planet.liquidColor must be warm, not blue');
+assert.ok(copperPlanet.pal.sea[1].c.r > copperPlanet.pal.sea[1].c.b, 'copper-brine seabed palette must match ocean composition');
+copperPlanet.dispose();
+
+const tunedSpec = applySystemBodyTuning(
+  { bodies: [{ bodyId: 'planet-1', type: 'lush', radius: 200000 }], compactObjects: [] },
+  (id) => (id === 'planet-1' ? { type: 'ocean', oceanProfile: 'pelagic-storm' } : null),
+);
+assert.equal(tunedSpec.bodies[0].oceanProfile, 'pelagic-storm', 'applySystemBodyTuning must forward oceanProfile for sysview parity');
+
+console.log(`PASS: ocean overhaul (${archetypes.size} sea-state archetypes, Beer-Lambert depth optics, Snell sun shafts, marine snow, splash spray, Planet/sysview palette coherence)`);

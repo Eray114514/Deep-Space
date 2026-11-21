@@ -5,7 +5,7 @@ const owners = new WeakMap();
 // ready JS shader/draw does not prove that query has finished. Retain the native
 // handle until COMPLETION_STATUS_KHR, without changing shaders or forcing link.
 // This adapter owns renderer-created programs; it is not a general WebGL proxy.
-export function installProgramRetirement(renderer, { pollMs = 10, maxPolls = 8 } = {}) {
+export function installProgramRetirement(renderer, { pollMs = 10, maxPolls = 8, maxBudgetMs = 4 } = {}) {
   if (owners.has(renderer)) return owners.get(renderer);
   if (!Number.isFinite(pollMs) || pollMs <= 0 || !Number.isInteger(maxPolls) || maxPolls < 1)
     throw new RangeError('Invalid program retirement poll budget');
@@ -26,8 +26,8 @@ export function installProgramRetirement(renderer, { pollMs = 10, maxPolls = 8 }
     canvas.removeEventListener('webglcontextlost', onLost);
     canvas.removeEventListener('webglcontextrestored', onRestored);
   };
-  const schedule = () => {
-    if (timer === null && pollable > 0) timer = setTimeout(poll, pollMs);
+  const schedule = (delayMs = pollMs) => {
+    if (timer === null && pollable > 0) timer = setTimeout(poll, delayMs);
     else if (stopped && !pending.size) cleanup();
   };
   const destroy = (program, record) => {
@@ -46,6 +46,7 @@ export function installProgramRetirement(renderer, { pollMs = 10, maxPolls = 8 }
   function poll() {
     timer = null;
     if (gl.isContextLost()) { onLost();return; }
+    const startedAt = performance.now();
     let remaining = Math.min(maxPolls, pending.size);
     while (remaining-- > 0 && pending.size) {
       const [program, record] = pending.entries().next().value;
@@ -58,8 +59,12 @@ export function installProgramRetirement(renderer, { pollMs = 10, maxPolls = 8 }
         if (complete) destroy(program, record);
       }
       catch (cause) { fault(record, cause); }
+      // Never stack multiple slow GPU completion IPC roundtrips inside one
+      // frame slice (e.g. during a Rift arrival handoff on D3D11/ANGLE).
+      if (maxBudgetMs > 0 && performance.now() - startedAt >= maxBudgetMs) break;
     }
-    schedule();
+    const elapsed = performance.now() - startedAt;
+    schedule(elapsed > maxBudgetMs * 2 ? Math.max(pollMs, 48) : pollMs);
   }
   function onLost() {
     epoch++;abandonedOnLoss += pending.size;pending.clear();pollable = 0;clearTimeout(timer);timer = null;

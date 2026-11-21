@@ -8,7 +8,7 @@ import { buildPlanetaryRing, bindRingShadow } from './rings.js';
 
 import * as THREE from 'three';
 import { makeRng, strHash32 } from './rng.js';
-import { createOceanClimate, sampleOceanClimate, placeOceanTidalEvent } from './ocean-climate.js';
+import { createOceanClimate, sampleOceanClimate, placeOceanTidalEvent, oceanVisualPalette } from './ocean-climate.js';
 import { oceanSeconds } from './ocean-clock.js';
 import { createOceanSurface, sampleOceanSurface } from './ocean-surface.js';
 import { clamp, frequencyBlend, lerp, smoothstep } from './noise.js';
@@ -654,6 +654,15 @@ export class Planet extends TerrainHeightField {
       for (let i = 1; i < p.land.length; i++) p.land[i].c.multiplyScalar(0.68);
       p.forest.multiplyScalar(0.72);
     }
+    // Align seabed stops with the planet's actual ocean composition (after all
+    // buildPalette RNG draws) so shallow transparent bays and orbital LODs never
+    // flash blue beneath a copper-brine or mineral-violet ocean.
+    if (this.oceanClimate && this.liquid === 'water' && p.sea?.length >= 4) {
+      const oPal = oceanVisualPalette(this.oceanClimate);
+      for (let i = 0; i < 4; i++) {
+        p.sea[i].c.copy(col(oPal.seaHex[i]));
+      }
+    }
     // Colors are authored as sRGB hex and shaded in linear — and that
     // conversion has ALREADY happened. `col()` is `new THREE.Color(hex)`, and
     // with THREE.ColorManagement enabled (the r155+ default, and this project
@@ -720,7 +729,12 @@ export class Planet extends TerrainHeightField {
     this.atmoColor = col(atmoLook.atmoHex ?? this.cfg.atmo);
     this.skyColor = col(atmoLook.skyHex ?? this.cfg.sky);
     switch (this.liquid) {
-      case 'water': this.liquidColor = col('#15527e'); this.liquidOpacity = 0.66; break;
+      case 'water': {
+        const oPal = this.oceanClimate ? oceanVisualPalette(this.oceanClimate) : null;
+        this.liquidColor = col(oPal?.liquidHex || '#15527e');
+        this.liquidOpacity = 0.66;
+        break;
+      }
       case 'toxic': this.liquidColor = col('#6fcc22'); this.liquidOpacity = 0.82; break;
       case 'ice':   this.liquidColor = col('#cfe6f5'); this.liquidOpacity = 1.0; break;
       case 'lava':  this.liquidColor = col('#3a1404'); this.liquidOpacity = 1.0; break;

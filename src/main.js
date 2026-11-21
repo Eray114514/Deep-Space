@@ -4050,9 +4050,36 @@ function prewarmPreparedLod(targetBody, token, route, prepared) {
 
 async function prewarmPreparedWater(targetBody, token, route, prepared) {
   if (!preparedDestinationIsActive(token, route, prepared)) return;
+  if (!targetBody?.waterLod) {
+    warpPreparedWaterWarmState = 'complete';
+    warpPreparedWaterWarmError = null;
+    return;
+  }
+  if (!targetBody.waterLod.roots?.some((root) => root.mesh)) {
+    // Never mark water preparation complete before a water root mesh exists:
+    // otherwise the portal opens showing bare seabed and triggers a cold water
+    // shader compile stall right on arrival.
+    const worldOffset = route?.target?.entry
+      ? route.target.entry.clone().sub(targetBody.posUniv)
+      : new THREE.Vector3(0, targetBody.R * 3, 0);
+    const camLocal = targetBody.worldOffsetToLocal?.(worldOffset, new THREE.Vector3()) || worldOffset;
+    targetBody.waterLod.focused = true;
+    targetBody.waterLod.update(camLocal, 1);
+    if (typeof flushChunkQueue === 'function') flushChunkQueue(10);
+    if (!targetBody.waterLod.roots?.some((root) => root.mesh)) {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => void prewarmPreparedWater(targetBody, token, route, prepared));
+      } else {
+        setTimeout(() => void prewarmPreparedWater(targetBody, token, route, prepared), 16);
+      }
+      return;
+    }
+  }
   const signal = warpCompile.signal;
   warpPreparedWaterWarmState = 'compiling';
   try {
+    // Compile both the live scene fog/shadow/hemi variant AND the portal far-view
+    // variant so crossing never stalls on a cold water shader link.
     await nodePipeline.prepare(() => {
       const source = targetBody?.waterLod?.roots?.find((root) => root.mesh)?.mesh || null;
       if (!source?.material) return;
@@ -4177,6 +4204,12 @@ function prepareWarpDestination(route) {
     }
     if (!route.bodyId || prepared.bodyById.has(route.bodyId) || prepared.built) {
       const targetBody = route.bodyId ? prepared.bodyById.get(route.bodyId) : (prepared.planets[0] || null);
+      // Pre-bind destination stellar occluders BEFORE shader prewarm so arrival
+      // never flips STELLAR_UNION_OCCLUSION and forces a synchronous recompile.
+      if (targetBody?.setStellarOccluders) {
+        const blockers = prepared.planets.filter((body) => body !== targetBody);
+        targetBody.setStellarOccluders(selectStellarOccluders(targetBody, blockers, prepared.starViews || []));
+      }
       if (targetBody && !targetBody.isGasGiant && targetBody.type !== 'artificialHabitat'
           && typeof atmospherePass !== 'undefined' && typeof warpCompile !== 'undefined') {
         void atmospherePass?.prewarmPlanetProfileAsync?.(targetBody, { signal: warpCompile.signal });
@@ -4369,6 +4402,18 @@ function renderRiftFarView(far, farCamera, farQuat, dt = 1 / 60) {
     _v.copy(farCamera).sub(planet.posUniv);
     planet.update(_v, dt, planet === focusBody, 0);
   }
+  if (focusBody?.setWaterEnvironment && focusBody.skyColor) {
+    if (!focusBody.skyColorLin) focusBody.skyColorLin = focusBody.skyColor.clone();
+    _v.copy(farCamera).sub(focusBody.posUniv);
+    const farUp = _v.lengthSq() > 1e-6 ? _v.normalize() : _v.set(0, 1, 0);
+    const sunDirFar = focusBody.sunDirWorld || _v2.set(0, 1, 0);
+    const sunElevFar = farUp.dot(sunDirFar);
+    const farDay = smoothstep(-0.18, 0.24, sunElevFar);
+    const farSunset = clamp(1 - Math.abs(sunElevFar) / 0.26, 0, 1);
+    _horC.copy(focusBody.skyColorLin).lerp(_warmB.setRGB(1.08, 0.105, 0.018), clamp(farSunset * 0.82, 0, 1));
+    _c2.copy(focusBody.skyColorLin).multiply(_zenithMul).lerp(_warmA.setRGB(0.12, 0.018, 0.07), farSunset * 0.5);
+    focusBody.setWaterEnvironment(_c2, _horC, farDay, farSunset);
+  }
   for (const object of far.compactObjects) object.updateVisual?.(performance.now() * 0.001);
   universe.relativizeSystem(far, farCamera);
   return portalView.render({
@@ -4423,7 +4468,9 @@ function renderRiftPortal() {
   if (!riftRoute.arrived) {
     const target = riftFarBodyId ? far.bodyById.get(riftFarBodyId) : null;
     const targetPresent = !riftFarBodyId || Boolean(target) || Boolean(far.built);
-    const rootsReady = !target?.lod?.roots?.length || target.lod.roots.every((root) => !!root.mesh);
+    const terrainRootsReady = !target?.lod?.roots?.length || target.lod.roots.every((root) => !!root.mesh);
+    const waterRootsReady = !target?.waterLod?.roots?.length || target.waterLod.roots.every((root) => !!root.mesh);
+    const rootsReady = terrainRootsReady && waterRootsReady;
     riftPreviewReady = rendered && targetPresent && rootsReady && riftDestinationPreparationReady();
   }
   riftPortal.writeComposite(composite.uniforms, nav.pos);

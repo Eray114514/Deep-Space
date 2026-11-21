@@ -13,6 +13,7 @@ import { orbitalPosition } from './astronomy.js';
 import { atmosphereAppearance } from './atmosphere-chemistry.js';
 import { computeBlackHoleBasis, makeBlackHoleVolumeMaterial } from './black-hole.js';
 import { resolveRingSpec, RING_PROFILE_GLSL } from './rings.js';
+import { createOceanClimate, oceanVisualPalette } from './ocean-climate.js';
 
 const ORBIT_PLANE_Y = 0.18;
 const STAR_CENTER_Y = 1.12;
@@ -102,6 +103,14 @@ function paintBodyTexture(body, w, h) {
   const gasPalette = gasPalettes[Math.floor(rand() * gasPalettes.length)];
   const stormU = 0.55 + rand() * 0.3, stormV = 0.55 + rand() * 0.18;
   const hasStorm = rand() < 0.72;
+  const oceanClimate = (type === 'lush' || type === 'ocean')
+    ? createOceanClimate(body.seed, {
+      type,
+      equilibriumK: body.equilibriumK,
+      oceanClass: body.tuning?.oceanClass || body.tuning?.oceanProfile || body.oceanProfile || null,
+    })
+    : null;
+  const oceanPal = oceanClimate ? oceanVisualPalette(oceanClimate) : null;
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -147,9 +156,30 @@ function paintBodyTexture(body, w, h) {
           if (land < 0.045) { r += 42; g += 34; b += 8; }       // sunlit shallows ring
         } else {
           const depth = THREE.MathUtils.clamp(-land * 4, 0, 1);
-          r = 18 + 20 * n - 6 * depth;
-          g = 44 + 48 * n - 12 * depth;
-          b = 76 + 88 * n - 16 * depth;
+          const deepC = oceanPal?.sysDeep || [14, 38, 76];
+          const midC = oceanPal?.sysMid || [26, 68, 118];
+          const shallowC = oceanPal?.sysShallow || [58, 134, 152];
+          const shelfMix = THREE.MathUtils.clamp(1 - depth, 0, 1);
+          const baseR = shelfMix > 0.5
+            ? THREE.MathUtils.lerp(midC[0], shallowC[0], (shelfMix - 0.5) * 2)
+            : THREE.MathUtils.lerp(deepC[0], midC[0], shelfMix * 2);
+          const baseG = shelfMix > 0.5
+            ? THREE.MathUtils.lerp(midC[1], shallowC[1], (shelfMix - 0.5) * 2)
+            : THREE.MathUtils.lerp(deepC[1], midC[1], shelfMix * 2);
+          const baseB = shelfMix > 0.5
+            ? THREE.MathUtils.lerp(midC[2], shallowC[2], (shelfMix - 0.5) * 2)
+            : THREE.MathUtils.lerp(deepC[2], midC[2], shelfMix * 2);
+          const varK = 0.84 + n * 0.32 + (n2 - 0.5) * 0.12;
+          r = baseR * varK;
+          g = baseG * varK;
+          b = baseB * varK;
+          if (oceanPal?.biolumGlow && shelfMix > 0.35 && n2 > 0.66) {
+            const bioK = THREE.MathUtils.smoothstep(n2, 0.66, 0.92) * shelfMix * 0.55;
+            er = oceanPal.biolumGlow[0] * bioK;
+            eg = oceanPal.biolumGlow[1] * bioK;
+            eb = oceanPal.biolumGlow[2] * bioK;
+            hasEmissive = true;
+          }
         }
         r = THREE.MathUtils.lerp(r, 214, ice);
         g = THREE.MathUtils.lerp(g, 223, ice);
@@ -1023,8 +1053,14 @@ export class SystemView {
     if (emissiveMap) {
       emissiveMap.userData.cached = true;
       material.emissiveMap = emissiveMap;
-      material.emissive = new THREE.Color(body.type === 'lava' ? 0xff7a26 : 0xa04fd8);
-      material.emissiveIntensity = body.type === 'lava' ? 1.9 : 0.6;
+      material.emissive = new THREE.Color(
+        body.type === 'lava' ? 0xff7a26
+          : (body.type === 'ocean' || body.type === 'lush') ? 0xffffff
+          : 0xa04fd8,
+      );
+      material.emissiveIntensity = body.type === 'lava' ? 1.9
+        : (body.type === 'ocean' || body.type === 'lush') ? 0.9
+        : 0.6;
     }
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(visualRadius, 64, 44), material);
     mesh.rotation.y = rand() * Math.PI * 2;
