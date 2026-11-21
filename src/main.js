@@ -79,6 +79,7 @@ import { surfaceInteraction } from './surface-interaction.js';
 import { vegetationDisturbance } from './vegetation/disturbance.js';
 import { configureSurfaceMaterials, surfaceMaterialStatus } from './surface-materials.js';
 import { WeatherEffects } from './weather-effects.js';
+import { UnderwaterSystem, computeUnderwaterEnvironment } from './underwater.js';
 import {
   configureCloudResourceManager, getCloudResourceManager,
 } from './cloud/cloud-resource-manager.js';
@@ -1296,6 +1297,8 @@ const farFlora = new FarFlora({
 });
 const skyDome = new SkyDome(scene);
 const weatherEffects = new WeatherEffects(scene);
+const underwaterEffects = new UnderwaterSystem();
+scene.add(underwaterEffects.group);
 // ?rain=0..1 forces surface rain intensity (captures and rain tuning).
 const RAIN_OVERRIDE = qs.has('rain') ? THREE.MathUtils.clamp(Number(qs.get('rain')) || 0, 0, 1) : null;
 const rainFrame = {
@@ -1534,6 +1537,7 @@ let envInAtmo = 0;       // exported by the ambience pass for audio/effects
 let envDay = 1;
 let activeWeather = null;
 let envUnderwater = false;
+let envSubDepth = 0;
 let underwaterPlanetKey = null;
 let devHeadlampEnabled = true;
 const environmentState = createEnvironmentState();
@@ -5417,10 +5421,12 @@ function startHeroPullBack(onDone) {
 // ---- ambience: atmosphere entry, sky color, fog, star dimming ------------------
 function ambience(dt = 1 / 60) {
   let inAtmo = 0, day = 1, skyStrength = 0;
-  const wasUnderwater = envUnderwater && underwaterPlanetKey === nearest?.seed;
+  const prevUnderwaterPlanet = underwaterPlanetKey;
+  const wasUnderwater = envUnderwater && prevUnderwaterPlanet === nearest?.seed;
   underwaterPlanetKey = nearest?.seed ?? null;
   envEclipse = 0;
   envUnderwater = false;
+  envSubDepth = 0;
   activeWeather = null;
   scene.fog.density = 0;
   if (nearest) {
@@ -5503,6 +5509,25 @@ function ambience(dt = 1 / 60) {
     const eyeWater = p.sampleWaterSurface?.(p.worldPositionToLocal(nav.pos, _v2),
       p.weatherHours, { normal: false });
     envUnderwater = !!eyeWater?.wet && eyeWater.clearance < (wasUnderwater ? 0.12 : -0.08);
+    envSubDepth = envUnderwater ? Math.max(0, -(eyeWater?.clearance || 0)) : 0;
+    if (wasUnderwater !== envUnderwater && prevUnderwaterPlanet === p.seed
+      && p.hasLiquid && p.liquid !== 'lava' && !timeWarp) {
+      waterInteraction.setPlanet(p.seed);
+      const splashLocal = eyeWater?.direction
+        ? _v3.copy(eyeWater.direction).multiplyScalar(p.seaRadius)
+        : _v2.normalize().multiplyScalar(p.seaRadius);
+      waterInteraction.inject(splashLocal, {
+        strength: envUnderwater ? 1.15 : 0.9,
+        speed: 6.2,
+        foam: envUnderwater ? 0.95 : 0.72,
+        kind: 'impact',
+      });
+      underwaterEffects.emitSplash(_v3.set(0, 0, 0), _up, {
+        count: envUnderwater ? 34 : 22,
+        speed: envUnderwater ? 8.5 : 6.0,
+        size: 3.6,
+      });
+    }
     updateEnvironmentState(environmentState, {
       // The gas column is referenced to the body's datum, not the seabed.
       // Ground clearance made sea-level sunset radiance fade over deep ocean.
@@ -5549,11 +5574,15 @@ function ambience(dt = 1 / 60) {
         .multiplyScalar(0.16 + day * 0.52), overcast);
     }
 
+    let underwaterEnv = null;
     if (envUnderwater) {
-      if (!p.liquidColorLin) p.liquidColorLin = p.liquidColor.clone();
-      _sky.copy(p.liquidColorLin).multiplyScalar(0.25 + 0.55 * day);
-      if (p.liquid === 'lava') _sky.set(1.2, 0.25, 0.02);
-      fogDensity = p.liquid === 'lava' ? 0.2 : 0.03;
+      underwaterEnv = computeUnderwaterEnvironment(p, {
+        subDepth: envSubDepth,
+        day,
+        sunset: envSunset,
+      });
+      _sky.setRGB(...underwaterEnv.fogColor);
+      fogDensity = underwaterEnv.fogDensity;
       skyStrength = 1;
     }
 
@@ -5573,14 +5602,20 @@ function ambience(dt = 1 / 60) {
     // Cool sky irradiance preserves the silhouette on the night side without
     // washing the whole planet with a global ambient light.
     const clearSpace = 1 - Math.max(0, inAtmo);
-    hemi.intensity = (0.055 + (1 - day) * 0.06) * clearSpace
-      + Math.sqrt(Math.max(0, inAtmo)) * (0.018
-        + day * environmentState.directTransmittance * 0.36
-        + environmentState.skyIrradiance * 0.18
-        + envSunset * 0.11);
-    hemi.color.copy(p.skyColorLin || _sky)
-      .lerp(_warmC.setRGB(0.72, 0.24, 0.16), envSunset * 0.42);
-    hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
+    if (underwaterEnv) {
+      hemi.intensity = underwaterEnv.hemiIntensity;
+      hemi.color.setRGB(...underwaterEnv.hemiSky);
+      hemi.groundColor.setRGB(...underwaterEnv.hemiGround);
+    } else {
+      hemi.intensity = (0.055 + (1 - day) * 0.06) * clearSpace
+        + Math.sqrt(Math.max(0, inAtmo)) * (0.018
+          + day * environmentState.directTransmittance * 0.36
+          + environmentState.skyIrradiance * 0.18
+          + envSunset * 0.11);
+      hemi.color.copy(p.skyColorLin || _sky)
+        .lerp(_warmC.setRGB(0.72, 0.24, 0.16), envSunset * 0.42);
+      hemi.groundColor.copy(p.pal.land[Math.min(2, p.pal.land.length - 1)].c);
+    }
 
     // the sky dome: horizon glow, deeper zenith, sun halo
     _horC.copy(p.skyColorLin).lerp(_warmB.setRGB(1.08, 0.105, 0.018),
@@ -5797,16 +5832,17 @@ function updateWaterInteraction(dt) {
     const waterDepth = footSurface?.wet ? footSurface.surfaceRadius - feetRadius : 0;
     const speed = walkCtl.hSpeed.length();
     const immersion = smoothstep(0.02, 0.3, waterDepth)
-      * (1 - smoothstep(2.2, 4.5, waterDepth));
-    const movingContact = immersion * smoothstep(0.02, 0.65, speed);
-    waterContact = immersion;
+      * (1 - smoothstep(2.6, 5.2, waterDepth));
+    const treading = smoothstep(0.35, 1.15, waterDepth) * (1 - smoothstep(2.4, 4.5, waterDepth)) * 0.24;
+    const movingContact = Math.max(immersion * smoothstep(0.02, 0.65, speed), treading);
+    waterContact = Math.max(immersion, treading);
     footRippleTimer -= dt;
     if (movingContact > 0.03 && footRippleTimer <= 0) {
-      footRippleTimer = clamp(0.48 / Math.max(0.7, speed), 0.16, 0.48);
+      footRippleTimer = clamp(0.46 / Math.max(0.55, speed), 0.15, 0.68);
       _up.copy(walkCtl.posLocal).normalize();
       waterWakePoint.copy(_up).multiplyScalar(p.seaRadius);
       waterInteraction.inject(waterWakePoint,
-        { strength: 0.22 + movingContact * 0.62, speed: 4.4 + speed, foam: movingContact * 0.55 });
+        { strength: 0.26 + movingContact * 0.68, speed: 4.5 + speed * 0.9, foam: movingContact * 0.62 });
     }
   }
 }
@@ -6506,6 +6542,21 @@ function frame(rafTs) {
       clock.elapsedTime, 0, { dt, origin: camera.getWorldPosition(_v4) });
   }
   surfaceWeapons.setWetness(weatherEffects.state.rainVisible ? weatherEffects.state.precipitation : 0, dt);
+  underwaterEffects.update({
+    dt,
+    underwater: envUnderwater,
+    planet: nearest,
+    subDepth: envSubDepth,
+    day: envDay,
+    sunset: envSunset,
+    upDir: nearest ? _up.copy(nav.pos).sub(nearest.posUniv).normalize() : null,
+    sunDirWorld: nearest?.sunDirWorld || null,
+    cameraPosUniv: nav.pos,
+    shipOffset: (state === 'space' || state === 'flyto') ? ship.group.position : null,
+    shipVel: (state === 'space' || state === 'flyto') ? nav.vel : null,
+    waterContact: (state === 'space' || state === 'flyto') ? waterContact : 0,
+    pixelRatio: renderer.getPixelRatio(),
+  });
   // Rain is heard on foot; aboard the ship the hull shuts it out.
   audio.weather({
     rain: state === 'walk' && weatherEffects.state.rainVisible ? weatherEffects.state.precipitation : 0,
@@ -7057,19 +7108,15 @@ function frame(rafTs) {
   // the local medium. During the spool the departure planet is still in full
   // view and must keep its atmosphere, ocean and clouds.
   const warpMediumHidden = state === 'warp' && !!warpTransit?.swapped && !warpRevealActive;
-  const localAtmospherePlanet = warpMediumHidden ? null : nearest;
+  // Underwater optics are owned by Beer-Lambert water fog, seabed caustics,
+  // Snell's window, and underwater shafts — never aerial haze or sky clouds.
+  const localAtmospherePlanet = (warpMediumHidden || envUnderwater) ? null : nearest;
   nodePipeline.setActiveAtmosphere(localAtmospherePlanet?.isGasGiant
     || localAtmospherePlanet?.type === 'artificialHabitat'
     ? null : localAtmospherePlanet, nav.pos);
   if (volumePass) {
     const motion = clamp(trueSpd / Math.max(nearest?.R || 1, 60000) * 18 + boostVisual * 0.22, 0, 1);
-    // The first two thirds of stellar warp are fully covered by starflow. Do
-    // not activate a destination volume merely because it is the selected
-    // navigation reference: that cold pipeline used to stop the tunnel for up
-    // to a second while the planet was still invisible. Engage it only in the
-    // authored braking/reveal window. The full graph waits for its required
-    // cloud programs before any pass starts; there is no separate masked draw.
-    const volumePlanet = warpMediumHidden ? null : nearest;
+    const volumePlanet = (warpMediumHidden || envUnderwater) ? null : nearest;
     volumePass.setActivePlanet(volumePlanet?.isGasGiant
       || volumePlanet?.type === 'artificialHabitat' ? null : volumePlanet, nav.pos, motion);
     nodePipeline.bindVolumeDepth?.(volumePass.activePlanet);
@@ -9226,6 +9273,7 @@ window.NMS = {
       riftPreviewSystem,
       walkCtl,
       weatherEffects,
+      underwaterEffects,
       audio,
       surveyUnits,
       surfaceGameplay,

@@ -16,6 +16,7 @@ import { WATER_IMPULSE_CAP, waterInteraction } from './water-interaction.js';
 import { SURFACE_INTERACTION_CAP, surfaceInteraction } from './surface-interaction.js';
 import { surfaceMaterialSlots } from './surface-materials.js';
 import { createOceanWaveField, oceanWavePhases, oceanWaveGLSL } from './ocean-wave-field.js';
+import { OCEAN_ARCHETYPES } from './ocean-climate.js';
 import { oceanSeconds } from './ocean-clock.js';
 import { oceanWakePacketGLSL } from './ocean-wake-packet.js';
 import { createOceanDetailFrame, oceanDetailOffsets, oceanDetailGLSL } from './ocean-detail-frame.js';
@@ -279,8 +280,18 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     };
     // land sits within a few hundred metres of the datum now; a 12% band
     // would hang valley mist over every plain
+    shader.uniforms.uTime = TIME;
     shader.uniforms.uMistH = { value: planet.hAmp * 0.015 };
     shader.uniforms.uMistColor = { value: planet.skyColor.clone().convertSRGBToLinear() };
+    const seaState = planet.oceanClimate?.seaState || null;
+    const isWaterSea = planet.hasLiquid && (planet.liquid === 'water' || planet.liquid === 'toxic');
+    shader.uniforms.uSeaCausticK = { value: isWaterSea ? (seaState?.causticIntensity ?? 1.0) : 0 };
+    shader.uniforms.uSeaAbsorption = {
+      value: new THREE.Vector3(...(planet.oceanClimate?.absorption || [0.16, 0.034, 0.016])),
+    };
+    shader.uniforms.uSeaScatter = {
+      value: new THREE.Vector3(...(seaState?.underwaterScatter || [0.025, 0.24, 0.42])),
+    };
     material.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
@@ -313,6 +324,10 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D uDetailTex;
+        uniform float uTime;
+        uniform float uSeaCausticK;
+        uniform vec3 uSeaAbsorption;
+        uniform vec3 uSeaScatter;
         uniform sampler2D uGrassColor;
         ${weatherAtlasGLSL}
         uniform sampler2D uGrassNormal;
@@ -697,6 +712,44 @@ export function applyTerrainDetail(material, planet, strength = 0.2, macroK = 0.
             diffuseColor.rgb = mix(diffuseColor.rgb,
               diffuseColor.rgb * vec3(0.56, 0.65, 0.69), gShoreWet * 0.80);
           }
+          // ---- submerged seabed optics: Beer-Lambert spectral tinting and
+          // crisp multi-wave optical caustic webs visible both from above clear
+          // shallows and while diving underwater.
+          if (uHasSea > 0.5 && uSeaCausticK > 0.001 && hgt < uT0 && viewDist < 6500.0) {
+            float subDepth = max(0.0, uT0 - hgt);
+            float subFade = 1.0 - smoothstep(3200.0, 6500.0, viewDist);
+            vec3 depthAtten = exp(-uSeaAbsorption * min(subDepth, 75.0) * 0.82);
+            diffuseColor.rgb = mix(diffuseColor.rgb,
+              diffuseColor.rgb * mix(vec3(0.10, 0.42, 0.58), depthAtten, 0.72)
+                + uSeaScatter * (1.0 - depthAtten) * 0.14,
+              smoothstep(0.0, 2.4, subDepth) * subFade * 0.86);
+            float sunElev = smoothstep(-0.02, 0.24, dot(nd, uCanopySun));
+            float nDotSun = max(0.0, dot(normalize(vLocalNrm), uCanopySun));
+            float causticMask = smoothstep(0.0, 0.45, subDepth) * exp(-subDepth * 0.042)
+              * sunElev * (0.30 + 0.70 * nDotSun) * vMat.z * subFade;
+            if (causticMask > 0.002) {
+              vec3 cRef = abs(nd.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+              vec3 cT = normalize(cross(cRef, nd));
+              vec3 cB = cross(nd, cT);
+              vec3 relP = terrainDetailPosition() + uCanopySun * (subDepth * 0.24);
+              // Analytic 3-wave warped interference lattice -> crisp luminous caustic filaments
+              vec2 cp = vec2(dot(relP, cT), dot(relP, cB)) * 0.62;
+              float ct = uTime * 1.15;
+              vec2 w1 = cp + vec2(sin(cp.y * 0.7 + ct * 0.8), cos(cp.x * 0.7 - ct * 0.65)) * 0.85;
+              vec2 w2 = mat2(0.82, -0.57, 0.57, 0.82) * cp * 1.38
+                + vec2(cos(cp.y * 0.9 - ct * 0.95), sin(cp.x * 0.85 + ct * 0.72)) * 0.75;
+              float g1 = abs(sin(w1.x + ct * 0.5) + cos(w1.y - ct * 0.42));
+              float g2 = abs(sin(w2.x - ct * 0.62) + cos(w2.y + ct * 0.54));
+              float net1 = pow(clamp(1.0 - g1 * 0.62, 0.0, 1.0), 4.0);
+              float net2 = pow(clamp(1.0 - g2 * 0.62, 0.0, 1.0), 4.0);
+              float causticWeb = clamp((net1 * 0.85 + net2 * 0.75 + net1 * net2 * 1.4), 0.0, 1.6)
+                * (1.0 - smoothstep(0.9, 8.5, pixelMetres));
+              vec3 causticTint = mix(vec3(0.32, 0.92, 1.0), vec3(0.88, 1.0, 0.86), exp(-subDepth * 0.16));
+              // Darken inter-filament cells slightly and brighten glowing caustic webs for high contrast
+              diffuseColor.rgb *= mix(1.0, 0.62 + causticWeb * 1.15 * uSeaCausticK, clamp(causticMask, 0.0, 0.94));
+              diffuseColor.rgb += causticTint * causticWeb * causticMask * uSeaCausticK * 0.85;
+            }
+          }
           float grainNear = 1.0 - smoothstep(2500.0, 9500.0, viewDist);
           if (grainNear > 0.001) {
             float grain = (triDetail(terrainDetailPosition(), w, terrainGrain, 0) - 0.5)
@@ -968,6 +1021,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     140, 560,
   );
 
+  const seaState = planet?.oceanClimate?.seaState
+    || OCEAN_ARCHETYPES[planet?.oceanClimate?.archetype]
+    || OCEAN_ARCHETYPES['temperate-swell'];
   const oceanFrame = new OceanRenderFrame(planet);
   const drawUniforms = {
     ...oceanFrame.uniforms,
@@ -979,9 +1035,24 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     uShallowC: { value: initialOptics.shallow.clone() },
     uAbsorption: { value: new THREE.Vector3(...initialOptics.absorption) },
     uShelfSpan: { value: shelfSpan },
-    uBiologicalActivity: { value: planet?.oceanClimate?.composition === 'bioluminescent'
-      ? (planet.oceanClimate.biologicalActivity || 0) : 0 },
+    uBiologicalActivity: { value: (planet?.oceanClimate?.composition === 'bioluminescent'
+      || planet?.oceanClimate?.archetype === 'abyssal-biolum')
+      ? (planet.oceanClimate.biologicalActivity || 0.8) : 0 },
     uMesoOffsets: { value: new THREE.Vector4() },
+    uWaterSssColor: { value: new THREE.Vector3(...seaState.sssColor) },
+    uWaterSssStrength: { value: seaState.sssStrength },
+    uWaterLangmuir: { value: seaState.langmuirStrength },
+    uWaterWhitecap: { value: new THREE.Vector2(seaState.whitecapStrength, seaState.whitecapThreshold) },
+    uWaterOpticsParams: {
+      value: new THREE.Vector4(
+        seaState.glitterSharpness,
+        seaState.fresnelContrast,
+        seaState.capillaryAmp,
+        seaState.swellSteepness,
+      ),
+    },
+    uWaterBiolumColor: { value: new THREE.Vector3(...seaState.biolumColor) },
+    uWaterUnderScatter: { value: new THREE.Vector3(...seaState.underwaterScatter) },
   };
   drawUniforms.uOceanModes = { value: oceanField.modes.map((mode) =>
     new THREE.Vector4(...mode.axis, mode.k)) };
@@ -1134,6 +1205,13 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
     shader.uniforms.uShelfSpan = drawUniforms.uShelfSpan;
     shader.uniforms.uBiologicalActivity = drawUniforms.uBiologicalActivity;
     shader.uniforms.uMesoOffsets = drawUniforms.uMesoOffsets;
+    shader.uniforms.uWaterSssColor = drawUniforms.uWaterSssColor;
+    shader.uniforms.uWaterSssStrength = drawUniforms.uWaterSssStrength;
+    shader.uniforms.uWaterLangmuir = drawUniforms.uWaterLangmuir;
+    shader.uniforms.uWaterWhitecap = drawUniforms.uWaterWhitecap;
+    shader.uniforms.uWaterOpticsParams = drawUniforms.uWaterOpticsParams;
+    shader.uniforms.uWaterBiolumColor = drawUniforms.uWaterBiolumColor;
+    shader.uniforms.uWaterUnderScatter = drawUniforms.uWaterUnderScatter;
     shader.uniforms.uDepthHazeDistance = { value: depthScale * 0.4 };
     shader.uniforms.uNearPatchCenter = drawUniforms.uNearPatchCenter;
     shader.uniforms.uNearPatchRadius = drawUniforms.uNearPatchRadius;
@@ -1272,6 +1350,13 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         uniform float uBiologicalActivity;
         uniform float uDepthHazeDistance;
         uniform vec4 uMesoOffsets;
+        uniform vec3 uWaterSssColor;
+        uniform float uWaterSssStrength;
+        uniform float uWaterLangmuir;
+        uniform vec2 uWaterWhitecap;
+        uniform vec4 uWaterOpticsParams;
+        uniform vec3 uWaterBiolumColor;
+        uniform vec3 uWaterUnderScatter;
         ${oceanRenderFrameGLSL}
         uniform float uNearPatchRadius;
         uniform vec3 uSkyZenith;
@@ -1304,6 +1389,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
         varying float vWaterCell;
         float gWaterFoam = 0.0;
         float gWaterWakeFoam = 0.0;
+        float gWaterLangmuir = 0.0;
         float gWaterRoughness = 0.16;
         vec2 gWaterDetail = vec2(0.5);
         vec2 gWaterMacroSlope = vec2(0.0);
@@ -1514,23 +1600,52 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
               + swashRibbon) * shoreFade;
           }
           float openWhitecap = 0.0;
-          if (crestHeight > 0.001 && macroSlopeLen > 0.035 && dep > 5.0) {
+          float langmuirStreak = 0.0;
+          float seaEnergy = smoothstep(0.9, 4.8, uOceanHeight);
+          if (crestHeight > 0.001 && macroSlopeLen > 0.025 && dep > 4.0) {
             vec2 foamPoreUv = oceanCapillary(vOceanRelative + localUp * vWaveHeight,
               vec2(uTime * 0.08, -uTime * 0.055));
             vec2 foamPore = texture2D(uDetailTex, foamPoreUv).rg;
-            float resolvedPores = smoothstep(0.46, 0.61, foamPore.x * 0.6 + foamPore.y * 0.4);
-            openWhitecap = crestHeight * resolvedPores
-              * smoothstep(0.035, 0.11, macroSlopeLen)
-              * smoothstep(5.0, 32.0, dep)
-              * smoothstep(0.6, 0.84, smallDetail)
-              * smoothstep(0.45, 0.76, alongShoreBreak) * uFoamK * 0.38;
+            float resolvedPores = smoothstep(0.40, 0.60, foamPore.x * 0.58 + foamPore.y * 0.42);
+            float crestSlopeGate = smoothstep(0.025, 0.095, macroSlopeLen);
+            float detailGate = smoothstep(uWaterWhitecap.y, uWaterWhitecap.y + 0.28,
+              smallDetail * 0.65 + alongShoreBreak * 0.35);
+            openWhitecap = crestHeight * resolvedPores * crestSlopeGate
+              * smoothstep(4.0, 26.0, dep) * detailGate
+              * uFoamK * uWaterWhitecap.x * 0.58;
+            // Trailing aerated foam lace sliding down steep storm wave backs
+            float spumeTail = smoothstep(0.05, 0.16, macroSlopeLen)
+              * smoothstep(0.48, 0.80, foamPore.y)
+              * smoothstep(8.0, 42.0, dep) * seaEnergy * uWaterWhitecap.x * 0.24;
+            openWhitecap = max(openWhitecap, spumeTail * crestHeight);
           }
+          // Wind-aligned Langmuir foam lanes on energetic / stormy seas
+          if (uWaterLangmuir > 0.02 && dep > 6.0 && viewDist < 9000.0 && vWaveNear > 0.01) {
+            float langFade = (1.0 - smoothstep(2600.0, 9000.0, viewDist))
+              * smoothstep(6.0, 32.0, dep) * (0.28 + 0.72 * seaEnergy) * vWaveNear;
+            if (langFade > 0.002) {
+              vec3 windAxis = uOceanModes[0].xyz - localUp * dot(uOceanModes[0].xyz, localUp);
+              float windAxisLen = length(windAxis);
+              vec3 wDir = windAxisLen > 1e-4 ? (windAxis / windAxisLen) : localT;
+              vec3 wSide = cross(localUp, wDir);
+              vec3 wPos = vOceanRelative + localUp * vWaveHeight;
+              vec2 lUv = vec2(dot(wPos, wDir) * 0.0042 - uTime * 0.014,
+                dot(wPos, wSide) * 0.029);
+              float lWarp = (texture2D(uDetailTex, lUv * 0.45 + vec2(0.19, 0.43)).r - 0.5) * 0.32;
+              float laneA = texture2D(uDetailTex, vec2(lUv.x, lUv.y + lWarp)).g;
+              float laneB = texture2D(uDetailTex, vec2(lUv.x * 1.9 + 0.31, lUv.y * 2.1 - lWarp)).r;
+              float laneSharp = smoothstep(0.60, 0.86, laneA * 0.62 + laneB * 0.38);
+              langmuirStreak = laneSharp * smoothstep(0.32, 0.78, smallDetail)
+                * uWaterLangmuir * langFade * 0.42;
+            }
+          }
+          gWaterLangmuir = langmuirStreak;
           ${tidalField ? `
           vec4 tidalFoamSample = oceanTidalEvent(vOceanRelative, dep);
           float crestFraction = tidalFoamSample.x / max(1.0, uTidalShape.x);
-          float tidalCrestFoam = smoothstep(0.66, 0.94, crestFraction)
-            * smoothstep(0.4, 0.7, smallDetail * 0.6 + alongShoreBreak * 0.4);
-          openWhitecap += tidalCrestFoam * 0.72;
+          float tidalCrestFoam = smoothstep(0.62, 0.92, crestFraction)
+            * smoothstep(0.38, 0.68, smallDetail * 0.6 + alongShoreBreak * 0.4);
+          openWhitecap += tidalCrestFoam * 0.78;
           ` : ''}
           float wakeFoam = 0.0;
           if (uRippleCount > 0 && viewDist < 4500.0)
@@ -1545,8 +1660,9 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             float dist = max(length(planar), 0.05);
             float ring = dist - rd.x * rd.y;
             float impactEnvelope = exp(-abs(ring) * 0.24 - rd.x * 0.42) * rd.z;
-            float impactFoam = (0.32 + 0.68 * max(0.0, sin(ring * 1.4)))
-              * impactEnvelope * rd.w * 1.1;
+            float impactCore = exp(-dist * 0.45 - rd.x * 0.95) * rd.z * 0.85;
+            float impactFoam = ((0.35 + 0.65 * max(0.0, sin(ring * 1.45)))
+              * impactEnvelope + impactCore) * rd.w * 1.35;
             vec3 wakeAxis = normalize(rdir.xyz - localUp * dot(rdir.xyz, localUp)
               + localT * 0.0001);
             vec3 wakeSide = normalize(cross(localUp, wakeAxis));
@@ -1564,7 +1680,7 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             // crests still break into unequal packets instead of two rails.
             float wakeBreak = waterFbm2(vec2(trailDistance * 0.055,
               lateral * 0.095) + vec2(rd.x * 0.23, -rd.x * 0.17));
-            float shoulderBreak = smoothstep(0.44, 0.73,
+            float shoulderBreak = smoothstep(0.40, 0.72,
               shoulderPhase * 0.43 + wakeBreak * 0.57);
             float sternWash = centreEnvelope;
             float wedgeHalfWidth = packet.armCenter;
@@ -1573,15 +1689,15 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             float transverseCrest = pow(max(0.0,
               sin(trailDistance * 0.31 + abs(lateral) * 0.085 - rd.x * 2.4)), 2.0)
               * insideWedge * packet.envelope
-              * smoothstep(0.48, 0.76, wakeBreak);
+              * smoothstep(0.45, 0.75, wakeBreak);
             // A dim continuous pressure shoulder carries the V from the
             // stern; stochastic breaking rides on top. Previously almost all
             // visible energy lived in shoulderBreak, creating detached stamps.
-            float directionalFoam = (armEnvelope * (0.12 + shoulderBreak * 1.8)
-              + armCore * shoulderBreak * 0.6
-              + transverseCrest * 0.55
-              + centreEnvelope * (0.1 + smallDetail * 0.18)
-              + sternWash * 0.2) * rd.w * 0.9;
+            float directionalFoam = (armEnvelope * (0.16 + shoulderBreak * 2.05)
+              + armCore * shoulderBreak * 0.72
+              + transverseCrest * 0.62
+              + centreEnvelope * (0.14 + smallDetail * 0.24)
+              + sternWash * 0.26) * rd.w * 1.05;
             // A hull emits several overlapping pressure samples. Summing all
             // of them filled the Kelvin wedge into a flat grey slab before
             // either divergent shoulder could read. The physical surface at
@@ -1589,24 +1705,30 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
             wakeFoam = max(wakeFoam,
               mix(impactFoam, directionalFoam, step(0.5, rdir.w)));
           }
-          gWaterWakeFoam = clamp(wakeFoam, 0.0, 0.5);
-          gWaterFoam = clamp(shoreFoam * 0.9 + openWhitecap + wakeFoam, 0.0, 0.95);
-          vec3 foamAlbedo = mix(vec3(0.92, 0.96, 0.98),
-            normalize(max(uShallowC, vec3(0.02))) * 0.94, 0.18);
+          gWaterWakeFoam = clamp(wakeFoam, 0.0, 0.78);
+          gWaterFoam = clamp(shoreFoam * 0.92 + openWhitecap + langmuirStreak + wakeFoam, 0.0, 0.96);
+          vec3 foamAlbedo = mix(vec3(0.93, 0.97, 0.99),
+            normalize(max(uShallowC, vec3(0.02))) * 0.95, 0.16);
           diffuseColor.rgb = mix(diffuseColor.rgb, foamAlbedo, gWaterFoam * 0.92);
           float cloud = waterCloud(vLocalPos);
           gWaterCloud = cloud;
           // Preserve a coherent water surface while allowing the actual shelf
           // geometry to read through clear shallows. Deep water is fully
-          // opaque; foam locally restores full coverage.
+          // opaque; foam locally restores full coverage. Underwater ceiling
+          // (!gl_FrontFacing) renders Snell's window + TIR as an opaque boundary.
           float interfaceFresnel = 0.0201 + 0.9799 * pow(1.0 - viewCos, 5.0);
           float transmittedEnergy = dot(transmission, vec3(0.2126, 0.7152, 0.0722));
           float alphaFloor = mix(0.10, 0.18, farBathymetry);
-          diffuseColor.a = clamp(1.0 - transmittedEnergy * (1.0 - interfaceFresnel), alphaFloor, 1.0);
-          diffuseColor.a = mix(diffuseColor.a, 1.0, gWaterFoam) * edgeCoverage;
+          if (gl_FrontFacing) {
+            diffuseColor.a = clamp(1.0 - transmittedEnergy * (1.0 - interfaceFresnel), alphaFloor, 1.0);
+            diffuseColor.a = mix(diffuseColor.a, 1.0, gWaterFoam) * edgeCoverage;
+          } else {
+            diffuseColor.rgb *= 0.12;
+            diffuseColor.a = 0.97;
+          }
           float distanceRough = smoothstep(2.0, 32.0, opticalFootprint) * 0.12;
-          gWaterRoughness = clamp(0.052 + (1.0 - smallDetail) * 0.085 + distanceRough
-            + gWaterFoam * 0.48 + cloud * 0.05, 0.045, 0.76);
+          gWaterRoughness = clamp(0.044 + (1.0 - smallDetail) * 0.082 + distanceRough
+            + gWaterFoam * 0.50 + cloud * 0.05, 0.038, 0.78);
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         roughnessFactor = gWaterRoughness;`)
@@ -1621,16 +1743,21 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
           // rails that previously read as a brushed-metal plane. Cross-fade
           // scales smoothly with pixelFootprint so total wave slope stays
           // fluid and liquid at every altitude rather than stacking.
-          vec2 g = (gWaterDetail - 0.5) * 1.45;
+          // Keep micro-normals smoothly liquid so wave backs never spike into
+          // dark black facets or reveal a circular near-patch seam.
+          vec2 g = (gWaterDetail - 0.5) * 0.68 * uWaterOpticsParams.z;
           float pixelFootprint = max(length(dFdx(vOceanRelative)), length(dFdy(vOceanRelative)));
-          g *= (1.0 - smoothstep(1.8, 12.0, pixelFootprint)) * vWaveNear;
-          float capFade = (1.0 - smoothstep(0.25, 2.2, pixelFootprint)) * vWaveNear;
+          g *= (1.0 - smoothstep(3.0, 26.0, pixelFootprint)) * vWaveNear;
+          float capFade = (1.0 - smoothstep(0.35, 4.2, pixelFootprint)) * vWaveNear;
           if (capFade > 0.001) {
             vec2 capillaryUv = oceanCapillary(vOceanRelative, vec2(uTime * 0.42, -uTime * 0.29));
             vec2 capillary = texture2D(uDetailTex, capillaryUv).rg - 0.5;
-            g += capillary * 0.50 * capFade;
+            vec2 fineCapUv = mat2(0.8, -0.6, 0.6, 0.8) * capillaryUv * 2.05 + vec2(-uTime * 0.31, uTime * 0.38);
+            vec2 fineCap = texture2D(uDetailTex, fineCapUv).rg - 0.5;
+            float fineFade = 1.0 - smoothstep(0.08, 1.1, pixelFootprint);
+            g += (capillary * 0.26 + fineCap * 0.16 * fineFade) * uWaterOpticsParams.z * capFade;
           }
-          if (pixelFootprint < 90.0 && vWaveNear > 0.001) {
+          if (pixelFootprint < 110.0 && vWaveNear > 0.001) {
             vec2 mesoUv0 = vec2(dot(vOceanRelative, ${glslVec3(mesoA0)}),
               dot(vOceanRelative, ${glslVec3(mesoB0)})) * ${Number(mesoScale0).toPrecision(17)}
               + uMesoOffsets.xy + vec2(uTime * 0.052, -uTime * 0.036);
@@ -1639,10 +1766,10 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
               + uMesoOffsets.zw + vec2(-uTime * 0.034, uTime * 0.026);
             vec2 meso0 = texture2D(uDetailTex, mesoUv0).rg - 0.5;
             vec2 meso1 = texture2D(uDetailTex, mesoUv1).rg - 0.5;
-            float mesoFade0 = mix(0.32, 0.58, smoothstep(1.5, 6.0, pixelFootprint))
-              * (1.0 - smoothstep(8.0, 32.0, pixelFootprint));
-            float mesoFade1 = mix(0.14, 0.48, smoothstep(4.0, 16.0, pixelFootprint))
-              * (1.0 - smoothstep(18.0, 85.0, pixelFootprint));
+            float mesoFade0 = mix(0.24, 0.42, smoothstep(1.5, 8.0, pixelFootprint))
+              * (1.0 - smoothstep(12.0, 48.0, pixelFootprint));
+            float mesoFade1 = mix(0.14, 0.36, smoothstep(5.0, 22.0, pixelFootprint))
+              * (1.0 - smoothstep(26.0, 105.0, pixelFootprint));
             g += (meso0 * mesoFade0 + meso1 * mesoFade1) * gWaterShoalMask * vWaveNear;
           }
           if (uRippleCount > 0 && length(vViewPosition) < 4500.0)
@@ -1674,101 +1801,162 @@ export function applyWaterWaves(material, planet, waveScale = 1 / 14) {
               waterFbm2(vec2(trailDistance * 0.052 + rd.x * 0.19,
                 lateral * 0.087 - rd.x * 0.13)));
             vec3 wakeGradientObject = wakeSide * sign(lateral) * armOscillation
-              * armEnvelope * mix(0.025, 0.075, packetBreak)
-              - wakeAxis * centreEnvelope * (0.009 + packetBreak * 0.018);
+              * armEnvelope * mix(0.036, 0.115, packetBreak)
+              - wakeAxis * centreEnvelope * (0.014 + packetBreak * 0.026);
             vec2 wakeGradient = vec2(dot(wakeGradientObject, tanL),
               dot(wakeGradientObject, bitL));
-            g += mix(impactGradient, wakeGradient, step(0.5, rdir.w));
+            g += mix(impactGradient * 1.18, wakeGradient, step(0.5, rdir.w));
           }
-          float opticalSwellBoost = mix(1.0, 1.48,
-            vWaveNear * (1.0 - smoothstep(30.0, 240.0, pixelFootprint)));
+          float opticalSwellBoost = mix(1.0, clamp(1.22 * uWaterOpticsParams.w, 1.0, 1.78),
+            vWaveNear * (1.0 - smoothstep(35.0, 260.0, pixelFootprint)));
+          vec2 finalSlope = gWaterMacroSlope * opticalSwellBoost + g * 0.34;
+          float slopeMag = length(finalSlope);
+          if (slopeMag > 0.68) finalSlope *= 0.68 / slopeMag;
           normal = normalize(normal
-            - vWaveT * (gWaterMacroSlope.x * opticalSwellBoost + g.x * 0.5)
-            - vWaveB * (gWaterMacroSlope.y * opticalSwellBoost + g.y * 0.5));
+            - vWaveT * finalSlope.x
+            - vWaveB * finalSlope.y);
         }`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         {
           vec3 viewDir = normalize(vViewPosition);
-          vec3 reflectionDir = reflect(-viewDir, normal);
-          float ndv = clamp(abs(dot(normal, viewDir)), 0.0, 1.0);
-          float fresnel = 0.0201 + 0.9799 * pow(1.0 - ndv, 5.0);
-          diffuseColor.rgb *= mix(1.0 - fresnel * 0.54, 1.0, gWaterFoam);
-          float skyHeight = clamp(dot(reflectionDir,
-            normalize(vWaveUp)), 0.0, 1.0);
-          vec3 reflectedSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
-          float cloud = gWaterCloud;
-          reflectedSky = mix(reflectedSky, vec3(0.46, 0.5, 0.56)
-            * (0.22 + uDay * 0.62), cloud * 0.62);
-          reflectedSky = surfaceWaterReflectedSky(
-            vLocalPos,
-            normalize(uSurfaceViewToLocal * reflectionDir),
-            gWaterRoughness,
-            cloud,
-            reflectedSky
-          );
-          float sunDot = max(dot(reflectionDir, normalize(vSunDirView)), 0.0);
-          float glitterField = (sunDot > 0.01 || (uSunset > 1e-3 && sunDot > 1e-4))
-            ? oceanGlitter(vOceanRelative, vec2(uTime * 0.16, -uTime * 0.11))
-            : 0.5;
-          float glitterBreak = 0.12 + 0.88 * smoothstep(0.48, 0.81,
-            glitterField * 0.72 + gWaterFacetLight * 0.28);
-          float glintPower = mix(1400.0, 180.0, gWaterRoughness);
-          float sunGlint = sunDot > 1e-5
-            ? pow(sunDot, glintPower) * mix(0.76, 0.24, gWaterRoughness) * min(uSunEnergy, 1.6) * glitterBreak
-            : 0.0;
-          float secondDot = max(dot(reflectionDir,
-            normalize(vSecondarySunDirView)), 0.0);
-          float secondGlint = (secondDot > 1e-5 && uSecondarySunEnergy > 1e-5)
-            ? pow(secondDot, glintPower) * mix(0.54, 0.18, gWaterRoughness) * min(uSecondarySunEnergy, 1.6)
-            : 0.0;
-          totalEmissiveRadiance += reflectedSky
-            * (0.012 + gWaterShallow * 0.024
-              + fresnel * mix(0.36, 0.64, max(uDay, uSunset * 0.85)))
-            * (1.0 - gWaterFoam * 0.72);
-          float subsurfaceWave = clamp(gWaterCrest * 0.75 + gWaterShallow * 0.65, 0.0, 1.0);
-          float crestBacklight = 0.25 + 0.75 * max(0.0, dot(viewDir, -normalize(vSunDirView)));
-          totalEmissiveRadiance += mix(uDeepC, uShallowC, max(gWaterShallow, gWaterCrest * 0.55))
-            * (0.024 + gWaterFacetLight * mix(0.02, 0.16, vWaveNear) * (0.25 + subsurfaceWave * crestBacklight))
-            * (0.24 + uDay * 0.76)
-            * (1.0 - gWaterFoam * 0.85);
-          // The broad low-sun lobe stays chromatic while the much narrower
-          // solar core remains bright. Separating them avoids a clipped white
-          // pillar and preserves the warm path across individual wave facets.
-          float warmPath = (sunDot > 1e-5 && uSunset > 1e-4)
-            ? (pow(sunDot, mix(18.0, 5.0, gWaterRoughness)) * 0.32 * glitterBreak
-              + pow(sunDot, 2.4) * 0.035 * smoothstep(0.38, 0.78, glitterField)) * uSunset
-            : 0.0;
-          vec3 reflectedSunColor = mix(uSunColor, vec3(1.0, 0.12, 0.018),
-            uSunset * 0.9);
-          sunGlint *= mix(1.0, 0.012, uSunset);
-          if (sunGlint + warmPath > 1e-6) {
-            totalEmissiveRadiance += reflectedSunColor * (sunGlint + warmPath)
-              * surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSunDirView));
+          vec3 sunDirV = normalize(vSunDirView);
+          vec3 waveUp = normalize(vWaveUp);
+          vec3 sunTrans = surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSunDirView));
+          if (!gl_FrontFacing) {
+            // Physical underwater ceiling optics: Snell's window refraction cone
+            // (~48.6 deg for water IOR 1.333) surrounded by abyssal Total Internal Reflection.
+            vec3 underN = normalize(normal);
+            float cosUnder = clamp(dot(underN, viewDir), 0.0, 1.0);
+            float snellWindow = smoothstep(0.54, 0.72, cosUnder);
+            float criticalRing = exp(-pow((cosUnder - 0.645) / 0.062, 2.0));
+            // Bend view ray toward sky zenith + wave slope for refracted air-side sky
+            vec3 refrSkyDir = normalize(mix(waveUp, -viewDir + underN * 0.36, 0.58));
+            float refrSkyH = clamp(dot(refrSkyDir, waveUp), 0.0, 1.0);
+            vec3 skyAbove = mix(uSkyHorizon, uSkyZenith, sqrt(refrSkyH));
+            skyAbove = surfaceWaterReflectedSky(
+              vLocalPos,
+              normalize(uSurfaceViewToLocal * refrSkyDir),
+              0.08,
+              gWaterCloud,
+              skyAbove
+            );
+            float refrSunDot = max(dot(refrSkyDir, sunDirV), 0.0);
+            vec3 sunOverhead = uSunColor * (pow(refrSunDot, 38.0) * 1.85 + pow(refrSunDot, 4.5) * 0.38)
+              * min(uSunEnergy, 1.6) * sunTrans;
+            // Dancing underside wave caustic sparkle inside the window
+            float underRipple = smoothstep(0.45, 0.85, gWaterFacetLight) * (0.25 + 0.75 * uDay);
+            vec3 windowCol = (skyAbove * (0.72 + 0.45 * uDay) + sunOverhead)
+              * (0.84 + 0.36 * underRipple);
+            // Total Internal Reflection outside Snell's window reflects the deep column
+            vec3 tirCol = mix(uDeepC * 0.52, uWaterUnderScatter * 0.38,
+              clamp(gWaterFacetLight * 0.65 + 0.2, 0.0, 1.0)) * (0.18 + 0.82 * uDay);
+            // Silvery-cyan dispersion shimmer along the critical-angle ring
+            vec3 rimCol = mix(uWaterSssColor, vec3(0.62, 0.92, 1.0), 0.5)
+              * criticalRing * (0.16 + 0.40 * uDay) * (0.65 + 0.6 * gWaterFacetLight);
+            totalEmissiveRadiance += mix(tirCol, windowCol, snellWindow) + rimCol;
+          } else {
+            vec3 reflectionDir = reflect(-viewDir, normal);
+            // Prevent steep wave backs from reflecting below-horizon darkness
+            float reflUp = dot(reflectionDir, waveUp);
+            if (reflUp < 0.035) {
+              reflectionDir = normalize(reflectionDir + waveUp * (0.045 - reflUp));
+            }
+            float ndv = clamp(abs(dot(normal, viewDir)), 0.0, 1.0);
+            float fresnelRaw = 0.0201 + 0.9799 * pow(1.0 - ndv, 5.0);
+            float fresnel = clamp(fresnelRaw * uWaterOpticsParams.y, 0.0, 0.96);
+            diffuseColor.rgb *= mix(1.0 - fresnel * 0.64, 1.0, gWaterFoam);
+            float skyHeight = clamp(dot(reflectionDir, waveUp), 0.0, 1.0);
+            vec3 reflectedSky = mix(uSkyHorizon, uSkyZenith, sqrt(skyHeight));
+            float cloud = gWaterCloud;
+            reflectedSky = mix(reflectedSky, vec3(0.46, 0.5, 0.56)
+              * (0.22 + uDay * 0.62), cloud * 0.62);
+            reflectedSky = surfaceWaterReflectedSky(
+              vLocalPos,
+              normalize(uSurfaceViewToLocal * reflectionDir),
+              gWaterRoughness,
+              cloud,
+              reflectedSky
+            );
+            float sunDot = max(dot(reflectionDir, sunDirV), 0.0);
+            float glitterField = (sunDot > 0.008 || (uSunset > 1e-3 && sunDot > 1e-4))
+              ? oceanGlitter(vOceanRelative, vec2(uTime * 0.16, -uTime * 0.11))
+              : 0.5;
+            float glitterBreak = 0.12 + 0.88 * smoothstep(0.45, 0.79,
+              glitterField * 0.72 + gWaterFacetLight * 0.28);
+            float glintPower = mix(1550.0, 200.0, gWaterRoughness) * uWaterOpticsParams.x;
+            float broadPower = mix(105.0, 22.0, gWaterRoughness);
+            float sunGlint = sunDot > 1e-5
+              ? (pow(sunDot, glintPower) * mix(0.92, 0.30, gWaterRoughness) * glitterBreak
+                + pow(sunDot, broadPower) * 0.09 * smoothstep(0.42, 0.84, glitterField))
+                * min(uSunEnergy, 1.6)
+              : 0.0;
+            float secondDot = max(dot(reflectionDir,
+              normalize(vSecondarySunDirView)), 0.0);
+            float secondGlint = (secondDot > 1e-5 && uSecondarySunEnergy > 1e-5)
+              ? pow(secondDot, glintPower) * mix(0.58, 0.20, gWaterRoughness) * min(uSecondarySunEnergy, 1.6)
+              : 0.0;
+            totalEmissiveRadiance += reflectedSky
+              * (0.022 + gWaterShallow * 0.024
+                + fresnel * mix(0.46, 0.82, max(uDay, uSunset * 0.88)))
+              * (1.0 - gWaterFoam * 0.74);
+            // Rich upward internal ocean scatter keeps wave troughs luminous
+            // jewel-blue/emerald rather than muddy black when tilted away from sun.
+            vec3 bodyUpScatter = mix(uDeepC, uShelfC, clamp(gWaterShallow * 0.75 + 0.25, 0.0, 1.0));
+            totalEmissiveRadiance += bodyUpScatter * (0.055 + 0.065 * uDay)
+              * (1.0 - fresnel * 0.55) * (1.0 - gWaterFoam * 0.85);
+            // Physical backlit wave-crest subsurface scattering (SSS): sunlight
+            // transmits through thin raised wave crests toward the camera, tinted
+            // by the planet's sea-state archetype and modulated by clouds & ring shadows.
+            float crestSlope = smoothstep(0.035, 0.18, length(gWaterMacroSlope));
+            float subsurfaceWave = clamp(gWaterCrest * 0.85 + crestSlope * 0.55 + gWaterShallow * 0.55, 0.0, 1.0);
+            vec3 sssHalf = normalize(-sunDirV + normal * 0.42);
+            float crestBacklight = pow(clamp(dot(viewDir, sssHalf), 0.0, 1.0), 2.8) * 0.95
+              + max(0.0, dot(normal, sunDirV)) * 0.28;
+            vec3 sssTint = mix(uWaterSssColor, uShallowC * 1.15, gWaterShallow * 0.48);
+            totalEmissiveRadiance += sssTint * uWaterSssStrength
+              * (0.018 + subsurfaceWave * mix(0.055, 0.36, vWaveNear) * (0.26 + crestBacklight * (0.55 + gWaterFacetLight * 0.45)))
+              * (0.14 + uDay * 0.86)
+              * mix(vec3(0.38), sunTrans, 0.76)
+              * (1.0 - gWaterFoam * 0.84);
+            // The broad low-sun lobe stays chromatic while the much narrower
+            // solar core remains bright. Separating them avoids a clipped white
+            // pillar and preserves the warm path across individual wave facets.
+            float warmPath = (sunDot > 1e-5 && uSunset > 1e-4)
+              ? (pow(sunDot, mix(18.0, 5.0, gWaterRoughness)) * 0.34 * glitterBreak
+                + pow(sunDot, 2.4) * 0.038 * smoothstep(0.38, 0.78, glitterField)) * uSunset
+              : 0.0;
+            vec3 reflectedSunColor = mix(uSunColor, vec3(1.0, 0.12, 0.018),
+              uSunset * 0.9);
+            sunGlint *= mix(1.0, 0.012, uSunset);
+            if (sunGlint + warmPath > 1e-6) {
+              totalEmissiveRadiance += reflectedSunColor * (sunGlint + warmPath) * sunTrans;
+            }
+            if (secondGlint > 1e-6) {
+              totalEmissiveRadiance += uSecondarySunColor * secondGlint
+                * surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSecondarySunDirView));
+            }
+            totalEmissiveRadiance += vec3(0.38, 0.46, 0.52)
+              * gWaterFoam * (0.05 + 0.065 * uDay);
+            // Aerated wake water remains bright even when it interrupts a dark
+            // reflection. Keeping this separate from generic shore foam makes
+            // the two Kelvin shoulders legible in a normal chase camera.
+            totalEmissiveRadiance += vec3(0.62, 0.72, 0.78)
+              * gWaterWakeFoam * (0.08 + 0.07 * uDay);
+            // Organisms respond to local agitation, not a uniformly emissive
+            // planet. Daylight overwhelms the faint glow; breaking crests,
+            // plankton lanes and vessel disturbance reveal luminous trails after dusk.
+            float biologicalAgitation = clamp(gWaterFoam * 0.72
+              + gWaterWakeFoam * 2.4
+              + gWaterLangmuir * 1.15
+              + smoothstep(0.05, 0.20, length(gWaterMacroSlope)) * 0.42, 0.0, 1.0);
+            float biologicalNight = 1.0 - smoothstep(0.0, 0.22, uDay);
+            totalEmissiveRadiance += uWaterBiolumColor
+              * uBiologicalActivity * biologicalAgitation * biologicalNight * 2.45;
           }
-          if (secondGlint > 1e-6) {
-            totalEmissiveRadiance += uSecondarySunColor * secondGlint
-              * surfaceStellarTransmission(normalize(uSurfaceViewToLocal * vSecondarySunDirView));
-          }
-          totalEmissiveRadiance += vec3(0.32, 0.39, 0.44)
-            * gWaterFoam * 0.05;
-          // Aerated wake water remains bright even when it interrupts a dark
-          // reflection. Keeping this separate from generic shore foam makes
-          // the two Kelvin shoulders legible in a normal chase camera.
-          totalEmissiveRadiance += vec3(0.5, 0.58, 0.62)
-            * gWaterWakeFoam * 0.065;
-          // Organisms respond to local agitation, not a uniformly emissive
-          // planet. Daylight overwhelms the faint glow; breaking crests and
-          // vessel disturbance reveal luminous streaks after dusk.
-          float biologicalAgitation = clamp(gWaterFoam * 0.65
-            + gWaterWakeFoam * 2.0
-            + smoothstep(0.06, 0.22, length(gWaterMacroSlope)) * 0.35, 0.0, 1.0);
-          float biologicalNight = 1.0 - smoothstep(0.0, 0.18, uDay);
-          totalEmissiveRadiance += vec3(0.015, 0.62, 0.48)
-            * uBiologicalActivity * biologicalAgitation * biologicalNight * 2.0;
         }`);
     installSurfaceAtmosphere(material, planet, shader);
   };
-  material.customProgramCacheKey = () => `water-regional-wave-field-v36-coast-optics:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
+  material.customProgramCacheKey = () => `water-regional-wave-field-v37-cinematic-snell:${hasSurfaceCloudMedium(planet)}:${tidalField ? 'tidal' : 'ordinary'}`;
   return prepareSurfaceAtmosphere(material, planet);
 }
 

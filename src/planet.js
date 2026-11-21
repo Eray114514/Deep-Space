@@ -1,4 +1,5 @@
 import { bindStellarOcclusion } from './stellar-occlusion.js';
+import { buildPlanetaryRing, bindRingShadow } from './rings.js';
 // Planet: a fully procedural world defined by ONE seeded height function and
 // ONE color function over unit-sphere directions. Terrain chunks at every LOD,
 // the walking controller, the landing logic and the scatter system all sample
@@ -185,14 +186,27 @@ export class Planet extends TerrainHeightField {
     this.hasLiquid = this.liquid !== null;
     this.tidalCoast = this.liquid === 'water';
     this.oceanClimate = ['water', 'toxic'].includes(this.liquid)
-      ? createOceanClimate(seed, { type, gravity: this.gravity,
-        oceanClass: this.tuning.oceanClass || this.tuning.oceanProfile }) : null;
-    this.waterStyle = this.tuning.oceanProfile === 'pelagic-storm'
-      ? { swell: 2.05, clarity: 0.74, foam: 1.35 }
+      ? createOceanClimate(seed, {
+        type,
+        gravity: this.gravity,
+        oceanClass: this.tuning.oceanClass || this.tuning.oceanProfile,
+        equilibriumK,
+      }) : null;
+    const archetype = this.oceanClimate?.archetype;
+    this.waterStyle = archetype === 'pelagic-storm'
+      ? { swell: 2.05, clarity: 0.72, foam: 1.42 }
+      : archetype === 'tropical-lagoon'
+        ? { swell: 0.92, clarity: 1.38, foam: 0.92 }
+      : archetype === 'polar-glacial'
+        ? { swell: 1.35, clarity: 1.18, foam: 1.18 }
+      : archetype === 'abyssal-biolum'
+        ? { swell: 1.45, clarity: 1.02, foam: 1.22 }
+      : archetype === 'mineral-exotic'
+        ? { swell: 1.28, clarity: 0.92, foam: 1.04 }
+      : archetype === 'acid-brine' || type === 'toxic'
+        ? { swell: 0.72, clarity: 0.48, foam: 0.76 }
       : type === 'ocean'
-        ? { swell: 1.65, clarity: 0.82, foam: 1.18 }
-      : type === 'toxic'
-        ? { swell: 0.72, clarity: 0.48, foam: 0.72 }
+        ? { swell: 1.65, clarity: 0.86, foam: 1.20 }
         : { swell: 1, clarity: 1, foam: 1 };
     const seaLevelOffset = Number.isFinite(this.tuning.seaLevelOffset) ? this.tuning.seaLevelOffset : 0;
     // Water-level curation must not rewrite the selected terrain. Mountain
@@ -430,7 +444,6 @@ export class Planet extends TerrainHeightField {
     if (this.cloudMeshNoctilucent) {
       pushFade(this.cloudMeshNoctilucent.material, this.cloudMeshNoctilucent.material.opacity);
     }
-    if (this.ringMesh) pushFade(this.ringMesh.material, this.ringMesh.material.opacity);
     this._atmoBaseDensity = this.atmoMesh
       ? (this.atmoUniforms || this.atmoMesh.material.uniforms).density.value : 0;
     if (this.appear < 1) this.applyAppear();
@@ -443,6 +456,7 @@ export class Planet extends TerrainHeightField {
       if (f.mat.userData.opacityNodeUniform) f.mat.userData.opacityNodeUniform.value = f.base * a;
       f.mat.transparent = a < 1 || f.transparent || f.base < 1;
     }
+    this.ring?.setOpacity(a);
     if (this.atmoMesh) {
       (this.atmoUniforms || this.atmoMesh.material.uniforms).density.value
         = this._atmoBaseDensity * a;
@@ -1130,28 +1144,20 @@ export class Planet extends TerrainHeightField {
       // it has a sparse, sun/terminator-gated WebGL implementation.
     }
 
-    const ringSystem = this.ringSystem;
-    const ringPresent = ringSystem ? ringSystem.present : (!this.isMoon && rand() < 0.24);
-    if (!this.isMoon && ringPresent) {
-      const inner = R * (ringSystem?.innerRadiusRatio || (1.55 + rand() * 0.4));
-      const outer = R * (ringSystem?.outerRadiusRatio || (inner / R + 0.5 + rand() * 0.7));
-      const geo = new THREE.RingGeometry(inner, outer, 160, 1);
-      // map UV.x to radius for the band texture
-      const pos = geo.attributes.position, uv = geo.attributes.uv;
-      for (let i = 0; i < uv.count; i++) {
-        const r = Math.hypot(pos.getX(i), pos.getY(i));
-        uv.setXY(i, (r - inner) / (outer - inner), 0.5);
-      }
-      const ringTint = this.pal.land[Math.min(2, this.pal.land.length - 1)].c;
-      this.ringMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-        map: makeRingTexture(makeRng(this.seed + ':ring'), ringTint),
-        transparent: true, side: THREE.DoubleSide, depthWrite: false,
-        opacity: ringSystem?.opticalDepth ? Math.min(0.92, 0.28 + ringSystem.opticalDepth * 0.68) : 0.85,
-      }));
-      this.ringMesh.quaternion.copy(this.axisQuat);
-      this.ringMesh.rotateX(Math.PI / 2);
-      this.ringMesh.renderOrder = 2;
-      this.group.add(this.ringMesh);
+    const ringTint = this.pal.land[Math.min(2, this.pal.land.length - 1)].c;
+    this.ring = buildPlanetaryRing(this, {
+      axisQuat: this.axisQuat,
+      planetTint: ringTint,
+      atmoColor: this.atmoColor,
+      hasAtmosphere: (this.atmoDensity || 0) > 0.02,
+    });
+    if (this.ring) {
+      this.ringMesh = this.ring.mesh;
+      this.ringSpec = this.ring.spec;
+      this.ringNormalLocal = this.ring.normalLocal;
+      this.group.add(this.ring.mesh);
+      this.group.add(this.ring.debris.mesh);
+      if (this.volCloudMat?.uniforms) bindRingShadow(this.volCloudMat.uniforms, this);
     }
   }
 
@@ -1164,6 +1170,7 @@ export class Planet extends TerrainHeightField {
     }
     const waterShader = this.liquidMat?.userData.shader;
     if (waterShader?.uniforms.uSunDir) waterShader.uniforms.uSunDir.value.copy(this.sunDirLocal);
+    this.ring?.setStellarLights(null, this.sunDirLocal);
   }
 
   setStellarLights(field) {
@@ -1251,6 +1258,7 @@ export class Planet extends TerrainHeightField {
     }
     for (const uniforms of [this.volCloudMat?.uniforms, this.terrainMaterial?.userData?.shader?.uniforms,
       this.liquidMat?.userData?.shader?.uniforms]) bindStellarOcclusion(uniforms, this);
+    this.ring?.setStellarLights(this.stellarLightField, this.sunDirLocal);
     return this.stellarLightField;
   }
 
@@ -1515,9 +1523,12 @@ export class Planet extends TerrainHeightField {
         source.localDirection.copy(source.worldDirection).applyQuaternion(this._invFrame);
       }
       this.setStellarLights(this.stellarLightField);
-    } else if (this.atmoMesh) {
-      const uniforms = this.atmoUniforms || this.atmoMesh.material.uniforms;
-      (uniforms.uStellarDirections0 || uniforms.sunDir)?.value.copy(this.sunDirLocal);
+    } else {
+      if (this.atmoMesh) {
+        const uniforms = this.atmoUniforms || this.atmoMesh.material.uniforms;
+        (uniforms.uStellarDirections0 || uniforms.sunDir)?.value.copy(this.sunDirLocal);
+      }
+      this.ring?.setStellarLights(null, this.sunDirLocal);
     }
     const waterShader = this.liquidMat?.userData.shader;
     if (waterShader?.uniforms.uSunDir) waterShader.uniforms.uSunDir.value.copy(this.sunDirLocal);
@@ -1719,6 +1730,7 @@ export class Planet extends TerrainHeightField {
         this.atmoMesh.material.side = wantedSide;
       }
     }
+    if (this.ring) this.ring.update(camLocal, animDt);
     // shells vanish near their own altitude so you fly through, not pop through;
     // each deck also gets the sun direction in its own rotating frame
     if (this.cloudBands.length) {
@@ -1959,6 +1971,11 @@ export class Planet extends TerrainHeightField {
       for (const k in this.flora) if (this.flora[k] && this.flora[k].dispose) this.flora[k].dispose();
       this.flora = null;
     }
+    if (this.ring) {
+      this.ring.dispose();
+      this.ring = null;
+      this.ringMesh = null;
+    }
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
@@ -2196,26 +2213,4 @@ function makeCloudTextures(simplex, coverage, offsets = [0, 0, 0],
     candidates.needsUpdate=true;
   }
   return { low, high, bands, bounds, candidates, stats };
-}
-
-function makeRingTexture(rand, tint) {
-  if (typeof document === 'undefined') return null;
-  const W = 256;
-  const canvas = document.createElement('canvas');
-  canvas.width = W; canvas.height = 1;
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(W, 1);
-  const d = img.data;
-  const r = tint.r * 255, g = tint.g * 255, b = tint.b * 255;
-  let a = 0;
-  for (let i = 0; i < W; i++) {
-    if (i % 8 === 0) a = rand() * rand();
-    const edge = smoothstep(0, 0.08, i / W) * (1 - smoothstep(0.85, 1, i / W));
-    d[i * 4] = lerp(200, r, 0.5);
-    d[i * 4 + 1] = lerp(190, g, 0.5);
-    d[i * 4 + 2] = lerp(180, b, 0.5);
-    d[i * 4 + 3] = a * edge * 200;
-  }
-  ctx.putImageData(img, 0, 0);
-  return new THREE.CanvasTexture(canvas);
 }

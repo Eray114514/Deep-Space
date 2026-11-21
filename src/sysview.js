@@ -12,6 +12,7 @@ import { makeRng, strHash32 } from './rng.js';
 import { orbitalPosition } from './astronomy.js';
 import { atmosphereAppearance } from './atmosphere-chemistry.js';
 import { computeBlackHoleBasis, makeBlackHoleVolumeMaterial } from './black-hole.js';
+import { resolveRingSpec, RING_PROFILE_GLSL } from './rings.js';
 
 const ORBIT_PLANE_Y = 0.18;
 const STAR_CENTER_Y = 1.12;
@@ -263,15 +264,43 @@ function atmosphereMaterial(color, opacity = 0.45) {
   });
 }
 
-function ringMaterial(seedStr, tint) {
-  const rand = makeRng(seedStr + ':ring');
-  const freq = 26 + rand() * 22, gapAt = 0.5 + rand() * 0.24, warp = 2 + rand() * 3;
-  const c = new THREE.Color(tint).multiplyScalar(0.72);
+function ringMaterial(body, innerR, outerR) {
+  const spec = resolveRingSpec(body);
   return new THREE.ShaderMaterial({
     transparent: true, side: THREE.DoubleSide, depthWrite: false,
-    uniforms: { uTint: { value: c }, uFreq: { value: freq }, uGap: { value: gapAt }, uWarp: { value: warp } },
-    vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-    fragmentShader: `uniform vec3 uTint;uniform float uFreq;uniform float uGap;uniform float uWarp;varying vec2 vUv;void main(){vec2 p=vUv*2.0-1.0;float r=length(p);float bands=.45+.55*sin(r*uFreq+sin(r*7.0)*uWarp);float edge=smoothstep(0.28,0.38,r)*(1.0-smoothstep(0.9,1.0,r));float gap=1.0-smoothstep(0.0,0.07,abs(r-uGap));float a=edge*(.17+.23*bands)*gap;gl_FragColor=vec4(uTint,a);}`,
+    uniforms: {
+      uInnerR: { value: innerR },
+      uOuterR: { value: outerR },
+      uOpticalDepth: { value: spec.opticalDepth },
+      uIceFraction: { value: spec.iceFraction },
+      uSeed: { value: spec.seed },
+      uGaps: { value: new THREE.Vector2(spec.gaps[0], spec.gaps[1]) },
+    },
+    vertexShader: `varying vec2 vRingXY;void main(){vRingXY=position.xy;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+    fragmentShader: `
+      uniform float uInnerR, uOuterR, uOpticalDepth, uIceFraction, uSeed;
+      uniform vec2 uGaps;
+      varying vec2 vRingXY;
+      ${RING_PROFILE_GLSL}
+      void main() {
+        float r = length(vRingXY);
+        float u = (r - uInnerR) / max(uOuterR - uInnerR, 1e-4);
+        if (u <= 0.001 || u >= 0.999) discard;
+        float tau = ringOpticalDensityAt(u, uSeed, uGaps, uOpticalDepth);
+        if (tau < 0.005) discard;
+        float s1 = uSeed * 62.8318;
+        float r1 = 0.5 + 0.5 * sin(u * 34.0 + s1);
+        float r2 = 0.5 + 0.5 * sin(u * 89.0 - s1 * 1.73 + r1 * 1.4);
+        vec3 rockA = vec3(0.46, 0.36, 0.28), rockB = vec3(0.68, 0.53, 0.39);
+        vec3 midA = vec3(0.75, 0.66, 0.54), midB = vec3(0.88, 0.82, 0.72);
+        vec3 iceA = vec3(0.74, 0.83, 0.93), iceB = vec3(0.92, 0.95, 0.99);
+        vec3 loCol = uIceFraction < 0.5 ? mix(rockA, midA, uIceFraction * 2.0) : mix(midA, iceA, (uIceFraction - 0.5) * 2.0);
+        vec3 hiCol = uIceFraction < 0.5 ? mix(rockB, midB, uIceFraction * 2.0) : mix(midB, iceB, (uIceFraction - 0.5) * 2.0);
+        float bandMix = clamp(r1 * 0.45 + r2 * 0.35 + (u > uGaps.x ? 0.15 : 0.0) - (u < 0.21 ? 0.22 : 0.0), 0.0, 1.0);
+        vec3 col = mix(loCol, hiCol, bandMix) * (1.0 - 0.32 * (1.0 - smoothstep(0.16, 0.25, u)));
+        float alpha = clamp((1.0 - exp(-tau * 1.15)) * 0.78, 0.0, 0.82);
+        gl_FragColor = vec4(col, alpha);
+      }`,
   });
 }
 
@@ -1022,15 +1051,16 @@ export class SystemView {
       );
       group.add(shell);
     }
-    const giant = body.type === 'gasGiant' || body.type === 'iceGiant';
-    const ringChance = body.type === 'gasGiant' ? 0.55 : body.type === 'iceGiant' ? 0.22 : 0;
-    if (rand() < ringChance) {
+    const ringSpec = resolveRingSpec(body);
+    if (ringSpec.present) {
+      const innerR = visualRadius * Math.min(1.65, Math.max(1.28, ringSpec.innerRadiusRatio));
+      const outerR = visualRadius * Math.min(2.85, Math.max(innerR / visualRadius + 0.55, ringSpec.outerRadiusRatio * 0.92));
       const ring = new THREE.Mesh(
-        new THREE.RingGeometry(visualRadius * 1.45, visualRadius * (2.3 + rand() * 0.8), 160, 2),
-        ringMaterial(body.seed, 0xc28a68),
+        new THREE.RingGeometry(innerR, outerR, 160, 2),
+        ringMaterial(body, innerR, outerR),
       );
-      ring.rotation.x = Math.PI / (2.35 + rand() * 0.5);
-      ring.rotation.z = (rand() - 0.5) * 0.4;
+      ring.rotation.x = Math.PI / 2 + (Number.isFinite(body.axialTilt) ? Math.min(0.45, Math.max(-0.45, body.axialTilt * 0.7)) : 0.28);
+      ring.rotation.z = (rand() - 0.5) * 0.35;
       group.add(ring);
     }
 

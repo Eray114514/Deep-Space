@@ -2,10 +2,17 @@ import * as THREE from 'three';
 import { makeRng } from './rng.js';
 import { resolveAtmosphereModel } from './atmosphere-chemistry.js';
 import { makeAtmosphereMaterialWebGL } from './atmosphere-webgl.js';
+import {
+  buildPlanetaryRing, RING_SHADOW_GLSL, ringShadowUniforms, bindRingShadow,
+} from './rings.js';
 
 const _camLocal = new THREE.Vector3();
+const _rotM4 = new THREE.Matrix4();
+const _meshM4 = new THREE.Matrix4();
+const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function makeBands(seed, type) {
+  if (typeof document === 'undefined') return null;
   const rand = makeRng(`${seed}:gas-bands`);
   const canvas = document.createElement('canvas');
   canvas.width = 1024; canvas.height = 512;
@@ -42,12 +49,68 @@ function makeBands(seed, type) {
   return texture;
 }
 
+function installGasGiantRingShadow(material, gasGiant) {
+  const shadowUniforms = {
+    ...ringShadowUniforms(),
+    uGasViewToLocal: { value: new THREE.Matrix3() },
+    uGasMeshToGroup: { value: new THREE.Matrix3() },
+  };
+  material.userData.ringShadowUniforms = shadowUniforms;
+  const previousRender = material.onBeforeRender;
+  material.onBeforeRender = function (renderer, scene, camera, ...args) {
+    previousRender?.call(this, renderer, scene, camera, ...args);
+    _rotM4.makeRotationFromQuaternion(gasGiant._invFrame).multiply(camera.matrixWorld);
+    shadowUniforms.uGasViewToLocal.value.setFromMatrix4(_rotM4);
+    _meshM4.makeRotationAxis(_yAxis, gasGiant.mesh?.rotation?.y || 0);
+    shadowUniforms.uGasMeshToGroup.value.setFromMatrix4(_meshM4);
+    bindRingShadow(shadowUniforms, gasGiant);
+  };
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, shadowUniforms);
+    material.userData.shader = shader;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        uniform mat3 uGasMeshToGroup;
+        varying vec3 vGasLocalPos;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vGasLocalPos = uGasMeshToGroup * position;`);
+    const lights = THREE.ShaderChunk.lights_fragment_begin
+      .replace(
+        'getDirectionalLightInfo( directionalLight, directLight );',
+        `getDirectionalLightInfo( directionalLight, directLight );
+        if (directLight.visible && uRingShadowEnabled > 0.5) {
+          vec3 localLightDir = normalize(uGasViewToLocal * directLight.direction);
+          directLight.color *= ringShadowTransmission(vGasLocalPos, localLightDir);
+        }`,
+      )
+      .replace(
+        'getPointLightInfo( pointLight, geometryPosition, directLight );',
+        `getPointLightInfo( pointLight, geometryPosition, directLight );
+        if (directLight.visible && uRingShadowEnabled > 0.5) {
+          vec3 localLightDir = normalize(uGasViewToLocal * directLight.direction);
+          directLight.color *= ringShadowTransmission(vGasLocalPos, localLightDir);
+        }`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <lights_physical_pars_fragment>', `#include <lights_physical_pars_fragment>
+        uniform mat3 uGasViewToLocal;
+        varying vec3 vGasLocalPos;
+        ${RING_SHADOW_GLSL}`)
+      .replace('#include <lights_fragment_begin>', lights);
+  };
+  material.customProgramCacheKey = () => 'gas-giant-ring-shadow-v1';
+}
+
 export class GasGiant {
-  constructor({ seed, name, catalogName, posUniv, type, radius, atmosphere = null, equilibriumK = null, fadeIn = false }) {
+  constructor({
+    seed, name, catalogName, posUniv, type, radius,
+    atmosphere = null, equilibriumK = null, ringSystem = null, fadeIn = false,
+  }) {
     this.seed = seed; this.name = name; this.catalogName = catalogName;
     this.type = type; this.isGasGiant = true; this.isMoon = false; this.landable = false;
     this.atmosphere = atmosphere;
     this.equilibriumK = Number.isFinite(equilibriumK) ? equilibriumK : null;
+    this.ringSystem = ringSystem;
     this.posUniv = posUniv.clone(); this.R = radius;
     this.atmoHeight = radius * 0.38; this.atmoDensity = type === 'iceGiant' ? 0.92 : 1.05;
     this.gravity = type === 'iceGiant' ? 12.5 : 21.5;
@@ -66,6 +129,7 @@ export class GasGiant {
       color: 0xffffff, transparent: fadeIn, opacity: this.appear,
     });
     this.terrainMaterial.userData.shader = null;
+    installGasGiantRingShadow(this.terrainMaterial, this);
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 64), this.terrainMaterial);
     this.mesh.receiveShadow = true; this.group.add(this.mesh);
 
@@ -78,24 +142,24 @@ export class GasGiant {
     this.haze.frustumCulled = false;
     this.group.add(this.haze);
 
-    const rand = makeRng(`${seed}:ring`);
-    if (rand() < 0.58) {
-      const inner = radius * (1.38 + rand() * 0.2), outer = radius * (2.15 + rand() * 0.65);
-      const ring = new THREE.RingGeometry(inner, outer, 160, 1);
-      const pos = ring.attributes.position;
-      const colors = new Float32Array(pos.count * 3);
-      for (let i = 0; i < pos.count; i++) {
-        const rr = Math.hypot(pos.getX(i), pos.getY(i));
-        const band = 0.25 + 0.55 * Math.abs(Math.sin(rr / radius * 41 + rand() * 2));
-        colors[i * 3] = band; colors[i * 3 + 1] = band * 0.9; colors[i * 3 + 2] = band * 0.72;
-      }
-      ring.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-      this.ringMesh = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.62, side: THREE.DoubleSide, depthWrite: false }));
-      this.ringMesh.rotation.x = Math.PI / 2; this.group.add(this.ringMesh);
+    this.ring = buildPlanetaryRing(this, {
+      planetTint: this.skyColor,
+      atmoColor: this.atmoColor,
+      hasAtmosphere: true,
+    });
+    if (this.ring) {
+      this.ringMesh = this.ring.mesh;
+      this.ringSpec = this.ring.spec;
+      this.ringNormalLocal = this.ring.normalLocal;
+      this.group.add(this.ring.mesh);
+      this.group.add(this.ring.debris.mesh);
+      bindRingShadow(this.terrainMaterial.userData.ringShadowUniforms, this);
     }
+
     this.sunDirLocal = new THREE.Vector3(0, 1, 0); this.sunDirWorld = new THREE.Vector3(0, 1, 0);
     this.frameOrientation = new THREE.Quaternion(); this._invFrame = new THREE.Quaternion();
     this.lod = { countChunks: () => 0 };
+    if (this.appear < 1) this.applyAppear();
   }
   get typeLabel() { return this.type === 'iceGiant' ? '冰巨星' : '气态巨星'; }
   setFrame(orientation) {
@@ -112,6 +176,7 @@ export class GasGiant {
       const u = this.hazeMaterial.uniforms;
       u.sunDir.value.copy(this.sunDirLocal);
       u.uStellarDirections0.value.copy(this.sunDirLocal);
+      this.ring?.setStellarLights(null, this.sunDirLocal);
     }
   }
   setSunDir(worldDir) {
@@ -120,6 +185,7 @@ export class GasGiant {
     const u = this.hazeMaterial.uniforms;
     u.sunDir.value.copy(this.sunDirLocal);
     u.uStellarDirections0.value.copy(this.sunDirLocal);
+    this.ring?.setStellarLights(null, this.sunDirLocal);
   }
   setStellarLights(field) {
     if (!field?.sources?.length) return this.setSunDir(this.sunDirWorld);
@@ -154,6 +220,7 @@ export class GasGiant {
     } else {
       u.uStarIrradiance1.value = 0;
     }
+    this.ring?.setStellarLights(this.stellarLightField, this.sunDirLocal);
   }
   setEclipseOccluder(occluder = null) {
     const u = this.hazeMaterial.uniforms;
@@ -176,21 +243,24 @@ export class GasGiant {
   applyAppear() {
     this.terrainMaterial.opacity = this.appear;
     this.hazeMaterial.uniforms.density.value = this.appear;
+    this.ring?.setOpacity(this.appear);
   }
   update(camWorld, dt, _focused, animDt = dt) {
     this.mesh.rotation.y += animDt * (this.type === 'iceGiant' ? 0.012 : 0.021);
-    if (this.ringMesh) this.ringMesh.rotation.z += animDt * 0.0002;
     if (camWorld) {
       this.worldOffsetToLocal(camWorld, _camLocal);
       this.hazeMaterial.uniforms.uCameraLocal.value.copy(_camLocal);
       const wantedSide = _camLocal.length() < this.hazeTopR * 1.04 ? THREE.BackSide : THREE.FrontSide;
       if (this.hazeMaterial.side !== wantedSide) this.hazeMaterial.side = wantedSide;
+      this.ring?.update(_camLocal, animDt);
+    } else {
+      this.ring?.update(null, animDt);
     }
     if (this.appear < 1) { this.appear = Math.min(1, this.appear + dt / 1.2); this.applyAppear(); }
   }
   dispose() {
     this.mesh.geometry.dispose(); this.terrainMaterial.map?.dispose(); this.terrainMaterial.dispose();
     this.haze.geometry.dispose(); this.hazeMaterial.dispose();
-    if (this.ringMesh) { this.ringMesh.geometry.dispose(); this.ringMesh.material.dispose(); }
+    if (this.ring) { this.ring.dispose(); this.ring = null; this.ringMesh = null; }
   }
 }

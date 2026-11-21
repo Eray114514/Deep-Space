@@ -18,6 +18,7 @@ import { CombatHud } from './combat-hud.js';
 import { createHabitatFurniture } from './furniture.js';
 import { OutpostDestructibles } from './destructibles.js';
 import { SurveyK9, ColonistRig, FirstPersonBody } from './k9-and-body.js';
+import { waterInteraction } from '../water-interaction.js';
 
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -723,6 +724,12 @@ export class SurfaceGameplay {
       const tHit = bestHit.raw;
       this.fx.impact({ point: tHit.point, normal: tHit.normal, surface: tHit.surface, dir: dirWorld });
       this._playImpactSound(tHit.surface, bestDist, dirWorld, tHit.normal);
+      if (tHit.surface === 'water' && planet?.hasLiquid && planet.liquid !== 'lava' && navPos) {
+        const hitUniv = _v1.copy(navPos).add(tHit.point);
+        const hitLocal = planet.worldPositionToLocal(hitUniv, _v2).normalize().multiplyScalar(planet.seaRadius);
+        waterInteraction.setPlanet(planet.seed);
+        waterInteraction.inject(hitLocal, { strength: 0.78, speed: 5.6, foam: 0.82, kind: 'impact' });
+      }
       return tHit.point;
     }
     return null;
@@ -824,6 +831,11 @@ export class SurfaceGameplay {
         this._playSfx('grenade_explode', { gain: 1.0 });
         this._playSfx('explosion', { gain: 0.75 });
         this.outpostRobots.applyExplosionWorld(blastWorld, 8.5, 130);
+        if (p.hasLiquid && p.liquid !== 'lava' && g.posLocal.length() - p.seaRadius < 7.0) {
+          const splashLocal = _v1.copy(g.posLocal).normalize().multiplyScalar(p.seaRadius);
+          waterInteraction.setPlanet(p.seed);
+          waterInteraction.inject(splashLocal, { strength: 1.9, speed: 9.4, foam: 1.4, kind: 'impact' });
+        }
         if (this.campPlanet === p && this.destructibles) {
           const cLocal = this.worldToCampPoint(blastWorld, new THREE.Vector3());
           this.destructibles.explode(cLocal, 8.5, 15);

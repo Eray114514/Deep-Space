@@ -19,6 +19,7 @@
 import * as THREE from 'three';
 import { Pass, FullScreenQuad } from '../../vendor/jsm/postprocessing/Pass.js';
 import { atmosphereTransportGLSL, atmosphereUniformGLSL } from '../atmosphere-transport-glsl.js';
+import { RING_SHADOW_GLSL, ringShadowUniforms, bindRingShadow } from '../rings.js';
 import { weatherAtlasGLSL, sampleWeatherAtlas } from './weather-atlas.js';
 import { liteCloudNoiseTexture } from './lite-cloud-noise.js';
 
@@ -394,6 +395,7 @@ const marchShader = /* glsl */`
   layout(location = 1) out highp vec4 gAux;
   layout(location = 2) out highp vec4 gShaft;
   ${atmosphereTransportGLSL}
+  ${RING_SHADOW_GLSL}
   ${cloudFieldGLSL}
   ${shadowLookupGLSL}
 
@@ -403,7 +405,8 @@ const marchShader = /* glsl */`
   }
 
   // Direct sunlight reaching a point above the ground, through the shared
-  // optical-depth LUT (alpha = fraction of the solar path clear of the planet).
+  // optical-depth LUT (alpha = fraction of the solar path clear of the planet)
+  // and planetary ring shadow transmission.
   vec3 sunAt(vec3 p, vec3 sunDirection) {
     float r = length(p);
     float altitude = clamp(r - uGroundR, 0.0, uTopAltitude);
@@ -411,7 +414,7 @@ const marchShader = /* glsl */`
     vec3 tau = (uBetaRayleigh * depth.r * uRayleighScaleHeight
       + uBetaMieExtinction * depth.g * uMieScaleHeight
       + uBetaOzone * depth.b * uOzoneHalfWidth) * uDensityScale;
-    return exp(-min(tau, vec3(50.0))) * depth.a;
+    return exp(-min(tau, vec3(50.0))) * depth.a * ringShadowTransmission(p, sunDirection);
   }
 
   void main() {
@@ -1038,7 +1041,7 @@ export class LiteCloudPass extends Pass {
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
       defines: { MARCH_STEPS: steps },
       uniforms: {
-        ...air, ...field, ...shadow,
+        ...air, ...field, ...shadow, ...ringShadowUniforms(),
         uFrame: { value: 0 },
         uExtinction: extinction,
         // The four scattering octaves stand in for the many orders a thick cloud
@@ -1202,6 +1205,7 @@ export class LiteCloudPass extends Pass {
         if (next.type === 'exotic' && next.atmoColor) {
           u.uCloudTint.value.lerp(next.atmoColor, 0.16);
         }
+        bindRingShadow(u, next);
         this.layerMeters = { base, top: base + shellDepth };
       }
     }

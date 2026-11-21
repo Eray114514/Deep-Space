@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionGLSL, stellarOcclusionUniforms, bindStellarOcclusion } from './stellar-occlusion.js';
+import { RING_SHADOW_GLSL, ringShadowUniforms, bindRingShadow } from './rings.js';
 import { surfaceCloudGLSL, surfaceCloudLightingGLSL, surfaceCloudUniforms, bindSurfaceClouds,
   hasSurfaceCloudMedium, registerSurfaceCloudOwner } from './cloud/surface-clouds.js';
 const preparedSurfaces = new WeakSet();
@@ -35,6 +36,7 @@ function surfaceMediumUniforms(material, planet) {
     const uniforms = {
       ...namespacedAtmosphereUniforms(),
       ...stellarOcclusionUniforms(),
+      ...ringShadowUniforms(),
       ...surfaceCloudUniforms(planet),
       uSurfaceViewToLocal: { value: new THREE.Matrix3() },
       uMacroTerrainMap: { value: fallbackMacroTerrainTexture() },
@@ -42,6 +44,7 @@ function surfaceMediumUniforms(material, planet) {
       uMacroBodyR: { value: planet?.R || 0 },
     };
     bindMacroTerrainUniforms(uniforms, planet);
+    bindRingShadow(uniforms, planet);
     material.userData.surfaceMedium = uniforms;
   }
   return material.userData.surfaceMedium;
@@ -79,6 +82,7 @@ export function prepareSurfaceAtmosphere(material, planet) {
       rotation.makeRotationFromQuaternion(planet._invFrame).multiply(camera.matrixWorld);
       uniforms.uSurfaceViewToLocal.value.setFromMatrix4(rotation);
       bindStellarOcclusion(uniforms, planet, material);
+      bindRingShadow(uniforms, planet);
       bindSurfaceClouds(uniforms, planet, renderer, camera, material);
       bindMacroTerrainUniforms(uniforms, planet);
       const air = planet.atmosphereTransportUniforms;
@@ -109,6 +113,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
   const transport = /* glsl */`
     ${cloudAtmosphereGLSL}
     ${stellarOcclusionGLSL}
+    ${RING_SHADOW_GLSL}
     ${surfaceCloudGLSL}
     ${surfaceCloudLightingGLSL}
     uniform mat3 uSurfaceViewToLocal;
@@ -164,9 +169,10 @@ export function installSurfaceAtmosphere(material, planet, shader) {
 
     vec3 surfaceSunTransmission(vec3 direction) {
       float cloud = surfaceCloudLighting(direction);
+      float ringShadow = ringShadowTransmission(vLocalPos, direction);
       float macroTerrain = length(vViewPosition) < 220000.0
         ? surfaceMacroTerrainShadow(vLocalPos, direction) : 1.0;
-      if (air_uEnabled < 0.5) return vec3(cloud * macroTerrain);
+      if (air_uEnabled < 0.5) return vec3(cloud * macroTerrain * ringShadow);
       float h = max(length(vLocalPos) - air_uGroundR, 0.0);
       float mu = dot(normalize(vLocalPos), direction);
       float visible = step(0.0, air_solarHorizonClearance(vLocalPos, direction));
@@ -174,7 +180,7 @@ export function installSurfaceAtmosphere(material, planet, shader) {
       vec3 od = air_sunlightOpticalDepth(h, mu).rgb
         * vec3(air_uRayleighScaleHeight, air_uMieScaleHeight, air_uOzoneHalfWidth) * air_uDensityScale;
       return exp(-(air_uBetaRayleigh * od.r + air_uBetaMieExtinction * od.g + air_uBetaOzone * od.b))
-        * (visible * cloud * macroTerrain);
+        * (visible * cloud * macroTerrain * ringShadow);
     }
 
     vec3 gStarDir0 = vec3(0.0, 1.0, 0.0);

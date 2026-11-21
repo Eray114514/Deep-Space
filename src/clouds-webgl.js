@@ -1,6 +1,7 @@
 import { cloudAirTransportGLSL } from './cloud/cloud-air-transport-glsl.js';
 import { namespacedAtmosphereUniforms } from './atmosphere-uniforms.js';
 import { stellarOcclusionUniforms, bindStellarOcclusion, stellarOcclusionGLSL } from './stellar-occlusion.js';
+import { RING_SHADOW_GLSL, ringShadowUniforms } from './rings.js';
 import { cloudAtmosphereGLSL } from './atmosphere-transport-glsl.js';
 import { weatherAtlasGLSL } from './cloud/weather-atlas.js';
 import { nearProductionCloudGLSL, productionCloudGLSL } from './cloud/production-medium-glsl.js';
@@ -192,6 +193,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       uEclipseCenter: { value: new THREE.Vector3() },
       uEclipseRadius: { value: 1 },
       uEclipseStarAngle: { value: 0 },
+      ...ringShadowUniforms(),
       uAmbC: { value: new THREE.Color(0.35, 0.42, 0.55) },
       uTint: { value: new THREE.Color(band.tint || 0xffffff) },
       uEngage: { value: 0 },
@@ -256,10 +258,12 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
       varying vec3 vViewDirection;
 
       ${stellarOcclusionGLSL}
+      ${RING_SHADOW_GLSL}
       ${weatherAtlasGLSL}
       float eclipseVisibility(vec3 samplePosition, vec3 sunDirection) {
-        if (uLocalOccluderCount > 0) return localStellarVisibility(samplePosition,sunDirection);
-        if (uEclipseEnabled < 0.5) return 1.0;
+        float ringVis = ringShadowTransmission(samplePosition, sunDirection);
+        if (uLocalOccluderCount > 0) return localStellarVisibility(samplePosition,sunDirection) * ringVis;
+        if (uEclipseEnabled < 0.5) return ringVis;
         vec3 toOccluder = uEclipseCenter - samplePosition;
         float distanceToOccluder = length(toOccluder);
         if (distanceToOccluder <= uEclipseRadius) return 0.0;
@@ -269,7 +273,7 @@ export function makeCloudVolumeMaterial(planet, band, detailTex, weatherMap,
           normalize(toOccluder), sunDirection), -1.0, 1.0));
         float penumbra = max(uEclipseStarAngle, 0.00002);
         return smoothstep(max(angularRadius - penumbra, 0.0),
-          angularRadius + penumbra, separation);
+          angularRadius + penumbra, separation) * ringVis;
       }
 
       // the SAME coverage fbm the impostor deck, terrain shadows and the CPU
