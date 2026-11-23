@@ -340,15 +340,22 @@ export class StarMap {
     this.labelIdentityCache = new Map();
 
     this.buildDOM();
-    this.buildRenderer();
-    this.sysview = new SystemView({
-      host: this.els.sysviewHost,
-      labelHost: this.els.labelLayer,
-      navArrow: this.els.navArrow,
-      nameTag: this.els.nameTag,
-      onSelect: (body) => this.onBodySelect(body),
-      pixelRatioCap: 1.25,
-    });
+    // Defer WebGL2 context creation until the star map / system view is actually
+    // opened so boot only allocates a single WebGL2 context for the main scene.
+    this.renderer = null;
+    this.rendererReady = false;
+    this.rendererInitError = null;
+    this.rendererInit = Promise.resolve();
+    this.sysview = null;
+    this._canvasEventsBound = false;
+    this._contextLost = false;
+    this._onContextLost = (event) => {
+      event.preventDefault();
+      this._contextLost = true;
+    };
+    this._onContextRestored = () => {
+      this._contextLost = false;
+    };
     this.bindUI();
   }
 
@@ -487,6 +494,38 @@ export class StarMap {
   }
 
   // ---- galaxy renderer --------------------------------------------------------
+  ensureRenderer() {
+    if (this.renderer) return this.rendererReady;
+    try {
+      this.buildRenderer();
+      this.bindCanvasEvents();
+      return this.rendererReady;
+    } catch (error) {
+      this.rendererReady = false;
+      this.rendererInitError = error;
+      console.error('Star map renderer failed to initialize.', error);
+      return false;
+    }
+  }
+
+  ensureSysview() {
+    if (this.sysview) return this.sysview;
+    try {
+      this.sysview = new SystemView({
+        host: this.els.sysviewHost,
+        labelHost: this.els.labelLayer,
+        navArrow: this.els.navArrow,
+        nameTag: this.els.nameTag,
+        onSelect: (body) => this.onBodySelect(body),
+        pixelRatioCap: 1.25,
+      });
+      return this.sysview;
+    } catch (error) {
+      console.error('System preview renderer failed to initialize.', error);
+      return null;
+    }
+  }
+
   buildRenderer() {
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.FogExp2(0x0c1112, 0.0026);
@@ -496,6 +535,8 @@ export class StarMap {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true, alpha: true, powerPreference: 'high-performance',
     });
+    this.renderer.domElement.addEventListener('webglcontextlost', this._onContextLost, false);
+    this.renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored, false);
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -562,6 +603,11 @@ export class StarMap {
       playMapSound('ui_click');
       this.warpToSelection();
     });
+  }
+
+  bindCanvasEvents() {
+    if (this._canvasEventsBound || !this.renderer) return;
+    this._canvasEventsBound = true;
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (event) => {
       this.pointerStart = { x: event.clientX, y: event.clientY };
@@ -603,8 +649,8 @@ export class StarMap {
     if (event.code === 'Escape') { this.goBack(); return; }
     if (this.mode === 'system') {
       if (event.code === 'KeyX') { this.warpToSelection(); return; }
-      if (event.code === 'KeyV') this.sysview.setLabelsVisible(!this.sysview.labelsVisible);
-      if (event.code === 'KeyQ') this.sysview.resetView();
+      if (event.code === 'KeyV' && this.sysview) this.sysview.setLabelsVisible(!this.sysview.labelsVisible);
+      if (event.code === 'KeyQ') this.sysview?.resetView();
     } else {
       if (event.code === 'KeyQ') this.resetGalaxyView();
     }
@@ -621,11 +667,12 @@ export class StarMap {
     this.els.canvas.style.opacity = '';
     this.els.sysviewHost.style.opacity = '';
     if (this.controls) this.controls.enabled = true;
-    if (suspendSysview) this.sysview.suspend();
+    if (suspendSysview) this.sysview?.suspend();
   }
 
   open() {
     if (this.isOpen) return;
+    if (!this.ensureRenderer()) return;
     this.isOpen = true;
     this._clearTransition({ suspendSysview: true });
     this.root.classList.remove('hidden');
@@ -642,8 +689,8 @@ export class StarMap {
     this.root.classList.remove('mode-system');
     this.selectedStar = this.getUniverse().system.star;
     this.selectedPlanet = null;
-    this.sysview.suspend();
-    this.sysview.setLabelsVisible(true);
+    this.sysview?.suspend();
+    this.sysview?.setLabelsVisible(true);
     this.updateRail();
     this.updateHints();
     this.els.loading.classList.add('done');
@@ -666,7 +713,7 @@ export class StarMap {
     this._lastHoverStar = null;
     this.els.loading.classList.add('done');
     cancelAnimationFrame(this.raf);
-    if (this.mode === 'system') this.sysview.suspend();
+    if (this.mode === 'system') this.sysview?.suspend();
   }
 
   // Full teardown for hot-reload / context-loss recovery. close() is the
@@ -675,10 +722,11 @@ export class StarMap {
   dispose() {
     clearTimeout(this._openTimer);
     cancelAnimationFrame(this.raf);
-    window.removeEventListener('resize', this._resize);
+    if (this._resize) window.removeEventListener('resize', this._resize);
     // Tear down the embedded system viewer first — it owns its own WebGL
     // renderer, composer, and a large texture cache.
     this.sysview?.dispose();
+    this.sysview = null;
     // Free the galaxy-level renderer + its textures + controls. OrbitControls
     // attaches listeners to renderer.domElement, so dispose order matters:
     // controls.dispose() must run before renderer.dispose() releases the
@@ -688,9 +736,17 @@ export class StarMap {
     this.selectionTexture?.dispose();
     this.softTexture?.dispose();
     this.blackHoleMarkerTexture?.dispose();
-    disposeObject(this.world);
-    this.renderer?.dispose();
-    this.renderer?.forceContextLoss?.();
+    if (this.world) disposeObject(this.world);
+    if (this.renderer) {
+      this.renderer.domElement.removeEventListener('webglcontextlost', this._onContextLost, false);
+      this.renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored, false);
+      this.renderer.dispose();
+      this.renderer.forceContextLoss?.();
+      this.renderer.domElement.remove();
+      this.renderer = null;
+      this.rendererReady = false;
+    }
+    this._canvasEventsBound = false;
     this.previewCache.clear();
     this.visitedSystems.clear();
   }
@@ -700,14 +756,14 @@ export class StarMap {
     if (this.mode === 'galaxy') return;
     const focusStar = this.selectedStar || this.getUniverse().system.star;
     const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const hadSystemScene = this.sysview.world.children.length > 0;
+    const hadSystemScene = (this.sysview?.world?.children?.length || 0) > 0;
     this._clearTransition({ suspendSysview: false });
     this.mode = 'galaxy';
     this.root.classList.add('mode-galaxy');
     this.root.classList.remove('mode-system');
     this.els.loading.classList.add('done');
     this.selectedStar = focusStar;
-    this.sysview.selectBody(null);
+    this.sysview?.selectBody(null);
     this.selectedPlanet = null;
     playMapSound('ui_click');
     this.updateRail();
@@ -723,7 +779,7 @@ export class StarMap {
       this.root.classList.add('sm-transitioning-out');
       this.els.canvas.style.opacity = '0';
       this.els.sysviewHost.style.opacity = '1';
-      this.sysview.beginOutro();
+      this.sysview?.beginOutro();
       this.controls.target.copy(starPos);
       this.camera.position.set(starPos.x, 3.2, starPos.z + 0.01);
       this.controls.update();
@@ -737,7 +793,7 @@ export class StarMap {
         toTarget: starPos.clone(),
       };
     } else {
-      this.sysview.suspend();
+      this.sysview?.suspend();
       this.resetGalaxyView(starPos);
     }
   }
@@ -778,23 +834,29 @@ export class StarMap {
     // 让浏览器先渲染一帧潜入过渡，再构建 3D 星系场景，避免点击瞬间卡顿
     await new Promise((resolve) => requestAnimationFrame(() => resolve()));
     if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
-    await this.sysview.suspend();
-    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
-    await this.sysview.readyPromise;
-    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
-    if (!this.sysview.rendererReady) {
+    const sysview = this.ensureSysview();
+    if (!sysview) {
       this._clearTransition();
       this.els.loading.classList.add('done');
-      console.error('System preview renderer did not initialize.', this.sysview.rendererInitError);
+      return;
+    }
+    await sysview.suspend();
+    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
+    await sysview.readyPromise;
+    if (this.mode !== 'system' || this.selectedStar !== selectedStar) return;
+    if (!sysview.rendererReady) {
+      this._clearTransition();
+      this.els.loading.classList.add('done');
+      console.error('System preview renderer did not initialize.', sysview.rendererInitError);
       return;
     }
     const preview = this.systemPreview(selectedStar);
-    this.sysview.buildSystem(preview, this.getTime());
+    sysview.buildSystem(preview, this.getTime());
     this.updateSystemPanel(preview);
     this.onBodySelect(null);
     this.resize();
-    this.sysview.frame(0);
-    if (!reduced) this.sysview.beginIntro();
+    sysview.frame(0);
+    if (!reduced) sysview.beginIntro();
     if (this._viewTransition?.kind === 'to-system') {
       this._viewTransition.startedAt = performance.now();
       this._viewTransition.systemBuilt = true;
@@ -1422,7 +1484,7 @@ export class StarMap {
   onBodySelect(body) {
     const changed = body && body !== this.selectedPlanet;
     this.selectedPlanet = body;
-    this.sysview.selectBody(body);
+    this.sysview?.selectBody(body);
     if (changed) playMapSound('ui_click');
     const has = !!body;
     for (const panel of [this.els.planetLeft, this.els.planetRight]) {
@@ -1510,12 +1572,13 @@ export class StarMap {
 
   // ---- frame / layout -----------------------------------------------------------
   resize() {
+    if (!this.renderer) return;
     const w = Math.max(1, this.els.canvas.clientWidth || this.root.clientWidth || innerWidth);
     const h = Math.max(1, this.els.canvas.clientHeight || this.root.clientHeight || innerHeight);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    if (this.mode === 'system' || this._viewTransition) this.sysview.resize();
+    if (this.mode === 'system' || this._viewTransition) this.sysview?.resize();
     this.updateResponsiveLayout(w, h);
   }
 
@@ -1576,8 +1639,8 @@ export class StarMap {
         const sysAlpha = tr.systemBuilt ? THREE.MathUtils.smoothstep(p, 0.12, 0.92) : 0;
         this.els.canvas.style.opacity = galaxyAlpha.toFixed(3);
         this.els.sysviewHost.style.opacity = sysAlpha.toFixed(3);
-        if (this.rendererReady && galaxyAlpha > 0.005) this.renderer.render(this.scene, this.camera);
-        if (tr.systemBuilt) this.sysview.frame(dt);
+        if (this.rendererReady && !this._contextLost && galaxyAlpha > 0.005) this.renderer.render(this.scene, this.camera);
+        if (tr.systemBuilt) this.sysview?.frame(dt);
         if (p >= 1 && tr.systemBuilt) this._clearTransition({ suspendSysview: false });
       } else {
         const sysAlpha = 1 - THREE.MathUtils.smoothstep(p, 0.0, 0.68);
@@ -1585,8 +1648,8 @@ export class StarMap {
         this.els.sysviewHost.style.opacity = sysAlpha.toFixed(3);
         this.els.canvas.style.opacity = galaxyAlpha.toFixed(3);
         this.updateMapLabels();
-        if (sysAlpha > 0.005) this.sysview.frame(dt);
-        if (this.rendererReady) this.renderer.render(this.scene, this.camera);
+        if (sysAlpha > 0.005) this.sysview?.frame(dt);
+        if (this.rendererReady && !this._contextLost) this.renderer.render(this.scene, this.camera);
         if (p >= 1) {
           this.resetGalaxyView(tr.toTarget);
           this._clearTransition({ suspendSysview: true });
@@ -1598,9 +1661,9 @@ export class StarMap {
       this.controls.update();
       this.updateGalaxyOverview();
       this.updateMapLabels();
-      if (this.rendererReady) this.renderer.render(this.scene, this.camera);
+      if (this.rendererReady && !this._contextLost) this.renderer.render(this.scene, this.camera);
     } else {
-      this.sysview.frame(dt);
+      this.sysview?.frame(dt);
     }
   }
 }

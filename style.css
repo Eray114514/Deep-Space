@@ -1004,6 +1004,42 @@ body:has(#graphics-settings-panel:not(.hidden)) .hero-dossier { opacity: 0 !impo
 
 #err { position: fixed; z-index: 100; inset: 18px; padding: 18px; overflow: auto; color: #ffd8d8; background: rgba(40, 0, 0, .94); font: 12px/1.5 var(--ui-mono); white-space: pre-wrap; }
 
+#webgl-error {
+  position: fixed; z-index: 95; inset: 0; display: grid; place-items: center; padding: 24px;
+  background: rgba(9, 10, 11, .92);
+}
+#webgl-error.hidden { display: none; }
+.webgl-error-panel {
+  width: min(600px, 92vw); max-height: calc(100vh - 48px); overflow: auto; padding: 28px 30px;
+  color: var(--menu-ink); background: var(--menu-plate);
+  border-top: 2px solid var(--menu-warn); box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+}
+.webgl-error-eyebrow { color: var(--menu-warn); font: 600 11px/1 var(--font-hud); letter-spacing: .22em; }
+.webgl-error-panel h2 { margin-top: 12px; font: 500 clamp(22px, 3vw, 30px)/1.12 var(--font-latin); letter-spacing: .06em; }
+.webgl-error-summary { margin-top: 16px; color: var(--menu-muted); font: 400 13px/1.65 var(--font-latin); }
+.webgl-error-steps { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 4px; }
+.webgl-error-steps > li {
+  display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: start;
+  padding: 12px 14px 12px 0; background: var(--menu-row);
+}
+.webgl-error-steps .step-num {
+  text-align: center; color: var(--menu-warn); font: 600 12px/1.4 var(--font-hud); letter-spacing: .12em;
+}
+.webgl-error-steps .step-body b { display: block; font: 600 13px/1.4 var(--font-latin); color: var(--menu-ink); }
+.webgl-error-steps .step-body p { margin-top: 4px; font: 400 12px/1.55 var(--font-latin); color: var(--menu-muted); }
+.webgl-error-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.webgl-error-btn {
+  min-height: 40px; padding: 0 18px; border: 1px solid var(--menu-line);
+  background: transparent; color: var(--menu-ink); cursor: pointer;
+  font: 600 13px/1 var(--font-latin); letter-spacing: .08em;
+}
+.webgl-error-btn.is-primary { background: var(--menu-select); color: var(--menu-select-ink); border-color: var(--menu-select); }
+.webgl-error-btn:hover, .webgl-error-btn:focus-visible { background: var(--menu-select); color: var(--menu-select-ink); outline: 0; }
+.webgl-error-footer {
+  margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--menu-line);
+  color: var(--menu-dim); font: 400 11px/1.5 var(--ui-mono); word-break: break-word;
+}
+
 #touch-ui { position: fixed; z-index: 20; inset: 0; pointer-events: none; }
 /* Touch devices keep the stick; mouse/desktop play should leave this corner clean. */
 #joystick {

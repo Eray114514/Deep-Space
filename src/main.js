@@ -174,7 +174,72 @@ const rendererOptions = {
   logarithmicDepthBuffer: true,
   powerPreference: qs.get('gpu') === 'low' ? 'low-power' : 'high-performance',
 };
-const rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
+function showWebGLRecoveryScreen(error) {
+  const loadingEl = document.getElementById('loading');
+  if (loadingEl) loadingEl.classList.add('hidden');
+  const panel = document.getElementById('webgl-error');
+  if (!panel) return;
+  const titleEl = document.getElementById('webgl-error-title');
+  const summaryEl = document.getElementById('webgl-error-summary');
+  const stepsEl = document.getElementById('webgl-error-steps');
+  const detailEl = document.getElementById('webgl-error-detail');
+  const retryBtn = document.getElementById('webgl-retry-btn');
+  const safeBtn = document.getElementById('webgl-safe-btn');
+
+  const blocked = error?.code === 'webgl-domain-blocked';
+  const disabled = error?.code === 'webgl-disabled';
+
+  if (titleEl) {
+    titleEl.textContent = blocked
+      ? '浏览器已暂时阻止本页面的 WebGL'
+      : disabled
+        ? '当前浏览器未启用 WebGL 2 硬件加速'
+        : '无法创建 WebGL 2 图形上下文';
+  }
+  if (summaryEl) {
+    summaryEl.textContent = blocked
+      ? '先前的显卡驱动重置、系统休眠或上下文丢失触发了浏览器的保护机制，Chromium 已在本次会话中锁定当前站点的 WebGL 权限（仅刷新页面无法解除）。'
+      : disabled
+        ? '本作需要 WebGL 2 渲染支持。当前浏览器可能关闭了硬件加速，或显卡驱动处于受限状态。'
+        : '初始化 WebGL 2 渲染器失败，可能是显存不足、同时打开了过多 3D 标签页或显卡驱动异常。';
+  }
+  const steps = blocked
+    ? [
+      ['完全重启浏览器', '关闭浏览器所有窗口（确认任务管理器 / 系统托盘中无后台进程）后重新打开本页，即可解除站点的 WebGL 锁定。'],
+      ['降低负载进入', '若设备刚经历休眠唤醒或显存紧张，重启后可点击下方“低负载模式重试”，关闭多重采样与高分辨率目标。'],
+      ['检查图形加速与驱动', '在浏览器设置中确认已开启“使用图形加速”，如频繁触发请更新显卡驱动。'],
+    ]
+    : [
+      ['启用图形加速并重启浏览器', '打开浏览器设置 → 系统 → 开启“使用图形加速”，完全重启浏览器后再试。'],
+      ['关闭多余 3D / 视频标签页', '释放显存与 WebGL 上下文配额后重新加载本页。'],
+      ['尝试低负载模式', '点击下方“低负载模式重试”以最小渲染属性启动。'],
+    ];
+  if (stepsEl) {
+    stepsEl.innerHTML = steps.map(([heading, body], idx) => (
+      `<li><span class="step-num">0${idx + 1}</span><div class="step-body"><b>${heading}</b><p>${body}</p></div></li>`
+    )).join('');
+  }
+  if (detailEl) {
+    const reason = error?.statusMessage || error?.message || 'Unknown WebGL creation error';
+    detailEl.textContent = `诊断信息：${reason}`;
+  }
+  retryBtn?.addEventListener('click', () => location.reload(), { once: true });
+  safeBtn?.addEventListener('click', () => {
+    const url = new URL(location.href);
+    url.searchParams.set('quality', 'performance');
+    location.href = url.toString();
+  }, { once: true });
+  panel.classList.remove('hidden');
+}
+
+let rendererRuntime;
+try {
+  rendererRuntime = await createGameRenderer(rendererPolicy, rendererOptions);
+} catch (error) {
+  console.error('Failed to initialize WebGL 2 renderer:', error?.statusMessage || error?.message, error);
+  showWebGLRecoveryScreen(error);
+  await new Promise(() => {});
+}
 const renderer = rendererRuntime.renderer;
 renderer.debug.checkShaderErrors = qs.get('shaderchecks') === '1';
 const actualRendererBackend = rendererRuntime.backend;
@@ -243,6 +308,13 @@ installDeviceRecovery(renderer, (state, detail) => {
   }
   if (notice && state === 'restored') notice.classList.add('hidden');
   console.info(`graphics device ${state}`, detail || '');
+});
+
+// Release auxiliary WebGL contexts cleanly on tab close / reload so repeated
+// refreshes do not accumulate active GPU contexts in Chromium.
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
+  try { starMap?.dispose?.(); } catch {}
 });
 
 const scene = new THREE.Scene();

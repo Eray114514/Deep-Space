@@ -333,6 +333,24 @@
   </div>
   <div id="err" class="hidden"></div>
 
+  <section id="webgl-error" class="hidden" role="alertdialog" aria-modal="true" aria-labelledby="webgl-error-title">
+    <div class="webgl-error-panel">
+      <header class="webgl-error-header">
+        <div class="webgl-error-titleblock">
+          <span class="webgl-error-eyebrow">AF/S9 · GRAPHICS RECOVERY</span>
+          <h2 id="webgl-error-title">无法创建 WebGL 2 图形上下文</h2>
+        </div>
+      </header>
+      <p id="webgl-error-summary" class="webgl-error-summary"></p>
+      <ol id="webgl-error-steps" class="webgl-error-steps"></ol>
+      <div class="webgl-error-actions">
+        <button id="webgl-retry-btn" class="webgl-error-btn is-primary" type="button">重新加载</button>
+        <button id="webgl-safe-btn" class="webgl-error-btn" type="button">低负载模式重试</button>
+      </div>
+      <footer class="webgl-error-footer"><code id="webgl-error-detail"></code></footer>
+    </div>
+  </section>
+
   <section id="perf-tutorial" class="hidden" role="dialog" aria-modal="true" aria-labelledby="perf-tutorial-title">
     <div class="perf-tutorial-panel">
       <header class="perf-tutorial-header">

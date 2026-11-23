@@ -466,6 +466,16 @@ export class SystemView {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     this.rendererReady = false;
     this.rendererInitError = null;
+    this.contextLost = false;
+    this._onContextLost = (event) => {
+      event.preventDefault();
+      this.contextLost = true;
+    };
+    this._onContextRestored = () => {
+      this.contextLost = false;
+    };
+    this.renderer.domElement.addEventListener('webglcontextlost', this._onContextLost, false);
+    this.renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored, false);
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, this.pixelRatioCap));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1254,7 +1264,7 @@ export class SystemView {
       for (const moon of record.moonPivots) moon.pivot.rotation.y += moon.speed * dt;
     }
     this._updateMarkers(t);
-    this.composer.render();
+    if (!this.contextLost) this.composer.render();
   }
 
   _updateMarkers(t) {
@@ -1306,7 +1316,10 @@ export class SystemView {
     this.composer.dispose?.();
     for (const retired of this.retiredSystems) this._disposeSystemObjects(retired.objects);
     this.retiredSystems.clear();
+    this.renderer.domElement.removeEventListener('webglcontextlost', this._onContextLost, false);
+    this.renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored, false);
     this.renderer.dispose();
+    this.renderer.forceContextLoss?.();
     this.renderer.domElement.remove();
   }
 }
