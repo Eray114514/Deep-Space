@@ -473,6 +473,136 @@ try {
   test19Desert.dispose();
 }
 
+// 5. Homeworld (瑞亚星, lush): verify ground-column critical-path refinement
+// during skydive/approach, highland performance-tier refinement to maxLevel,
+// and absence of positive plateau DC shift between maxLevel and fullMaxFreq.
+{
+  const mwCat = buildGalaxyCatalog('MILKY-038');
+  const rheaSpec = generateSystemSpec('MILKY-038', mwCat[0]).bodies.find((b) => b.type === 'lush');
+  const makeRhea = () => new Planet({
+    seed: rheaSpec.seed,
+    name: rheaSpec.name,
+    catalogName: rheaSpec.catalogName,
+    posUniv: new THREE.Vector3(),
+    type: rheaSpec.type,
+    isMoon: rheaSpec.isMoon,
+    radius: rheaSpec.radius,
+    atmosphere: rheaSpec.atmosphere,
+    clouds: rheaSpec.clouds,
+    equilibriumK: rheaSpec.equilibriumK,
+    formation: rheaSpec.formation,
+    ringSystem: rheaSpec.ringSystem,
+  });
+
+  // 5a. Plateau lodGuard must not create > 0.85 m positive vertical shift at maxLevel.
+  setTerrainScreenError(1.0);
+  const rhea = makeRhea();
+  try {
+    const maxFreq = rhea.freqAtLevel(rhea.maxLevel);
+    let maxPosDiff = -Infinity;
+    let forestDir = null;
+    for (let i = 0; i < 2000; i++) {
+      const a = i * 2.39996;
+      const y = -0.8 + (i / 2000) * 1.6;
+      const r = Math.sqrt(Math.max(0, 1 - y * y));
+      const d = new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r).normalize();
+      const hf = rhea.height(d, rhea.fullMaxFreq);
+      const biome = rhea.biomeAt(d, hf);
+      if (hf <= rhea.seaLevel + 5 || (biome !== 'forest' && biome !== 'grass')) continue;
+      if (!forestDir && hf > rhea.seaLevel + 40 && biome === 'forest') forestDir = d;
+      const diff = rhea.height(d, maxFreq) - hf;
+      if (diff > maxPosDiff) maxPosDiff = diff;
+    }
+    assert.ok(maxPosDiff < 0.85,
+      `Rhea maxLevel positive height shift ${maxPosDiff.toFixed(3)} m >= 0.85 m (plateau lodGuard regression)`);
+
+    // 5b. Ground-column critical-path priority must refine the chunk underfoot
+    // from L0 roots to maxLevel in bounded chunk builds without starving behind
+    // far-horizon L4 rings or ocean shells (deterministic: 1 completed chunk/step).
+    const walkH = rhea.height(forestDir, rhea.fullMaxFreq);
+    const walkCam = forestDir.clone().multiplyScalar(rhea.R + walkH + 1.7);
+    const initialWaterChunks = rhea.waterLod ? rhea.waterLod.countChunks() : 0;
+    let builtChunks = 0;
+    let waterBuiltDuringCatchup = 0;
+    let hitLevel = 0;
+    let hitErr = Infinity;
+    for (let step = 0; step < 440; step++) {
+      rhea.update(walkCam, 0.05, true, 0.05);
+      if (rhea.lod.groundLodDeficit === 0) break;
+      let spins = 0;
+      let b = 0;
+      while (b === 0 && ++spins < 200) {
+        b = flushChunkQueue(1);
+      }
+      builtChunks += b;
+      if (rhea.waterLod) {
+        waterBuiltDuringCatchup = rhea.waterLod.countChunks() - initialWaterChunks;
+      }
+    }
+    // Settle morph on the active ground chunk before raycasting its height.
+    for (let step = 0; step < 25; step++) {
+      rhea.update(walkCam, 0.05, true, 0.05);
+    }
+    const ray = new THREE.Raycaster(forestDir.clone().multiplyScalar(rhea.R + 50000), forestDir.clone().negate());
+    const findHit = (n) => {
+      if (hitLevel > 0) return;
+      if (n.mesh?.visible) {
+        n.mesh.updateMatrixWorld(true);
+        const hits = ray.intersectObject(n.mesh, false);
+        if (hits.length) {
+          hitLevel = n.level;
+          hitErr = hits[0].point.length() - (rhea.R + walkH);
+        }
+      }
+      if (n.children) for (const c of n.children) findHit(c);
+    };
+    for (const root of rhea.lod.roots) findHit(root);
+    assert.equal(rhea.lod.groundLodDeficit, 0,
+      `Rhea ground column failed to reach maxLevel within 440 chunks (built=${builtChunks})`);
+    assert.ok(builtChunks <= 420,
+      `Rhea ground column took ${builtChunks} chunks (expected <= 420; critical-path priority regressed)`);
+    assert.ok(waterBuiltDuringCatchup <= 4,
+      `waterLod stole ${waterBuiltDuringCatchup} chunk builds while terrain underfoot had groundLodDeficit > 0`);
+    assert.equal(hitLevel, rhea.maxLevel,
+      `Rhea ground chunk under feet is L${hitLevel} (expected maxLevel L${rhea.maxLevel})`);
+    assert.ok(Math.abs(hitErr) < 0.5,
+      `Rhea ground mesh error ${hitErr.toFixed(3)} m >= 0.5 m`);
+  } finally {
+    rhea.dispose();
+  }
+
+  // 5c. Highland spot with > 1 km low-freq deviation must still reach maxLevel on performance preset.
+  setTerrainScreenError(1.35);
+  const rheaPerf = makeRhea();
+  try {
+    let worst = { diff: 0, d: null, hf: 0 };
+    for (let i = 0; i < 2000; i++) {
+      const a = i * 2.39996;
+      const y = -0.9 + (i / 2000) * 1.8;
+      const r = Math.sqrt(Math.max(0, 1 - y * y));
+      const d = new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r).normalize();
+      const hf = rheaPerf.height(d, rheaPerf.fullMaxFreq);
+      if (hf <= rheaPerf.seaLevel + 5) continue;
+      const diff = Math.abs(hf - rheaPerf.height(d, 24));
+      if (diff > worst.diff) worst = { diff, d, hf };
+    }
+    const cam = worst.d.clone().multiplyScalar(rheaPerf.R + worst.hf + 1.7);
+    rheaPerf.lod.focused = true;
+    for (let step = 0; step < 300; step++) {
+      rheaPerf.lod.update(cam, 0.05);
+      flushChunkQueue(80);
+      if (step > 25 && rheaPerf.lod.groundLodDeficit === 0) break;
+    }
+    assert.equal(rheaPerf.lod.groundLodDeficit, 0,
+      `Rhea highland spot (|h-h24|=${worst.diff.toFixed(0)} m) must reach maxLevel on performance preset`);
+    assert.equal(rheaPerf.lod.debugStats().visibleMaxLevel, rheaPerf.maxLevel,
+      `Rhea highland spot stalled below maxLevel ${rheaPerf.maxLevel}`);
+  } finally {
+    rheaPerf.dispose();
+    setTerrainScreenError(1.0);
+  }
+}
+
 console.log('PASS: quadtree seams, 2:1 balance, border normals, highland LOD freedom, and ridge anti-aliasing', {
   checkedSameEdges,
   checkedMixedEdges,

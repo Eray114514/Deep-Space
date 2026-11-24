@@ -871,9 +871,9 @@ export class Planet extends TerrainHeightField {
         deferRoots: this.deferRoots,
         // Terrain collision and silhouette detail must reach the player first
         // after a teleport/landing. The local patch already supplies nearby
-        // water geometry, so far-water shell jobs may safely yield to terrain
-        // whenever both queues contend for the same frame budget.
-        buildPriority: 24,
+        // water geometry, so far-water shell jobs must yield to focused
+        // terrain (whose focusAngle spans 0..314) whenever both contend.
+        buildPriority: 400,
         maxCellPixels: 3.35,
         gridCells: waterGridCells,
         gridCellsAtLevel: waterGridCellsAtLevel,

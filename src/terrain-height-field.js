@@ -309,7 +309,10 @@ export class TerrainHeightField {
     if (land <= 0.01) return h;
     const t = h / this.plateauH;
     const f = Math.floor(t);
-    const lodGuard = (1.8 * this.R) / (Math.max(this.plateauH, 1) * Math.max(maxFreq, 1));
+    // Keep coarse LOD terrace slopes smooth without shifting fine ground meshes
+    // vertically relative to fullMaxFreq (where players, grass, and trees sit).
+    const rawLodGuard = (1.8 * this.R) / (Math.max(this.plateauH, 1) * Math.max(maxFreq, 1));
+    const lodGuard = Math.max(0, rawLodGuard - 0.02);
     const w = Math.min(0.5, (this.hasLiquid ? 0.30 : 0.34) + lodGuard);
     const terraced = (f + smoothstep(0.5 - w, 0.5 + w, t - f)) * this.plateauH;
     const amt = this.hasLiquid

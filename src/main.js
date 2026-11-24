@@ -6550,8 +6550,14 @@ function frame(rafTs) {
   // In narrow coastal valleys a coarse land triangle can cross the entire
   // channel. Let the shoreline catch up during a high-quality descent.
   const shorelineBacklog = heavySurfaceBacklog && !QUALITY_LOW && nearest.hasLiquid && nearestAlt < 18000;
+  // When the player is near or on the ground and the terrain chunk directly
+  // underfoot has not reached its target LOD yet, temporarily boost the build
+  // slice so grass, trees, and feet never sit below a coarse triangle sheet.
+  const groundLodCatchup = nearTerrain && nearest?.lod && nearestAlt < 2500
+    && nearest.lod.groundLodDeficit > 0;
   const terrainBuildMs=debugBuildBudgetMs || (!loadingCleared
     ? QUALITY_LOW ? 5.5 : 110
+    : groundLodCatchup ? (QUALITY_LOW ? 8 : 14)
     : shorelineBacklog ? 9 : heavySurfaceBacklog ? 4.2 : state === 'walk' ? 2.6 : nearTerrain ? 3.4 : 1.6);
   const waterBuildMs=nearest?.nearWaterPatch?.preferredBudget(nav.pos.distanceTo(nearest.posUniv)-nearest.seaRadius,dt)||0;
   sceneBuildBudget.begin(terrainBuildMs+waterBuildMs+scatter.streamBudgetMs+(FARFLORA?farFlora.streamBudgetMs:0),

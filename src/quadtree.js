@@ -123,6 +123,29 @@ const _edgeD0 = new THREE.Vector3();
 const _edgeD1 = new THREE.Vector3();
 const _ex = new THREE.Vector4();
 const _camDir = new THREE.Vector3();
+const _visibilityProbe = {
+  face: 0, level: 0, ix: 0, iy: 0, size: 0, centerDir: new THREE.Vector3(),
+};
+
+function directionToCubeFaceUV(dir) {
+  const ax = Math.abs(dir.x), ay = Math.abs(dir.y), az = Math.abs(dir.z);
+  if (ax >= ay && ax >= az) {
+    const inv = 1 / Math.max(ax, 1e-12);
+    return dir.x >= 0
+      ? { face: 0, u: -dir.z * inv, v: dir.y * inv }
+      : { face: 1, u: dir.z * inv, v: dir.y * inv };
+  }
+  if (ay >= ax && ay >= az) {
+    const inv = 1 / Math.max(ay, 1e-12);
+    return dir.y >= 0
+      ? { face: 2, u: dir.x * inv, v: -dir.z * inv }
+      : { face: 3, u: dir.x * inv, v: dir.z * inv };
+  }
+  const inv = 1 / Math.max(az, 1e-12);
+  return dir.z >= 0
+    ? { face: 4, u: dir.x * inv, v: dir.y * inv }
+    : { face: 5, u: -dir.x * inv, v: dir.y * inv };
+}
 
 // position/normal of the surface at one LOD cutoff; height and slope are
 // left in _ss for the caller (colors are the fragment shader's job now)
@@ -236,10 +259,22 @@ export function flushChunkQueue(budgetMs = 7) {
         // one wins the spatial priority race, finish its three siblings before
         // sampling another activation set; otherwise the queue can contain
         // dozens of isolated, unusable children while the centre stays coarse.
-        const activationSetPriority = e.parent === preferredBuildParent
-          ? -1e6 : 0;
-        const prio = activationSetPriority + focusBonus + explicitPriority + startupLevel
-          + focusAngle + (e.lod.nodeDistance(e) / e.size) * focusK;
+        const isUrgent = e.lod.focused && !e.lod.startupPriority
+          && e.urgentFrame === e.lod._frame;
+        let prio;
+        if (isUrgent) {
+          // Chunks on the active critical path blocking the camera's ground
+          // column preempt distant horizon chunks and water shells. Build
+          // coarser blockers first so 2:1 balance and cross-face barriers
+          // unlock cleanly instead of starving behind deeper unrelated nodes.
+          const siblingBoost = e.parent === preferredBuildParent ? -400 : 0;
+          prio = -1e6 + e.level * 1000 + siblingBoost + focusAngle;
+        } else {
+          const activationSetPriority = e.parent === preferredBuildParent
+            ? -1e5 : 0;
+          prio = activationSetPriority + focusBonus + explicitPriority + startupLevel
+            + focusAngle + (e.lod.nodeDistance(e) / e.size) * focusK;
+        }
         if (prio < bestPriority) {
           bestPriority = prio;
           bestIndex = i;
@@ -292,8 +327,9 @@ function makeNode(lod, face, level, ix, iy) {
   };
   FACE_FN[face]((u0 + node.u1) / 2, (v0 + node.v1) / 2, node.centerDir);
   node.centerDir.normalize();
+  const centerFreq = lod.planet.freqAtLevel ? lod.planet.freqAtLevel(level) : 24;
   node.centerPos.copy(node.centerDir)
-    .multiplyScalar(lod.planet.R + lod.planet.height(node.centerDir, 24));
+    .multiplyScalar(lod.planet.R + lod.planet.height(node.centerDir, centerFreq));
   return node;
 }
 
@@ -308,6 +344,8 @@ export class ChunkedLOD {
     this.camLocal = new THREE.Vector3(1e9, 0, 0);
     this.roots = [];
     this._frame = 0;
+    this._camCell = null;
+    this.groundLodDeficit = 0;
     for (let f = 0; f < 6; f++) {
       const root = makeNode(this, f, 0, 0, 0);
       if (planet.deferRoots) {
@@ -358,6 +396,9 @@ export class ChunkedLOD {
     }
     const clearance = Math.max(0, camR - localSurfaceR);
     this._cameraClearance = clearance;
+    this._camCell = camR > 1
+      ? directionToCubeFaceUV(_camDir.copy(camLocal).multiplyScalar(1 / camR))
+      : null;
     const radiusRatio = 1 + clearance / Math.max(this.planet.R, 1);
     // A 64×64 terrain chunk already resolves sub-pixel geometry at orbit.
     // Refining beyond the authored orbit cap only rebuilt imperceptible
@@ -418,9 +459,146 @@ export class ChunkedLOD {
       this._deferMorphUpload = false;
     }
     if (!this.visible) {
+      this.groundLodDeficit = 0;
       for (const root of this.roots) this.hideSubtree(root);
-    } else if (!this.planet.noMorph) {
-      this.syncVisibleEdgeMorphs();
+    } else {
+      if (!this.planet.noMorph) this.syncVisibleEdgeMorphs();
+      this.updateGroundUrgency(clearance);
+    }
+  }
+
+  beyondHorizonForAddress(face, level, ix, iy) {
+    const span = 2 / (1 << level);
+    const u = -1 + (ix + 0.5) * span;
+    const v = -1 + (iy + 0.5) * span;
+    _visibilityProbe.face = face;
+    _visibilityProbe.level = level;
+    _visibilityProbe.ix = ix;
+    _visibilityProbe.iy = iy;
+    _visibilityProbe.size = (Math.PI / 2) * this.planet.R / (1 << level);
+    FACE_FN[face](u, v, _visibilityProbe.centerDir).normalize();
+    return this.beyondHorizon(_visibilityProbe);
+  }
+
+  /**
+   * Mark every queued chunk on the exact dependency DAG blocking the camera's
+   * ground column so flushChunkQueue refines the terrain underfoot before
+   * building distant horizon chunks or ocean shells.
+   */
+  updateGroundUrgency(clearance) {
+    this.groundLodDeficit = 0;
+    if (!this.focused || this.startupPriority || this.planet.bakeDepth || !this._camCell) return;
+    let groundNode = this.roots[this._camCell.face];
+    if (!groundNode) return;
+    while (groundNode.splitActive && groundNode.children) {
+      const midU = (groundNode.u0 + groundNode.u1) * 0.5;
+      const midV = (groundNode.v0 + groundNode.v1) * 0.5;
+      const cx = this._camCell.u >= midU ? 1 : 0;
+      const cy = this._camCell.v >= midV ? 1 : 0;
+      groundNode = groundNode.children[cy * 2 + cx];
+    }
+    let targetLevel = groundNode.level;
+    while (targetLevel < this._levelCap) {
+      const sizeL = (Math.PI / 2) * this.planet.R / (1 << targetLevel);
+      const scaleL = this.planet.lodDistanceScaleAtLevel
+        ? this.planet.lodDistanceScaleAtLevel(targetLevel)
+        : this.planet.lodDistanceScale || 1;
+      if (clearance < sizeL * Math.max(1.25, SPLIT * scaleL)) {
+        targetLevel++;
+      } else {
+        break;
+      }
+    }
+    if (!groundNode.mesh || groundNode.level < targetLevel) {
+      this.groundLodDeficit = Math.max(1, targetLevel - groundNode.level);
+      this.markBlockingDeps(groundNode);
+      return;
+    }
+    if (clearance < 500 && groundNode.level >= 3) {
+      const nearRadius = Math.max(clearance * 2.5, 140);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          let addr;
+          if (dx === 0) addr = cardinalNeighbourAddress(groundNode.face, dy < 0 ? 0 : 1, groundNode.level, groundNode.ix, groundNode.iy);
+          else if (dy === 0) addr = cardinalNeighbourAddress(groundNode.face, dx < 0 ? 2 : 3, groundNode.level, groundNode.ix, groundNode.iy);
+          else addr = this.diagonalNeighbourAddress(groundNode.face, groundNode.level, groundNode.ix, groundNode.iy, dx, dy);
+          if (!addr) continue;
+          const nb = this.findVisibleCovering(addr.face, groundNode.level, addr.ix, addr.iy);
+          if (!nb || this.beyondHorizon(nb)) continue;
+          const nbScale = this.planet.lodDistanceScaleAtLevel
+            ? this.planet.lodDistanceScaleAtLevel(nb.level)
+            : this.planet.lodDistanceScale || 1;
+          const nbSplitLimit = nb.size * SPLIT * nbScale * 0.9;
+          if ((!nb.mesh || nb.level < targetLevel)
+            && this.nodeDistance(nb) < Math.min(nearRadius, nbSplitLimit)) {
+            this.groundLodDeficit = Math.max(this.groundLodDeficit, Math.max(1, targetLevel - nb.level));
+            this.markBlockingDeps(nb);
+          }
+        }
+      }
+    }
+  }
+
+  findVisibleCovering(face, level, ix, iy) {
+    let node = this.roots[face];
+    if (!node) return null;
+    for (let depth = 1; depth <= level; depth++) {
+      if (!node.splitActive || !node.children) return node;
+      const bit = level - depth;
+      const cx = (ix >> bit) & 1;
+      const cy = (iy >> bit) & 1;
+      node = node.children[cy * 2 + cx];
+    }
+    return node;
+  }
+
+  markBlockingDeps(node) {
+    if (!node || node._urgentVisit === this._frame) return;
+    node._urgentVisit = this._frame;
+    if (!node.mesh) node.urgentFrame = this._frame;
+    if (node.level >= this._levelCap) return;
+    if (node.children) {
+      for (const c of node.children) {
+        if (!c.mesh) c.urgentFrame = this._frame;
+      }
+    }
+    for (const edge of this.boundaryEdges(node)) {
+      const addr = this.neighbourAddress(node, edge);
+      const peer = this.findNode(addr.face, node.level, addr.ix, addr.iy, false);
+      if (!peer || this.beyondHorizon(peer)) continue;
+      for (let owner = peer; owner; owner = owner.parent) {
+        if (!owner.mesh) owner.urgentFrame = this._frame;
+      }
+      if (peer.children) {
+        for (const c of peer.children) {
+          if (!c.mesh) c.urgentFrame = this._frame;
+        }
+      }
+      if (!peer.splitActive) this.markBlockingDeps(peer);
+    }
+    if (node.level >= 1) {
+      const parentIx = node.ix >> 1;
+      const parentIy = node.iy >> 1;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          let addr;
+          if (dx === 0) addr = cardinalNeighbourAddress(node.face, dy < 0 ? 0 : 1, node.level, node.ix, node.iy);
+          else if (dy === 0) addr = cardinalNeighbourAddress(node.face, dx < 0 ? 2 : 3, node.level, node.ix, node.iy);
+          else addr = this.diagonalNeighbourAddress(node.face, node.level, node.ix, node.iy, dx, dy);
+          if (!addr) continue;
+          const pIx = addr.ix >> 1;
+          const pIy = addr.iy >> 1;
+          if (addr.face === node.face && pIx === parentIx && pIy === parentIy) continue;
+          const peerParent = this.findNode(addr.face, node.level - 1, pIx, pIy, false);
+          if (!peerParent || this.beyondHorizon(peerParent)) continue;
+          for (let owner = peerParent; owner; owner = owner.parent) {
+            if (!owner.mesh) owner.urgentFrame = this._frame;
+          }
+          if (!peerParent.splitActive) this.markBlockingDeps(peerParent);
+        }
+      }
     }
   }
 
@@ -489,14 +667,18 @@ export class ChunkedLOD {
     const screenWantSplit = node.level <= 10 && screenCellPx > this.maxCellPixels;
     const screenRetainSplit = node.level <= 10
       && screenCellPx > this.maxCellPixels * 0.75;
+    const containsCam = this._camCell !== null && node.face === this._camCell.face
+      && this._camCell.u >= node.u0 && this._camCell.u <= node.u1
+      && this._camCell.v >= node.v0 && this._camCell.v <= node.v1;
+    const groundWantSplit = containsCam && cameraAltitude < node.size * 1.25;
     const naturalWantSplit = node.level < this._levelCap
       && (d < node.size * splitDistance || screenWantSplit
-        || node.level < this._forceLevel)
+        || node.level < this._forceLevel || groundWantSplit)
       && !beyond;
     const forcedAcrossFace = node.forceSplitUntil >= this._frame && !beyond;
     const wantSplit = naturalWantSplit || forcedAcrossFace;
     const wantMerge = node.level >= this._levelCap || beyond
-      || (!forcedAcrossFace && d > node.size * mergeDistance && !screenRetainSplit);
+      || (!forcedAcrossFace && !groundWantSplit && d > node.size * mergeDistance && !screenRetainSplit);
     const keepSplit = wantSplit || (node.splitActive && !wantMerge);
 
     if (!node.mesh) {
@@ -514,7 +696,7 @@ export class ChunkedLOD {
       // time before the extra geometry is actually resolvable.
       const reach = (this.planet.noMorph ? SPLIT : (this.focused ? 5.8 : PREFETCH)) * distanceScale;
       if (d < node.size * reach || screenWantSplit
-        || node.level < this._forceLevel || forcedAcrossFace) {
+        || node.level < this._forceLevel || forcedAcrossFace || groundWantSplit) {
         this.createChildren(node);
       }
     }
@@ -703,9 +885,8 @@ export class ChunkedLOD {
       // path. Checking only afterwards queued a hidden branch every frame,
       // which its normal horizon cleanup immediately destroyed again.
       const existingPeer = this.findNode(address.face, node.level, address.ix, address.iy, false);
-      const visibilityPeer = existingPeer || makeNode(this, address.face,
-        node.level, address.ix, address.iy);
-      if (this.beyondHorizon(visibilityPeer)) continue;
+      if (existingPeer ? this.beyondHorizon(existingPeer)
+        : this.beyondHorizonForAddress(address.face, node.level, address.ix, address.iy)) continue;
       const peer = this.findNode(address.face, node.level, address.ix, address.iy, true);
       if (!peer || this.beyondHorizon(peer)) continue;
       // The peer is only reachable through its ancestors. Keeping just this
@@ -754,8 +935,8 @@ export class ChunkedLOD {
         const pIy = addr.iy >> 1;
         if (addr.face === node.face && pIx === parentIx && pIy === parentIy) continue;
         const existingParent = this.findNode(addr.face, node.level - 1, pIx, pIy, false);
-        const visibilityParent = existingParent || makeNode(this, addr.face, node.level - 1, pIx, pIy);
-        if (this.beyondHorizon(visibilityParent)) continue;
+        if (existingParent ? this.beyondHorizon(existingParent)
+          : this.beyondHorizonForAddress(addr.face, node.level - 1, pIx, pIy)) continue;
         const peerParent = this.findNode(addr.face, node.level - 1, pIx, pIy, true);
         if (!peerParent || this.beyondHorizon(peerParent)) continue;
         for (let owner = peerParent; owner; owner = owner.parent) {
@@ -784,8 +965,8 @@ export class ChunkedLOD {
         const pIy = addr.iy >> 1;
         if (addr.face === node.face && pIx === parentIx && pIy === parentIy) continue;
         const peerParent = this.findNode(addr.face, node.level - 1, pIx, pIy, false);
-        const visibilityParent = peerParent || makeNode(this, addr.face, node.level - 1, pIx, pIy);
-        if (this.beyondHorizon(visibilityParent)) continue;
+        if (peerParent ? this.beyondHorizon(peerParent)
+          : this.beyondHorizonForAddress(addr.face, node.level - 1, pIx, pIy)) continue;
         if (!peerParent || !peerParent.splitActive) {
           return false;
         }
