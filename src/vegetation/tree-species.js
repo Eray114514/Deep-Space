@@ -1,19 +1,19 @@
 // Tree species for one planet. The ez-tree generator grows each species'
-// skeleton once; this module meshes it at four levels of detail that all share
-// that skeleton, so a tree keeps its silhouette from arm's length to the
-// horizon:
+// skeleton once; this module meshes it at four silhouette-locked levels of
+// detail that share that exact skeleton and deterministic per-leaf colours,
+// so a tree never morphs, changes silhouette, or shifts tint as you approach:
 //
-//   near      full branch and leaf detail
-//   mid       thinned rings and leaves (larger leaf cards keep the coverage)
-//   far       trunk and main limbs, a few dozen big foliage cards
-//   horizon   crossed silhouettes and an overhead projection of the crown
+//   near      full branch and leaf detail + subtle sloped-ground root flare
+//   mid       smooth curved limbs + spatially stratified 34% foliage (1.5x)
+//   far       trunk & primary limbs + nested stratified 12% foliage (2.25x)
+//   horizon   crossed dome-lit silhouettes and an overhead crown projection
 //
-// Every level is one indexed geometry (bark and foliage merged, atlas uvs,
-// vertex colours for the species tint) so the tree field can instance it with
-// a single material.
+// Every level is one indexed geometry (bark u<0.5 and foliage u>=0.5 merged,
+// vertex colours for species tint) so the tree field instances it in one draw.
 
 import * as THREE from 'three';
 import { Tree } from '../../vendor/ez-tree/tree.js';
+import { Billboard } from '../../vendor/ez-tree/enums.js';
 import { makeRng } from '../rng.js';
 import {
   BARK_RECT, CELL_BROADLEAF, CELL_BUSH, CELL_FROND, CELL_IMPOSTOR_0, CELL_NEEDLE,
@@ -40,79 +40,266 @@ const TYPE_TREES = {
 };
 const DEFAULT_TREES = [['oak', 'aspen'], ['pine', 'ash']];
 
-const DETAIL = {
-  near: {},
-  mid: { sectionStride: 5, segmentFactor: 0.4, leafStride: 10, leafScale: 3.0 },
-  far: { sectionStride: 99, segmentFactor: 0.01, leafStride: 40, leafScale: 5.3 },
+// Gentle, silhouette-locked LOD parameters.
+// `mid` keeps curved boughs (sectionStride 2) and 34% of leaves at 1.52x
+// via 3D spatial-envelope stratification (no periodic branch skipping or 3x
+// balloon leaves). `far` takes a nested subset of the same priority order.
+const LOD_SPECS = {
+  near: { sectionStride: 1, segmentFactor: 1.0,  minBranchFrac: 0.0,  leafKeep: 1.0,  leafScale: 1.0,  grid: 0,  billboard: null },
+  mid:  { sectionStride: 2, segmentFactor: 0.50, minBranchFrac: 0.10, leafKeep: 0.28, leafScale: 1.62, grid: 10, billboard: null },
+  far:  { sectionStride: 6, segmentFactor: 0.25, minBranchFrac: 0.24, leafKeep: 0.15, leafScale: 2.32, grid: 7,  billboard: Billboard.Single },
+  bush: { sectionStride: 2, segmentFactor: 0.40, minBranchFrac: 0.25, leafKeep: 0.42, leafScale: 1.72, grid: 8,  billboard: null },
 };
 
 const _v = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _e = new THREE.Euler();
 
-// With segmentFactor near zero every ring is three vertices plus its seam
-// duplicate. Dropping the rings thinner than `minRadius` removes the twigs
-// (hundreds of triangles nobody can see past 200 m) and keeps trunk and limbs.
-function limbTriangles(branches, minRadius) {
-  const position = branches.getAttribute('position');
-  const index = branches.index.array;
-  const ringCount = Math.floor(position.count / 4);
-  const radius = new Float32Array(ringCount);
-  for (let ring = 0; ring < ringCount; ring++) {
-    const a = ring * 4;
-    const cx = (position.getX(a) + position.getX(a + 1) + position.getX(a + 2)) / 3;
-    const cy = (position.getY(a) + position.getY(a + 1) + position.getY(a + 2)) / 3;
-    const cz = (position.getZ(a) + position.getZ(a + 1) + position.getZ(a + 2)) / 3;
-    radius[ring] = Math.hypot(position.getX(a) - cx, position.getY(a) - cy, position.getZ(a) - cz);
-  }
-  const kept = [];
-  for (let i = 0; i < index.length; i += 3) {
-    const r = Math.max(radius[index[i] >> 2], radius[index[i + 1] >> 2], radius[index[i + 2] >> 2]);
-    if (r >= minRadius) kept.push(index[i], index[i + 1], index[i + 2]);
-  }
-  return kept;
+function leafHash(seed, index, salt = 0) {
+  let h = (Math.imul(index | 0, 374761393) ^ Math.imul((seed | 0) + (salt | 0), 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-function mergeTree({ branches, leaves }, { scale, barkColor, leafColor, cell, crownCenter, branchIndex = null, rng }) {
-  const bp = branches.getAttribute('position'), bn = branches.getAttribute('normal'), bu = branches.getAttribute('uv');
-  const lp = leaves.getAttribute('position'), ln = leaves.getAttribute('normal'), lu = leaves.getAttribute('uv');
-  const bi = branchIndex || branches.index.array, li = leaves.index.array;
-  const count = bp.count + lp.count;
-  const position = new Float32Array(count * 3), normal = new Float32Array(count * 3);
-  const uv = new Float32Array(count * 2), color = new Float32Array(count * 3);
-  const rect = cellRect(cell);
+// Mesh skeleton branches directly with exact base-radius culling (cleanly keeps
+// trunk and primary limbs without leaving torn triangles) plus a subtle flared
+// root collar extending -0.45 m below y=0 so trunks stay grounded on slopes.
+function meshSkeletonBranches(skeletonBranches, { sectionStride, segmentFactor, minRadius, scale, rootSkirt }) {
+  const verts = [], normals = [], uvs = [], indices = [];
+  for (let bIndex = 0; bIndex < skeletonBranches.length; bIndex++) {
+    const branch = skeletonBranches[bIndex];
+    if (bIndex > 0 && branch.baseRadius < minRadius) continue;
+    const { sections, segmentCount } = branch;
+    if (!sections || sections.length < 2) continue;
+    const segments = Math.max(3, Math.round(segmentCount * segmentFactor));
+    const sampled = [];
+    if (bIndex === 0 && rootSkirt > 0) {
+      const s0 = sections[0];
+      sampled.push({
+        origin: new THREE.Vector3(s0.origin.x, s0.origin.y - rootSkirt / scale, s0.origin.z),
+        orientation: s0.orientation,
+        radius: s0.radius * 1.24,
+      });
+    }
+    for (let i = 0; i < sections.length; i += sectionStride) sampled.push(sections[i]);
+    if ((sections.length - 1) % sectionStride !== 0) sampled.push(sections[sections.length - 1]);
 
-  for (let i = 0; i < bp.count; i++) {
-    position[i * 3] = bp.getX(i) * scale; position[i * 3 + 1] = bp.getY(i) * scale; position[i * 3 + 2] = bp.getZ(i) * scale;
-    normal[i * 3] = bn.getX(i); normal[i * 3 + 1] = bn.getY(i); normal[i * 3 + 2] = bn.getZ(i);
-    uv[i * 2] = BARK_RECT.u0 + Math.min(1, Math.max(0, bu.getX(i))) * (BARK_RECT.u1 - BARK_RECT.u0);
-    // one bark tile per ~1.4 m of trunk, mirrored ring to ring by the mesher
-    uv[i * 2 + 1] = bu.getY(i) * 0.5;
-    // darker toward the ground: the cheapest contact shadow there is
-    const ground = 0.62 + 0.38 * Math.min(1, (bp.getY(i) * scale) / 2.5);
-    color[i * 3] = barkColor.r * ground; color[i * 3 + 1] = barkColor.g * ground; color[i * 3 + 2] = barkColor.b * ground;
-  }
-  for (let q = 0; q < lp.count; q += 4) {
-    // one tint per card: sun-bleached outside, deep green in the crown's core
-    const tint = 0.78 + rng() * 0.42;
-    const hue = (rng() - 0.5) * 0.16;
-    for (let k = 0; k < 4; k++) {
-      const i = bp.count + q + k, s = q + k;
-      const x = lp.getX(s) * scale, y = lp.getY(s) * scale, z = lp.getZ(s) * scale;
-      position[i * 3] = x; position[i * 3 + 1] = y; position[i * 3 + 2] = z;
-      // light the crown as one rounded volume instead of a pile of planes
-      _v.set(x - crownCenter.x, (y - crownCenter.y) * 0.8, z - crownCenter.z).normalize()
-        .multiplyScalar(0.75).add({ x: ln.getX(s) * 0.25, y: ln.getY(s) * 0.25 + 0.2, z: ln.getZ(s) * 0.25 }).normalize();
-      normal[i * 3] = _v.x; normal[i * 3 + 1] = _v.y; normal[i * 3 + 2] = _v.z;
-      uv[i * 2] = rect.u0 + lu.getX(s) * (rect.u1 - rect.u0);
-      uv[i * 2 + 1] = rect.v0 + lu.getY(s) * (rect.v1 - rect.v0);
-      const depth = 0.72 + 0.28 * Math.min(1, Math.hypot(x - crownCenter.x, y - crownCenter.y, z - crownCenter.z) / crownCenter.radius);
-      color[i * 3] = leafColor.r * tint * depth * (1 + hue);
-      color[i * 3 + 1] = leafColor.g * tint * depth;
-      color[i * 3 + 2] = leafColor.b * tint * depth * (1 - hue);
+    const indexOffset = verts.length / 3;
+    for (let k = 0; k < sampled.length; k++) {
+      const section = sampled[k];
+      let firstVertex = null, firstNormal = null;
+      for (let j = 0; j < segments; j++) {
+        const angle = (Math.PI * 2 * j) / segments;
+        const ca = Math.cos(angle), sa = Math.sin(angle);
+        const vertex = new THREE.Vector3(ca, 0, sa)
+          .multiplyScalar(section.radius)
+          .applyEuler(section.orientation)
+          .add(section.origin);
+        const normal = new THREE.Vector3(ca, 0, sa)
+          .applyEuler(section.orientation)
+          .normalize();
+        if (j === 0) { firstVertex = vertex; firstNormal = normal; }
+        verts.push(vertex.x, vertex.y, vertex.z);
+        normals.push(normal.x, normal.y, normal.z);
+        uvs.push(j / segments, (k % 2) === 0 ? 0 : 1);
+      }
+      // seam duplicate
+      verts.push(firstVertex.x, firstVertex.y, firstVertex.z);
+      normals.push(firstNormal.x, firstNormal.y, firstNormal.z);
+      uvs.push(1, (k % 2) === 0 ? 0 : 1);
+    }
+    const stride = segments + 1;
+    for (let k = 0; k < sampled.length - 1; k++) {
+      for (let j = 0; j < segments; j++) {
+        const v1 = indexOffset + k * stride + j;
+        const v2 = indexOffset + k * stride + (j + 1);
+        const v3 = v1 + stride;
+        const v4 = v2 + stride;
+        indices.push(v1, v3, v2, v2, v3, v4);
+      }
     }
   }
-  const index = new Uint32Array(bi.length + li.length);
-  index.set(bi, 0);
-  for (let i = 0; i < li.length; i++) index[bi.length + i] = li[i] + bp.count;
+  return { verts, normals, uvs, indices };
+}
+
+// Select a spatially uniform, silhouette-preserving subset of skeleton leaves.
+// Every occupied 3D crown voxel first contributes its outermost leaf (locking
+// pine branch tips and broadleaf crown lobes across all LODs); remaining quota
+// is filled uniformly across voxels so no branch is ever skipped periodically.
+function selectStratifiedLeafIndices(leaves, keepRatio, gridRes, crownCenterUnscaled, leafBox, seed) {
+  const total = leaves.length;
+  if (keepRatio >= 0.999 || total === 0) {
+    const all = new Int32Array(total);
+    for (let i = 0; i < total; i++) all[i] = i;
+    return all;
+  }
+  const target = Math.max(8, Math.round(total * keepRatio));
+  const min = leafBox.min, max = leafBox.max;
+  const dx = Math.max(1e-3, max.x - min.x);
+  const dy = Math.max(1e-3, max.y - min.y);
+  const dz = Math.max(1e-3, max.z - min.z);
+  const buckets = new Map();
+  for (let i = 0; i < total; i++) {
+    const o = leaves[i].origin;
+    const gx = Math.min(gridRes - 1, Math.max(0, Math.floor(((o.x - min.x) / dx) * gridRes)));
+    const gy = Math.min(gridRes - 1, Math.max(0, Math.floor(((o.y - min.y) / dy) * gridRes)));
+    const gz = Math.min(gridRes - 1, Math.max(0, Math.floor(((o.z - min.z) / dz) * gridRes)));
+    const key = (gx * gridRes + gy) * gridRes + gz;
+    let list = buckets.get(key);
+    if (!list) { list = []; buckets.set(key, list); }
+    const distSq = (o.x - crownCenterUnscaled.x) ** 2
+      + ((o.y - crownCenterUnscaled.y) * 0.85) ** 2
+      + (o.z - crownCenterUnscaled.z) ** 2;
+    list.push({ i, distSq, h: leafHash(seed, i, 71) });
+  }
+  // Sort each voxel outermost-first so round 0 locks the outer silhouette.
+  const orderedBuckets = [...buckets.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, list]) => {
+      list.sort((a, b) => (b.distSq - a.distSq) || (a.h - b.h));
+      return list;
+    });
+  // Round-robin across voxels (ordered by outermost radius on round 0)
+  const chosen = [];
+  let round = 0;
+  while (chosen.length < target) {
+    const roundCandidates = [];
+    for (let b = 0; b < orderedBuckets.length; b++) {
+      if (round < orderedBuckets[b].length) roundCandidates.push(orderedBuckets[b][round]);
+    }
+    if (!roundCandidates.length) break;
+    if (round === 0) {
+      // Prioritize outer silhouette voxels first if target < occupied voxel count
+      roundCandidates.sort((a, b) => (b.distSq - a.distSq) || (a.h - b.h));
+    } else {
+      // Quasi-random uniform fill across interior voxels
+      roundCandidates.sort((a, b) => a.h - b.h);
+    }
+    for (let k = 0; k < roundCandidates.length && chosen.length < target; k++) {
+      chosen.push(roundCandidates[k].i);
+    }
+    round++;
+  }
+  chosen.sort((a, b) => a - b);
+  return Int32Array.from(chosen);
+}
+
+// Build merged branch + leaf BufferGeometry using exact skeleton leaf indices so
+// per-leaf colours are strictly identical across near, mid, and far LODs.
+function buildMergedLod({
+  skeleton, spec, trunkRadius, scale, barkColor, leafColor, cell,
+  crownCenter, crownCenterUnscaled, leafBox, billboard, seed, rootSkirt,
+}) {
+  const b = meshSkeletonBranches(skeleton.branches, {
+    sectionStride: spec.sectionStride,
+    segmentFactor: spec.segmentFactor,
+    minRadius: trunkRadius * spec.minBranchFrac,
+    scale,
+    rootSkirt,
+  });
+  const keptLeaves = selectStratifiedLeafIndices(
+    skeleton.leaves, spec.leafKeep, spec.grid || 10, crownCenterUnscaled, leafBox, seed,
+  );
+  const effectiveBillboard = spec.billboard || billboard;
+  const quadsPerLeaf = effectiveBillboard === Billboard.Double ? 2 : 1;
+  const bVerts = b.verts.length / 3;
+  const lVerts = keptLeaves.length * quadsPerLeaf * 4;
+  const totalVerts = bVerts + lVerts;
+  const position = new Float32Array(totalVerts * 3);
+  const normal = new Float32Array(totalVerts * 3);
+  const uv = new Float32Array(totalVerts * 2);
+  const color = new Float32Array(totalVerts * 3);
+  const rect = cellRect(cell);
+
+  for (let i = 0; i < bVerts; i++) {
+    const bx = b.verts[i * 3] * scale;
+    const by = b.verts[i * 3 + 1] * scale;
+    const bz = b.verts[i * 3 + 2] * scale;
+    position[i * 3] = bx; position[i * 3 + 1] = by; position[i * 3 + 2] = bz;
+    normal[i * 3] = b.normals[i * 3];
+    normal[i * 3 + 1] = b.normals[i * 3 + 1];
+    normal[i * 3 + 2] = b.normals[i * 3 + 2];
+    uv[i * 2] = BARK_RECT.u0 + Math.min(1, Math.max(0, b.uvs[i * 2])) * (BARK_RECT.u1 - BARK_RECT.u0);
+    uv[i * 2 + 1] = b.uvs[i * 2 + 1] * 0.5;
+    // Contact AO darkening at ground & root collar
+    const ground = 0.56 + 0.44 * Math.min(1, Math.max(0, (by + 0.35) / 2.8));
+    color[i * 3] = barkColor.r * ground;
+    color[i * 3 + 1] = barkColor.g * ground;
+    color[i * 3 + 2] = barkColor.b * ground;
+  }
+
+  const leafMinY = leafBox.min.y * scale;
+  const leafSpanY = Math.max(0.5, (leafBox.max.y - leafBox.min.y) * scale);
+  const lIdxCount = keptLeaves.length * quadsPerLeaf * 6;
+  const index = new Uint32Array(b.indices.length + lIdxCount);
+  index.set(b.indices, 0);
+
+  let vWrite = bVerts;
+  let iWrite = b.indices.length;
+  const rotations = effectiveBillboard === Billboard.Double ? [0, Math.PI * 0.5] : [0];
+  const quadCorners = [
+    [-0.5, 1, 0, 0, 1],
+    [-0.5, 0, 0, 0, 0],
+    [0.5, 0, 0, 1, 0],
+    [0.5, 1, 0, 1, 1],
+  ];
+
+  for (let idx = 0; idx < keptLeaves.length; idx++) {
+    const leafIdx = keptLeaves[idx];
+    const leaf = skeleton.leaves[leafIdx];
+    const size = leaf.size * spec.leafScale;
+    // Keep enlarged mid/far cards centred on the original leaf midpoint rather
+    // than growing outward past the twig tip, preventing crown inflation across LODs.
+    const yBase = 0.5 * (leaf.size - size);
+    // Pure function of (seed, skeleton leaf index) so the same leaf keeps the
+    // exact same tint and warmth in near, mid, and far meshes.
+    const tint = 0.80 + leafHash(seed, leafIdx, 13) * 0.38;
+    const hue = (leafHash(seed, leafIdx, 37) - 0.5) * 0.14;
+    const baseNormal = _v2.set(0, 0, 1).applyEuler(leaf.orientation);
+
+    for (let r = 0; r < rotations.length; r++) {
+      _e.set(0, rotations[r], 0);
+      const quadBase = vWrite;
+      for (let k = 0; k < 4; k++) {
+        const [cx, cy, cz, lu, lv] = quadCorners[k];
+        _v.set(cx * size, yBase + cy * size, cz)
+          .applyEuler(_e)
+          .applyEuler(leaf.orientation)
+          .add(leaf.origin);
+        const x = _v.x * scale, y = _v.y * scale, z = _v.z * scale;
+        position[vWrite * 3] = x;
+        position[vWrite * 3 + 1] = y;
+        position[vWrite * 3 + 2] = z;
+
+        // Smooth spherical crown normal blended with leaf facing for volumetric shading
+        _v.set(x - crownCenter.x, (y - crownCenter.y) * 0.8, z - crownCenter.z).normalize()
+          .multiplyScalar(0.76)
+          .addScaledVector(baseNormal, 0.24)
+          .add({ x: 0, y: 0.18, z: 0 })
+          .normalize();
+        normal[vWrite * 3] = _v.x;
+        normal[vWrite * 3 + 1] = _v.y;
+        normal[vWrite * 3 + 2] = _v.z;
+
+        uv[vWrite * 2] = rect.u0 + lu * (rect.u1 - rect.u0);
+        uv[vWrite * 2 + 1] = rect.v0 + lv * (rect.v1 - rect.v0);
+
+        const radial = Math.min(1, Math.hypot(x - crownCenter.x, y - crownCenter.y, z - crownCenter.z) / crownCenter.radius);
+        const heightK = Math.min(1, Math.max(0, (y - leafMinY) / leafSpanY));
+        const ao = 0.64 + 0.22 * radial + 0.16 * heightK;
+        color[vWrite * 3] = leafColor.r * tint * ao * (1 + hue);
+        color[vWrite * 3 + 1] = leafColor.g * tint * ao;
+        color[vWrite * 3 + 2] = leafColor.b * tint * ao * (1 - hue);
+        vWrite++;
+      }
+      index[iWrite++] = quadBase;
+      index[iWrite++] = quadBase + 1;
+      index[iWrite++] = quadBase + 2;
+      index[iWrite++] = quadBase;
+      index[iWrite++] = quadBase + 2;
+      index[iWrite++] = quadBase + 3;
+    }
+  }
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(position, 3));
@@ -121,7 +308,7 @@ function mergeTree({ branches, leaves }, { scale, barkColor, leafColor, cell, cr
   geometry.setAttribute('color', new THREE.BufferAttribute(color, 3));
   geometry.setIndex(new THREE.BufferAttribute(index, 1));
   geometry.computeBoundingSphere();
-  return geometry;
+  return { geometry, keptLeaves };
 }
 
 function horizonCard(width, height, cell, leafColor, crownHeight, footprint) {
@@ -132,11 +319,17 @@ function horizonCard(width, height, cell, leafColor, crownHeight, footprint) {
     const base = position.length / 3;
     for (const [sx, sy] of [[-0.5, 0], [0.5, 0], [0.5, 1], [-0.5, 1]]) {
       position.push(sx * width * ax, sy * height, sx * width * az);
-      // lit like the canopy it stands for: mostly from above
-      normal.push(0, 1, 0);
+      // Outward-tilted rounded dome normals match the volumetric shading of far
+      // crowns across all sun altitudes instead of flashing flat under low light.
+      const nx = sx * ax * 0.75;
+      const ny = sy > 0.5 ? 0.92 : 0.72;
+      const nz = sx * az * 0.75;
+      const inv = 1 / Math.hypot(nx, ny, nz);
+      normal.push(nx * inv, ny * inv, nz * inv);
       const half = (rect.u1 - rect.u0) * 0.5;
       uv.push(rect.u0 + k * half + (sx + 0.5) * half, rect.v0 + sy * (rect.v1 - rect.v0));
-      color.push(leafColor.r, leafColor.g, leafColor.b);
+      const vShade = sy > 0.5 ? 1.06 : 0.84;
+      color.push(leafColor.r * vShade, leafColor.g * vShade, leafColor.b * vShade);
     }
     index.push(base, base + 1, base + 2, base, base + 2, base + 3);
   }
@@ -145,9 +338,10 @@ function horizonCard(width, height, cell, leafColor, crownHeight, footprint) {
   for (const [x, z] of [[-0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]]) {
     position.push((footprint.x - 0.5 + x * footprint.span) * width, crownHeight,
       (footprint.z + z * footprint.span) * width);
-    normal.push(0, 1, 0);
+    const inv = 1 / Math.hypot(x * 0.55, 0.95, z * 0.55);
+    normal.push(x * 0.55 * inv, 0.95 * inv, z * 0.55 * inv);
     uv.push(top.u0 + (x + 0.5) * (top.u1 - top.u0), top.v0 + (z + 0.5) * (top.v1 - top.v0));
-    color.push(leafColor.r, leafColor.g, leafColor.b);
+    color.push(leafColor.r * 0.98, leafColor.g * 0.98, leafColor.b * 0.98);
   }
   index.push(base, base + 1, base + 2, base, base + 2, base + 3);
   const geometry = new THREE.BufferGeometry();
@@ -177,48 +371,71 @@ function growSpecies(archetypeName, rng, colors, slot) {
   o.leaves.roundedNormals = false;
   tree.generate();
 
-  const full = tree.createGeometry(DETAIL.near);
-  full.leaves.computeBoundingBox();
-  full.branches.computeBoundingBox();
-  const box = full.leaves.boundingBox.clone().union(full.branches.boundingBox);
+  // Compute canonical bounding boxes from the full generated tree
+  tree.leavesMesh.geometry.computeBoundingBox();
+  tree.branchesMesh.geometry.computeBoundingBox();
+  const leafBox = tree.leavesMesh.geometry.boundingBox.clone();
+  const box = leafBox.clone().union(tree.branchesMesh.geometry.boundingBox);
   const height = archetype.height[0] + rng() * (archetype.height[1] - archetype.height[0]);
   const scale = height / Math.max(1e-3, box.max.y);
-  const leafBox = full.leaves.boundingBox;
+  const crownCenterUnscaled = {
+    x: (leafBox.min.x + leafBox.max.x) * 0.5,
+    y: (leafBox.min.y + leafBox.max.y) * 0.5,
+    z: (leafBox.min.z + leafBox.max.z) * 0.5,
+  };
   const crownCenter = {
-    x: (leafBox.min.x + leafBox.max.x) * 0.5 * scale,
-    y: (leafBox.min.y + leafBox.max.y) * 0.5 * scale,
-    z: (leafBox.min.z + leafBox.max.z) * 0.5 * scale,
+    x: crownCenterUnscaled.x * scale,
+    y: crownCenterUnscaled.y * scale,
+    z: crownCenterUnscaled.z * scale,
     radius: Math.max(0.5, Math.hypot(leafBox.max.x - leafBox.min.x, leafBox.max.y - leafBox.min.y, leafBox.max.z - leafBox.min.z) * 0.5 * scale),
   };
-  const cell = CARD_CELL[archetype.card];
-  const shared = { scale, barkColor: colors.bark, leafColor: colors.leaf, cell, crownCenter };
 
   const bush = archetypeName === 'bush';
-  // Shrubs are scattered by the hundred: keep denser enlarged leaf cards so
-  // distant mipmaps never cull every leaf and expose bare dark twigs.
-  const mid = tree.createGeometry(bush
-    ? { sectionStride: 3, segmentFactor: 0.01, leafStride: 3, leafScale: 2.35 } : DETAIL.mid);
-  const far = tree.createGeometry(DETAIL.far);
+  const cell = CARD_CELL[archetype.card];
   const trunkRadius = o.branch.radius[0];
-  const geometries = {
-    near: mergeTree(full, { ...shared, rng: makeRng('near' + o.seed) }),
-    mid: mergeTree(mid, { ...shared, rng: makeRng('mid' + o.seed),
-      branchIndex: bush ? limbTriangles(mid.branches, trunkRadius * 0.35) : null }),
-    far: mergeTree(far, { ...shared, rng: makeRng('far' + o.seed), branchIndex: limbTriangles(far.branches, trunkRadius * 0.3) }),
+  const rootSkirt = bush ? 0.14 : 0.45;
+  const shared = {
+    skeleton: tree.skeleton,
+    trunkRadius,
+    scale,
+    barkColor: colors.bark,
+    leafColor: colors.leaf,
+    cell,
+    crownCenter,
+    crownCenterUnscaled,
+    leafBox,
+    billboard: o.leaves.billboard,
+    seed: o.seed,
+    rootSkirt,
   };
 
-  // Project the actual mid-detail foliage in both side views and overhead.
-  // Centre the footprint on the trunk and leave room for asymmetric branches.
+  const nearBuilt = buildMergedLod({ ...shared, spec: LOD_SPECS.near });
+  const midBuilt = buildMergedLod({ ...shared, spec: bush ? LOD_SPECS.bush : LOD_SPECS.mid });
+  const farBuilt = buildMergedLod({ ...shared, spec: LOD_SPECS.far });
+
+  const geometries = {
+    near: nearBuilt.geometry,
+    mid: midBuilt.geometry,
+    far: farBuilt.geometry,
+  };
+
+  // Project the actual stratified mid-detail foliage into both side views and
+  // overhead using the real mid leaf size so horizon impostors match far crowns.
   const width = 2.2 * scale * Math.max(-box.min.x, box.max.x, -box.min.z, box.max.z);
-  const leaves = mid.leaves.getAttribute('position');
   const clumps = [];
-  for (let q = 0; q < leaves.count; q += 4) {
-    let x = 0, y = 0, z = 0;
-    for (let k = 0; k < 4; k++) { x += leaves.getX(q + k); y += leaves.getY(q + k); z += leaves.getZ(q + k); }
-    x *= 0.25 * scale; y *= 0.25 * scale; z *= 0.25 * scale;
+  const impostorLeafScale = bush ? LOD_SPECS.bush.leafScale : LOD_SPECS.mid.leafScale;
+  for (let i = 0; i < midBuilt.keptLeaves.length; i++) {
+    const leaf = tree.skeleton.leaves[midBuilt.keptLeaves[i]];
+    // Leaf card centre sits half a leaf length along its local +Y axis
+    _v.set(0, leaf.size * impostorLeafScale * 0.45, 0)
+      .applyEuler(leaf.orientation)
+      .add(leaf.origin);
+    const x = _v.x * scale, y = _v.y * scale, z = _v.z * scale;
     clumps.push({
-      x: 0.5 + x / width, y: Math.min(0.96, y / height), z,
-      r: Math.min(0.13, (o.leaves.size * DETAIL.mid.leafScale * scale * 0.47) / width),
+      x: 0.5 + x / width,
+      y: Math.min(0.96, Math.max(0.04, y / height)),
+      z,
+      r: Math.min(0.11, (leaf.size * impostorLeafScale * scale * 0.52) / width),
       light: Math.min(1, Math.max(0, 0.45 + 0.5 * (y / height) + z / width)),
     });
   }
@@ -228,20 +445,28 @@ function growSpecies(archetypeName, rng, colors, slot) {
   const maxZ = Math.max(...clumps.map(c => c.z / width + c.r * 1.22));
   // Fit leaning crowns around their own centre and leave a transparent
   // apron on every side for the overhead atlas mips.
-  const footprint = { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2,
-    span: Math.max(maxX - minX, maxZ - minZ, 0.1) * 1.16 };
+  const footprint = {
+    x: (minX + maxX) / 2,
+    z: (minZ + maxZ) / 2,
+    span: Math.max(maxX - minX, maxZ - minZ, 0.1) * 1.16,
+  };
   const impostor = {
     clumps, footprint,
-    trunk: { top: Math.min(0.9, (leafBox.min.y * scale) / height + 0.25), halfWidth: Math.max(0.006, (trunkRadius * scale) / width * 0.6) },
+    trunk: {
+      top: Math.min(0.9, (leafBox.min.y * scale) / height + 0.25),
+      halfWidth: Math.max(0.006, (trunkRadius * scale) / width * 0.6),
+    },
   };
-  // an up-lit flat card reads brighter than the self-shadowing crown it replaces
-  geometries.horizon = horizonCard(width, height, CELL_IMPOSTOR_0 + slot, colors.leaf.clone().multiplyScalar(0.50), crownCenter.y, footprint);
-  full.branches.dispose(); full.leaves.dispose();
-  mid.branches.dispose(); mid.leaves.dispose();
-  far.branches.dispose(); far.leaves.dispose();
-  tree.branchesMesh.geometry.dispose(); tree.leavesMesh.geometry.dispose();
-  return { name: archetypeName, height, width, geometries, card: archetype.card, bark: archetype.bark, impostor,
-    leafColor: colors.leaf };
+  // Dome-lit crossed cards shade darker than flat up-lit cards; 0.66 matches far crowns.
+  geometries.horizon = horizonCard(width, height, CELL_IMPOSTOR_0 + slot,
+    colors.leaf.clone().multiplyScalar(0.66), crownCenter.y, footprint);
+
+  tree.branchesMesh.geometry.dispose();
+  tree.leavesMesh.geometry.dispose();
+  return {
+    name: archetypeName, height, width, geometries, card: archetype.card, bark: archetype.bark,
+    impostor, leafColor: colors.leaf,
+  };
 }
 
 // Everything is a pure function of the planet seed.
@@ -251,11 +476,9 @@ export function buildTreeSpecies(planet, palette) {
   const pick = (list) => list[Math.floor(rng() * list.length)];
   const names = [pick(options[0]), pick(options[1])];
   if (names[1] === names[0]) names[1] = options[1].find((name) => name !== names[0]) || names[1];
-  // Atlas luminance averages about 0.8 and foliage self-shadows, so the tint
-  // is lifted to land back on the palette's canopy colour.
   // Palette colours are authored for ground seen from orbit and are far too
   // dark for a sunlit leaf. Keep the hue and bring the reflectance to that of
-  // real foliage (about 0.16 in the green) and bark (about 0.12).
+  // real foliage (about 0.17 in the green) and bark (about 0.11).
   const lift = (color, target) => {
     const lum = Math.max(1e-3, 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b);
     return color.clone().multiplyScalar(target / lum);

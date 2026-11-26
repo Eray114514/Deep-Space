@@ -2111,17 +2111,21 @@ export function applyCloudField(material, coverage, offX, offY, offZ, relief = 0
 // all scatter props share this scale: 1 on the ground, easing to 0 as the
 // camera climbs out — thousands of props must never blink out in one frame
 export const GROW = { value: 1 };
+export const FOLIAGE_DAY = { value: 1 };
 
 export function applyWindSway(material, amount, foliageLighting = false, frame = null) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = TIME;
     shader.uniforms.uGrow = GROW;
+    shader.uniforms.uFoliageDay = FOLIAGE_DAY;
     shader.uniforms.uSway = { value: amount };
     shader.uniforms.uWind = { value: WIND };
     shader.uniforms.uBendPos = { value: surfaceInteraction.positions };
     shader.uniforms.uBendData = { value: surfaceInteraction.data };
     shader.uniforms.uWindPhase = { value: new THREE.Vector4() };
     shader.uniforms.uWindFlutterPhase = { value: 0 };
+    shader.uniforms.uScatterCam = { value: new THREE.Vector3() };
+    shader.uniforms.uScatterFade = { value: new THREE.Vector2(0, 0) };
     Object.assign(shader.uniforms, disturbanceUniforms());
     if (frame) Object.assign(shader.uniforms, frame.uniforms);
     shader.vertexShader = shader.vertexShader
@@ -2132,6 +2136,8 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
         uniform vec4 uWind;
         uniform vec4 uWindPhase;
         uniform float uWindFlutterPhase;
+        uniform vec3 uScatterCam;
+        uniform vec2 uScatterFade;
         uniform vec4 uBendPos[${SURFACE_INTERACTION_CAP}];
         uniform vec4 uBendData[${SURFACE_INTERACTION_CAP}];
         ${DISTURBANCE_GLSL}
@@ -2178,15 +2184,24 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
           transformed.z += cos(ph + uWindPhase.x) * pressure * tip * 0.7;
           transformed.y *= 1.0 - pressure * tip * 0.68;
           transformed = plantBend() * transformed;
-          transformed *= 1.0 - crush;
+          float scatterScale = 1.0;
+          if (uScatterFade.y > 0.0) {
+            float sDist = distance(ip, uScatterCam);
+            float sJitter = (fract((ph + uWindPhase.x) * 0.271) - 0.5) * (uScatterFade.y - uScatterFade.x) * 0.48;
+            scatterScale = 1.0 - smoothstep(uScatterFade.x, uScatterFade.y, sDist + sJitter);
+          }
+          transformed *= (1.0 - crush) * scatterScale;
         }
         #endif`);
     if (material.vertexColors) {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+        uniform float uFoliageDay;`)
+        .replace(
+          '#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         #ifdef USE_COLOR
           ${foliageLighting && material.map
-            ? 'totalEmissiveRadiance += diffuseColor.rgb * 0.2;'
+            ? 'totalEmissiveRadiance += diffuseColor.rgb * (0.18 * uFoliageDay + 0.012);'
             : 'totalEmissiveRadiance *= vColor.rgb;'}
         #endif`);
     }
@@ -2202,7 +2217,7 @@ export function applyWindSway(material, amount, foliageLighting = false, frame =
   // uSway carries the exact sway amplitude as a uniform; GLSL only branches on
   // amount > 0, so keying by boolean avoids compiling separate identical
   // programs for grassNear / grassMid / grassFar.
-  material.customProgramCacheKey = () => 'wind-sway-v7-disturb-' + (amount > 0 ? 'sway' : 'rigid') + '-' + (foliageLighting ? (material.map ? 'card' : 'leaf') : 'solid');
+  material.customProgramCacheKey = () => 'wind-sway-v8-scatter-fade-' + (amount > 0 ? 'sway' : 'rigid') + '-' + (foliageLighting ? (material.map ? 'card' : 'leaf') : 'solid');
   return material;
 }
 

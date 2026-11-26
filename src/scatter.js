@@ -225,6 +225,8 @@ export class Scatter {
     this.planet = null;
     this.lastKey = '';
     this.frame.setOrigin(_v.set(0, 0, 0));
+    this.frame.uniforms.uScatterCam.value.set(0, 0, 0);
+    this.frame.uniforms.uScatterFade.value.set(0, 0);
   }
 
   hideAll() {
@@ -244,6 +246,11 @@ export class Scatter {
 
     const p = this.planet;
     this.frame.syncInteractions(p.bodyId || p.seed);
+    // Drive smooth continuous camera-distance dissolve on the GPU so shrubs and
+    // grass never pop in size on 9 m lattice crossings or form a sharp circular ring.
+    const outerR = Math.max(22, (this.range - 1.1) * CELL_M);
+    this.frame.uniforms.uScatterCam.value.copy(camLocal).sub(this.frame.origin);
+    this.frame.uniforms.uScatterFade.value.set(outerR * 0.56, outerR * 0.96);
     _dir.copy(camLocal).normalize();
     const Q = p.R / CELL_M;                 // cell-id lattice radius
     const cellAng = CELL_M / p.R;
@@ -269,6 +276,7 @@ export class Scatter {
     if (budgetMs<=0)return;
     if (this.stepJob(performance.now() + budgetMs)) {
       this.commitJob(this.job);
+      this.frame.uniforms.uScatterCam.value.copy(camLocal).sub(this.frame.origin);
       this.pruneCellCache(this.job);
       this.job = null;
     }
@@ -391,11 +399,13 @@ export class Scatter {
 
   // Ensure the cell is planted (cached), then copy it into this ring.
   *placeCell(job, ck, qx, qy, qz) {
-    // props near the range edge grow in instead of popping in
+    // Continuous GPU camera-distance fade owns the organic outer meadow
+    // dissolve; keep the CPU cell taper strictly at the outermost cell rim so
+    // shrubs and grass never jump in scale on 9 m lattice anchor steps.
     _up.set(qx, qy, qz).normalize();
     const dot = Math.min(1, Math.max(-1, _up.dot(job.anchor)));
     const cells = Math.acos(dot) / job.cellAng;
-    let edge = Math.min(1, Math.max(0, ((this.range - 1) - cells) / Math.max(2, this.range * 0.3)));
+    let edge = Math.min(1, Math.max(0, ((this.range - 1) - cells) / 1.35));
     if (edge < 0.03) return;
     edge = edge * edge * (3 - 2 * edge);
 
@@ -516,8 +526,8 @@ export class Scatter {
       // a healthy sward is one green with soft lighter and darker drifts;
       // only the driest patches start to yellow
       const dryness = Math.min(1, Math.max(0, (patch - 0.62) * 3));
-      _ic.lerp(_straw, dryness * 0.22).multiplyScalar(0.6 + (1 - patch) * 0.12).offsetHSL(
-        (hashFloat(hc, 0) - 0.5) * 0.02, 0.14, (hashFloat(hc, 1) - 0.5) * 0.035);
+      _ic.lerp(_straw, dryness * 0.22).multiplyScalar(0.65 + (1 - patch) * 0.12).offsetHSL(
+        (hashFloat(hc, 0) - 0.5) * 0.02, 0.12, (hashFloat(hc, 1) - 0.5) * 0.035);
       grass.color[i * 3] = _ic.r; grass.color[i * 3 + 1] = _ic.g; grass.color[i * 3 + 2] = _ic.b;
     }
   }
@@ -564,7 +574,15 @@ export class Scatter {
       mesh.instanceMatrix.array.set(stage.matrix.subarray(0, count * 16), 0);
       mesh.instanceColor.array.set(stage.color.subarray(0, count * 3), 0);
       mesh.count = count;
+      if (mesh.instanceMatrix.clearUpdateRanges && mesh.instanceMatrix.addUpdateRange) {
+        mesh.instanceMatrix.clearUpdateRanges();
+        mesh.instanceMatrix.addUpdateRange(0, count * 16);
+      }
       mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor.clearUpdateRanges && mesh.instanceColor.addUpdateRange) {
+        mesh.instanceColor.clearUpdateRanges();
+        mesh.instanceColor.addUpdateRange(0, count * 3);
+      }
       mesh.instanceColor.needsUpdate = true;
     }
   }

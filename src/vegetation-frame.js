@@ -14,6 +14,8 @@ export class VegetationFrame {
     this.uniforms = {
       uWindPhase: { value: new THREE.Vector4() },
       uWindFlutterPhase: { value: 0 },
+      uScatterCam: { value: new THREE.Vector3() },
+      uScatterFade: { value: new THREE.Vector2(0, 0) },
       uBendPos: { value: Array.from({ length: SURFACE_INTERACTION_CAP }, () => new THREE.Vector4()) },
       uBendData: { value: field.data },
       ...disturbanceUniforms(),

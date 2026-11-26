@@ -42,8 +42,8 @@ try {
       { samples: 0, maxPositionError: 0, maxPressureDistanceError: 0 }]));
     const nativeShadows = [];
     let failure = null;
-    const probeMaterial = source => {
-      const key = source.type + ':' + source.customProgramCacheKey();
+    const probeMaterial = (source, swayAmount = '') => {
+      const key = source.type + ':' + source.customProgramCacheKey() + ':' + swayAmount;
       if (materials.has(key)) return materials.get(key);
       const material = source.clone(), deform = source.onBeforeCompile;
       // The native point-shadow renderer supplies this light before a draw.
@@ -159,7 +159,7 @@ try {
                 for (const age of [0,.4]) for (const grow of [1,.73,0]) {
                   surfaceInteraction.data[0].x=age*1.25; scatter.frame.syncInteractions('fixture'); GROW.value=grow;
                   for (const [name, sourceMaterial] of variants) {
-                    const mesh = new T.InstancedMesh(points,probeMaterial(sourceMaterial),count);
+                    const mesh = new T.InstancedMesh(points,probeMaterial(sourceMaterial, amount),count);
                     mesh.frustumCulled=false; mesh.position.copy(renderOrigin);
                     for (let i=0;i<count;i++) {
                       mesh.instanceMatrix.array.set(selected.subarray(i*16,i*16+16),i*16);

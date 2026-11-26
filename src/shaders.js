@@ -7,7 +7,7 @@
 // material in place and may return undefined, so the facade guarantees the
 // caller always gets a material back.
 import {
-  TIME, GROW, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
+  TIME, GROW, FOLIAGE_DAY, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
   detailTexture, disposeDetailTexture, cloudDensityCPU, cloudBaseDensityCPU,
   applyTerrainDetail as applyTerrainDetailImpl,
   applyWaterWaves as applyWaterWavesImpl,
@@ -17,7 +17,7 @@ import {
 } from './shaders-webgl.js';
 
 export {
-  TIME, GROW, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
+  TIME, GROW, FOLIAGE_DAY, WIND, setWeatherWind, tickShaders, sampleDetailCPU,
   detailTexture, disposeDetailTexture, cloudDensityCPU, cloudBaseDensityCPU,
   terrainDepthMaterial,
 };

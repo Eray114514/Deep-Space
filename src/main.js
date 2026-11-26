@@ -46,7 +46,7 @@ import {
 } from './ship-landing.js';
 import { SkydiveController } from './skydive.js';
 import { WEAPON_FOREGROUND_LAYER, SKYDIVE_RIG_LAYER } from './render-layers.js';
-import { setWeatherWind, tickShaders } from './shaders.js';
+import { FOLIAGE_DAY, setWeatherWind, tickShaders } from './shaders.js';
 import { UI } from './ui.js';
 import { clamp, lerp, smoothstep } from './noise.js';
 import { makeWord } from './names.js';
@@ -6836,40 +6836,66 @@ function frame(rafTs) {
     sunShadow.color.copy(sysLight.color);
     // Hysteresis-stabilized 2x octave shadow radius steps keep SurfaceShadowGrid's
     // sub-texel phase locked within each altitude band while covering 0..6.5 km flight.
+    // On foot / landed, tighten the frustum to 110..180 m so tree shadows get
+    // ~16-21 cm texels (3-4x sharper than the 650 m flight frustum) with tight
+    // depth precision and no chunky shimmering blocks around trunks.
+    const groundedShadow = state === 'walk' || state === 'shipwalk' || state === 'landed';
     const shadowClearance = nearest?.hasLiquid
       ? Math.min(nearestAlt, Math.max(0, nav.pos.distanceTo(nearest.posUniv) - nearest.seaRadius))
       : nearestAlt;
-    if (state === 'walk' || state === 'shipwalk' || state === 'landed' || shadowClearance < 115) activeShadowOctave = 1;
+    if (groundedShadow || shadowClearance < 115) activeShadowOctave = 1;
     else if (shadowClearance > 1850) activeShadowOctave = 8;
     else if (shadowClearance > 1450) activeShadowOctave = activeShadowOctave === 8 ? 8 : 4;
     else if (shadowClearance > 560) activeShadowOctave = 4;
     else if (shadowClearance > 440) activeShadowOctave = activeShadowOctave >= 4 ? 4 : 2;
     else if (shadowClearance > 145) activeShadowOctave = 2;
     else activeShadowOctave = activeShadowOctave >= 2 ? 2 : 1;
-    const activeShadowRadius = Math.min(4800, effectiveShadowDistance * activeShadowOctave);
-    const lightDist = Math.max(4000, activeShadowRadius * 2.5);
-    const farDist = Math.max(8500, activeShadowRadius * 5.5);
+    const groundedCap = SHADOW_MAP >= 2048 ? 180 : 110;
+    const activeShadowRadius = groundedShadow
+      ? Math.min(effectiveShadowDistance, groundedCap)
+      : Math.min(4800, effectiveShadowDistance * activeShadowOctave);
+    const lightDist = groundedShadow
+      ? Math.max(1400, activeShadowRadius * 3.0)
+      : Math.max(4000, activeShadowRadius * 2.5);
+    const farDist = groundedShadow
+      ? Math.max(3000, activeShadowRadius * 6.5)
+      : Math.max(8500, activeShadowRadius * 5.5);
     if (sunShadow.shadow.camera.far !== farDist) {
       sunShadow.shadow.camera.far = farDist;
       sunShadow.shadow.camera.updateProjectionMatrix();
     }
     // Calibrate depth bias in world metres (not fixed NDC fraction across
-    // 8.5..26 km far planes) and keep normalBias proportional to shadow texel
+    // 3..26 km far planes) and keep normalBias proportional to shadow texel
     // size so tree shadows stay rooted at their trunks instead of floating.
     const shadowRange = Math.max(1000, farDist - sunShadow.shadow.camera.near);
     const shadowTexel = (2 * activeShadowRadius) / Math.max(512, SHADOW_MAP);
-    sunShadow.shadow.bias = -0.22 / shadowRange;
-    sunShadow.shadow.normalBias = Math.max(0.25, shadowTexel * 0.55);
-    sunShadow.shadow.radius = 1.4;
+    sunShadow.shadow.bias = -0.16 / shadowRange;
+    sunShadow.shadow.normalBias = Math.max(0.10, shadowTexel * 0.45);
+    sunShadow.shadow.radius = groundedShadow ? 2.0 : 1.5;
     sunShadow.position.copy(sunDirCam).multiplyScalar(lightDist);
     sunShadow.target.position.set(0, 0, 0);
     surfaceShadowGrid.update(sunShadow, nav.pos, nearest.posUniv,
-      activeShadowRadius, renderer.capabilities.maxTextureSize);
+      activeShadowRadius, renderer.capabilities.maxTextureSize, nearest);
+    if (FARFLORA && farFlora.planet === nearest) farFlora.setShadowRadius(activeShadowRadius);
     sysLight.intensity *= 1 - shadowBlend;
     if (universe.fadingSystem) universe.fadingSystem.sunLight.intensity *= 1 - shadowBlend;
   } else {
     sunShadow.intensity = 0;
     sunShadow.shadow.autoUpdate = false;
+  }
+  if (nearest && !nearest.isGasGiant) {
+    const sunElevDot = _v.copy(nav.pos).sub(nearest.posUniv).normalize().dot(nearest.sunDirWorld);
+    const daySun = smoothstep(-0.08, 0.20, sunElevDot);
+    FOLIAGE_DAY.value = daySun;
+    if (FARFLORA && farFlora.planet === nearest && typeof farFlora.setEnvironment === 'function') {
+      const dominantStar = universe.system.dominantStarFrom(nearest.posUniv);
+      const sunColor = dominantStar?.light?.color || sunShadow.color;
+      const starFlux = Math.max(0, Math.min(1, (sunShadow.intensity + (dominantStar?.light?.intensity || 0)) / 2.2));
+      farFlora.setEnvironment(nearest.sunDirLocal, sunColor, hemi.color, hemi.groundColor,
+        starFlux * daySun, hemi.intensity * (0.10 + 0.90 * daySun));
+    }
+  } else {
+    FOLIAGE_DAY.value = 1;
   }
 
   // Atmospheric buffeting is coherent, not per-frame random noise. Random
