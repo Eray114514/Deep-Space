@@ -1478,7 +1478,12 @@ portalView = new PortalView({
     // stack is never the far side's owner.
     const pipeline = new GameLegacyPipeline(renderer, scene, viewCamera,
       { ...MAIN_PIPELINE_OPTIONS, volume: false, temporalAA: false });
-    if (pipeline.cloudPass && nodePipeline.cloudPass) pipeline.cloudPass.setQuality({ scale: nodePipeline.cloudPass.scale });
+    if (pipeline.cloudPass && nodePipeline.cloudPass) {
+      pipeline.cloudPass.setQuality({
+        scale: nodePipeline.cloudPass.scale,
+        baseScale: nodePipeline.cloudPass.baseScale,
+      });
+    }
     return pipeline;
   },
 });

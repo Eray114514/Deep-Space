@@ -232,7 +232,19 @@ export class GameLegacyPipeline {
   }
 
   setSize(width, height, dpr = 1) {
-    this.invalidateTemporalHistory('resize');
+    const dprOnly = this._viewportWidth === width && this._viewportHeight === height;
+    this._viewportWidth = width;
+    this._viewportHeight = height;
+    if (dprOnly) {
+      // Adaptive DPR steps keep camera framing identical: preserve
+      // LiteCloudPass history so its single-buffer Catmull-Rom resize
+      // resamples cleanly without flashing clouds blurry.
+      this.frameState.invalidate('resize');
+      this.volumePass?.resetHistory();
+      this.temporalAA?.resetHistory();
+    } else {
+      this.invalidateTemporalHistory('resize');
+    }
     // EffectComposer.setPixelRatio() internally calls setSize() with the stale
     // dimensions, so re-apply it only when the ratio actually changes; the
     // explicit setSize below then resizes targets exactly once per viewport

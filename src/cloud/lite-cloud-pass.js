@@ -51,8 +51,8 @@ function sampleLiteNoiseB(noiseTex, u, v, w) {
 const SHADOW_SIZE = 1024;
 // Depth of the cumulus layer. The deck fills under half of it; towers use the rest.
 const LAYER_DEPTH = 11000;
-// Game hours for one form-and-dissolve cycle of the cloud fields.
-const EVOLVE_HOURS = 5;
+// Game hours for one form-and-dissolve cycle of the cloud fields (calm, natural pace).
+const EVOLVE_HOURS = 14;
 const _matrix = new THREE.Matrix4();
 const _quaternion = new THREE.Quaternion();
 const _sun = new THREE.Vector3();
@@ -85,7 +85,10 @@ const cloudFieldGLSL = /* glsl */`
   float evolvePhase(float cycles, out vec3 offsetA, out vec3 offsetB) {
     offsetA = fract(vec3(0.731, 0.317, 0.547) * floor(cycles));
     offsetB = fract(vec3(0.413, 0.871, 0.229) * floor(cycles + 0.5)) + 0.5;
-    return 1.0 - abs(2.0 * fract(cycles) - 1.0);
+    float w = 1.0 - abs(2.0 * fract(cycles) - 1.0);
+    // Smoothstep dwell near 0 and 1 keeps single-field contrast steady without
+    // rhythmic linear triangle-wave softening.
+    return w * w * (3.0 - 2.0 * w);
   }
   float evolveBlend(float a, float b, float w) {
     // Keep the contrast a single field has.
@@ -137,15 +140,17 @@ const cloudFieldGLSL = /* glsl */`
   // octaves smaller than the step are faded out instead of being sampled as
   // noise: gFarSmall drops the 2-3 km cumulus, gFarWide the 9 km cells.
   float gFarSmall = 0.0, gFarWide = 0.0;
-  // Metres one sample stands for (a march texel at the sample's distance, or
-  // a shadow-map texel). Every noise octave is read at the mip that matches
-  // it, so detail smaller than a pixel averages out instead of being dropped
-  // early (blurry from orbit) or sampled raw (sparkle).
+  // Metres one sample stands for (transverse march texel at the sample's
+  // distance, or shadow-map texel) and along-ray step filter width. Every noise
+  // octave is read at the mip matching the larger of the two, calibrated to the
+  // noise volume's real feature bandwidth (~26 texels/cycle) so mid-altitude and
+  // orbital clouds stay crisp while distant/large-step samples never alias.
   float gFootprint = 0.0;
+  float gStepFilter = 0.0;
   // Footprint that decides when cells merge into sheets. Unlike gFootprint it
   // does not shrink with resolution: the same distance looks the same at 2K.
   float gSheet = 0.0;
-  float noiseLod(float period) { return log2(max(gFootprint * 64.0 / period, 1.0)); }
+  float noiseLod(float period) { return log2(max(max(gFootprint, gStepFilter) * 32.0 / period, 1.0)); }
   // Height of the last sampled column's cloud top within the layer (0..1).
   float gCrown = 0.0;
 
@@ -188,9 +193,9 @@ const cloudFieldGLSL = /* glsl */`
       // Break every ~9 km cell into 2-3 km cumulus. Seen from the ground a
       // sky needs many small clouds receding to the horizon; a few huge
       // blobs overhead read as a ceiling.
-      // Single cumulus live and die faster than the fields they belong to.
+      // Single cumulus live and die moderately faster than synoptic fields.
       vec3 sa, sb;
-      float sw = evolvePhase(uEvolve * 2.7 + 0.3, sa, sb);
+      float sw = evolvePhase(uEvolve * 1.5 + 0.3, sa, sb);
       small = evolveBlend(textureLod(uNoise, q.zxy / 8300.0 + 0.29 + sa, noiseLod(8300.0)).r,
         textureLod(uNoise, q.zxy / 8300.0 + 0.29 + sb, noiseLod(8300.0)).r, sw);
       float nearField = base * 0.46 + wide * 0.2 + small * 0.34;
@@ -200,7 +205,7 @@ const cloudFieldGLSL = /* glsl */`
     // From far enough that a cell is a few pixels, single clouds are not
     // seen at all: the fields read as continuous sheets shaped by the
     // weather, and break into cells as the camera comes closer.
-    base = mix(base, 0.6, smoothstep(1500.0, 4200.0, gSheet));
+    base = mix(base, 0.6, smoothstep(1700.0, 4800.0, gSheet));
     base = sat((base - 0.22) / 0.6);
     // Cumulus profile: flat base, cloud-top height driven by the slow
     // thickness field and by each cell (cell cores tower upward).
@@ -214,7 +219,9 @@ const cloudFieldGLSL = /* glsl */`
     // above the deck is a relief of lit tops and shaded gaps, not a flat sheet.
     if (fine > 0.0) top *= 1.0 - fine * (0.22 * (1.0 - small) + 0.12 * (1.0 - textureLod(uNoise, q / 7300.0, noiseLod(7300.0)).g));
     gCrown = top;
-    float profile = smoothstep(0.0, 0.05, h) * smoothstep(top, top * mix(0.5, 0.74, fine), h);   // crisp tops up close
+    float stepSoft = smoothstep(130.0, 620.0, gStepFilter);
+    float baseRamp = mix(0.05, 0.16, stepSoft);
+    float profile = smoothstep(0.0, baseRamp, h) * smoothstep(top, top * mix(0.45, 0.74, fine), h);   // crisp tops up close
     float d = sat(remap(base * profile, 1.0 - cov, 1.0, 0.0, 1.0));
     if (d <= 0.0) return 0.0;
     if (fine > 0.0) {
@@ -228,13 +235,12 @@ const cloudFieldGLSL = /* glsl */`
       e = min(e * fine, 0.9);
       d = sat((d - e) / (1.0 - e));
     }
-    // A cumulus goes from clear air to opaque within tens of metres. The
-    // noise ramp spans hundreds, which drew every cloud as a ball of fog:
-    // push the ramp to the outside so the edge is a surface, then let the
-    // thinnest rim still fade instead of ending in a hard outline.
-    // The edge can only be as sharp as a sample is small: a hard cut through
-    // sub-pixel cloud drew salt-and-pepper grain and contour rings from orbit.
-    float sharp = mix(uSharp, 1.5, smoothstep(120.0, 1100.0, gFootprint));
+    // Separate transverse (orbital) and along-ray (grazing step) bandlimiting:
+    // orbital top-down clouds stay sharp while long horizon steps stay smooth
+    // and stipple-free with low Monte-Carlo variance.
+    float sharpFootprint = mix(uSharp, 2.2, smoothstep(250.0, 2400.0, gFootprint));
+    float sharpStep = mix(uSharp, 1.38, stepSoft);
+    float sharp = min(sharpFootprint, sharpStep);
     float haze = uHaze * (sharp - 1.0) / max(uSharp - 1.0, 1e-3);
     return pow(sat((d - haze) * sharp), 1.15) * cov * 1.3;
   }`;
@@ -307,6 +313,7 @@ const shadowShader = /* glsl */`
     // rims do not stair-step or shimmer as clouds and sun move.
     float texel = uShadowExtent / 512.0;
     gFootprint = texel * 2.2;
+    gStepFilter = 0.0;
     gSheet = texel;
     gFarSmall = smoothstep(350.0, 1200.0, texel);
     gFarWide = smoothstep(2500.0, 8000.0, texel);
@@ -352,7 +359,8 @@ const shadowShader = /* glsl */`
               float ds = mSpan / float(steps), tau = 0.0;
               bool hit = false;
               float previous = 0.0, prevDepth = (s1 - m1) / fullSpan;
-              gFootprint = max(texel * 2.2, ds * 0.5);
+              gFootprint = texel * 2.2;
+              gStepFilter = ds * 0.45;
               for (int i = 0; i < 28; i++) {
                 if (i >= steps) break;
                 float s = m1 - (float(i) + 0.5) * ds;
@@ -422,7 +430,7 @@ const marchShader = /* glsl */`
     gAux = vec4(6e4, 6e4, 0.0, 1.0);
     gShaft = vec4(0.0);
     // The whole low-res grid shifts by a quarter texel each frame (2x2 cycle):
-    // its samples land exactly on the centres of the 2x history's pixels.
+    // its samples land on the four quadrants of the history grid.
     vec2 rayUv = vUv + uSubpixel * uMarchTexel;
     vec4 view = uInvProjection * vec4(rayUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 directionView = normalize(view.xyz / max(abs(view.w), 1e-6));
@@ -438,7 +446,10 @@ const marchShader = /* glsl */`
     vec3 sunDirection1 = normalize(uSunDirection1);
     vec3 irradiance1 = uSunColor1 * uSunEnergy1 * uRadianceScale;
     float mu1 = dot(rd, sunDirection1);
-    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.61803);
+    // Temporal step phase: 0.4045085 = (1 + phi^-1) / 4 so every 4-frame 2x2
+    // quadrant update advances by the exact golden ratio (+0.618034) instead of
+    // aliasing near 0.5 (4 * 0.618 = 2.472) and locking into a dot-grid.
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.40450850);
     vec2 outer = shellHits(ro, rd, uShellTop), inner = shellHits(ro, rd, uShellBase);
     // A moon (or a close planet) between the star and this world: the same
     // occluder model the atmosphere pass uses, so cloud, air and ground
@@ -475,8 +486,9 @@ const marchShader = /* glsl */`
       gShaft = vec4(loss * uShaftStrength * smoothstep(baseHere, baseHere - 700.0, r0), 1.0);
     }
 
-    // ---- High cirrus: one thin sheet well above the cumulus layer. It costs
-    // a handful of fetches and gives the sky a second, clearly higher storey.
+    // ---- High cirrus & altocumulus: thin ice storey above the cumulus layer.
+    // Footprint divides by slant so oblique rays toward the horizon mip-filter
+    // cleanly instead of aliasing into shimmering horizontal barcode stripes.
     float cirrusRadius = uShellTop + uShellDepth * 0.41, cirrusT = -1.0, cirrusA = 0.0;
     vec3 cirrusL = vec3(0.0);
     bool cirrusFront = r0 >= cirrusRadius;
@@ -486,42 +498,47 @@ const marchShader = /* glsl */`
     if (cirrusT > 0.0) {
       vec3 p = ro + rd * cirrusT;
       vec3 q = uCloudMat * p;
-      float patches = smoothstep(0.5, 0.8, textureLod(uNoise, q.zxy / 230000.0 + 0.2, 0.0).b);
+      float slant = abs(dot(rd, p / length(p)));
+      float cirrusFootprint = cirrusT * uPixelAngle / max(slant, 0.14);
+      float patches = smoothstep(0.50, 0.82, textureLod(uNoise, q.zxy / 230000.0 + 0.2, 0.0).b);
       if (patches > 0.0) {
-        float warp = textureLod(uNoise, q / 41000.0, 0.0).b;
-        vec3 streak = q * vec3(1.0 / 16000.0, 1.0 / 16000.0, 1.0 / 90000.0) + warp * 0.22;
-        float fibre = textureLod(uNoise, streak, 0.0).g * 0.6 + textureLod(uNoise, streak * 2.7 + 0.4, 0.0).r * 0.4;
-        // Past ~60 km single fibres are sub-pixel and would sparkle; let the
-        // sheet dissolve instead (cirrus is a near-sky layer in this pass).
-        fibre = mix(fibre, 0.4, smoothstep(50000.0, 180000.0, cirrusT));
-        // Not every high sheet is fibrous. Elsewhere the same storey breaks
-        // into altocumulus: small rounded cells packed in loose rows, grey in
-        // the middle and bright at the rims from below. A fibrous texture
-        // over the whole sky converged on the vanishing point as streaks.
-        float cellular = smoothstep(0.42, 0.62, textureLod(uNoise, q.yzx / 160000.0 + 0.47, 0.0).b) * uAltocumulus;
-        // The body channel tiles three cells to a period: a 7 km period gives
-        // ~2.3 km cells with kilometre and half-kilometre lobes. (At a 2.6 km
-        // period the cells were a few hundred metres and repeated visibly.)
-        vec3 cq = q * vec3(1.0 / 7000.0, 1.0 / 7000.0, 1.0 / 11000.0) + warp * 0.45;
-        float cellLod = log2(max(cirrusT * uPixelAngle * 64.0 / 7000.0, 1.0));
-        float cell = textureLod(uNoise, cq, cellLod).r * 0.8 + textureLod(uNoise, cq * 1.7 + 0.31, cellLod + 0.8).g * 0.2;
-        float puff = smoothstep(0.5, 0.74, cell);
-        // Past a few hundred kilometres the cells merge into a thin sheet.
-        float cellFade = smoothstep(120000.0, 400000.0, cirrusT);
-        puff = mix(puff, 0.3, cellFade);
-        float a = mix(smoothstep(0.52, 0.86, fibre) * 0.36, puff * 0.62, cellular) * patches;
+        vec3 cUp = q / length(q);
+        // Divergence-free zonal wind vector: smooth everywhere with zero polar seam.
+        vec3 zonal = vec3(-cUp.z, 0.0, cUp.x);
+        float warpLod = log2(max(cirrusFootprint * 24.0 / 92000.0, 1.0));
+        float warp = textureLod(uNoise, q / 92000.0, warpLod).b;
+        float fibreLod = log2(max(cirrusFootprint * 26.0 / 34000.0, 1.0));
+        // Wind-sheared feathery cirrus wisps: gentle large-scale meander plus a
+        // 2-tap directional streak along planetary zonal flow (no marble swirls
+        // and no Cartesian axis bias).
+        vec3 baseF = q / 34000.0 + vec3(warp * 0.22, -warp * 0.12, warp * 0.18);
+        float f0 = textureLod(uNoise, baseF, fibreLod).g;
+        float f1 = textureLod(uNoise, baseF + zonal * 0.26, fibreLod).g;
+        float f2 = textureLod(uNoise, (baseF + zonal * 0.13) * 2.15 + 0.4, fibreLod + 0.9).r;
+        float fibre = (f0 + f1) * 0.31 + f2 * 0.38;
+        fibre = mix(fibre, 0.42, smoothstep(65000.0, 220000.0, cirrusT));
+        float cellular = smoothstep(0.46, 0.68, textureLod(uNoise, q.yzx / 160000.0 + 0.47, 0.0).b) * uAltocumulus;
+        float cellLod = log2(max(cirrusFootprint * 26.0 / 11500.0, 1.0));
+        // Gentle wind meander so altocumulus stays mackerel-sky puffs instead
+        // of shearing into swirled ribbons.
+        vec3 cq = q / 11500.0 + zonal * ((warp - 0.5) * 0.38) + (warp - 0.5) * 0.22;
+        float cell = textureLod(uNoise, cq, cellLod).r * 0.78
+          + textureLod(uNoise, cq * 1.65 + 0.31, cellLod + 0.9).g * 0.22;
+        float puff = smoothstep(0.50, 0.78, cell);
+        // Dissolve sub-pixel cells at grazing angles & long distance into a soft veil.
+        float cellFade = max(smoothstep(95000.0, 260000.0, cirrusT), 1.0 - smoothstep(0.10, 0.34, slant));
+        puff = mix(puff, 0.22, cellFade);
+        float horizonFade = smoothstep(0.03, 0.22, slant);
+        float a = mix(smoothstep(0.52, 0.86, fibre) * 0.28, puff * 0.48, cellular) * patches * horizonFade;
         float cellThick = cellular * smoothstep(0.62, 0.95, cell) * (1.0 - cellFade);
-        // A thin sheet thickens toward the horizon with the slant path.
-        float slant = max(abs(dot(rd, p / length(p))), 0.16);
-        cirrusA = 1.0 - pow(1.0 - a, 1.0 / slant);
+        cirrusA = 1.0 - pow(1.0 - sat(a), 1.0 / max(slant, 0.32));
         float day = smoothstep(-0.12, 0.12, dot(p / length(p), sunDirection));
         float ecl = eclipsing ? eclipseVisibility(p, sunDirection) : 1.0;
         day *= mix(0.3, 1.0, ecl);
-        cirrusL = (irradiance * sunAt(p, sunDirection) * ecl * mix(hgPhase(mu, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
-          + irradiance1 * sunAt(p, sunDirection1) * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0) * mix(hgPhase(mu1, 0.7), 0.0796, 0.55) * uScatterGain * 0.9
+        cirrusL = (irradiance * sunAt(p, sunDirection) * ecl * mix(hgPhase(mu, 0.72), 0.0796, 0.52) * uScatterGain * 0.92
+          + irradiance1 * sunAt(p, sunDirection1) * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0) * mix(hgPhase(mu1, 0.72), 0.0796, 0.52) * uScatterGain * 0.92
           + irradiance * vec3(0.045, 0.062, 0.095) * (0.25 + 0.75 * day)) * uCloudTint;
-        // From below, a cell's thick middle passes less of the sunlit top.
-        if (!cirrusFront) cirrusL *= 1.0 - 0.45 * cellThick * (1.0 - smoothstep(0.7, 0.97, mu));
+        if (!cirrusFront) cirrusL *= 1.0 - 0.42 * cellThick * (1.0 - smoothstep(0.7, 0.97, mu));
       }
     }
 
@@ -533,186 +550,170 @@ const marchShader = /* glsl */`
     else if (r0 > uShellBase) { t0 = 0.0; t1 = inner.x > 0.0 ? inner.x : outer.y; }
     else if (!ground) { t0 = inner.y; t1 = outer.y; }
     if (t1 > t0) {
-      // A ray grazing the limb crosses up to ~700 km of layer. Cut at 320 km,
-      // the far half of the curving deck vanished, and the cut moved with the
-      // camera, so distant clouds appeared and disappeared.
       t1 = min(t1, t0 + 900000.0);
       float span = t1 - t0;
-      // Weather is looked up where the sample is, every few kilometres of
-      // travel. Interpolating a handful of samples across the whole ray made
-      // a cloud's existence depend on the view: it vanished as the camera moved.
-      float coverMax = 1.0;
-      // Interpolated between lookups 3.5 km apart along the ray. Held
-      // constant instead, coverage and base lift stepped at fixed distances
-      // from the camera and cut every cloud into terraces around the viewer.
       vec2 weather = vec2(0.0), weatherA = vec2(0.0), weatherB = vec2(0.0);
       float tWeather = -1e9;
-      if (coverMax >= 0.03) {
-        vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
-        vec3 sunFar = sunAt(ro + rd * t1, sunDirection);
-        float dmin = max(min(min(50.0 + 0.004 * t0, span / 90.0), 300.0), 20.0);
-        float t = t0 + dmin * jitter;
-        tBack = t0;
-        // Seen edge-on from far away (the limb from orbit) the small octaves
-        // are squeezed below a pixel and only produce sparkle: drop them there.
-        vec3 entry = ro + rd * t0;
-        float edgeOn = (1.0 - smoothstep(0.1, 0.42, abs(dot(rd, entry / length(entry))))) * smoothstep(40000.0, 160000.0, t0);
-        // Inside cloud the lit skin is thinner than a coarse step. On entry
-        // the ray backs up and continues in fine steps; otherwise the first
-        // sample sat deep on average and every top read grey with a bright
-        // rim and contour rings (worst looking straight down).
-        // The fine steps cover the lit skin only (while the ray is still
-        // mostly clear), and a few empty fine samples are tolerated after
-        // backing up: leaving fine mode on the first empty sample jumped the
-        // ray straight over any cloud thinner than a coarse step.
-        bool inside = false;
-        int refine = 0, fine = 0;
-        // Long rays (the horizon band from low altitude, the limb from high)
-        // cross hundreds of kilometres of layer; 96 steps ran out before the
-        // far end and the clouds there were missing, at a distance that moved
-        // with the camera. They get up to twice the steps, decided by the
-        // span alone so every pixel's samples stay at the same distances as
-        // its neighbours'. Only that thin band pays for them.
-        float reach = clamp(span / 60000.0, 1.0, 2.0);
-        float baseSteps = float(MARCH_STEPS);
-        #if MARCH_STEPS == 56
-          // A long, grazing path needs finer spacing to hit distant cloudlets.
-          // Short paths retain the Performance preset's usual sampling cost.
-          baseSteps += 40.0 * smoothstep(10000.0, 40000.0, span);
-        #endif
-        int steps = int(baseSteps * reach);
-        for (int i = 0; i < max(MARCH_STEPS, 96) * 2; i++) {
-          if (i >= steps || t > t1) break;
-          // Steps grow with distance, but never past a fair share of the
-          // span: looking down from 17 km the growth alone reached kilometre
-          // steps inside the layer and jumped whole small cumulus, which then
-          // came and went from frame to frame with the jitter.
-          float dt = max(dmin, min(0.055 * (t - t0), (1.2 + 0.3 * reach) * span / float(steps)));
-          // Only the first few samples past an entry are fine: a grazing ray
-          // through a thin deck stayed "inside" for hundreds of steps and ran
-          // out of budget before the far half of the sky.
-          if (inside && fine > 0 && T > 0.35) { dt = max(dt * 0.3, 20.0); fine--; }
-          // Samples stay one step apart; only the start is jittered. Picking
-          // a random point inside each step left gaps of up to two steps,
-          // which skipped thin cloud on some frames and not others: the whole
-          // deck flickered. (The contour terraces that dither was hiding came
-          // from steps too long for the layer, fixed by the cap above.)
-          // Far steps are kilometres long. Without an offset every pixel samples
-          // the same distances and the clouds are cut into arcs around the
-          // camera that slide as it moves; shifted by a fraction of the step
-          // per pixel and frame, the history averages them out. Near steps
-          // stay put (shifting them made the deck flicker).
-          vec3 p = ro + rd * (t + dt * (jitter - 0.5) * smoothstep(2500.0, 5000.0, dt));
-          if (t - tWeather > 3500.0) {
-            if (t - tWeather > 7000.0) { tWeather = t; weatherA = weatherAt(p); }
-            else { tWeather += 3500.0; weatherA = weatherB; }
-            weatherB = weatherAt(ro + rd * (tWeather + 3500.0));
-          }
-          weather = mix(weatherA, weatherB, sat((t - tWeather) / 3500.0));
-          float rp = length(p);
-          float above = rp - (uShellBase + weather.y + uShellDepth);
-          if (above > 200.0) {
-            // Reaching the local tops takes at least above/down along a straight ray.
-            t += clamp(0.8 * above / max(-dot(rd, p / rp), 0.08), dt, 6000.0);
+      vec3 sunNear = sunAt(ro + rd * t0, sunDirection);
+      vec3 sunMid = sunAt(ro + rd * (t0 + span * 0.4), sunDirection);
+      vec3 sunFar = sunAt(ro + rd * t1, sunDirection);
+      // Long horizon & limb rays receive up to 2x steps, chosen purely by span.
+      float reach = clamp(span / 55000.0, 1.0, 2.0);
+      float baseSteps = float(MARCH_STEPS);
+      #if MARCH_STEPS == 56
+        baseSteps += 40.0 * smoothstep(10000.0, 40000.0, span);
+      #endif
+      int steps = int(baseSteps * reach);
+      float dmin = max(min(min(44.0 + 0.0025 * t0, span / 80.0), 300.0), 20.0);
+      float growth = max(0.048, 8.6 / float(steps));
+      float dtCap = max(dmin, (1.42 + 0.34 * reach) * span / float(steps));
+      float t = t0;
+      float prevTs = t0;
+      tBack = t0;
+      vec3 entry = ro + rd * t0;
+      float edgeOn = (1.0 - smoothstep(0.1, 0.42, abs(dot(rd, entry / length(entry))))) * smoothstep(45000.0, 170000.0, t0);
+      bool wasEmpty = true;
+      int subRemaining = 0;
+      float subDt = 0.0;
+      float prevD = 0.0;
+      for (int i = 0; i < max(MARCH_STEPS, 96) * 2; i++) {
+        if (i >= steps || t >= t1) break;
+        float dt;
+        if (subRemaining > 0) {
+          dt = min(subDt, t1 - t);
+        } else {
+          dt = clamp(growth * (t - t0), dmin, dtCap);
+          // Smooth C1 step contraction inside the sunlit outer skin of clouds
+          // up to ~95 km so backlit ridges stay crisp and stipple-free while
+          // thin wisps and deep shaded cores keep full horizon reach.
+          float inCloudSkin = smoothstep(0.012, 0.10, prevD) * smoothstep(105000.0, 18000.0, t) * smoothstep(0.08, 0.45, T);
+          dt *= mix(1.0, 0.34, inCloudSkin);
+          dt = min(dt, t1 - t);
+        }
+        // Exact 1-step stratified sample inside [t, t + dt] using one ray-constant
+        // jitter: consecutive samples stay strictly 1.00x..1.05x dt apart (zero
+        // 2x gaps), and every distance near/mid/far spans 100% of its local step
+        // (completely eliminating camera-locked concentric striping shells).
+        float ts = t + dt * jitter;
+        vec3 p = ro + rd * ts;
+        if (ts - tWeather > 3500.0 || ts < tWeather) {
+          if (ts - tWeather > 7000.0 || ts < tWeather) { tWeather = ts; weatherA = weatherAt(p); }
+          else { tWeather += 3500.0; weatherA = weatherB; }
+          weatherB = weatherAt(ro + rd * (tWeather + 3500.0));
+        }
+        weather = mix(weatherA, weatherB, sat((ts - tWeather) / 3500.0));
+        float rp = length(p);
+        float above = rp - (uShellBase + weather.y + uShellDepth);
+        if (subRemaining == 0 && above > 200.0) {
+          t += clamp(0.75 * above / max(-dot(rd, p / rp), 0.10), dt, 5000.0);
+          prevTs = t;
+          wasEmpty = true; prevD = 0.0;
+          continue;
+        }
+        float cov = weather.x;
+        // Skip quickly across genuinely clear synoptic zones.
+        if (subRemaining == 0 && cov < 0.025 && max(weatherA.x, weatherB.x) < 0.025) {
+          t += min(dt * 1.6, 2800.0);
+          prevTs = t;
+          wasEmpty = true; prevD = 0.0;
+          continue;
+        }
+        float near = sat(1.0 - ts / 85000.0);
+        gFootprint = ts * uPixelAngle;
+        gSheet = ts * uSheetAngle;
+        gStepFilter = dt * 0.44;
+        // Conservative Lipschitz ceiling skip: clears empty tower headroom above
+        // the deck from orbit without tunneling through nearby convective towers.
+        if (wasEmpty && subRemaining == 0) {
+          float over = rp - cloudCeiling(p, weather.y);
+          if (over > 240.0) {
+            t += clamp(0.75 * over / (max(-dot(rd, p / rp), 0.0) + 0.72), dt, min(4000.0, span * 0.04));
+            prevTs = t;
+            prevD = 0.0;
             continue;
           }
-          float cov = weather.x;
-          // Close-range billows last until a march texel outgrows them.
-          float near = sat(1.0 - t / 60000.0);
-          gFootprint = t * uPixelAngle;
-          gSheet = t * uSheetAngle;
-          // Above the highest top this spot can have, no sample can hit
-          // cloud: skip down toward it. Most of the layer's depth is kept for
-          // towers, so a ray looking down from orbit otherwise spent half its
-          // steps in empty air. The bound can rise along the ray (~0.4 m per
-          // metre at most), hence the shorter jump where the ray is flat.
-          if (!inside) {
-            float over = rp - cloudCeiling(p, weather.y);
-            if (over > 150.0) {
-              t += clamp(0.9 * over / (max(-dot(rd, p / rp), 0.0) + 0.4), dt, 6000.0);
-              continue;
-            }
-          }
-          // Fade octaves the growing step can no longer resolve.
-          // (by step length along grazing rays, by distance when looking down from orbit)
-          gFarSmall = max(smoothstep(2.2, 6.0, dt / 500.0), smoothstep(500.0, 1500.0, gFootprint));
-          gFarWide = max(smoothstep(1.2, 3.5, dt / 3000.0), smoothstep(800.0, 2000.0, gFootprint));
-          gFarSmall = max(gFarSmall, edgeOn);
-          gFarWide = max(gFarWide, edgeOn * 0.7);
-          float d = cov < 0.03 ? 0.0 : cloudDensity(p, cov, near > 0.0 ? 2 : 1, near, weather.y);
-          float crown = gCrown;
-          if (d > 0.002 && !inside) { inside = true; refine = 4; fine = 8; t -= dt * 0.85; continue; }
-          if (d <= 0.002) { if (refine > 0) refine--; else inside = false; }
-          if (d > 0.002) {
-            if (tFront < 0.0) tFront = t;
-            float h = sat((length(p) - uShellBase - weather.y) / uShellDepth);
-            // Optical depth toward the sun: five growing steps reaching ~7 km, far
-            // enough for a tower to shade the cumulus beside it.
-            float tau = 0.0, ls = 300.0;
-            vec3 pl = p;
-            // The first step sees the same billows the view does, so each one
-            // shades the next instead of the whole cloud lighting as a blob.
-            for (int j = 0; j < 5; j++) {
-              pl += sunDirection * ls;
-              tau += cloudDensity(pl, cov, j == 0 && uLightLod > 0.5 ? (near > 0.0 ? 2 : 1) : 0, near, weather.y) * ls;
-              ls *= 1.9;
-            }
-            tau *= uExtinction;
-            // Far-reaching shade from the sun map: cloud on cloud.
-            if (uShadowOn > 0.5) tau = max(tau, cloudCastTau(p, sunDirection) * uCloudCast);
-            // Multi-scattering octaves: each order loses extinction and
-            // anisotropy. Gives silver linings and keeps thick cores from going black.
-            float scatter = 0.0, scatter1 = 0.0, a = 1.0;
-            for (int k = 0; k < 4; k++) {
-              float e = a * exp(-tau * a);
-              scatter += e * mix(hgPhase(mu, 0.82 * a), hgPhase(mu, -0.25 * a), 0.28);
-              scatter1 += e * mix(hgPhase(mu1, 0.82 * a), hgPhase(mu1, -0.25 * a), 0.28);
-              a *= 0.48;
-            }
-            // The higher orders a thick cloud really has leave its sunlit
-            // skin as a near-Lambert diffuser (albedo ~0.8 from any side).
-            // Four HG octaves lose that energy fast at back-scatter angles,
-            // so an orbit view with the sun behind it saw grey tops. This
-            // isotropic term only lives where sunlight still arrives; shaded
-            // flanks (large tau) keep their blue-grey.
-            float skin = 0.0796 * 0.55 * exp(-tau * 0.9);
-            scatter += skin;
-            scatter1 += skin;
-            // Powder darkens the sun-facing rims of small puffs seen up close.
-            // From tens of kilometres it only dimmed whole decks: with the sun
-            // behind an orbital viewer it halved every cloud top to grey.
-            float powderK = (0.35 * sat(0.5 - 0.5 * mu) + 0.15) * (1.0 - smoothstep(12000.0, 60000.0, t));
-            float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), powderK)
-              * mix(0.76, 1.0, exp(-tau * 0.3));
-            // The companion star reuses the primary's optical depth (they are
-            // rarely far apart in the sky) with its own phase and horizon.
-            float ecl = eclipsing ? eclipseVisibility(p, sunDirection) : 1.0;
-            vec3 sun = irradiance * mix(sunNear, sunFar, sat((t - t0) / span)) * (scatter * powder * ecl);
-            if (uSunEnergy1 > 0.001) sun += irradiance1 * sunAt(p, sunDirection1) * (scatter1 * powder
-              * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0));
-            // Under the umbra the surrounding sky is shadowed too.
-            float day = smoothstep(-0.12, 0.12, dot(normalize(p), sunDirection)) * mix(0.3, 1.0, ecl);
-            vec3 ambient = irradiance * mix(vec3(0.013, 0.020, 0.036), vec3(0.047, 0.070, 0.116), h)
-              * (0.55 + 0.45 * exp(-d * 2.5)) * (0.25 + 0.75 * day);
-            // Bases sit in their own shadow; tops catch the sun.
-            // Troughs between domes are hemmed in by their neighbours: less sun
-            // and sky reaches them. This is what lets the deck read as relief
-            // from straight above, where the light march alone sees no shadow.
-            float open = mix(0.74, 1.0, smoothstep(0.25, 0.8, crown));
-            open = mix(open, 1.0, 0.5 * smoothstep(100000.0, 400000.0, t));
-            // Bases sit lower in their own cloud, not in the deck: a small cumulus
-            // whose top is at a third of the deck used to stay in the "base"
-            // band entirely and read grey from above.
-            vec3 source = (sun * uScatterGain * mix(0.5, 1.0, smoothstep(0.0, 0.55, h / max(crown, 0.2))) + ambient) * open * uCloudTint;
-            float Ti = exp(-d * uExtinction * dt);
-            float w = T * (1.0 - Ti);
-            L += w * source; weighted += w * t; weight += w;
-            T *= Ti;
-            tBack = t;
-            if (T < 0.008) { T = 0.0; break; }
-          }
-          t += dt;
         }
+        gFarSmall = max(smoothstep(450.0, 1400.0, dt), smoothstep(650.0, 1800.0, gFootprint));
+        gFarWide = max(smoothstep(2400.0, 6000.0, dt), smoothstep(1400.0, 3200.0, gFootprint));
+        gFarSmall = max(gFarSmall, edgeOn);
+        gFarWide = max(gFarWide, edgeOn * 0.7);
+        int sampleLod = near > 0.0 ? 2 : 1;
+        float d = cov < 0.025 ? 0.0 : cloudDensity(p, cov, sampleLod, near, weather.y);
+        float crown = gCrown;
+        // Single-call-site entry skin refinement: back up to the last confirmed
+        // empty sample prevTs and subdivide [prevTs, ts] into 2..4 fine sub-steps
+        // so every pixel catches the sunlit front rim regardless of jitter phase.
+        if (d > 0.002 && wasEmpty && subRemaining == 0 && T > 0.15 && i < steps - 12) {
+          float subSpan = min(ts - prevTs, dt * 1.15);
+          if (subSpan > 35.0) {
+            int subN = subSpan > 480.0 ? 4 : (subSpan > 160.0 ? 3 : 2);
+            t = ts - subSpan;
+            wasEmpty = false;
+            subRemaining = subN;
+            subDt = subSpan / float(subN);
+            continue;
+          }
+        }
+        if (d > 0.002) {
+          if (tFront < 0.0) tFront = ts;
+          float h = sat((rp - uShellBase - weather.y) / uShellDepth);
+          // Optical depth toward the sun: five growing steps starting close
+          // (117 m) so cauliflower billows self-shadow crisply while reaching ~6 km.
+          float tau = 0.0, ls = 180.0;
+          vec3 pl = p;
+          for (int j = 0; j < 5; j++) {
+            pl += sunDirection * (j == 0 ? ls * 0.65 : ls);
+            tau += cloudDensity(pl, cov, j == 0 && uLightLod > 0.5 ? sampleLod : 0, near, weather.y) * ls;
+            ls *= 2.05;
+          }
+          tau *= uExtinction;
+          if (uShadowOn > 0.5) tau = max(tau, cloudCastTau(p, sunDirection) * uCloudCast);
+          float scatter = 0.0, scatter1 = 0.0, a = 1.0;
+          for (int k = 0; k < 4; k++) {
+            float e = a * exp(-tau * a);
+            scatter += e * mix(hgPhase(mu, 0.82 * a), hgPhase(mu, -0.25 * a), 0.28);
+            scatter1 += e * mix(hgPhase(mu1, 0.82 * a), hgPhase(mu1, -0.25 * a), 0.28);
+            a *= 0.48;
+          }
+          float skin = 0.0796 * 0.55 * exp(-tau * 0.9);
+          scatter += skin;
+          scatter1 += skin;
+          float powderK = (0.35 * sat(0.5 - 0.5 * mu) + 0.15) * (1.0 - smoothstep(14000.0, 65000.0, ts));
+          float powder = mix(1.0, 1.0 - exp(-tau * 2.0 - d * 3.0), powderK)
+            * mix(0.78, 1.0, exp(-tau * 0.3));
+          float ecl = eclipsing ? eclipseVisibility(p, sunDirection) : 1.0;
+          float uSpan = sat((ts - t0) / max(span, 1.0));
+          vec3 sunTrans = uSpan < 0.4
+            ? mix(sunNear, sunMid, uSpan / 0.4)
+            : mix(sunMid, sunFar, (uSpan - 0.4) / 0.6);
+          vec3 sun = irradiance * sunTrans * (scatter * powder * ecl);
+          if (uSunEnergy1 > 0.001) {
+            sun += irradiance1 * sunAt(p, sunDirection1)
+              * (scatter1 * powder * (eclipsing ? eclipseVisibility(p, sunDirection1) : 1.0));
+          }
+          float day = smoothstep(-0.12, 0.12, dot(p / rp, sunDirection)) * mix(0.3, 1.0, ecl);
+          float relH = sat(h / max(crown, 0.22));
+          vec3 ambColor = mix(vec3(0.019, 0.023, 0.032), vec3(0.048, 0.071, 0.118), smoothstep(0.0, 0.78, h));
+          vec3 ambient = irradiance * ambColor
+            * (0.56 + 0.44 * exp(-d * 2.2)) * mix(0.76, 1.0, relH) * (0.24 + 0.76 * day);
+          float open = mix(0.74, 1.0, smoothstep(0.25, 0.8, crown));
+          open = mix(open, 1.0, 0.5 * smoothstep(100000.0, 400000.0, ts));
+          vec3 source = (sun * uScatterGain * mix(0.48, 1.0, smoothstep(0.0, 0.55, relH)) + ambient) * open * uCloudTint;
+          float Ti = exp(-d * uExtinction * dt);
+          float w = T * (1.0 - Ti);
+          L += w * source; weighted += w * ts; weight += w;
+          T *= Ti;
+          tBack = ts;
+          wasEmpty = false;
+          prevD = d;
+          if (T < 0.008) { T = 0.0; break; }
+        } else {
+          prevTs = ts;
+          if (subRemaining == 0) wasEmpty = true;
+          prevD = 0.0;
+        }
+        if (subRemaining > 0) subRemaining--;
+        t += dt;
       }
     }
     if (weight < 1e-4 && cirrusA < 0.004) return;
@@ -756,12 +757,47 @@ const resolveShader = /* glsl */`
   uniform mat4 uInvProjection, uCameraWorld, uWorldToLocal, uPrevProjection;
   uniform mat3 uPrevLocalToView, uDeckDelta;
   uniform vec3 uCameraDelta, uDeckCameraDelta, uCameraLocal;
-  uniform vec2 uCloudTexel, uSubpixel;
+  uniform vec2 uCloudTexel, uHistTexel, uHistSize, uSubpixel;
   uniform float uHistoryWeight, uCurrentWeight, uSettling, uDeckMoving, uCameraFar, uShellTop, uShellBase;
   varying vec2 vUv;
   float surfaceDistance, cloudAbove, occluded = 0.0;
   ivec2 maxCell;
   ${frontCoverageGLSL}
+  // 5-tap Catmull-Rom bicubic history lookup: prevents repeated fractional
+  // reprojection during slow space-to-planet approaches from smearing the 2x
+  // history buffer into bilinear blur.
+  vec4 sampleHistoryCatmullRom(sampler2D tex, vec2 uv) {
+    vec2 pos = uv * uHistSize;
+    vec2 center = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - center;
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+    vec2 w0 = f2 - 0.5 * (f3 + f);
+    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    vec2 w3 = 0.5 * (f3 - f2);
+    vec2 w2 = 1.0 - w0 - w1 - w3;
+    vec2 w12 = w1 + w2;
+    vec2 tc0 = (center - 1.0) * uHistTexel;
+    vec2 tc3 = (center + 2.0) * uHistTexel;
+    vec2 tc12 = (center + w2 / max(w12, vec2(1e-5))) * uHistTexel;
+    float s0 = w12.x * w0.y;
+    float s1 = w0.x * w12.y;
+    float s2 = w12.x * w12.y;
+    float s3 = w3.x * w12.y;
+    float s4 = w12.x * w3.y;
+    vec4 t0 = texture2D(tex, clamp(vec2(tc12.x, tc0.y), 0.0, 1.0));
+    vec4 t1 = texture2D(tex, clamp(vec2(tc0.x, tc12.y), 0.0, 1.0));
+    vec4 t2 = texture2D(tex, clamp(vec2(tc12.x, tc12.y), 0.0, 1.0));
+    vec4 t3 = texture2D(tex, clamp(vec2(tc3.x, tc12.y), 0.0, 1.0));
+    vec4 t4 = texture2D(tex, clamp(vec2(tc12.x, tc3.y), 0.0, 1.0));
+    vec4 result = (t0 * s0 + t1 * s1 + t2 * s2 + t3 * s3 + t4 * s4) / max(s0 + s1 + s2 + s3 + s4, 1e-5);
+    // Anti-ringing clamp to the 5-tap convex hull preserves crisp gradients
+    // during slow space approach without amplifying half-res raymarch noise.
+    vec4 tapMin = min(min(min(t0, t1), min(t2, t3)), t4);
+    vec4 tapMax = max(max(max(t0, t1), max(t2, t3)), t4);
+    result = clamp(result, tapMin, tapMax);
+    return vec4(max(result.rgb, vec3(0.0)), clamp(result.a, 0.0, 1.0));
+  }
   // One march texel with the part of its cloud that lies behind this pixel's
   // opaque surface removed. Masking here, per fine pixel and always with that
   // pixel's own grid phase, keeps the depth order out of the per-frame
@@ -813,16 +849,27 @@ const resolveShader = /* glsl */`
     vec4 spatial = mix(mix(maskedTexel(c0), maskedTexel(c0 + ivec2(1, 0)), f.x),
       mix(maskedTexel(c0 + ivec2(0, 1)), maskedTexel(c0 + ivec2(1, 1)), f.x), f.y);
     if (uHistoryWeight <= 0.0) { gl_FragColor = spatial; return; }
-    // Clear sky reprojects as a far point so the history follows rotation.
+    // Foreground depth dilation: if the shifted march cell missed a cloud rim
+    // this frame, inherit the closest adjacent cloud depth so cloud edges
+    // reproject with their real parallax instead of jumping to far clear sky.
     float km = texelFetch(tCurrentAux, cell, 0).z;
+    if (km <= 0.0) {
+      float best = 1e9;
+      float kL = texelFetch(tCurrentAux, clamp(cell + ivec2(-1, 0), ivec2(0), maxCell), 0).z;
+      float kR = texelFetch(tCurrentAux, clamp(cell + ivec2(1, 0), ivec2(0), maxCell), 0).z;
+      float kD = texelFetch(tCurrentAux, clamp(cell + ivec2(0, -1), ivec2(0), maxCell), 0).z;
+      float kU = texelFetch(tCurrentAux, clamp(cell + ivec2(0, 1), ivec2(0), maxCell), 0).z;
+      if (kL > 0.0) best = min(best, kL);
+      if (kR > 0.0) best = min(best, kR);
+      if (kD > 0.0) best = min(best, kD);
+      if (kU > 0.0) best = min(best, kU);
+      if (best < 1e8) km = best;
+    }
     float distance = km > 0.0 ? km * 1000.0 : 150000.0;
-    // Where this frame saw no cloud but the ray crosses the deck, whatever the
-    // history holds there is cloud that just drifted off: follow it at the
-    // deck's middle so it leaves rather than fading out as a trail.
     bool onDeck = km > 0.0;
     if (!onDeck) {
       float mid = 0.5 * (uShellBase + uShellTop);
-      float b = dot(uCameraLocal, rd), r0 = length(uCameraLocal);
+      float b = dot(uCameraLocal, rd);
       float h = b * b - (r0 - mid) * (r0 + mid);
       if (h > 0.0) {
         h = sqrt(h);
@@ -830,32 +877,24 @@ const resolveShader = /* glsl */`
         if (t > 0.0) { distance = t; onDeck = true; }
       }
     }
-    // The camera offset is formed on the CPU in double precision. A cloud
-    // point also rode the deck's rotation since last frame: at the game's
-    // accelerated clock that is several texels a frame, and reprojecting it
-    // as fixed ground dragged every cloud into a long streak.
     vec3 previousView = onDeck
       ? uPrevLocalToView * (uDeckCameraDelta + uDeckDelta * (rd * distance))
       : uPrevLocalToView * (uCameraDelta + rd * distance);
     vec4 clip = uPrevProjection * vec4(previousView, 1.0);
     vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
     if (!(clip.w > 0.0 && uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0)) { gl_FragColor = spatial; return; }
-    vec4 history = texture2D(tHistory, uv);
+    vec4 history = sampleHistoryCatmullRom(tHistory, uv);
     // Screen motion of this point since last frame, in march texels.
     float motion = length((uv - vUv) * size);
-    // Keep history inside what the current 3x3 neighbourhood allows: this
-    // bounds ghosting when clouds are revealed, relit or the camera cuts.
-    // A held view reprojects exactly, and there the clamp would only erase
-    // sub-texel cloud that the shifted grid sees in one phase of four, so it
-    // applies while the view moves and for a few frames after it settles.
-    // Drifting clouds also grow and dissolve; while the deck moves, keep half
-    // the clamp so a cloud that thinned away does not linger in the history.
-    float clampAmount = max(max(smoothstep(0.05, 0.3, motion), uSettling), uDeckMoving * 0.5);
+    vec4 m1 = vec4(0.0), m2 = vec4(0.0);
     vec4 lo = nearest, hi = nearest;
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
       vec4 n = maskedTexel(cell + ivec2(x, y));
       lo = min(lo, n); hi = max(hi, n);
+      m1 += n; m2 += n * n;
     }
+    m1 /= 9.0;
+    vec4 sigma = sqrt(max(m2 / 9.0 - m1 * m1, vec4(0.0)));
     // Where an opaque surface hides or cuts into the cloud layer (e.g. a ridge
     // or high-altitude foliage above uShellBase), never let stale sky-cloud
     // history bleed onto the foreground object during camera motion or drift.
@@ -863,17 +902,25 @@ const resolveShader = /* glsl */`
       gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
       return;
     }
-    vec4 pad = ((hi - lo) * 0.25 + vec4(vec3(0.02), 0.01)) * (1.0 - occluded * 0.85);
-    clampAmount = max(clampAmount, occluded);
-    history = mix(history, clamp(history, lo - pad, hi + pad), clampAmount);
+    // Variance-guided neighbourhood box: bounds ghosting during fast turns and
+    // disocclusion while keeping converged 2x super-resolution edges crisp
+    // during slow space-to-planet approaches.
+    float clampDrive = max(smoothstep(0.25, 1.5, motion), occluded);
+    float gamma = mix(1.85, 1.15, clampDrive);
+    vec4 pad = ((hi - lo) * 0.22 + vec4(vec3(0.018), 0.01)) * (1.0 - occluded * 0.85);
+    vec4 varLo = max(lo - pad, m1 - sigma * gamma);
+    vec4 varHi = min(hi + pad, m1 + sigma * gamma);
+    vec4 boxLo = mix(lo - pad, varLo, clampDrive);
+    vec4 boxHi = mix(hi + pad, varHi, clampDrive);
+    float clampAmount = max(max(smoothstep(0.12, 0.75, motion), uSettling * 0.65), max(uDeckMoving * 0.18, occluded));
+    history = mix(history, clamp(history, boxLo, boxHi), clampAmount);
     // This pixel's own sample arrives when the shifted grid lands on it.
-    float exact = 1.0 - smoothstep(0.15, 0.4, max(abs(off.x), abs(off.y)));
-    // In fast motion only a quarter of the pixels would see a current sample,
-    // which drew a 2x2 comb across moving edges: let every pixel follow the
-    // interpolated current frame there.
-    float moving = smoothstep(0.5, 2.5, motion);
+    float exact = 1.0 - smoothstep(0.18, 0.44, max(abs(off.x), abs(off.y)));
+    // Only fall back to bilinear spatial blending under fast pan/turn motion;
+    // keep slow approach in crisp Catmull-Rom 2x accumulation.
+    float moving = smoothstep(1.1, 3.6, motion);
     vec4 target = mix(spatial, nearest, exact);
-    gl_FragColor = mix(history, target, max(max(exact * uCurrentWeight, moving * 0.35), occluded * 0.5));
+    gl_FragColor = mix(history, target, max(max(exact * uCurrentWeight, moving * 0.28), occluded * 0.5));
   }`;
 
 const compositeShader = /* glsl */`
@@ -928,12 +975,18 @@ const compositeShader = /* glsl */`
       }
     }
     vec4 cloud = coverage > 0.0 ? texture2D(tCloud, vUv) : vec4(0.0, 0.0, 0.0, 1.0);
-    float far = smoothstep(15000.0, 70000.0, deck);
+    // Apply only a subtle anti-aliasing soften on grazing horizon rays — never
+    // blur top-down orbital cloud views.
+    float far = smoothstep(25000.0, 90000.0, deck);
     if (far > 0.0 && coverage > 0.0) {
-      vec2 o = uHistTexel * 2.2;
-      vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
-        + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
-      cloud = mix(cloud, blurred, far * 0.15);
+      vec3 entryP = uCameraLocal + rd * deck;
+      float grazing = 1.0 - smoothstep(0.08, 0.28, abs(dot(rd, entryP / max(length(entryP), 1.0))));
+      if (grazing > 0.0) {
+        vec2 o = uHistTexel * 1.5;
+        vec4 blurred = (cloud * 2.0 + texture2D(tCloud, vUv + o) + texture2D(tCloud, vUv - o)
+          + texture2D(tCloud, vUv + vec2(o.x, -o.y)) + texture2D(tCloud, vUv + vec2(-o.x, o.y))) / 6.0;
+        cloud = mix(cloud, blurred, far * grazing * 0.12);
+      }
     }
     vec3 color = base.rgb * shade * mix(1.0, cloud.a, coverage) + cloud.rgb * coverage;
     vec3 shaftLoss = min(texture2D(tShaft, vUv).rgb * shaftMask, base.rgb * 0.82);
@@ -946,6 +999,7 @@ export class LiteCloudPass extends Pass {
     this.camera = camera;
     this.atmospherePass = atmospherePass;
     this.scale = scale;
+    this.baseScale = scale;
     this.maxPixels = maxPixels;
     this.activePlanet = null;
     this.sampleListener = false;
@@ -999,6 +1053,7 @@ export class LiteCloudPass extends Pass {
     this.previousLocalToView = new THREE.Matrix3();
     this.previousDeck = new THREE.Matrix3();
     this.settleFrames = 0;
+    this.deckMovingEma = 0;
 
     const air = atmospherePass.material.uniforms;
     const field = {
@@ -1105,13 +1160,15 @@ export class LiteCloudPass extends Pass {
         uDeckDelta: { value: new THREE.Matrix3() },
         uDeckCameraDelta: { value: new THREE.Vector3() },
         uCloudTexel: marchTexel,
+        uHistTexel: { value: new THREE.Vector2(1, 1) },
+        uHistSize: { value: new THREE.Vector2(1, 1) },
         uSubpixel: subpixel,
         uHistoryWeight: { value: 0 },
         uSettling: { value: 1 },
         uDeckMoving: { value: 0 },
-        // Exact samples arrive once per four frames on the 2x history; at
-        // ~0.22 each, about twenty frames average the step jitter away.
-        uCurrentWeight: { value: 0.22 },
+        // Exact samples arrive once per four frames on the 2x history; ~0.18
+        // averages step jitter cleanly while staying responsive to drift.
+        uCurrentWeight: { value: 0.18 },
       },
       vertexShader, fragmentShader: resolveShader,
     });
@@ -1130,8 +1187,12 @@ export class LiteCloudPass extends Pass {
     this.#refresh();
   }
 
-  setQuality({ scale, steps } = {}) {
-    if (Number.isFinite(scale)) this.scale = THREE.MathUtils.clamp(scale, 0.2, 1);
+  setQuality({ scale, baseScale, steps } = {}) {
+    if (Number.isFinite(scale)) {
+      this.scale = THREE.MathUtils.clamp(scale, 0.2, 1);
+      if (this.scale > this.baseScale) this.baseScale = this.scale;
+    }
+    if (Number.isFinite(baseScale)) this.baseScale = THREE.MathUtils.clamp(baseScale, 0.2, 1);
     if (Number.isInteger(steps) && steps !== this.marchMaterial.defines.MARCH_STEPS) {
       this.marchMaterial.defines.MARCH_STEPS = steps;
       this.marchMaterial.needsUpdate = true;
@@ -1145,7 +1206,7 @@ export class LiteCloudPass extends Pass {
     if (!other || other === this) return;
     for (const key of ['history', 'historyIndex', 'historyValid', 'frame', 'previousCamera',
       'previousPlanet', 'previousSun', 'previousLocalToView', 'previousDeck', 'settleFrames',
-      'subpixelIndex', 'historyRatio', 'target', 'targetTypeChosen']) {
+      'deckMovingEma', 'subpixelIndex', 'historyRatio', 'baseScale', 'target', 'targetTypeChosen']) {
       const value = this[key];
       this[key] = other[key];
       other[key] = value;
@@ -1255,7 +1316,8 @@ export class LiteCloudPass extends Pass {
     const noiseTex = u.uNoise.value || liteCloudNoiseTexture();
     const cycles = ((planet.weatherHours || 0) / EVOLVE_HOURS) % 1024;
     const fa = Math.floor(cycles), fb = Math.floor(cycles + 0.5);
-    const wa = 1 - Math.abs(2 * fract(cycles) - 1);
+    const waRaw = 1 - Math.abs(2 * fract(cycles) - 1);
+    const wa = waRaw * waRaw * (3 - 2 * waRaw);
     const bA = sampleLiteNoiseB(noiseTex, qx / 93000 + fract(0.731 * fa),
       qy / 93000 + fract(0.317 * fa), qz / 93000 + fract(0.547 * fa));
     const bB = sampleLiteNoiseB(noiseTex, qx / 93000 + fract(0.413 * fb) + 0.5,
@@ -1355,7 +1417,7 @@ export class LiteCloudPass extends Pass {
     // Same inverse deck spin the terrain and water cloud shadows use.
     _matrix.makeRotationFromQuaternion(_quaternion.copy(planet.cloudMesh.quaternion).invert());
     u.uCloudMat.value.setFromMatrix4(_matrix);
-    u.uFrame.value = this.temporalEnabled || this.animateJitter ? (this.frame = (this.frame + 1) % 64) : 0;
+    u.uFrame.value = this.temporalEnabled || this.animateJitter ? (this.frame = (this.frame + 1) % 1024) : 0;
 
     u.uEvolve.value = ((planet.weatherHours || 0) / EVOLVE_HOURS) % 1024;
     if (this.sampleListener || this.listenerDensity) this.#sampleListener(renderer, planet, u);
@@ -1363,28 +1425,45 @@ export class LiteCloudPass extends Pass {
     if (this.shadowsEnabled) this.#renderShadowMap(renderer, planet);
 
     const pixels = readBuffer.width * readBuffer.height;
-    const scale = Math.min(this.scale, Math.sqrt(this.maxPixels / Math.max(1, pixels)));
+    const pixelCapScale = Math.sqrt(this.maxPixels / Math.max(1, pixels));
+    const scale = Math.min(this.scale, pixelCapScale);
+    const baseScale = Math.min(Math.max(this.baseScale || this.scale, scale), pixelCapScale);
     const width = Math.max(1, Math.round(readBuffer.width * scale));
     const height = Math.max(1, Math.round(readBuffer.height * scale));
-    // The history is twice the march resolution while that stays within the
-    // output; a march at three quarters or more just accumulates in place.
-    const ratio = this.temporalEnabled && scale <= 0.55 ? 2 : 1;
-    if (this.target.width !== width || this.target.height !== height || this.historyRatio !== ratio) {
+    // Decouple history buffer resolution from transient adaptive march-scale
+    // changes: when adaptive quality trims raymarch scale, the history stays
+    // intact instead of resizing and flashing blurry.
+    const ratio = this.temporalEnabled && baseScale <= 0.55 ? 2 : 1;
+    const histScale = this.temporalEnabled ? Math.min(1, baseScale * ratio) : baseScale;
+    const histW = Math.max(1, Math.round(readBuffer.width * histScale));
+    const histH = Math.max(1, Math.round(readBuffer.height * histScale));
+    if (this.target.width !== width || this.target.height !== height) {
       this.target.setSize(width, height);
-      for (const target of this.history) target.setSize(width * ratio, height * ratio);
-      this.historyRatio = ratio;
+    }
+    // Single-buffer seamless history resize: resize only the incoming write
+    // buffer so the previous read buffer stays intact for Catmull-Rom
+    // resampling across adaptive DPR steps (zero history wipe / blur flash).
+    const read = this.history[this.historyIndex];
+    const write = this.history[1 - this.historyIndex];
+    if (write.width !== histW || write.height !== histH) {
+      write.setSize(histW, histH);
+    }
+    if (read.width <= 1 || read.height <= 1) {
+      read.setSize(histW, histH);
       this.historyValid = false;
     }
+    this.historyRatio = ratio;
     const sub = u.uSubpixel.value;
     if (ratio === 2) {
       this.subpixelIndex = (this.subpixelIndex + 1) & 3;
       sub.set(SUBPIXEL_CYCLE[this.subpixelIndex][0], SUBPIXEL_CYCLE[this.subpixelIndex][1]);
     } else sub.set(0, 0);
     u.uMarchTexel.value.set(1 / width, 1 / height);
-    // Angle one march texel subtends; the shifted grid resolves a little finer.
+    // Angle one reconstructed cloud pixel subtends; using histH keeps noise LOD
+    // and sharpness steady even if adaptive quality tweaks the march scale.
     const viewSpan = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov || 60) / 2);
-    u.uPixelAngle.value = viewSpan / height * (ratio === 2 ? 0.6 : 1);
-    // A 1080p march texel, whatever the resolution.
+    u.uPixelAngle.value = viewSpan / Math.max(1, histH) * (ratio === 2 ? 1.15 : 1);
+    // A 1080p-equivalent angular footprint, independent of screen resolution.
     u.uSheetAngle.value = viewSpan / 540 * 0.6;
 
     if (!this.targetTypeChosen) {
@@ -1398,43 +1477,52 @@ export class LiteCloudPass extends Pass {
     this.marchQuad.render(renderer);
 
     const c = this.compositeMaterial.uniforms;
-    c.uHistTexel.value.set(1 / (width * ratio), 1 / (height * ratio));
+    c.uHistTexel.value.set(1 / histW, 1 / histH);
     c.uFullPixelAngle.value = viewSpan / Math.max(1, readBuffer.height);
 
     // Temporal resolve into the other history target.
     const r = this.resolveMaterial.uniforms;
+    // Match the read target's exact dimensions so seamless single-buffer DPR
+    // resizes sample the previous frame accurately via Catmull-Rom.
+    r.uHistTexel.value.set(1 / read.width, 1 / read.height);
+    r.uHistSize.value.set(read.width, read.height);
     const cameraLocal = u.uCameraLocal.value;
     r.uCameraDelta.value.subVectors(cameraLocal, this.previousCamera);
     // Deck motion since last frame: previous = prevDeck^-1 * deck (rotations).
     const deck = u.uCloudMat.value;
     r.uDeckDelta.value.copy(this.previousDeck).transpose().multiply(deck);
     r.uDeckCameraDelta.value.copy(cameraLocal).applyMatrix3(r.uDeckDelta.value).sub(this.previousCamera);
-    // Metres the deck slid at the planet's surface since last frame.
+    // Smooth, gentle clamp factor for in-place cloud evolution (reprojection
+    // already compensates rigid deck rotation via uDeckDelta, so frame-dt
+    // variation must not toggle history weights between 0 and 1).
     const spin = Math.acos(THREE.MathUtils.clamp((r.uDeckDelta.value.elements[0] + r.uDeckDelta.value.elements[4]
       + r.uDeckDelta.value.elements[8] - 1) / 2, -1, 1));
-    r.uDeckMoving.value = THREE.MathUtils.smoothstep(spin * planet.R, 0.5, 3);
-    // A held view over a held deck can average longer: the sharp cloud rims
-    // otherwise shimmer with the march's per-frame step jitter.
-    const held = this.settleFrames === 0 && r.uDeckMoving.value < 0.5;
-    r.uCurrentWeight.value = ratio === 2 ? (held ? 0.1 : 0.22) : 0.1;
+    const rawDeckMoving = THREE.MathUtils.clamp(spin * planet.R / 10, 0, 1);
+    this.deckMovingEma = this.historyValid ? THREE.MathUtils.lerp(this.deckMovingEma, rawDeckMoving, 0.12) : rawDeckMoving;
+    r.uDeckMoving.value = this.deckMovingEma;
     this.previousDeck.copy(deck);
-    // A teleport, a body change or a resize starts the history over.
+    // A teleport, a body change or a resize starts the history over; allow
+    // proportionally larger per-frame travel when far out in space.
+    const maxContinuousDelta = Math.max(20000, Math.max(0, cameraLocal.length() - planet.R) * 0.08);
     const continuous = this.temporalEnabled && this.historyValid && planet === this.previousPlanet
-      && r.uCameraDelta.value.length() < 20000
+      && r.uCameraDelta.value.length() < maxContinuousDelta
       && _sun.copy(u.uSunDirection0.value).normalize().dot(this.previousSun) > 0.99985;
     r.uHistoryWeight.value = continuous ? 1 : 0;
-    // Clamp for two full grid cycles after the view turns by a visible amount
-    // (in march texels) or cuts; translation shows up in the per-pixel motion.
+    // Clamp gently after a visible turn or cut; smooth decay avoids sharp/blur snaps.
     _matrix.multiplyMatrices(u.uWorldToLocal.value, u.uCameraWorld.value);
     _rotation.setFromMatrix4(_matrix).transpose();
     let turned = 0;
     for (let i = 0; i < 9; i++) turned = Math.max(turned, Math.abs(_rotation.elements[i] - this.previousLocalToView.elements[i]));
     const texelsPerRadian = height / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov || 60) / 2));
-    const moved = !continuous || turned * texelsPerRadian > 0.1;
-    this.settleFrames = moved ? 8 : Math.max(0, this.settleFrames - 1);
-    r.uSettling.value = this.settleFrames > 0 ? 1 : 0;
+    const moved = !continuous || turned * texelsPerRadian > 0.25;
+    this.settleFrames = moved ? 6 : Math.max(0, this.settleFrames - 1);
+    const settleFraction = this.settleFrames / 6;
+    r.uSettling.value = settleFraction;
+    // Continuous blend weight: smoother convergence when steady, responsive on turns.
+    r.uCurrentWeight.value = ratio === 2
+      ? THREE.MathUtils.lerp(0.14, 0.24, Math.max(settleFraction, r.uDeckMoving.value * 0.35))
+      : 0.12;
     this.previousLocalToView.copy(_rotation);
-    const read = this.history[this.historyIndex], write = this.history[1 - this.historyIndex];
     r.tHistory.value = read.texture;
     r.tSceneDepth.value = this.atmospherePass.sceneDepthTexture || readBuffer.depthTexture || null;
     renderer.setRenderTarget(write);
