@@ -7270,10 +7270,11 @@ function frame(rafTs) {
   if (RENDER_LOOK_NEXT) {
     // The cabin is fully occluded by the hull in a settled chase view. Keeping
     // its independent light layer alive there paid for every cabin material
-    // and fixture without contributing a pixel. Retain it across cockpit,
-    // seat/walk, open-ramp fly-ins and view-blend frames so transitions stay continuous.
+    // and fixture without contributing a pixel. Keep it for interior views and
+    // during hover ingress, when the canopy reveals the cabin before the HUD switches.
     const needsForegroundInterior = ship.foregroundOnly
-      && (shipView.isCockpit() || shipView.shipwalk || shipView.viewBlend < 1 || shipView.rampT > 0.01);
+      && (shipView.isCockpit() || shipView.shipwalk || shipView.viewBlend < 1 || shipView.rampT > 0.01
+        || (state === 'landing' && ship.hoverMode === 'high'));
     const foregroundLayers = needsForegroundInterior
       ? [SHIP_FOREGROUND_LAYER, SHIP_INTERIOR_LAYER]
       : [SHIP_FOREGROUND_LAYER];

@@ -600,10 +600,33 @@ try {
       const p = NMS._planet(0);
       const radius = p.surfaceRadius(new NMS._THREE.Vector3(...dir));
       NMS.teleport(0, (radius + height - p.R) / p.R, { dir, horizon: true });
+      NMS.shipViewDebug.setViewMode('chase');
     }, { dir: sites.moderate.dir, height });
     await page.waitForFunction(h => Math.abs(NMS.alt() - h) < 5, height);
     if (height > 420) {
       await page.waitForFunction(() => document.getElementById('land-btn').classList.contains('hidden'));
+      await page.evaluate(async () => {
+        const { SHIP_INTERIOR_LAYER } = await import('/src/render-layers.js');
+        const { ship, shipView } = NMS._internals;
+        const trace = { tailClear: true, frames: 0, interiorReady: false };
+        window.__hoverCameraTrace = trace;
+        const sample = () => {
+          if (NMS.state === 'landing') {
+            const { p } = shipView.captureShipLocalCamera();
+            trace.frames++;
+            // The overhead glass is between Z -8.22 and -6.20. The dorsal
+            // fin aft of Z +4.9 reaches 6.6 m above the deck.
+            if (p.z >= 4.9 && p.z <= 11.3 && p.y < 6.8) trace.tailClear = false;
+            if (p.z > -6.2 && p.z < 4.9 && p.y < 3.15) trace.tailClear = false;
+            if (shipView.viewMode === 'chase' && p.z > -8.22 && p.z < -6.2 && p.y < 2.5) {
+              trace.interiorReady ||= !ship.separateInterior
+                || NMS._pipeline.foregroundPass.layers.includes(SHIP_INTERIOR_LAYER);
+            }
+          }
+          if (NMS.state !== 'landed') requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
     }
     const hoverStartMs = Date.now();
     await page.keyboard.press(key);
@@ -616,6 +639,10 @@ try {
     }
     await page.waitForFunction('NMS.state === "landed"', null, { timeout: 60000 });
     const hoverElapsedMs = Date.now() - hoverStartMs;
+    const hoverCamera = await page.evaluate(() => window.__hoverCameraTrace);
+    check(hoverCamera.frames > 5 && hoverCamera.tailClear && hoverCamera.interiorReady
+        && await page.evaluate(() => NMS.shipViewState().viewMode === 'cockpit'),
+      `hover push clears the hull and enters through the overhead canopy into a visible cockpit ${JSON.stringify(hoverCamera)}`);
     check(await page.evaluate(h => NMS.shipLandingState().hoverMode === 'high'
         && Math.abs(NMS.alt() - h) < 12
         && !NMS.surfaceGameplayState().campDeployed

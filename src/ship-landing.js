@@ -633,7 +633,11 @@ export function createHoverEntrySequence({
   const camLocal = new THREE.Vector3();
   const camLocalQuat = new THREE.Quaternion();
 
-  const duration = wasCockpit ? 0.55 : 1.05;
+  const duration = wasCockpit ? 0.55 : 1.25;
+  // Clear HALCYON's 6.6 m dorsal fin, then reach the overhead pane above
+  // the pilot before dropping to eye height. A straight push cuts through
+  // the fin and enters the hull behind the cockpit liner.
+  const flyoverY = Math.max(camStartShipOffset.y, 8.1);
   let cockpitSignaled = wasCockpit;
 
   function step(k) {
@@ -652,9 +656,14 @@ export function createHoverEntrySequence({
       _v1.lerpVectors(camStartShipOffset, eyeLocalP, settle);
       _q2.copy(camStartShipQuat).slerp(eyeLocalQ, settle);
     } else {
-      _v1.lerpVectors(camStartShipOffset, eyeLocalP, e);
-      _v1.y += Math.sin(Math.PI * e) * 1.45;
-      _q2.copy(camStartShipQuat).slerp(eyeLocalQ, smootherstep01(Math.pow(k, 0.90)));
+      const push = smootherstep01(k / 0.82);
+      const lift = smootherstep01(k / 0.38);
+      const drop = smootherstep01((k - 0.44) / 0.56);
+      _v1.lerpVectors(camStartShipOffset, eyeLocalP, push);
+      _v1.y = lerp(lerp(camStartShipOffset.y, flyoverY, lift), eyeLocalP.y, drop);
+      _q2.copy(camStartShipQuat).slerp(eyeLocalQ, e);
+      const flyoverPitch = -0.19 * Math.sin(Math.PI * k) ** 2;
+      _q2.multiply(_q1.setFromAxisAngle(X_AXIS, flyoverPitch));
       if (!cockpitSignaled && k >= 0.96) {
         cockpitSignaled = true;
         shipView.viewMode = 'cockpit';
